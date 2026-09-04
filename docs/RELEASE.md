@@ -858,11 +858,127 @@ warns about.
 | unsigned publish | the PUT route (422) | none |
 | `min_version` above the build (CR-52) | four gates | none |
 | same version, different bytes | publish / feed (409) | `--allow-replace`, or a version bump |
-| **not soaked** | `[ MAKE CURRENT ]` (409) | `force=1` + the version typed |
-| **needs a newer dashboard** | make-current AND the feed's auto-publish (409) | update the dashboard |
+| **not soaked** | `[ MAKE CURRENT ]` (409); and since 2026-09-04 the PUBLISH door too, where it stages with a note instead of failing | `force=1` + the version typed, or `soak_minutes = 0` |
+| **needs a newer dashboard** | make-current AND the feed's auto-publish; a publish that asks for current is staged with a note | update the dashboard |
 | **recalled by the vendor** | make-current (409), the offer, the feed's available list | none |
 | **arch mismatch** | the offer (nothing is served) | publish a build for that arch |
 | unsigned binary | `ship.cmd -MakeCurrent` | `-AllowUnsignedBinary` |
+
+---
+
+## Every door to "make current", and the dashboard's own updates (2026-09-04)
+
+The 2026-09-04 usability + resilience sweep (REL-1, REL-4, REL-9, REL-14,
+SYS-2, SYS-7) found the 08-28 controls above standing at three doors out of
+five, and the dashboard itself with no unattended update path at all. What
+changed:
+
+**The soak gate stands at the PUBLISH door too.** It lives in
+`dashboard/src/ccsync_dashboard/package_store.py` now (`make_current_refusal`,
+re-exported from `api.py` so every existing caller keeps its name), which is
+the only module allowed to write `companion_packages` -- so a door that can
+publish is a door the gate stands at. A publish that asks for `make_current`
+and has not soaked is **published STAGED, and the refusal comes back as a
+`note`**, never a 4xx: the bytes are fine and signed, only the flip is in
+question, and refusing the whole publish is what made the vendor feed
+re-download the same 40 MB on every check and throw it away again.
+
+Everything that publishes now prints the same sentence:
+
+> published and STAGED: push it to one computer, let it soak, then MAKE CURRENT.
+
+`./tools/release_macos.sh --publish --make-current` and
+`./tools/build_onboard_macos.sh --publish --make-current` read the `note` out
+of the PUT's answer and print it instead of "made it CURRENT" -- until this
+wave, the exact command CLAUDE.md tells you to run on the Mac handed every Mac
+editor a build nothing anywhere had run.
+
+Three carve-outs, all deliberate:
+
+* **A rollback** (`ever_current`) is never gated, as before.
+* **The bootstrap**: when NOTHING is current for that platform and kind, an
+  unattended publish flips it. There is no fleet to protect -- every computer
+  is being offered nothing at all -- and gating it would leave a brand-new
+  customer with no companion until somebody found the override.
+* **A downgrade asked for by the feed** is a WITHDRAWAL, not a rollout: the
+  channel's `current` pointer moving backwards is how a bad build is taken
+  away from feed customers, and a gate in front of it would pin every fleet
+  on the build being withdrawn.
+
+An admin standing at `[ MAKE CURRENT ]` is refused exactly as before, with the
+typed override in front of them. **`[releases] soak_minutes = 0` now really is
+the way back to the pre-08-28 behaviour** -- zero used to leave the "has any
+computer reported this build" half standing, which a build published thirty
+seconds ago can never satisfy.
+
+**`-EmitKindExtras` is gated** (REL-4). It signs `requires_dashboard`/`arch`
+into the record, and a companion below **0.9.55** does not know those field
+names: its signature check fails on the whole record, it refuses the build
+silently and permanently, and the recovery is a reinstall at that desk. Step
+0a of `ship.ps1` reads the live dashboard's rollout counts on the fleet
+credential and refuses the flag unless every reporting computer is on 0.9.55
+or newer -- a fleet it cannot read is a refusal, not a pass. It names
+`check_deploy_drift.ps1 -AdminUser <you>` to list them, because the fleet
+credential answers counts and never names.
+
+**The ordering gate runs before the build** (SYS-7). `ship.cmd` refuses when
+the live dashboard is older than this companion's `REQUIRES_DASHBOARD`
+(`-AllowBehind` to publish it staged on purpose), and `publish_latest.py`
+refuses when the newest **dashboard** bundle on the vendor channel is older
+than the companion's requirement (`--allow-behind`). Both exist because the
+failure is invisible: the build is published, never offered, and every page
+reports the fleet as up to date (SYS-2).
+
+**`publish_latest.py` says what will actually happen.** With `--make-current`
+it names the `policy = current` sites that take it on their next check and the
+`manual` sites that need a click; without it, it says nobody is offered
+anything on any policy. The recall command is printed in the same block.
+
+**The release key can be copied, and the ship asks** (REL-14).
+`python tools/release_key.py backup --to <path>` writes a copy (the file IS
+the key -- there is no passphrase wrap, and the tool says so),
+`backup --print` gives the base64 line for a password manager, and either
+records `backed_up_at` in `~/.ccsync-release/backup.json`. `release_key.py new`
+now ends with the same warning `bake` uses, and `ship.cmd` prints one line
+when no backup has ever been recorded. Never a refusal. Record it on the
+dashboard too: **SETTINGS -> PROTECTION -> [ I HAVE BACKED IT UP ]**.
+
+**The dashboard can update itself, on the one pathway where that is possible.**
+On a site with `[releases] policy = "current"` **in image mode**, the feed
+poller applies a newer dashboard **code bundle** unattended, through
+`dashboard_update.start_apply` with every one of its stand-down rules intact
+(runtime-id match, no update already running, free space, no live YouTube jobs,
+and the boot-attempt guard that rolls the tree back if the new code will not
+start). The soak is the same idea with the only evidence a dashboard bundle
+can have: **age**. There is no fleet of dashboards to canary on, so the
+question is whether the vendor has left the release standing for
+`release_soak_minutes` -- the window in which a bad build is recalled. A bundle
+that failed here once is never retried unattended.
+
+The two pathways that stay manual, and now say so on **SETTINGS -> HEALTH**
+under `[ WHAT IS RUNNING ]`:
+
+| Situation | What happens | What to run |
+|---|---|---|
+| image mode, code bundle, `policy = current` | applied automatically after the soak | nothing |
+| image mode, code bundle, `stage` / `manual` | offered on the Packages page | `[ APPLY ]` there |
+| image mode, **runtime** update (a different image) | never applied: its dependencies are not in this container's venv | update the image from the NAS's own app manager (docs/DOCKER.md) |
+| **bind-mount** mode | the container does not own its code and cannot replace it | `tools\ship.cmd -DashboardOnly` on your wired computer |
+
+`[ WHAT IS RUNNING ]` is the in-product half of `check_deploy_drift.ps1`
+(SYS-7): this dashboard's version against the newest the vendor offers, the
+current companion against the newest the vendor offers, how many computers are
+on each build with the date each was published, and one sentence when they
+disagree. A second customer has no base rig and no repo, so for them the drift
+doctor does not exist.
+
+**The EULA and the guide ship with the code** (REL-5). `docs/legal/` and
+`docs/HOW_IT_WORKS.md` are in the image (`COPY` lines in
+`dashboard/deploy/Dockerfile`, re-included in `.dockerignore`), in the OTA
+bundle (`TREES`/`FILES` in `tools/build_dashboard_bundle.py`) and in a
+bind-mode deploy (`install_dashboard_app.py` ships them into
+`<root>/app/docs`). A build with no licence agreement makes the wizard's first
+step **amber**, not a green tick nobody read.
 
 ---
 

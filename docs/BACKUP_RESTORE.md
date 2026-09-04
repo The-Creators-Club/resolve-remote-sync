@@ -40,6 +40,20 @@ what the NAS holds and where.
 > Projects tree). Without them the page still runs the runbook and prints the
 > commands; it just cannot do the copying. `docs/SELF_DIAGNOSIS.md` section 15
 > is the full description.
+>
+> **`install_dashboard_app.py` sets both since 2026-09-04** (OPS-3). It asks
+> the NAS which dataset the tree is in, checks that `<mountpoint>/.zfs/snapshot`
+> is really there, mounts it read-only at `/snapshots` and works the subpath
+> out from the paths it already has. Nothing is mounted where it could not
+> verify the directory - docker CREATES a missing bind source, and a stray
+> `.zfs` directory invented inside a customer's footage tree is not a thing a
+> deploy may do - so the honest outcomes are a working RECOVERY page or a page
+> that says **"this deployment was never given a snapshot mount"** and names
+> the variable. Two cases need a hand: a **Synology** (share snapshots live
+> under `/volume<N>/@sharesnap/<share>`, which no path here can derive) and a
+> stack installed from a pasted compose file. Both are one key:
+> `site.toml [tree] snapshot_dir` (plus `snapshot_projects_subpath`), and the
+> mount line in the compose file if you pasted one.
 
 ---
 
@@ -56,6 +70,9 @@ what the NAS holds and where.
 | `ytdl.db` | `<apps_root>/ytdl-data/ytdl.db` | NAS snapshots of the apps dataset |
 | The deployed app code | `<apps_root>/app` | git, plus `app.old.<ts>` from the last deploy |
 | An editor's local copy | `P:\` on their machine | **Nothing.** It is a replica, not a backup. |
+| **Syncthing's own config** - every device pairing, every folder share, the GUI credentials | TrueNAS: a TrueNAS-managed `ix_volume` for the catalog app. DSM: inside the compose stack's own volume | **NOT covered.** It is outside both `[tree] pool_root` and `[apps] root`, which are the only two things `setup_snapshots.py` knows about, so it relies entirely on the TrueNAS Apps pool. Losing it loses every editor's pairing; the recovery is re-approving each device (§8) (OPS-22, 2026-09-03) |
+| **The release signing key** (`release.key`) | one Windows profile on the base rig, `%USERPROFILE%\.ccsync-release\` | **Nothing.** Never on the NAS, in no snapshot, in no repo. A companion trusts only the public keys baked into the build it is running, so losing the private half means no signed publish for the fleet until every machine is reinstalled by hand, and `RELEASE.md`'s rotation needs the OLD key. **Copy it into a password manager** (OPS-8, `INSTALL.md` Step 6) |
+| **The Android signing keystore**, if you build the mobile app | one Windows profile on the base rig | **Nothing**, for the release key's reasons. Google Play will not accept an app signed by a different key, so the answer to losing it is a new listing. Same password manager, same day |
 
 Two datasets carry everything that matters: the **tree** dataset and the
 **apps** dataset. Both are snapshotted on the same schedule — **provided each
@@ -580,6 +597,20 @@ By hand, on a deployment the dashboard has no snapshot mount on:
   decision. TrueNAS: Data Protection → Replication Tasks to a second box or a
   cloud target. DSM: Snapshot Replication to another Synology. Both replicate
   the snapshots this document configures, so setting them up is additive.
+- **Syncthing's config volume** (OPS-22, 2026-09-03). Named in §1 as NOT
+  covered rather than quietly omitted: on TrueNAS it belongs to a catalog app
+  whose `ix_volume` lives on the Apps pool, outside anything this document
+  schedules, and taking a periodic snapshot of somebody else's app volume is
+  not something these scripts will do behind an operator's back. **The
+  recovery path if it is lost is re-pairing, not restoring:** re-run
+  `python server/install_syncthing_app.py --site site.toml`, then approve each
+  editor's device again - Settings ▸ Users ▸ the pending-devices panel, or
+  `python server/accept_device.py --site site.toml --device-id <id>` - and let
+  the enforce cycle re-share every ticked project. No footage is at risk in
+  that state: the editors' copies and the NAS copy both still exist, they
+  simply stop replicating until the pairings are back. If your Apps pool
+  itself has a snapshot schedule (TrueNAS ▸ Data Protection), that covers this
+  volume, and it is worth ten seconds to check.
 - **Backing up editor machines.** `P:` is a replica. Anything an editor keeps
   only on their own disk (Resolve local databases, scratch renders) is theirs
   to back up.

@@ -89,6 +89,21 @@ TREES: tuple[tuple[str, str], ...] = (
     ("broll/web", "broll-app"),
     ("music/web", "music-app"),
     ("ytdl/web", "ytdl-app"),
+    # REL-5 (usability sweep 2026-09-04): the legal paperwork travels with the
+    # code. Without it an over-the-air dashboard shows the first-run wizard an
+    # empty licence box, a disabled [ ACCEPT ], and ticks `eula` green -- and
+    # THIRD_PARTY_NOTICES.md (in this same directory) has the same problem.
+    # ~124 KB of markdown against a ~10 MB bundle. The bundle root IS the code
+    # root, so this lands where setup_engine._find_eula looks: <root>/docs/legal.
+    ("docs/legal", "docs/legal"),
+)
+
+# Single FILES, for the same reason: /help renders exactly one document and
+# copying the whole of docs/ (bug-hunt notes, plans, 60 runbooks) into every
+# customer's container is not what "ship the guide" means (REL-5, and the
+# wave-4 owed item -- help.py's search order already looks in <root>/docs).
+FILES: tuple[tuple[str, str], ...] = (
+    ("docs/HOW_IT_WORKS.md", "docs/HOW_IT_WORKS.md"),
 )
 
 # Directory names dropped wherever they appear. `data` is in here because each
@@ -184,6 +199,13 @@ def collect_files(repo_root: Path) -> list[tuple[str, Path]]:
         for path in iter_tree(source):
             rel = path.relative_to(source).as_posix()
             collected.append((f"{bundle_name}/{rel}", path))
+    for source_rel, bundle_name in FILES:
+        source = repo_root / source_rel
+        if not source.is_file():
+            raise BundleError(
+                f"{source_rel} is missing from this checkout -- a bundle without it "
+                f"is a dashboard whose /help page says it is not installed")
+        collected.append((bundle_name, source))
     return collected
 
 

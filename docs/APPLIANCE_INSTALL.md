@@ -7,10 +7,14 @@ describes the install as `dashboard/deploy/compose.appliance.yaml` and
 every place a later work package (`ZERO_TOUCH_PLAN.md` section 4) changes
 the story. **WP D — the `/setup` wizard — has since landed** (2026-08-17, its
 last placeholder steps 2026-08-18), so steps 2 and 3 below describe something
-that exists; they were rewritten on 2026-08-21 (CR-67). **WP B has not**: the
-tailnet node in step 4 is still signed in by hand. Do not hand this to a real
-customer until step 4 stops asking for a shell — the sections still marked
-**NOT YET TRUE** below are not cosmetic.
+that exists; they were rewritten on 2026-08-21 (CR-67). **WP B has still not landed**, but its
+worst edge is gone: the wizard's own "Connect to your tailnet" task asks the
+bundled node for a sign-in link and puts it on the page (UX-21, 2026-09-04),
+so step 4 no longer sends anybody to `docker compose logs` to read a URL out
+of a log. What WP B still owes is Serve: nothing publishes this dashboard on
+the tailnet automatically. **The DRAFT label stays until somebody who is not
+the author has run this end to end** — the sections marked **NOT YET TRUE**
+below are not cosmetic.
 
 ## The bar this is judged against
 
@@ -114,32 +118,37 @@ account exists, re-checked under `BEGIN IMMEDIATE`.
 Still worth doing first: confirm the stack is healthy (`docker compose ps`, or
 `curl http://<nas-ip>:8480/api/v1/health` from the NAS itself).
 
-### 4. Connect to your tailnet
+### 4. The wizard does the rest
 
-**NOT YET TRUE.** The plan (`ZERO_TOUCH_PLAN.md` 3.5 step 4, WP B) is: the
-wizard drives the login itself over the tailnet node's LocalAPI and shows
-the sign-in link, you click it, and the dashboard then *derives* its own
-public URL (`https://ccsync-<studio>.<tailnet>.ts.net`) from the same
-socket — no URL to type anywhere, and no admin console visit to mint a key.
+Work down the checklist on `/setup`. Everything from here is a page in the
+browser; the shell commands that used to be steps are kept below each one as
+the fallback for when something cannot start.
 
-Today (WP A only, no WP B) the `tailscale` service runs bare `tailscaled`
-with no login attempted automatically — the stock image's own `tailscale
+**Connect to your tailnet.** The bundled `tailscale` service runs bare
+`tailscaled` and attempts no login of its own — the stock image's `tailscale
 up` was measured to give up after 60 seconds and crash-loop otherwise
-(`docs/spikes/zero-touch-spikes-2026-08-17.md` S1), so this stack
-deliberately does not run it. Until WP B exists, an operator has to trigger
-the login by hand:
+(`docs/spikes/zero-touch-spikes-2026-08-17.md` S1). Press
+**[ GET A SIGN-IN LINK ]** on that task: the dashboard asks the node over its
+own LocalAPI socket, starts the interactive login and shows you the
+`login.tailscale.com` link. Open it, sign in, then press CHECK on the task and
+it reports the node's tailnet name (UX-21, 2026-09-04).
+
+*If the bundled node cannot start* — no link after a second press, or the task
+says there is no node here — do it from a shell on the NAS instead:
 
 ```
 docker compose exec tailscale tailscale --socket=/var/run/tailscale/tailscaled.sock up
+docker compose logs tailscale          # the same URL, as the "AuthURL is ..." line
 ```
 
-then either read the URL that command prints directly, or
-`docker compose logs tailscale` afterward for the `AuthURL is …` line.
-**Nothing sets Serve yet either** — `POST /localapi/v0/serve-config` refuses
-until the node is logged in (`netMap is nil`), so even after this step the
-dashboard is reachable only on its loopback bind
-(`127.0.0.1:8480`), not on the tailnet, until WP B's Serve-setting code
-exists.
+**Still NOT YET TRUE: Serve.** `POST /localapi/v0/serve-config` refuses until
+the node is signed in (`netMap is nil`), and nothing calls it afterwards, so
+even a signed-in node leaves this dashboard on its loopback bind
+(`127.0.0.1:8480`) rather than published on the tailnet. That is WP B's
+remaining half.
+
+**Editors, software, protection.** The last three optional tasks, described
+in step 5 below.
 
 ### 5. Editors, software, protection
 
@@ -191,7 +200,7 @@ for snapshots.
 ```
 docker compose ps                          # all five services; secrets-init "Exited (0)" is normal
 docker compose logs secrets-init           # confirms the two .env files were generated
-docker compose logs tailscale              # the sign-in link, and Serve/LocalAPI state
+docker compose logs tailscale              # the sign-in link (step 4's fallback), and Serve/LocalAPI state
 docker compose logs dashboard | head -40   # run.sh's own boot lines
 curl -s http://127.0.0.1:8480/api/v1/health # {"ok": true, ...} from ON the NAS
 ```

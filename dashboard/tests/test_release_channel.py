@@ -242,7 +242,7 @@ def test_make_current_is_refused_until_a_machine_has_run_the_build(env):
     publish(client, "0.2.0")
     r = client.post("/api/v1/admin/packages/windows/0.2.0/current")
     assert r.status_code == 409
-    assert "no machine has reported 0.2.0" in r.json()["detail"]
+    assert "no computer has reported 0.2.0" in r.json()["detail"]
     assert dbmod.get_current_package(conn, "windows") is None
 
     report(client, version="0.2.0", crashes=0)
@@ -354,13 +354,22 @@ def test_a_build_needing_a_newer_dashboard_cannot_be_made_current(env):
     assert dbmod.get_current_package(conn, "windows") is None
 
 
-def test_publishing_straight_to_current_is_refused_on_the_same_rule(env):
+def test_publishing_straight_to_current_is_staged_on_the_same_rule(env):
+    """REL-1 (usability sweep 2026-09-04): the ORDERING violation used to
+    refuse the whole publish with a 409 and unlink the .part. It stages now
+    and says why -- which is what the 08-28 comment always said should
+    happen, and what stopped the feed re-downloading 40 MB on every check
+    only to throw it away again. The bytes are fine; only the flip is in
+    question."""
     client, conn, _settings = env
     r = publish(client, "0.2.0", requires_dashboard="99.0.0", make_current=1)
-    assert r.status_code == 409
-    assert "Update the dashboard first" in r.json()["detail"]
-    # Nothing partially applied: no row, no file.
-    assert dbmod.get_package(conn, "windows", "0.2.0") is None
+    assert r.status_code == 200
+    note = r.json()["note"]
+    assert package_store.STAGED_SENTENCE in note
+    assert "Update the dashboard first" in note
+    # Published, and NOT what anybody is offered.
+    assert dbmod.get_package(conn, "windows", "0.2.0") is not None
+    assert dbmod.get_current_package(conn, "windows") is None
 
 
 def test_a_build_needing_this_dashboard_or_older_is_fine(env):
@@ -690,3 +699,70 @@ def test_the_packages_page_names_an_arch_with_no_build(env):
     assert {"platform": "macos", "arch": "x86_64", "machines": 1} in view["arch_gaps"]
     page = client.get("/partials/admin/packages")
     assert "no macos/x86_64 build published" in page.text
+
+
+# --------------------------------------------- the soak gate at the PUBLISH door
+#
+# REL-1 (usability sweep 2026-09-04). The 08-28 gate stood at three doors and
+# all three were HTTP routes; the two that are not -- the feed's `current`
+# policy and `./tools/release_macos.sh --publish --make-current` -- reached
+# store_verified_package(make_current=True) and handed the whole fleet a build
+# no computer anywhere had run. The gate lives in package_store now, so a
+# publish that ASKS to be made current is published STAGED instead, with the
+# refusal as a note.
+
+
+def test_a_publish_that_asks_for_current_is_staged_when_it_has_not_soaked(env):
+    client, conn, _settings = env
+    # A first build becomes current: nothing is current yet, so there is no
+    # fleet to protect and every computer is being offered nothing at all.
+    assert publish(client, "0.2.0", make_current=1).status_code == 200
+    assert dbmod.get_current_package(conn, "windows")["version"] == "0.2.0"
+
+    r = publish(client, "0.3.0", make_current=1)
+    assert r.status_code == 200
+    note = r.json()["note"]
+    assert package_store.STAGED_SENTENCE in note
+    assert "no computer has reported 0.3.0" in note
+    # Published, on the shelf, and NOT what the fleet is offered.
+    assert dbmod.get_package(conn, "windows", "0.3.0") is not None
+    assert dbmod.get_current_package(conn, "windows")["version"] == "0.2.0"
+
+    # ...and the canary is still the way through, unchanged.
+    report(client, version="0.3.0", crashes=0)
+    backdate_soak(conn, 45)
+    assert client.post("/api/v1/admin/packages/windows/0.3.0/current").status_code == 200
+    assert dbmod.get_current_package(conn, "windows")["version"] == "0.3.0"
+
+
+def test_a_publish_that_does_not_ask_for_current_gets_no_note(env):
+    client, _conn, _settings = env
+    r = publish(client, "0.2.0")
+    assert r.status_code == 200
+    assert r.json()["note"] == ""
+
+
+def test_soak_minutes_zero_is_the_way_back_to_the_old_behaviour(env):
+    """The escape the 08-28 comment promised and the code did not give: with
+    the gate at the publish door, `soak_minutes = 0` had to mean NO SOAK, not
+    "zero minutes of a soak that also requires a computer to have reported"."""
+    client, conn, _settings = env
+    dbmod.meta_set(conn, "release_soak_minutes", "0")
+    conn.commit()
+    assert publish(client, "0.2.0", make_current=1).status_code == 200
+    r = publish(client, "0.3.0", make_current=1)
+    assert r.json()["note"] == ""
+    assert dbmod.get_current_package(conn, "windows")["version"] == "0.3.0"
+
+
+def test_the_gate_at_the_publish_door_never_refuses_the_bytes(env):
+    """A staged publish is a PUBLISH: the file is on disk and the row is
+    there, so [ MAKE CURRENT ] and the per-computer push both work. The
+    ordering refusal used to unlink the .part and 409 the whole thing, which
+    is what made the feed re-download the same 40 MB on every check."""
+    client, conn, settings = env
+    publish(client, "0.2.0", make_current=1)
+    publish(client, "0.3.0", make_current=1, body=b"v3-bytes")
+    row = dbmod.get_package(conn, "windows", "0.3.0")
+    path = settings.packages_path() / "windows" / row["filename"]
+    assert path.read_bytes() == b"v3-bytes"

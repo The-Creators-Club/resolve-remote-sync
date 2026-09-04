@@ -358,6 +358,12 @@
         + " (" + (install.percent || 0) + "%)"));
       panel.appendChild(progressBar(install.percent));
       pollInstall(state);
+    } else if (install.state === "interrupted") {
+      // REL-15 (usability sweep 2026-09-04): an install the server was still
+      // running when it restarted. It used to render as "not installed",
+      // which is true of the disk and useless to the admin who started it.
+      panel.appendChild(el("div", "banner", "▲ [ INTERRUPTED ] "
+        + (install.error || "that install did not finish.")));
     } else if (install.state === "error" && install.error) {
       panel.appendChild(el("div", "banner", "▲ " + install.error));
     } else if (install.detail) {
@@ -365,7 +371,8 @@
     }
 
     var actions = el("div", "ai-key");
-    var go = el("button", "btn", install.installed ? "[ UPDATE ]" : "[ INSTALL ]");
+    var go = el("button", "btn", install.state === "interrupted" ? "[ TRY AGAIN ]"
+      : (install.installed ? "[ UPDATE ]" : "[ INSTALL ]"));
     go.type = "button";
     go.disabled = install.state === "running" || !data.supported;
     go.addEventListener("click", function () {

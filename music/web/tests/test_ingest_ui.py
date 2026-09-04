@@ -275,7 +275,7 @@ def test_a_refusal_from_run_is_a_persistent_notice_not_a_toast(js):
     assert 'e.status === 503' in body
     assert 'miSetNotice(' in body
     # ...and it names the way out, which for music is the fallback path.
-    assert 'let the base rig index them' in body
+    assert 'let the indexing computer index them' in body
     notice = js[js.index('function miSetNotice'):]
     notice = notice[:notice.index('\n}\n')]
     assert "classList.toggle('hidden', !mi.notice)" in notice
@@ -358,7 +358,7 @@ def test_a_companion_too_old_for_music_ingest_says_so(js):
     Not the same message as "not running", and it names what happens instead."""
     assert 'e.status === 404' in js
     assert 'too old for music ingest' in js
-    assert 'indexed on the base rig' in js
+    assert 'indexed on the indexing computer' in js
 
 
 # --- theme --------------------------------------------------------------------

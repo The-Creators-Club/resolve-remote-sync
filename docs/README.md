@@ -3,7 +3,10 @@
 CC Sync — fleet sync for DaVinci Resolve®. Every document in `docs/`, one line
 each. Start at the top if you are new.
 
-Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
+Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13); completed and
+put under test 2026-09-04 (SYS-12). `tools/tests/test_docs_index.py` fails if a
+document is added to `docs/` and not listed here, because the promise in the
+line above is machine-checkable and nothing was checking it.
 
 ---
 
@@ -39,6 +42,12 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | [`CLIENT_FOLDERS.md`](CLIENT_FOLDERS.md) | Curated b-roll folders with a link a prospective licensee can open: how to use them, what the client sees, and publishing the one path prefix with Tailscale Funnel |
 | [`DOCKER.md`](DOCKER.md) | The two ways the dashboard container gets its code and its dependencies |
 | [`CARDS_DEPLOY.md`](CARDS_DEPLOY.md) | Refreshing Timeline Cards on the NAS: the one code mount that is another repo's checkout, why a copy without a restart changes nothing, and the rollback |
+| [`RELEASE_PATHWAYS.md`](RELEASE_PATHWAYS.md) | **Read before starting a release.** Which of the two publish pathways applies right now: Alex's terminal, or CI plus `publish_latest.py` |
+| [`FILE_MOVES.md`](FILE_MOVES.md) | Moving a file on the server without it coming straight back: the project page's move button, the two-phase command, and why nothing in that path deletes |
+| [`UPLOAD_ONLY_TICK.md`](UPLOAD_ONLY_TICK.md) | The upload-only tick: originals up, nothing down, and why it is "no share" rather than a send-only folder |
+| [`MOBILE.md`](MOBILE.md) | The dashboard on a phone: installing it from the browser, what works offline, and what the admin sets up |
+| [`ANDROID.md`](ANDROID.md) | The Android APK half of the phone story, and the one symptom it exists for (the app showing a URL bar) |
+| [`YTDL_TERMS_AND_QUEUE.md`](YTDL_TERMS_AND_QUEUE.md) | The YouTube downloader's term review and search queue |
 | [`CI.md`](CI.md) | What runs on a runner, and what still only runs on the base rig |
 | [`PRODUCT_REPO.md`](PRODUCT_REPO.md) | The customer-facing repo, how it is exported, and what is withheld |
 
@@ -88,9 +97,13 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | [`TREE_LAYOUT_PLAN.md`](TREE_LAYOUT_PLAN.md) | The plan that executes that audit: one layout object published in the manifest (`projects_dir`, `proxy_dir_name`, the `Assets/*` roles, `Youtube`, fixer targets, extensions), plus the Setup step that learns a customer's template from their own sample projects |
 | [`SHARED_FOLDERS_PLAN.md`](SHARED_FOLDERS_PLAN.md) | One folder used by two projects: a project's marker declares `includes`, the dashboard resolves them into the selection, lanes A/B run the borrowed subpath, lane C reuses the lender's Syncthing folder with a restricted `.stignore`; no second copy, no relinking |
 | [`TREE_LAYOUT_AGNOSTICISM.md`](TREE_LAYOUT_AGNOSTICISM.md) | The 2026-08-19 audit of what a customer can change about the tree by config (root, depth, template folders) versus what is code (`Projects`, `Assets/*`, the `Proxy/` sibling rule that defines the lanes, the archive taxonomy), with sales qualification questions and a costed work list |
+| [`TIMELINE-CARDS-INTO-CCSYNC.md`](TIMELINE-CARDS-INTO-CCSYNC.md) | Timeline Cards folded in: the agent into the companion, the page into the dashboard, and the job queue across the fleet (phases 0-4; §9 is what runs where) |
+| [`MOBILE_PLAN.md`](MOBILE_PLAN.md) | The plan behind the phone port: one app, no second URL, the web manifest and service worker, and the Android wrapper |
+| [`LIBRARY_WALK_PLAN.md`](LIBRARY_WALK_PLAN.md) | Enumerating Resolve clips from the project library file instead of the scripting API, and what "As built" changed |
+| [`TRAY_MENU_LATENCY.md`](TRAY_MENU_LATENCY.md) | Why the tray menu sometimes opens late (Windows): the investigation, and which step of the fix is built |
 | `../SPEC.md` | The internal architecture document — history, rationale, known flaws |
 | `../KNOWN_BUGS.md` | The live defect ledger (numbered entries, per-platform prefixes) |
-| `../CLAUDE.md` | Repo conventions, test commands, and the one ship command |
+| `../CLAUDE.md` | Repo conventions, test commands, and the two release pathways |
 
 ## Archives — history, not instructions
 
@@ -104,6 +117,7 @@ and are deliberately left as they were; do not copy commands out of them.
 | [`bug-hunt-2026-08-11.md`](bug-hunt-2026-08-11.md) | The 127-finding hunt |
 | [`bug-hunt-2026-08-14.md`](bug-hunt-2026-08-14.md) | The 94-finding hunt |
 | [`bug-hunt-2026-08-21.md`](bug-hunt-2026-08-21.md) | The 78-finding hunt plus the 53-issue design review. Fixed in the repo on 2026-08-21 and **unshipped**: `KNOWN_BUGS.md` CR-46 to CR-67 is what landed, what was deliberately deferred, and which seams were still open |
+| [`bug-hunt-2026-09-03.md`](bug-hunt-2026-09-03.md) | The 84-finding sixth fleet hunt (seventeen hunters, five verifiers), fixed the same day as CR-102 to CR-119 |
 | [`synology-spikes-2026-08-17.md`](synology-spikes-2026-08-17.md) | The eight day-1 spikes run against real Synology hardware |
 | [`macos-first-run-2026-08-04.md`](macos-first-run-2026-08-04.md) | The first macOS bring-up session |
 | [`macos-first-run-2026-08-05.md`](macos-first-run-2026-08-05.md) | The follow-up session |

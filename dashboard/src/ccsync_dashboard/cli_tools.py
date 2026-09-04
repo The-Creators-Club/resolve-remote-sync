@@ -189,6 +189,15 @@ CODEX_SUMS_ASSET = "codex-package_SHA256SUMS"
 # sha256, both of which are enforced, so a hostile server cannot spend our
 # disk quietly either way.
 CLAUDE_MAX_BYTES = 512 * 1024 * 1024
+# What each install actually COSTS on the data volume, for the free-space
+# refusal (REL-7). Measured, not the cap above: the cap is a runaway-response
+# guard and refusing an install on 512 MiB when the binary is 313 MiB would be
+# a refusal about a number nobody can see. Codex is the compressed package
+# plus its unpacked tree.
+APPROX_INSTALL_BYTES = {
+    CLAUDE_CODE: 330 * 1024 * 1024,
+    CODEX: 200 * 1024 * 1024,
+}
 CODEX_MAX_BYTES = 400 * 1024 * 1024
 CODEX_MAX_UNPACKED_BYTES = 1536 * 1024 * 1024
 JSON_MAX_BYTES = 8 * 1024 * 1024
@@ -230,6 +239,20 @@ def state_path(settings: Any, name: str) -> Path:
 
 def pointer_path(settings: Any, name: str) -> Path:
     return tool_root(settings, name) / "current"
+
+
+def inflight_path(settings: Any, name: str) -> Path:
+    """`<data>/tools/<tool>/install.json` -- the install that is RUNNING.
+
+    REL-15 (usability sweep 2026-09-04): the live status was three module
+    globals and a daemon thread, so a `docker restart`, an image update or an
+    OOM kill during a 313 MB download over a slow customer link lost it
+    entirely. The page came back saying "not installed", with no trace that
+    anything had been in flight, and left the .part behind. This file is the
+    trace: written when the thread starts, deleted when it ends any way at
+    all, and read by install_status when no thread is running.
+    """
+    return tool_root(settings, name) / "install.json"
 
 
 def token_path(settings: Any, name: str) -> Path:
@@ -291,6 +314,93 @@ def _utcnow() -> str:
     from . import db as dbmod
 
     return dbmod.utcnow_iso()
+
+
+def _write_inflight(settings: Any, name: str, data: dict) -> None:
+    """Best effort by construction: a record we could not write must never be
+    the reason an install does not start (REL-15)."""
+    try:
+        path = inflight_path(settings, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name("install.json.tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        log.warning("could not record the in-flight install of %s", name, exc_info=True)
+
+
+def read_inflight(settings: Any, name: str) -> dict:
+    """The in-flight record, or {}. A corrupt file reads as {} for the same
+    reason read_state's does: a file that will not parse must not be able to
+    500 the Settings page."""
+    try:
+        raw = inflight_path(settings, name).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _clear_inflight(settings: Any, name: str) -> None:
+    try:
+        inflight_path(settings, name).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# How long a `.staging` part file may survive its own download. A day, and
+# swept at IMPORT, exactly like api._sweep_stale_parts does for package
+# uploads: until now only a LATER SUCCESSFUL install pruned .staging, so a
+# container killed mid-download left up to 313 MB on the data volume for ever
+# (REL-15 / REL-7 -- the same volume dashboard.db lives on).
+STALE_STAGING_SECONDS = 24 * 3600
+
+
+def sweep_stale_staging(settings: Any, now: float | None = None) -> list[str]:
+    """Delete abandoned `.staging/*` older than a day. Never raises."""
+    import time
+
+    now = time.time() if now is None else now
+    swept: list[str] = []
+    for name in TOOLS:
+        try:
+            staging = tool_root(settings, name) / ".staging"
+            if not staging.is_dir():
+                continue
+            for path in staging.iterdir():
+                try:
+                    if not path.is_file() or now - path.stat().st_mtime < STALE_STAGING_SECONDS:
+                        continue
+                    path.unlink()
+                except OSError:
+                    continue
+                swept.append(f"{name}/{path.name}")
+        except OSError:
+            continue
+    if swept:
+        log.warning("removed %d abandoned CLI download(s): %s",
+                    len(swept), ", ".join(sorted(swept)))
+    return swept
+
+
+_swept_once = False
+
+
+def _sweep_once(settings: Any) -> None:
+    """The import-time sweep, deferred to the first status read because that
+    is the first moment this module has a `settings` to find `<data>` with.
+    Once per process, and never fatal."""
+    global _swept_once
+    if _swept_once:
+        return
+    _swept_once = True
+    try:
+        sweep_stale_staging(settings)
+    except Exception:                                                 # noqa: BLE001
+        log.warning("the stale-download sweep failed", exc_info=True)
 
 
 # --------------------------------------------------------------- environment
@@ -484,8 +594,12 @@ def codex_target(machine: str | None = None, system: str | None = None) -> str:
             else "aarch64-unknown-linux-musl")
 
 
-def install_supported(settings: Any) -> tuple[bool, str]:
-    """(can the wizard install here, why not). Never raises."""
+def install_supported(settings: Any, name: str = "") -> tuple[bool, str]:
+    """(can the wizard install here, why not). Never raises.
+
+    `name` is optional because the Settings page asks the question about the
+    CONTAINER before an admin has picked a tool; with one, the answer also
+    covers that tool's download size (REL-7)."""
     try:
         platform_key()
     except UnsupportedPlatform as exc:
@@ -502,6 +616,25 @@ def install_supported(settings: Any) -> tuple[bool, str]:
     if not os.access(existing, os.W_OK | os.X_OK):
         return False, (f"{existing} is not writable by this container. The data "
                        f"volume has to be writable to install anything into it.")
+    # REL-7 (usability sweep 2026-09-04): writable is not the same as roomy.
+    # Claude Code linux-x64 MEASURED 313 MiB (see CLAUDE_MAX_BYTES) and lands
+    # on the same volume as dashboard.db, so an install started with 210 MiB
+    # free is a download that fails at 100% -- or, worse, a SQLite write
+    # failure on the database that tells the whole fleet whether its footage
+    # is syncing. Asked on the RENDER (so the panel says why before an admin
+    # clicks) and again in start_install.
+    #
+    # With no `name` the answer is about the volume, not about a tool: the
+    # floor alone, because refusing every tool on the biggest one's size would
+    # hide a perfectly installable Codex behind Claude Code's 313 MiB.
+    from . import dashboard_update
+
+    label = TOOLS[name].label if name in TOOLS else "a CLI"
+    refusal = dashboard_update.space_refusal(
+        settings, APPROX_INSTALL_BYTES.get(name, 0),
+        what=f"installing {label}", factor=2)
+    if refusal:
+        return False, refusal
     return True, ""
 
 
@@ -742,8 +875,10 @@ def install_status(settings: Any, name: str) -> dict:
     """What the poller sees: the live run if there is one, else the installed
     record. Never raises."""
     spec(name)
+    _sweep_once(settings)
     with _install_lock:
         status = dict(_install_status.get(name) or _blank_status(name))
+        running_here = _install_running == name
     state = read_state(settings, name)
     binary = installed_binary(settings, name)
     status["installed"] = bool(binary)
@@ -762,6 +897,30 @@ def install_status(settings: Any, name: str) -> dict:
         status["unverified"] = True
     else:
         status["unverified"] = False
+    # REL-15: a record with no running thread is an install this process did
+    # not finish and cannot resume -- a restart, an image update, an OOM kill.
+    # It is reported as INTERRUPTED, never as "not installed", which is what
+    # the page used to say about a download that had been running for four
+    # minutes. An install that had already finished (the binary is there) is
+    # not interrupted: it is installed, and the stale record is swept.
+    inflight = read_inflight(settings, name)
+    status["interrupted"] = False
+    if inflight and not running_here and status["state"] != "running":
+        if binary and status["installed_version"] == str(inflight.get("version") or ""):
+            _clear_inflight(settings, name)
+        else:
+            started = str(inflight.get("started_at") or "")
+            status["interrupted"] = True
+            status["state"] = "interrupted"
+            status["step"] = "interrupted"
+            status["version"] = str(inflight.get("version") or "")
+            status["started_at"] = started or status.get("started_at") or ""
+            status["error"] = (
+                f"the download of {spec(name).label} was still running when this "
+                f"server restarted"
+                + (f" (started {started})" if started else "")
+                + ". Nothing was installed and nothing was left half-installed. "
+                  "Start it again when you are ready.")
     return status
 
 
@@ -773,7 +932,7 @@ def start_install(settings: Any, name: str) -> dict:
     """
     global _install_running
     spec(name)
-    ok, why = install_supported(settings)
+    ok, why = install_supported(settings, name)
     if not ok:
         raise ToolError(why)
     with _install_lock:
@@ -784,6 +943,15 @@ def start_install(settings: Any, name: str) -> dict:
         _install_status[name] = _blank_status(name)
         _install_status[name].update({"state": "running", "step": "checking the publisher",
                                       "started_at": _utcnow()})
+        started_at = _install_status[name]["started_at"]
+    # REL-15: on disk BEFORE the thread starts, so a container killed one
+    # second later still knows an install was in flight. Cleared by the
+    # worker's `finally`, which runs for an error and a success alike -- so a
+    # record that outlives its thread means one thing only: this process died.
+    _write_inflight(settings, name, {
+        "tool": name, "started_at": started_at, "version": "", "url": "",
+        "step": "checking the publisher", "total": 0,
+    })
     thread = threading.Thread(target=_install_worker, args=(settings, name),
                               name=f"install-{name}", daemon=True)
     thread.start()
@@ -809,6 +977,7 @@ def _install_worker(settings: Any, name: str) -> None:
     finally:
         with _install_lock:
             _install_running = ""
+        _clear_inflight(settings, name)
         # A new binary means every cached "is it installed / signed in" answer
         # is stale.
         _reset_probe_cache()
@@ -830,6 +999,11 @@ def _install_claude(settings: Any) -> None:
     entry = claude_platform_entry(manifest, key)
     url = claude_binary_url(version, key, entry["binary"])
     _set_status(name, step=f"downloading {version} ({key})", total=entry["size"], bytes=0)
+    # REL-15: what a restart interrupted, in the words the page will use.
+    _write_inflight(settings, name, {
+        "tool": name, "started_at": _utcnow(), "version": version, "url": url,
+        "step": "downloading", "total": int(entry["size"] or 0),
+    })
 
     staging = tool_root(settings, name) / ".staging"
     staging.mkdir(parents=True, exist_ok=True)
@@ -897,6 +1071,10 @@ def _install_codex(settings: Any) -> None:
             f"{CODEX_SUMS_ASSET} with the release.")
     _set_status(name, step=f"downloading {version} ({target_triple})",
                 checksum_source=checksum_source, bytes=0, total=0, detail="")
+    _write_inflight(settings, name, {                                # REL-15
+        "tool": name, "started_at": _utcnow(), "version": version, "url": url,
+        "step": "downloading", "total": 0,
+    })
     staging = tool_root(settings, name) / ".staging"
     staging.mkdir(parents=True, exist_ok=True)
     part = staging / f"{version}.tar.gz"

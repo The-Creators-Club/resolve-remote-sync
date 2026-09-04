@@ -733,11 +733,11 @@ LINES: tuple[ProtectionLine, ...] = (
     ProtectionLine(
         "editor_trash",
         "deleted-file copies on editors' computers are within their limit",
-        "whether editors' machines are still pruning their safety copies",
+        "whether editors' computers are still pruning their safety copies",
         "CC Sync keeps a copy of everything it deletes on an editor's computer. "
-        "They are pruned automatically, and a machine well over the limit is a "
-        "machine whose pruning has stopped, filling the drive footage needs.",
-        "Check that computer's row on the FLEET page for [ RESUME ]: pruning is "
+        "They are pruned automatically, and a computer well over the limit is a "
+        "computer whose pruning has stopped, filling the drive footage needs.",
+        "Check that computer's row on the SYNC STATUS page for [ RESUME ]: pruning is "
         "paused while its download safety brake is on.",
         _check_editor_trash,
         severity="warn"),

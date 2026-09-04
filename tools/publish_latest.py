@@ -306,6 +306,12 @@ def main() -> int:
     ap.add_argument("--notes", default="",
                     help="one line of what changed, shown to editors in the update "
                          "dialog (unsigned advisory)")
+    # SYS-7 (usability sweep 2026-09-04): the ordering gate, at publish time.
+    ap.add_argument("--allow-behind", action="store_true",
+                    help="publish a companion whose `requires_dashboard` is ABOVE the "
+                         "newest dashboard bundle on the channel. Every customer would "
+                         "stage it and never offer it (SYS-2), and their fleet would "
+                         "look up to date while it stopped updating")
     ap.add_argument("--allow-key-rotation", action="store_true",
                     help="publish even though the signing key is not baked into the build "
                          "that is CURRENT for that platform. Every machine on the current "
@@ -395,6 +401,32 @@ def main() -> int:
             if not meta.get("tests_run"):
                 step("WARNING: this build was made with tests skipped")
 
+            # SYS-7 / SYS-2: a companion that needs a dashboard newer than the
+            # newest dashboard bundle the channel carries is a build every
+            # customer's dashboard will STAGE and never offer -- and their
+            # fleet then reads as fully up to date on the grid, in the weekly
+            # report and on the Packages page while its updates have stopped.
+            # Publish the dashboard bundle first. Never guessed: a channel with
+            # no dashboard record at all cannot answer the question, and says
+            # so rather than refusing.
+            needs_dash = str(meta.get("requires_dashboard") or "").strip()
+            newest_dash = newest_published(channel, "dashboard", "linux")
+            if needs_dash and not newest_dash:
+                step(f"NOTE: this build needs dashboard {needs_dash} and the channel "
+                     f"carries no dashboard bundle at all, so nothing here can check "
+                     f"the order. A customer whose dashboard is older will stage it "
+                     f"and never offer it.")
+            elif (needs_dash and newest_dash
+                    and version_tuple(needs_dash) > version_tuple(newest_dash)
+                    and not args.allow_behind):
+                fail(f"{kind}/{plat} v{version} needs dashboard {needs_dash} and the "
+                     f"newest dashboard bundle on the channel is {newest_dash}. Every "
+                     f"customer would publish this build and never offer it, and their "
+                     f"fleet would read as up to date while its updates had stopped. "
+                     f"Publish the dashboard bundle first (docs/RELEASE.md, the "
+                     f"dashboard half), or pass --allow-behind if you know theirs is "
+                     f"already newer.")
+
             if (kind, plat, version) in already and not args.force:
                 step(f"v{version} is already on the published channel -- nothing to do "
                      "(--force to republish)")
@@ -422,10 +454,31 @@ def main() -> int:
     for s in skipped:
         print(f"   skipped:   {s}")
     if published and not args.dry_run:
+        # REL-9 (usability sweep 2026-09-04): this used to print the `manual`
+        # story unconditionally -- including when --make-current was passed,
+        # which RELEASE_PATHWAYS.md tells you to always do, and including for
+        # every site on `policy = current`, which is what this studio's own
+        # site.toml uses. On those the build reaches the fleet within one poll
+        # with nobody clicking anything, so the operator was told the opposite
+        # of what was about to happen. The recall command is in the same block
+        # because that is the sentence you want in front of you at the moment
+        # you learn the build is bad.
         print()
-        step("the fleet does NOT have these yet: the dashboard offers a feed build "
-             "only after Settings > Packages > check, and an admin clicks Publish "
-             "([releases] policy = manual).")
+        if args.make_current:
+            step("published and pointed CURRENT.")
+            step("  Sites on [releases] policy = current will publish this and offer it "
+                 "to their whole fleet on their next check (default: daily; a container "
+                 "restart checks 10 s after boot). Their own soak gate still applies: a "
+                 "build no computer there has run is staged until one has.")
+            step("  Sites on `manual` need Settings > Packages > [ CHECK NOW ] > "
+                 "[ PUBLISH ].")
+        else:
+            step("published and STAGED: the channel's `current` pointer was NOT moved, "
+                 "so nobody is offered this yet, on any policy. Re-run with "
+                 "--make-current when you are ready.")
+        step(r"  Recall it: python tools\publish_feed.py --retract --kind <kind> "
+             "--platform <platform> --version <version> --reason \"...\" "
+             "--github-upload")
     return 0
 
 

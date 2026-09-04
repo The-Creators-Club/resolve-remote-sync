@@ -341,7 +341,8 @@ def test_fix_clip_relinks_every_media_pool_item_from_one_copy(tmp_path):
     )
 
     assert result["ok"] is True
-    assert "3 item(s)" in result["message"]
+    # UX-10 real plurals, wave 5 of the 2026-09-03 sweep.
+    assert "relinked 3 items" in result["message"]
     assert [c[0] for c in calls] == ["mpi-a", "mpi-b", "mpi-c"]
     # every relink targets the SAME single copy, not three separate copies
     assert len({c[1] for c in calls}) == 1
@@ -388,7 +389,7 @@ def test_fix_clip_relinks_duplicate_media_pool_items_only_once(tmp_path):
     )
 
     assert result["ok"] is True
-    assert "2 item(s)" in result["message"]
+    assert "relinked 2 items" in result["message"]
     assert len(calls) == 2
     assert calls[0] is shared and calls[1] is other
 
@@ -485,7 +486,7 @@ def test_fix_clip_reports_partial_relink_failure(tmp_path):
     )
 
     assert result["ok"] is False
-    assert "1/2" in result["message"]
+    assert "relink failed for 1 of 2 items" in result["message"]
     assert result["copied_to"] is not None  # copy survives a partial relink failure
 
 
@@ -1529,11 +1530,31 @@ class TestDryRun:
             dry_run=True,
         )
 
-        assert result["ok"] is False and result["dry_run"] is True
+        # RES-15 (sweep 2026-09-03): a rehearsal is ok. It used to come back
+        # ok: False, which every caller counts as a failed fix.
+        assert result["ok"] is True and result["dry_run"] is True
+        assert result["would_copy"] == 1 and result["would_relink"] == 1
         assert relinks == []
         assert not (root / "B-roll").exists()
         assert result["would_copy_to"].endswith(os.path.join("B-roll", "clip.mov"))
         assert result["would_relink_to"] == r"P:\B-roll\clip.mov"
+
+    def test_a_rehearsal_is_never_reported_as_a_failure(self, tmp_path):
+        """RES-15: the one property the popup relies on. `dry_run` is the
+        key that says "counted nowhere", and `ok` must not be the thing
+        that makes a rehearsal look like a broken machine."""
+        root = tmp_path / "root"
+        root.mkdir()
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"x" * 10)
+        result = fixer.fix_clip(str(src), "B-roll", str(root), [object(), object()],
+                                copy_fn=lambda s, d: pytest.fail("rehearsal copied"),
+                                dry_run=True)
+        assert result["dry_run"] is True
+        assert result.get("aborted") is not True
+        assert result["copied_to"] is None
+        assert result["would_relink"] == 2
+        assert "Rehearsal" in result["message"]
 
     def test_it_still_refuses_a_destination_outside_local_root(self, tmp_path):
         root = tmp_path / "root"

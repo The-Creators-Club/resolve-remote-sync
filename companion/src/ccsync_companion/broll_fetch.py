@@ -182,11 +182,11 @@ def prereq_error(ccsync_cfg: dict[str, Any]) -> Optional[str]:
     """
     remote = str(ccsync_cfg.get("remote") or "").strip()
     if not remote:
-        return ("this machine's sync config names no rclone remote, so the "
+        return ("this computer's sync config names no rclone remote, so the "
                 "clip can't be fetched from the NAS (remote= in ~/.ccsync/config.toml)")
     remote_root = str(ccsync_cfg.get("remote_root") or "").strip()
     if not remote_root:
-        return ("this machine's sync config has no remote_root, so the "
+        return ("this computer's sync config has no remote_root, so the "
                 "clip can't be fetched from the NAS (remote_root= in ~/.ccsync/config.toml)")
     rclone_path = str(ccsync_cfg.get("rclone_path") or "rclone")
     ok, detail = rclone_lane.rclone_available(rclone_path)
@@ -222,7 +222,7 @@ def fetch_refusal(
     """
     root = str((ccsync_cfg or {}).get("local_root") or "").strip()
     if not root:
-        return ("this machine's sync config has no local_root, so there is "
+        return ("this computer's sync config has no local_root, so there is "
                 "nowhere to put the file (local_root= in ~/.ccsync/config.toml)")
     try:
         local_root = str(ccsync_config.resolved_local_root(ccsync_cfg or {}))
@@ -231,14 +231,14 @@ def fetch_refusal(
     if not loopback_guard.is_within(dest, local_root):
         log.warning("broll fetch: refusing %s -- outside the tree at %s",
                     dest, local_root)
-        return "that file is outside this machine's tree -- nothing was downloaded"
+        return "that file is outside this computer's tree -- nothing was downloaded"
 
     check = probe if probe is not None else root_guard.probe_root
     state = check(local_root)
     if state in (root_guard.ROOT_ABSENT, root_guard.ROOT_MISPLACED):
         log.warning("broll fetch: refusing %s -- the tree at %s is %s",
                     dest, local_root, state)
-        return ("this machine's tree isn't mounted right now, so nothing can "
+        return ("this computer's tree isn't mounted right now, so nothing can "
                 "be downloaded into it -- reconnect the drive and try again")
     return None
 

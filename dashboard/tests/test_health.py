@@ -443,3 +443,84 @@ def test_nothing_here_raises_on_junk():
         health.why_not_syncing(_row(guard=junk), NOW)
     health.why_not_syncing({}, NOW)
     health.why_not_syncing({"lanes": [None, "x"]}, NOW)
+
+
+# ------------------------------------------------------------------- UX-19
+#
+# Usability sweep 2026-09-03. A local stop and a pause are two switches with
+# one word: with both set, an editor cleared the one the grid named and
+# nothing started moving. The ranking is unchanged - it decides which comes
+# FIRST, never which of the two is said - and only causes a person can act on
+# separately qualify, so a stall or a dead engine never becomes a second
+# clause about the same fault.
+
+
+def test_a_pause_under_a_stop_names_both_switches():
+    row = _row(guard={"blocked_reason": "paused", "halt_active": True})
+    code, sentence = health.why_not_syncing(row, NOW)
+    assert code == "paused"                       # the companion's own answer
+    assert sentence == ("Not syncing: syncing is paused on this computer. "
+                        "Also: syncing is stopped on this computer")
+    assert [c for c, _s in health.why_causes(row, NOW)] == ["paused", "local_halt"]
+
+
+def test_a_fleet_stop_is_the_second_cause_when_the_computer_reported_a_pause():
+    row = _row(fleet_halt_active=True, guard={"blocked_reason": "paused"})
+    code, sentence = health.why_not_syncing(row, NOW)
+    assert code == "paused"
+    assert "stopped by your admin" in sentence
+    assert sentence.count("Not syncing") == 1, (
+        "the second clause is a clause, not a second whole sentence")
+
+
+def test_the_ranking_still_decides_which_comes_first():
+    """A fleet stop outranks the local one, and the local one is not repeated
+    under it: the two halt branches are one switch, not two."""
+    row = _row(fleet_halt_active=True, guard={"halt_active": True})
+    codes = [c for c, _s in health.why_causes(row, NOW)]
+    assert codes == ["fleet_halt"]
+
+
+def test_only_a_switch_a_person_can_clear_is_a_second_cause():
+    """A stalled transfer under a stop is the SAME fault said twice."""
+    row = _row(guard={"halt_active": True, "stalled_lane": "B",
+                      "stalled_seconds": 2820})
+    codes = [c for c, _s in health.why_causes(row, NOW)]
+    assert codes == ["local_halt"]
+    assert set(health.WHY_SECOND_CAUSES) <= set(health.WHY_ORDER)
+    for code in health.WHY_SECOND_CAUSES:
+        assert code not in ("lane_stalled", "syncthing_down", "no_selection")
+
+
+def test_a_computer_that_stopped_itself_says_so_in_both_shapes():
+    """The vocabulary (CR-181): the brake and the disk floor are the computer
+    stopping ITSELF, which is neither "you paused it" nor "your admin
+    stopped it"."""
+    _code, breaker = health.why_not_syncing(
+        _row(guard={"breaker_tripped": True}), NOW)
+    assert "stopped itself" in breaker
+    _code, disk = health.why_not_syncing(
+        _row(guard={"disk_root_free_bytes": 8 * GB,
+                    "disk_root_total_bytes": 1000 * GB}), NOW)
+    assert "stopped itself" in disk
+
+
+def test_the_three_ways_sync_is_off_are_three_different_sentences():
+    row = _row()
+    assert "stopped by your admin" in health._why_sentence("fleet_halt", row)
+    assert "paused" in health._why_sentence("paused", row)
+    assert "stopped on this computer" in health._why_sentence("local_halt", row)
+    for code in ("fleet_halt", "local_halt", "paused", "breaker_tripped"):
+        sentence = health._why_sentence(code, row)
+        assert "halted" not in sentence and "parked" not in sentence
+        assert "breaker" not in sentence and "machine" not in sentence
+
+
+def test_a_second_cause_never_costs_the_page():
+    for junk in ({"halt_active": "yes", "halt_scope": 7},
+                 {"blocked_reason": "paused", "disk_root_free_bytes": "lots",
+                  "disk_root_total_bytes": 0},
+                 {"breaker_tripped": "maybe"}):
+        health.why_not_syncing(_row(guard=junk), NOW)
+        health.why_causes(_row(guard=junk), NOW)
+    assert health.why_causes({}, NOW) == []

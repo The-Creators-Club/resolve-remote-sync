@@ -8,6 +8,12 @@
          capitalises the first letter of a text field by default, so "jsmith"
          arrives as "Jsmith" and the NAS refuses it. The password field is
          exempt -- a password type never autocapitalises. #}
+      {# UX-22 (usability sweep 2026-09-03): the first page a customer's
+         editor ever sees said [ SIGN IN ] and nothing else. The brand comes
+         from the site manifest through ui._render (never a literal), and the
+         line below it is the one thing a person with no account needs to be
+         told. #}
+      <div class="login-brand">{{ brand_org | upper }}</div>
       <div class="side-head">[ SIGN IN ]</div>
       {% if error %}<div class="login-error">▲ {{ error }}</div>{% endif %}
       {% if sso_enabled %}
@@ -17,7 +23,9 @@
         <a class="btn login-btn" href="{{ sso_url }}">[ SIGN IN WITH SSO ]</a>
       {% endif %}
       {% if show_password_form %}
-        <div class="muted">Use your NAS username and password.</div>
+        <div class="muted">Use the username and password your admin gave you.</div>
+        <div class="muted">Your admin creates this account for you. If you do
+          not have one yet, ask them before installing.</div>
         <form method="post" action="/login">
           <input type="hidden" name="next" value="{{ next_path or '/' }}">
           {% if sso_enabled %}<input type="hidden" name="local" value="1">{% endif %}

@@ -208,7 +208,7 @@ def test_the_fragment_toggle_refuses_a_wired_machine_too(env):
 
     r = client.post("/partials/selection/jsmith/2026-ff5-animals/toggle?machine=WIRED-PC")
     assert r.status_code == 409
-    assert "wired machine" in r.json()["detail"]
+    assert "wired to the server" in r.json()["detail"]
 
     r = client.post("/partials/selection/jsmith/2026-ff5-animals/toggle?machine=NOPE")
     assert r.status_code == 404

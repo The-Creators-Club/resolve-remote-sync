@@ -470,7 +470,11 @@ def test_ticking_a_project_for_a_base_rig_is_refused(env):
 
     r = client.put("/api/v1/selection/base1/2026-ff5-energy-transition")
     assert r.status_code == 409
-    assert "base rig" in r.json()["detail"]
+    # CR-181 (wave 4, 2026-09-04): "base rig" left the copy. The refusal is
+    # the same one; what an admin reads is what the setting means on the
+    # computer itself, and why the tick was refused.
+    detail = r.json()["detail"]
+    assert "wired to the server" in detail and "cannot be ticked" in detail
     assert dbmod.fetch_selections(conn, "base1") == []
 
     dbmod.add_selection(conn, "base1", "2026-ff5-energy-transition", "admin", now)

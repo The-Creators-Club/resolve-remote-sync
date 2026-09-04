@@ -2714,14 +2714,14 @@ def test_remove_project_stops_before_deleting_when_untick_fails(tmp_path):
 def test_remove_project_refuses_on_base_rig(tmp_path):
     stub, proj = _remove_stub(tmp_path, mode="base")
     ok, msg = stub.remove("2026-cct-website-highlights-website-highlights")
-    assert not ok and "base rig" in msg
+    assert not ok and "wired computer" in msg
     assert proj.exists()
 
 
 def test_remove_project_refuses_unselected_slug(tmp_path):
     stub, proj = _remove_stub(tmp_path)
     ok, msg = stub.remove("some-other-project")
-    assert not ok and "not selected" in msg
+    assert not ok and "not ticked" in msg
     assert proj.exists()
 
 
@@ -5371,7 +5371,7 @@ def test_pool_sweep_warns_once_for_foreign_clips_in_one_batch(tmp_path, monkeypa
     app._refresh_media_tree_once()
 
     assert len(toasts) == 1, "a backlog must be ONE toast, not one per clip"
-    assert "another editor's machine" in toasts[0]
+    assert "another editor's computer" in toasts[0]
 
     app._refresh_media_tree_once()
     assert len(toasts) == 1, "warn-once per path"

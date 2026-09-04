@@ -1955,3 +1955,101 @@ def test_size_mismatch_samples_are_capped_and_empty_without_a_scan(tmp_path):
     lane._size_mismatches = {"count": 90, "subpath": None,
                              "samples": [f"f{i}.mov" for i in range(90)]}
     assert len(lane.size_mismatch_samples()) == 20
+
+
+# -- SYNC-106 (wave 5, sweep 2026-09-03): the stand-down speaks to the editor -
+#
+# `detail` is the one string the tray line, the balloon, the Settings window
+# and the dashboard's fleet chip all render, and it used to carry the trip
+# reason verbatim - which names `remote_root`, the marker directories and the
+# entry counts, and once ended "Check remote_root in config.toml": a file
+# under ~/.ccsync that a frozen build does not expose and that is not an
+# editor's to edit. The admin's sentence did not move; it was joined.
+
+def _tripped_lane_b(tmp_path, reason, cause=""):
+    from ccsync_companion.sync import lane_guard
+
+    breaker = lane_guard.LaneBBreaker(tmp_path / "breaker.json", {})
+    breaker.trip(reason, cause)
+    (tmp_path / "local").mkdir(parents=True, exist_ok=True)
+    lane = RcloneLane(
+        direction=DIRECTION_DOWN,
+        local_root=str(tmp_path / "local"),
+        remote="nas",
+        remote_root="Creators_Club",
+        state_dir=tmp_path / "state",
+        breaker=breaker,
+        remote_list_fn=lambda cmd, timeout: "Projects",
+        popen_factory=lambda cmd, **kw: pytest.fail("a tripped lane may not spawn rclone"),
+    )
+    return breaker, lane
+
+
+def test_the_breaker_stand_down_says_the_editors_sentence(tmp_path):
+    from ccsync_companion.sync import lane_guard
+
+    technical = ("the NAS root does not look like the tree: none of Projects is "
+                 "under remote_root (saw 0 entries). Check remote_root in "
+                 "config.toml.")
+    breaker, lane = _tripped_lane_b(tmp_path, technical,
+                                    lane_guard.BREAKER_CAUSE_ROOT)
+    status = lane.run_once()
+    assert status.detail == (
+        "STOPPED (safety): "
+        + lane_guard.BREAKER_EDITOR_REASONS[lane_guard.BREAKER_CAUSE_ROOT])
+    for internal in ("remote_root", "config.toml", "entries"):
+        assert internal not in status.detail
+    # ...and the admin's half is exactly where it was: on the breaker, which
+    # is what the log, the report and copy_diagnostics read.
+    assert breaker.reason == technical
+    assert breaker.report()["reason"] == technical
+    assert breaker.report()["editor_reason"] == status.detail.split(": ", 1)[1]
+
+
+def test_a_trip_from_an_older_build_still_gets_a_sentence(tmp_path):
+    """A latch written before 0.9.69 has a reason and no cause, and it is read
+    back from disk on the next start."""
+    from ccsync_companion.sync import lane_guard
+
+    _breaker, lane = _tripped_lane_b(
+        tmp_path, "the NAS listing for Projects/FF5 shrank from 40 to 3 entries "
+                  "since the last pass -- that is not a normal change, so proxy "
+                  "download stopped before anything was deleted.")
+    status = lane.run_once()
+    assert status.detail.endswith(
+        lane_guard.BREAKER_EDITOR_REASONS[lane_guard.BREAKER_CAUSE_SHRANK])
+
+
+def test_the_technical_reason_is_logged_once_per_trip_not_once_per_pass(
+        tmp_path, caplog):
+    from ccsync_companion.sync import lane_guard
+
+    technical = "the NAS listed Projects/FF5 as EMPTY, and it held 40 entries last time."
+    _breaker, lane = _tripped_lane_b(tmp_path, technical,
+                                     lane_guard.BREAKER_CAUSE_EMPTY)
+    with caplog.at_level("INFO", logger="ccsync.sync.rclone"):
+        lane.run_once()
+        lane.run_once()
+        lane.run_once()
+    stood_down = [r for r in caplog.records if "stands down" in r.getMessage()]
+    assert len(stood_down) == 1, [r.getMessage() for r in stood_down]
+    assert technical in stood_down[0].getMessage()
+
+
+def test_a_stand_down_with_no_reason_at_all_still_says_something(tmp_path):
+    """A trip nobody can name is still a trip the editor has to be told about,
+    and it must never render as a bare state word."""
+    from ccsync_companion.sync import lane_guard
+
+    (tmp_path / "local").mkdir(parents=True, exist_ok=True)
+    lane = RcloneLane(
+        direction=DIRECTION_DOWN,
+        local_root=str(tmp_path / "local"),
+        remote="nas",
+        remote_root="Creators_Club",
+        state_dir=tmp_path / "state",
+    )
+    status = lane._breaker_stand_down()
+    assert status.detail.startswith("STOPPED (safety): Proxy download stopped "
+                                    "itself as a safety measure.")
+    assert status.detail.endswith(lane_guard._BREAKER_TAIL)

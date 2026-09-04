@@ -27,12 +27,12 @@
           <td data-label="STATUS"><span class="dot {{ item.status }}">●</span></td>
           <td data-label="PROJECT"><span class="who">{{ item.label }}</span>
               {% if item.is_current %}<span class="chip amber">[ SYNCING NOW ]</span>{% endif %}
-              {% if item.upload_only %}<span class="chip amber" title="upload only: video originals go to the server, nothing comes down">[ UPLOAD ONLY ]</span>{% endif %}
+              {% if item.upload_only %}<a class="chip amber" href="{{ term_href('Upload only') }}" title="upload only: video originals go to the server, nothing comes down">[ UPLOAD ONLY ]</a>{% endif %}
               {% if item.missing_project %}<span class="chip red" title="project no longer exists on the server">[ GONE ]</span>{% endif %}
               {% for inc in item.includes %}
               <div class="muted mono-sm">shares {{ inc.sub_rel }} from {{ inc.lender_label }}</div>
               {% endfor %}</td>
-          <td class="mono" data-label="SYNCED">{% if item.upload_only %}<span class="muted" title="no shared folder on this computer: only lane A runs, see TRANSFERS for what is left to upload">originals up only</span>{% elif item.completion is not none %}<span class="cssbar"><span class="fill" style="width:{{ [[item.completion, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(item.completion) }}%{% else %}<span class="muted">no data yet</span>{% endif %}</td>
+          <td class="mono" data-label="SYNCED">{% if item.upload_only %}<span class="muted" title="nothing comes down to this computer for this project: only the upload runs, and TRANSFERS says what is left to send">upload only</span>{% elif item.completion is not none %}<span class="cssbar"><span class="fill" style="width:{{ [[item.completion, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(item.completion) }}%{% else %}<span class="muted">no data yet</span>{% endif %}</td>
           <td class="mono-sm" data-label="LEFT">
             {% if item.need_items %}{{ item.need_items }} files · {{ item.need_bytes | human_bytes }}
               {% if item.rate_bytes_per_sec and item.rate_bytes_per_sec > 1 %} · {{ item.rate_bytes_per_sec | human_bytes }}/s{% endif %}

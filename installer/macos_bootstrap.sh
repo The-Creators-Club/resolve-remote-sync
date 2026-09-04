@@ -53,7 +53,7 @@
 #     Finish page without scraping the human-facing summary.
 set -u
 
-INSTALLER_VERSION="1.0.40"
+INSTALLER_VERSION="1.0.41"
 
 # ----------------------------------------------------------------------
 # PINNED DOWNLOADS (2026-08-17, docs/COMMERCIAL_READINESS.md item 13)
@@ -351,7 +351,16 @@ case "$REMOTE_ROOT" in
             capability_miss "the NAS project-tree path is not known: no --remote-root was given and $DASHBOARD_URL/api/v1/site does not publish one. Lanes A and B have nowhere to sync to -- ask your admin for the absolute NAS path (e.g. /mnt/<pool>/<share>/<tree> or /volume1/<share>/<tree>) and re-run with --remote-root."
         fi ;;
     /*) ;;
-    *) warn "--remote-root '$REMOTE_ROOT' is not absolute. The SFTP session starts in your home directory on the NAS, so a relative path resolves under ~/ and will not find the project tree. Prefix it with '/'." ;;
+    # OPS-12 (usability + resilience sweep 2026-09-03): a MIS-TYPED root used
+    # to be a warning and a green run, which is the worse outcome of the two.
+    # An empty one at least stops; a relative one resolves under the editor's
+    # SFTP home, so upload puts camera originals somewhere nothing indexes and
+    # the dashboard never sees them. Same verdict as empty now, and the value
+    # is dropped so nothing downstream writes it into rclone.conf.
+    *)  if [ "$RESOLVE_MAPPING_ONLY" != 1 ]; then
+            capability_miss "--remote-root '$REMOTE_ROOT' is not an absolute path, so nothing was configured for upload and proxy download. The SFTP session starts in your home directory on the NAS, so a relative path would put camera originals somewhere the server never looks. Ask your admin for the absolute NAS path (e.g. /mnt/<pool>/<share>/<tree> or /volume1/<share>/<tree>) and re-run with --remote-root."
+        fi
+        REMOTE_ROOT="" ;;
 esac
 
 BIN_DIR="$HOME/.local/ccsync/bin"
@@ -1492,6 +1501,68 @@ run_resolve_prefs() {
     return 0
 }
 
+# THE WAY OUT, kept where the editor's own tools already are (OPS-17, sweep
+# 2026-09-03). The uninstaller used to exist only inside the package zip,
+# which the wizard path never delivers, so to an editor -- and to their IT --
+# CC Sync was a background app with a menu-bar icon and no way off the
+# machine. Copied rather than generated: macos_uninstall.sh is the real
+# thing, and a second half-copy of it here would drift. Absent (a wizard run
+# that carries only the bootstrap) leaves UNINSTALLER_PATH empty and the
+# closing banner says where to get it instead of naming a file that is not
+# there.
+UNINSTALLER_PATH=""
+install_uninstaller() {
+    local dir candidate
+    dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || dir=""
+    for candidate in "${CCSYNC_UNINSTALLER:-}"                      "${dir:+$dir/macos_uninstall.sh}"; do
+        [ -n "$candidate" ] || continue
+        [ -f "$candidate" ] || continue
+        if [ "$DRY_RUN" = 1 ]; then
+            dry "would install the uninstaller: $candidate -> $BIN_DIR/macos_uninstall.sh"
+            UNINSTALLER_PATH="$BIN_DIR/macos_uninstall.sh"
+            return 0
+        fi
+        if cp "$candidate" "$BIN_DIR/macos_uninstall.sh" 2>/dev/null; then
+            chmod +x "$BIN_DIR/macos_uninstall.sh" 2>/dev/null || true
+            xattr -d com.apple.quarantine "$BIN_DIR/macos_uninstall.sh" 2>/dev/null || true
+            UNINSTALLER_PATH="$BIN_DIR/macos_uninstall.sh"
+            step "installed the uninstaller: $UNINSTALLER_PATH"
+            return 0
+        fi
+    done
+    return 0
+}
+
+print_uninstall_step() {
+    echo ""
+    if [ -n "$UNINSTALLER_PATH" ]; then
+        echo " To remove CC Sync from this Mac later, run:"
+        echo "     bash \"$UNINSTALLER_PATH\""
+        echo " It stops the app, removes it and its background jobs, and leaves"
+        echo " your footage alone."
+    else
+        echo " To remove CC Sync from this Mac later, run macos_uninstall.sh from"
+        echo " the installer package your admin sent you, or ask them for it."
+    fi
+}
+
+# Is Resolve on this Mac at all? (OPS-11, sweep 2026-09-03.) The mapping
+# helper answers "never launched" whenever the preference files are absent,
+# which is also what a Mac with no Resolve on it looks like -- so an editor
+# who has not installed it was told to "launch it once, quit it, then re-run",
+# advice that cannot be followed and never names the real cause. The Tailscale
+# step has probed for its bundle since 1.0.17; this is the same probe.
+# CCSYNC_RESOLVE_APP overrides for a copy kept somewhere else (and is what the
+# test drives).
+resolve_app_installed() {
+    local candidate
+    for candidate in         "${CCSYNC_RESOLVE_APP:-}"         "/Applications/DaVinci Resolve/DaVinci Resolve.app"         "/Applications/DaVinci Resolve.app"; do
+        [ -n "$candidate" ] || continue
+        [ -d "$candidate" ] && return 0
+    done
+    return 1
+}
+
 run_resolve_mapping() {
     if [ "$SKIP_RESOLVE_MAPPING" = 1 ]; then
         RESOLVE_MAPPING_STATUS="skipped"
@@ -1551,9 +1622,17 @@ run_resolve_mapping() {
             warn "(Resolve rewrites its preferences when it quits, so an edit made now would be thrown away. Nothing was changed.)"
             ;;
         4)
-            RESOLVE_MAPPING_STATUS="never-launched"
-            warn "Resolve has never been launched on this Mac -- launch it once, quit it, then re-run: $0 --resolve-mapping-only"
-            warn "(Resolve writes its preference files on first run; this script will not invent them.)"
+            # No preference files. Two very different reasons (OPS-11), and
+            # only one of them is fixed by launching Resolve.
+            if resolve_app_installed; then
+                RESOLVE_MAPPING_STATUS="never-launched"
+                warn "Resolve has never been launched on this Mac -- launch it once, quit it, then re-run: $0 --resolve-mapping-only"
+                warn "(Resolve writes its preference files on first run; this script will not invent them.)"
+            else
+                RESOLVE_MAPPING_STATUS="not-installed"
+                warn "DaVinci Resolve is not installed on this Mac. CC Sync needs Resolve Studio (the paid version)."
+                warn "Install it, then run: $0 --resolve-mapping-only"
+            fi
             ;;
         5)
             RESOLVE_MAPPING_STATUS="format"
@@ -1583,6 +1662,7 @@ if [ "$RESOLVE_MAPPING_ONLY" = 1 ]; then
 fi
 
 ensure_dir "$BIN_DIR"
+install_uninstaller
 
 # ----------------------------------------------------------------------
 # 1. Tailscale
@@ -1667,6 +1747,16 @@ else
                 else
                     cp "$FOUND" "$BIN_DIR/rclone"
                     chmod +x "$BIN_DIR/rclone"
+                    # OPS-13 (sweep 2026-09-03): this came out of a
+                    # curl-downloaded archive, so it carries
+                    # com.apple.quarantine -- and a quarantined binary
+                    # launched by a background process fails with no visible
+                    # dialog at all. Only the companion was being cleared.
+                    # Worse, the re-run guard is `[ -x "$BIN_DIR/rclone" ]`,
+                    # so every later run prints "already installed" forever
+                    # and it presents as "upload and proxy download just never
+                    # do anything".
+                    xattr -d com.apple.quarantine "$BIN_DIR/rclone" 2>/dev/null || true
                     step "installed rclone to $BIN_DIR/rclone"
                 fi
             fi
@@ -1765,6 +1855,10 @@ else
                 else
                     cp "$FOUND" "$BIN_DIR/syncthing"
                     chmod +x "$BIN_DIR/syncthing"
+                    # Quarantine, for rclone's reason above (OPS-13): this one
+                    # is launched by a LaunchAgent, which is exactly the case
+                    # that fails silently.
+                    xattr -d com.apple.quarantine "$BIN_DIR/syncthing" 2>/dev/null || true
                     SYNCTHING_BIN="$BIN_DIR/syncthing"
                     step "installed Syncthing to $BIN_DIR/syncthing"
                 fi
@@ -2643,6 +2737,12 @@ print_resolve_mapping_step() {
             echo "      Launch it once, quit it, then run:"
             echo "        $0 --resolve-mapping-only"
             ;;
+        not-installed)
+            echo "   6. NOT DONE -- DaVinci Resolve is not installed on this Mac."
+            echo "      CC Sync needs Resolve Studio (the paid version). Install it,"
+            echo "      then run:"
+            echo "        $0 --resolve-mapping-only"
+            ;;
         format)
             echo "   6. NOT DONE -- Resolve's preferences are in a format this"
             echo "      installer does not recognise. Set the Mapped Mount by hand:"
@@ -2715,6 +2815,7 @@ else
     print_resolve_mapping_step
     echo "   7. do NOT mount any NAS share over SMB alongside this -- see the"
     echo "      drive-letter/mount warning in docs/EDITOR_SETUP.md"
+    print_uninstall_step
     echo "=================================================================="
 
     # Last line seen, so the one thing that invalidates everything above

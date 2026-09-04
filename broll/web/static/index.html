@@ -26,7 +26,7 @@
     <!-- Root-relative on purpose, unlike every asset URL here: mounted under
          /broll/ this is the way back out to the dashboard at the origin root.
          Standalone (dev) it harmlessly reloads this page. -->
-    <a class="btn nav-link" href="/" title="back to the CC Sync dashboard (project sync status)">[ DASHBOARD ]</a>
+    <a class="btn nav-link" href="/" title="back to the CC Sync dashboard (SYNC STATUS)">[ DASHBOARD ]</a>
   </div>
   <div class="rule">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</div>
 
@@ -164,7 +164,7 @@
       <button id="ingest-recheck" class="text-btn">recheck</button>
     </div>
     <p class="muted small">
-      Your own machine does the work: the CC Sync companion transcodes, indexes with
+      Your own computer does the work: the CC Sync tray transcodes, indexes with
       the local model and uploads the finished clips to the archive. Nothing is
       uploaded to the dashboard.
     </p>
@@ -261,7 +261,7 @@
     <h3>Batches</h3>
     <div id="ingest-scope-tabs" class="mode-toggles">
       <button type="button" class="mode-btn" data-scope="mine">Mine</button>
-      <button type="button" class="mode-btn hidden" data-scope="all">All machines</button>
+      <button type="button" class="mode-btn hidden" data-scope="all">All computers</button>
     </div>
     <div id="ingest-batch-list" class="ingest-batch-list"></div>
   </div>
@@ -317,21 +317,21 @@
     <div id="shares-list" class="shares-list"></div>
     <p class="muted small">
       Mount paths (which local drive/volume each share resolves to) are configured
-      per-editor in <code>~/.broll-companion.json</code> on your own machine, not here.
-      The <code>broll</code> share needs no entry: your CC Sync companion points it at
+      per-editor in <code>~/.broll-companion.json</code> on your own computer, not here.
+      The <code>broll</code> share needs no entry: the CC Sync tray points it at
       the B-roll Archive in your synced tree.
     </p>
 
-    <h3>Companion app</h3>
+    <h3>CC Sync tray</h3>
     <div class="companion-status">
       <span id="companion-dot" class="status-dot status-unknown"></span>
       <span id="companion-text">checking&hellip;</span>
       <button id="companion-recheck" class="text-btn">recheck</button>
     </div>
     <p class="muted small">
-      "Send to Resolve" is built into the CC Sync companion, the tray app you
-      already run. It listens on <code>127.0.0.1:8899</code> and drives DaVinci Resolve
-      from there. If this says it isn't running, start the CC Sync companion (and if you
+      "Send to Resolve" is built into the CC Sync tray, the app you already run.
+      It listens on <code>127.0.0.1:8899</code> and drives DaVinci Resolve
+      from there. If this says it isn't running, start CC Sync (and if you
       still have the old separate BRoll Companion in your tray, quit it: it's retired and
       it holds this port).
     </p>

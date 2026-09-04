@@ -84,6 +84,13 @@ SPEC_DIR = Path(SPECPATH)
 REPO_ROOT = SPEC_DIR.parent
 COMPANION_SRC = REPO_ROOT / "companion" / "src"
 BOOTSTRAP_SH = REPO_ROOT / "installer" / "macos_bootstrap.sh"
+# THE WAY OUT (OPS-17, usability sweep 2026-09-03). install_uninstaller()
+# in macos_bootstrap.sh copies this into ~/.ccsync/bin and the closing
+# banner names it; it looks for it beside itself (dirname "$0", which for
+# the wizard is the _MEIPASS extraction dir) or at $CCSYNC_UNINSTALLER.
+# Without this line the wizard path installed CC Sync with no way off the
+# machine, and the banner said where to get one instead.
+UNINSTALL_SH = REPO_ROOT / "installer" / "macos_uninstall.sh"
 COMPANION_BIN = REPO_ROOT / "companion" / "dist" / "ccsync-companion"
 EULA_MD = SPEC_DIR / "assets" / "EULA.md"
 
@@ -109,6 +116,10 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(BOOTSTRAP_SH), "."),
+        # Beside the bootstrap, for the reason UNINSTALL_SH gives above. The
+        # executable bit does not survive `datas`; it does not need to,
+        # because install_uninstaller() copies it and chmod +x's the copy.
+        (str(UNINSTALL_SH), "."),
         (str(COMPANION_BIN), "."),   # bundled so the wizard installs everything
         # Logo for the wizard window icon -- theme.apply_window_icon() reads
         # it from sys._MEIPASS/ccsync_companion/assets/icon.png.
@@ -226,7 +237,7 @@ app = BUNDLE(
     # wizard asks for (Full Disk Access is NOT one of them).
     bundle_identifier="com.ccsync.onboard",
     info_plist={
-        "CFBundleShortVersionString": "1.0.40",  # INSTALLER_VERSION -- bump together
+        "CFBundleShortVersionString": "1.0.41",  # INSTALLER_VERSION -- bump together
         "NSHighResolutionCapable": True,
         # The wizard is a foreground app with a real window; no LSUIElement.
     },

@@ -135,12 +135,12 @@ def require_identity(x_ccsync_identity: str = Header(default=None)) -> str:
             'refusing. Set it (the dashboard already requires it to log anyone '
             'in) and restart.')
         raise HTTPException(403, {
-            'detail': 'this dashboard cannot verify companion identities',
+            'detail': 'this dashboard cannot verify who is calling',
             'reason': 'identity_unconfigured'})
     editor = identity.read_identity_token(secret, x_ccsync_identity)
     if not editor:
         raise HTTPException(403, {
             'detail': (f'a valid {identity.HEADER} is required: sign in again '
-                       'from the companion tray'),
+                       'from the CC Sync tray'),
             'reason': 'identity'})
     return editor

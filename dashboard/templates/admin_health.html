@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}{{ brand_org | upper }}: HEALTH{% endblock %}
+{% block layout %}
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+    {% include "partials/sidebar.html" %}
+  </aside>
+  <main class="main">
+    {% include "partials/settings_nav.html" %}
+    <div class="detail-head"><h1>[ HEALTH ]</h1></div>
+    <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 62ch">
+      Everything this server currently has open, worst first: problems it
+      found, alerts, facts that have stopped being true, and safety
+      mechanisms it cannot confirm. Each line says what it means and what to
+      do, in the words of the page it came from. Nothing here changes
+      anything.
+    </p>
+    <p class="muted" style="margin: 0 0 0.9rem; max-width: 62ch">
+      [ NOT CHECKED ] is not [ OK ]. It means this server cannot answer that
+      one, and the reason is beside it.
+    </p>
+
+    {# SYS-7 (usability sweep 2026-09-04). The five numbers the drift doctor
+       compares, four of which this server holds, with a verdict. Above the
+       open findings on purpose: "which build is everyone on" is the question
+       behind most of them, and CR-98 was a fault investigated and closed with
+       "already fixed in the repo -- what was missing was deployment". #}
+    {% if what_is_running %}
+      <div class="side-head">[ WHAT IS RUNNING ]</div>
+      <div class="banner" style="margin-top:0.4rem">
+        <div class="mono-sm">
+          THIS DASHBOARD: {{ what_is_running.dashboard.running }}
+          {% if what_is_running.dashboard.newest_offered %}
+            <span class="chip {{ 'amber' if what_is_running.dashboard.behind else '' }}">
+              [ VENDOR: {{ what_is_running.dashboard.newest_offered }} ]</span>
+          {% else %}
+            <span class="chip">[ VENDOR: NOT CHECKED ]</span>
+          {% endif %}
+        </div>
+        {% for c in what_is_running.companions %}
+          <div class="mono-sm" style="margin-top:0.35rem">
+            {{ c.platform | upper }} COMPUTERS ARE OFFERED: {{ c.current or "nothing" }}
+            {% if c.current_published_at %}<span class="muted">published {{ c.current_published_at | ago }}</span>{% endif %}
+            {% if c.newest_offered %}
+              <span class="chip {{ 'amber' if c.behind_vendor else '' }}">
+                [ VENDOR: {{ c.newest_offered }} ]</span>
+            {% endif %}
+          </div>
+          {% for b in c.builds %}
+            <div class="mono-sm muted" style="margin-left:1.2rem">
+              {{ b.computers }} on {{ b.version }}{% if b.is_current %} (current){% endif %}
+              {% if b.published_at %}, published {{ b.published_at | ago }}{% endif %}
+            </div>
+          {% endfor %}
+        {% endfor %}
+        {% if not what_is_running.companions %}
+          <div class="mono-sm muted" style="margin-top:0.35rem">
+            No computer build is current here yet, so nothing has been offered
+            to anybody.
+          </div>
+        {% endif %}
+        {% for line in what_is_running.disagreements %}
+          <div style="margin-top:0.35rem">{{ line }}</div>
+        {% endfor %}
+        {% if not what_is_running.disagreements %}
+          <div class="muted" style="margin-top:0.35rem">
+            Everything here agrees: this server, the vendor's channel and the
+            computers reporting in.
+          </div>
+        {% endif %}
+        {% if what_is_running.dashboard_update_note %}
+          {# SYS-2: in bind-mount mode this is the exact command to run, and in
+             image mode it is why the container has not taken the bundle
+             itself. Either way it is the sentence the feed poller last wrote,
+             printed unchanged. #}
+          <div class="mono-sm muted" style="margin-top:0.35rem">
+            {{ what_is_running.dashboard_update_note }}
+          </div>
+        {% endif %}
+        <div class="mono-sm" style="margin-top:0.35rem">
+          <a class="btn tap" href="/admin/packages">[ PACKAGES ]</a>
+          {% if what_is_running.feed_checked_at %}
+            <span class="muted">vendor channel last checked {{ what_is_running.feed_checked_at | ago }}</span>
+          {% else %}
+            <span class="muted">the vendor channel has never been checked here</span>
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+
+    {% if health_total %}
+      <div class="mono-sm" style="margin-bottom:0.6rem">
+        {% if health_counts.error %}<span class="chip red">[ {{ health_counts.error }} NEEDS ATTENTION ]</span>{% endif %}
+        {% if health_counts.warn %}<span class="chip amber">[ {{ health_counts.warn }} WORTH A LOOK ]</span>{% endif %}
+        {% if health_counts.unknown %}<span class="chip">[ {{ health_counts.unknown }} NOT CHECKED ]</span>{% endif %}
+      </div>
+      {% for row in health_rows %}
+        <div class="banner {{ 'alarm' if row.band == 'error' }}" style="margin-top:0.5rem">
+          <span class="chip {{ 'red' if row.band == 'error' else ('amber' if row.band == 'warn' else '') }}">[ {{ row.source_label }} ]</span>
+          <span class="who">{{ row.title }}</span>
+          {% if row.subject %}<div class="mono-sm muted" style="margin-top:0.2rem">{{ row.subject }}</div>{% endif %}
+          {# The diagnosis and the fix are the SOURCE's own strings, printed
+             here unchanged (SYS-6): this page composes four lists, it does
+             not rewrite any of them. A sentence that reads badly here reads
+             badly on its own page too, and that is where it is fixed. #}
+          {% if row.diagnosis %}<div style="margin-top:0.35rem">{{ row.diagnosis }}</div>{% endif %}
+          {% if row.fix %}<div class="mono-sm" style="margin-top:0.35rem">WHAT TO DO: {{ row.fix }}</div>{% endif %}
+          <div class="mono-sm" style="margin-top:0.35rem">
+            {% if row.href %}<a class="btn tap" href="{{ row.href }}">{{ row.href_label }}</a>{% endif %}
+            <a class="btn tap" href="{{ row.detail_page }}">{{ row.detail_label }}</a>
+          </div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="banner">
+        Nothing is open. Every check this server runs answered, and none of
+        them found a problem.
+      </div>
+    {% endif %}
+
+    <div class="muted mono-sm" style="margin-top:1rem; max-width:62ch">
+      The four pages behind this one are
+      <a href="/#server-notices">the notices panel</a>,
+      <a href="/admin/alerts">ALERTS</a>,
+      <a href="/admin/invariants">INVARIANTS</a> and
+      <a href="/admin/protection">PROTECTION</a>. Each holds the full list,
+      including everything that is currently fine.
+    </div>
+  </main>
+{% endblock %}

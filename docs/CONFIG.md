@@ -47,7 +47,7 @@ it stops and names it; that is the enforcement.
 |---|---|---|
 | `pool_root` | — | **R**. TrueNAS `/mnt/<pool>/<dataset>`, Synology `/volume<N>/<share>` |
 | `tree_name` | — | **R**. The tree's own directory name — what an editor sees as `P:\` |
-| `projects_dir` | `Projects` | The subdirectory holding projects. Everything else (`Assets/Luts`, `Assets/Stills`, `Assets/B-roll Archive`, `Assets/Music`) is **fixed by the product** |
+| `projects_dir` | `Projects` | **FIXED at `Projects`; not a setting you can use** (SYS-20, 2026-09-04). Everything except `server/common.py` says `Projects` in code - the manifest, every companion lane, the fixer, the b-roll paths - so any other value is a tree the fleet syncs nothing from, silently. Since 2026-09-04 it is refused instead: the dashboard will not start with `DASH_SITE_PROJECTS_DIR` set to anything else, and Settings refuses a pasted `site.toml` that carries one. `Assets/Luts`, `Assets/Stills`, `Assets/B-roll Archive` and `Assets/Music` are fixed by the product in the same way. `docs/TREE_LAYOUT_PLAN.md` is the work that would make it real |
 | `template_folders` | product default | Subfolders every new project gets. Set here and the same list reaches `setup_tree.py`, the dashboard's create-project flow **and** `GET /api/v1/site` |
 | `shared_assets` | `["Assets/Luts", "Assets/Stills"]` | Libraries shared with every editor automatically, no tick required. The Syncthing folder id is the slugified rel path |
 | `homes_parent` | `<pool_root>/homes` | Where editor **home directories** live — the parent, never one editor's home. DSM: `/var/services/homes`. Not cosmetic: sshd's `StrictModes` decides whether an editor's key works at all |
@@ -452,7 +452,7 @@ for `broll_ingest_*`):
 | `music_ingest_enabled` | `true` | `false` switches the orchestrator off; the loopback routes then answer "music indexing is not running on this machine" and the page falls back |
 | `music_ingest_idle_seconds` | `proxy_gen_idle_seconds`, else `300` | How long away from the keyboard counts as idle, for a batch running in `idle` mode |
 | `music_ingest_skip_while_resolve` | `true` | Stand down while Resolve is open. Kept for symmetry with b-roll and with the proxy generator; music uses one CPU core, so a site that wants it running anyway can say so |
-| `music_ingest_free_space_floor_gb` | `20` | Refuse to stage a drop below this much free space. Read by the orchestrator AND by the PUT that refuses before the first byte (both since 2026-08-18; the route used to read b-roll's key) |
+| `music_ingest_free_space_floor_gb` | `2` | Refuse to stage a drop below this much free space. Read by the orchestrator AND by the PUT that refuses before the first byte (both since 2026-08-18; the route used to read b-roll's key). The DEFAULT is music's own since 2026-09-04 (CMEDIA-9): 20 GB was sized for camera originals and refused an album on a laptop with 15 GB free |
 | `music_ingest_max_concurrent_ffmpeg` | `2` | How many transcodes one batch may run at once, for the formats that need one |
 | `music_ingest_staging_dir` | `<local_root>/Assets/Music/.ingest` | The base rig overrides it: its `local_root` IS the NAS share, and staging there would push every file over SMB twice |
 | `music_clap_feed_base` | *(the site manifest's)* | A dev loop or a base rig pointing at a local copy of the feed. Overrides `release_feed_base` |

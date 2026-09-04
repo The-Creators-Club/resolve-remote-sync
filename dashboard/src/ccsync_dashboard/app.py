@@ -54,6 +54,14 @@ _OPEN_EXACT = {
     # authenticates with, and api.api_diagnostics repeats every one of those
     # checks. Open here means "no SESSION", never "no credential".
     "/api/v1/diagnostics",
+    # The wizard offering the SSH public key it has just generated (OPS-2,
+    # usability sweep 2026-09-04). Open here means "no SESSION", never "no
+    # credential": api.api_submit_ssh_key demands a valid X-CCSync-Identity
+    # matching the username in the body, and the key it accepts lands in a
+    # queue that grants nothing until an admin approves it. It has to be
+    # reachable without a session because the editor has just been given
+    # their identity token and has no browser login of any kind.
+    "/api/v1/ssh-key",
     # The site manifest, on the same terms as /api/v1/health: an installer,
     # the onboarding wizard and the companion all read it BEFORE anyone has
     # logged in, and it carries no secret (SYNOLOGY_PORT_PLAN.md WP0 step 3;

@@ -280,10 +280,19 @@
     <div class="muted">all reporting computers are on the current version</div>
   {% endif %}
 
+  {# REL-8 (usability sweep 2026-09-04): this used to name
+     `build_editor_package.ps1 -RebuildExe ... -Publish -MakeCurrent`, which is
+     the exact command ship.ps1 refuses to run -- -RebuildExe rebuilds the exe
+     untested and restamps the manifest tests_run=false, which is how a
+     companion reached the whole fleet with its suite never executed (OPS-1).
+     Nothing on a page a customer's admin reads should name a script flag that
+     is a known footgun; there is one command, and it is ship.cmd. #}
   <div class="muted" style="margin-top:0.8rem">
-    Publish new builds from the base rig:
-    <span class="mono-sm publish-cmd">.\build_editor_package.ps1 -RebuildExe -RebuildOnboard -Publish [-MakeCurrent]</span>
-    uploads both the companion and the installer. Each computer's tray then shows “Update now”.
+    Publish new builds from your wired computer with one command:
+    <span class="mono-sm publish-cmd">tools\ship.cmd</span>
+    It runs the gates, the test suites, the build, the publish and the
+    soak-gated flip. See docs/RELEASE.md. Each computer's tray then offers the
+    update.
   </div>
 
   {# The vendor release feed (ZERO_TOUCH_PLAN.md WP E, 2026-08-17): "we
@@ -293,9 +302,9 @@
   <div class="side-head" style="margin-top:1.6rem">[ AVAILABLE FROM THE VENDOR ]</div>
   {% if not feed.configured %}
     <div class="muted">
-      not configured. Set <span class="mono-sm">DASH_RELEASE_FEED_URL</span> to the vendor's
-      channel (e.g. <span class="mono-sm">https://releases.ccsync.app/v1/channel.json</span>)
-      and redeploy to enable one-click updates from here. See docs/RELEASE_FEED.md.
+      not configured, so this server is not being offered new builds. Ask whoever installed
+      this server to point it at your supplier's release channel: it is a container setting,
+      not something this page can change.
     </div>
   {% else %}
     {# REL-11 (2026-09-03): "last checked 19 hours ago" with no cadence beside

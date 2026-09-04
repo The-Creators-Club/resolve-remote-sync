@@ -57,7 +57,7 @@ class SlowChild:
 
 
 def make(tmp_path, dashboard, caps=None, idle=900, resolve=False, halted=False,
-         recent_path=None, runner_fn=None, **cfg_over):
+         recent_path=None, runner_fn=None, blocked=None, **cfg_over):
     return runner_mod.JobRunner(
         cfg(tmp_path, **cfg_over),
         request_fn=dashboard.request,
@@ -66,6 +66,7 @@ def make(tmp_path, dashboard, caps=None, idle=900, resolve=False, halted=False,
         idle_probe=FakeIdle(idle),
         resolve_running_fn=lambda: resolve,
         halted_fn=lambda: halted,
+        blocked_fn=blocked,
         machine_name="EDIT-PC",
         recent_path=recent_path,
         runner_fn=runner_fn,
@@ -341,3 +342,64 @@ def test_the_status_block_is_json_for_the_report_and_the_tray(tmp_path):
     r = make(tmp_path, FakeDashboard())
     r.tick()
     json.dumps(r.status())
+
+
+# ---------------------------------- the third GPU consumer (CMEDIA-1)
+#
+# The ingestors and the proxy generator have negotiated over this machine's
+# GPU since 2026-08-18 ("indexing beats proxy generation"); the job runner was
+# outside that agreement, and both gates open on the same event. So a whisper
+# job was claimed onto a machine already holding 8-12 GB of VLM weights, and
+# the OOM came back as a job failure that earned the machine a cooldown.
+
+def test_local_work_closes_the_gate_and_says_which(tmp_path):
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash, blocked=lambda: "indexing b-roll first")
+    r.note_report_reply({"commands": {"jobs": {"offered": [7]}}})
+    r.tick()
+    status = r.status()
+    assert status["state"] == runner_mod.STATE_LOCAL_WORK
+    assert status["gate"]["taking_work"] is False
+    assert "busy with your own work" in status["gate"]["reason"]
+    assert "indexing b-roll first" in status["gate"]["reason"]
+    assert dash.claims == 0
+
+
+def test_a_volunteer_click_is_not_consent_to_run_two_gpu_jobs(tmp_path):
+    """The local-work gate sits ABOVE the two gates a person can open: a
+    volunteer window is "you may use my machine while I am here", not "run a
+    transcription on top of the batch I am waiting for"."""
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash, idle=1, blocked=lambda: "indexing b-roll first")
+    r.volunteer(30)
+    r.note_report_reply({"commands": {"jobs": {"offered": [7]}}})
+    r.tick()
+    assert r.status()["state"] == runner_mod.STATE_LOCAL_WORK
+    assert dash.claims == 0
+
+
+def test_a_seam_that_cannot_answer_is_not_a_free_gpu(tmp_path):
+    """Fails CLOSED, like the halt and the Resolve probe beside it."""
+    def boom():
+        raise RuntimeError("the ingestor is wedged")
+
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash, blocked=boom)
+    r.note_report_reply({"commands": {"jobs": {"offered": [7]}}})
+    r.tick()
+    assert r.status()["state"] == runner_mod.STATE_LOCAL_WORK
+    assert dash.claims == 0
+
+
+def test_nothing_local_leaves_the_gate_exactly_as_it_was(tmp_path):
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash, blocked=lambda: False)
+    r.note_report_reply({"commands": {"jobs": {"offered": [7]}}})
+    r.tick()
+    assert r.status()["state"] != runner_mod.STATE_LOCAL_WORK
+    # ...and a runner built without the seam at all (an older caller) is
+    # unchanged: absent is not blocked.
+    r2 = make(tmp_path, FakeDashboard(a_job(tmp_path)))
+    r2.note_report_reply({"commands": {"jobs": {"offered": [7]}}})
+    r2.tick()
+    assert r2.status()["state"] != runner_mod.STATE_LOCAL_WORK

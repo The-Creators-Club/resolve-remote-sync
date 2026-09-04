@@ -115,6 +115,39 @@ $SubstRunEntry = "CCSyncSubst$DriveLetter"
 # it -- the block rule is ours and must go with the share it scoped.
 $SmbFirewallRuleName = "CC Sync: block remote SMB (tree share is loopback-only)"
 
+# The Apps & features entry windows_bootstrap.ps1 writes (OPS-17, usability +
+# resilience sweep 2026-09-03). It is per-user, under HKCU, and it must go
+# with the app: an entry left behind offers Windows a way to run an
+# uninstaller that is no longer there.
+$UninstallKeyRoot = if ($env:CCSYNC_UNINSTALL_KEY_ROOT) { $env:CCSYNC_UNINSTALL_KEY_ROOT }
+                    else { "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" }
+$UninstallKeyName = "CCSync"
+
+function Unregister-UninstallEntry {
+    <#
+      .SYNOPSIS
+        Remove this install's Apps & features entry (OPS-17).
+      .DESCRIPTION
+        Returns $true when there is no entry afterwards -- which includes the
+        machine that never had one, because "nothing to remove" and "removed"
+        are the same end state and only a FAILURE is worth telling anyone
+        about. Parameterised on the key root so
+        installer/tests/Test-UninstallEntry.ps1 can drive it against a scratch
+        key. Never throws.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$KeyRoot,
+        [Parameter(Mandatory)][string]$KeyName
+    )
+    $key = Join-Path $KeyRoot $KeyName
+    try {
+        if (-not (Test-Path -LiteralPath $key)) { return $true }
+        Remove-Item -LiteralPath $key -Recurse -Force
+        return (-not (Test-Path -LiteralPath $key))
+    }
+    catch { return $false }
+}
+
 Write-Step "mode: $(if ($Full) { 'FULL (also removes your sign-in + Syncthing identity)' } else { 'keep sign-in + settings' })"
 Write-Step "your synced media is never touched by this script -- only the CCSync app itself."
 if ($DryRun) { Write-Step "DRY RUN -- nothing will be changed" }
@@ -386,6 +419,18 @@ if (Test-Path -LiteralPath $driveIconsKey) {
 }
 
 # --- 4. program binaries --------------------------------------------------
+# The Apps & features entry goes FIRST: it points at a script inside $BinDir,
+# and an entry outliving the file it names is a button that fails (OPS-17).
+if ($DryRun) {
+    Write-Step "[dry-run] would remove the Apps & features entry $UninstallKeyRoot\$UninstallKeyName"
+}
+elseif (Unregister-UninstallEntry -KeyRoot $UninstallKeyRoot -KeyName $UninstallKeyName) {
+    Write-Step "removed the Apps & features entry"
+}
+else {
+    Write-Warn2 "could not remove the Apps & features entry at $UninstallKeyRoot\$UninstallKeyName -- delete that key by hand, or it will offer to uninstall something that is gone."
+}
+
 if (Test-Path -LiteralPath $BinDir) {
     if ($DryRun) { Write-Step "[dry-run] would delete $BinDir (rclone, syncthing, companion exe)" }
     else {
@@ -504,4 +549,11 @@ Write-Host ""
 Write-Host "=================================================================="
 Write-Step "CCSync uninstall complete$(if ($DryRun) { ' (dry run -- nothing changed)' })."
 Write-Step "Tailscale / rclone / Syncthing installed as system packages were left alone; remove them from Apps & features if wanted."
+# This script is installed INTO $BinDir by windows_bootstrap.ps1 (OPS-17), and
+# Windows will not always let a running script delete itself. Say so rather
+# than leave a file nobody expects.
+if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath) -and
+    $PSCommandPath.StartsWith($BinDir, [StringComparison]::OrdinalIgnoreCase)) {
+    Write-Step "this uninstaller is still on disk at $PSCommandPath (it was running). Delete that file, and the folder it is in, whenever you like."
+}
 Write-Host "=================================================================="

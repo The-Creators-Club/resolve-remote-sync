@@ -1,28 +1,29 @@
 {% extends "base.html" %}
-{% block title %}{{ brand_org | upper }}: ASSIGNMENTS{% endblock %}
+{% block title %}{{ brand_org | upper }}: SYNC PLANS{% endblock %}
 {% block layout %}
   <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">
     {% include "partials/settings_nav.html" %}
-    <div class="detail-head"><h1>[ ASSIGNMENTS ]</h1></div>
+    <div class="detail-head"><h1>[ SYNC PLANS ]</h1></div>
     <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 62ch;">
-      tick a project onto one computer, or pull it back. One column per
+      Tick a project onto one computer, or pull it back. One column per
       computer: a person with a desktop and a laptop gets a column each, and
       the two sync different things. Every cell here is the same write the
-      editor switcher's checkboxes make (lane C shares, lane A/B scope, the
-      enforce cycle) - there is no second selection store. The small
-      <span class="mono-sm">up</span> box beside a tick makes it UPLOAD ONLY:
-      that computer sends its video originals for the project to the server
-      and downloads nothing, for an editor who has the footage backed up
-      locally and does not want the rest of the project coming down.
+      checkboxes on SYNC STATUS make: there is one list, not two. The small
+      <span class="mono-sm">up</span> box beside a tick makes it
+      <a href="{{ term_href('Upload only') }}">UPLOAD ONLY</a>: that computer
+      sends its video originals for the project to the server and downloads
+      nothing, for an editor who has the footage backed up locally and does
+      not want the rest of the project coming down. What the words on this
+      page mean: <a href="{{ GLOSSARY_HREF }}">the glossary</a>.
     </p>
     <div class="assign-toolbar">
       <input class="assign-filter" type="search" id="assign-filter"
              placeholder="filter projects…" aria-label="filter projects">
       <span class="muted mono-sm">
-        {{ assignments.projects | length }} project(s) &times; {{ assignments.columns | length }} computer(s)
+        {{ assignments.projects | length }} project{{ "s" if assignments.projects | length != 1 }} &times; {{ assignments.columns | length }} computer{{ "s" if assignments.columns | length != 1 }}
       </span>
     </div>
     {% if not assignments.columns %}
@@ -106,8 +107,24 @@
         </thead>
         <tbody>
           {% for p in assignments.projects %}
+          {% set tick_count = assignments.tick_editor_counts.get(p.slug, 0) %}
           <tr data-project-label="{{ p.label | lower }}">
-            <td class="assign-project" title="{{ p.label }}">{{ p.label }}</td>
+            <td class="assign-project" title="{{ p.label }}">{{ p.label }}
+              {# DCORE-5 (2026-09-04): the one control that takes a project
+                 off every list. Reversible and destructive of nothing: the
+                 folder, its marker, its files and every tick below stay
+                 exactly as they are, which is what the confirm says. A plain
+                 form, like the topbar's sign-out-everywhere, because the
+                 whole grid changes when a row leaves it. #}
+              <form class="inline-form" method="post" action="/partials/admin/projects/archive"
+                    onsubmit="return window.confirm('Archive {{ p.label }}? {{ tick_count }} editor{{ '' if tick_count == 1 else 's' }} sync it now, and it stops being sent to their computers. Nothing is deleted: the folder and the files stay on the server, and UNARCHIVE puts it back.');">
+                <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+                <input type="hidden" name="slug" value="{{ p.slug }}">
+                <input type="hidden" name="archived" value="1">
+                <button class="btn tap" type="submit"
+                        title="take this project off every tick list, the queue and this grid. The folder, its files and the ticks themselves are kept, and UNARCHIVE brings it all back.">[ ARCHIVE ]</button>
+              </form>
+            </td>
             {% for c in assignments.columns %}
             {% set wired = (c.editor, c.machine) in assignments.base_machine_cells %}
             {% set up_only = (p.slug, c.editor, c.machine) in assignments.upload_only_cells %}
@@ -161,6 +178,34 @@
         </tbody>
       </table>
     </div>
+    {% endif %}
+    {% if assignments.archived_projects %}
+    {# The reverse side of DCORE-5. An archived project is not gone and this
+       is where an owner sees that: the ticks are still counted, and one
+       click puts the project back on every list it left. #}
+    <div class="side-head" style="margin-top:1.2rem">[ ARCHIVED PROJECTS ]
+      <span class="muted">off every tick list and the queue. Nothing was deleted: the folders and the files are still on the server.</span></div>
+    {# A LIST, not a table (M3, mobile plan §3.2): this page's one table is the
+       grid, whose scroller is the element itself (`.assign-scroll.scroll-x`),
+       and a second table here would need a second wrapper for a handful of
+       short rows that read perfectly well stacked on a phone. #}
+    <ul class="archived-projects" style="list-style:none;padding:0;margin:0.4rem 0">
+      {% for a in assignments.archived_projects %}
+      <li style="margin:0.3rem 0">
+        <span class="who">{{ a.label }}</span>
+        <span class="muted mono-sm">archived {{ a.archived_at | ago }} by {{ a.archived_by or "?" }},
+          still ticked for {{ a.editors }} editor{{ "" if a.editors == 1 else "s" }}</span>
+        <form class="inline-form" method="post" action="/partials/admin/projects/archive"
+              style="display:inline">
+          <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+          <input type="hidden" name="slug" value="{{ a.slug }}">
+          <input type="hidden" name="archived" value="0">
+          <button class="btn tap" type="submit"
+                  title="put this project back on every tick list and the queue. The ticks it had are still there, so it starts syncing again on the next cycle.">[ UNARCHIVE ]</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
     {% endif %}
     {# aria-live region for toasts (rollback / bulk-column results) -- kept
        outside the scrollable grid so it never scrolls out of view. #}

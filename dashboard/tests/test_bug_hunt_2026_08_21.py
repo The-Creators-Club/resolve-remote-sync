@@ -308,7 +308,7 @@ def test_ticking_a_wired_machine_by_name_is_refused(env):
 
     resp = client.put("/api/v1/selection/alex/p1?machine=BASE-RIG")
     assert resp.status_code == 409, resp.text
-    assert "wired machine" in resp.json()["detail"]
+    assert "wired to the server" in resp.json()["detail"]
 
 
 def test_a_plan_cannot_be_copied_onto_a_wired_machine(env):

@@ -71,7 +71,7 @@ def test_assignments_page_requires_admin(env):
     as_user(client, "owen")     # admin
     resp = client.get("/admin/assignments")
     assert resp.status_code == 200
-    assert "[ ASSIGNMENTS ]" in resp.text
+    assert "[ SYNC PLANS ]" in resp.text
 
 
 def test_grid_renders_projects_editors_and_existing_ticks(env):
@@ -287,7 +287,7 @@ def test_wired_column_unticked_stays_disabled(env):
     # ...and the server still refuses a tick on it, exactly as CR-28 always has.
     r = client.put(f"/api/v1/selection/editor1/{DRONE}?machine=BASE-RIG")
     assert r.status_code == 409, r.text
-    assert "wired machine" in r.json()["detail"]
+    assert "wired to the server" in r.json()["detail"]
 
 
 def test_a_remote_column_of_the_same_mixed_account_is_unaffected(env):

@@ -63,6 +63,12 @@ smb_unc = '\\<nas>\<pool>\<tree>'          # single quotes: a TOML literal
                                            # string, so backslashes stay as-is
 
 [apps]
+# CREATE THIS AS A DATASET FIRST -- `sudo zfs create -p tank/apps/ccsync-dashboard`
+# (OPS-9, 2026-09-03). Nothing here creates one: the deploy only `mkdir -p`s
+# the path, and setup_snapshots.py then refuses the target ("that is a pool,
+# not a dataset"), which leaves dashboard.db with no snapshot behind it under
+# a green install transcript. `python server/setup_snapshots.py --site
+# site.toml --list --apply` is the check, and the deploy warns about it too.
 root = "/mnt/tank/apps/ccsync-dashboard"
 
 [net]

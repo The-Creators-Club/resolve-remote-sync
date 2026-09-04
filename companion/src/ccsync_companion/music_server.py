@@ -369,7 +369,7 @@ def build_reveal_response(
         # here opens the editor's Documents folder and looks like a bug.
         return 200, {
             "ok": False,
-            "error": f"{path} is not on this machine - is the share mounted?",
+            "error": f"{path} is not on this computer - is the share mounted?",
         }
 
     argv = ytdl_server.reveal_command(target, select, platform)
@@ -488,9 +488,9 @@ def build_send_response(
             progress = fetch.get("progress") or {}
             percent = progress.get("percent")
             message = (
-                f"syncing the track to this machine: {percent}%"
+                f"syncing the track to this computer: {percent}%"
                 if isinstance(percent, int)
-                else "syncing the track to this machine…"
+                else "syncing the track to this computer…"
             )
             return 200, {"ok": False, "state": "downloading",
                          "error": message, "progress": progress}

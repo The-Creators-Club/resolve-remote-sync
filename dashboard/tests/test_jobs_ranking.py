@@ -205,4 +205,8 @@ def test_the_near_media_words_describe_what_the_signal_tests(conn):
     edit = machine(conn, "edit-pc", dict(MEDIA))
     assert jobs_mod._signal_true("near_media", facts(conn, edit), None) is False
     assert "dashboard host" not in jobs_mod.SIGNAL_WORDS["near_media"]
-    assert "base rig" in jobs_mod.SIGNAL_WORDS["near_media"]
+    # CR-181 (wave 4, 2026-09-04): "base rig" left the copy. The signal still
+    # tests `mode == "base"`; the words a reader gets are "wired to the
+    # server", which is what that setting means on the computer itself.
+    assert "base rig" not in jobs_mod.SIGNAL_WORDS["near_media"]
+    assert "wired to the server" in jobs_mod.SIGNAL_WORDS["near_media"]

@@ -13216,6 +13216,1007 @@ Deploy the dashboard before the companions, as always: the report fields above
 and an older dashboard would 422 or drop.
 
 
+## Usability + resilience sweep, wave 4: one vocabulary, one help page, one health page (CR-177..CR-181, 2026-09-04)
+
+`docs/USABILITY_RESILIENCE_SWEEP_2026-09-03.md` section 4 (the vocabulary
+table) and section 5 wave 4. Five Opus builders: companion tray/app copy,
+companion settings window, dashboard templates + `/help` + `/admin/health`,
+the three web UIs, dashboard API/scheduler copy. The words are now
+**tick / sync plan, computer, paused / stopped by your admin / stopped
+itself, wired / remote, upload / proxy download / folder sync,
+[ UPLOAD ONLY ], SYNC STATUS**, and each surface carries a scan test with a
+retired-words list and a reasoned allow-list, so the old words cannot creep
+back. Built with NO gate between waves at the owner's instruction; the one
+gate runs after wave 5.
+
+Dashboard **0.7.34**, companion **0.9.69**. Owed into wave 5: the deploy
+does not ship `docs/HOW_IT_WORKS.md` into the container, so `/help` answers
+"not installed" on the NAS until `install_dashboard_app.py` copies it or
+`DASH_HELP_DOC` is set; `broll_server.py`'s ~15 "this machine" ingest
+refusals and `rclone_lane._breaker_stand_down`'s technical detail are the
+companion's last old-vocabulary strings; `capabilities.jobs_gate` is not
+persisted (v50 would let `why` say "busy making proxies" from the database);
+HOW_IT_WORKS.md's prose outside the glossary still says machine/lane (SYS-5).
+
+### CR-177 - four words for a computer, two for a stop, and a breaker that told an editor to edit config.toml - FIXED in repo 2026-09-04 (companion 0.9.69)
+Wave 4 of the usability + resilience sweep, companion half (sweep section 4
+"One vocabulary", UX-19, SYNC-106, CMEDIA-1, CMEDIA-9, SYS-21 (a)). The
+owner approved one word per concept on 2026-09-04: a **computer** in copy
+(`machine` stays in code, routes and DB columns; `device` is a Syncthing
+identity and nothing else); sync that is not running is **paused** (you did
+it), **stopped by your admin** (a fleet halt) or **stopped itself** (the
+breaker, the disk floor); the transports are **upload** / **proxy download**
+/ **folder sync**, never a lane and never a letter; a project is **ticked**
+and the set of them is a **sync plan**.
+
+* **The vocabulary is applied and then SCANNED.** Every visible string in
+  `tray.py`, `tray_native.py`, `app.py`, `ui_copy.py`, `jobs_runner.py`,
+  `capabilities.py`, `drive_reminder.py`, `eula.py`, `settings_window.py` and
+  `sync/lane_guard.py` (about 45 sentences) reads the approved word, and
+  `tests/test_sweep_2026_09_04_copy.py` fails on "lane / lane A / lane B /
+  lane C / machine / base rig / rig / halted / parked / breaker / selection /
+  assignment" as whole words in any of them. The scan skips DICT KEYS and
+  lookups (`guard.get("parked")`, `{"reason": ...}`) and one- or two-word
+  literals, because the state files and the wire deliberately did NOT change,
+  and carries ONE allow-listed string with its reason. The two route labels
+  `ui_copy` pins were renamed with the rows they quote ("STOP ALL SYNCING ON
+  THIS COMPUTER", "REMOVE '<x>' FROM THIS COMPUTER"), so route and button
+  still read the same words.
+* **A stop and a pause are two switches and the tray named one** (UX-19).
+  With both set the menu carried "Start syncing again" and "Resume syncing
+  (currently PAUSED)" four lines apart and clicking either left the computer
+  not syncing. The local stop's row is now named for its CAUSE and dated -
+  "Clear the sync stop on this computer (set today at 09:12)", the stamp
+  dropped rather than guessed when it cannot be read - the pause reads
+  "Resume syncing (paused by you)", the state block grows "Two things are
+  stopping sync on this computer: a stop and a pause. Clear both to sync
+  again.", and the Sync: line carries the SECOND reason ("Sync: stopped on
+  this computer (and paused)"). The ranking is the dashboard's own
+  (`health.WHY_ORDER`: fleet halt, then local halt, then paused).
+* **The breaker told an editor to edit a file they cannot open** (SYNC-106).
+  The trip reason was one string doing two jobs, and one of the three ended
+  "Check remote_root in config.toml." The trip now carries a CAUSE
+  (`root_unrecognised` / `remote_empty` / `remote_shrank` / `pass_deletes` /
+  `cumulative_deletes`); `reason` is unchanged and stays the admin's - the
+  log, the report and copy_diagnostics carry it - and `editor_reason` is what
+  the tray line, the balloon, the resume dialog and `sync_guard.blocked`
+  render: "The server does not look like your project tree right now, so
+  CCSync stopped downloading proxies before anything could be removed.
+  Nothing was deleted and your uploads are still running. Ask your admin to
+  check the server." That tail is on ALL FIVE reasons, not just the two that
+  happened to have it. A latch tripped by an older build has a reason and no
+  cause and is mapped back by the half of the sentence its trigger owns.
+* **Three GPU consumers on one computer, and only two of them negotiated**
+  (CMEDIA-1). `JobRunner` gets the `blocked_fn` seam the ingestors and the
+  proxy generator have, wired to `app._jobs_block_reason()` (either
+  ingestor's `blocking_reason()`, then "waiting: making proxies"), a new gate
+  state `STATE_LOCAL_WORK` reported by `status()`, and `jobs_gate.detail`
+  beside the machine-readable `reason` so `GET /api/v1/jobs/<id>/why` can say
+  "busy indexing b-roll" instead of ranking a saturated machine first on
+  longest-idle. It sits ABOVE the two gates a person can open: a volunteer
+  click is not consent to run two GPU jobs at once. The seam fails CLOSED,
+  like the halt and Resolve probes beside it, and is NOT the config gate
+  `_proxy_block_reason` answers True for.
+* **The 20 GB staging floor was b-roll's number applied to music**
+  (CMEDIA-9). `IngestKind.free_space_floor_gb` (b-roll 20, music 2) is what
+  `broll_server._ingest_floor_bytes` falls back to; the per-kind config key
+  still wins. A music drop on a laptop with 15 GB free was refused and the
+  drop zone never rendered, for a batch whose largest file stages 512 MiB.
+* **One help page, one constant** (SYS-21 a). `ui_copy.HELP_URL_PATH`
+  ("/help", the dashboard's new route), `ui_copy.HELP_PAGE`
+  ("Tray > Settings > HELP", checked against a row that exists like every
+  other route) and `ui_copy.help_url(cfg)` - `<dashboard_url>/help`, or None
+  on a computer with no dashboard yet, never a relative path or a guess.
+
+Deploy order is unchanged (dashboard first): the dashboard's `why` reads
+`jobs_gate.detail` and its absence is what every companion below 0.9.69
+sends. Nothing here changes a state file's keys or the report's `reason`.
+
+### CR-178 - the Settings window spoke five vocabularies, hid its own help below everything, and could change one setting - FIXED in repo 2026-09-04 (companion 0.9.69)
+Wave 4 of the usability + resilience sweep, the companion window half (APP-17,
+SYS-8, SYS-21 (a), UX-3, UX-11, SYNC-117, RES-15, plus sweep section 4's
+vocabulary table). `settings_window.py` and `popup.py` only; the tray's own
+lines are the same wave's other half.
+
+* **One vocabulary** (sweep section 4). `[ SYNC LANES ]` is `[ SYNCING ]`;
+  the three transports are `upload` / `proxy download` / `folder sync`
+  everywhere an editor reads them, taken from `ui_copy.lane_words` so the
+  window and the dashboard's API say the same words about the same lane; a
+  project's mode is `upload only (no proxy download)`, not "uploads only (no
+  proxies come down)"; `Machine name:` is `Computer name:`; the two role
+  dialogs say "this computer" and no longer say "the base rig" or "that
+  lane". A scan test in `test_settings_window.py` walks every Line and
+  Button label and fails on `lane`, `machine`, `base rig`, `halted`,
+  `parked` or `breaker`. Two labels are exempt and still say MACHINE -
+  `STOP ALL SYNCING ON THIS MACHINE` and `REMOVE '<x>' FROM THIS MACHINE` -
+  because `ui_copy.ROUTE_ROWS` pins them as the row other modules' copy
+  points at; renaming them is one edit in `ui_copy.py` and one here, and
+  belongs to whoever owns that file next.
+* **HELP goes FIRST when anything is a warning** (APP-17). Eight of the
+  advisory lines instruct the reader to press [ COPY DIAGNOSTICS FOR YOUR
+  ADMIN ], and on a computer with something wrong the SYNCING section alone
+  is taller than the 640 px window, so that button was below two sections
+  the reader had to scroll past to find. On a healthy computer nothing
+  moves. Above the scroll area there is now a **jump strip**: one button per
+  section header, `canvas.yview_moveto` to that header's y measured at CLICK
+  time (the window rebuilds itself every two seconds, so a y captured at
+  render points at whatever has since grown above it). The strip is packed
+  outside the canvas so it does not scroll away from the reader who needs
+  it, and it is the one control here that does NOT close the window: it
+  opens nothing and changes nothing.
+* **FLEET JOBS is a section, not a TOML file** (SYS-8, UX-11). `[x] Let the
+  fleet use this computer` (`jobs_enabled`), one checkbox per kind from
+  `capabilities.KNOWN_KINDS` in editor English ("Transcribe audio (uses the
+  graphics card)", "Draw audio waveforms"), and `LEND THIS COMPUTER FOR 30
+  MINUTES AT A TIME (click for 60)` cycling 15/30/60/120
+  (`jobs_volunteer_minutes`). `conform` and `resolve-edit` are never
+  offered, because they may never move between computers (plan §4.2).
+  Every write goes through `config_mod.set_value` - the one-key line patch
+  the role switch uses, with APP-11's read-back proof - and every one of the
+  three is read at construction (`JobsRunner.__init__`, `capabilities`), so
+  the section says "The settings above were changed and take effect when
+  CCSync next starts" exactly the way the role does. Ticking all the kinds
+  writes `""`, not the full list: a build that learns a new kind later must
+  not find this computer excluded from it by a list nobody knew they were
+  writing. Unticking the LAST kind is refused with "Untick 'Let the fleet
+  use this computer' instead", because `jobs_kinds = ""` means every kind
+  and "none" cannot be written at all. `cards_agent` is deliberately absent:
+  exactly one computer in a fleet may run it and the server is the only
+  party that can see all of them. The status half (CMEDIA-2) and the
+  settings half share the one header.
+* **The drive reminder can be turned off, for this episode only**
+  (SYNC-117). While an episode is open, SYNCING carries [ REMIND ME LATER ]
+  (two hours, then the usual cadence) and [ STOP REMINDING ME ABOUT THIS
+  DRIVE ]. `drive_reminder.mute_episode(minutes)` stops the thread and
+  nothing else: the record, the summary and `active` are untouched, so the
+  standing warning line stays where it was, and the drive coming back clears
+  everything as before. The mute is NOT written to the record and NOT a
+  config key - a restart with the drive still out reminds again, because
+  this is a data-safety warning and `drive_reminder_minutes` is still the
+  way to turn the cadence down for good. `reminders_muted` compares the
+  episode's own start time rather than reading a flag, so a new episode
+  never inherits the last one's click.
+* **A FIX ALL rehearsal reads as a rehearsal** (RES-15). `fixer.fix_clip`'s
+  dry run returns `ok: True, dry_run: True` with `would_copy` /
+  `would_relink` counts; it used to return `ok: False`, which every caller
+  counts as a failure, so a clean 69-clip rehearsal was summarised as "0 of
+  69 copied in, 69 failed" with 12 red rows. `summarize_fix_results` learns
+  `dry_run`: "REHEARSAL: nothing was copied. 69 files would be copied into
+  P:\." with neutral rows naming where each clip WOULD land, no undo pointer
+  and no byte count (`fix_copied_bytes` and `fix_summary_text` exclude
+  rehearsal rows). The mode is now visible before the click: a red line in
+  the popup header ("FIX ALL is in rehearsal mode on this computer and will
+  copy nothing.") and the same sentence in Settings > ADVANCED with
+  [ TURN REHEARSAL OFF ], which writes `fixer_dry_run = false` AND drops
+  `fixer.dry_run_default`'s per-process cache - without that the button
+  would appear to do nothing until the next start, which is APP-11's shape.
+* **HELP contains help** (UX-3, SYS-21 (a)). [ HOW CC SYNC WORKS ] and
+  [ WHAT DO THESE MEAN? ] (the same page's `#glossary`) open the dashboard's
+  help page in the default browser through `ui_copy.help_url(cfg)`, with a
+  `dashboard_url` + `HELP_URL_PATH` fallback so a build whose `ui_copy` half
+  is older still gets the buttons. Hidden entirely when this computer has no
+  dashboard URL: a button that can only fail is worse than a section with
+  two rows in it. `webbrowser.open()` returns False with nothing logged when
+  no browser could be launched, so the failure is logged and named.
+
+Config keys this window can now write: `mode` (unchanged), `jobs_enabled`,
+`jobs_kinds`, `jobs_volunteer_minutes`, `fixer_dry_run`. All five through
+`config_mod.set_value`, all five needing a restart to apply, all five saying
+so on the line.
+
+### CR-179 - four words for one thing, no help page, and four pages that each answered "is my fleet all right" - FIXED in repo 2026-09-04 (dashboard 0.7.34)
+Wave 4's dashboard half (SYS-6, SYS-21a, UX-3, UX-22, DUI-11, DUI-12, and the
+terminology table in `docs/USABILITY_RESILIENCE_SWEEP_2026-09-03.md` section
+4):
+
+* **One vocabulary, and a scan that keeps it.** The product said tick,
+  selection, plan and assignment for one act; machine, computer, device and
+  rig for one box; halted, parked, stopped and breaker for one state; and
+  lane A/B/C for the three things a person actually watches. Every visible
+  string in `templates/`, `static/` and `ui.py` now uses **tick** /
+  **sync plan** (the page is `[ SYNC PLANS ]`), **computer** (`device` only
+  for a Syncthing identity), **paused** (you did it) / **stopped by your
+  admin** (a fleet halt) / **stopped itself** (the proxy-download brake, the
+  disk floor), **wired** / **remote**, and **upload** / **proxy download** /
+  **folder sync**. THE CODE KEEPS ITS NAMES: `selections` is still the table,
+  `machine` is still the column, the route segment and the form field, and
+  `api.LANE_LABELS` still answers A/B/C for the JSON API and every log line.
+  The seam is one dict, `ui.LANE_WORDS` (`lane_word` as a Jinja filter), so a
+  chip names itself from the lane the report carried. The scan that keeps it
+  is `tests/test_sweep_2026_09_04_copy.py`, extended with a template/JS half
+  that reads only what a browser paints: text outside any tag with `{{ }}`
+  and `{% %}` removed, the values of `title` / `placeholder` / `aria-label` /
+  `alt` / `hx-confirm`, and our own JS string literals. A string with no space
+  in it is a key or a route and is skipped, `htmx.min.js` is vendored and
+  skipped, and everything else that is left is in an allow-list WITH ITS
+  REASON (four Syncthing-identity lines, the viewport meta, and the file-move
+  button label the flow's own copy owns).
+* **`/help` serves the guide** (UX-3 / SYS-21a). `docs/HOW_IT_WORKS.md` is 788
+  lines of customer prose that was reachable only by someone with the
+  repository: zero links to any document existed anywhere in the product.
+  `help.py` finds it (`DASH_HELP_DOC`, then `<app>/docs/`, then the repo
+  checkout beside the package - `install_dashboard_app.py` ships the
+  `dashboard/` tree as `app` and nothing else, so **a deployed server needs
+  the doc shipped or the env var set**; with neither, the page says "Help is
+  not installed on this server" and never 500s) and renders it with a
+  stdlib-only markdown subset, because `markdown` is not in
+  `requirements.lock` and this is not worth a dependency for. Everything is
+  escaped before anything is marked up; no HTML in the document passes
+  through. Headings get numbering-free ids and every glossary row gets
+  `id="term-<slug>"`, because four surfaces deep-link into it: the sync line
+  and the SYNC column on SYNC STATUS, the UPLOAD ONLY chips (sidebar, queue,
+  project page), the SYNC PLANS intro, and the topbar's `[ ? ]`. The guide's
+  section 15 is the terminology table now, in customer prose.
+* **One `[ HEALTH ]` page** (SYS-6). Open notices, the RED/AMBER alert
+  findings, broken invariants and missing protection lines in ONE ranked list
+  at `/admin/health`, read through the existing `db` / `alerts` /
+  `invariants` / `protection` public functions - no new data, no new query.
+  Every row carries its source's own `diagnosis` and `fix` VERBATIM plus the
+  wave-2 `[ TAKE ME THERE ]` href, and links to the page that owns it: a
+  composed page that paraphrases is a second place for the wording to be
+  wrong. Bands are error, then warn, then **unknown** - `[ NOT CHECKED ]` is
+  its own band and never folds into OK, which is the rule
+  `docs/SELF_DIAGNOSIS.md` exists to hold. One source that raises costs its
+  own rows and not the page. It is the SETTINGS LANDING (the drawer's
+  [ SETTINGS ] and the topbar gear) and the topbar's alert chip points here
+  rather than at one of the four sources.
+* **The Settings strip is three labelled runs**, not fourteen flat entries:
+  *Run the fleet* (SITE, USERS, SYNC PLANS, TRANSFERS, PACKAGES, JOBS,
+  HISTORY, SETUP), *Is it healthy* (HEALTH, INVARIANTS, PROTECTION, ALERTS),
+  *When it breaks* (RECOVERY, HELP). `ui.SETTINGS_NAV_GROUPS` is the list and
+  `SETTINGS_NAV` is DERIVED from it, so a page cannot be in a run and not in
+  the strip. A run whose every entry is admin-only renders nothing at all for
+  an editor, heading included.
+* **The audit log is `[ HISTORY ]`** (DUI-12): three things in one navigation
+  were called a timeline (a Resolve timeline, the mounted Timeline Cards, and
+  the audit log), so an owner told "check the timeline" had three places to
+  look. Heading, tab title and `plan_changes.html`'s "the full history" link;
+  the route is unchanged.
+* **SITE SETTINGS explains itself** (DUI-11): sixteen jargon fields carried
+  exactly one hint, in a mechanism built for hints, and a first-time customer
+  meets that page immediately after the wizard. One sentence and an example
+  for every field, READ rather than hovered (a phone has no hover), in three
+  headed groups - `[ YOUR STUDIO ]`, `[ THE TREE ]` and
+  `[ HOW EDITORS CONNECT - ADVANCED ]`, the last collapsed. `dashboard_url`
+  carries its own amber line: *This must be exactly the address editors type
+  in their browser, or Send to Resolve stops working* - the 8899 loopback's
+  origin allow-list refuses every Send-to-Resolve call when it does not match.
+* **The login page says what this is** (UX-22): the brand from the site
+  manifest (never a literal) and one muted line, "Your admin creates this
+  account for you. If you do not have one yet, ask them before installing."
+  It still does NOT say "no account with that name here" on the error branch,
+  and deliberately: on every deployment that authenticates against the NAS the
+  question needs a second credential round-trip from an unauthenticated route,
+  which is a free enumeration oracle, and item 15 (2026-08-17) settled on ONE
+  message for every refusal for that reason. The comment at `_LOGIN_REFUSED`
+  records it. The wave-3 throttle sentence is untouched.
+
+Owed: the deploy does not ship `docs/HOW_IT_WORKS.md` into the container yet
+(`install_dashboard_app.py` uploads `dashboard/` only), so `/help` on the NAS
+answers "not installed" until either that script copies it or `DASH_HELP_DOC`
+names a path in the compose file. The rest of the guide's prose still says
+"machine" and "lane" outside the glossary, section 4, section 8 and the
+troubleshooting table; that pass is wave 5's, with the doc's content
+corrections.
+
+### CR-180 - the three SPAs called one computer five things and the tray app four - FIXED in repo 2026-09-04 (broll, music and ytdl web)
+
+Section 4 of the 2026-09-03 usability sweep ("One vocabulary", UX-4/UX-5)
+found the same concept wearing a different name on every surface. Wave 4
+builder C applied the owner's fixed vocabulary to every string an editor
+READS in the three mounted web UIs - toasts, tooltips, empty states, button
+labels, headings and the `detail` an HTTP refusal carries - and pinned it.
+Code identifiers, DOM ids, CSS classes, routes, the `machine` query
+parameter, the `machines` table and every log line keep their names on
+purpose: renaming those would be a data change wearing a copy change.
+
+* **the box on the desk is a computer.** "machine" left 46 visible strings
+  across the three pages: b-roll's "Clip isn't on this machine yet", the
+  ingest tier refusal ("this machine's GPU can't hold it"), music's "syncing
+  the track to this machine", the batch cards' "no machine yet" and "All
+  machines" tab, and ytdl's whole local-download vocabulary ("downloading on
+  your machine", "this machine declined the job", "free on the download
+  machine", the [ STOP ] and [ DOWNLOAD ON THE SERVER INSTEAD ] tooltips).
+* **the program is the CC Sync tray.** The three pages between them called it
+  "the companion", "the companion app", "the CC Sync companion", "the ccsync
+  companion" and "the tray app", sometimes two of those in one sentence. All
+  of them are "the CC Sync tray" now, and a test refuses the other four
+  spellings. The two update instructions that still pointed at "tray icon ->
+  check for updates" say "take the update your tray offers", which is the
+  label `upgrade.offer_label` actually draws.
+* **"the base rig" left the UI.** Music's queue panel was headed "Waiting for
+  the base rig" and five sentences named it; an editor has no way to know
+  which computer that is or whether they own it. It is "the indexing
+  computer" throughout, including the `[ include them ]` tooltip and the
+  no-waveform caption.
+* **music's error sentinel moved with the copy.** `app.js` tells "the tray
+  answered with an HTTP error" from "the request never reached 127.0.0.1" by
+  the PREFIX of the thrown Error, which was the word `companion`. Renaming
+  only the sentence would have silently picked the wrong branch for every
+  failure - the same inversion as 2026-08-12 - so the sentinel is `tray HTTP
+  <status>` and a test holds the two together.
+* **the home page is SYNC STATUS.** All three `[ DASHBOARD ]` back links said
+  "back to the CC Sync dashboard (project sync status)".
+* **`selections` stays in the DB, "sync plans" is the words.** The ytdl
+  project picker's one visible refusal said "no dashboard database to read
+  project selections from".
+* **the scan.** `test_one_vocabulary.py` in each of the three suites reads
+  only where the product speaks: JS string literals with comments removed,
+  HTML text nodes plus `title`/`placeholder`/`aria-label`/`alt`, and the
+  `detail`/`message`/`error` values in the route modules. Interpolations
+  (`${batch.machine}`, `{machine}`) are stripped first, because a template
+  token filled with a hostname is not a word anyone reads. b-roll's
+  allow-list has two entries, each with its reason; music's and ytdl's are
+  empty. A stale allow-list entry is its own failure.
+
+### CR-181 - one vocabulary in the dashboard's Python copy, two switches in one sentence, and the third GPU consumer - FIXED in repo 2026-09-04 (dashboard 0.7.34)
+
+Wave 4's dashboard half. The sweep's section 4 gave one word per concept; this
+is that word applied to every sentence the Python side hands a person - HTTP
+`detail` messages, notice and alert titles, bodies and fix lines, invariant and
+protection copy, the weekly report, and `jobs.explain`'s per-machine `why` -
+plus the two behaviour changes the vocabulary exposed.
+
+* **The words.** A **computer**, never a machine, a rig or a base rig
+  ("device" stays for a Syncthing identity). **Upload** / **proxy download** /
+  **folder sync**, never a lane: `alerts._lane_words`' fallback, the
+  `lane_stalled` / `lane_error` alert titles ("a sync transfer is stuck"), the
+  weekly report's `BYTES MOVED` heading and `health._lane_words`. The page an
+  admin is sent to is **SYNC STATUS**, not FLEET, in seven fix lines across
+  `alerts.py`, `notices.py`, `invariants.py`, `protection.py` and `api.py` -
+  the nav has not said FLEET since 2026-08-18.
+* **UX-19 - three ways for sync to be off, and they are three sentences.**
+  **paused** = you did it, **stopped by your admin** = a fleet halt, **stopped
+  itself** = the proxy-download brake or the disk floor. `health._why_sentence`
+  says which one it is (the disk floor said only "the drive has 8 GB free" and
+  read as a fault of the drive), and **where two are true the sentence names
+  both**, ranked: `why_causes()` returns them apart, `why_not_syncing()` joins
+  them with ". Also: ", and `/api/v1/fleet`'s `why` block carries `causes`.
+  Only a switch a person can clear separately qualifies as a second cause
+  (`WHY_SECOND_CAUSES`); a stall under a stop is the same fault said twice.
+  With a pause under a local stop the editor used to clear the one the grid
+  named and watch nothing move.
+* **CMEDIA-1 - the third GPU consumer, the dashboard half.** B-roll indexing
+  and proxy generation negotiate on the editor's own computer; the job
+  scheduler was outside that agreement, and because both gates open on the
+  same event (nobody at the keyboard) the common case was a whisper job ranked
+  FIRST onto the computer that had been "idle" longest while it held 8-12 GB
+  of VLM weights. The OOM came back as a job failure and earned that computer
+  the per-machine cooldown for a fault it did not have. `jobs.policy_refusal`
+  now refuses on `capabilities.jobs_gate.reason == "local_work"` with that
+  companion's own sentence ("busy indexing b-roll", "busy making proxies"),
+  which also keeps it out of `ranked_machines` entirely - refused before
+  `rank_key` sees it, so longest-idle cannot promote it. `reason_code` for a
+  job with no other candidate is `all_busy`: transient, so a Timeline Cards
+  client waits instead of falling back for ever. An unknown gate reason is NOT
+  a refusal - a dashboard that invents refusals from strings it has never seen
+  is a queue that stops for a typo in a newer companion.
+  **No column and no migration:** the gate is a fact about this second, so it
+  rides the report and the claim (`machine_facts(capabilities=...)`), and
+  `explain`, which answers from the database hours later, reads the two flags
+  that ARE already stored on the row it selects, `ingest_active` and
+  `music_ingest_active`. The companion's gate wins wherever there is one,
+  because only the computer knows it is three minutes into a proxy encode.
+
+`dashboard/tests/test_sweep_2026_09_04_copy.py` grew a second scan:
+**`test_no_retired_word_in_python_copy`**, whole-word and case-insensitive
+over `lane`, `machine`, `rig`, `halt(ed)`, `park(ed)`, `breaker`, `selection`
+and `assignment` in every string these twelve modules hand a person. SQL, log
+and `execute()` arguments, docstrings, route paths and single-word constants
+are out of scope by construction, and everything left is in `VOCABULARY_ALLOWED`
+with the reason: the `machine` FORM FIELD's validation message, `.ccsync/machine.json`
+(a file name), and two button labels quoted back to the reader
+([ MOVE ON THE SERVER AND ON EVERY MACHINE ], [ RELEASE THE HALT ]) which are
+renamed in the templates or nowhere. The code keeps every name it had:
+`selections` is still the table, `machine` the column, the route segment and
+the form field, and `fleet_halt` / `disk_park` / `breaker_tripped` /
+`machine_silent` are still the kind ids.
+
+Tests: `test_health.py` +7 (UX-19 and the three sentences),
+`test_jobs_scheduling.py` +8 (CMEDIA-1, from a stubbed report), the copy scan
++2. Twelve pins in seven suites moved to the new words, never loosened.
+`docs/SELF_DIAGNOSIS.md` section 4 now states the rule for anyone adding a kind.
+
+
+## Usability + resilience sweep, wave 5: the second customer (CR-182..CR-186, 2026-09-04)
+
+`docs/USABILITY_RESILIENCE_SWEEP_2026-09-03.md` section 5, wave 5, the last
+of the six. Five Opus builders: access (suspend, archive, local membership,
+eviction that keeps a committed computer, optional SSH key with a pending
+queue the wizard fills), install and restore (the snapshot mount set by the
+deploy, deploy-time snapshot warning, uninstall registration on both
+platforms, SmartScreen note, Resolve-not-installed probe, RECOVERY copy
+without repo scripts, appliance doc reordered with the tailscale sign-in
+link in the wizard), release (the soak gate on every door, gated
+-EmitKindExtras, EULA + legal + HOW_IT_WORKS shipped in image, bundle and
+bind mode, one free-space helper, release-key backup, WHAT IS RUNNING,
+the dashboard's own unattended update on `policy = current` in code mode),
+docs hygiene (HOW_IT_WORKS rewritten from the shipped tray and settings
+window and pinned by a test, README index under test, ARCHITECTURE
+blast-radius table, dated status headers, `projects_dir` refused at boot,
+no repo script named in customer copy), and the companion's last
+old-vocabulary strings. Waves 4 and 5 were built with no gate between them
+at the owner's instruction; the one gate ran after this wave.
+
+Dashboard **0.7.34** with **schema v50** (`known_editors.suspended_*`,
+`projects.archived_*`, `machine_state.cap_jobs_gate_*`, `pending_ssh_keys`),
+companion **0.9.69**, installer **1.0.41**. Dashboard first, as always.
+
+Owed after the sweep: CI runs only one of the seven installer scripts
+(`docs/CI.md` names the gap); the wizard specs bundle the uninstallers but
+nothing pins the two `datas` rows; UX-21's Tailscale Serve half is still
+NOT YET TRUE and the appliance doc keeps its DRAFT label; the htmx
+feed-publish partial does not render `staged_note` yet (JSON, log and the
+Mac scripts do); there is no box on an editor's computer to paste a report
+token into, and queuing a fleet job is still CLI-only (CR-185's two
+owner-level items).
+
+### CR-182 - stopping a person, and removing a project, were things this dashboard could say but not do - FIXED in repo 2026-09-04 (dashboard 0.7.34, schema v50)
+Wave 5's dashboard-core half, "the second customer" (DCORE-1, -4, -5, -6, -12,
+OPS-2, UX-13, UX-14, plus CMEDIA-1's server side). Schema **v50**:
+`known_editors.suspended_at/_by/_reason`, `projects.archived_at/_by`,
+`machine_state.cap_jobs_gate_reason/_detail` and the `pending_ssh_keys` table.
+
+* **DCORE-1** DISABLE revoked sessions and `cce1.` tokens and NOTHING else:
+  nothing in the report path or the enforce cycle had ever read
+  `users.disabled`, so a disabled contractor's companion kept posting under an
+  identity token that never expires (CR-86), `record_known_editor` re-registered
+  them every 30 s, and every project ticked for them stayed shared - while the
+  page said DISABLED and the API answered `{"ok": true, "purged": {...}}`. The
+  report path now asks `api._account_refusal` after the identity checks and
+  before any write, and turns the computer away with the reason
+  **"this account has been disabled"** stamped on `machines.report_refused_at/
+  _reason` (the fleet grid's `[ BEING REFUSED ]` chip and the `report_refused`
+  alert already render it). Absent counts as disabled on a local site - the
+  account was deleted and the token outlives it - EXCEPT while no local account
+  exists at all, which is the bootstrap window and must not 401 a live fleet.
+  Fails open on a database error: a read that cannot answer never turns the
+  fleet away. The confirm now names the consequence exactly ("Their computers
+  stop reporting and keep the projects they already have until you remove the
+  ticks or forget the computers"), and DISABLE/ENABLE write `user.disable` /
+  `user.enable` to the audit ledger, which they never did.
+* **DCORE-4** The shipped fleet runs `DASH_AUTH_METHOD=smb`, where DISABLE does
+  not exist at all: the only "stop this person" control the Users page offered
+  was DELETE, which removes the NAS account, forgets every computer, removes
+  the Syncthing devices and drops the plan. **[ SUSPEND ] / [ RESUME ]** is the
+  non-destructive one, auth-method independent because it acts on FLEET state:
+  `known_editors.suspended_at` (v50), the report path refuses with **"this
+  account is suspended"**, and the enforce cycle drops that person from
+  `plan_rows` / `plan_editors` and from the unconditional shared-asset share, so
+  their folders are unshared on the next cycle - the same path a removed tick
+  takes, under the same blast-radius brake, and under-sharing is the safe
+  direction. **The plan is never touched**, so RESUME puts back exactly what was
+  there. `db.suspended_editors` is the ONE predicate every reader asks, the way
+  `base_only_editors` is (CR-28). A SUSPENDED chip on Users and on SYNC STATUS,
+  because otherwise a suspended person's computers look exactly like computers
+  somebody switched off. Suspending yourself is a 409; suspending a name the
+  fleet has no record of is a 404, never a row invented on the way past.
+* **DCORE-5** Any signed-in editor can create a project - deliberately, it is
+  how a shoot starts on a Friday night - and NOTHING could ever remove one: a
+  typo became a permanent row in every tick list, in the plans grid and in the
+  queue, and the only cure was deleting the folder on the NAS by hand and
+  waiting up to 15 minutes for `deactivate_missing_projects`, which the DASH-4
+  brake may itself refuse on a small site. **[ ARCHIVE ]** on SYNC PLANS
+  (admin-only, `POST /api/v1/projects/{slug}/archive`) sets `active=0` - the
+  flag every reader in `db.py` already filters on - stamps `archived_at/_by`,
+  and the enforce cycle stops contributing that folder's ticks (its own and any
+  borrower's). The stamp is load-bearing: archiving KEEPS the folder and the
+  marker, so `upsert_project` runs for it on the next collector pass and a bare
+  `active=1` would have un-archived it within 60 seconds, silently, with the
+  shares. Nothing is deleted, the ticks stay in the table, and the confirm names
+  how many editors sync it before the click. `project.create` (both doors: the
+  JSON route and the editor's own NEW PROJECT partial), `project.archive` and
+  `project.unarchive` are audited. The create form now SAYS who may create a
+  project, that it appears for everyone, and that only an admin can take it back
+  off those lists.
+* **DCORE-6** `_require_fleet_member` proved membership by asking the NAS
+  whether the account is in `editors`. On a `DASH_AUTH_METHOD=local` appliance -
+  the zero-touch shape, which has no NAS credential by design - `nas_configured`
+  is False, so the whole check was SKIPPED: any local account, including one
+  made for browsing the b-roll library, got an identity token and the shared
+  report token from `/api/v1/verify` and could write reports as itself. Local
+  accounts carry a role and nothing consulted it. Membership on a local site is
+  now the account row - present, not disabled, not suspended, role in
+  `local_users.ROLES` - and the skip-with-warning path is reserved for
+  smb/oidc sites with no NAS credential, where the log line names the real
+  configuration ("no membership backend for auth_method='smb'") instead of
+  pointing at DASH_NAS_PW, which is irrelevant there.
+* **DCORE-12** Past the 20-machine cap, `evict_extra_machines` deleted the
+  oldest `machine_state` AND `machines` rows, deliberately keeping the plan. But
+  a computer with no registry row has no `syncthing_device_id` the enforce cycle
+  can address, so its plan falls back to the person-level share set, and
+  `api_tick` answers 404 "'leso' has no computer named 'LESO-MBP'" for a machine
+  that is still holding footage and still in Syncthing - with no notice, no
+  audit and no log line anywhere. The registry row is now KEPT whenever it still
+  owes something (`_machine_has_commitments`: a `selections` row, or a Syncthing
+  device id), which puts it in the LOST state the fleet grid already draws
+  (`lost_machines`, DASH-16) with its `[ FORGET ]` button, and the cap refusal
+  is logged at WARNING naming the computer and the reason. No new notice kind:
+  a LOST state exists and rendering it there is what the finding asked for.
+  `machine_state` is still pruned, and a row that owes nothing is still evicted.
+* **OPS-2 / UX-14** Creating an editor account REQUIRED an SSH public key that
+  only the wizard generates, and the wizard cannot run until the account exists:
+  the owner's only exits were a repo checkout or emailing somebody a private
+  key. The key is optional on create now (blank is refused only for an account
+  that already exists, because both NAS backends WRITE the key they are handed
+  and a blank one erases the key that account's lanes are using); the row shows
+  **[ NO SSH KEY ]** with "upload and proxy download will not run until a key is
+  added" and an **[ ADD SSH KEY ] / [ UPDATE SSH KEY ]** control that posts to
+  the same `create_or_update_editor` path - which works in NAS mode, where the
+  old keys routes were local-only. And the wizard now POSTs its public half to
+  `POST /api/v1/ssh-key` under the identity token `/verify` has just issued it
+  (`onboarding/steps.submit_ssh_key`, best effort, never a gate: an older
+  dashboard 404s and the Finish page still prints the key). It lands in
+  `pending_ssh_keys` (v50) and **grants nothing**: `[ SSH KEYS AWAITING
+  APPROVAL ]` on Users is one click, the same shape a Syncthing device id
+  already arrives in, and `[ DISMISS ]` throws the offer away without touching
+  the account. A suspended or disabled editor cannot queue one.
+* **UX-13** The Users page said "TRUENAS_PW is not configured on the dashboard
+  ... Set TRUENAS_HOST / TRUENAS_USER / TRUENAS_PW on the app and redeploy" -
+  the old variable names, and an instruction (edit the container's environment
+  and redeploy) that is the one thing a non-technical owner cannot do, on the
+  page the setup wizard's Editors step sends them to. It now reads "This
+  dashboard has no NAS password, so editor accounts cannot be created here. Set
+  it on Settings, Setup (Connect to your NAS), or set DASH_NAS_PW in the
+  container", with a link to the setup task, and the htmx create route answers
+  the same sentence instead of the bare variable name.
+* **CMEDIA-1 (server side)** `jobs.local_work_words` reads
+  `capabilities["jobs_gate"]` and nothing persisted it, so a machine holding
+  8-12 GB of VLM weights or mid proxy encode looked to the scheduler exactly
+  like an idle one - it ranked first on longest-idle, the job OOMed, and the
+  machine earned the per-machine cooldown for a fault it did not have.
+  `cap_jobs_gate_reason` / `_detail` (v50) are written beside the v49
+  `cap_cards_*` columns, wholesale like every other capability, and decoded back
+  into `jobs_gate`. NULL is "this companion did not say", never "idle".
+
+**Deploy the dashboard before the companions**, as ever: a companion that sends
+`jobs_gate` to a dashboard without v50 has that section discarded (loudly,
+SYS-3), and SUSPEND on an old dashboard does not exist.
+
+Not done, on purpose: `GET /api/v1/selection/...` still answers a suspended
+editor's plan (the report refusal is what stops that machine, and a read that
+returns the plan the enforce cycle is unsharing is not a way in); and DISABLE
+still does not remove Syncthing devices - SUSPEND is the control that removes
+shares, reversibly, and DELETE is the one that removes devices.
+
+### CR-183 - the documented install ended with a recovery page that could only print commands, and an app nobody could uninstall - FIXED in repo 2026-09-04 (installer 1.0.41, server, dashboard 0.7.34)
+Wave 5's install/recovery half, "the second customer": every item here is
+something that worked on this fleet only because the person who built it was
+standing next to it.
+
+* **OPS-3** - `DASH_SNAPSHOT_DIR` had zero hits in `server/`, `INSTALL.md` and
+  `SERVER.md`, while `BACKUP_RESTORE.md` opened with "start at the dashboard,
+  not at this document". So every install that followed the documentation got a
+  Settings -> RECOVERY that could browse nothing and restore nothing, and the
+  owner found that out during an incident. The deploy sets both variables now
+  (`install_dashboard_app.snapshot_source/snapshot_env/snapshot_volumes`): it
+  asks the NAS which dataset the tree is in, checks `<mountpoint>/.zfs/snapshot`
+  is really there, mounts it **read-only** at `/snapshots`, and computes
+  `DASH_SNAPSHOT_PROJECTS_SUBPATH` from the paths it already has rather than
+  guessing. Nothing is mounted where the directory could not be VERIFIED -
+  docker creates a missing bind source, and inventing a `.zfs` inside a
+  customer's footage tree is not a thing a deploy may do - so a Synology and a
+  pasted compose file are one manifest key instead (`[tree] snapshot_dir`,
+  `snapshot_projects_subpath`). Both variables are in `compose.yaml`,
+  `compose.image.yaml` and the golden fixture, so the FILE and the POSTed DICT
+  still describe one container. The page's own sentence changed with it: unset
+  now reads **"this deployment was never given a snapshot mount"** and names
+  the variable, never "there are no snapshots".
+* **OPS-9** - Step 4 of the install configured snapshots and never checked that
+  anything got scheduled, and the trap it cannot see is that `[apps] root` must
+  BE a dataset while the deploy only ever `mkdir -p`s it (server-6: on this
+  fleet's own box `dashboard.db` has never had a scheduled snapshot behind it,
+  under a green transcript). `install_dashboard_app.py` asks the same question
+  `setup_snapshots.py --list` asks - an EMPTY policy, so the refusal happens
+  before the backend reads or writes anything - and prints
+  `WARNING: no snapshot floor` with the backend's own sentence. It applies
+  nothing and fails no deploy. `INSTALL.md` gained the Step 1 prerequisite
+  (`sudo zfs create -p tank/apps/ccsync-dashboard`) and the Step 4
+  `--list --apply` line, "not optional"; `SERVER.md` says it beside the key.
+* **OPS-8** - the release signing key lives on one Windows profile, is never on
+  the NAS and is in no snapshot, and the only "back it up" sentence in the repo
+  was one line in `COMMERCIAL_READINESS.md`. It is a row in `BACKUP_RESTORE.md`
+  §1 ("Protected by: **Nothing**") with the cost of losing it spelled out, plus
+  the Android keystore beside it, and one line in `INSTALL.md` Step 6.
+* **OPS-10** - on TrueNAS the Syncthing catalog app mints its own API key, so an
+  owner following §3 literally invented a `SYNCTHING_API_KEY` that could never
+  match and met 403s from four scripts with nothing pointing at the cause. The
+  row is split by backend, and Step 2 says out loud that this is the one secret
+  Step 3.1 produces rather than consumes.
+* **OPS-22** - Syncthing's config (every device pairing, every folder share, the
+  GUI credentials) lives in a TrueNAS-managed `ix_volume`, outside both
+  `[tree] pool_root` and `[apps] root` - the only two things `setup_snapshots.py`
+  knows about - and was in neither the protected table nor the deliberate
+  omissions. It is a **NOT covered** row now, and §8 names the real recovery:
+  re-run `install_syncthing_app.py`, re-approve every device, let the enforce
+  cycle re-share. No footage is at risk in that state; replication simply stops.
+* **OPS-24** - `$EDITOR site.toml` is bash on a page that calls the base rig
+  Windows two paragraphs earlier (`notepad site.toml`, with the POSIX line
+  underneath); `[stack] project_server = false` is named in Step 1, because it
+  defaults to true and Step 8's health check FAILs its Postgres line by design
+  without it; every `SERVER-SYNOLOGY.md` example passes `--site site.toml`, with
+  a note saying why (a laptop holding several customers' manifests).
+* **OPS-11** - macOS status 4 ("never launched") fires whenever Resolve's
+  preference files are absent, which is also what a Mac with no Resolve on it
+  looks like, so an editor who had not installed it was told to "launch it once,
+  quit it, then re-run". `resolve_app_installed` probes the bundle first (the
+  same probe the Tailscale step has always made) and a new status
+  **`not-installed`** says "DaVinci Resolve is not installed on this Mac. CC
+  Sync needs Resolve Studio (the paid version)." `onboarding/steps.py`'s
+  `_RESOLVE_MAPPING_MESSAGES` carries the wizard's wording for it, so the
+  Finish page says the same thing rather than falling through to "unexpected
+  status".
+* **OPS-12** - an EMPTY `--remote-root` was a named capability miss and exit 3;
+  a MIS-TYPED one was a warning and a green run, which is the worse outcome,
+  because upload then puts camera originals in the editor's bare SFTP home where
+  nothing indexes them and the dashboard never sees them. Both platforms treat a
+  non-absolute root as a capability miss now, "nothing was configured for upload
+  and proxy download", and drop the value so nothing downstream writes it.
+* **OPS-13** - only the companion had `com.apple.quarantine` stripped. rclone and
+  Syncthing come out of the same curl-downloaded archives into the same
+  `~/.local/ccsync/bin`, and a quarantined binary launched by launchd fails with
+  no visible dialog at all - presenting as "upload and proxy download just never
+  do anything", forever, because the re-run guard is `[ -x "$BIN_DIR/rclone" ]`.
+  Both are cleared after the copy.
+* **OPS-17** - `windows_uninstall.ps1` shipped inside the package zip and nowhere
+  else, and the wizard path never delivers that zip: CC Sync appeared in no
+  uninstall list on any machine. The Windows bootstrap copies the uninstaller
+  (and `drive_mapping.ps1`, which it dot-sources) into `%LOCALAPPDATA%\ccsync\bin`
+  and registers an **HKCU** uninstall entry - DisplayName from the site's
+  `org_name`, `UninstallString` running it with `-NoProfile -ExecutionPolicy
+  Bypass -File "<quoted path>"`, `NoModify`/`NoRepair`, `DisplayVersion`,
+  `Publisher` - which `windows_uninstall.ps1` removes BEFORE it deletes the bin
+  directory that entry names. macOS drops `macos_uninstall.sh` into
+  `~/.local/ccsync/bin` and the closing banner names it. New sixth installer
+  test: `installer/tests/Test-UninstallEntry.ps1` (19 cases, against a scratch
+  key under `HKCU:\Software\ccsync-test`, cleaned up).
+* **OPS-20** - with no certificate yet, an editor's first click meets "Windows
+  protected your PC" whose default button is **Don't run**. That was documented
+  for the developer in three places and for the editor nowhere. The Windows pick
+  on `installer.html` says what to click and points at the sha256 already on the
+  page; `START_HERE.md` says the same, with `Get-FileHash`.
+* **UX-18** - the RECOVERY page prescribed three repo scripts to a person who has
+  a container and a browser (the CR-59 shape). The snapshot one points at the
+  SETUP page's "Protect your data" task; the post-rollback one is a button to
+  the Projects page plus one sentence naming who to ask for the part no page
+  here can do; the index rollback names the computer it runs on and who
+  publishes the index. A scan test refuses `server/` in any fact's fix, and
+  `setup_tree.py`/`setup_snapshots.py` in any step's body.
+* **UX-21** - the appliance install's step 4 was `docker compose exec` followed by
+  `docker compose logs` to read a sign-in URL out of a log: the one step of the
+  whole install that forced a non-technical owner into a terminal. The setup
+  wizard's tailnet task has a **[ GET A SIGN-IN LINK ]** button that asks the
+  bundled node over its own LocalAPI, starts the interactive login and puts the
+  `login.tailscale.com` link on the page. It never claims a sign-in it cannot
+  see (that happens in the admin's browser, at Tailscale) and never posts to a
+  node that is already Running. `APPLIANCE_INSTALL.md` is reordered so step 3 is
+  "open the dashboard" and step 4 is "the wizard does the rest", with the CLI
+  kept underneath as the fallback. **The DRAFT label stays**: nobody who is not
+  the author has run it end to end, and WP B still owes Serve.
+
+**Owed, and outside this builder's files:** `onboarding/build_onboard.spec` and
+`build_onboard_macos.spec` bundle only the bootstrap, so on the WIZARD path
+there is no `windows_uninstall.ps1` / `macos_uninstall.sh` to copy and OPS-17
+degrades to the package path it already had (no entry is written pointing at a
+file that is not there). One `datas` line in each spec finishes it. (The `not-installed` row in
+`onboarding/steps.py` landed on E1's request, so that half is done.)
+
+### CR-184 - the soak gate stood at three doors out of five, the EULA and the guide were in no shipped build, and the dashboard was the one component that could not update itself - FIXED in repo 2026-09-04 (dashboard 0.7.34, tools)
+Wave 5's release half (REL-1, REL-4, REL-5, REL-7, REL-8, REL-9, REL-14,
+REL-15, SYS-7 and SYS's cross-cutting "the dashboard's unattended update
+path"). Nothing here is new machinery: it is the 08-28 controls standing at
+the doors they were always meant to stand at, plus the two documents the
+product asks a customer to read.
+
+* **REL-1** - `make_current_refusal` lived in `api.py`, so the gate stood at
+  the three doors that are HTTP routes and at neither of the two that are not:
+  `./tools/release_macos.sh --publish --make-current` - the exact command
+  CLAUDE.md tells the owner to run on the Mac - and a site on
+  `[releases] policy = "current"`, which is the shape a second customer ships
+  with. Both reached `store_verified_package(make_current=True)`, which checked
+  the signature and the ordering and then set current with no soak, no recall
+  check and no confirmation: a whole fleet taking a build no computer anywhere
+  had run, unattended, on a daily poller.
+  * `make_current_refusal` and `soak_minutes_for` moved to
+    **`package_store.py`** - the only module allowed to write
+    `companion_packages`, so a door that can publish is a door the gate stands
+    at. `api.py` keeps one-line re-exports; every existing caller keeps its
+    name.
+  * a publish that ASKS for `make_current` and is refused is **published
+    STAGED and returns the refusal as a `note`**, never a 4xx. The bytes are
+    fine and signed; only the flip is in question. That also retires the
+    ordering refusal that used to unlink the `.part` and 409 the whole publish
+    - which is why the feed re-downloaded and re-discarded the same 40 MB on
+    every check.
+  * one sentence, every door: *"published and STAGED: push it to one computer,
+    let it soak, then MAKE CURRENT."* (`package_store.STAGED_SENTENCE`). Both
+    Mac scripts read the `note` out of the PUT's answer and print it instead of
+    "made it CURRENT".
+  * three carve-outs, all deliberate: a **rollback** (`ever_current`) as
+    before; the **bootstrap** - nothing current for that platform and kind, so
+    there is no fleet to protect and gating it would leave a new customer with
+    no companion at all; and a **downgrade asked for by an unattended door**,
+    which is a vendor WITHDRAWAL and must never be gated, or the gate pins
+    every fleet on the build being withdrawn. An admin at `[ MAKE CURRENT ]`
+    is refused exactly as before.
+  * **`soak_minutes = 0` now really is the escape** the 08-28 comment
+    promised. Zero used to leave `db.soak_state`'s "has any computer reported
+    this build" half standing, which a build published thirty seconds ago can
+    never satisfy - so with the gate at the publish door, a site that set 0
+    would have found every publish staged for ever.
+* **REL-4** - `-EmitKindExtras` signs `requires_dashboard`/`arch` into the
+  record, and a companion below **0.9.55** does not know those field names: its
+  signature check fails on the whole record, it refuses the build silently and
+  permanently, and the recovery is a reinstall at that desk. The precondition
+  was written in a code comment, in `docs/RELEASE.md` and in the owner's notes,
+  and checked nowhere. `ship.ps1` step **0a** now reads the live dashboard's
+  rollout counts on the fleet credential it already holds and refuses the flag
+  unless every reporting computer is on 0.9.55 or newer - and a fleet it cannot
+  read is a REFUSAL, not a pass. It names `check_deploy_drift.ps1 -AdminUser`
+  to list them, because `_rollout_block` answers counts and never names, which
+  is right. Every switch on `ship.ps1` has a `.PARAMETER` block now; the most
+  dangerous one had none.
+* **REL-5** - no EULA shipped in the image or the OTA bundle, so on the
+  appliance shape the first-run wizard showed an empty licence box, a disabled
+  `[ ACCEPT ]`, and ticked `eula` **green**. `docs/legal/` and
+  `docs/HOW_IT_WORKS.md` now travel three ways: `COPY` lines in
+  `dashboard/deploy/Dockerfile` (with the matching `!docs/legal` re-inclusion
+  in `.dockerignore`), `TREES`/`FILES` in `tools/build_dashboard_bundle.py`
+  (which REFUSES to build a bundle without them), and a bind-mode step 2a in
+  `server/install_dashboard_app.py` that ships them into `<root>/app/docs`.
+  `setup_engine`'s `EULA_PATH` searches `<app>/docs/legal` before the repo
+  path - `parents[3]` is `/` in the container, where nothing has ever been -
+  and the absent-file fallback is **`warn`**: *"no licence agreement is
+  included in this build, so nothing has been accepted"*. It holds `done`,
+  which is the point: a build that ships without one is visibly wrong rather
+  than quietly complete. The same shipping makes `/help` (wave 4's owed item)
+  answer on a deployed server for the first time.
+* **REL-7** - the free-space floor guarded the human PUT and neither writer
+  that arrives WITHOUT a human sizing it up. One helper now,
+  `dashboard_update.space_refusal`, called by the PUT (507), by
+  `release_feed.publish_from_feed` against the record's DECLARED `size_bytes`
+  before a byte moves, and by `cli_tools.install_supported` against the tool's
+  measured size (Claude Code is 313 MiB onto the volume `dashboard.db` lives
+  on). The feed's refusal is recorded as its `last_error` - *"could not take
+  companion 0.9.65: 380 MiB free"* - because a log line on a `policy = current`
+  site is a sentence nobody will ever read. A volume that cannot be MEASURED
+  still blocks nothing.
+* **REL-8** - the Packages page told the admin to run
+  `build_editor_package.ps1 -RebuildExe ... -Publish -MakeCurrent`, which is
+  the exact command `ship.ps1` refuses to run (it restamps the manifest
+  `tests_run=false`; OPS-1). It names `tools\ship.cmd` and `docs/RELEASE.md`
+  now. Nothing on a customer-facing page should name a script flag that is a
+  known footgun.
+* **REL-9** - `publish_latest.py` signed off with the `manual` story
+  unconditionally, including with `--make-current` and including for every
+  site on `policy = current` - which is what this studio's own `site.toml`
+  uses, and where the build reaches the fleet within one poll with nobody
+  clicking anything. The closing block is conditional now, says what happens on
+  both kinds of site, and carries the recall command, because that is the
+  sentence you want in front of you at the moment you learn the build is bad.
+* **REL-14** - losing `~/.ccsync-release/release.key` ends every fleet's
+  ability to take another build, and the strongest statement of that was line
+  668 of a 1200-line runbook. `release_key.py new` ends with the same warning
+  voice `bake` uses; `release_key.py backup --to <path>` writes a copy and
+  `--print` gives the base64 line for a password manager. **No passphrase
+  wrap**: the in-tree crypto signs and verifies and does not encrypt, and a
+  homemade construction protecting this particular secret is worse than the
+  problem - so the tool says plainly that the copy IS the key. Either form
+  records `backed_up_at` in `~/.ccsync-release/backup.json` and prints the
+  instruction for the protection page's `[ I HAVE BACKED IT UP ]` (an
+  admin-session htmx form with no JSON twin, and this script has no dashboard
+  credential and no business acquiring one). `ship.cmd` prints one line when no
+  backup was ever recorded. Never a refusal.
+* **REL-15** - an install started in the CLI wizard was three module globals
+  and a daemon thread, so a `docker restart` or an OOM kill during a 313 MB
+  download lost it entirely: the page came back saying "not installed", with no
+  trace, and left the `.part` behind for ever. `<data>/tools/<tool>/install.json`
+  is written before the thread starts and cleared in its `finally`, so a record
+  with no running thread means one thing only - this process died - and renders
+  `[ INTERRUPTED ]` with `[ TRY AGAIN ]`. `.staging/*` older than 24 h is swept
+  on the first status read of the process, the way `api._sweep_stale_parts`
+  sweeps package uploads.
+* **SYS-7** - `[ WHAT IS RUNNING ]` on **SETTINGS -> HEALTH**: this dashboard's
+  version against the newest the vendor offers, the current companion against
+  the newest the vendor offers, how many computers are on each build with the
+  date each was published, and one sentence when they disagree, in SYS-2's
+  wording. The drift doctor is a PowerShell script on a base rig, and a second
+  customer has no base rig and no repo, so for them it does not exist. An
+  unchecked vendor channel renders `[ VENDOR: NOT CHECKED ]`, never "up to
+  date". Ship-time, the same question is a gate: `ship.cmd` refuses when the
+  live dashboard is older than the build's `REQUIRES_DASHBOARD`
+  (`-AllowBehind`), and `publish_latest.py` refuses when the newest dashboard
+  bundle on the channel is (`--allow-behind`) - a channel with no dashboard
+  record at all cannot answer, and says so rather than refusing.
+* **the dashboard's unattended update path (SYS-2)** - the dashboard is the one
+  component with no unattended update path and it gates every companion update
+  through `requires_dashboard`, so one version stale freezes the whole fleet's
+  updates on a site where nobody clicks anything. On `policy = "current"` **in
+  image mode** the feed poller now applies a newer dashboard CODE bundle
+  itself, through `dashboard_update.start_apply` with every stand-down rule
+  intact (runtime-id match, nothing already running, free space, no live
+  YouTube jobs, and the boot-attempt guard that rolls the tree back if the new
+  code will not start). The soak is the same idea with the only evidence a
+  dashboard bundle can have - **age**, i.e. whether the vendor has left the
+  release standing for `release_soak_minutes`, the window in which a bad build
+  is recalled. A bundle that failed here once is never retried unattended. The
+  two pathways that stay manual say so in words the operator can act on: a
+  **runtime** update names the NAS's own app manager, and **bind-mount** mode
+  names `tools\ship.cmd -DashboardOnly` - the note lives in
+  `meta.dashboard_auto_update_note` and prints in `[ WHAT IS RUNNING ]`.
+
+Deliberately NOT done: no `dashboard_behind` notice KIND was registered.
+`db.NOTICE_KINDS` is another builder's file this wave and the rule is that a
+kind is registered WITH its writer; the same sentence reaches the operator
+through the HEALTH box and the feed's `last_error`. Deploy the dashboard
+before the companions as always, and note that after this the FIRST publish of
+a version to a dashboard that already has a current build is STAGED - the ship
+already knows that path (exit 3, `-Resume`), but a script that assumed
+`make_current=1` meant "current" now gets a `note` instead of a lie.
+
+### CR-185 - the document we hand a customer described a product that had not shipped for a fortnight, and eight surfaces answered a non-technical owner with "edit an env var" - FIXED in repo 2026-09-04 (docs, dashboard 0.7.34)
+
+* **SYS-5** - `docs/HOW_IT_WORKS.md` section 6.6 listed nine tray items. Five of
+  them ("Open my project folder", "Grade from server originals", "Copy
+  diagnostics for your admin", "Open log", "Advanced") stopped being menu items
+  at CR-88 on 2026-08-27 and moved into the companion's Settings window, which
+  the customer explainer did not mention at all. The section is rewritten from
+  `tray.py`'s own literals (the ten-item layout, plus the state lines and
+  prompts that self-remove), and three sections were added: **6.7 The Settings
+  window** (its eight sections as `settings_window.py` builds them today),
+  **4.2 Sending originals up without bringing the project down** (upload only,
+  CR-85, a phrase that did not occur in the document), and **7.1 What the
+  server tells you it has found** (PROBLEMS THE SERVER FOUND, Settings >
+  HEALTH, [ TAKE ME THERE ], and why [ NOT CHECKED ] is not [ OK ]). The whole
+  document is now in the wave-4 vocabulary: no `machine` outside the glossary
+  row that defines the word, no `lane` outside the one sentence that translates
+  the three names for support, and no `halt` / `breaker` / `trip`.
+  `dashboard/tests/test_help_doc_matches_the_companion.py` pins it both ways -
+  a label that leaves `tray.py` fails, and a Settings section the window grows
+  and the document does not describe fails too. The dashboard serves this file
+  at `/help`, which is what makes it the dashboard suite's business.
+* **SYS-12** - `docs/README.md` promised "every document in `docs/`, one line
+  each" and was missing eleven, two of which CLAUDE.md names as required
+  reading before touching their code paths (`FILE_MOVES.md`,
+  `UPLOAD_ONLY_TICK.md`) and one of which exists because a session could not
+  find the right release route (`RELEASE_PATHWAYS.md`). Rows added, and
+  `tools/tests/test_docs_index.py` now asserts the promise in both directions:
+  every `docs/*.md` and `docs/legal/*.md` is listed, and every link resolves.
+* **SYS-13** - `ARCHITECTURE.md` said "up to three mounted sub-applications"
+  three lines above a diagram with four, prose describing four and a rule that
+  begins "three rules hold for all four". Fixed, plus the two weeks it had
+  never caught up with: a "The server diagnoses itself" section pointing at
+  `SELF_DIAGNOSIS.md`, one line each for `supervisor.py` and the phone port,
+  and the **blast-radius table** the 08-28 sweep asked for (what stops, what
+  keeps working and what it looks like, for each of eleven things being down).
+  Two of them degrade quietly rather than badly, which is the harder failure,
+  and the table says which two.
+* **SYS-14** - `CLAUDE.md`'s "There is one command. It is `tools\ship.cmd`" is
+  now the two-pathway sentence with the pointer to `RELEASE_PATHWAYS.md`. That
+  framing cost a session half an hour reconstructing a ship it could not run,
+  and CLAUDE.md is the file every session reads first.
+* **SYS-19** - `MULTI_BASE_RIG_PLAN.md` and `COMMERCIAL_READINESS.md` are
+  frozen snapshots written in the present tense, and both are read as status by
+  anyone new. Each now carries a dated "Status as at 2026-09-04; not
+  maintained: check `KNOWN_BUGS.md`" header. COMMERCIAL_READINESS's five
+  per-item "DONE in repo, unshipped" lines name the ledger id that tracks each
+  instead (CR-1/CR-2, CR-7, CR-11/CR-12/CR-13, CR-17, CR-8/CR-18), because the
+  ledger is the thing that is maintained; where no single id covers a row it
+  says "status unknown as at 2026-09-04" rather than guessing. Two sentences
+  that had become untrue are marked where they stand: `effective_mode()`'s
+  "either source says so" (CR-88 made it config only) and
+  "`install_dashboard_app.py` still deploys bind-mount mode only".
+* **SYS-20** - `[tree] projects_dir` has been half-wired since the 08-19 audit:
+  read by `server/common.py` and by nothing else, absent from the manifest, and
+  hard-coded as `Projects` in roughly a dozen companion modules. A customer who
+  set it got a NAS tree under one name and a fleet that syncs nothing, silently.
+  It is a refusal now, on `check_boot_secrets`' terms: `settings.py` will not
+  start a dashboard whose `DASH_SITE_PROJECTS_DIR` is anything else (one hatch,
+  `DASH_DEV_INSECURE=1`, loud in the log), and `site_store.import_toml` refuses
+  a pasted `site.toml` carrying one rather than silently dropping it the way it
+  drops `[apps]` and `[stack]` - the import is the path a second customer takes
+  (ZERO_TOUCH_PLAN §6 step 1), so it is the one that mattered. Documented as
+  fixed in `CONFIG.md` and `TREE_LAYOUT_AGNOSTICISM.md`. **Nothing sets this
+  variable today**, so no live deployment changes behaviour. Still open: the
+  same refusal on the base rig, in `server/common.py`, which is where the key
+  is actually read.
+* **DUI-8** - fifteen sentences answered a non-technical owner with "edit an
+  env var and redeploy" or "run this script from the repo", for an owner who
+  has neither a checkout nor SSH to the NAS. Two were also stale: the project
+  page told an admin to run `server/accept_device.py` for something that has
+  been a button on Settings, USERS for weeks. Each line now either points at
+  the page that does it or says plainly "Ask whoever installed this server: it
+  is a container setting, not something this page can change".
+  `accept_device.py` and `~/.ccsync/config.toml` are gone from copy an
+  appliance customer reads, and seven phrases (those two plus
+  `DASH_RELEASE_FEED_URL`, `DASH_SHARED_REPORT_TOKEN_ENABLED`,
+  `DASH_ENFORCE_MAX_REMOVALS`, `server/setup_tree.py`,
+  `server/install_dashboard_app.py`) are in the wave-0 scan test so they cannot
+  come back.
+
+**Two things for the owner, not code.** The report-token panel used to say
+"put it in that editor's `config.toml`"; there is no box anywhere on an
+editor's computer to paste a report token into (`settings_window.py` has no
+field for it), so the copy now says who to send it to. If that credential is
+meant to be self-serve, it needs a control. And queuing a fleet job is still
+CLI-only (`tools/jobs.py queue`); Settings > JOBS can only cancel.
+
+### CR-186 - the loopback's ingest refusals, the fix summaries and the breaker's stand-down still spoke the old vocabulary - FIXED in repo 2026-09-04 (companion 0.9.69)
+
+Wave 5 of the usability + resilience sweep (`docs/USABILITY_RESILIENCE_SWEEP_2026-09-03.md`
+section 4, owner-approved 2026-09-04), finishing what wave 4 started on the
+tray and the Settings window.
+
+**What an editor saw.** Wave 4 converted the tray, the balloons, `app.py` and
+the Settings window to one vocabulary: a computer is a COMPUTER, sync that is
+not running is PAUSED / STOPPED BY YOUR ADMIN / STOPPED ITSELF, the transports
+are UPLOAD / PROXY DOWNLOAD / FOLDER SYNC. The loopback server was not in that
+pass, and it is the half an editor reads on their PHONE-sized b-roll and music
+pages: about twenty refusals said "machine" (`"this machine has no synced tree,
+so there is nowhere to stage the clips"`, `"nobody is signed in on this
+machine"`, `"that file was not chosen on this machine"`, `"syncing the clip to
+this machine: 42%"`, ...). The b-roll and music UIs print the companion's
+`message`/`reasons` verbatim, so the same computer was a "machine" in the drop
+zone and a "computer" in the tray, four inches apart. The ingest window's
+held-back line said "need the base rig to finish", a phrase no editor has ever
+been given a meaning for, and counted in "1 track(s)".
+
+**And the breaker's sentence, SYNC-106's second half.** Wave 4 gave
+`lane_guard.breaker_editor_reason()` the five editor sentences and wired them
+into the tray line, the balloon and the report, but `rclone_lane`'s
+`_breaker_stand_down` still wrote the TECHNICAL reason onto `LaneStatus.detail`
+- which is what the Settings window and the dashboard's fleet chip render. So
+one of the three trips still ended, on two screens, with `"Check remote_root in
+config.toml."`: a file under `~/.ccsync` that a frozen build does not expose,
+that names two internal keys, and that is not an editor's to edit.
+
+**Fixed.** `detail` is now `"STOPPED (safety): "` plus the editor's sentence
+for that trip's CAUSE (falling back through `_BREAKER_CAUSE_MARKERS` for a
+latch written by an older build, which is read off disk on the next start).
+Nothing else moved: the technical reason is still the breaker's `reason`, still
+the `log.error` the trip writes, still `sync_guard.lane_b_breaker.reason` on
+every report, and it is now also logged once per distinct trip at the
+stand-down (`"lane B stands down, breaker reason: ..."`) rather than once per
+rotation. The ~20 loopback refusals say "computer"; the held-back line reads
+`"Waiting for the computer that is wired to the server: 1 track still on this
+computer."`; the four `(s)` plurals left in `popup.py` / `fixer.py` go through
+`ui_copy.count`.
+
+**Words only.** No route, no JSON key, no state code, no report shape and no
+behaviour changed - the web UIs pin the loopback's `state`/`ok` shapes and
+prefer `message` when present, and every one of those keys is where it was.
+`machine` stays what it is in code, on the wire (`X-CCSync-Machine`), in
+`selections`/`machines` and in the log.
+
+**Where.** `companion/src/ccsync_companion/`: `broll_server.py`,
+`music_server.py`, `broll_fetch.py`, `broll_ingest.py`, `music_ingest.py`,
+`popup.py`, `fixer.py`, `sync/rclone_lane.py`, `broll_vlm_sidecar.py`,
+`music_clap_sidecar.py`, and one balloon in `app.py`. The scan that keeps it
+that way is `companion/tests/test_sweep_2026_09_04_copy.py`: all ten modules
+joined `MODULES`, with two allow-list entries, both `self.log` lines the
+scan's log-argument filter cannot see (it only subtracts a module-level
+`log.…`).
+
+**The two sidecars and the stale-tmp toast, same day.** The seven refusals
+`broll_vlm_sidecar.py` and `music_clap_sidecar.py` RAISE are not their own
+screen: `broll_server.build_ingest_capabilities` puts them straight into
+`reasons`, which both drop zones print. Converting the caller and not the
+callee would have left one list saying "no usable GPU on this machine" beside
+"nobody is signed in on this computer". So they went too - four in
+`broll_vlm_sidecar.py` (including "this batch can run on another computer") and
+three in `music_clap_sidecar.py` - and both modules joined `MODULES` with no
+allow-list entry of their own. `app.py`'s stale-tmp balloon ("Found 1
+half-copied file(s) from an interrupted copy") is the last `(s)` an editor
+could be shown and now goes through `ui_copy.count` like the rest.
+`test_broll_server.py`'s scan no longer excuses the GPU and model sentences: it
+asserts over every reason in both capability answers, which is the one an
+editor on a laptop reads most.
+
+**Nothing left owed on this path.** Ten of the companion's modules that talk
+to an editor now carry the scan, and the only "machine" left in any of them is
+a dict key, a header name, a state code or a log line.
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

@@ -3464,7 +3464,7 @@ def test_a_capable_companion_is_probed_then_handed_the_job_id(spa):
     assert r['order'] == ['api/jobs/90/download', CAPABILITIES, LOCAL_DOWNLOAD], r['order']
     # exactly one attempt per submission -- no retry loop, no loopback polling
     assert r['after_more_polls'] == 2, r
-    assert r['badge'] == 'downloading on your machine', r
+    assert r['badge'] == 'downloading on your computer', r
     assert r['badge_hidden'] is False and 'local' in r['badge_class'].split(), r
     assert r['badge_title'] == 'claimed by owen', r
     assert r['link_hidden'] is False, 'no way back to the server'
@@ -3501,7 +3501,7 @@ def test_no_companion_no_dispatch_and_the_editor_is_told_why(spa):
     # dispatched, told in the owner's words, and still downloading server-side
     assert r['terms']['calls'] == [CAPABILITIES], r['terms']
     assert r['terms']['toast_hidden'] is False, 'the terms refusal was silent'
-    assert 'accept the download terms in the companion' in r['terms']['toast_text']
+    assert 'accept the download terms in the CC Sync tray' in r['terms']['toast_text']
     assert 'Accept YouTube Terms' in r['terms']['toast_text']
     assert r['terms']['badge'] == 'downloading on the server', r['terms']
 
@@ -3545,11 +3545,11 @@ def test_the_badge_flips_on_its_own_when_the_server_reclaims(spa):
     the job back, and the header says so within a poll -- because the badge is
     read off the payload and remembered nowhere."""
     r = spa['the_badge_flips_when_the_server_reclaims']
-    assert r['local']['badge'] == 'downloading on your machine', r['local']
+    assert r['local']['badge'] == 'downloading on your computer', r['local']
     assert 'local' in r['local']['cls'].split(), r['local']
     assert r['local']['title'] == 'claimed by owen', r['local']
     assert r['local']['link_hidden'] is False, r['local']
-    assert r['still'] == 'downloading on your machine', r
+    assert r['still'] == 'downloading on your computer', r
     assert r['reclaimed'] == 'downloading on the server', r
     assert 'local' not in r['reclaimed_cls'].split(), r
     assert r['reclaimed_title'] == '', r
@@ -3568,7 +3568,7 @@ def test_the_hand_back_posts_once_and_waits_for_the_poll(spa):
     assert r['posts'][0]['method'] == 'POST'
     assert r['posts'][0]['body'] == {'mode': 'server'}, r['posts'][0]
     assert r['after_click']['disabled'] is True, 'clickable twice'
-    assert r['after_click']['badge'] == 'downloading on your machine', \
+    assert r['after_click']['badge'] == 'downloading on your computer', \
         'the page decided the mode itself instead of asking'
     assert 'server' in r['toast']
     assert r['badge_after_poll'] == 'downloading on the server', r
@@ -4278,7 +4278,7 @@ def test_the_executor_badge_is_derived_from_the_payload_and_nothing_else():
     js = _js()
     body = js[js.index('function renderMode('):js.index('async function lockToServer(')]
     assert 'job.download_mode' in body and "job.phase === 'downloading'" in body, body
-    assert 'downloading on your machine' in body, body
+    assert 'downloading on your computer' in body, body
     assert 'downloading on the server' in body, body
     assert 'job.claimed_by' in body, body
     assert 'state.' not in body.replace('state.localDownload', ''), \
@@ -4722,7 +4722,7 @@ def test_a_local_download_shows_what_this_machine_is_doing(spa):
 
 def test_a_converting_clip_is_named_rather_than_looking_stalled(spa):
     r = spa['a_converting_clip_says_so_rather_than_stalling']
-    assert 'converting to H.264 on your machine' in r['line'], r['line']
+    assert 'converting to H.264 on your computer' in r['line'], r['line']
 
 
 def test_a_companion_that_cannot_answer_leaves_the_page_as_it_was(spa):

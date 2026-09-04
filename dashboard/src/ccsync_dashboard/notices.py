@@ -327,8 +327,8 @@ def _check_collector_alarms(conn, settings, now: str) -> None:
                 conn, "share_without_plan", "warn", subject,
                 body=("This computer is still being sent a project that nobody has "
                       "ticked for it. The removal was refused by the safety limit above, "
-                      "so the project keeps syncing to a machine whose plan does not "
-                      "include it."),
+                      "so the project keeps syncing to a computer whose sync plan "
+                      "does not include it."),
                 fix="Clear the share-removal problem above and the next pass applies it.",
                 now=now)
     else:
@@ -452,8 +452,8 @@ def _check_identity_collisions(conn, settings, now: str) -> None:
             conn, "duplicate_machine_id", "error", subject,
             body=(f"Two computers are reporting the same identity: {row['who']}. This "
                   "happens when a computer's disk was copied onto another one. Sync "
-                  "plans, updates and halts for either of them can land on the wrong "
-                  "machine."),
+                  "plans, updates and stop commands for either of them can land on "
+                  "the wrong computer."),
             fix=("On the newer computer, quit CCSync, delete the file .ccsync/machine.json "
                  "in that user's home folder, and start CCSync again. It mints a fresh "
                  "identity on the next start."),
@@ -555,7 +555,7 @@ def _check_plan_without_share(
                       "that computer, and the tick looks exactly like it is working."),
                 fix=("Untick and re-tick that project for that computer on its "
                      "project page. If it keeps happening, check that computer's row "
-                     "on the FLEET page has a Syncthing device id."),
+                     "on the SYNC STATUS page has a Syncthing device id."),
                 now=now)
     db.clear_notices_of_kind(conn, "plan_without_share", open_subjects, now=now)
 
@@ -602,9 +602,9 @@ def _check_machine_space(conn, settings, now: str) -> None:
                 body=(f"{subject} is holding {int(trash) // (1024 ** 3)} GB of safety "
                       "copies of deleted files. They are kept on purpose, but they are "
                       "taking up room that footage needs."),
-                fix=("The computer clears these by itself every 6 hours unless its "
-                     "download safety brake is on. Check that machine's row on the fleet "
-                     "grid for [ RESUME ]."),
+                fix=("The computer clears these by itself every 6 hours unless "
+                     "proxy download has stopped itself. Check that computer's row on "
+                     "the SYNC STATUS page for [ RESUME ]."),
                 now=now)
     db.clear_notices_of_kind(conn, "machine_disk_low", open_disks, now=now)
     db.clear_notices_of_kind(conn, "machine_trash_oversize", open_trash, now=now)
@@ -917,7 +917,7 @@ def check_settings(conn, settings, now: str | None = None) -> None:
             body=("One or more of this server's passwords or tokens has quotation marks "
                   "or spaces around it, which almost always means the quotes were copied "
                   "into the setting by mistake. Everything that uses it will be refused, "
-                  "on every machine at once."),
+                  "on every computer at once."),
             fix=("Edit those settings on the server (no quotes, no trailing spaces) and "
                  "restart the dashboard."),
             now=stamp)

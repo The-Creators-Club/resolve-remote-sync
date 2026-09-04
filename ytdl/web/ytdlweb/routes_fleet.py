@@ -240,13 +240,13 @@ def require_identity(x_ccsync_identity):
                     'not set, so no identity can be verified -- refusing. The '
                     'server worker downloads these jobs instead.')
         raise HTTPException(403, {
-            'detail': 'this dashboard cannot verify companion identities',
+            'detail': 'this dashboard cannot verify who is calling',
             'reason': 'identity_unconfigured'})
     editor = identity.read_identity_token(config.SESSION_SECRET, x_ccsync_identity)
     if not editor:
         raise HTTPException(403, {
             'detail': (f'a valid {identity.HEADER} is required: sign in again '
-                       'from the companion tray'),
+                       'from the CC Sync tray'),
             'reason': 'identity'})
     return editor
 
@@ -365,11 +365,11 @@ def _already_downloading(job):
     No em dash: this string reaches an editor through the companion's log and
     the SPA's toast (CLAUDE.md, 2026-08-18).
     """
-    holder = str(job['claimed_by'] or 'another machine')
+    holder = str(job['claimed_by'] or 'another computer')
     machine = db.claimed_machine_of(job)
     if not machine:
         return f'{holder} is already downloading this job'
-    where = projects.machine_label(holder, machine) or f'machine {machine}'
+    where = projects.machine_label(holder, machine) or f'computer {machine}'
     return f'{holder} is already downloading this job on {where}'
 
 
@@ -442,7 +442,7 @@ def claim(job_id: int, body: ClaimIn,
             'phase': job['phase'], 'reason': 'mode_lock'})
     if body.template_version != ytdl_common.TEMPLATE_VERSION:
         raise HTTPException(410, {
-            'detail': ('this companion builds filenames to template version '
+            'detail': ('this CC Sync tray builds filenames to template version '
                        f'{body.template_version}; this server is on '
                        f'{ytdl_common.TEMPLATE_VERSION}. Downloading here would '
                        'put two spellings of the same clip in the tree.'),
@@ -451,10 +451,10 @@ def claim(job_id: int, body: ClaimIn,
             'sidecar_version': ytdl_common.SIDECAR_VERSION})
     if body.sidecar_version and body.sidecar_version != ytdl_common.SIDECAR_VERSION:
         raise HTTPException(410, {
-            'detail': ('this companion writes credits sidecars to version '
+            'detail': ('this CC Sync tray writes credits sidecars to version '
                        f'{body.sidecar_version}; this server is on '
                        f'{ytdl_common.SIDECAR_VERSION}. The clips would land '
-                       'with a different sidecar from every other machine\'s.'),
+                       'with a different sidecar from every other computer\'s.'),
             'reason': 'sidecar_version',
             'template_version': ytdl_common.TEMPLATE_VERSION,
             'sidecar_version': ytdl_common.SIDECAR_VERSION})
@@ -465,7 +465,7 @@ def claim(job_id: int, body: ClaimIn,
         # it out of scope and stopped -- and the job would then sit still for
         # the whole lease before the worker could have it (COMP-BROLL-10).
         raise HTTPException(410, {
-            'detail': (f'this job is {job["quality"]}, which that machine does '
+            'detail': (f'this job is {job["quality"]}, which that computer does '
                        'not run'),
             'reason': 'out_of_scope', 'quality': job['quality']})
     if not _version_at_least(body.ytdlp_version, config.MIN_YTDLP_VERSION):

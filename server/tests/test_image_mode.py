@@ -452,7 +452,12 @@ def test_the_rollback_command_is_the_same_command_with_the_other_mode(monkeypatc
                         lambda root, target, *a, **k: shipped.append(target) or True)
     rc, transcript = _dry_run(monkeypatch, capsys, ("--mode", "bind"))
     assert rc == 0
-    assert shipped == ["app", "broll-web", "music-web", "ytdl-web"]
+    # `app/docs` since REL-5 (usability sweep 2026-09-04): the licence
+    # agreement and the help guide are shipped into the app tree in bind mode,
+    # the way the image carries them in a COPY. Still the same command in both
+    # modes, and still nothing shipped at all in image mode -- which is what
+    # this test is about.
+    assert shipped == ["app", "app/docs", "broll-web", "music-web", "ytdl-web"]
     assert "stack mode: bind" in transcript
     assert "implying --recreate" in transcript
     assert "'image': 'python:3.12.7-slim'" in transcript

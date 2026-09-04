@@ -60,6 +60,7 @@ class IngestKind:
         uses_tier: bool,
         report_section: str,
         max_prepare_items: int,
+        free_space_floor_gb: float = 20.0,
         blocking_reason: str = "",
         finished_states=None,
     ) -> None:
@@ -95,6 +96,13 @@ class IngestKind:
         self.uses_tier = uses_tier
         self.report_section = report_section
         self.max_prepare_items = max_prepare_items
+        # How much room the staging folder needs before this kind will accept
+        # a drop at all, when the site has set no `<prefix>_free_space_floor_gb`
+        # (CMEDIA-9, sweep 2026-09-03). PER KIND because 20 GB was sized for
+        # 40 GB camera originals and the largest thing a music batch can stage
+        # is 512 MB a file: it refused a drop on a laptop with 15 GB free and
+        # never rendered the drop zone. The config key still wins.
+        self.free_space_floor_gb = float(free_space_floor_gb)
         self._blocking_reason = blocking_reason
         # Item states meaning "nothing left to do with this one", or None for
         # b-roll's own four (`broll_ingest.ITEM_FINISHED`). Music adds
@@ -199,6 +207,7 @@ BROLL_KIND = IngestKind(
     uses_tier=True,
     report_section="broll_ingest",
     max_prepare_items=2000,
+    free_space_floor_gb=20.0,
     blocking_reason="indexing b-roll first",
 )
 
@@ -223,6 +232,10 @@ MUSIC_KIND = IngestKind(
     # card -- and the server refuses a 501st item, so offering to stage 2,000
     # would be an offer this machine cannot keep.
     max_prepare_items=500,
+    # Two, not b-roll's twenty: an album of 500 tracks at the 512 MiB per-file
+    # cap is still far under it, and the floor's job is "can the next file
+    # land", not "is this a healthy disk".
+    free_space_floor_gb=2.0,
     # `musicweb.ingest_batches.ITEM_TERMINAL`, and the fifth member is the
     # whole fallback: a companion that cannot embed uploads the file and
     # leaves a base-rig queue row, which ends the item HERE.

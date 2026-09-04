@@ -547,14 +547,14 @@ def classify_lane_error(last_error: Optional[str], root_absent: bool = False,
         # The same state seen by a lane built without a supervisor (a bare
         # lane in a test, or a companion whose supervisor failed to
         # construct). Say the same thing, minus the promise to fix it.
-        return ("The sync engine (Syncthing) is not running on this machine, so "
+        return ("The sync engine (Syncthing) is not running on this computer, so "
                 "audio, graphics, subtitles and project files are not syncing. "
-                f"Restart this machine, or {ui_copy.DIAGNOSTICS}.")
+                f"Restart this computer, or {ui_copy.DIAGNOSTICS}.")
     if "marker missing" in text:
         # The editor deleted a project's local folder while it was still
         # ticked -- routine when cycling projects, and nothing was lost
         # (the server copy is untouched). Say what to do, not PROBLEM.
-        return ("A project folder was deleted on this machine while still ticked. "
+        return ("A project folder was deleted on this computer while still ticked. "
                 f"Untick it on the dashboard, or use {ui_copy.remove_project()}.")
     if "made no progress" in text or "did not exit" in text:
         # SYNC-104 (sweep 2026-09-04): the SYNC-1 stall watchdog kills the
@@ -563,14 +563,14 @@ def classify_lane_error(last_error: Optional[str], root_absent: bool = False,
         # _stalled_line three rows below told the true story. Same words as
         # _stalled_line, per this repo's "the tray line, the chip and the log
         # agree word for word" rule.
-        return ("This lane stopped moving and was restarted. If it keeps "
+        return ("This transfer stopped moving and was restarted. If it keeps "
                 "happening, check the drive is connected.")
     if any(k in text for k in ("no space", "enospc", "disk full", "not enough space")):
         return "Your disk is full. Free up space and it will resume."
     if any(k in text for k in (
         "permission denied", "auth", "handshake", "publickey", "unable to authenticate",
     )):
-        return ("The server rejected this machine's login. "
+        return ("The server rejected this computer's login. "
                 f"{ui_copy.DIAGNOSTICS}.")
     if any(k in text for k in (
         "timeout", "timed out", "no route", "connection refused", "connection reset",
@@ -735,7 +735,7 @@ def _format_lane_line_from(
         named = _named_config_problem(status.detail, problem_detail)
         if named:
             return f"{label}: NOT SYNCING: {named}"
-        return f"{label}: NOT SYNCING (this machine isn't set up yet)"
+        return f"{label}: NOT SYNCING (this computer isn't set up yet)"
     if paused:
         return f"{label}: PAUSED"
     if status.state == STATE_ERROR:
@@ -745,12 +745,12 @@ def _format_lane_line_from(
     if "sign in required" in detail.lower():
         return f"{label}: NOT SYNCING (sign in first)"
     if "sync disabled" in detail.lower() or "direct NAS access" in detail:
-        return f"{label}: not used on this machine (it works straight off the NAS)"
+        return f"{label}: not used on this computer (it works straight off the server)"
     if detail.startswith(_LANE_PROBLEM_PREFIX):
         named = _named_config_problem(detail, problem_detail)
         if named:
             return f"{label}: NOT SYNCING: {named}"
-        return f"{label}: NOT SYNCING (this machine isn't set up yet)"
+        return f"{label}: NOT SYNCING (this computer isn't set up yet)"
     stale = _plan_stale_phrase(plan_age_seconds)
     if status.state == STATE_SYNCING:
         # `queued` is set to 0 at the end of every run and incremented by
@@ -1456,7 +1456,7 @@ def _show_youtube_terms_dialog(app: "CompanionApp", confirm=None) -> None:
 
     if ytdl_attestation.accepted(who):
         _notify(app, f"You already accepted the YouTube terms "
-                     f"({ytdl_attestation.TEXT_VERSION}) on this machine.")
+                     f"({ytdl_attestation.TEXT_VERSION}) on this computer.")
         return
 
     body = f"{ytdl_attestation.NOTICE_TEXT}\n\nAccepting as: {who}"
@@ -1774,17 +1774,17 @@ def _confirm_remove_project(app: "CompanionApp", slug: str, rel: str) -> None:
             override = bool(typed)
         else:
             body = (
-                "Remove '" + rel + "' from THIS machine?" + "\n\n"
+                "Remove '" + rel + "' from THIS computer?" + "\n\n"
                 "This unticks the project on the dashboard, stops syncing it here, "
                 "and deletes the local copy to free disk space." + "\n\n"
-                "CCSync has checked: everything on this machine has reached the "
+                "CCSync has checked: everything on this computer has reached the "
                 "server, so nothing will be lost." + "\n\n"
                 "Tick the project again any time to sync it back."
             )
             confirmed = popup.confirm_dialog(
                 site_mod.notify_title("remove project"),
                 body,
-                ok_label="REMOVE FROM THIS MACHINE",
+                ok_label="REMOVE FROM THIS COMPUTER",
             )
     finally:
         if lock is not None:
@@ -1924,7 +1924,7 @@ def _confirm_resume_lane_b(app: "CompanionApp", snap: dict) -> None:
     if not breaker.get("tripped") and floor.get("parked"):
         _confirm_resume_disk_floor(app, str(floor.get("reason") or "this drive is nearly full"))
         return
-    reason = str(breaker.get("reason") or "a safety check failed")
+    reason = breaker_editor_reason(breaker)
     lock = getattr(app, "_popup_active_lock", None)
     if lock is not None and not lock.acquire(blocking=False):
         _notify(app, "Another CCSync window is already open. Close it first.")
@@ -1962,11 +1962,11 @@ def _confirm_halt(app: "CompanionApp") -> None:
     try:
         confirmed = popup.confirm_dialog(
             site_mod.notify_title("stop all syncing"),
-            "Stop ALL syncing on this machine?\n\n"
+            "Stop ALL syncing on this computer?\n\n"
             "This is stronger than Pause: uploads, proxy downloads AND the shared "
             "project files (Syncthing) all stop, and they STAY stopped after a "
-            "restart until you start them again from the tray menu "
-            "(Start syncing again).\n\n"
+            "restart until you clear the stop from the tray menu "
+            "(Clear the sync stop on this computer).\n\n"
             "Nothing is deleted. Use this when something looks wrong and you want "
             "the files to stop moving.",
             ok_label="STOP ALL SYNCING",
@@ -1976,7 +1976,7 @@ def _confirm_halt(app: "CompanionApp") -> None:
             lock.release()
     if not confirmed:
         return
-    ok, message = app.halt_all_sync("stopped from the tray on this machine")
+    ok, message = app.halt_all_sync("stopped from the tray on this computer")
     _notify(app, message if ok else f"Could not stop syncing: {message}")
 
 
@@ -2029,7 +2029,7 @@ def _confirm_grade_swap(app: "CompanionApp", to_server: bool) -> None:
                                              body, ok_label=f"SWAP {letter} TO SERVER")
         else:
             body = (
-                f"Point {letter} back at this machine's local copy (proxies)?" + gap +
+                f"Point {letter} back at this computer's local copy (proxies)?" + gap +
                 "Set Resolve's Playback > Proxy Handling back to Prefer Proxies."
             )
             confirmed = popup.confirm_dialog(site_mod.notify_title("back to proxies"),
@@ -2309,8 +2309,15 @@ def _sync_line(snap: dict) -> str:
     guard = snap.get("sync_guard") or {}
     halt = guard.get("halt") or {}
     if halt.get("active"):
-        return ("Sync: stopped by your admin" if halt.get("scope") == "fleet"
-                else "Sync: stopped on this machine")
+        # UX-19 (sweep 2026-09-03): a stop and a pause are two switches, and
+        # for a week the tray named only the higher-ranked one - so clearing
+        # it left the editor looking at a computer that still did not sync
+        # and a line that had not changed. Same ranking the dashboard's
+        # health.why_not_syncing uses (fleet halt, then local halt, then
+        # paused), with the second reason carried rather than dropped.
+        line = ("Sync: stopped by your admin" if halt.get("scope") == "fleet"
+                else "Sync: stopped on this computer")
+        return f"{line} (and paused)" if snap.get("paused") else line
     if (guard.get("lane_b_breaker") or {}).get("tripped"):
         return "Sync: proxy download stopped (see Settings)"
     if snap.get("problems") or snap.get("eula_problem"):
@@ -2785,6 +2792,26 @@ def _volunteer_label(snap: dict) -> str:
     return f"⚡ Taking fleet jobs until {when} (click to stop)"
 
 
+def breaker_editor_reason(breaker: dict) -> str:
+    """The editor's half of a lane B trip (SYNC-106).
+
+    The report block carries both since 0.9.69; a companion that tripped on
+    an older build has only the technical sentence, and lane_guard maps that
+    back. Imported lazily for the same reason lane_guard_trash_name is: the
+    tray must not drag the sync package in at import time."""
+    reason = str((breaker or {}).get("editor_reason") or "").strip()
+    if reason:
+        return reason
+    try:
+        from .sync import lane_guard
+
+        return lane_guard.breaker_editor_reason((breaker or {}).get("reason"),
+                                                (breaker or {}).get("cause"))
+    except Exception:
+        return (str((breaker or {}).get("reason") or "").strip()
+                or "a safety check failed")
+
+
 def _breaker_line(guard: dict) -> Optional[str]:
     """The one-line "proxy download is stopped" state, or None.
 
@@ -2795,8 +2822,7 @@ def _breaker_line(guard: dict) -> Optional[str]:
     breaker = (guard or {}).get("lane_b_breaker") or {}
     if not breaker.get("tripped"):
         return None
-    reason = str(breaker.get("reason") or "a safety check failed")
-    return f"⛔ PROXY DOWNLOAD STOPPED (safety): {reason}"
+    return f"⛔ PROXY DOWNLOAD STOPPED (safety): {breaker_editor_reason(breaker)}"
 
 
 def _disk_line(guard: dict) -> Optional[str]:
@@ -2848,9 +2874,56 @@ def _halt_line(guard: dict) -> Optional[str]:
     if not halt.get("active"):
         return None
     who = ("Your administrator stopped syncing for everyone"
-           if halt.get("scope") == "fleet" else "Syncing is STOPPED on this machine")
+           if halt.get("scope") == "fleet" else "Syncing is STOPPED on this computer")
     reason = str(halt.get("reason") or "")
     return f"⛔ {who}" + (f": {reason}" if reason else "")
+
+
+def _two_stops_line(snap: dict) -> Optional[str]:
+    """"Two things are stopping sync on this computer" (UX-19).
+
+    A local stop and a pause are two independent latches with one word
+    between them: with both set the menu carried "Clear the sync stop" and
+    "Resume syncing" four lines apart, and clicking either left the computer
+    not syncing with nothing on screen saying why."""
+    halt = ((snap or {}).get("sync_guard") or {}).get("halt") or {}
+    if not halt.get("active") or not snap.get("paused"):
+        return None
+    if halt.get("scope") == "fleet":
+        return ("⚠ Two things are stopping sync on this computer: your admin's "
+                "stop and a pause.")
+    return ("⚠ Two things are stopping sync on this computer: a stop and a "
+            "pause. Clear both to sync again.")
+
+
+def halt_release_label(guard: dict) -> str:
+    """The local stop's menu row, named for its CAUSE (UX-19).
+
+    "Start syncing again" named the effect, which is exactly what it did not
+    do while a pause was also set."""
+    halt = (guard or {}).get("halt") or {}
+    when = _when_phrase(halt.get("at"))
+    return ("► Clear the sync stop on this computer"
+            + (f" (set {when})" if when else ""))
+
+
+def _when_phrase(stamp: Any) -> str:
+    """"today at 14:32" / "on 2 Sep at 14:32", or "" when the stamp cannot be
+    read. Local clock, because the person reading it is at that keyboard.
+
+    Never a guess: an unreadable stamp drops the parenthetical rather than
+    dating the stop to now (CR-89's rule for `_stamp_age_seconds`)."""
+    try:
+        when = datetime.fromisoformat(str(stamp)).astimezone()
+    except (TypeError, ValueError):
+        return ""
+    try:
+        today = datetime.now().astimezone().date()
+    except Exception:
+        return ""
+    if when.date() == today:
+        return f"today at {when.strftime('%H:%M')}"
+    return f"on {when.strftime('%d %b').lstrip('0')} at {when.strftime('%H:%M')}"
 
 
 def _trash_line(guard: dict) -> Optional[str]:
@@ -4062,7 +4135,7 @@ def action_halt_sync(app: "CompanionApp") -> None:
 
 
 def action_release_halt(app: "CompanionApp") -> None:
-    _spawn(app, "Start syncing again", lambda: _release_halt(app))
+    _spawn(app, "Clear the sync stop", lambda: _release_halt(app))
 
 
 def action_open_dashboard(app: "CompanionApp", url: str) -> None:
@@ -4369,7 +4442,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     stray_luts = int(snap.get("stray_luts") or 0)
     lut_items = (
         [tray_backend.MenuItem(
-            f"► {stray_luts} LUT{'s' if stray_luts != 1 else ''} only on this machine: "
+            f"► {stray_luts} LUT{'s' if stray_luts != 1 else ''} only on this computer: "
             f"share with the team", on_share_luts,
         )]
         if stray_luts else []
@@ -4393,7 +4466,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     halt_active = bool((guard.get("halt") or {}).get("active"))
     halt_is_fleet = (guard.get("halt") or {}).get("scope") == "fleet"
     halt_release_items = (
-        [tray_backend.MenuItem("► Start syncing again", on_release_halt)]
+        [tray_backend.MenuItem(halt_release_label(guard), on_release_halt)]
         if halt_active and not halt_is_fleet else []
     )
 
@@ -4452,7 +4525,8 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     ]
     state_items = [
         tray_backend.MenuItem(line, None, enabled=False)
-        for line in (_sync_line(snap), snap.get("resolve_line"),
+        for line in (_sync_line(snap), _two_stops_line(snap),
+                     snap.get("resolve_line"),
                      snap.get("ytdl_line"), snap.get("ytdl_login_line"),
                      jobs_forced_line(snap.get("jobs_status")),
                      *ingest_failure_lines)
@@ -4469,7 +4543,9 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         tray_backend.MenuItem("Sync now", on_sync_now),
         *volunteer_items,
         tray_backend.MenuItem(
-            "▶ Resume syncing (currently PAUSED)" if snap["paused"] else "⏸ Pause syncing",
+            # UX-19: "paused by you" says which of the two switches this
+            # row is, on a computer where a stop may be set as well.
+            "▶ Resume syncing (paused by you)" if snap["paused"] else "⏸ Pause syncing",
             on_toggle_pause, checked=(lambda paused: lambda item: paused)(snap["paused"]),
         ),
         tray_backend.MenuItem("Open my sync drive", on_open_sync_drive),

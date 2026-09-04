@@ -868,6 +868,16 @@ if ! grep -q '"is_admin"[[:space:]]*:[[:space:]]*true' "$BODY_FILE"; then
 fi
 step "logged in as $ADMIN_USER"
 
+# REL-1 (usability sweep 2026-09-04): the PUT answers `note` when it published
+# the build but did NOT make it current -- the soak gate stands at the publish
+# door now, and `--make-current` from a Mac was one of the two doors that used
+# to walk past it. Read out of the body with sed rather than a JSON parser
+# (this script has no python dependency by design); an absent field reads as
+# empty, which is the "it did what you asked" case.
+staged_note() {
+    LC_ALL=C sed -n 's/.*"note"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -n 1
+}
+
 # --- upload -----------------------------------------------------------
 MC=0
 [ "$MAKE_CURRENT" = 1 ] && MC=1
@@ -890,7 +900,11 @@ elif [ "$PUT_CODE" != "200" ]; then
     fail "publish failed with HTTP $PUT_CODE -- see the response above. Nothing is current that was not current before."
 fi
 
-if [ "$MAKE_CURRENT" = 1 ]; then
+NOTE="$(staged_note "$BODY_FILE")"
+if [ -n "$NOTE" ]; then
+    step "macos companion v$VERSION: $NOTE"
+    step "push it to one Mac from Settings > Packages, leave it running, then [ MAKE CURRENT ] there."
+elif [ "$MAKE_CURRENT" = 1 ]; then
     step "published macos companion v$VERSION and made it CURRENT"
 else
     step "published macos companion v$VERSION -- STAGED, not current"

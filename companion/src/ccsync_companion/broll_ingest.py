@@ -59,6 +59,7 @@ from . import site as site_mod
 from . import ingest_kinds
 from . import popup
 from . import root_guard
+from . import ui_copy
 from . import upgrade as upgrade_mod
 
 log = logging.getLogger("ccsync.brollingest")
@@ -803,7 +804,7 @@ class BrollIngestor:
                 continue
             if local and not os.path.isfile(local):
                 item["stage"] = ITEM_FAILED
-                item["error"] = ("the source file is no longer on this machine "
+                item["error"] = ("the source file is no longer on this computer "
                                  "(the drive was unplugged, or it was moved)")
         # The lease is certainly stale after a restart, so the first tick
         # re-issues the (idempotent) claim -- see `_reclaim`, which is what
@@ -962,7 +963,7 @@ class BrollIngestor:
             return self.sidecar.fits(tier)
         except Exception:
             self.log.debug("the tier fit check failed", exc_info=True)
-            return False, "this machine could not be checked for the indexing model"
+            return False, "this computer could not be checked for the indexing model"
 
     def _model_ready(self, tier: str) -> bool:
         try:
@@ -1168,8 +1169,12 @@ class BrollIngestor:
             # never filled, because these two are finished here and counted
             # nowhere. Named rather than folded into `done`: the file is still
             # on this computer and that is the whole point of the state.
-            held = (f"{queued} {self.kind.unit}(s) need the base rig to finish. "
-                    f"They are still on this computer.")
+            # ...and the vocabulary of it is the fleet's since wave 5 of the
+            # 2026-09-03 sweep: an editor never reads "base rig", and a count
+            # is pluralised rather than written "(s)".
+            held = ("Waiting for the computer that is wired to the server: "
+                    f"{ui_copy.count(queued, self.kind.unit)} still on this "
+                    "computer.")
             note = f"{note} {held}" if note else held
         return popup.ProgressModel(
             title=self.kind.window_title,
@@ -1226,7 +1231,7 @@ class BrollIngestor:
                           exc_info=True)
         self._save()
 
-    def cancel(self, reason: str = "cancelled on this machine") -> None:
+    def cancel(self, reason: str = "cancelled on this computer") -> None:
         """Stop the batch and tell the server. Staged files stay (plan §6):
         an editor who cancels by accident has not lost their drop."""
         with self._lock:
@@ -1364,7 +1369,7 @@ class BrollIngestor:
         for root in roots:
             if loopback_guard.is_within(path, root):
                 return ""
-        return ("that file was not chosen on this machine: use the "
+        return ("that file was not chosen on this computer: use the "
                 "\"choose from this computer\" picker and pick it again")
 
     def prepare(self, body: dict) -> tuple[int, dict]:
@@ -1385,7 +1390,7 @@ class BrollIngestor:
         root = self.staging_root()
         if root is None:
             return 503, {"ok": False, "message": (
-                "this machine has no synced tree, so there is nowhere to stage "
+                "this computer has no synced tree, so there is nowhere to stage "
                 f"the {self.kind.unit}s")}
         # UX-17 (resilience sweep 2026-08-28): the WHOLE drop, before the
         # first byte. The per-file 507 fired mid-batch, once part of a 200 GB
@@ -1647,16 +1652,16 @@ class BrollIngestor:
             current = (self._batch or {}).get("uid")
         if current and current != batch_uid:
             return 409, {"ok": False, "message": (
-                "this machine is already indexing another batch")}
+                "this computer is already indexing another batch")}
         if not self.enabled:
             return 503, {"ok": False, "message": (
-                f"{self.kind.label} indexing is switched off on this machine")}
+                f"{self.kind.label} indexing is switched off on this computer")}
         if not self.deps.dashboard_url or not self.deps.token:
             return 503, {"ok": False, "message": (
-                "this machine has no dashboard URL or token configured")}
+                "this computer has no dashboard URL or token configured")}
         if not self.deps.identity_token():
             return 503, {"ok": False, "message": (
-                "nobody is signed in on this machine")}
+                "nobody is signed in on this computer")}
         staging = None
         if staging_id:
             with self._lock:
@@ -1664,7 +1669,7 @@ class BrollIngestor:
             if staging is None:
                 return 409, {"ok": False, "message": (
                     f"those {self.kind.unit}s are no longer staged on this "
-                    "machine - drop them again")}
+                    "computer - drop them again")}
 
         capabilities = broll_server.build_ingest_capabilities(
             self.cfg, self, self.deps, kind=self.kind)
@@ -1673,7 +1678,7 @@ class BrollIngestor:
         except Exception as exc:  # noqa: BLE001 - an unreachable dashboard is an answer
             self.log.warning("could not claim batch %s (%s)", batch_uid, exc)
             return 503, {"ok": False, "message": (
-                "this machine could not reach the dashboard to claim the batch")}
+                "this computer could not reach the dashboard to claim the batch")}
         if status != 200 or not isinstance(parsed, dict):
             message = _detail_of(parsed) or "the dashboard would not hand over this batch"
             self.log.warning("claim of %s refused (HTTP %s: %s)",
@@ -2105,7 +2110,7 @@ class BrollIngestor:
 
         source = item.get("local_path") or ""
         if not source or not os.path.isfile(source):
-            self._fail_item(item, "the source file is not on this machine any more")
+            self._fail_item(item, "the source file is not on this computer any more")
             return
 
         # 1. probe (needed by the sprite geometry and the result POST)
@@ -3089,7 +3094,7 @@ class BrollIngestor:
             return "no path was given for that clip"
         try:
             if not os.path.isfile(path):
-                return "that file is not on this machine"
+                return "that file is not on this computer"
         except OSError:
             return "that file could not be read"
         if os.path.splitext(path)[1].lower() not in self.kind.exts:
@@ -3174,7 +3179,7 @@ def _gate_note(gate: str) -> str:
         STATE_NO_MODEL: "fetching the local indexing model",
         STATE_NO_FFMPEG: "waiting for ffmpeg to be installed",
         STATE_DRIVE_ABSENT: "waiting: the sync drive is not connected",
-        STATE_MISCONFIGURED: "waiting: this machine's sync config needs fixing",
+        STATE_MISCONFIGURED: "waiting: this computer's sync config needs fixing",
         STATE_RUNNING: "",
         STATE_NOTHING_TO_DO: "",
     }.get(gate, gate)

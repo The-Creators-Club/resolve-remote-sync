@@ -1,0 +1,16 @@
+{# [ SUSPEND ] / [ RESUME ] for one editor (DCORE-4, usability sweep
+   2026-09-04). Its own file because it is rendered in both account tables on
+   this page -- local accounts and NAS editor accounts -- and it must mean the
+   same thing in both: it acts on FLEET state, not on the login, so it is the
+   one non-destructive "stop this person" control an smb site has.
+
+   Set `suspend_user` before including it. #}
+{% set is_suspended = suspend_user in (admin_users.suspended or []) %}
+<form class="inline-form" hx-post="/partials/admin/users/suspend"
+      hx-target="closest .admin-users-box" hx-swap="outerHTML"
+      {% if not is_suspended %}hx-confirm="Pause syncing for {{ suspend_user }}? Their sync plan is kept and RESUME puts it back."{% endif %}>
+  <input type="hidden" name="username" value="{{ suspend_user }}">
+  <input type="hidden" name="suspended" value="{{ '0' if is_suspended else '1' }}">
+  <button class="btn tap" type="submit"
+          title="{% if is_suspended %}let this person's computers sync again. Their sync plan was never touched, so the projects they had come back on the next cycle.{% else %}their computers are turned away when they report and their projects are unshared, without touching a file or a tick. This is the reversible way to stop somebody: DELETE is not.{% endif %}">{% if is_suspended %}[ RESUME ]{% else %}[ SUSPEND ]{% endif %}</button>
+</form>

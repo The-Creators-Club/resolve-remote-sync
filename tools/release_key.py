@@ -13,6 +13,8 @@ tools/sign_release.py ever reads it, on the release rig, at publish time.
     python tools/release_key.py bake        # write the public half into the
                                             # companion's RELEASE_PUBKEYS
     python tools/release_key.py bake --add  # keep the existing keys (rotation)
+    python tools/release_key.py backup --to D:/release.key     # a copy, offline
+    python tools/release_key.py backup --print                 # for a password manager
 
 Storage format is one line of base64 over the raw 32-byte Ed25519 seed, with
 `#` comments allowed above it -- deliberately boring so it can be copied to
@@ -126,6 +128,123 @@ def cmd_new(args) -> int:
     print("Next: python tools/release_key.py bake   (puts the PUBLIC half into")
     print("      companion/src/ccsync_companion/release_pubkey.py), then rebuild")
     print("      and ship -- companions only trust keys baked into their own binary.")
+    print("")
+    # REL-14 (usability sweep 2026-09-04): the same voice `bake` uses for a
+    # replaced key, because this is the same fact seen from the other end.
+    # Losing these 32 bytes is unrecoverable for every fleet that exists, and
+    # the strongest statement of that used to be line 668 of a 1200-line
+    # runbook. Not a refusal and not a prompt: `new` runs once, on a rig with
+    # no key, and stopping to ask a question there helps nobody.
+    print("BACK IT UP NOW. This file is 32 bytes on one profile on one computer.")
+    print("If it is lost, no fleet anywhere can ever be offered another build: every")
+    print("companion trusts only the keys baked into the binary it is running, and the")
+    print("recovery is a hands-on reinstall on every machine.")
+    print("  python tools/release_key.py backup --to <path on a USB stick or a vault>")
+    print("  python tools/release_key.py backup --print    (paste into a password manager)")
+    return 0
+
+
+BACKUP_RECORD_NAME = "backup.json"
+
+
+def backup_record_path(path: Path) -> Path:
+    """`backed_up_at` lives BESIDE the key, not inside it: the key file's
+    format is one line of base64 that gets copied to an offline medium and
+    read back by read_secret, and a JSON blob in it would break every copy
+    anybody has already made."""
+    return path.parent / BACKUP_RECORD_NAME
+
+
+def read_backup_record(path: Path) -> dict:
+    try:
+        import json
+
+        data = json.loads(backup_record_path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _record_backup(path: Path, where: str) -> None:
+    import datetime
+    import json
+
+    record = {
+        "backed_up_at": datetime.datetime.now(datetime.timezone.utc)
+                                .strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "where": where,
+        "pubkey_id": "",
+    }
+    try:
+        raw = read_secret(path)
+        record["pubkey_id"] = release_pubkey.pubkey_id(
+            base64.b64encode(ed25519.public_key(raw)).decode("ascii"))
+    except SystemExit:
+        pass
+    try:
+        backup_record_path(path).write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError:
+        print("NOTE: could not record the backup date beside the key -- the copy "
+              "itself is what matters.")
+
+
+def cmd_backup(args) -> int:
+    """Copy the key somewhere the owner keeps it, and record that it happened.
+
+    NO PASSPHRASE WRAP, deliberately (REL-14, usability sweep 2026-09-04). The
+    in-tree crypto is `ccsync_companion.ed25519`, which signs and verifies and
+    does not encrypt; a scrypt+XOR construction written here would be homemade
+    cryptography protecting the one secret in this product that must never be
+    guessable, and adding a dependency to the release tooling for it is worse
+    than the problem. What actually protects a non-technical owner is a copy
+    they will really make -- a printed base64 line in a password manager, or a
+    file on a USB stick in a drawer -- so that is what this writes, and it says
+    plainly that the copy IS the key.
+    """
+    path = key_path(args.path)
+    raw = read_secret(path)
+    line = base64.b64encode(raw).decode("ascii")
+    if args.print_only:
+        print("")
+        print("THIS LINE IS THE PRIVATE KEY. Anyone holding it can publish a build every")
+        print("editor's companion trusts and runs at logon. Paste it into a password")
+        print("manager, then clear this terminal's scrollback.")
+        print("")
+        print(f"{_HEADER} {line}")
+        print("")
+        _record_backup(path, "printed for a password manager")
+    else:
+        dest = Path(args.to).expanduser()
+        if dest.is_dir():
+            dest = dest / path.name
+        if dest.exists() and not args.force:
+            print(f"{dest} already exists -- NOT overwriting it. Pass --force if that "
+                  f"copy is stale.")
+            return 1
+        try:
+            # O_EXCL in write_secret is what makes the --force path need this:
+            # the point of that flag is that a key file is never created
+            # world-readable, and an overwrite the operator asked for is a
+            # different question from a clobber they did not.
+            if args.force:
+                dest.unlink(missing_ok=True)
+            write_secret(dest, raw)
+        except OSError as exc:
+            print(f"could not write {dest}: {exc}")
+            return 1
+        print(f"wrote {dest}")
+        print("THAT FILE IS THE PRIVATE KEY, not an encrypted backup: keep it offline "
+              "(a USB stick in a drawer, a safe), never on the NAS, never in this repo,")
+        print("never in a cloud folder that syncs to a machine an editor uses.")
+        _record_backup(path, str(dest))
+    print("")
+    # The protection page's `release_key_backup` line is an ADMIN-SESSION htmx
+    # form (ui.partial_admin_protection_ack) with no JSON twin, and this script
+    # has no dashboard credential and no business acquiring one. So it prints
+    # the instruction rather than posting it.
+    print("Record it on the dashboard so the PROTECTION page turns green:")
+    print("  SETTINGS > PROTECTION > [ I HAVE BACKED IT UP ], with today's date.")
     return 0
 
 
@@ -199,6 +318,16 @@ def main(argv: list[str] | None = None) -> int:
     p_pub.add_argument("--quiet", action="store_true", help="just the base64 key")
     p_pub.set_defaults(func=cmd_pubkey)
 
+    p_backup = sub.add_parser("backup", help="copy the key somewhere safe (REL-14)")
+    p_backup.add_argument("--to", default="",
+                          help="write a copy here (a file, or a directory to write "
+                               "release.key into)")
+    p_backup.add_argument("--print", dest="print_only", action="store_true",
+                          help="print the base64 line instead, for a password manager")
+    p_backup.add_argument("--force", action="store_true",
+                          help="overwrite an existing copy at --to")
+    p_backup.set_defaults(func=cmd_backup)
+
     p_bake = sub.add_parser("bake", help="write the public half into the companion")
     p_bake.add_argument("--add", action="store_true",
                         help="keep the keys already baked (rotation overlap)")
@@ -206,6 +335,8 @@ def main(argv: list[str] | None = None) -> int:
     p_bake.set_defaults(func=cmd_bake)
 
     args = ap.parse_args(argv)
+    if args.cmd == "backup" and not args.to and not args.print_only:
+        ap.error("backup needs --to <path> or --print")
     return args.func(args)
 
 

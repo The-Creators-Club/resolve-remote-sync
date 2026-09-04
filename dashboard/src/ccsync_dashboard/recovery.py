@@ -154,10 +154,17 @@ def list_snapshots(env: dict[str, str] | None = None) -> tuple[list[dict[str, An
     """
     root = snapshot_root(env)
     if root is None:
+        # OPS-3 (usability + resilience sweep 2026-09-03): NOTHING set this
+        # variable until 2026-09-04, so the honest sentence is about the
+        # DEPLOYMENT rather than about this server's knowledge. A deploy from
+        # server/install_dashboard_app.py fills it in by itself now; an older
+        # one, a pasted compose file or a Synology needs the mount adding.
         return [], (
-            f"this server has not been told where it can read this NAS's snapshots. "
-            f"Mount them into the dashboard container read-only and set "
-            f"{ENV_SNAPSHOT_DIR} to that path.")
+            f"this deployment was never given a snapshot mount, so this server "
+            f"cannot read any snapshot ({ENV_SNAPSHOT_DIR} is not set on the "
+            f"dashboard container). Re-run the deploy, or mount the NAS's "
+            f"snapshots into the container read-only and set {ENV_SNAPSHOT_DIR} "
+            f"to that path.")
     try:
         if not root.is_dir():
             return [], (f"{root} is not a directory this server can read. Check the "
@@ -191,9 +198,10 @@ def _snapshot_dir(name: str, env: dict[str, str] | None = None) -> Path:
     root = snapshot_root(env)
     if root is None:
         raise RecoveryError(
-            "this server cannot see this NAS's snapshots, so it cannot restore from "
-            f"one. Set {ENV_SNAPSHOT_DIR} on the dashboard container, or use the "
-            "commands on the recovery page instead.", 409)
+            "this deployment was never given a snapshot mount, so this server cannot "
+            f"restore from one ({ENV_SNAPSHOT_DIR} is not set on the dashboard "
+            "container). Re-run the deploy, or use the commands on the recovery page "
+            "instead.", 409)
     name = (name or "").strip()
     if not name or "/" in name or "\\" in name or name in (".", ".."):
         raise RecoveryError(f"{name!r} is not a snapshot name this server will accept")
@@ -687,8 +695,12 @@ def _dataset_fact(key: str, label: str, dataset: str, var: str,
                 f"the NAS has {len(tasks)} snapshot task(s) and none of them covers "
                 f"{dataset}, so this server cannot confirm it is a dataset with "
                 f"snapshots behind it rather than a plain directory",
-                "add a periodic snapshot task for it (server/setup_snapshots.py), or "
-                "correct the variable naming it")
+                # UX-18 (usability sweep 2026-09-03): this used to name a repo
+                # script, and the admin reading it has a container and a
+                # browser. The wizard's "Protect your data" task is the same
+                # job with nothing to check out.
+                "set up snapshots on the SETUP page, under 'Protect your data', "
+                "or correct the variable naming it")
 
 
 def gather_facts(settings: Any, conn: sqlite3.Connection,
@@ -747,7 +759,11 @@ def gather_facts(settings: Any, conn: sqlite3.Connection,
         (f"{len(snapshots)} snapshot(s), newest {snapshots[0]['name']}"
          if snapshots else ""),
         bool(snapshots), snap_why,
-        f"mount the snapshots read-only into the container and set {ENV_SNAPSHOT_DIR}")
+        # OPS-3: the deploy sets this itself since 2026-09-04, so the first
+        # thing to try is the one an admin can do without a shell.
+        f"re-run the deploy of this dashboard, which mounts them and sets "
+        f"{ENV_SNAPSHOT_DIR}; site.toml [tree] snapshot_dir names the directory "
+        f"where the deploy cannot work it out")
     container = (env.get(ENV_CONTAINER_NAME) or "").strip()
     facts["container"] = Fact(
         "container", "what this dashboard's container is called", container,
@@ -890,13 +906,29 @@ def _plan_whole_tree(facts: dict[str, Fact], ctx: dict[str, Any]) -> list[Step]:
             ["zfs list -t snapshot -r {tree_dataset}",
              "zfs rollback -r {tree_dataset}@<SNAPSHOT>"],
             ("platform", "tree_dataset"), facts),
+        # UX-18 (usability sweep 2026-09-03): this step used to say "re-run
+        # server/setup_tree.py for each project". The person reading it has a
+        # container and a browser, no checkout of this repo and no SSH to the
+        # NAS, so it named the one thing they cannot do. What they CAN do is
+        # here, and who to ask is said out loud rather than implied.
+        Step("action",
+             "Afterwards: put back anything the rollback undid",
+             body=("A project that was created after that moment is gone from the "
+                   "server with everything else written since. Create it again from "
+                   "the Projects page here: the folder is made with the right owner "
+                   "and permissions as it goes, which is what editors need to be able "
+                   "to write to it. Folders that existed in the snapshot come back "
+                   "exactly as they were and need nothing."),
+             href="/projects"),
         Step("note",
-             "Afterwards",
-             body=("Ownership comes back as it was in the snapshot, so re-run "
-                   "server/setup_tree.py for each project, then let the fleet resume "
+             "Then watch the first pass",
+             body=("Let the fleet off hold and watch the first pass on the "
                    # UX-7 (usability sweep 2026-09-03): the words "Fleet page"
                    # appear nowhere in the UI. The nav calls it SYNC STATUS.
-                   "and watch the first pass on the SYNC STATUS page.")),
+                   "SYNC STATUS page. If an editor is refused access to a folder "
+                   "that came back, that one needs an administrator login on the NAS "
+                   "itself and nothing on this page can do it: ask whoever installed "
+                   "CC Sync for you.")),
     ]
 
 
@@ -904,11 +936,25 @@ def _plan_search_index(facts: dict[str, Fact], ctx: dict[str, Any]) -> list[Step
     return [
         Step("note",
              "The search index has its own rollback, and it takes a second",
-             body=("Publishing an index leaves the previous one beside it as "
-                   ".prev-<timestamp>. Rolling back is a rename, from the base rig, "
-                   "and it needs no snapshot and no shell on the NAS.")),
+             body=("Publishing an index leaves the previous one beside it on the "
+                   "server as .prev-<timestamp>, so nothing was lost when the bad one "
+                   "went live. Putting the previous one back needs no snapshot and no "
+                   "shell on the NAS.")),
+        # UX-18 (usability sweep 2026-09-03): the command is still the honest
+        # answer -- this dashboard deliberately does not swap its own live
+        # index out from under itself -- but it runs on the computer that
+        # PUBLISHES the index, and an admin with only a browser has to be told
+        # that in words rather than left to discover it in a shell.
+        Step("note",
+             "Who can do it",
+             body=("It is one command on the computer the index is published from: "
+                   "the studio computer that runs the indexing, not this server and "
+                   "not an editor's computer. If that is not yours, ask whoever "
+                   "publishes the b-roll or music search for you. Nothing else on "
+                   "this server is affected in the meantime: search shows the wrong "
+                   "results, and every other page is unaffected.")),
         Step("command",
-             "On the base rig",
+             "On the computer that publishes the index",
              body="",
              commands=["cd server",
                        "python publish_db.py --which broll --rollback --apply"]),

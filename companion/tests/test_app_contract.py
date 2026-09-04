@@ -436,7 +436,11 @@ def test_the_jobs_gate_is_the_machines_own_verdict(tmp_path):
 
     app = _app(tmp_path)
     app.job_runner = _Runner()
-    assert app.jobs_gate() == {"taking_work": False, "reason": "user_active"}
+    # `detail` rides beside the state code since CMEDIA-1: for `local_work`
+    # it is the whole content of the answer (WHICH work of the editor's own),
+    # and "" for a runner that offered no sentence.
+    assert app.jobs_gate() == {"taking_work": False, "reason": "user_active",
+                               "detail": ""}
     # An empty queue is an OPEN gate: reading it as a refusal is exactly the
     # confusion `GET /api/v1/jobs/<id>/why` exists to end.
     _Runner.state = "nothing_offered"
@@ -543,3 +547,50 @@ def test_a_drive_that_is_then_unplugged_with_nothing_owed_stops_reminding(tmp_pa
     assert app._drive_reminder.active is True
     app._on_root_absent(app_mod.root_guard_mod.ROOT_ABSENT)
     assert app._drive_reminder.active is False
+
+
+def test_the_jobs_block_reason_is_the_editors_own_work(tmp_path):
+    """CMEDIA-1: the seam the proxy generator and the two ingestors already
+    negotiate this machine's GPU over, extended to fleet work. Never the
+    config gate `_proxy_block_reason` answers True for: a half-configured
+    sync tree is not a reason to refuse a transcription, and True with no
+    words would be a refusal nobody could explain."""
+    app = _app(tmp_path)
+
+    class _Ingestor:
+        def __init__(self, reason=None):
+            self.reason = reason
+
+        def blocking_reason(self):
+            return self.reason
+
+    class _Generator:
+        def __init__(self, encoding):
+            self._encoding = encoding
+
+        def gap(self):
+            return {"encoding": self._encoding}
+
+    app.broll_ingestor = _Ingestor()
+    app.music_ingestor = _Ingestor()
+    app.proxy_generator = _Generator(False)
+    app.config_problems = ["local_root is not set"]
+    assert app._jobs_block_reason() is False
+
+    app.proxy_generator = _Generator(True)
+    assert app._jobs_block_reason() == "waiting: making proxies"
+
+    app.music_ingestor = _Ingestor("indexing music first")
+    assert app._jobs_block_reason() == "indexing music first"
+
+    app.broll_ingestor = _Ingestor("indexing b-roll first")
+    assert app._jobs_block_reason() == "indexing b-roll first"
+
+    # An ingestor that raises is not an answer, and must not be the reason a
+    # machine takes no work forever: the next source is asked.
+    class _Broken:
+        def blocking_reason(self):
+            raise RuntimeError("wedged")
+
+    app.broll_ingestor = _Broken()
+    assert app._jobs_block_reason() == "indexing music first"

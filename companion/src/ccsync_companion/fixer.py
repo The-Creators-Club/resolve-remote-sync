@@ -1197,7 +1197,9 @@ def fix_clip(
     `dry_run` (config `fixer_dry_run`, COMMERCIAL_READINESS.md item 9,
     2026-08-17) runs every check and every refusal and then STOPS: no name is
     claimed, no byte is copied, no clip is relinked. The plan comes back in
-    the result as `would_copy_to` with `ok: False`, `dry_run: True`, and is
+    the result as `would_copy_to`/`would_copy` with `dry_run: True` and
+    `ok: True` (RES-15: a rehearsal is not a failed fix, and reporting it as
+    one made the popup call a clean rehearsal a 69-file catastrophe), and is
     logged. It exists because FIX ALL is the companion's largest destructive
     action and had no way to be rehearsed on a machine whose local_root or
     destination mapping is in doubt -- and "run it and see" costs a
@@ -1267,12 +1269,23 @@ def fix_clip(
         log.info("fix_clip [dry-run]: would copy %s -> %s and relink %d media pool "
                  "item(s) to %s", file_path, planned, len(items),
                  canonical_clip_path(planned, local_root, canonical_prefix))
+        # ok: True since RES-15 (sweep 2026-09-03). A rehearsal that reported
+        # ok: False was counted as a FAILURE by every caller -- the popup
+        # summarised a clean 69-clip rehearsal as "0 of 69 copied in, 69
+        # failed" with 12 red rows, i.e. the one screen an admin runs a
+        # rehearsal to read told them their machine was broken. Nothing here
+        # is a failure: every check passed and the plan is the result. The
+        # `dry_run` key is what a caller counting successes must look at, and
+        # popup.summarize_fix_results / _fix_done do.
         return {
-            "ok": False,
+            "ok": True,
             "dry_run": True,
-            "message": (f"Dry run: would copy to {planned} and relink "
-                        f"{len(items)} clip reference(s). Nothing was changed."),
+            "message": (f"Rehearsal: would copy to {planned} and relink "
+                        f"{ui_copy.count(len(items), 'clip reference')}. "
+                        "Nothing was changed."),
             "copied_to": None,
+            "would_copy": 1,
+            "would_relink": len(items),
             "would_copy_to": str(planned),
             "would_relink_to": canonical_clip_path(planned, local_root, canonical_prefix),
         }
@@ -1414,8 +1427,9 @@ def fix_clip(
                 "aborted": True,
                 "message": (
                     f"Stopped by you. {src.name} was copied in and "
-                    f"{relinked} of {len(items)} clip(s) were repointed at the copy. "
-                    "Run FIX ALL again to finish the rest."
+                    f"{relinked} of {ui_copy.count(len(items), 'clip')} "
+                    "were repointed at the copy. Run FIX ALL again to finish "
+                    "the rest."
                 ),
                 "copied_to": str(dest_path),
                 "relinked": relinked,
@@ -1442,14 +1456,16 @@ def fix_clip(
         return {
             "ok": False,
             "message": (
-                f"copied to {dest_path} but relink failed for {len(failures)}/{len(items)} "
-                f"item(s): {'; '.join(failures)}"
+                f"copied to {dest_path} but relink failed for "
+                f"{len(failures)} of {ui_copy.count(len(items), 'item')}: "
+                f"{'; '.join(failures)}"
             ),
             "copied_to": str(dest_path),
         }
 
     return {
         "ok": True,
-        "message": f"Fixed: copied to {dest_path} and relinked {len(items)} item(s)",
+        "message": (f"Fixed: copied to {dest_path} and relinked "
+                    f"{ui_copy.count(len(items), 'item')}"),
         "copied_to": str(dest_path),
     }

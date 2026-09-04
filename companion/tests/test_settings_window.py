@@ -29,6 +29,20 @@ def _section(sections, title):
     return next(s for s in sections if s.title == title)
 
 
+def _own_config(tmp_path, monkeypatch, **values):
+    """Point config_mod.CONFIG_PATH at a config.toml of this test's own
+    (SYS-8): the FLEET JOBS section reads the file that will be read at the
+    next start, and the developer running the suite has one of their own."""
+    from ccsync_companion import config as config_mod
+
+    path = tmp_path / "config.toml"
+    config_mod.ensure_config_exists(path)
+    for key, value in values.items():
+        config_mod.set_value(path, key, value)
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", path)
+    return path
+
+
 def _flat_labels(sections):
     out = []
     for s in sections:
@@ -49,7 +63,8 @@ def test_model_has_the_five_sections_in_order():
                    identity=_FakeIdentity("owen"))
     sections = build_settings_model(_tray_snapshot(app), app)
     titles = [s.title for s in sections]
-    assert titles == ["THIS COMPUTER", "SYNC LANES", "ADVANCED", "HELP"]
+    assert titles == ["THIS COMPUTER", "SYNCING", "FLEET JOBS", "ADVANCED",
+                      "HELP"]
 
 
 def test_youtube_section_appears_only_when_gated_on():
@@ -156,7 +171,7 @@ def test_switching_to_base_asks_first_and_spells_out_the_consequence(tmp_path,
     assert len(asked) == 1
     body = asked[0]
     for phrase in ("WIRED TO THE SERVER", "sync NOTHING to it",
-                   "no proxy downloads", "tick projects"):
+                   "no proxy download", "tick projects"):
         assert phrase in body, body
     assert "—" not in body  # no em dashes in copy an editor reads
 
@@ -313,12 +328,12 @@ def test_restart_now_restarts_when_nothing_is_in_the_way(monkeypatch):
     assert restarted == [app.shutdown]
 
 
-# -- SYNC LANES: lines and actions (ported from the old menu tests) --------
+# -- SYNCING: lines and actions (ported from the old menu tests) --------
 
 
 def test_lane_lines_render_the_same_as_the_old_menu():
     app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("Uploads" in l for l in lines) or any(
         "lane_a_video_up" in l for l in lines) or True  # the fake app has one generic lane
     assert any(l.endswith("up to date") or "up to date" in l for l in lines)
@@ -326,62 +341,62 @@ def test_lane_lines_render_the_same_as_the_old_menu():
 
 def test_the_menu_says_who_cannot_see_the_footage():
     app = _proxy_app(missing=12)
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert "12 clips have no proxy: other editors can't see them" in lines
 
 
 def test_the_one_clip_wording_is_singular():
     app = _proxy_app(missing=1)
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert "1 clip has no proxy: other editors can't see it" in lines
 
 
 def test_the_menu_says_when_it_is_making_them_and_that_it_stops():
     app = _proxy_app(missing=12, left=9, encoding=True)
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert "Making proxies… 9 left (stops when you're back)" in lines
     assert not any("have no proxy" in l for l in lines)
 
 
 def test_braw_is_named_because_only_the_editor_can_fix_it():
     app = _proxy_app(missing=4, braw=4)
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert "4 BRAW clips need the Blackmagic Proxy Generator" in lines
 
 
 def test_the_actions_are_offered_and_hidden_correctly():
     app = _proxy_app(missing=12)
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("MAKE PROXIES NOW" in l for l in lines)
 
     app2 = _proxy_app(missing=12, left=9, encoding=True)
-    lines2 = _labels(_section(build_settings_model(_tray_snapshot(app2), app2), "SYNC LANES"))
+    lines2 = _labels(_section(build_settings_model(_tray_snapshot(app2), app2), "SYNCING"))
     assert any("STOP MAKING PROXIES" in l for l in lines2)
     assert not any("MAKE PROXIES NOW" in l for l in lines2)
 
 
 def test_no_make_them_now_on_a_machine_that_cannot_generate():
     app = _proxy_app(missing=12, can_generate=False)
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("have no proxy" in l for l in lines)
     assert not any("MAKE PROXIES NOW" in l for l in lines)
 
 
 def test_the_history_button_is_offered_even_with_nothing_missing():
     app = _proxy_app(made=528)
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
-    assert any("PROXIES THIS MACHINE HAS MADE" in l for l in lines)
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
+    assert any("PROXIES THIS COMPUTER HAS MADE" in l for l in lines)
 
 
 def test_the_menu_says_what_was_made_today():
     app = _proxy_app(made=528, src_bytes=1_320_000_000_000, proxy_bytes=44_000_000_000)
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert "Made 528 proxies today · 1.2 TB → 41.0 GB" in lines
 
 
 def test_failures_are_named_on_the_made_line():
     app = _proxy_app(made=10, failed=2)
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("2 failed" in l for l in lines)
 
 
@@ -391,33 +406,33 @@ def test_the_proxy_line_says_why_it_is_standing_aside():
                              "encoding": False, "can_generate": True,
                              "state": "blocked",
                              "blocked_reason": "indexing b-roll first"}
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert "Proxies waiting: indexing b-roll first" in lines
 
 
 def test_a_crunching_batch_says_what_it_is_doing_and_when_it_stops():
     app = _ingest_app()
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert "Indexing b-roll… 12 of 40 (stops when you're back)" in lines
 
 
 def test_a_queued_batch_says_it_is_waiting_and_offers_index_now():
     app = _ingest_app(gate="user-active", done=0)
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert "B-roll indexing waits until you're away: 40 clips queued" in lines
     assert any("INDEX B-ROLL NOW" in l for l in lines)
 
 
 def test_a_paused_batch_offers_resume_and_not_pause():
     app = _ingest_app(paused=True, gate="paused")
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("RESUME B-ROLL INDEXING" in l for l in lines)
     assert not any(l == "PAUSE B-ROLL INDEXING" for l in lines)
 
 
 def test_the_ingest_actions_are_present():
     app = _ingest_app()
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("CANCEL THE B-ROLL BATCH" in l for l in lines)
     assert any("SHOW B-ROLL INDEXING PROGRESS" in l for l in lines)
     assert any(l == "PAUSE B-ROLL INDEXING" for l in lines)
@@ -431,19 +446,19 @@ def test_the_restart_advisory_appears_in_sync_lanes():
     app.sync_guard = lambda: {"restarts": {
         "sequencer": {"count_24h": 7, "count_1h": 3, "last_at": None,
                       "last_error": "OSError: P: is gone"}}}
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("keeps restarting its sync engine" in l for l in lines)
 
 
 def test_breaker_and_halt_actions_appear_in_sync_lanes():
     app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app.sync_guard = lambda: {"lane_b_breaker": {"tripped": True, "reason": "x"}}
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("RESUME PROXY DOWNLOAD" in l for l in lines)
 
     app2 = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app2.sync_guard = lambda: {"halt": {"active": True, "scope": "local"}}
-    lines2 = _labels(_section(build_settings_model(_tray_snapshot(app2), app2), "SYNC LANES"))
+    lines2 = _labels(_section(build_settings_model(_tray_snapshot(app2), app2), "SYNCING"))
     assert any("START SYNCING AGAIN" in l for l in lines2)
 
 
@@ -468,7 +483,7 @@ def test_advanced_lists_scan_consolidate_and_undo():
     assert any("SCAN WHOLE PROJECT" in l for l in lines)
     assert any("SYNCED FOLDER" in l for l in lines)
     assert any("UNDO THE LAST CLIP-PATH CHANGE" in l for l in lines)
-    assert any("STOP ALL SYNCING ON THIS MACHINE" in l for l in lines)
+    assert any("STOP ALL SYNCING ON THIS COMPUTER" in l for l in lines)
 
 
 def test_advanced_offers_grade_swap_and_label_flips():
@@ -493,7 +508,7 @@ def test_advanced_lists_removable_projects():
         {"slug": "2026-cct-website-highlights-website-highlights",
          "rel": "2026/CCT/Website Highlights/Website Highlights"}]
     lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "ADVANCED"))
-    assert any("Website Highlights" in l and "FROM THIS MACHINE" in l for l in lines)
+    assert any("Website Highlights" in l and "FROM THIS COMPUTER" in l for l in lines)
 
 
 def test_stop_all_syncing_is_hidden_while_already_halted():
@@ -562,7 +577,7 @@ def test_the_stall_line_appears_in_sync_lanes():
     app.sync_guard = lambda: {"stalled": {
         "lane": "B", "seconds": 1500, "killed": True,
         "at": datetime.now(timezone.utc).isoformat()}}
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("Proxy download stopped moving" in l for l in lines)
 
 
@@ -575,7 +590,7 @@ def test_a_moved_project_folder_is_readable_with_a_button_to_put_it_back():
         {"slug": "nuclear-2026", "subpath": "Projects/2026/FF5/Nuclear",
          "expected": "P:/Projects/2026/FF5/Nuclear",
          "found": "P:/Projects/2026/FF5/Nuclear FINAL"}]}
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("'Nuclear' is not where CCSync expects it" in l for l in lines)
     assert any("PUT 'Nuclear' BACK WHERE CCSYNC EXPECTS IT" in l for l in lines)
 
@@ -586,7 +601,7 @@ def test_a_folder_we_cannot_find_gets_the_warning_but_no_button():
     app.sync_guard = lambda: {"moved_project_dirs": [
         {"slug": "nuclear-2026", "subpath": "Projects/2026/FF5/Nuclear",
          "expected": "P:/Projects/2026/FF5/Nuclear", "found": None}]}
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("is not where CCSync expects it" in l for l in lines)
     assert not any("PUT " in l for l in lines)
 
@@ -596,7 +611,7 @@ def test_stray_project_folders_are_reported_with_no_delete_button():
     app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app.sync_guard = lambda: {"stray_projects": {
         "count": 3, "bytes": 40 * 10 ** 9, "paths": [], "slugs": []}}
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("3 project folder(s) on this computer are in no sync plan" in l
                for l in lines)
     assert not any("DELETE" in l for l in lines)
@@ -606,7 +621,7 @@ def test_finished_staging_has_a_line_and_a_clear_button():
     app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app.sync_guard = lambda: {"ingest_staging": {
         "bytes": 42 * 10 ** 9, "batches": 6, "oldest_at": "2026-08-01T00:00:00Z"}}
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("42.0 GB" in l for l in lines)
     assert any("CLEAR FINISHED STAGING" in l for l in lines)
 
@@ -614,7 +629,7 @@ def test_finished_staging_has_a_line_and_a_clear_button():
 def test_none_of_the_three_appear_when_nothing_is_wrong():
     app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app.sync_guard = lambda: {}
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert not any("CLEAR FINISHED STAGING" in l or "no sync plan" in l
                    or "is not where CCSync expects it" in l for l in lines)
 
@@ -644,7 +659,7 @@ def _resolve_app(**health):
 
 def test_the_skipped_clip_line_appears_in_sync_lanes():
     app = _resolve_app(ignored_this_session=14, ignored_folders=0)
-    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
     assert any("14 clip(s) skipped this session" in l for l in lines)
 
 
@@ -821,10 +836,15 @@ def test_projects_section_names_the_mode_and_each_lane_in_words():
     lines = _labels(_section(build_settings_model(_snap(app), app),
                              "PROJECTS ON THIS COMPUTER"))
     assert any("2026/FF5/Animals - full sync: syncing now" in l for l in lines)
-    assert any("proxies syncing now" in l for l in lines)
+    # One vocabulary (wave 4, 2026-09-04): the three transports are named
+    # the way the dashboard names them, and "lane" is in no visible string.
+    assert any("proxy download syncing now" in l for l in lines)
+    assert any("upload up to date" in l for l in lines)
+    assert any("folder sync waiting its turn" in l for l in lines)
+    assert not any("proxies syncing" in l or "shared files" in l for l in lines)
     # The ONLY place "upload only" used to appear was the label of the button
     # that deletes the project (SYNC-107).
-    assert any("2026/CCT/Show - uploads only (no proxies come down)" in l
+    assert any("2026/CCT/Show - upload only (no proxy download)" in l
                for l in lines)
     assert any("Proxies never come down" in l for l in lines)
 
@@ -853,10 +873,10 @@ def test_a_raising_project_status_costs_the_section_and_nothing_else():
     app.sequencer = _Boom()
     titles = _titles(build_settings_model(_snap(app), app))
     assert "PROJECTS ON THIS COMPUTER" not in titles
-    assert "SYNC LANES" in titles
+    assert "SYNCING" in titles
 
 
-# -- SYNC-118: SYNC LANES is ranked, not a wall -----------------------------
+# -- SYNC-118: SYNCING is ranked, not a wall -----------------------------
 
 
 def test_advisories_rank_blocking_first_and_info_last():
@@ -896,7 +916,7 @@ def test_the_lanes_section_ranks_a_halt_above_the_trash_size():
                   "max_age_days": 30},
     }
     items = _section(build_settings_model(_snap(app, sync_guard=guard), app),
-                     "SYNC LANES").items
+                     "SYNCING").items
     texts = [i.text for i in items if isinstance(i, Line)]
     halt = next(i for i, t in enumerate(texts) if "Syncing is STOPPED" in t)
     trash = next(i for i, t in enumerate(texts) if "Recoverable files" in t)
@@ -1007,7 +1027,7 @@ def test_an_app_without_resolve_health_draws_no_resolve_section():
     assert "RESOLVE" not in _titles(build_settings_model(_snap(app), app))
 
 
-# -- CMEDIA-2: the JOBS section ---------------------------------------------
+# -- CMEDIA-2 + SYS-8: the FLEET JOBS section ------------------------------
 
 
 def _jobs_app(status):
@@ -1027,7 +1047,7 @@ def test_jobs_section_shows_the_gate_the_current_job_and_the_last_ten():
                     "outcome": "failed", "error": "ffmpeg exited 1",
                     "finished_at": _time.time() - 3600}],
     })
-    items = _section(build_settings_model(_snap(app), app), "JOBS").items
+    items = _section(build_settings_model(_snap(app), app), "FLEET JOBS").items
     lines = [i.text for i in items if isinstance(i, Line)]
     assert any("Not taking work: you are at the keyboard" in l for l in lines)
     assert any("whisper on FF5/a.mov (started 4 min ago)" in l for l in lines)
@@ -1038,9 +1058,9 @@ def test_jobs_section_shows_the_gate_the_current_job_and_the_last_ten():
 
 def test_no_current_job_offers_no_stop_button():
     app = _jobs_app({"gate": {"taking_work": True}, "current": {}, "recent": []})
-    items = _section(build_settings_model(_snap(app), app), "JOBS").items
+    items = _section(build_settings_model(_snap(app), app), "FLEET JOBS").items
     assert any(i.text == "Taking fleet work" for i in items if isinstance(i, Line))
-    assert not [i for i in items if isinstance(i, Button)]
+    assert "STOP THIS JOB" not in [i.label for i in items if isinstance(i, Button)]
 
 
 def test_stopping_a_job_that_is_not_running_never_says_it_stopped(monkeypatch):
@@ -1053,9 +1073,16 @@ def test_stopping_a_job_that_is_not_running_never_says_it_stopped(monkeypatch):
     assert said == ["There is no fleet job running now."]
 
 
-def test_an_app_without_jobs_status_draws_no_jobs_section():
+def test_an_app_without_jobs_status_still_gets_the_settings(tmp_path, monkeypatch):
+    """SYS-8: the status half needs a jobs_status the older app half does not
+    have; the three per-computer SETTINGS are always the editor's to change."""
+    _own_config(tmp_path, monkeypatch)
     app = _plain_app()
-    assert "JOBS" not in _titles(build_settings_model(_snap(app), app))
+    items = _section(build_settings_model(_snap(app), app), "FLEET JOBS").items
+    labels = [i.label for i in items if isinstance(i, Button)]
+    assert not any(l.startswith("Not taking work") or l == "Taking fleet work"
+                   for l in [i.text for i in items if isinstance(i, Line)])
+    assert any("Let the fleet use this computer" in l for l in labels)
 
 
 # -- APP-8 / APP-9 / APP-13 --------------------------------------------------
@@ -1091,7 +1118,7 @@ def test_the_licence_line_drops_the_wizard_and_offers_the_one_click():
                    "machine. Re-run the CCSync setup wizard to read and accept it."),
     }}
     items = _section(build_settings_model(_snap(app, sync_guard=guard), app),
-                     "SYNC LANES").items
+                     "SYNCING").items
     lines = [i.text for i in items if isinstance(i, Line)]
     licence = [l for l in lines if "licence agreement" in l]
     assert licence, "the licence refusal must still be shown"
@@ -1136,3 +1163,284 @@ def test_age_phrase_reads_in_words():
     assert sw.age_phrase(now - 7200, now) == "2 h ago"
     assert sw.age_phrase("", now) == ""
     assert sw.age_phrase("not a time", now) == ""
+
+
+# -- wave 4 of the 2026-09-03 sweep: one vocabulary, help, jobs, RES-15 ------
+
+
+def test_no_visible_string_says_lane_machine_or_halted():
+    """The vocabulary, as a scan (sweep section 4). No exemptions: the two
+    labels ui_copy pins as routes were renamed with it on 2026-09-04, so the
+    route and the row still read the same words."""
+    app = _plain_app()
+    app.sequencer = _Sequencer([
+        {"slug": "2026/FF5/Animals", "mode": "upload_only", "state": "idle",
+         "lanes": {"A": "idle", "B": "off", "C": "idle"}, "detail": ""}])
+    for text in _flat_labels(build_settings_model(_snap(app), app)):
+        lowered = text.lower()
+        for word in ("lane", "machine", "base rig", "halted", "parked",
+                     "breaker"):
+            assert word not in lowered, text
+
+
+def test_help_goes_first_when_anything_is_a_warning():
+    """APP-17: eight advisory lines tell the reader to press COPY
+    DIAGNOSTICS, and on a bad day that button was below two sections taller
+    than the window."""
+    app = _plain_app()
+    healthy = [s.title for s in build_settings_model(_snap(app), app)]
+    assert healthy[0] == "THIS COMPUTER" and healthy[-1] == "HELP"
+
+    sections = build_settings_model(
+        _snap(app, root_unfinished="2 uploads (2.3 GB left)"), app)
+    assert [s.title for s in sections][0] == "HELP"
+    assert sorted(s.title for s in sections) == sorted(healthy)
+
+
+def test_the_help_section_offers_the_one_document(monkeypatch):
+    """UX-3 / SYS-21 (a): the HELP section used to contain no help."""
+    app = _FakeApp({"dashboard_url": "https://nas.example.ts.net",
+                    "ytdl_local_downloads": False},
+                   identity=_FakeIdentity("owen"))
+    labels = [i.label for i in _section(build_settings_model(_snap(app), app),
+                                        "HELP").items if isinstance(i, Button)]
+    assert "HOW CC SYNC WORKS" in labels
+    assert "WHAT DO THESE MEAN?" in labels
+
+    opened = []
+    monkeypatch.setattr(sw.tray_mod, "_spawn", lambda a, label, fn: fn())
+    monkeypatch.setattr(sw.tray_mod, "_notify", lambda a, msg: opened.append(msg))
+    import webbrowser
+
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url) or True)
+    sw.action_open_help(app, "#glossary")
+    assert opened and opened[0].endswith("#glossary")
+    assert opened[0].startswith("https://nas.example.ts.net")
+
+
+def test_no_help_buttons_without_a_dashboard_to_serve_them():
+    app = _plain_app()   # dashboard_url = ""
+    labels = [i.label for i in _section(build_settings_model(_snap(app), app),
+                                        "HELP").items if isinstance(i, Button)]
+    assert "HOW CC SYNC WORKS" not in labels
+
+
+# -- SYS-8 / UX-11: the fleet-jobs settings ---------------------------------
+
+
+def _jobs_labels(app):
+    return [i.label for i in _section(build_settings_model(_snap(app), app),
+                                      "FLEET JOBS").items if isinstance(i, Button)]
+
+
+def test_the_fleet_jobs_section_ticks_every_kind_by_default(tmp_path, monkeypatch):
+    from ccsync_companion import capabilities
+
+    _own_config(tmp_path, monkeypatch)
+    labels = _jobs_labels(_plain_app())
+    assert any(l == "[x] Let the fleet use this computer" for l in labels)
+    # One box per kind this build knows, and never the two that may not move
+    # between computers (plan section 4.2).
+    ticked = [l for l in labels if l.startswith("  [x] ")]
+    assert len(ticked) == len(capabilities.KNOWN_KINDS)
+    assert not any("conform" in l or "resolve-edit" in l for l in labels)
+
+
+def test_a_kind_left_out_of_the_allow_list_reads_as_unticked(tmp_path, monkeypatch):
+    _own_config(tmp_path, monkeypatch, jobs_kinds="peaks, audio-extract")
+    labels = _jobs_labels(_plain_app())
+    assert any(l.startswith("  [x] ") and "waveform" in l for l in labels)
+    assert any(l.startswith("  [ ] ") and "Transcribe" in l for l in labels)
+
+
+def test_unticking_a_kind_writes_the_rest_of_them(tmp_path, monkeypatch):
+    from ccsync_companion import capabilities, config as config_mod
+
+    path = _own_config(tmp_path, monkeypatch)
+    said = []
+    monkeypatch.setattr(sw.tray_mod, "_spawn", lambda a, label, fn: fn())
+    monkeypatch.setattr(sw.tray_mod, "_notify", lambda a, msg: said.append(msg))
+    monkeypatch.setattr(sw, "show_settings", lambda app: None)
+    app = _plain_app()
+
+    button = next(i for i in _section(build_settings_model(_snap(app), app),
+                                      "FLEET JOBS").items
+                  if isinstance(i, Button) and "Transcribe" in i.label)
+    button.on_click()
+    written = config_mod.load_config(path).get("jobs_kinds")
+    kinds = capabilities.job_kinds({"jobs_kinds": written})
+    assert "whisper" not in kinds
+    assert set(kinds) == set(k for k in capabilities.KNOWN_KINDS if k != "whisper")
+    assert any("next time CCSync starts" in m for m in said)
+
+
+def test_the_last_kind_cannot_be_unticked(tmp_path, monkeypatch):
+    """An empty jobs_kinds means EVERY kind, so "none" cannot be written -
+    the honest answer is the checkbox above it."""
+    from ccsync_companion import config as config_mod
+
+    path = _own_config(tmp_path, monkeypatch, jobs_kinds="peaks")
+    said = []
+    monkeypatch.setattr(sw.tray_mod, "_spawn", lambda a, label, fn: fn())
+    monkeypatch.setattr(sw.tray_mod, "_notify", lambda a, msg: said.append(msg))
+    app = _plain_app()
+    button = next(i for i in _section(build_settings_model(_snap(app), app),
+                                      "FLEET JOBS").items
+                  if isinstance(i, Button) and "waveform" in i.label)
+    button.on_click()
+    assert config_mod.load_config(path).get("jobs_kinds") == "peaks"
+    assert said and said[0].startswith("That is the last kind of work")
+
+
+def test_turning_the_fleet_off_writes_the_key(tmp_path, monkeypatch):
+    from ccsync_companion import config as config_mod
+
+    path = _own_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(sw.tray_mod, "_spawn", lambda a, label, fn: fn())
+    monkeypatch.setattr(sw.tray_mod, "_notify", lambda a, msg: None)
+    monkeypatch.setattr(sw, "show_settings", lambda app: None)
+    app = _plain_app()
+    button = next(i for i in _section(build_settings_model(_snap(app), app),
+                                      "FLEET JOBS").items
+                  if isinstance(i, Button) and "Let the fleet" in i.label)
+    button.on_click()
+    assert config_mod.load_config(path).get("jobs_enabled") is False
+
+
+def test_the_volunteer_minutes_cycle(tmp_path, monkeypatch):
+    from ccsync_companion import config as config_mod
+
+    path = _own_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(sw.tray_mod, "_spawn", lambda a, label, fn: fn())
+    monkeypatch.setattr(sw.tray_mod, "_notify", lambda a, msg: None)
+    monkeypatch.setattr(sw, "show_settings", lambda app: None)
+    app = _plain_app()
+    button = next(i for i in _section(build_settings_model(_snap(app), app),
+                                      "FLEET JOBS").items
+                  if isinstance(i, Button) and i.label.startswith("LEND"))
+    assert "30 minutes" in button.label and "click for 60" in button.label
+    button.on_click()
+    assert config_mod.load_config(path).get("jobs_volunteer_minutes") == 60
+    assert sw._next_volunteer_choice(120) == 15
+
+
+def test_a_changed_jobs_setting_says_it_needs_a_restart(tmp_path, monkeypatch):
+    _own_config(tmp_path, monkeypatch, jobs_enabled=False)
+    app = _plain_app()   # its live config still says the default, True
+    lines = [i.text for i in _section(build_settings_model(_snap(app), app),
+                                      "FLEET JOBS").items if isinstance(i, Line)]
+    assert any("take effect when CCSync next starts" in l for l in lines)
+
+
+# -- SYNC-117: the drive reminder can be turned off, for this episode -------
+
+
+class _Episode:
+    def __init__(self, active=True, muted=False):
+        self.active = active
+        self.reminders_muted = muted
+        self.muted = []
+
+    def mute_episode(self, minutes=0.0):
+        self.muted.append(minutes)
+        return True
+
+
+def test_an_open_episode_offers_both_buttons():
+    app = _plain_app()
+    app._drive_reminder = _Episode()
+    labels = [i.label for i in _section(
+        build_settings_model(_snap(app, root_unfinished="2 uploads"), app),
+        "SYNCING").items if isinstance(i, Button)]
+    assert "REMIND ME LATER" in labels
+    assert "STOP REMINDING ME ABOUT THIS DRIVE" in labels
+
+
+def test_a_muted_episode_keeps_the_warning_and_drops_the_buttons():
+    app = _plain_app()
+    app._drive_reminder = _Episode(muted=True)
+    items = _section(build_settings_model(
+        _snap(app, root_unfinished="2 uploads (2.3 GB left)"), app),
+        "SYNCING").items
+    lines = [i.text for i in items if isinstance(i, Line)]
+    assert any("2 uploads (2.3 GB left) still to" in l for l in lines)
+    assert any("Reminders about this drive are off" in l for l in lines)
+    assert "STOP REMINDING ME ABOUT THIS DRIVE" not in [
+        i.label for i in items if isinstance(i, Button)]
+
+
+def test_no_buttons_when_no_episode_is_open():
+    app = _plain_app()
+    app._drive_reminder = _Episode(active=False)
+    labels = [i.label for i in _section(build_settings_model(_snap(app), app),
+                                        "SYNCING").items if isinstance(i, Button)]
+    assert "REMIND ME LATER" not in labels
+
+
+def test_muting_says_what_it_did_and_what_it_did_not(monkeypatch):
+    said = []
+    app = _plain_app()
+    app._drive_reminder = _Episode()
+    monkeypatch.setattr(sw.tray_mod, "_spawn", lambda a, label, fn: fn())
+    monkeypatch.setattr(sw.tray_mod, "_notify", lambda a, msg: said.append(msg))
+    sw.action_mute_drive_reminder(app, 0)
+    assert app._drive_reminder.muted == [0]
+    assert "still waiting for it" in said[0]
+
+    sw.action_mute_drive_reminder(app, 120)
+    assert app._drive_reminder.muted == [0, 120]
+    assert "120 minutes" in said[1]
+
+
+def test_a_drive_that_came_back_between_render_and_click_says_so(monkeypatch):
+    said = []
+    app = _plain_app()
+
+    class _Gone(_Episode):
+        def mute_episode(self, minutes=0.0):
+            return False
+
+    app._drive_reminder = _Gone()
+    monkeypatch.setattr(sw.tray_mod, "_spawn", lambda a, label, fn: fn())
+    monkeypatch.setattr(sw.tray_mod, "_notify", lambda a, msg: said.append(msg))
+    sw.action_mute_drive_reminder(app, 0)
+    assert said == ["There is nothing to remind you about now."]
+
+
+# -- RES-15: rehearsal mode is visible, and switchable off ------------------
+
+
+def test_advanced_names_rehearsal_mode_and_offers_the_switch(monkeypatch):
+    from ccsync_companion import fixer, popup
+
+    app = _plain_app()
+    monkeypatch.setattr(fixer, "dry_run_default", lambda: True)
+    items = _section(build_settings_model(_snap(app), app), "ADVANCED").items
+    assert any(i.text == popup.REHEARSAL_WARNING for i in items
+               if isinstance(i, Line))
+    assert "TURN REHEARSAL OFF" in [i.label for i in items if isinstance(i, Button)]
+
+    monkeypatch.setattr(fixer, "dry_run_default", lambda: False)
+    assert "TURN REHEARSAL OFF" not in [
+        i.label for i in _section(build_settings_model(_snap(app), app),
+                                  "ADVANCED").items if isinstance(i, Button)]
+
+
+def test_turning_rehearsal_off_writes_the_key_and_drops_the_cache(tmp_path,
+                                                                  monkeypatch):
+    from ccsync_companion import config as config_mod, fixer
+
+    path = _own_config(tmp_path, monkeypatch, fixer_dry_run=True)
+    said = []
+    monkeypatch.setattr(sw.tray_mod, "_spawn", lambda a, label, fn: fn())
+    monkeypatch.setattr(sw.tray_mod, "_notify", lambda a, msg: said.append(msg))
+    fixer.reset_dry_run_cache()
+    try:
+        sw.action_turn_rehearsal_off(_plain_app())
+        assert config_mod.load_config(path).get("fixer_dry_run") is False
+        assert said == ["FIX ALL will copy files in again."]
+        # The cache is what would otherwise leave the button doing nothing
+        # until the next start (APP-11's shape).
+        assert fixer.dry_run_default() is False
+    finally:
+        fixer.reset_dry_run_cache()

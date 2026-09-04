@@ -140,7 +140,7 @@ def list_batches(scope: str = Query(default="mine"),
     if scope not in ("mine", "all"):
         raise HTTPException(422, "scope must be 'mine' or 'all'")
     if scope == "all" and not admin:
-        raise HTTPException(403, {"detail": "only an admin can see every machine's "
+        raise HTTPException(403, {"detail": "only an admin can see every computer's "
                                             "batches", "reason": "admin_only"})
     ingest_batches.expire_stale_leases(conn)
     return {"scope": scope, "admin": admin,

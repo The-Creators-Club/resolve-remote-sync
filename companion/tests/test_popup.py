@@ -2376,3 +2376,50 @@ def test_a_model_with_no_failures_draws_nothing():
 
     assert popup.ProgressModel(total=4, done=4).failure_lines() == []
     assert popup.ProgressModel(total=4, done=4).failures_block() == ""
+
+
+# -- RES-15: a rehearsal is not a catastrophe -------------------------------
+
+
+def test_summarize_fix_results_reads_a_rehearsal_as_a_plan():
+    """`fixer_dry_run` used to summarise as "0 of 69 copied in, 69 failed"
+    with 12 red rows: the one screen an admin runs a rehearsal to read told
+    them their computer was broken."""
+    from ccsync_companion import popup
+
+    results = [{"ok": True, "dry_run": True, "would_copy": 1,
+                "would_copy_to": r"P:\2026\FF5\a.mov"} for _ in range(3)]
+    assert popup.summarize_fix_results(results, 3, local_root="P:\\") == (
+        "REHEARSAL: nothing was copied. 3 files would be copied into P:\\.")
+    one = popup.summarize_fix_results(results[:1], 1, local_root="P:\\")
+    assert one.startswith("REHEARSAL: nothing was copied. 1 file would")
+    assert "failed" not in one
+
+
+def test_a_rehearsal_names_a_destination_even_with_no_root_passed():
+    from ccsync_companion import popup
+
+    results = [{"ok": True, "dry_run": True, "would_copy_to": r"P:\2026\a.mov"}]
+    assert r"P:\2026\a.mov" in popup.summarize_fix_results(results, 1)
+
+
+def test_a_rehearsal_counts_no_bytes_and_offers_no_undo():
+    """Nothing was copied and nothing was relinked, so "copied 12 GB" and
+    the undo pointer are both lies."""
+    from ccsync_companion import popup
+
+    rows = [{"file_path": __file__}]
+    results = [{"ok": True, "dry_run": True, "file_path": __file__,
+                "would_copy_to": "somewhere"}]
+    assert popup.fix_copied_bytes(rows, results) == 0
+    text = popup.fix_summary_text(results, 1)
+    assert text.startswith("REHEARSAL:")
+    assert popup.UNDO_POINTER not in text
+
+
+def test_the_rehearsal_warning_is_one_sentence_editors_can_act_on():
+    from ccsync_companion import popup
+
+    assert popup.REHEARSAL_WARNING == (
+        "FIX ALL is in rehearsal mode on this computer and will copy nothing.")
+    assert "—" not in popup.REHEARSAL_WARNING   # owner's rule, 2026-08-18

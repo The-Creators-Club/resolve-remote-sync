@@ -14,6 +14,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import sqlite3
@@ -22,6 +23,14 @@ from pathlib import Path
 from typing import Any, Container, Iterable, Mapping
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+
+# This layer is deliberately silent: it is data, and every caller of it owns
+# the sentence a human reads. The ONE exception is a decision this module
+# makes on its own and nobody above it can see -- the machine cap's refusal
+# to evict a registry row that still owes a plan or a share (DCORE-12,
+# 2026-09-04), which is reached from inside a write helper and used to be
+# invisible everywhere: no notice, no audit, no log line at all.
+log = logging.getLogger("ccsync.dashboard.db")
 
 # Caps + retention for the media-presence tables.
 EDITOR_MEDIA_CAP = 2000          # per-file disk-manifest rows per (editor, machine, project)
@@ -1661,6 +1670,57 @@ ALTER TABLE machine_state ADD COLUMN cap_cards_last_poll_at TEXT;
 ALTER TABLE machine_state ADD COLUMN cap_cards_http_status INTEGER;
 """
 
+# v50: THE SECOND CUSTOMER'S FOUR (wave 5 of the usability sweep,
+# 2026-09-04): DCORE-4, DCORE-5, OPS-2/UX-14 and CMEDIA-1.
+#
+# `known_editors.suspended_*` is DCORE-4. Suspension is deliberately NOT a
+# column on `users`: `users` exists only on a DASH_AUTH_METHOD=local site,
+# and the button an owner reaches for ("pause the freelancer until next
+# month") has to exist on the shipped smb shape too, where the only control
+# the Users page had was DELETE. It acts on FLEET state -- the report path
+# refuses, the enforce cycle removes the shares -- so it belongs on the
+# fleet's own record of who an editor is. The plan (`selections`) is
+# untouched by design: [ RESUME ] has to put back exactly what was there.
+#
+# `projects.archived_at/by` is DCORE-5. Archiving sets `active=0`, which is
+# the flag every reader in this file already filters on, and the stamp is
+# what stops the next collector pass resurrecting it (upsert_project's
+# ON CONFLICT sets active=1 on every scan of a folder that still exists --
+# and the folder DOES still exist, because archiving keeps the folder and the
+# marker). Nothing here deletes: [ UNARCHIVE ] clears the stamp and the next
+# pass brings the row back with its inventory.
+#
+# `pending_ssh_keys` is OPS-2/UX-14's second half. The wizard generates the
+# key an account needs before its lanes can run, and until now the account
+# had to exist first WITH that key -- a circle an owner could only escape by
+# generating a keypair themselves. The wizard posts its public half under the
+# identity token it has just been issued, and it lands HERE, not on the
+# account: a queue an admin approves in one click, exactly as a Syncthing
+# device id is approved today. A row in this table grants nothing.
+#
+# `cap_jobs_gate_*` is CMEDIA-1's dashboard half, beside the v49 `cap_cards_*`
+# columns and written the same way. `jobs.local_work_words` reads
+# capabilities["jobs_gate"], which nothing persisted: a machine holding 12 GB
+# of VLM weights looked to the scheduler exactly like an idle one.
+SCHEMA_V50 = """
+ALTER TABLE known_editors ADD COLUMN suspended_at TEXT;
+ALTER TABLE known_editors ADD COLUMN suspended_by TEXT;
+ALTER TABLE known_editors ADD COLUMN suspended_reason TEXT;
+ALTER TABLE projects ADD COLUMN archived_at TEXT;
+ALTER TABLE projects ADD COLUMN archived_by TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_jobs_gate_reason TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_jobs_gate_detail TEXT;
+CREATE TABLE IF NOT EXISTS pending_ssh_keys (
+  username     TEXT NOT NULL,
+  fingerprint  TEXT NOT NULL,
+  key_text     TEXT NOT NULL,
+  machine      TEXT NOT NULL DEFAULT '',
+  submitted_at TEXT NOT NULL,
+  source       TEXT NOT NULL DEFAULT 'wizard',
+  PRIMARY KEY (username, fingerprint)
+);
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1780,6 +1840,12 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # before it: two unrelated columns, but a schema number is a shared
     # resource and a wave that takes one number per finding runs out of them.
     (49, SCHEMA_V49),
+    # 50: the second customer's four (wave 5, 2026-09-04). ONE number for the
+    # whole wave on purpose, and gapless like every one before it: this wave
+    # runs five parallel work packages and a schema number is a shared
+    # resource, so the four unrelated groups of columns land in one step
+    # rather than four.
+    (50, SCHEMA_V50),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -1940,6 +2006,77 @@ def record_known_editor(
         "VALUES (?, ?, ?)",
         (name, now or utcnow_iso(), source),
     )
+
+
+# --------------------------------------------------- pending SSH keys (v50)
+#
+# OPS-2 / UX-14 (usability sweep 2026-09-04). Creating an editor account
+# demanded an SSH public key that only the wizard generates, and the wizard
+# cannot run until the account exists. The wizard posts its public half here
+# under the identity token /api/v1/verify has just issued it; an admin
+# approves it in one click on the Users page, exactly as they approve a
+# Syncthing device id today.
+#
+# A ROW HERE GRANTS NOTHING. It is a queue, not a keystore: nothing reads it
+# except the Users page and the approve button, and approving is what calls
+# the account backend. Keyed on the fingerprint so a wizard re-run (or a
+# second computer with its own key) is an upsert of the same row rather than
+# a queue that grows every time somebody presses RETRY INSTALL.
+
+PENDING_SSH_KEY_MAX_CHARS = 4096
+
+
+def add_pending_ssh_key(
+    conn: sqlite3.Connection, username: str, fingerprint: str, key_text: str, *,
+    machine: str = "", source: str = "wizard", now: str | None = None,
+) -> None:
+    conn.execute(
+        """INSERT INTO pending_ssh_keys
+             (username, fingerprint, key_text, machine, submitted_at, source)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(username, fingerprint) DO UPDATE SET
+             key_text=excluded.key_text, machine=excluded.machine,
+             submitted_at=excluded.submitted_at, source=excluded.source""",
+        (str(username or "").strip().lower(), str(fingerprint or ""),
+         str(key_text or "")[:PENDING_SSH_KEY_MAX_CHARS], str(machine or "")[:128],
+         now or utcnow_iso(), str(source or "wizard")[:32]),
+    )
+
+
+def fetch_pending_ssh_keys(
+    conn: sqlite3.Connection, username: str | None = None,
+) -> list[dict[str, Any]]:
+    q = "SELECT * FROM pending_ssh_keys"
+    params: list[Any] = []
+    if username is not None:
+        q += " WHERE username=?"
+        params.append(str(username).strip().lower())
+    q += " ORDER BY submitted_at DESC, username"
+    try:
+        rows = conn.execute(q, params).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [dict(r) for r in rows]
+
+
+def get_pending_ssh_key(
+    conn: sqlite3.Connection, username: str, fingerprint: str,
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM pending_ssh_keys WHERE username=? AND fingerprint=?",
+        (str(username or "").strip().lower(), str(fingerprint or "")),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def drop_pending_ssh_key(
+    conn: sqlite3.Connection, username: str, fingerprint: str,
+) -> bool:
+    cur = conn.execute(
+        "DELETE FROM pending_ssh_keys WHERE username=? AND fingerprint=?",
+        (str(username or "").strip().lower(), str(fingerprint or "")),
+    )
+    return bool(cur.rowcount)
 
 
 # ----------------------------------------------------- per-editor report tokens
@@ -2210,6 +2347,84 @@ def base_only_editors(conn: sqlite3.Connection) -> set[str]:
     return {editor for editor, modes in by_editor.items() if modes == {"base"}}
 
 
+# ------------------------------------------------------ suspension (v50)
+#
+# DCORE-4 (usability sweep 2026-09-04). ONE predicate, the way CR-28 has
+# `base_only_editors`: every reader that decides what a computer receives asks
+# `suspended_editors` and drops those people, so "suspended" cannot mean one
+# thing to the report path and another to the enforce cycle.
+#
+# It is NOT a login flag. Disabling an account (local sites only) is about
+# signing in; this is about the fleet, and it is the only "stop this person"
+# control an smb site has that is not DELETE.
+
+def suspend_editor(conn: sqlite3.Connection, editor: str, *, by: str,
+                   reason: str = "", now: str | None = None) -> bool:
+    """Suspend `editor` (idempotent). False if there is no such editor.
+
+    Records the row first when the fleet has never seen this name written
+    down: an account created on the NAS and never used still has to be
+    suspendable, and record_known_editor is the same evidence trail the
+    approve and create paths write."""
+    name = str(editor or "").strip().lower()
+    if not name or not _USERNAME_RE.match(name):
+        return False
+    # An editor this dashboard has no record of is a typo, not a person to
+    # suspend: known_editor_usernames is the same four-source evidence test
+    # the device-approve guard uses (CR-91).
+    if name not in known_editor_usernames(conn):
+        return False
+    record_known_editor(conn, name, "admin", now)
+    cur = conn.execute(
+        "UPDATE known_editors SET suspended_at=?, suspended_by=?, suspended_reason=? "
+        "WHERE editor_username=?",
+        (now or utcnow_iso(), str(by or "?"), str(reason or "")[:255], name),
+    )
+    return bool(cur.rowcount)
+
+
+def unsuspend_editor(conn: sqlite3.Connection, editor: str) -> bool:
+    """Lift a suspension. The plan was never touched, so there is nothing to
+    put back: the next enforce cycle re-shares exactly what was ticked."""
+    name = str(editor or "").strip().lower()
+    cur = conn.execute(
+        "UPDATE known_editors SET suspended_at=NULL, suspended_by=NULL, "
+        "suspended_reason=NULL WHERE editor_username=? AND suspended_at IS NOT NULL",
+        (name,),
+    )
+    return bool(cur.rowcount)
+
+
+def suspended_editors(conn: sqlite3.Connection) -> set[str]:
+    """Usernames whose fleet access is suspended.
+
+    Tolerates a database that predates v50 (an empty set, i.e. nobody is
+    suspended): this is called from the enforce cycle and from the report
+    path, and a missing column must never be able to unshare a fleet or turn
+    a machine away."""
+    try:
+        rows = conn.execute(
+            "SELECT editor_username FROM known_editors WHERE suspended_at IS NOT NULL")
+    except sqlite3.OperationalError:
+        return set()
+    return {str(r[0] or "").strip().lower() for r in rows if r[0]}
+
+
+def editor_suspension(conn: sqlite3.Connection, editor: str) -> dict[str, Any] | None:
+    """{at, by, reason} for a suspended editor, else None."""
+    name = str(editor or "").strip().lower()
+    try:
+        row = conn.execute(
+            "SELECT suspended_at, suspended_by, suspended_reason FROM known_editors "
+            "WHERE editor_username=?", (name,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None or not row["suspended_at"]:
+        return None
+    return {"at": row["suspended_at"], "by": row["suspended_by"] or "",
+            "reason": row["suspended_reason"] or ""}
+
+
 def known_editor_usernames(conn: sqlite3.Connection) -> set[str]:
     """Every username the dashboard has a positive record of.
 
@@ -2256,14 +2471,100 @@ def compute_rate_ema(
 # ---------------------------------------------------------------- writes
 
 def upsert_project(conn: sqlite3.Connection, slug: str, label: str, path: str, now: str) -> int:
+    # AN ARCHIVED PROJECT STAYS ARCHIVED (DCORE-5, v50). Archiving keeps the
+    # folder and the marker on the NAS -- that is the whole point, nothing
+    # here deletes -- so the folder is still in Syncthing's config and this
+    # upsert runs for it on every collector pass. A bare `active=1` would
+    # therefore un-archive it within 60 seconds, silently, and the shares
+    # would come back with it.
     conn.execute(
         """INSERT INTO projects (slug, label, path, first_seen, last_seen, active)
            VALUES (?, ?, ?, ?, ?, 1)
            ON CONFLICT(slug) DO UPDATE SET
-             label=excluded.label, path=excluded.path, last_seen=excluded.last_seen, active=1""",
+             label=excluded.label, path=excluded.path, last_seen=excluded.last_seen,
+             active=CASE WHEN projects.archived_at IS NULL THEN 1 ELSE 0 END""",
         (slug, label, path, now, now),
     )
     return conn.execute("SELECT id FROM projects WHERE slug=?", (slug,)).fetchone()[0]
+
+
+# ------------------------------------------------------- archive (v50)
+#
+# DCORE-5 (usability sweep 2026-09-04). Any signed-in editor can create a
+# project -- deliberately, it is how a shoot starts on a Friday night -- and
+# until now NOTHING could remove one: a typo became a permanent row in every
+# editor's tick list, in the assignments grid and in the queue, and the only
+# cure was deleting the folder on the NAS by hand and waiting for
+# deactivate_missing_projects (which the DASH-4 brake may itself refuse).
+#
+# Archiving is reversible and touches no data: the folder, the marker, the
+# files and every `selections` row survive. What changes is `active`, which
+# is the flag every reader in this file already filters on, plus the enforce
+# cycle dropping its shares (collector._run_enforce) -- the same "under-
+# sharing is the safe direction" path a removed tick uses.
+
+def archive_project(conn: sqlite3.Connection, slug: str, *, by: str,
+                    now: str | None = None) -> bool:
+    """Mark a project archived. False if there is no such project."""
+    cur = conn.execute(
+        "UPDATE projects SET active=0, archived_at=?, archived_by=? "
+        "WHERE slug=? AND archived_at IS NULL",
+        (now or utcnow_iso(), str(by or "?"), str(slug or "")),
+    )
+    return bool(cur.rowcount)
+
+
+def unarchive_project(conn: sqlite3.Connection, slug: str) -> bool:
+    """Put an archived project back. `active` goes back to 1 here rather than
+    waiting for the next collector pass, so the row (and the ticks that were
+    never removed) reappear on the page that pressed the button."""
+    cur = conn.execute(
+        "UPDATE projects SET active=1, archived_at=NULL, archived_by=NULL "
+        "WHERE slug=? AND archived_at IS NOT NULL",
+        (str(slug or ""),),
+    )
+    return bool(cur.rowcount)
+
+
+def archived_project_slugs(conn: sqlite3.Connection) -> set[str]:
+    """Slugs an admin has archived. Empty on a pre-v50 database: a missing
+    column must never be read as "everything is archived", which would
+    unshare the fleet."""
+    try:
+        rows = conn.execute(
+            "SELECT slug FROM projects WHERE archived_at IS NOT NULL")
+    except sqlite3.OperationalError:
+        return set()
+    return {str(r[0]) for r in rows if r[0]}
+
+
+def fetch_archived_projects(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Archived projects with the tick count each still holds, newest first.
+
+    The count is what the [ UNARCHIVE ] row shows and what the archive
+    confirm quoted before the click: those ticks are still in the table, and
+    nothing about archiving removed them."""
+    try:
+        rows = conn.execute(
+            """SELECT p.slug, p.label, p.archived_at, p.archived_by,
+                      (SELECT COUNT(DISTINCT s.editor_username) FROM selections s
+                        WHERE s.project_slug = p.slug) AS editors
+               FROM projects p WHERE p.archived_at IS NOT NULL
+               ORDER BY p.archived_at DESC, p.label""").fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [dict(r) for r in rows]
+
+
+def project_tick_editors(conn: sqlite3.Connection, slug: str) -> list[str]:
+    """Who has this project ticked, on any of their computers. The number the
+    archive confirm has to name: "3 editors sync it" is the difference
+    between a typo and somebody's Monday."""
+    return [
+        str(r[0]) for r in conn.execute(
+            "SELECT DISTINCT editor_username FROM selections WHERE project_slug=? "
+            "ORDER BY editor_username", (str(slug or ""),))
+    ]
 
 
 def replace_project_links(
@@ -2819,7 +3120,7 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
         "href": "/admin/packages"},
     # -- identity and plans --------------------------------------------------
     "duplicate_machine_id": {"severity": "error", "what":
-        "one computer identity claimed by two hostnames (a cloned machine)",
+        "one computer identity claimed by two hostnames (a cloned computer)",
         "href": "/fleet"},
     "duplicate_device_id": {"severity": "error", "what":
         "one Syncthing device id claimed by two computers",
@@ -5345,7 +5646,7 @@ def copy_machine_plan(
     """
     if (editor, source) in base_machines(conn):
         raise ValueError(
-            f"{source!r} is a wired machine: it works directly off the NAS and "
+            f"{source!r} is wired to the server: it works directly off the NAS and "
             "holds no plan, so there is nothing to copy from it"
         )
     rows = selections_for_machine(conn, editor, source)
@@ -6894,10 +7195,12 @@ def set_fleet_halt(
             when = prior["expires_at"] or prior["set_at"]
             if when:
                 raise ValueError(
-                    f"The halt already ended at {when}. Start a new one with a reason."
+                    f"Syncing already started again at {when}. To stop it "
+                    f"again, give a reason."
                 )
             raise ValueError(
-                "There is no halt to keep going. Start one with a reason."
+                "Nothing is stopped, so there is nothing to keep stopped. "
+                "Stop syncing with a reason."
             )
         expires_at = (parse_iso(stamp) + dt.timedelta(hours=window)).isoformat()
         state = {
@@ -6999,11 +7302,50 @@ def evict_extra_machines(
         # been off for a month is not a reason to silently forget which
         # projects it holds -- and re-reporting under the same name picks the
         # rows straight back up.
+        #
+        # DCORE-12 (usability sweep 2026-09-04): NOT while that plan or a
+        # Syncthing share still names it. A computer with no registry row has
+        # no syncthing_device_id the enforce cycle can address, so its plan
+        # falls back to the person-level share set and api_tick answers 404
+        # "'leso' has no computer named 'LESO-MBP'" for a machine that is
+        # still holding footage and still in Syncthing -- with no notice, no
+        # audit and no log line anywhere. The row stays, which is exactly the
+        # LOST state (lost_machines / DASH-16) the fleet grid already draws,
+        # and the cap warning is raised instead of the fleet being reshaped.
+        keeps = _machine_has_commitments(conn, editor, machine)
+        if keeps:
+            log.warning(
+                "NOT evicting %s/%s past the %d-machine cap: %s. Its registry row is kept "
+                "and it shows as LOST on the fleet page until somebody presses FORGET.",
+                editor, machine, keep, keeps)
+            continue
         conn.execute(
             "DELETE FROM machines WHERE editor_username=? AND machine=?",
             (editor, machine),
         )
     return len(victims)
+
+
+def _machine_has_commitments(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> str:
+    """Why this registry row may not be deleted, in words, or "" (DCORE-12).
+
+    Two commitments: a sync plan of its own, and a Syncthing device id -- the
+    only handle the enforce cycle has on the shares that device holds."""
+    reasons: list[str] = []
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM selections WHERE editor_username=? AND machine=?",
+        (editor, machine)).fetchone()
+    ticks = int((row or {"n": 0})["n"] or 0)
+    if ticks:
+        reasons.append(f"{ticks} project(s) still ticked for it")
+    device = conn.execute(
+        "SELECT syncthing_device_id FROM machines WHERE editor_username=? AND machine=?",
+        (editor, machine)).fetchone()
+    if device is not None and str(device["syncthing_device_id"] or "").strip():
+        reasons.append("it still has a Syncthing device")
+    return ", ".join(reasons)
 
 
 # ---------------------------------------------------------- admin deletes
@@ -8521,12 +8863,12 @@ def job_requirements_met(
             wanted = [want] if isinstance(want, str) else list(want or [])
             missing = [str(w) for w in wanted if str(w) not in names]
             if missing:
-                return False, "this machine has no %s mount" % ", ".join(missing)
+                return False, "this computer has no %s mount" % ", ".join(missing)
             continue
         have = caps.get(key)
         if isinstance(want, bool):
             if bool(have) != want:
-                return False, "%s is %s on this machine" % (
+                return False, "%s is %s on this computer" % (
                     key, "not available" if want else "set")
             continue
         if isinstance(want, (int, float)):
@@ -9156,6 +9498,7 @@ def store_machine_capabilities(
     caps = dict(caps)
     resolve = caps.get("resolve") if isinstance(caps.get("resolve"), Mapping) else {}
     cards = caps.get("cards_agent") if isinstance(caps.get("cards_agent"), Mapping) else {}
+    jobs_gate = caps.get("jobs_gate") if isinstance(caps.get("jobs_gate"), Mapping) else {}
     mounts = [str(m)[:32] for m in (caps.get("mounts") or [])][:CAPABILITY_MOUNTS_MAX]
     conn.execute(
         """UPDATE machine_state SET
@@ -9168,7 +9511,8 @@ def store_machine_capabilities(
              cap_cards_connected=?, cap_cards_state=?,
              cap_cards_timeline=?, cap_cards_version=?, cap_cards_since=?,
              cap_cards_gate_state=?, cap_cards_detail=?,
-             cap_cards_last_poll_at=?, cap_cards_http_status=?
+             cap_cards_last_poll_at=?, cap_cards_http_status=?,
+             cap_jobs_gate_reason=?, cap_jobs_gate_detail=?
             WHERE editor_username=? AND machine=?""",
         (now,
          int(bool(caps.get("gpu_present"))),
@@ -9223,6 +9567,18 @@ def store_machine_capabilities(
          (str((cards or {}).get("last_poll_at"))[:64]
           if (cards or {}).get("last_poll_at") else None),
          _as_int((cards or {}).get("last_http_status")),
+         # WHAT THIS MACHINE IS BUSY WITH ITSELF (CMEDIA-1, v50). The job
+         # runner's gate answers `local_work` while a Qwen3-VL batch or a
+         # proxy encode has the GPU, and nothing persisted it: the scheduler
+         # ranked a saturated machine first on longest-idle, the job OOMed,
+         # and the machine earned a cooldown for a fault it did not have.
+         # NULL when the companion sent no `jobs_gate` (a build older than
+         # the gate), which jobs.local_work_words reads as "did not say",
+         # never as "idle".
+         (str((jobs_gate or {}).get("reason"))[:32]
+          if (jobs_gate or {}).get("reason") else None),
+         (str((jobs_gate or {}).get("detail"))[:255]
+          if (jobs_gate or {}).get("detail") else None),
          str(editor), str(machine)),
     )
 
@@ -9277,6 +9633,12 @@ def _capabilities_of(row: sqlite3.Row | None) -> dict[str, Any]:
                         "detail": _row_value(row, "cap_cards_detail") or "",
                         "last_poll_at": _row_value(row, "cap_cards_last_poll_at"),
                         "last_http_status": _row_value(row, "cap_cards_http_status")},
+        # CMEDIA-1 (v50). The shape jobs.local_work_words expects, and it is
+        # read defensively there: only `local_work` refuses, an unknown
+        # reason is not a refusal, and an absent one is a companion too old
+        # to have the gate at all.
+        "jobs_gate": {"reason": _row_value(row, "cap_jobs_gate_reason") or "",
+                      "detail": _row_value(row, "cap_jobs_gate_detail") or ""},
     }
 
 
@@ -9288,7 +9650,8 @@ _CAPABILITY_COLUMNS = """cap_at, cap_gpu_present, cap_gpu_name, cap_gpu_vram_gb,
        cap_cards_connected, cap_cards_state, cap_cards_timeline,
        cap_cards_version, cap_cards_since,
        cap_cards_gate_state, cap_cards_detail, cap_cards_last_poll_at,
-       cap_cards_http_status"""
+       cap_cards_http_status,
+       cap_jobs_gate_reason, cap_jobs_gate_detail"""
 
 
 # A machine's allow-list is a handful of names; sixteen is already more kinds

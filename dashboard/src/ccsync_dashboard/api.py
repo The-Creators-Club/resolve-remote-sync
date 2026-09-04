@@ -159,6 +159,73 @@ def resolve_companion_credential(
     return AUTH_NONE, None
 
 
+# ------------------------------------------------- is this person still in
+#
+# DCORE-1 / DCORE-4 (usability sweep 2026-09-04). Two states, one gate, and
+# both of them are about the FLEET rather than about signing in:
+#
+#   disabled   a local account an admin switched off. Until now that revoked
+#              sessions and cce1 tokens and nothing else, so the companion
+#              carried on reporting under an identity token that never
+#              expires (CR-86) and the shares stayed up.
+#   suspended  the auth-method-independent "pause this person" DCORE-4 asked
+#              for, and the only such control an smb site has that is not
+#              DELETE.
+#
+# The strings are the REASON stamped on machines.report_refused_reason, which
+# the fleet grid renders and the `report_refused` alert quotes, so they are
+# short sentences about the account and not about this request.
+REFUSED_ACCOUNT_DISABLED = "this account has been disabled"
+REFUSED_ACCOUNT_SUSPENDED = "this account is suspended"
+
+# What the editor at the tray reads. The reason above is for the admin's
+# page; this is the 401 detail, and it has to name who can undo it.
+_ACCOUNT_REFUSAL_DETAIL = {
+    REFUSED_ACCOUNT_DISABLED: (
+        "this account has been disabled on the dashboard. Ask your admin to turn it "
+        "back on: nothing will sync until they do"),
+    REFUSED_ACCOUNT_SUSPENDED: (
+        "this account is suspended on the dashboard. Ask your admin to press RESUME: "
+        "your sync plan is untouched and comes straight back"),
+}
+
+
+def _account_refusal(settings, conn: sqlite3.Connection, editor: str) -> str | None:
+    """Why this editor's computers may not report right now, or None.
+
+    FAILS OPEN on a database error: a read that cannot answer must never turn
+    the fleet away. Suspension is checked first because it is the answer an
+    admin acted on most recently and the one they can undo on any site.
+    """
+    name = str(editor or "").strip().lower()
+    if not name:
+        return None
+    try:
+        if name in db.suspended_editors(conn):
+            return REFUSED_ACCOUNT_SUSPENDED
+    except sqlite3.Error:                                              # noqa: BLE001
+        log.warning("could not read the suspension state for %r", name)
+        return None
+    if not _local_mode(settings):
+        # smb/oidc: the account lives on the NAS and this dashboard has no
+        # disabled flag for it. Asking the NAS on every report -- 30 s per
+        # machine -- is not a check, it is an outage waiting for a slow
+        # backend, and suspension above is the control that covers it.
+        return None
+    try:
+        user = local_users.get_user(conn, name)
+        if user is not None:
+            return REFUSED_ACCOUNT_DISABLED if user["disabled"] else None
+        # ABSENT. Only a refusal on a site that has local accounts at all: a
+        # dashboard mid-bootstrap (auth_method=local, no users created yet)
+        # must not 401 a fleet that has been reporting for a year.
+        if local_users.any_users_exist(conn):
+            return REFUSED_ACCOUNT_DISABLED
+    except sqlite3.Error:                                              # noqa: BLE001
+        log.warning("could not read the local account state for %r", name)
+    return None
+
+
 def companion_token_ok(settings, conn: sqlite3.Connection | None, token: str) -> bool:
     """Either credential, without caring which. For the routes that pair it
     with a separate identity check of their own."""
@@ -832,6 +899,12 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     diag_stamps = db.diagnostics_stamp_map(conn)
     machine_role = db.machine_modes(conn)
     plans = db.plan_summary_map(conn, machines.keys())
+    # DCORE-4 (2026-09-04): a suspended person's computers are being turned
+    # away and unshared, which on this page looks exactly like a machine
+    # somebody switched off. The chip is what tells the two apart, and it
+    # says the one thing an admin can act on: an admin did this, and
+    # [ RESUME ] on the Users page undoes it.
+    suspended_accounts = db.suspended_editors(conn)
     # A halted fleet is why THIS machine is not syncing, and it is the one
     # alarm _scope_editors_view deliberately does not redact.
     fleet_halted = bool(db.get_fleet_halt(conn)["active"])
@@ -898,8 +971,13 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
             entry["guard"]["report_refused_reason"] = refusal.get("reason")
         entry["diagnostics"] = diag_stamps.get(key) or {}
         entry["mode"] = machine_role.get(key) or "editor"
+        entry["account_suspended"] = entry["editor_username"] in suspended_accounts
         entry["plan"] = plans.get(key) or {}
         entry["fleet_halt_active"] = fleet_halted
+        # UX-19 (usability sweep 2026-09-03): where two switches are off the
+        # sentence names both, in the ranked order, and `causes` carries them
+        # apart for any caller that wants to draw them as two lines.
+        causes = health.why_causes(entry, now)
         why = health.why_not_syncing(entry, now)
         if why is None:
             entry["why"] = None
@@ -907,6 +985,7 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
             entry["why"] = {
                 "reason": why[0],
                 "sentence": why[1],
+                "causes": [{"reason": c, "sentence": s} for c, s in causes],
                 # An upload-only machine is doing exactly what it was ticked
                 # for (CR-85): the sentence is an EXPLANATION, and colouring
                 # it red is what would send an admin chasing it.
@@ -1878,7 +1957,8 @@ class VerifyIn(LoginIn):
     platform: str | None = None
 
 
-def _require_fleet_member(settings, username: str) -> None:
+def _require_fleet_member(settings, username: str,
+                          conn: sqlite3.Connection | None = None) -> None:
     """Refuse to mint a companion identity (and hand out the shared report
     token) for an SMB account that isn't part of this fleet.
 
@@ -1896,10 +1976,45 @@ def _require_fleet_member(settings, username: str) -> None:
     """
     if auth.is_admin(settings, username):
         return
+    # THE LOCAL SITE HAS ITS OWN ANSWER (DCORE-6, usability sweep 2026-09-04).
+    # On a DASH_AUTH_METHOD=local appliance -- the zero-touch shape, which has
+    # no NAS credential by design -- nas_configured is False, so this check
+    # used to be skipped entirely: ANY local account, including one created
+    # for browsing the b-roll library, was handed an identity token and the
+    # shared report token and could write reports as itself. Local accounts
+    # carry a role and nothing consulted it. Membership here is the account
+    # row: present, not disabled, not suspended, role admin or editor.
+    if _local_mode(settings):
+        owned = conn is None
+        c = conn if conn is not None else db.connect(settings.db_path)
+        try:
+            user = local_users.get_user(c, username)
+            refusal = _account_refusal(settings, c, username)
+        finally:
+            if owned:
+                c.close()
+        if user is None:
+            raise HTTPException(
+                status_code=403,
+                detail=f"{username!r} is not an account on this dashboard - ask an admin "
+                       "to create it on Settings, Users")
+        if refusal:
+            raise HTTPException(status_code=403,
+                                detail=_ACCOUNT_REFUSAL_DETAIL[refusal])
+        if str(user["role"] or "").strip().lower() not in local_users.ROLES:
+            raise HTTPException(
+                status_code=403,
+                detail=f"{username!r} is not an editor on this dashboard - ask an admin "
+                       "to give the account the editor role")
+        return
     if not nas_factory.nas_configured(settings):
+        # smb/oidc with no NAS credential: there is genuinely nothing to check
+        # against, so the check is skipped and said out loud. The old wording
+        # named DASH_NAS_PW, which is not the configuration this is about.
         log.warning(
-            "minting an identity for %r without an editors-group check: DASH_NAS_PW is not "
-            "configured on the dashboard", username)
+            "minting an identity for %r with no membership check: no membership backend "
+            "for auth_method=%r", username,
+            str(getattr(settings, "auth_method", "") or "smb"))
         return
     try:
         client = nas_factory.make_nas_client(settings)
@@ -1952,7 +2067,7 @@ def api_verify(
         auth.record_login_failure(request, username)
         raise HTTPException(status_code=401, detail="bad username or password")
     auth.clear_login_failures(request, username)
-    _require_fleet_member(settings, username)
+    _require_fleet_member(settings, username, conn)
     result = {
         "ok": True,
         "username": username,
@@ -2350,8 +2465,8 @@ def api_tick(
         # UNTICKING stays allowed (below), so an existing one can be removed.
         raise HTTPException(
             status_code=409,
-            detail="this is a base rig account: it works directly off the NAS "
-                   "and syncs nothing, so projects cannot be ticked for it",
+            detail="this account is wired to the server: it works directly off "
+                   "the NAS and syncs nothing, so projects cannot be ticked for it",
         )
     target = _machine_arg(machine)
     known = db.machines_of(conn, editor)
@@ -2372,7 +2487,7 @@ def api_tick(
         # [ GETTING READY ] chip CR-28 was raised for.
         raise HTTPException(
             status_code=409,
-            detail=f"{target!r} is a wired machine: it works directly off the NAS "
+            detail=f"{target!r} is wired to the server: it works directly off the NAS "
                    "and syncs nothing, so projects cannot be ticked for it",
         )
     now = db.utcnow_iso()
@@ -3105,8 +3220,8 @@ def api_set_project_root(
             if not may_first_claim(settings, conn, user, name):
                 raise HTTPException(
                     status_code=403,
-                    detail=f"{name!r} is not a Resolve project any of your machines has "
-                           "reported -- open it in Resolve first, or ask an admin",
+                    detail=f"{name!r} is not a Resolve project any of your computers "
+                           "has reported. Open it in Resolve first, or ask an admin",
                 )
             inserted = db.sticky_project_root(
                 conn, name, slug, db.utcnow_iso(), source="editor", updated_by=user
@@ -3162,9 +3277,13 @@ def _validate_tree_part(value: str, what: str) -> str:
 def _projects_dir_or_error(settings) -> Path:
     projects_dir = str(getattr(settings, "projects_dir", "") or "")
     if not projects_dir or not Path(projects_dir).is_dir():
+        # DUI-8 class (wave 5, 2026-09-04): this reaches an EDITOR pressing
+        # NEW PROJECT, and it used to name a script from this repo -- which a
+        # customer's admin has no checkout of, and an editor could not run if
+        # they did. Name the person, not the script.
         raise ProjectSetupError(
-            "the NAS Projects tree is not mounted on the dashboard "
-            "(DASH_PROJECTS_DIR) -- create the folder with server/setup_tree.py instead"
+            "the server's Projects folder is not mounted on this dashboard. Ask whoever "
+            "installed this server to create or link the folder: it is a server-side step"
         )
     return Path(projects_dir)
 
@@ -3255,8 +3374,8 @@ def _register_project(
         # made, mapping silently skipped) is how an editor ends up believing
         # a project is set up when their companion still prompts for it.
         raise ProjectSetupError(
-            f"{resolve_project!r} is not a Resolve project any of your machines has "
-            "reported -- open it in Resolve first, or ask an admin to set the mapping"
+            f"{resolve_project!r} is not a Resolve project any of your computers "
+            "has reported. Open it in Resolve first, or ask an admin to set the mapping"
         )
     st_path = f"{settings.syncthing_data_prefix.rstrip('/')}/{rel}"
     db.upsert_project(conn, slug, rel, st_path, now)
@@ -3462,8 +3581,59 @@ def api_create_project(
         )
     except ProjectSetupError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    # DCORE-5 (2026-09-04): who made this project, and when. Any signed-in
+    # editor may create one (deliberately: it is how a shoot starts on a
+    # Friday night) and until now nothing recorded it, while every file move
+    # -- admin-only -- has been audited since 2026-08-27.
+    db.audit(conn, user, "project.create", str(result.get("slug") or ""),
+             {"label": result.get("rel") or "",
+              "used_existing_folder": bool(payload.use_existing)})
     conn.commit()
     return {"ok": True, **result, "project_roots": _project_roots_view(conn)}
+
+
+class ArchiveProjectIn(BaseModel):
+    archived: bool = True
+
+
+@router.post("/projects/{slug}/archive")
+def api_archive_project(
+    slug: str, payload: ArchiveProjectIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Archive (or restore) a project. DCORE-5, 2026-09-04.
+
+    Admin-only, and it deletes NOTHING: the folder, its marker, its files and
+    every tick stay exactly as they are. The project leaves the tick lists,
+    the assignments grid and the queue (`active=0`, the flag every reader
+    already filters on), and the enforce cycle removes its Syncthing shares
+    the same way an untick does. [ UNARCHIVE ] puts all of it back.
+
+    It is the answer to a typo becoming permanent: before this, the only way
+    to remove a project was to delete the folder on the NAS by hand and wait
+    up to 15 minutes for deactivate_missing_projects, which the DASH-4 brake
+    may itself refuse on a small site."""
+    admin = _require_admin(request)
+    slug = str(slug or "").strip()
+    row = conn.execute("SELECT slug, label FROM projects WHERE slug=?", (slug,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no project called {slug!r}")
+    editors = db.project_tick_editors(conn, slug)
+    if payload.archived:
+        if not db.archive_project(conn, slug, by=admin):
+            raise HTTPException(status_code=409, detail=f"{slug!r} is already archived")
+        db.audit(conn, admin, "project.archive", slug,
+                 {"label": row["label"], "editors": editors})
+        log.warning("admin %r archived project %r (%d editor(s) still have it ticked; "
+                    "their shares go on the next enforce cycle, nothing was deleted)",
+                    admin, slug, len(editors))
+    else:
+        if not db.unarchive_project(conn, slug):
+            raise HTTPException(status_code=409, detail=f"{slug!r} is not archived")
+        db.audit(conn, admin, "project.unarchive", slug, {"label": row["label"]})
+    conn.commit()
+    return {"ok": True, "slug": slug, "archived": bool(payload.archived),
+            "editors": editors}
 
 
 @router.post("/projects/link")
@@ -3565,6 +3735,15 @@ def _build_admin_users_view(settings, conn: sqlite3.Connection) -> dict[str, Any
     # are the ones only [ DELETE ] on this page can clean up.
     result["computers"] = build_computers_view(conn)
     known = db.known_editor_usernames(conn)
+    # DCORE-4 / OPS-2 (2026-09-04). Both are fleet state, so both are read
+    # here whatever the identity backend: SUSPEND is the button an smb site
+    # never had, and a key an editor's wizard has offered is waiting for a
+    # click on this page and nowhere else.
+    suspended = db.suspended_editors(conn)
+    result["suspended"] = sorted(suspended)
+    result["suspensions"] = {
+        name: db.editor_suspension(conn, name) for name in sorted(suspended)}
+    result["pending_ssh_keys"] = db.fetch_pending_ssh_keys(conn)
     account_names: set[str] = {
         str(u.get("username") or "").lower() for u in (result["local_users"] or [])
     }
@@ -3781,7 +3960,7 @@ def approve_username_error(
     return (
         f"'{username}' is not an editor this dashboard knows. Pick the OWNER of "
         "this computer: one editor can own several computers, so a second "
-        "machine takes the same username as the first. Tick CREATE NEW EDITOR "
+        "computer takes the same username as the first. Tick CREATE NEW EDITOR "
         "if this really is a new person."
     )
 
@@ -3811,6 +3990,26 @@ def normalize_device_id(device_id: str) -> str:
             f"can never connect."
         )
     return cleaned
+
+
+def _blank_key_refusal(request: Request, username: str) -> str | None:
+    """None if this NAS account may be created without an SSH key.
+
+    A blank key is fine for an account that does not exist yet; for one that
+    does, both backends WRITE the key they are given (TrueNAS PUTs
+    `sshpubkey`, DSM rewrites authorized_keys), so a blank one silently
+    erases the key that account's lanes A and B are authenticating with.
+    A NAS we cannot ask is not a reason to refuse: it fails the create a
+    moment later anyway, with its own message."""
+    try:
+        nas = _nas_client_or_503(request)
+        if nas.find_user(username) is not None:
+            return (f"{username} already has an account. Leave the key blank only when "
+                    "creating a new one: to change this editor's key, paste the new key "
+                    "here")
+    except (NasError, HTTPException):
+        return None
+    return None
 
 
 def _local_mode(settings) -> bool:
@@ -3864,8 +4063,19 @@ def api_admin_create_user(
                    "digits, '.', '_', '-'",
         )
     ssh_pubkey = (payload.ssh_pubkey or "").strip()
-    if not looks_like_ssh_pubkey(ssh_pubkey):
+    if ssh_pubkey and not looks_like_ssh_pubkey(ssh_pubkey):
         raise HTTPException(status_code=422, detail="does not look like an OpenSSH public key")
+    if not ssh_pubkey:
+        # OPS-2 / UX-14 (2026-09-04): the key was REQUIRED here, and the only
+        # thing that generates it is the wizard, which cannot run until the
+        # account exists. Blank is allowed for a NEW account (the row shows
+        # [ NO SSH KEY ] and upload and proxy download do not run until one
+        # is added); it is refused for an existing one, because both backends
+        # write the key they are handed and a blank one would erase the key
+        # that account is already using.
+        error = _blank_key_refusal(request, username)
+        if error:
+            raise HTTPException(status_code=422, detail=error)
     try:
         result = nas.create_or_update_editor(username, ssh_pubkey, payload.full_name)
         if payload.password:
@@ -3980,6 +4190,11 @@ def api_admin_disable_user(
             )
     try:
         local_users.disable_user(conn, username, payload.disabled)
+        # DCORE-1 (2026-09-04): half the admin surface wrote nothing to the
+        # ledger and this was one of them. Written on the same connection,
+        # inside the same transaction as the change (db.audit's contract).
+        db.audit(conn, admin, "user.disable" if payload.disabled else "user.enable",
+                 username, {"disabled": bool(payload.disabled)})
     except local_users.LocalUserError as exc:
         # 409 for a guard refusal, 404 only for "no such account": the request
         # is well-formed and would be fine against a different one, which is
@@ -3998,6 +4213,204 @@ def api_admin_disable_user(
                     "token(s) revoked)", admin, username,
                     purged["sessions_revoked"], purged["report_tokens_revoked"])
     return {"ok": True, "purged": purged, "view": build_admin_users_view(settings, conn)}
+
+
+class SetSuspendedIn(BaseModel):
+    suspended: bool = True
+    # Free text an admin can leave for themselves ("back 3 March"). Shown on
+    # the row and in the audit detail; never sent to the companion.
+    reason: str = Field(default="", max_length=255)
+
+
+@router.post("/admin/users/{username}/suspend")
+def api_admin_suspend_user(
+    username: str, payload: SetSuspendedIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Pause (or resume) an editor's whole fleet access. DCORE-4, 2026-09-04.
+
+    NOT auth-method gated, and that is the point: the shipped fleet runs
+    DASH_AUTH_METHOD=smb, where the only "stop this person" control this page
+    had was DELETE -- which removes the NAS account, forgets every computer,
+    removes the Syncthing devices and drops the plan. An owner who wants
+    "pause the freelancer until next month" had a destructive button or
+    nothing.
+
+    Three things happen and none of them destroys anything: the report path
+    turns their computers away with a named reason, the enforce cycle removes
+    their Syncthing shares (the same path a removed tick uses - under-sharing
+    is the safe direction), and the row shows SUSPENDED. The PLAN is
+    deliberately untouched, so [ RESUME ] puts back exactly what was there.
+
+    Nothing here signs anybody out: on a local site DISABLE is still the
+    control for "cannot sign in", and the two are independent on purpose.
+    """
+    admin = _require_admin(request)
+    username = username.strip().lower()
+    if not is_valid_username(username):
+        raise HTTPException(status_code=422, detail="not a valid username")
+    if payload.suspended and username == admin.strip().lower():
+        raise HTTPException(
+            status_code=409,
+            detail="you cannot suspend the account you are signed in as - sign in as "
+                   "another admin to suspend this one")
+    if payload.suspended:
+        if not db.suspend_editor(conn, username, by=admin, reason=payload.reason):
+            raise HTTPException(
+                status_code=404,
+                detail=f"{username!r} is not an editor this dashboard knows")
+        db.audit(conn, admin, "user.suspend", username, {"reason": payload.reason})
+        log.warning("admin %r suspended %r: their computers are being turned away and "
+                    "their shares will be removed on the next enforce cycle", admin, username)
+    else:
+        db.unsuspend_editor(conn, username)
+        db.audit(conn, admin, "user.resume", username, {})
+        log.warning("admin %r resumed %r: their plan was never touched, so the next "
+                    "enforce cycle shares it again", admin, username)
+    conn.commit()
+    return {"ok": True, "suspended": bool(payload.suspended),
+            "view": build_admin_users_view(request.app.state.settings, conn)}
+
+
+# ------------------------------------------------------ SSH keys (OPS-2)
+#
+# The circle UX-14 named: an editor account cannot be created without an SSH
+# public key, and the only thing that generates one is the wizard, which
+# cannot run until the account exists. Two halves break it. The account can
+# now be created WITHOUT a key (see _blank_key_refusal), and the wizard sends
+# its key up here on first sign-in, into a queue an admin approves in one
+# click -- the same shape a Syncthing device id already arrives in.
+
+class SubmitSshKeyIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    ssh_pubkey: str = Field(min_length=1, max_length=db.PENDING_SSH_KEY_MAX_CHARS)
+    # Which computer generated it, for the approve row. Never trusted for
+    # anything: a key is approved onto a PERSON.
+    machine: str = Field(default="", max_length=128)
+
+
+@router.post("/ssh-key")
+def api_submit_ssh_key(
+    payload: SubmitSshKeyIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """The wizard offering the public key it has just generated (OPS-2).
+
+    Authenticated on the identity token /api/v1/verify issued seconds ago and
+    on nothing else: this is the one moment in an editor's life when they
+    have proved who they are and have no account key yet. It GRANTS NOTHING.
+    The key lands in `pending_ssh_keys`, which nothing reads but the Users
+    page, and an admin's click is what installs it.
+    """
+    settings = request.app.state.settings
+    username = payload.username.strip().lower()
+    identity = request.headers.get("x-ccsync-identity", "")
+    id_user = None
+    if settings.session_secret and identity:
+        id_user, _retired = auth.read_identity_token_ex(settings, identity)
+    if not settings.session_secret:
+        raise HTTPException(status_code=503,
+                            detail="identity not configured (DASH_SESSION_SECRET unset)")
+    if id_user is None or id_user != username:
+        raise HTTPException(
+            status_code=401,
+            detail="X-CCSync-Identity required: sign in from the installer or the "
+                   "companion tray first")
+    refusal = _account_refusal(settings, conn, username)
+    if refusal:
+        raise HTTPException(status_code=403, detail=_ACCOUNT_REFUSAL_DETAIL[refusal])
+    key_text = payload.ssh_pubkey.strip()
+    if not looks_like_ssh_pubkey(key_text):
+        raise HTTPException(status_code=422, detail="does not look like an OpenSSH public key")
+    try:
+        fingerprint = local_users.pubkey_fingerprint(key_text)
+    except local_users.LocalUserError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.add_pending_ssh_key(conn, username, fingerprint, key_text,
+                           machine=payload.machine.strip(), source="wizard")
+    db.audit(conn, username, "ssh_key.offered", username,
+             {"fingerprint": fingerprint, "machine": payload.machine.strip()})
+    conn.commit()
+    log.info("%s offered an SSH public key (%s) from %s: waiting for an admin to approve it",
+             username, fingerprint, payload.machine.strip() or "an unnamed computer")
+    return {"ok": True, "pending": True, "fingerprint": fingerprint}
+
+
+class PendingKeyIn(BaseModel):
+    fingerprint: str = Field(min_length=1, max_length=128)
+
+
+def approve_pending_ssh_key(
+    request: Request, conn: sqlite3.Connection, username: str, fingerprint: str, *,
+    admin: str,
+) -> dict[str, Any]:
+    """Install a queued key onto the account, then drop the queue row.
+
+    ONE implementation behind the JSON route and the Users page button, for
+    the reason delete_user_everywhere states: the button must never be a
+    softer door than the route. The queue row is dropped only after the
+    backend has accepted the key, so a NAS that is down leaves the offer
+    where it was rather than losing it."""
+    settings = request.app.state.settings
+    username = username.strip().lower()
+    row = db.get_pending_ssh_key(conn, username, fingerprint)
+    if row is None:
+        raise HTTPException(status_code=404,
+                            detail=f"no key waiting for {username} with that fingerprint")
+    key_text = str(row["key_text"] or "").strip()
+    if _local_mode(settings):
+        try:
+            local_users.add_ssh_key(conn, username, key_text, label=str(row["machine"] or ""))
+        except local_users.LocalUserError as exc:
+            # A key already on the account is not a failure: the offer has
+            # done its job and the row should go.
+            if "already" not in str(exc).lower():
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+    else:
+        nas = _nas_client_or_503(request)
+        try:
+            nas.create_or_update_editor(username, key_text, None)
+        except NasError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{settings.nas_kind}: {exc} - the key is still waiting") from exc
+    db.drop_pending_ssh_key(conn, username, fingerprint)
+    db.record_known_editor(conn, username, "admin")
+    db.audit(conn, admin, "ssh_key.approve", username,
+             {"fingerprint": fingerprint, "machine": row["machine"]})
+    conn.commit()
+    log.warning("admin %r approved the SSH key %s for %r: their upload and proxy download "
+                "can authenticate now", admin, fingerprint, username)
+    return {"ok": True, "username": username, "fingerprint": fingerprint}
+
+
+@router.post("/admin/users/{username}/keys/pending/approve")
+def api_admin_approve_ssh_key(
+    username: str, payload: PendingKeyIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    admin = _require_admin(request)
+    result = approve_pending_ssh_key(request, conn, username, payload.fingerprint,
+                                     admin=admin)
+    return {**result, "view": build_admin_users_view(request.app.state.settings, conn)}
+
+
+@router.post("/admin/users/{username}/keys/pending/dismiss")
+def api_admin_dismiss_ssh_key(
+    username: str, payload: PendingKeyIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Throw an offered key away. Nothing is revoked: the editor's computer
+    still has the private half and can offer it again."""
+    admin = _require_admin(request)
+    username = username.strip().lower()
+    dropped = db.drop_pending_ssh_key(conn, username, payload.fingerprint)
+    if dropped:
+        db.audit(conn, admin, "ssh_key.dismiss", username,
+                 {"fingerprint": payload.fingerprint})
+    conn.commit()
+    return {"ok": True, "dropped": dropped,
+            "view": build_admin_users_view(request.app.state.settings, conn)}
 
 
 def _purge_user_credentials(request: Request, conn: sqlite3.Connection, username: str, *,
@@ -4192,7 +4605,7 @@ def forget_machine_everywhere(request: Request, conn: sqlite3.Connection, editor
         (editor, machine),
     ).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+        raise HTTPException(status_code=404, detail=f"no computer {machine!r} for {editor!r}")
     try:
         removed = _remove_editor_devices(
             settings, [row["syncthing_device_id"]] if row["syncthing_device_id"] else [])
@@ -4625,7 +5038,7 @@ def api_push_machine_update(
         (editor, machine),
     ).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+        raise HTTPException(status_code=404, detail=f"no computer {machine!r} for {editor!r}")
     version = ((payload.version if payload else None) or "").strip()
     if not version:
         current = db.get_current_package(
@@ -4633,14 +5046,14 @@ def api_push_machine_update(
         if current is None:
             raise HTTPException(
                 status_code=409,
-                detail="no current companion package is published for that machine's platform",
+                detail="no current companion package is published for that computer's platform",
             )
         version = current["version"]
     # DCORE-13: what was already parked, read BEFORE this write overwrites it,
     # so the answer can say "you were already waiting on this one".
     pending_before = bool(db.pending_machine_request(conn, editor, machine)["update"])
     if not db.request_machine_update(conn, editor, machine, version, admin, db.utcnow_iso()):
-        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+        raise HTTPException(status_code=404, detail=f"no computer {machine!r} for {editor!r}")
     conn.commit()
     log.info("%s asked %s/%s to update to v%s", admin, editor, machine, version)
     return {"ok": True, "editor": editor, "machine": machine, "version": version,
@@ -4701,17 +5114,18 @@ def api_resume_machine_lane_b(
     admin = _require_admin(request)
     editor, machine = editor.strip().lower(), machine.strip()
     if machine not in db.machines_of(conn, editor):
-        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+        raise HTTPException(status_code=404, detail=f"no computer {machine!r} for {editor!r}")
     if not db.machine_breaker_tripped(conn, editor, machine):
         raise HTTPException(
             status_code=409,
-            detail="that computer's last report does not show proxy download parked, "
-                   "so there is nothing to resume. Wait for its next report and try again.",
+            detail="that computer's last report does not show proxy download "
+                   "stopped, so there is nothing to resume. Wait for its next "
+                   "report and try again.",
         )
     # DCORE-13: read before the write, so a second click can say so.
     pending_before = db.pending_machine_request(conn, editor, machine)["lane_b_resume"]
     if not db.request_lane_b_resume(conn, editor, machine, admin, db.utcnow_iso()):
-        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+        raise HTTPException(status_code=404, detail=f"no computer {machine!r} for {editor!r}")
     conn.commit()
     log.info("%s asked %s/%s to resume proxy download", admin, editor, machine)
     return {"ok": True, "editor": editor, "machine": machine,
@@ -4745,23 +5159,23 @@ def api_copy_machine_plan(
     editor, machine, source = editor.strip().lower(), machine.strip(), source.strip()
     known = set(db.machines_of(conn, editor))
     if machine not in known:
-        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+        raise HTTPException(status_code=404, detail=f"no computer {machine!r} for {editor!r}")
     if source not in known:
-        raise HTTPException(status_code=404, detail=f"no machine {source!r} for {editor!r}")
+        raise HTTPException(status_code=404, detail=f"no computer {source!r} for {editor!r}")
     if source == machine:
         raise HTTPException(status_code=422, detail="source and target are the same computer")
     if editor in db.base_only_editors(conn):
         raise HTTPException(
             status_code=409,
-            detail="this is a base rig account: it works directly off the NAS "
-                   "and syncs nothing, so projects cannot be ticked for it",
+            detail="this account is wired to the server: it works directly off "
+                   "the NAS and syncs nothing, so projects cannot be ticked for it",
         )
     if (editor, machine) in db.base_machines(conn):
         # Per MACHINE (dash-admin-8, 2026-08-21): copying a plan onto a wired
         # computer is a tick on it by another route.
         raise HTTPException(
             status_code=409,
-            detail=f"{machine!r} is a wired machine: it works directly off the NAS "
+            detail=f"{machine!r} is wired to the server: it works directly off the NAS "
                    "and syncs nothing, so a plan cannot be copied onto it",
         )
     # DCORE-2 (usability sweep 2026-09-04): a copy REPLACES a plan, and until
@@ -5124,21 +5538,14 @@ def _row_str(row: sqlite3.Row | dict[str, Any], key: str) -> str:
     return "" if value is None else str(value)
 
 
-def soak_minutes_for(conn: sqlite3.Connection, settings) -> int:
-    """How long a staged build must have run somewhere before it may be made
-    current (REL-1, resilience sweep 2026-08-28).
-
-    A `meta` row wins over the environment so a site can change it without a
-    redeploy, and the floor is ZERO minutes on purpose: an operator who wants
-    the old behaviour back sets it to 0 rather than learning a force flag.
-    """
-    raw = db.meta_get(conn, "release_soak_minutes")
-    if raw is None:
-        raw = getattr(settings, "release_soak_minutes", db.DEFAULT_SOAK_MINUTES)
-    try:
-        return max(0, int(float(str(raw).strip())))
-    except (TypeError, ValueError):
-        return db.DEFAULT_SOAK_MINUTES
+# REL-1 (usability sweep 2026-09-04): both moved to package_store, which is
+# the only writer of companion_packages and therefore the only place a gate
+# stands at EVERY door -- including the two that are not HTTP routes (the
+# feed's `current` policy and the Mac scripts' PUT). Re-exported here because
+# `api.make_current_refusal` is the name three routes, ui.py's htmx twin and
+# db.py's comments all use.
+soak_minutes_for = package_store.soak_minutes_for
+make_current_refusal = package_store.make_current_refusal
 
 
 def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = None) -> dict[str, Any]:
@@ -5347,26 +5754,21 @@ def api_admin_packages(
 
 
 def _refuse_publish_without_space(settings, request: Request) -> None:
+    # REL-7 (usability sweep 2026-09-04): the arithmetic and the sentence live
+    # in dashboard_update.space_refusal now, so the two publish paths that
+    # arrive WITHOUT a human sizing them up -- the vendor feed's auto-publish
+    # and the CLI wizard's install -- refuse on the same floor with the same
+    # words. This route's behaviour is unchanged: 507, or nothing at all when
+    # the volume cannot be measured.
     from . import dashboard_update
 
-    space = _data_space_block(settings)
-    free = int(space.get("free_bytes") or -1)
-    if free < 0:
-        return                    # could not measure: do not guess, do not block
     try:
         declared = int(request.headers.get("content-length") or 0)
     except ValueError:
         declared = 0
-    needed = declared * 3 + dashboard_update.PUBLISH_MIN_FREE_BYTES
-    if free < needed:
-        raise HTTPException(
-            status_code=507,
-            detail=(f"not enough free space on the data volume: "
-                    f"{free // (1024 * 1024)} MiB free, this publish needs about "
-                    f"{needed // (1024 * 1024)} MiB. Old builds are pruned on publish "
-                    "(current plus the two newest are kept); free some space and "
-                    "try again."),
-        )
+    refusal = dashboard_update.space_refusal(settings, declared, what="this publish")
+    if refusal:
+        raise HTTPException(status_code=507, detail=refusal)
 
 
 @router.put("/admin/packages/{platform}/{version}")
@@ -5577,8 +5979,9 @@ async def api_publish_package(
     # auto-publish can never disagree about what "published" means. See
     # package_store.store_verified_package's docstring for what it does and
     # why it raises PackageStoreError rather than HTTPException directly.
+    note = ""
     try:
-        await run_in_threadpool(
+        note = await run_in_threadpool(
             package_store.store_verified_package,
             conn, settings,
             kind=kind, platform=platform, version=version, filename=filename,
@@ -5600,108 +6003,12 @@ async def api_publish_package(
               "arch": arch.strip(), "git_sha": git_sha.strip(),
               "git_dirty": bool(git_dirty), "notes": db.package_notes(notes)})
     conn.commit()
-    return {"ok": True, "view": build_packages_view(conn, settings)}
-
-
-def make_current_refusal(
-    conn: sqlite3.Connection, settings, *, kind: str, platform: str, version: str,
-    force: bool = False, confirm: str = "", now: str | None = None,
-) -> tuple[int, str] | None:
-    """(status, detail) when this build may NOT be handed to the fleet, else
-    None. THE gate (REL-1/SYS-6, REL-3, REL-4/SYS-13, 2026-08-28).
-
-    One function because there are three doors into "make current" -- the JSON
-    route, the Packages page's htmx twin, and the roll-back button -- and a
-    gate that only two of them pass through is not a gate. Order matters: a
-    recall and an ordering violation are facts about the BUILD and no
-    confirmation overrides them, while the soak is a judgement about
-    EVIDENCE, which an admin is allowed to overrule in front of a typed
-    confirmation.
-    """
-    row = db.get_package(conn, platform, version, kind)
-    if row is None:
-        return 404, f"no published {platform} {kind} package {version}"
-    reason = _row_str(row, "retracted_reason")
-    if _row_str(row, "retracted_at"):
-        return 409, (
-            f"{kind} {version} was RECALLED by the vendor"
-            + (f": {reason}" if reason else "")
-            + ". It cannot be made current. Roll the fleet back to a build "
-              "that was not recalled."
-        )
-    requires = _row_str(row, "requires_dashboard")
-    if package_store.blocks_on_dashboard_version(kind, requires):
-        return 409, (
-            f"{kind} {version} needs dashboard {requires} and this dashboard is "
-            f"{VERSION}. Update the dashboard first, then make this build current."
-        )
-    if not _row_str(row, "signature") and not (
-        force and str(confirm or "").strip() == str(version).strip()
-    ):
-        # UX-9 (resilience sweep 2026-08-28). An UNSIGNED build made current
-        # stops every companion upgrading, silently: they verify the record
-        # signature and refuse the offer, and the only signal anywhere was a
-        # chip on this page. A judgement about evidence rather than a fact
-        # about the build, so it goes through the SAME typed override the soak
-        # gate uses -- one mechanism, not two.
-        return 409, (
-            f"{kind} {version} has no release signature. Companions verify "
-            f"signatures, so making it current stops EVERY machine in the fleet "
-            f"from updating, silently. Republish it through tools\\ship.cmd "
-            f"instead. To make it current anyway, type the version number "
-            f"({version}) into the confirmation box."
-        )
-    if _row_value(row, "ever_current"):
-        # A ROLLBACK, not a rollout: this build has been what the fleet was
-        # offered before, so the evidence the soak gate asks for already
-        # exists. Gating it would put the gate in the way of the recovery it
-        # exists to make possible (REL-1, 2026-08-28).
-        return None
-    if kind != "companion" or force:
-        if force and str(confirm or "").strip() != str(version).strip():
-            return 409, (
-                f"to override the soak gate, type the version number "
-                f"({version}) into the confirmation box. Nothing changed."
-            )
-        return None
-    soak = db.soak_state(conn, platform, version,
-                         soak_minutes_for(conn, settings), now)
-    if soak["ok"]:
-        return None
-    if not soak["machines"]:
-        detail = (
-            f"no machine has reported {version} yet, so nothing has run it. "
-            f"Push it to one machine first, leave it for "
-            f"{soak['soak_minutes']} min, then make it current."
-        )
-    elif soak["reverted"]:
-        detail = (
-            f"{soak['reverted']} of the {soak['machines']} machine(s) on {version} "
-            f"had to be rolled back off it by the crash-loop guard."
-        )
-    elif soak["crashes"]:
-        detail = (
-            f"{soak['machines']} machine(s) on {version} have reported "
-            f"{soak['crashes']} crash(es)."
-        )
-    elif not any(d["crash_count"] == 0 for d in soak["detail"]):
-        # "We could not tell" is not "fine" (resilience sweep 2026-08-28): a
-        # companion that never sent a crash section has told us nothing about
-        # whether this build stays up, and a soak is a claim that something
-        # was observed.
-        detail = (
-            f"no machine on {version} has reported its crash counter, so "
-            f"nothing here says the build stays up."
-        )
-    else:
-        detail = (
-            f"{soak['machines']} machine(s) have been on {version} for "
-            f"{soak['minutes']} min; the soak is {soak['soak_minutes']} min."
-        )
-    return 409, (
-        f"{version} has not soaked yet: {detail} Make it current anyway by "
-        f"confirming the override."
-    )
+    # REL-1 (usability sweep 2026-09-04): `note` is non-empty when the publish
+    # asked for make_current and the soak gate refused it. NOT an error status:
+    # the bytes are published and signed, and every publisher (the ship, the
+    # two Mac scripts, publish_latest) prints this sentence rather than
+    # inferring "made current" from the flag it passed.
+    return {"ok": True, "note": note, "view": build_packages_view(conn, settings)}
 
 
 @router.post("/admin/packages/{platform}/{version}/current")
@@ -6209,7 +6516,8 @@ def _note_identity_clone(
                   f"running. This happens when one computer's disk was copied "
                   f"onto another one. Until it is sorted out, neither computer's "
                   f"list of projects to sync is safe: the server cannot tell "
-                  f"which of the two a plan, an update or a halt belongs to. If "
+                  f"which of the two a sync plan, an update or a stop belongs to. "
+                  f"If "
                   f"one of these two names is simply the new name of the other, "
                   f"because that computer was renamed, this clears itself a few "
                   f"minutes after the old name stops reporting and the projects "
@@ -6221,7 +6529,7 @@ def _note_identity_clone(
                  "rename rather than a copy: wait five minutes and it sorts "
                  "itself out. If it is still here after that and one of the two "
                  "computers no longer exists, remove that one with [ FORGET ] on "
-                 "the FLEET page."),
+                 "the SYNC STATUS page."),
             now=now)
     except sqlite3.Error:
         log.warning("could not record the duplicate_machine_id notice for %s",
@@ -7344,6 +7652,21 @@ class CardsAgentIn(_ReportSectionIn):
     last_http_status: int | None = Field(default=None, ge=0, le=1000)
 
 
+class JobsGateIn(_ReportSectionIn):
+    """Why this computer is taking no fleet work of its own accord (CMEDIA-1,
+    usability sweep 2026-09-04).
+
+    A PLAIN STRING for the same reason CardsAgentIn's `state` is one: the
+    companion's gate grows reasons, and a value this build has never heard of
+    must not 422 a whole report. jobs.local_work_words treats only
+    `local_work` as a refusal, so an unknown reason changes nothing -- a
+    dashboard that invents refusals from strings it does not understand is a
+    queue that stops for a typo.
+    """
+    reason: str = Field(default="", max_length=32)
+    detail: str = Field(default="", max_length=255)
+
+
 class CapabilitiesIn(_ReportSectionIn):
     """The companion's `capabilities` section (TIMELINE-CARDS-INTO-CCSYNC.md
     §4.3, 2026-08-29): what this computer can DO.
@@ -7394,6 +7717,10 @@ class CapabilitiesIn(_ReportSectionIn):
     volunteer_until: str | None = Field(default=None, max_length=64)
     resolve: ResolveCapabilityIn | None = None
     cards_agent: CardsAgentIn | None = None
+    # CMEDIA-1: what this machine is busy with ITSELF (a Qwen3-VL batch, a
+    # proxy encode). Absent on a companion older than the gate, which the
+    # scheduler must read as "did not say", never as "idle".
+    jobs_gate: JobsGateIn | None = None
 
 
 class MusicIngestIn(BrollIngestIn):
@@ -7975,23 +8302,34 @@ def api_report(
     if settings.session_secret:
         if not identity:
             raise _refuse_identity(
-                "X-CCSync-Identity required -- sign in from the companion tray "
-                "(Sign in…) to get a machine identity token",
-                "no machine identity token was sent")
+                "X-CCSync-Identity required: sign in from the companion tray "
+                "(Sign in…) to get a computer identity token",
+                "no computer identity token was sent")
         if id_user is None:
             raise _refuse_identity(
-                "X-CCSync-Identity is invalid or expired -- sign in again from the "
+                "X-CCSync-Identity is invalid or expired: sign in again from the "
                 "companion tray",
-                "its machine identity token cannot be verified (the dashboard's "
+                "its computer identity token cannot be verified (the dashboard's "
                 "session secret has changed)")
         if id_user != editor:
             raise _refuse_identity(
                 "X-CCSync-Identity does not match editor_name",
-                "its machine identity token belongs to a different editor")
+                "its computer identity token belongs to a different editor")
     elif identity and id_user is not None and id_user != editor:
         raise _refuse_identity(
             "X-CCSync-Identity does not match editor_name",
-            "its machine identity token belongs to a different editor")
+            "its computer identity token belongs to a different editor")
+    # THE ACCOUNT ITSELF (DCORE-1 / DCORE-4, usability sweep 2026-09-04).
+    # Everything above proves this companion is who it says it is; none of it
+    # asked whether that person is still allowed here. Nothing in the report
+    # path or the enforce cycle read `users.disabled`, so a disabled
+    # contractor's companion kept posting under its never-expiring identity
+    # token, kept being re-registered by record_known_editor every 30 s, and
+    # kept receiving every project ticked for them -- while the Users page
+    # said DISABLED.
+    account_refusal = _account_refusal(settings, conn, editor)
+    if account_refusal:
+        raise _refuse_identity(_ACCOUNT_REFUSAL_DETAIL[account_refusal], account_refusal)
     verified = id_user is not None and id_user == editor
     # This machine IS reporting and IS being accepted: clear yesterday's
     # refusal, and count (or stop counting) it against the rotation drain.
@@ -8749,7 +9087,7 @@ def api_admin_ask_why(
     pending_before = db.pending_machine_request(conn, editor, machine)["diagnostics"]
     if not db.request_diagnostics(conn, editor, machine, admin, db.utcnow_iso()):
         raise HTTPException(status_code=404,
-                            detail=f"no machine {machine!r} for {editor!r}")
+                            detail=f"no computer {machine!r} for {editor!r}")
     conn.commit()
     return {"ok": True, "editor": editor, "machine": machine,
             "pending_before": pending_before,
@@ -8999,7 +9337,9 @@ def _undo_state_sentence(row: Mapping[str, Any]) -> str:
     state = str(row.get("state") or "").strip().lower()
     detail = str(row.get("detail") or "").strip()
     if state == db.RESOLVE_UNDO_PARKED:
-        return detail or ("parked: no project open in Resolve, will resume "
+        # UX-16: "parked" is not one of the three words. Nothing is wrong
+        # here, so it is not "stopped" either: it is waiting.
+        return detail or ("waiting: no project open in Resolve, will resume "
                           "when one is")
     if state == db.RESOLVE_UNDO_RETRYING:
         return detail or "retrying on this computer's next report"
@@ -9039,7 +9379,7 @@ def api_machine_resolve_undo(
         conn, editor, machine, journal, str(match.get("project") or ""),
         admin, db.utcnow_iso())
     if not request_id:
-        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+        raise HTTPException(status_code=404, detail=f"no computer {machine!r} for {editor!r}")
     conn.commit()
     log.info("%s asked %s/%s to undo the clip-path changes in %s",
              admin, editor, machine, journal)

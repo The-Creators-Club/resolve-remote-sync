@@ -44,8 +44,10 @@ PREFIX_SRC="$(slice 'canonical_prefix_letter() {' 'CANONICAL_PREFIX="$(site_valu
 VERIFY_SRC="$(slice 'verify_sha256() {' '# ------')"
 MISSING_FLAGS_SRC="$(slice 'missing_required_flags() {' '# --resolve-mapping-only touches')"
 QUIT_WARN_SRC="$(slice 'resolve_quit_timeout_warning() {' 'resolve_mapping_manual_instructions() {')"
+RESOLVE_APP_SRC="$(slice 'resolve_app_installed() {' 'run_resolve_mapping() {')"
+UNINSTALL_STEP_SRC="$(slice 'print_uninstall_step() {' '# Is Resolve on this Mac')"
 
-for name in SITE_VALUE_SRC PREFIX_SRC VERIFY_SRC LOW_SPACE_SRC MISSING_FLAGS_SRC QUIT_WARN_SRC; do
+for name in SITE_VALUE_SRC PREFIX_SRC VERIFY_SRC LOW_SPACE_SRC MISSING_FLAGS_SRC QUIT_WARN_SRC             RESOLVE_APP_SRC UNINSTALL_STEP_SRC; do
     eval "body=\$$name"
     case "$body" in
         *'}'*) ;;
@@ -62,6 +64,8 @@ eval "$VERIFY_SRC"
 eval "$LOW_SPACE_SRC"
 eval "$MISSING_FLAGS_SRC"
 eval "$QUIT_WARN_SRC"
+eval "$RESOLVE_APP_SRC"
+eval "$UNINSTALL_STEP_SRC"
 
 # --- site_value ------------------------------------------------------------
 # One flat JSON object by contract (dashboard api.api_site). sed, not a JSON
@@ -222,6 +226,49 @@ esac
 case "$QUIT_WARNING" in
     *—*) bad "resolve_quit_timeout_warning contains an em dash" ;;
     *) ok "resolve_quit_timeout_warning has no em dash" ;;
+esac
+
+# --- resolve_app_installed / print_uninstall_step (OPS-11, OPS-17, ---------
+# --- usability + resilience sweep 2026-09-03) ------------------------------
+# OPS-11: status 4 (no preference files) fired for a Mac with no Resolve on it
+# at all, and the advice was "launch it once, quit it, then re-run" -- which
+# cannot be followed and never names the real cause. The bundle probe is what
+# tells the two apart.
+TMP_APP="$(mktemp -d)"
+CCSYNC_RESOLVE_APP="$TMP_APP/DaVinci Resolve.app"
+if resolve_app_installed; then
+    bad "resolve_app_installed said yes for a bundle that is not there"
+else
+    ok "resolve_app_installed says no when the bundle is absent"
+fi
+mkdir -p "$CCSYNC_RESOLVE_APP"
+if resolve_app_installed; then
+    ok "resolve_app_installed finds the bundle it was pointed at"
+else
+    bad "resolve_app_installed missed the bundle at $CCSYNC_RESOLVE_APP"
+fi
+CCSYNC_RESOLVE_APP=""
+rm -rf "$TMP_APP"
+
+# OPS-17: the only copy of the uninstaller used to be inside a package zip the
+# wizard path never delivers, so CC Sync had no way off the machine that an
+# editor or their IT could find.
+UNINSTALLER_PATH="$HOME/.local/ccsync/bin/macos_uninstall.sh"
+UNINSTALL_TEXT="$(print_uninstall_step)"
+case "$UNINSTALL_TEXT" in
+    *"$HOME/.local/ccsync/bin/macos_uninstall.sh"*)
+        ok "the closing banner names the uninstaller it installed" ;;
+    *) bad "the closing banner does not name the uninstaller: $UNINSTALL_TEXT" ;;
+esac
+UNINSTALLER_PATH=""
+UNINSTALL_TEXT="$(print_uninstall_step)"
+case "$UNINSTALL_TEXT" in
+    *"macos_uninstall.sh"*) ok "with no uninstaller installed the banner still says where to get one" ;;
+    *) bad "the banner says nothing about removing CC Sync: $UNINSTALL_TEXT" ;;
+esac
+case "$UNINSTALL_TEXT" in
+    *—*) bad "print_uninstall_step contains an em dash" ;;
+    *) ok "print_uninstall_step has no em dash" ;;
 esac
 
 echo ""

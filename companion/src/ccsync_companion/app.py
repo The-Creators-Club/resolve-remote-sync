@@ -134,7 +134,7 @@ def install_in_progress_problem(cfg: Optional[dict[str, Any]] = None,
     letter = prefix.rstrip("\\/") or "your media drive"
     return (
         "The last install of CCSync on this computer did not finish, so this "
-        f"machine may have no {letter} drive and a half-written setup. Nothing "
+        f"computer may have no {letter} drive and a half-written setup. Nothing "
         "will sync until it is finished. Run the CCSync installer again and "
         "choose FINISH THE INSTALL."
     )
@@ -822,7 +822,7 @@ def _proxy_state_note(state: str) -> str:
         proxy_gen_mod.STATE_PAUSED: "paused",
         proxy_gen_mod.STATE_NO_FFMPEG: "waiting: ffmpeg is not installed here",
         proxy_gen_mod.STATE_DRIVE_ABSENT: "waiting: the sync drive is not connected",
-        proxy_gen_mod.STATE_MISCONFIGURED: "waiting: this machine's sync config needs fixing",
+        proxy_gen_mod.STATE_MISCONFIGURED: "waiting: this computer's sync config needs fixing",
     }.get(state, "")
 
 
@@ -1884,6 +1884,9 @@ class CompanionApp:
                 idle_probe=self._jobs_idle_probe,
                 resolve_running_fn=resolve_prefs_mod.resolve_is_running,
                 halted_fn=lambda: bool(self.halt.active),
+                # CMEDIA-1: the same seam the proxy generator and the two
+                # ingestors negotiate over this machine's GPU with.
+                blocked_fn=self._jobs_block_reason,
                 notify=self._notify_tray,
             )
         except Exception:
@@ -2644,12 +2647,17 @@ class CompanionApp:
         The sentence has to say three things or it produces a support call:
         nothing was deleted, uploads are still running, and there is a tray
         action that fixes it. The tray line and the dashboard alarm carry the
-        same reason string."""
+        same reason string.
+
+        SYNC-106 (sweep 2026-09-03): `reason` is the trigger's technical
+        sentence, which named `remote_root` and told the editor to check a
+        config file they cannot open. The editor's half of it is what goes in
+        the toast; the technical one stays in the log and the report."""
         self._notify_tray(
             "CCSync STOPPED downloading proxies as a safety measure:\n"
-            f"{reason}\n"
-            "Your uploads are still running and nothing has been deleted. When your "
-            'admin says the server is fine, use the tray\'s "Resume proxy download".',
+            f"{lane_guard.breaker_editor_reason(reason)}\n"
+            'When your admin says the server is fine, use the tray\'s '
+            '"Resume proxy download".',
             site_mod.notify_title("proxy download stopped"),
         )
 
@@ -2692,7 +2700,7 @@ class CompanionApp:
             if self.halt.active:
                 scope = self.halt.scope
                 return (
-                    "syncing is halted on this machine"
+                    "syncing is stopped on this computer"
                     + (" by your administrator" if scope == lane_guard.HALT_SCOPE_FLEET else "")
                 )
         except Exception:
@@ -2701,7 +2709,7 @@ class CompanionApp:
         if self._paused:
             return "syncing is paused from the tray"
         if not self._sync_enabled:
-            return "syncing is switched off on this machine"
+            return "syncing is switched off on this computer"
         return ""
 
     def _notify_watch_state(self, message: str) -> None:
@@ -3009,7 +3017,7 @@ class CompanionApp:
         log.warning("clip stored under another machine's path (unfixable here): %s", path)
         self._notify_tray(
             f"\u201c{name}\u201d points at {path[:60]}\u2026 - a path that only exists on "
-            "another editor's machine, so it can never sync or come online here. "
+            "another editor's computer, so it can never sync or come online here. "
             # RES-9 (sweep 2026-09-04): the last two Resolve strings that
             # named a drive letter as a literal. canonical_prefix_label()
             # falls back to "your media drive", which is also the only true
@@ -3361,7 +3369,7 @@ class CompanionApp:
         if not self._sync_enabled:
             log.info("consolidate ignored: sync_enabled=false on this machine")
             self._notify_tray(
-                "This machine works directly off the NAS, so there's nothing to copy in.",
+                "This computer works directly off the server, so there's nothing to copy in.",
                 site_mod.notify_title(),
             )
             return
@@ -3371,7 +3379,7 @@ class CompanionApp:
             return
         if self.config_problems:
             self._notify_tray(
-                "CCSync isn't fully set up on this machine yet, so nothing can be "
+                "CCSync isn't fully set up on this computer yet, so nothing can be "
                 f"copied in. {ui_copy.DIAGNOSTICS}.", site_mod.notify_title())
             return
         if self._root_absent or self._local_root_is_broken():
@@ -4054,7 +4062,7 @@ class CompanionApp:
         more = f" and {len(items) - 1} other clip(s)" if len(items) > 1 else ""
         self._notify_tray(
             f"“{first}”{more} point at paths that only exist on another "
-            "editor's machine, so they can never sync or come online here. "
+            "editor's computer, so they can never sync or come online here. "
             f"Whoever imported them should re-import through "  # RES-9
             f"{self.canonical_prefix_label()} (their companion will offer the "
             f"fix). Details in the log.",
@@ -4343,7 +4351,7 @@ class CompanionApp:
         from . import drive_swap
 
         if not self.p_swap_available():
-            return False, "grade-swap is not available on this machine"
+            return False, "grade-swap is not available on this computer"
         unc = self._server_p_unc()
         self._p_swap_busy = True
         try:
@@ -4948,7 +4956,15 @@ class CompanionApp:
         # capabilities section, and `why` prints "this machine says:
         # user_active" beside the dashboard's own reasoning. The sentence is
         # a tray line and belongs on the tray.
-        return {"taking_work": taking, "reason": state}
+        #
+        # ...with ONE sentence beside it since CMEDIA-1: `local_work` is a
+        # state whose whole content is WHICH local work ("waiting: indexing
+        # b-roll"), and a `why` page that can only print the state code
+        # cannot say it.
+        detail = ""
+        if isinstance(gate, dict):
+            detail = str(gate.get("reason") or "").strip()
+        return {"taking_work": taking, "reason": state, "detail": detail}
 
     def stop_current_job(self) -> bool:
         """Stop the fleet job this machine is running, if any. True when
@@ -5120,7 +5136,7 @@ class CompanionApp:
         mine = next((p for p in self.removable_projects() if p["slug"] == slug), None)
         if mine is None:
             out["blocked"] = True
-            out["reasons"].append("that project is not selected on this machine")
+            out["reasons"].append("that project is not ticked for this computer")
             return out
         rel = mine["rel"]
         # An upload-only project has no shared folder on this machine
@@ -5232,7 +5248,7 @@ class CompanionApp:
                 out["blocked"] = True
                 out["reasons"].append(
                     f"{ui_copy.count(need_local, 'shared file')} have not "
-                    f"arrived on this machine yet"
+                    f"arrived on this computer yet"
                 )
         return out
 
@@ -5277,7 +5293,7 @@ class CompanionApp:
         if not self._managed or self.selection_client is None:
             return False, "not in managed mode"
         if self.effective_mode() == "base":
-            return False, "refusing on the base rig: its tree IS the server tree"
+            return False, "refusing on a wired computer: its tree IS the server tree"
         if self._root_absent:
             # SYNC-13 (2026-08-11): with the drive merely unplugged the steps
             # below all "succeed" -- untick, unshare, then target.exists() is
@@ -5291,7 +5307,7 @@ class CompanionApp:
             )
         rel = next((p["rel"] for p in self.removable_projects() if p["slug"] == slug), None)
         if rel is None:
-            return False, "that project is not selected on this machine"
+            return False, "that project is not ticked for this computer"
         safe_rel = normalized_safe_rel(rel)
         if not safe_rel:
             return False, f"unsafe project path {rel!r} -- nothing was deleted"
@@ -5358,7 +5374,7 @@ class CompanionApp:
                 f"deleted ({exc}). Delete the folder by hand -- it is safe now."
             )
         log.info("remove_project: deleted %s", target)
-        return True, f"'{rel}' removed from this machine. The server copy is untouched."
+        return True, f"'{rel}' removed from this computer. The server copy is untouched."
 
     def editor_identity(self) -> Optional[str]:
         """The editor name to use for reporting/destination-suggestion
@@ -5385,7 +5401,7 @@ class CompanionApp:
 
     def _lane_config_problem_detail(self) -> str:
         return (
-            "NOT SYNCING: this machine isn't fully set up -- "
+            "NOT SYNCING: this computer isn't fully set up -- "
             f"{self.config_problems[0] if self.config_problems else 'see companion.log'}"
         )
 
@@ -5533,11 +5549,11 @@ class CompanionApp:
         try:
             accepted = popup.licence_dialog(
                 site_mod.notify_title("licence agreement"),
-                (f"This machine is NOT SYNCING until someone here accepts the "
+                (f"This computer is NOT SYNCING until someone here accepts the "
                  f"{site_mod.product_name()} licence agreement (version "
                  f"{eula_mod.EULA_VERSION}).\n\n"
                  f"Read it below. Accepting records your agreement on this "
-                 f"machine only, and syncing starts straight away."),
+                 f"computer only, and syncing starts straight away."),
                 document,
             )
         except Exception:
@@ -5658,7 +5674,7 @@ class CompanionApp:
             for lane in self.lanes:
                 try:
                     with lane._lock:
-                        lane._status.detail = "sync disabled: this machine works directly off the NAS"
+                        lane._status.detail = "sync disabled: this computer works directly off the server"
                 except Exception:
                     pass
             log.info("sync disabled by config (sync_enabled=false) -- no lanes started")
@@ -6582,8 +6598,11 @@ class CompanionApp:
             breaker = guard.get("lane_b_breaker") or {}
             if not breaker.get("tripped"):
                 return None
+            # SYNC-106: the editor's half. The dashboard appends this detail
+            # to its own sentence, so what an admin reads on the grid is the
+            # same words the editor is reading at the tray.
             return (f"Proxy download is stopped as a safety measure: "
-                    f"{breaker.get('reason') or 'a safety check failed'}",
+                    f"{lane_guard.breaker_editor_reason(breaker.get('reason'), breaker.get('cause'))}",
                     str(breaker.get("tripped_at") or "") or None)
         if reason == "no_selection":
             state, detail = self.sequencer_state()
@@ -6835,7 +6854,7 @@ class CompanionApp:
                 pass
         if changed:
             self._notify_tray(
-                f"SYNCING IS STOPPED on this machine.\n{reason}\n"
+                f"SYNCING IS STOPPED on this computer.\n{reason}\n"
                 "Nothing is uploading, downloading or sharing until it is started "
                 "again.", site_mod.notify_title("syncing stopped"),
             )
@@ -6861,7 +6880,7 @@ class CompanionApp:
         reason = self.halt.reason
         who = ("your administrator stopped syncing for the whole fleet"
                if self.halt.scope == lane_guard.HALT_SCOPE_FLEET
-               else "syncing is STOPPED on this machine")
+               else "syncing is STOPPED on this computer")
         return f"STOPPED: {who}" + (f" -- {reason}" if reason else "")
 
     def _release_lane_c_folders(self) -> None:
@@ -8040,7 +8059,7 @@ class CompanionApp:
         try:
             health = self.reporter.health()
             accepted = health.get("last_success_at") or (
-                "NEVER (nothing this machine has sent was accepted)")
+                "NEVER (nothing this computer has sent was accepted)")
             out.append(f"  last ACCEPTED: {accepted}")
             out.append(f"  last status: {health.get('last_status') or '(no report yet)'}")
             out.append(f"  failures in a row: {health.get('consecutive_failures')}")
@@ -8861,7 +8880,7 @@ class CompanionApp:
             return
         self._open_work_window(
             "ingest", "INDEXING B-ROLL",
-            "Your clips are indexed on this machine and uploaded to the archive. "
+            "Your clips are indexed on this computer and uploaded to the archive. "
             "Closing this window does not stop it.",
             self._broll_progress_model, self._ingest_window_action)
 
@@ -8897,7 +8916,7 @@ class CompanionApp:
             return
         self._open_work_window(
             "music_ingest", "INDEXING MUSIC",
-            "Your tracks are analysed on this machine and uploaded to the "
+            "Your tracks are analysed on this computer and uploaded to the "
             "library. Closing this window does not stop it.",
             self.music_ingestor.progress_model, self._music_ingest_window_action)
 
@@ -8975,6 +8994,39 @@ class CompanionApp:
             self.stop_proxy_generation()
         elif name == "start_now":
             self.proxy_generator.request_run()
+
+    def _jobs_block_reason(self) -> Any:
+        """`JobRunner.blocked_fn`: a sentence, or False (CMEDIA-1).
+
+        The editor's OWN work on this computer, in the order it would be
+        noticed: a b-roll or a music batch (either ingestor's
+        `blocking_reason()`, the same string the proxy generator stands down
+        with), then a proxy encode. Never the config gate `_proxy_block_reason`
+        answers True for: fleet work is not stopped by a half-configured sync
+        tree, the runner has its own capability gate for that, and True with
+        no words would be a refusal nobody could explain.
+        """
+        for name in ("broll_ingestor", "music_ingestor"):
+            ingestor = getattr(self, name, None)
+            if ingestor is None:
+                continue
+            try:
+                reason = ingestor.blocking_reason()
+            except Exception:
+                log.debug("%s: blocking_reason() failed", name, exc_info=True)
+                continue
+            if reason:
+                return str(reason)
+        generator = getattr(self, "proxy_generator", None)
+        if generator is not None:
+            try:
+                # `encoding` is the bool the tray already renders: clips in
+                # flight right now, not a queue that may never start.
+                if (generator.gap() or {}).get("encoding"):
+                    return "waiting: making proxies"
+            except Exception:
+                log.debug("proxy generator: gap() failed", exc_info=True)
+        return False
 
     def _proxy_block_reason(self) -> Any:
         """`ProxyGenerator.blocked_fn`: True, a reason string, or False.
@@ -9074,7 +9126,7 @@ class CompanionApp:
     def index_music_now(self) -> None:
         """Tray action: "don't wait until I'm away" for the current batch."""
         if self.music_ingestor is None:
-            self._notify_tray("Music indexing is not set up on this machine.")
+            self._notify_tray("Music indexing is not set up on this computer.")
             return
         self.music_ingestor.request_run()
         self._notify_tray(
@@ -9124,7 +9176,7 @@ class CompanionApp:
     def index_broll_now(self) -> None:
         """Tray action: "don't wait until I'm away" for the current batch."""
         if self.broll_ingestor is None:
-            self._notify_tray("B-roll indexing is not set up on this machine.")
+            self._notify_tray("B-roll indexing is not set up on this computer.")
             return
         self.broll_ingestor.request_run()
         self._notify_tray(
@@ -9178,7 +9230,7 @@ class CompanionApp:
     def generate_proxies_now(self) -> None:
         """Tray action: scan now and encode without waiting for idle."""
         if self.proxy_generator is None:
-            self._notify_tray("Proxy generation is not set up on this machine.")
+            self._notify_tray("Proxy generation is not set up on this computer.")
             return
         self.proxy_generator.request_run()
         # The window the owner asked for (2026-08-18): a six-hour encode
@@ -9209,7 +9261,7 @@ class CompanionApp:
         """
         history = getattr(self.proxy_generator, "history", None)
         if history is None:
-            self._notify_tray("Proxy generation is not set up on this machine.")
+            self._notify_tray("Proxy generation is not set up on this computer.")
             return ""
         try:
             path = history.write_report()
@@ -9230,7 +9282,7 @@ class CompanionApp:
         where Resolve already knows about it.
         """
         if self._lut_links is None:
-            self._notify_tray("LUT sharing is not set up on this machine.")
+            self._notify_tray("LUT sharing is not set up on this computer.")
             return
         with self._lut_lock:
             strays = list(self._stray_luts)
@@ -9240,7 +9292,7 @@ class CompanionApp:
         library = self._lut_links.library()
         if not library.is_dir():
             self._notify_tray(
-                "The shared LUT library hasn't synced to this machine yet -- try again later."
+                "The shared LUT library hasn't synced to this computer yet -- try again later."
             )
             return
         total_mb = sum(int(s.get("size") or 0) for s in strays) / (1024 * 1024)
@@ -9264,8 +9316,8 @@ class CompanionApp:
         try:
             confirmed = popup.confirm_dialog(
                 "Share these LUTs with the team?",
-                f"{len(strays)} LUT(s) on this machine ({total_mb:.1f} MB) are not in the shared "
-                f"library.\n\nCopying them to {library} puts them on every editor's machine. "
+                f"{len(strays)} LUT(s) on this computer ({total_mb:.1f} MB) are not in the shared "
+                f"library.\n\nCopying them to {library} puts them on every editor's computer. "
                 f"Your own copies stay where they are.\n\n{preview}",
                 ok_label="SHARE",
             )
@@ -9415,8 +9467,9 @@ class CompanionApp:
             return
         if leftovers:
             self._notify_tray(
-                f"Found {len(leftovers)} half-copied file(s) from an interrupted copy. "
-                f"Nothing was deleted. {ui_copy.DIAGNOSTICS}.",
+                f"Found {ui_copy.count(len(leftovers), 'half-copied file')} "
+                f"from an interrupted copy. Nothing was deleted. "
+                f"{ui_copy.DIAGNOSTICS}.",
                 site_mod.notify_title())
         # ...and the OTHER half of an interrupted FIX ALL: the 0-byte final
         # name it reserved before starting the copy. Unlike the partial above
@@ -9925,7 +9978,7 @@ class CompanionApp:
 
             if errors:
                 self._notify_tray(
-                    "NOT SYNCING: CCSync isn't fully set up on this machine. "
+                    "NOT SYNCING: CCSync isn't fully set up on this computer. "
                     f"{ui_copy.DIAGNOSTICS}.", site_mod.notify_title())
             else:
                 # The licence gate (_start_lanes) is silent apart from the log

@@ -406,3 +406,29 @@ def test_a_role_that_says_nothing_extra_fills_nothing_in(tmp_path):
     section = caps_mod.build(cfg(tmp_path), use_cache=False)
     assert section["cards_agent"] == {"connected": False, "state": "disabled",
                                       "timeline": "", "version": 0, "since": None}
+
+
+def test_the_jobs_gate_carries_the_local_work_detail(tmp_path):
+    """CMEDIA-1: `reason` is the machine-readable state (wave 3's contract)
+    and `detail` is the sentence beside it. For `local_work` the detail IS
+    the answer - "busy indexing b-roll" is what `GET /api/v1/jobs/<id>/why`
+    prints instead of ranking a saturated machine first on longest-idle."""
+    section = caps_mod.build(
+        cfg(tmp_path),
+        jobs_gate_fn=lambda: {"taking_work": False, "reason": "local_work",
+                              "detail": "indexing b-roll first"},
+        use_cache=False)
+    assert section["jobs_gate"] == {"taking_work": False,
+                                    "reason": "local_work",
+                                    "detail": "indexing b-roll first"}
+
+
+def test_an_empty_detail_is_omitted_rather_than_sent_blank(tmp_path):
+    """A companion older than 0.9.69 sends no detail at all, and "" would be
+    a different claim from silence on the dashboard's side."""
+    section = caps_mod.build(
+        cfg(tmp_path),
+        jobs_gate_fn=lambda: {"taking_work": True, "reason": "ready",
+                              "detail": "   "},
+        use_cache=False)
+    assert section["jobs_gate"] == {"taking_work": True, "reason": "ready"}

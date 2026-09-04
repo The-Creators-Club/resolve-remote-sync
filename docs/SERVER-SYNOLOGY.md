@@ -315,7 +315,7 @@ Offboarding is the same command as TrueNAS; on DSM it truncates
 `~/.ssh/authorized_keys` and (with `--lock`) expires the account:
 
 ```sh
-python server/setup_editor_account.py --nas-kind synology \
+python server/setup_editor_account.py --site site.toml --nas-kind synology \
     --name jsmith --revoke-key --apply --lock
 ```
 
@@ -372,10 +372,16 @@ rig"): an unknown host key is refused, `[nas] ssh_hostkey` pins it, and the
 first connection to a new DSM box is
 
 ```sh
-python server/check_health.py --nas-kind synology --trust-host-key-on-first-use
+python server/check_health.py --site site.toml --nas-kind synology --trust-host-key-on-first-use
 ```
 
 which records the key in `~/.ccsync/known_hosts` and prints the line to paste.
+
+> **Every example on this page passes `--site site.toml`** (OPS-24,
+> 2026-09-03). Without it the search order falls through to `$CCSYNC_SITE` and
+> then to `<repo>/site.toml`, so on a laptop holding several customers'
+> manifests an otherwise correct command runs against the wrong NAS. Name the
+> file every time; it costs twelve characters.
 The dashboard's own SSH channel (it writes `authorized_keys` over SSH here,
 because DSM has no key API) is pinned separately by
 `DASH_NAS_SSH_HOSTKEY`, which the deploy fills from the same `site.toml` key.
@@ -389,7 +395,7 @@ itself still has **no login**, so anyone with a shell on the NAS is a Syncthing
 administrator over every folder in the fleet. Add one:
 
 ```sh
-SYNCTHING_API_KEY=... python server/secure_syncthing_gui.py
+SYNCTHING_API_KEY=... python server/secure_syncthing_gui.py --site site.toml
 ```
 
 It leaves the API key alone, so the dashboard and every server script keep
@@ -415,7 +421,7 @@ A snapshot made outside the API (`btrfs subvolume snapshot`, `synobtrfssnap`)
 is invisible to DSM's own list, which keys off `@<share>.meta`.
 
 **Configuring the backup floor** (2026-08-17, `docs/COMMERCIAL_READINESS.md`
-item 8): `python server\setup_snapshots.py --nas-kind synology` reports what
+item 8): `python server\setup_snapshots.py --site site.toml --nas-kind synology` reports what
 exists and what it would change; `--apply` does it. Because DSM cannot be
 scheduled from here without the package, that run prints the exact click path
 and **exits 1** — "the script printed some advice" must never read as "the

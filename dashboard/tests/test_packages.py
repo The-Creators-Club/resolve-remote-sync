@@ -54,6 +54,15 @@ def env(tmp_path):
         admin_users=frozenset({"owen"}),
         packages_dir=str(tmp_path / "pkgs"),
         release_pubkeys=(TEST_PUBKEY,),
+        # REL-1 (usability sweep 2026-09-04): the soak gate stands at the
+        # PUBLISH door now, not only at [ MAKE CURRENT ], so a publish that
+        # asks for make_current stages until a computer has run the build.
+        # This file is about the currency machinery itself (who is offered
+        # what, which bytes the download serves), so it takes the documented
+        # escape a site that wants the old behaviour takes: soak_minutes = 0.
+        # The gate's own tests live in test_release_channel.py, at the
+        # default 30.
+        release_soak_minutes=0,
     )
     app = create_app(settings)
     app.state.credential_verifier = lambda s, u, p: p == "pw"
@@ -399,7 +408,7 @@ def test_feed_policy_current_still_works_through_the_json_route(env):
 def test_c3_confirm_copy_is_pinned_in_confirms_js():
     text = (DASHBOARD_ROOT / "static" / "confirms.js").read_text(encoding="utf-8")
     assert "Publish new builds automatically AND make them current?" in text
-    assert "Every editor's machine will take each new build from the vendor feed" in text
+    assert "Every editor's computer will take each new build from the vendor feed" in text
     assert "without anyone approving it first." in text
     assert "Choose 'stage' if you want to test a build before the fleet gets it." in text
 

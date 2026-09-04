@@ -31,10 +31,20 @@
    an element from its sideways-scroll check only when it carries `scroll-x`,
    and without it the strip read as 259px of unexplained overflow on every
    admin page. #}
+{# SYS-6 (usability sweep 2026-09-03, wave 4): THREE LABELLED RUNS, not
+   fourteen flat entries. The groups are ui.SETTINGS_NAV_GROUPS and
+   SETTINGS_NAV is derived from them, so a page cannot be in the strip and in
+   no run. A run whose every entry is admin-only renders nothing at all for an
+   editor, heading included -- an editor on Transfers must not read a label
+   for a run they cannot enter. #}
 <nav class="settings-nav scroll-x" aria-label="settings">
-  {% for key, label, href, admin_only in SETTINGS_NAV %}
-    {% if session_is_admin or not admin_only %}
-      <a class="btn settings-nav-item{{ ' settings-nav-current' if nav_current == key }}" href="{{ href }}"{{ ' aria-current="page"' | safe if nav_current == key }}>[ {{ label }} ]</a>
+  {% for group, entries in SETTINGS_NAV_GROUPS %}
+    {% set visible = entries | selectattr("3", "equalto", false) | list if not session_is_admin else entries %}
+    {% if visible %}
+      <span class="settings-nav-group">{{ group }}</span>
+      {% for key, label, href, admin_only in visible %}
+        <a class="btn settings-nav-item{{ ' settings-nav-current' if nav_current == key }}" href="{{ href }}"{{ ' aria-current="page"' | safe if nav_current == key }}>[ {{ label }} ]</a>
+      {% endfor %}
     {% endif %}
   {% endfor %}
 </nav>

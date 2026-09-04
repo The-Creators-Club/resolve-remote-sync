@@ -1102,6 +1102,36 @@ class OnboardWizard:
                 f"-- it will already be signed in."
             )
 
+    def _offer_ssh_key(self) -> None:
+        """Send this computer's public key up for the admin to approve
+        (OPS-2, 2026-09-04).
+
+        Best effort by design, and it changes nothing about the rest of the
+        install: the Finish page still prints the key to send by hand, and a
+        dashboard too old to have the route simply 404s. What it buys is the
+        common case -- the admin created the account without a key (which
+        they can now do) and a click on Settings, Users finishes the job with
+        nothing to copy or paste.
+        """
+        if not self.pub_key or not self.identity_token:
+            return
+        import socket
+
+        try:
+            machine = socket.gethostname()
+        except Exception:  # noqa: BLE001 - a name is a nicety here
+            machine = ""
+        result = steps.submit_ssh_key(
+            self.dashboard_url_var.get(), self.verified_username,
+            self.identity_token, self.pub_key, machine)
+        if result.get("ok"):
+            self._append_log("SSH public key sent to the dashboard: your admin approves "
+                             "it on the Users page.")
+        else:
+            self._append_log(f"could not send the SSH key to the dashboard "
+                             f"({result.get('error')}) - send it to your admin from the "
+                             f"last page instead.")
+
     def _worker_editor(self) -> None:
         try:
             if steps.installer_on_forbidden_drive(self._site()):
@@ -1130,6 +1160,7 @@ class OnboardWizard:
 
             self._clean_slate("editor")
             self._write_config_and_identity("editor")
+            self._offer_ssh_key()
 
             # Locate the bundled companion exe; the bootstrap installs it to
             # the canonical %LOCALAPPDATA%\ccsync\bin, registers autostart,

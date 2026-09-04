@@ -149,7 +149,7 @@ def test_every_stacked_cell_says_which_column_it_is(env):
     bare = [td for td in tds if "data-label=" not in td]
     assert not bare, f"cells with no data-label: {bare}"
     # UX-16 (2026-09-03): the column is COMPUTER now.
-    for label in ("STATUS", "EDITOR", "COMPUTER", "LANES", "VERSION", "LAST REPORT"):
+    for label in ("STATUS", "EDITOR", "COMPUTER", "SYNC", "VERSION", "LAST REPORT"):
         assert f'data-label="{label}"' in body
 
 
@@ -205,7 +205,7 @@ def test_the_project_detail_table_stacks_with_labels():
     src = (TEMPLATES / "partials" / "project_detail.html").read_text(encoding="utf-8")
     assert '<table class="editors stack">' in src
     for label in ("STATUS", "EDITOR", "SYNCED", "HAS", "MISSING", "MEDIA",
-                  "LANES", "LAST SEEN"):
+                  "SYNC", "LAST SEEN"):
         assert f'data-label="{label}"' in src
 
 

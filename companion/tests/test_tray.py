@@ -396,7 +396,7 @@ def test_pause_label_carries_state():
     app = _FakeApp({"dashboard_url": ""})
     assert "⏸ Pause syncing" in _menu_labels(_build_menu(app))
     app.paused = True
-    assert "▶ Resume syncing (currently PAUSED)" in _menu_labels(_build_menu(app))
+    assert "▶ Resume syncing (paused by you)" in _menu_labels(_build_menu(app))
 
 
 # -- UX-1 / UX-2 / UX-11 / UX-12: the tray must tell the truth ------------
@@ -424,7 +424,7 @@ def test_lane_line_says_sync_disabled_rather_than_ok():
                         detail="sync disabled: this machine works directly off the NAS")
     line = _format_lane_line(status, _FakeApp({"dashboard_url": ""}))
     assert "OK" not in line
-    assert "not used on this machine" in line
+    assert "not used on this computer" in line
 
 
 def test_lane_line_reports_paused_first():
@@ -848,7 +848,7 @@ def test_the_fingerprint_moves_when_the_stray_lut_count_does():
 
     app.stray_lut_count = lambda: 3
     snap = _tray_snapshot(app)
-    assert any("3 LUTs only on this machine" in l
+    assert any("3 LUTs only on this computer" in l
                for l in _all_menu_labels(_build_menu(app, snap)))
     assert _menu_fingerprint(snap) != fp_none
 
@@ -900,7 +900,7 @@ def test_a_lane_error_while_the_drive_is_out_is_not_a_deleted_project():
     from ccsync_companion.tray import classify_lane_error
 
     raw = "folder(s) in error: 2026-cct-x (folder marker missing)"
-    assert "deleted on this machine" in classify_lane_error(raw)
+    assert "deleted on this computer" in classify_lane_error(raw)
     swapped = classify_lane_error(raw, root_absent=True)
     assert "disconnected" in swapped
     assert "untick" not in swapped.lower()
@@ -2881,7 +2881,7 @@ def test_the_conditional_block_items_appear_and_disappear_together():
     assert any(l.startswith("\u26a0 NOT SET UP") for l in labels)
     assert "\u25ba Accept the licence agreement to start syncing\u2026" in labels
     assert "Set up 'New Doc' on the server\u2026" in labels
-    assert any(l.startswith("\u25ba 5 LUTs only on this machine") for l in labels)
+    assert any(l.startswith("\u25ba 5 LUTs only on this computer") for l in labels)
 
 
 def test_open_my_project_folder_was_renamed_to_open_my_sync_drive():
@@ -2944,10 +2944,17 @@ def test_sync_line_priority_halt_beats_everything():
                    "lane_b_breaker": {"tripped": True}},
         problems=True, paused=True, root_absent=True,
     )
-    assert _sync_line(snap) == "Sync: stopped on this machine"
+    # UX-19: the SECOND reason rides along rather than being dropped - both
+    # switches are set here, and clearing either one leaves this computer not
+    # syncing.
+    assert _sync_line(snap) == "Sync: stopped on this computer (and paused)"
 
     snap["sync_guard"]["halt"]["scope"] = "fleet"
+    assert _sync_line(snap) == "Sync: stopped by your admin (and paused)"
+    snap["paused"] = False
     assert _sync_line(snap) == "Sync: stopped by your admin"
+    snap["sync_guard"]["halt"]["scope"] = "local"
+    assert _sync_line(snap) == "Sync: stopped on this computer"
 
 
 def test_sync_line_breaker_beats_not_set_up_and_paused():

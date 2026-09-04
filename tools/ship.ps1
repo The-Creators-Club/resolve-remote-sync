@@ -106,6 +106,38 @@
     Let a +dirty build be made CURRENT for the fleet (REL-13). Without it a
     dirty ship still publishes, STAGED.
 
+.PARAMETER EmitKindExtras
+    Sign `requires_dashboard` and `arch` into the release record. GATED since
+    2026-09-04 (REL-4): a companion below 0.9.55 does not know those field
+    names, so its signature check fails on the whole record and it refuses the
+    build permanently, with no over-the-air recovery. Step 0a refuses the flag
+    unless every computer that has reported is on 0.9.55 or newer.
+
+.PARAMETER AllowBehind
+    Publish although the live dashboard is OLDER than this companion's
+    REQUIRES_DASHBOARD (SYS-7). The build is then staged there for ever:
+    nobody is offered it, and the fleet page says everyone is up to date.
+    Deploy the dashboard first instead.
+
+.PARAMETER PublishFeed
+    Also publish this build to the VENDOR FEED every customer dashboard reads,
+    not only to -DashboardUrl. Off by default: "CI builds, this rig signs" is
+    the standing policy (tools/publish_latest.py). Needs `gh` and the release
+    key.
+
+.PARAMETER FeedRepo
+    The GitHub repository holding the vendor feed. Only read with -PublishFeed.
+
+.PARAMETER Notes
+    One line of WHAT CHANGED, shown to the editor beside the version number in
+    the update dialog. Unsigned advisory: a sentence must never be able to make
+    a record unverifiable on an older companion.
+
+.PARAMETER AllowUnsignedBinary
+    Publish and make current an exe with no valid Authenticode signature. The
+    upgrade channel's own ed25519 signature is separate and always required;
+    this is about the editor-facing SmartScreen/AV experience.
+
 .PARAMETER AllowKeyRotation
     Publish although this rig's signing key is not one the build the fleet is
     currently on trusts. Every machine on that build refuses this one (REL-7).
@@ -142,7 +174,12 @@ param(
     # REL-7: sign with a key the build the fleet is currently on does not
     # trust. Every machine on it refuses what this publishes.
     [switch]$AllowKeyRotation,
+    # REL-4 (usability sweep 2026-09-04): GATED, in step 0a. It signs the two
+    # optional extra fields into the record, and a companion below 0.9.55
+    # refuses such a record outright and for ever.
     [switch]$EmitKindExtras,
+    # SYS-7: publish a companion the LIVE dashboard is too old to offer.
+    [switch]$AllowBehind,
     # REL-15: continue a ship that stopped part-way, from tools\.ship-state.json.
     [switch]$Resume,
     # COMMERCIAL_READINESS.md item 4 (2026-08-17): make an exe with no valid
@@ -190,6 +227,30 @@ if ($Notes) {
 }
 
 function Write-Step { param([string]$m) Write-Host "[ship] $m" }
+
+# The one version comparison this script makes (REL-4 / SYS-7, 2026-09-04).
+# Numeric per part, because after 0.9.9 comes 0.10.0, never 1.0 (owner's rule
+# 2026-08-18) and a string compare puts 0.10.0 BELOW 0.9.9. An unparseable
+# version answers FALSE -- "we could not tell" is never "fine" on either of the
+# two gates that read this.
+$KindExtrasFloor = "0.9.55"
+
+function Test-VersionAtLeast {
+    param([string]$Have, [string]$Want)
+    if (-not $Have -or -not $Want) { return $false }
+    $a = @(); $b = @()
+    foreach ($part in ($Have -split '\.')) { if ($part -notmatch '^\d+$') { return $false }; $a += [int]$part }
+    foreach ($part in ($Want -split '\.')) { if ($part -notmatch '^\d+$') { return $false }; $b += [int]$part }
+    for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count); $i++) {
+        $x = 0; $y = 0
+        if ($i -lt $a.Count) { $x = $a[$i] }
+        if ($i -lt $b.Count) { $y = $b[$i] }
+        if ($x -gt $y) { return $true }
+        if ($x -lt $y) { return $false }
+    }
+    return $true
+}
+
 function Write-Fail { param([string]$m) Write-Host "[ship] FAILED: $m" -ForegroundColor Red }
 
 # --- the ship journal (REL-15, resilience sweep 2026-08-28) -----------------
@@ -440,6 +501,106 @@ if (-not $DashboardOnly) {
     if (-not $AllowUnsignedBinary) {
         Write-Step "code signing: identity configured"
     }
+}
+
+# --- 0a. gates that read the LIVE dashboard --------------------------------
+# Three refusals that were a comment, a runbook line and nothing at all until
+# the 2026-09-04 usability sweep. All three ask the dashboard this ship
+# publishes to, on the fleet credential it already holds, and all three happen
+# BEFORE the deploy, the suites and a five-minute PyInstaller build -- the same
+# lesson as the two version checks above.
+if (-not $DashboardOnly) {
+    $healthText = ""
+    try {
+        $healthText = Invoke-CurlWithToken -Uri "$DashboardUrl/api/v1/health" `
+            -Token $env:DASH_REPORT_TOKEN -ExtraArgs @("--max-time", "20")
+    }
+    catch { $healthText = "" }
+    $health = $null
+    if ($healthText) {
+        try { $health = ($healthText | Out-String | ConvertFrom-Json) } catch { $health = $null }
+    }
+
+    # REL-4: -EmitKindExtras signs `requires_dashboard`/`arch` into the record.
+    # A companion older than 0.9.55 does not know those field names, so its
+    # signature check fails on the whole record and it refuses the build for
+    # good -- there is no over-the-air recovery from that, only a reinstall by
+    # hand at that desk. The precondition ("once every companion in the fleet
+    # is 0.9.55+") was stated in a code comment, in docs/RELEASE.md and in the
+    # owner's notes, and was checked nowhere.
+    #
+    # The fleet credential answers COUNTS, not names -- api._rollout_block says
+    # why, and it is right: who is behind is an admin question. So this refuses
+    # on "any computer is behind the current build", which is the strongest
+    # answer this credential can give, and names the command that names them.
+    if ($EmitKindExtras) {
+        if ($null -eq $health -or $null -eq $health.rollout) {
+            Write-Fail "-EmitKindExtras: could not read the fleet's versions from $DashboardUrl."
+            Write-Step "That flag permanently strands any computer below ${KindExtrasFloor}: it refuses"
+            Write-Step "the signed record outright, and the only fix is a reinstall at that desk."
+            Write-Step "Check the dashboard is up, then re-run. Do not guess this one."
+            exit 1
+        }
+        $stragglers = @()
+        foreach ($c in @($health.rollout)) {
+            $cur = "$($c.current_version)"
+            if (-not (Test-VersionAtLeast $cur $KindExtrasFloor)) {
+                $stragglers += "$($c.platform) computers are offered $cur, which is below $KindExtrasFloor"
+            }
+            elseif ([int]$c.behind -gt 0) {
+                $stragglers += "$([int]$c.behind) $($c.platform) computer(s) are behind $cur and could be below $KindExtrasFloor"
+            }
+        }
+        if ($stragglers.Count -gt 0) {
+            Write-Fail "-EmitKindExtras is refused: the fleet is not all on $KindExtrasFloor or newer."
+            foreach ($sline in $stragglers) { Write-Step "  $sline" }
+            Write-Step "A computer below $KindExtrasFloor refuses a record carrying the extra signed"
+            Write-Step "fields, silently and permanently: the recovery is a reinstall at that desk."
+            Write-Step "Name them:  .\tools\check_deploy_drift.ps1 -AdminUser $AdminUser"
+            Write-Step "Ship without -EmitKindExtras until every computer has taken a newer build."
+            exit 1
+        }
+        Write-Step "-EmitKindExtras: every reporting computer is on $KindExtrasFloor or newer"
+    }
+
+    # SYS-7: this build's own REQUIRES_DASHBOARD against the dashboard that is
+    # actually running. Publishing a companion the live dashboard is too old to
+    # OFFER leaves the fleet on the build it has while every page says it is up
+    # to date (SYS-2). Step 1 deploys the dashboard first in bind mode, so this
+    # is normally already true; in image mode it is an over-the-air update the
+    # operator has to do, and this is where they find out.
+    $requiresDash = ""
+    $mReq = Select-String -Path "companion\src\ccsync_companion\config.py" `
+        -Pattern '^REQUIRES_DASHBOARD\s*=\s*"([^"]+)"'
+    if ($mReq) { $requiresDash = $mReq.Matches[0].Groups[1].Value }
+    $liveDash = ""
+    if ($health) { $liveDash = "$($health.version)" }
+    if ($requiresDash -and $liveDash -and -not (Test-VersionAtLeast $liveDash $requiresDash)) {
+        if ($AllowBehind) {
+            Write-Host "[ship] WARNING: $DashboardUrl is $liveDash and this companion needs $requiresDash -- publishing anyway (-AllowBehind). It will be STAGED there, never offered." -ForegroundColor Yellow
+        }
+        else {
+            Write-Fail "the live dashboard is $liveDash and this companion needs $requiresDash."
+            Write-Step "It would be published and then never offered to anybody, while the fleet"
+            Write-Step "page reported every computer as up to date (SYS-2)."
+            Write-Step "Deploy the dashboard first:  .\tools\ship.cmd -DashboardOnly"
+            Write-Step "(image mode: SETTINGS, PACKAGES, DASHBOARD, apply the newer bundle.)"
+            Write-Step "Or re-run with -AllowBehind to publish it staged on purpose."
+            exit 1
+        }
+    }
+    elseif ($requiresDash -and -not $liveDash) {
+        Write-Step "NOTE: could not read the live dashboard's version -- the requires_dashboard order is NOT checked"
+    }
+}
+
+# REL-14: one line, never a refusal. The signing key is 32 bytes on one profile
+# on one computer, and losing it ends every fleet's ability to take another
+# build. Nothing in the ship, publish_latest or the drift check had ever asked
+# whether a copy exists.
+$keyBackupRecord = Join-Path $env:USERPROFILE ".ccsync-release\backup.json"
+if (-not (Test-Path -LiteralPath $keyBackupRecord)) {
+    Write-Host "[ship] NOTE: this computer's release key has no recorded backup. If this machine dies, no fleet can ever be updated again:  python tools\release_key.py backup --to <a USB stick>" -ForegroundColor Yellow
 }
 
 # --- 0. the suite that guards what step 1 is about to do --------------------

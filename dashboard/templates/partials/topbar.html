@@ -54,7 +54,7 @@
    absent-at-zero rule: a permanently-present [ 0 ALERTS ] stops being read. #}
 {% set alert_total = (alert_counts.get("error", 0) + alert_counts.get("warn", 0)) if alert_counts is defined and alert_counts else 0 %}
 {% if alert_total %}
-<a class="chip phone-hide {{ 'red' if alert_counts.get('error') else 'amber' }}" href="/admin/alerts"
+<a class="chip phone-hide {{ 'red' if alert_counts.get('error') else 'amber' }}" href="/admin/health"
    title="what the fleet's self-diagnosis currently has open">[ {{ alert_total }} ALERT{{ "S" if alert_total != 1 }} ]</a>
 {% endif %}
 
@@ -88,7 +88,7 @@
            title="the server has found problems it cannot fix by itself">[ {{ notice_counts.error }} PROBLEM{{ "S" if notice_counts.error != 1 }} ]</a>
       {% endif %}
       {% if alert_total %}
-        <a class="chip {{ 'red' if alert_counts.get('error') else 'amber' }}" href="/admin/alerts"
+        <a class="chip {{ 'red' if alert_counts.get('error') else 'amber' }}" href="/admin/health"
            title="what the fleet's self-diagnosis currently has open">[ {{ alert_total }} ALERT{{ "S" if alert_total != 1 }} ]</a>
       {% endif %}
       {% if session_user %}<span class="muted">{{ session_user }}{{ " (admin)" if session_is_admin }}</span>{% endif %}
@@ -123,7 +123,7 @@
       <a class="drawer-item{{ ' drawer-current' if nav_current == 'cards' }}" href="/cards/">[ CARDS ]</a>
     {% endif %}
     {% if session_is_admin %}
-      <a class="drawer-item{{ ' drawer-current' if nav_current in SETTINGS_PAGES }}" href="/admin/settings">[ SETTINGS ]</a>
+      <a class="drawer-item{{ ' drawer-current' if nav_current in SETTINGS_PAGES }}" href="{{ SETTINGS_LANDING }}">[ SETTINGS ]</a>
     {% else %}
       {# An editor has no Settings hub to enter, so the one hub page they ARE
          allowed to see is named here directly. Without this the redesign would
@@ -138,6 +138,7 @@
        strip the same day. Unknown UA is the one case that still paints a page:
        /download renders /installer's two-platform chooser then. #}
     <a class="drawer-item{{ ' drawer-current' if nav_current == 'installer' }}" href="/download">[ INSTALLER ]</a>
+    <a class="drawer-item{{ ' drawer-current' if nav_current == 'help' }}" href="/help">[ HELP ]</a>
   </nav>
   <div class="drawer-foot">
     {% if session_user %}
@@ -210,6 +211,7 @@
 {% endif %}
 <span class="session">
   {% if session_user %}
+    <a class="help-link" href="/help" title="how this works, and what the words mean">[ ? ]</a>
     <span class="muted">{{ session_user }}{{ " (admin)" if session_is_admin }}</span>
     {# The gear: the owner's own request (2026-08-18) for a way into Settings
        that is visible from every page without reading a word. Hand-drawn
@@ -218,7 +220,7 @@
        red from .gear-link. Admins only -- /admin/settings 403s for an
        editor, and a control that always refuses is worse than no control. #}
     {% if session_is_admin %}
-      <a class="gear-link" href="/admin/settings" aria-label="settings" title="settings">
+      <a class="gear-link" href="{{ SETTINGS_LANDING }}" aria-label="settings" title="settings">
         <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false"
              fill="none" stroke="currentColor" stroke-width="2.2">
           <circle cx="12" cy="12" r="5.2"></circle>

@@ -371,7 +371,7 @@ def test_a_403_on_scope_all_falls_back_to_mine(js):
 def test_the_batch_list_shows_machine_heartbeat_and_counts(js):
     body = js[js.index("function ingestRenderBatches"):]
     body = body[:body.index("\n}\n")]
-    assert "batch.machine" in body and "no machine yet" in body
+    assert "batch.machine" in body and "no computer yet" in body
     assert "ingestAgo(batch.last_heartbeat_at)" in body
     # The counters moved into ingestBatchCounts when they were put into words
     # (BROLL-22, 2026-09-04); the card is still what shows them.

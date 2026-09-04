@@ -28,6 +28,14 @@ installer
 tools
 server
 docs
+# ...EXCEPT the two documents the running dashboard serves (REL-5, usability
+# sweep 2026-09-04): the licence agreement the first-run wizard makes an admin
+# accept, and the guide /help renders. 172 KB of markdown, and without them an
+# image-mode container shows an empty licence box with a disabled [ ACCEPT ]
+# and ticks the wizard's `eula` task green. A re-inclusion has to come AFTER
+# the directory that excludes it: the last matching pattern wins.
+!docs/legal
+!docs/HOW_IT_WORKS.md
 broll/indexer
 music/indexer
 

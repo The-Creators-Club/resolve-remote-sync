@@ -1809,3 +1809,68 @@ form.htmx-request select,
 form.htmx-request input { pointer-events: none; }
 /* ===== END sweep wave 3 2026-09-04 ======================================== */
 
+
+/* ===== BEGIN wave 4 of the usability sweep (2026-09-04) =================
+   SYS-6 (three labelled runs in the Settings strip), UX-3 (/help and the
+   [ ? ] that reaches it), UX-22 (the brand on the login page) and DUI-11
+   (a readable hint under every SITE SETTINGS field). Dashboard only: none
+   of these classes exist in the three SPAs' stylesheets. */
+
+/* The run's own label. It is not a link and must not read as one: it is the
+   only non-clickable thing in a row of buttons, so it is quiet, wide-tracked
+   and sits on the same baseline. */
+.settings-nav-group {
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  align-self: center;
+}
+/* A wrapping strip must not orphan a label at the end of a row; the group and
+   the entries that follow it stay together on the same line where they fit. */
+.settings-nav-group + .settings-nav-item { margin-left: -0.6rem; }
+
+/* The [ ? ] in the topbar and beside a sync line. Same red as the gear. */
+.help-link { color: var(--red); white-space: nowrap; }
+.help-link:hover { color: var(--red-hot); }
+
+/* /help. A document, so it gets a reading measure rather than the full
+   width of a fleet grid. */
+.help-main { max-width: 76ch; }
+.help-toc { margin: 0 0 1.4rem; }
+.help-toc ul { list-style: none; margin: 0.4rem 0 0; padding: 0; }
+.help-toc li { padding: 0.1rem 0; }
+.help-toc-3 { padding-left: 1.2rem; }
+.help-doc { line-height: 1.55; }
+.help-doc h1, .help-doc h2, .help-doc h3 { color: var(--red); }
+.help-doc h2 { margin-top: 2rem; }
+.help-doc h3 { margin-top: 1.4rem; font-size: 15px; }
+/* Every heading and every glossary row is a deep-link target, and the topbar
+   is sticky: without this the anchor lands under it. */
+.help-doc :target,
+.help-doc h1, .help-doc h2, .help-doc h3, .help-doc tr { scroll-margin-top: 5rem; }
+.help-doc tr:target { outline: 1px solid var(--red); }
+.help-doc code { background: var(--field); padding: 0 0.2rem; }
+.help-doc pre { background: var(--field); padding: 0.6rem; overflow-x: auto; }
+.help-doc table.help-table { border-collapse: collapse; width: 100%; margin: 0.6rem 0; }
+.help-doc table.help-table th,
+.help-doc table.help-table td {
+  border: 1px solid var(--red-dim);
+  padding: 0.35rem 0.5rem;
+  vertical-align: top;
+  text-align: left;
+}
+
+/* DUI-11: the hint is READ, not hovered. A phone has no hover at all, and
+   this page is the one a first-time customer meets after the wizard. */
+.field-hint { display: inline-block; max-width: 62ch; font-size: 11px; line-height: 1.4; }
+.settings-group-body { padding-top: 0.4rem; }
+
+/* UX-22: the brand above [ SIGN IN ], from the site manifest. */
+.login-brand {
+  color: var(--red);
+  letter-spacing: 0.18em;
+  margin-bottom: 0.6rem;
+}
+/* ===== END wave 4 of the usability sweep ============================== */

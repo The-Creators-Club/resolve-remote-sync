@@ -483,3 +483,76 @@ class DriveReminder:
             pass
         except Exception:
             log.debug("drive reminder: could not delete %s", self._state_path, exc_info=True)
+
+    # -- SYNC-117: the editor can turn the repetition off, for THIS episode --
+    #
+    # Deliberately at the end of the class and written to touch nothing above
+    # it (wave 4, 2026-09-04: another builder owns the sentences in this
+    # module at the same time). The mute is a property of the OPEN EPISODE,
+    # not a setting: it is not written to the record, so a restart with the
+    # drive still out reminds again, and the drive coming back ends it with
+    # everything else clear() ends. drive_reminder_minutes stays the way to
+    # turn the cadence down for good.
+
+    def mute_episode(self, minutes: float = 0.0) -> bool:
+        """Stop reminding about the episode that is open. Returns whether
+        there was one.
+
+        `minutes > 0` is [ REMIND ME LATER ]: silence now, one reminder when
+        it elapses, then the usual cadence. `0` is [ STOP REMINDING ME ABOUT
+        THIS DRIVE ]: silence for the rest of the episode. Neither touches
+        the record, the summary or `active`, so the standing warning line in
+        the tray and in Settings stays exactly where it was - the editor
+        turned off the balloon, not the fact that work is owed."""
+        try:
+            with self._lock:
+                if self._sentence is None:
+                    return False
+                since = self._since
+            self._stop_thread()
+            try:
+                wait_seconds = max(0.0, float(minutes)) * 60.0
+            except (TypeError, ValueError):
+                wait_seconds = 0.0
+            # A SNOOZE is not a mute: the reminders are coming back, so the
+            # window keeps offering both buttons rather than saying they are
+            # off.
+            self._muted_since = since if wait_seconds <= 0 else None
+            if wait_seconds <= 0:
+                log.info("drive reminder: reminders muted for this episode by the "
+                         "editor; the warning line stays and the drive coming back "
+                         "still clears everything")
+                return True
+
+            def _snooze() -> None:
+                try:
+                    if self._stop_event.wait(wait_seconds):
+                        return
+                    if not self.remind_now():
+                        return
+                    # Back to the normal cadence, in this same thread: _loop
+                    # is the cadence, and starting a second thread for it
+                    # would leave two of them reminding.
+                    self._loop()
+                except Exception:
+                    log.exception("drive reminder: the snooze stopped")
+
+            self._stop_event.clear()
+            thread = threading.Thread(
+                target=_snooze, name="ccsync-drive-reminder", daemon=True)
+            self._thread = thread
+            thread.start()
+            log.info("drive reminder: reminders snoozed for %.0f min", minutes)
+            return True
+        except Exception:
+            log.exception("drive reminder: could not mute the episode")
+            return False
+
+    @property
+    def reminders_muted(self) -> bool:
+        """Whether THIS episode is the one that was muted. Compared against
+        the episode's own start time rather than a bare flag: an episode that
+        ended and a new one that began must not inherit the answer."""
+        muted_since = getattr(self, "_muted_since", None)
+        return (self._sentence is not None and muted_since is not None
+                and muted_since == self._since)

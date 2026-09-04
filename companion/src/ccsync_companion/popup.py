@@ -176,8 +176,17 @@ class BatchControl:
         self._skip.clear()
 
 
+# RES-15 (sweep 2026-09-03): the sentence that names rehearsal mode, in the
+# two places an editor or admin can be looking when FIX ALL copies nothing.
+# Here rather than in fixer.py because it is copy, not behaviour, and
+# settings_window.py renders the same string in ADVANCED.
+REHEARSAL_WARNING = ("FIX ALL is in rehearsal mode on this computer and will "
+                     "copy nothing.")
+
+
 def summarize_fix_results(
-    results: list[dict[str, Any]], batch_size: int, stopped_early: bool = False
+    results: list[dict[str, Any]], batch_size: int, stopped_early: bool = False,
+    local_root: str = "",
 ) -> str:
     """The one-line headline over a finished batch.
 
@@ -185,7 +194,26 @@ def summarize_fix_results(
     reporting "3 fixed, 1 failed" for a file the user deliberately abandoned
     reads as a malfunction, and reporting it as fixed is a lie about a file
     that was never copied or relinked. Pure so the wording is testable
-    without Tk."""
+    without Tk.
+
+    A REHEARSAL (`fixer_dry_run`, RES-15) is its own headline and never a
+    count of fixes: `dry_run` results are plans, and the admin rehearsing on
+    a machine whose local_root is in doubt is reading this line to find out
+    where the copies would land."""
+    rehearsal = [r for r in results if r.get("dry_run")]
+    if rehearsal:
+        where = str(local_root or "").strip()
+        if not where:
+            # The plan itself names a destination; its parent chain is the
+            # only root we have when the caller passed none.
+            where = str(rehearsal[0].get("would_copy_to") or "").strip()
+        planned = sum(int(r.get("would_copy") or 0) or 1 for r in rehearsal)
+        head = (f"REHEARSAL: nothing was copied. "
+                f"{ui_copy.count(planned, 'file')} would be copied"
+                + (f" into {where}" if where else "") + ".")
+        if stopped_early and len(results) < batch_size:
+            head += f" Stopped: {batch_size - len(results)} left alone."
+        return head
     fixed = sum(1 for r in results if r.get("ok"))
     skipped = sum(1 for r in results if r.get("aborted"))
     failed = len(results) - fixed - skipped
@@ -214,7 +242,11 @@ def fix_copied_bytes(rows: list[dict[str, Any]], results: list[dict[str, Any]]) 
     The source is still there (FIX ALL copies, it never moves), and a failed
     or skipped attempt has had both its artifacts deleted by fixer.fix_clip,
     so only the successes may be counted."""
-    ok = {str(r.get("file_path") or "") for r in results if r.get("ok")}
+    # A rehearsal's rows are ok and copied NOTHING (RES-15), so they are
+    # excluded here: "copied 12 GB" under "nothing was copied" is the exact
+    # contradiction that made a dry run unreadable.
+    ok = {str(r.get("file_path") or "") for r in results
+          if r.get("ok") and not r.get("dry_run")}
     return sum(_safe_size(str(row.get("file_path") or ""))
                for row in rows if str(row.get("file_path") or "") in ok)
 
@@ -227,6 +259,9 @@ def fix_summary_text(results: list[dict[str, Any]], batch_size: int,
     database and the window simply closed: no count, no size, and no mention
     anywhere in the flow that the change can be undone. Pure, so the wording
     is testable without Tk."""
+    if any(r.get("dry_run") for r in results):
+        # RES-15: nothing was fixed and there is nothing to undo.
+        return summarize_fix_results(results, batch_size)
     fixed = sum(1 for r in results if r.get("ok"))
     failures = [r for r in results if not r.get("ok") and not r.get("aborted")]
     parts = [f"Fixed {fixed} of {batch_size}"]
@@ -881,6 +916,17 @@ class PopupDialog:
         ).grid(row=r, column=0, columnspan=2, sticky="w", pady=(4, 10))
         r += 1
 
+        # RES-15 (sweep 2026-09-03): rehearsal mode is a config key read once
+        # per process, and until now the ONLY sign of it was a batch that
+        # reported every clip as failed. Said before the click, in the header
+        # the editor is already reading, because FIX ALL is the button it
+        # makes inert.
+        if fixer.dry_run_default():
+            _label(self.root, REHEARSAL_WARNING, fg=theme.RED,
+                   font=theme.mono(10, bold=True), wraplength=620
+                   ).grid(row=r, column=0, columnspan=2, sticky="w", pady=(0, 8))
+            r += 1
+
         # FIX ALL / IGNORE at the TOP: with dozens of rows the button bar
         # scrolled off the bottom of the screen and was unreachable.
         btn_bar = tk.Frame(self.root, bg=theme.BG)
@@ -1322,6 +1368,11 @@ class PopupDialog:
         aborted = [r for r in results if r.get("aborted")]
         failures = [r for r in results if not r.get("ok") and not r.get("aborted")]
         stopped_early = self._stop_requested and len(results) < len(batch)
+        # RES-15: a rehearsal reports instead of finishing. It must not fall
+        # into the else-branch below, which closes the window through
+        # on_done: the plan IS the output of a dry run, and closing on it
+        # left the admin with nothing but a log line.
+        rehearsal = [r for r in results if r.get("dry_run")]
 
         # Keep the actual ROWS, so RETRY FAILED can re-run exactly these with
         # the same destinations. The user could previously see only a count.
@@ -1334,7 +1385,7 @@ class PopupDialog:
         for r in failures:
             log.warning("fix all: FAILED %s -- %s", r["file_path"], r["message"])
 
-        if failures or aborted or stopped_early:
+        if failures or aborted or stopped_early or rehearsal:
             try:
                 self._fix_btn.config(state="normal")
                 self._ignore_btn.config(state="normal")
@@ -1345,8 +1396,23 @@ class PopupDialog:
                     self._retry_btn.pack(side="left", padx=(18, 0))
             except Exception:
                 pass
-            head = summarize_fix_results(results, len(batch), stopped_early)
+            head = summarize_fix_results(results, len(batch), stopped_early,
+                                         local_root=self.local_root)
             blocks: list[str] = []
+            if rehearsal:
+                # Neutral rows, not the red "✗ name: message" list: nothing
+                # failed here (RES-15). Each says where that clip would have
+                # landed, which is the whole question a rehearsal answers.
+                shown = "\n".join(
+                    f"{canon.basename(r['file_path'])} would be copied to "
+                    f"{r.get('would_copy_to') or 'your synced folder'}"
+                    for r in rehearsal[:12])
+                if len(rehearsal) > 12:
+                    shown += (f"\n… and {len(rehearsal) - 12} more "
+                              f"(see {ui_copy.OPEN_LOG})")
+                blocks.append(shown)
+                blocks.append(REHEARSAL_WARNING + " Turn it off in "
+                              "Settings, ADVANCED, [ TURN REHEARSAL OFF ].")
             if aborted:
                 names = ", ".join(canon.basename(r["file_path"]) for r in aborted[:6])
                 blocks.append(
@@ -1359,8 +1425,10 @@ class PopupDialog:
                     # the orphan is on the user's disk inside the sync folder
                     # (CORE-H5) and only this process ever knew about it.
                     blocks.append(
-                        "⚠ CCSync could NOT delete the half-copied file(s): "
-                        + "; ".join(leftovers[:6]) + ". Please delete them by hand.")
+                        "⚠ CCSync could NOT delete the "
+                        + ui_copy.count(len(leftovers), "half-copied file")
+                        + ": " + "; ".join(leftovers[:6])
+                        + ". Please delete them by hand.")
             if failures:
                 # Name every failure (up to a readable cap) with its REASON,
                 # not a bare "FAILED" -- the destination lives on an SMB share
@@ -1377,9 +1445,9 @@ class PopupDialog:
                     shown += ("\nThese are online-only cloud files. Make them available "
                               "offline in your cloud drive, then press RETRY FAILED.")
                 blocks.append(shown)
-            if not failures and not aborted:
+            if not failures and not aborted and not rehearsal:
                 blocks.append("Nothing was moved or deleted.")
-            if any(r.get("ok") for r in results):
+            if any(r.get("ok") and not r.get("dry_run") for r in results):
                 # RES-13: a partial run changed the project database too, and
                 # the window that stays open to retry never said the change
                 # could be taken back.

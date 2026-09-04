@@ -24,7 +24,11 @@ reason: one red suite should not cost you a second round trip to see the others.
 ### `windows-latest`
 
 `companion`, `onboarding`, `bench`, and the installer's PowerShell drive-map
-parser test. These are the Windows-first pieces by construction: ctypes Win32
+parser test. That is **one** of the seven scripts in `installer/tests/`
+(`Test-DriveMapParser.ps1`); the other six -- licence gate, previous-install
+rollback, console user, SMB share gone, foreign tree drive, uninstall entry --
+run only when somebody runs them locally, which is a gap worth knowing about
+rather than one this line should hide (noted 2026-09-04). These are the Windows-first pieces by construction: ctypes Win32
 calls, a registry Run key, a logon task, a loopback SMB share, Tk dialogs, and
 a PowerShell bootstrap. Two things happen before any of that:
 

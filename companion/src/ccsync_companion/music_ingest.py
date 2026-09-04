@@ -103,7 +103,7 @@ class MusicIngestor(broll_ingest.BrollIngestor):
             refusal = self.sidecar.refusal(self.cfg)
         except Exception:  # noqa: BLE001
             self.log.debug("the sidecar refusal check failed", exc_info=True)
-            return False, ("this machine could not be checked for the music "
+            return False, ("this computer could not be checked for the music "
                            "indexing model")
         return (not refusal), refusal
 
@@ -252,7 +252,7 @@ class MusicIngestor(broll_ingest.BrollIngestor):
 
         source = item.get("local_path") or ""
         if not source or not os.path.isfile(source):
-            self._fail_item(item, "the source file is not on this machine any more")
+            self._fail_item(item, "the source file is not on this computer any more")
             return
 
         # 1. probe + content hash. Both are cheap, both are what the server's

@@ -96,7 +96,10 @@ def test_dashboard_url_greys_out_when_tailscale_is_actually_signed_in(env, monke
         "Self": {"DNSName": "studio.tail1234.ts.net."}, "TailscaleIPs": []})
     body = client.get("/admin/settings").text
     field = body[body.index('name="dashboard_url"'):]
-    assert "readonly" in field[:200], field[:200]
+    # 400, not 200: DUI-11 (2026-09-04) gave every field a one-sentence
+    # hint with an example, and the `title` now sits between the name and
+    # the readonly attribute.
+    assert "readonly" in field[:400], field[:400]
     assert "studio.tail1234.ts.net" in body
 
 
@@ -144,7 +147,10 @@ def test_nas_syncthing_id_greys_out_when_syncthing_answers_a_device_id(tmp_path,
         classmethod(lambda cls, s, session=None: _FakeSyncthingClient("ABCDEFG-1234567")))
     body = client.get("/admin/settings").text
     field = body[body.index('name="nas_syncthing_id"'):]
-    assert "readonly" in field[:200], field[:200]
+    # 400, not 200: DUI-11 (2026-09-04) gave every field a one-sentence
+    # hint with an example, and the `title` now sits between the name and
+    # the readonly attribute.
+    assert "readonly" in field[:400], field[:400]
     assert "ABCDEFG" in body
     conn.close()
     client.__exit__(None, None, None)

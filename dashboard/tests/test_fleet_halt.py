@@ -128,8 +128,8 @@ def test_a_halted_machine_shows_on_the_grid(env):
         "halt": {"active": True, "scope": "local", "reason": "editor stopped it"},
     }), headers=report_headers())
     page = as_admin(client).get("/partials/fleet")
-    assert "SYNC HALTED" in page.text
-    assert "SYNCING STOPPED on 1 computer" in page.text  # UX-16 / UX-10
+    assert "SYNCING PAUSED ON THIS COMPUTER" in page.text  # CR-179
+    assert "SYNCING IS PAUSED on 1 computer" in page.text  # UX-16 / UX-10
 
 
 def test_the_skipped_exists_counter_reaches_the_grid(env):
@@ -219,7 +219,7 @@ def test_the_fleet_banner_says_when_the_whole_fleet_is_halted(env):
     as_admin(client).post("/api/v1/fleet/halt",
                           json={"active": True, "reason": "restoring the pool"})
     page = as_admin(client).get("/partials/fleet")
-    assert "FLEET SYNC IS HALTED" in page.text
+    assert "SYNCING IS STOPPED ON EVERY COMPUTER" in page.text  # CR-179
     assert "restoring the pool" in page.text
 
 
@@ -231,11 +231,11 @@ def test_the_users_page_panel_halts_and_releases(env):
     resp = as_admin(client).post("/partials/admin/fleet-halt",
                                  data={"active": "1", "reason": "NAS maintenance"})
     assert resp.status_code == 200
-    assert "SYNCING IS HALTED FLEET-WIDE" in resp.text
+    assert "SYNCING IS STOPPED ON EVERY COMPUTER" in resp.text  # CR-179
     assert dbmod.get_fleet_halt(conn)["active"] is True
 
     resp = as_admin(client).post("/partials/admin/fleet-halt", data={"active": "0"})
-    assert "HALT ALL SYNCING" in resp.text
+    assert "STOP ALL SYNCING" in resp.text  # CR-179
     assert dbmod.get_fleet_halt(conn)["active"] is False
 
 
@@ -326,12 +326,12 @@ def test_an_expired_halt_is_released_for_every_reader(env, monkeypatch):
 
     # 2) the fleet grid no longer shows the halt banner
     grid = as_admin(client).get("/partials/fleet")
-    assert "FLEET SYNC IS HALTED" not in grid.text
+    assert "SYNCING IS STOPPED ON EVERY COMPUTER" not in grid.text
 
     # 3) the standing every-page banner reads it as expired, not active
     banner = as_admin(client).get("/partials/fleet-halt-banner")
-    assert "SYNCING IS HALTED ON EVERY COMPUTER" not in banner.text
-    assert "THE FLEET HALT HAS EXPIRED" in banner.text
+    assert "SYNCING IS STOPPED ON EVERY COMPUTER" not in banner.text
+    assert "THE FLEET-WIDE STOP HAS EXPIRED" in banner.text  # CR-179
 
     # ...and get_fleet_halt itself agrees
     assert dbmod.get_fleet_halt(conn)["active"] is False
@@ -391,7 +391,7 @@ def test_halt_history_records_who_when_why_and_released(env):
     assert actions == ["halt", "release", "halt"]
 
     page = as_admin(client).get("/partials/admin/fleet-halt")
-    assert "PREVIOUS HALTS" in page.text
+    assert "PREVIOUS STOPS" in page.text  # CR-179
     assert "first look" in page.text
     assert "second look" in page.text
 
@@ -408,7 +408,7 @@ def test_the_banner_renders_hours_and_machines_on_a_non_fleet_page(env):
     assert 'hx-get="/partials/fleet-halt-banner"' in page.text
 
     banner = as_admin(client).get("/partials/fleet-halt-banner")
-    assert "SYNCING IS HALTED ON EVERY COMPUTER" in banner.text
+    assert "SYNCING IS STOPPED ON EVERY COMPUTER" in banner.text  # CR-179
     assert "1 computer" in banner.text or "computer in the fleet" in banner.text
 
 
@@ -432,7 +432,7 @@ def test_extend_on_an_expired_halt_refuses_rather_than_going_blank(env, monkeypa
     panel = as_admin(client).post(
         "/partials/admin/fleet-halt", data={"active": "1", "extend": "1"})
     assert panel.status_code == 200
-    assert "already ended" in panel.text
+    assert "already started again" in panel.text
     assert prior["expires_at"] in panel.text
     # Nothing was silently re-halted with a blank reason.
     assert dbmod.get_fleet_halt(conn)["active"] is False
@@ -445,7 +445,7 @@ def test_extend_on_an_expired_halt_raises_a_readable_error_at_the_db_layer(env, 
     client, conn = env
     dbmod.set_fleet_halt(conn, True, "restoring the pool", "owen", hours=1,
                          now="2026-08-28T10:00:00+00:00")
-    with pytest.raises(ValueError, match="already ended"):
+    with pytest.raises(ValueError, match="already started again"):
         dbmod.set_fleet_halt(conn, True, "", "owen", extend=True,
                              now="2026-08-29T10:00:00+00:00")
     assert dbmod.get_fleet_halt(conn, now="2026-08-29T10:00:00+00:00")["active"] is False
@@ -475,8 +475,8 @@ def test_c2_halt_confirm_copy_is_pinned():
         encoding="utf-8")
     assert ("Stop syncing on EVERY computer in the fleet? Uploads, proxy downloads "
             "and shared project files stop everywhere until you start them again "
-            "here. Nothing is deleted. Work done while the halt is on will not "
-            "reach anyone until you release it.") in text
+            "here. Nothing is deleted. Work done while it is stopped will not "
+            "reach anyone until you start them again.") in text
 
 
 def test_a_blank_extend_cannot_start_a_halt_through_the_json_route(env):
@@ -489,7 +489,7 @@ def test_a_blank_extend_cannot_start_a_halt_through_the_json_route(env):
     resp = as_admin(client).post(
         "/api/v1/fleet/halt", json={"active": True, "extend": True})
     assert resp.status_code == 422
-    assert "no halt to keep going" in resp.json()["detail"]
+    assert "nothing to keep stopped" in resp.json()["detail"]
     assert dbmod.get_fleet_halt(_conn)["active"] is False
 
 

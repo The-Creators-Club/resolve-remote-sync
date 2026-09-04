@@ -286,7 +286,7 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
-$InstallerVersion = "1.0.40"
+$InstallerVersion = "1.0.41"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see
@@ -805,7 +805,14 @@ if (-not $RemoteRoot) {
     Add-CapabilityMiss "the NAS project-tree path is not known: no -RemoteRoot was given and $DashboardUrl/api/v1/site does not publish one. Lanes A and B have nowhere to sync to -- ask your admin for the absolute NAS path (e.g. /mnt/<pool>/<share>/<tree> or /volume1/<share>/<tree>) and re-run with -RemoteRoot."
 }
 elseif (-not $RemoteRoot.StartsWith("/")) {
-    Write-Warn2 "-RemoteRoot '$RemoteRoot' is not absolute. The SFTP session starts in your home directory on the NAS, so a relative path resolves under ~/ and will not find the project tree. Prefix it with '/'."
+    # OPS-12 (usability + resilience sweep 2026-09-03): a MIS-TYPED root was a
+    # warning and a green run, which is worse than the empty case above. A
+    # relative path resolves under the editor's SFTP home, so upload puts
+    # camera originals where nothing indexes them and the dashboard never sees
+    # them. Same verdict as empty now, and the value is dropped so the config
+    # seeding below leaves the key unwritten.
+    Add-CapabilityMiss "-RemoteRoot '$RemoteRoot' is not an absolute path, so nothing was configured for upload and proxy download. The SFTP session starts in your home directory on the NAS, so a relative path would put camera originals somewhere the server never looks. Ask your admin for the absolute NAS path (e.g. /mnt/<pool>/<share>/<tree> or /volume1/<share>/<tree>) and re-run with -RemoteRoot."
+    $RemoteRoot = ""
 }
 
 $IsElevated = Test-IsElevated
@@ -828,6 +835,125 @@ else {
 
 $BinDir = "$env:LOCALAPPDATA\ccsync\bin"
 Ensure-Dir $BinDir
+
+# --------------------------------------------------------------------
+# 1a. THE WAY OUT: Apps & features, and the uninstaller beside the app
+# --------------------------------------------------------------------
+# OPS-17 (usability + resilience sweep 2026-09-03). windows_uninstall.ps1
+# shipped inside the editor package zip and nowhere else, and the wizard path
+# never delivers that zip -- so an editor who was onboarded by onboard.exe had
+# no copy of it, and CC Sync appeared in no uninstall list on the machine. To
+# the editor, to their own IT and to the next reviewer of this product, that
+# is a background app with a tray icon and a firewall rule that cannot be
+# removed.
+#
+# HKCU, not HKLM: this installer runs unelevated by design, the app is
+# per-user (%LOCALAPPDATA%), and a machine-wide entry would offer to remove an
+# app the next user does not have. Windows lists both in Apps & features.
+$UninstallKeyRoot = if ($env:CCSYNC_UNINSTALL_KEY_ROOT) { $env:CCSYNC_UNINSTALL_KEY_ROOT }
+                    else { "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" }
+# The id under that root. Stable across versions on purpose: a re-run
+# overwrites the same entry rather than adding a second one.
+$UninstallKeyName = "CCSync"
+
+function Register-UninstallEntry {
+    <#
+      .SYNOPSIS
+        Write the Apps & features entry for this per-user install (OPS-17).
+      .DESCRIPTION
+        Pure enough to test: every path, name and version is a parameter, and
+        the key root is one too, so installer/tests/Test-UninstallEntry.ps1
+        drives it against a scratch key under HKCU. Returns $true when the
+        entry is there afterwards. NEVER throws at the caller: an install that
+        works is not failed by a registry value, and the caller warns.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$KeyRoot,
+        [Parameter(Mandatory)][string]$KeyName,
+        [Parameter(Mandatory)][string]$DisplayName,
+        [Parameter(Mandatory)][string]$UninstallScript,
+        [string]$Publisher = "CC Sync",
+        [string]$Version = "",
+        [string]$InstallLocation = "",
+        [string]$IconPath = ""
+    )
+    $key = Join-Path $KeyRoot $KeyName
+    try {
+        if (-not (Test-Path -LiteralPath $key)) { New-Item -Path $key -Force | Out-Null }
+        # -File, quoted: the path is under %LOCALAPPDATA%, which contains the
+        # user's name and therefore, often enough, a space. -NoProfile and
+        # -ExecutionPolicy Bypass because an editor's machine commonly has the
+        # default Restricted policy, which would refuse the script Windows is
+        # about to run on their behalf.
+        $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$UninstallScript`""
+        New-ItemProperty -Path $key -Name "DisplayName" -Value $DisplayName -PropertyType String -Force | Out-Null
+        New-ItemProperty -Path $key -Name "UninstallString" -Value $cmd -PropertyType String -Force | Out-Null
+        New-ItemProperty -Path $key -Name "Publisher" -Value $Publisher -PropertyType String -Force | Out-Null
+        if ($Version) {
+            New-ItemProperty -Path $key -Name "DisplayVersion" -Value $Version -PropertyType String -Force | Out-Null
+        }
+        if ($InstallLocation) {
+            New-ItemProperty -Path $key -Name "InstallLocation" -Value $InstallLocation -PropertyType String -Force | Out-Null
+        }
+        if ($IconPath -and (Test-Path -LiteralPath $IconPath)) {
+            New-ItemProperty -Path $key -Name "DisplayIcon" -Value $IconPath -PropertyType String -Force | Out-Null
+        }
+        # There is no repair and no modify: the only supported change is
+        # re-running the installer, so do not offer buttons that do nothing.
+        New-ItemProperty -Path $key -Name "NoModify" -Value 1 -PropertyType DWord -Force | Out-Null
+        New-ItemProperty -Path $key -Name "NoRepair" -Value 1 -PropertyType DWord -Force | Out-Null
+        return (Test-Path -LiteralPath $key)
+    }
+    catch { return $false }
+}
+
+# The uninstaller (and the drive library it dot-sources) live beside the app
+# it removes, because the package zip is not something an editor keeps.
+$UninstallScriptPath = Join-Path $BinDir "windows_uninstall.ps1"
+$uninstallSource = Join-Path $PSScriptRoot "windows_uninstall.ps1"
+if ($DryRun) {
+    Write-Step "[dry-run] would copy windows_uninstall.ps1 to $BinDir and register an Apps & features entry"
+}
+elseif (Test-Path -LiteralPath $uninstallSource) {
+    try {
+        Copy-Item -LiteralPath $uninstallSource -Destination $UninstallScriptPath -Force
+        # windows_uninstall.ps1 dot-sources drive_mapping.ps1 from beside
+        # itself; without it the drive mapping and its loopback share are left
+        # alone and the two commands are only printed.
+        $mappingSource = Join-Path $PSScriptRoot "drive_mapping.ps1"
+        if (Test-Path -LiteralPath $mappingSource) {
+            Copy-Item -LiteralPath $mappingSource -Destination (Join-Path $BinDir "drive_mapping.ps1") -Force
+        }
+        Write-Step "installed the uninstaller: $UninstallScriptPath"
+    }
+    catch {
+        Write-Warn2 "could not copy windows_uninstall.ps1 into $BinDir ($($_.Exception.Message)). Keep the installer package: it is the only other copy."
+        $UninstallScriptPath = ""
+    }
+}
+else {
+    # A bootstrap run on its own, out of the package. Nothing to copy, and no
+    # entry pointing at a file that is not there.
+    $UninstallScriptPath = ""
+}
+
+if (-not $DryRun -and $UninstallScriptPath) {
+    # The name a person reads in Apps & features. The customer's own name when
+    # the site publishes one, the product name otherwise -- no customer's name
+    # is ever compiled in (CLAUDE.md).
+    $brandOrg = Get-SiteValue "org_name"
+    $entryName = if ($brandOrg) { "CC Sync ($brandOrg)" } else { "CC Sync" }
+    $registered = Register-UninstallEntry -KeyRoot $UninstallKeyRoot -KeyName $UninstallKeyName `
+        -DisplayName $entryName -UninstallScript $UninstallScriptPath `
+        -Publisher $(if ($brandOrg) { $brandOrg } else { "CC Sync" }) `
+        -Version $InstallerVersion -InstallLocation $BinDir -IconPath $CompanionExePath
+    if ($registered) {
+        Write-Step "CC Sync is listed in Apps & features (Settings > Apps > Installed apps)"
+    }
+    else {
+        Write-Warn2 "could not add CC Sync to Apps & features. To remove it later, run: powershell -NoProfile -ExecutionPolicy Bypass -File `"$UninstallScriptPath`""
+    }
+}
 
 # --------------------------------------------------------------------
 # 1. Tailscale

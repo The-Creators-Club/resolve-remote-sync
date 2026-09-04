@@ -1772,7 +1772,7 @@ function renderDownloads(job, r) {
     // rows in it and click one. `reveal_path` rides on the manifest row now;
     // a row from a build that sent none is left exactly as it was.
     if (v.dl_state === 'done' && v.reveal_path) {
-      row.title = 'open this clip\'s folder on this machine';
+      row.title = 'open this clip\'s folder on this computer';
       row.onclick = () => reveal(v);
     }
     list.appendChild(row);
@@ -1891,7 +1891,7 @@ function sizeEstimate(secs, quality) {
 function freeNote(job) {
   const free = job && job.claim_free_bytes;
   if (free == null || !(Number(free) > 0)) return '';
-  return `${fmtGB(Number(free))} free on the download machine`;
+  return `${fmtGB(Number(free))} free on the computer doing the download`;
 }
 
 function renderGrid() {
@@ -2376,8 +2376,8 @@ let lastCompanionRefusal = "";
 function explainCompanionRefusal(reason) {
   if (reason === lastCompanionRefusal) return;
   lastCompanionRefusal = reason;
-  toast("Please first accept the download terms in the companion: right-click the " +
-        "tray icon, then 'Accept YouTube Terms'. This download runs on the server instead.",
+  toast("Please first accept the download terms in the CC Sync tray: right-click " +
+        "the tray icon, then 'Accept YouTube Terms'. This download runs on the server instead.",
         true, 12000);
 }
 
@@ -2419,7 +2419,7 @@ function initLocalSwitch() {
     try { localStorage.setItem(LOCAL_KEY, box.checked ? '1' : '0'); }
     catch { /* it still applies to this download */ }
     toast(box.checked
-      ? 'downloads will be offered to this machine first'
+      ? 'downloads will be offered to this computer first'
       : 'downloads will run on the server. YouTube originals only sync '
         + 'upwards, so you can fetch one later from the download history.');
     // CR-72 follow-up: the picker's own `local` param tracks this switch, so
@@ -2448,7 +2448,7 @@ function noteLocalSkipped(why) {
   lastLocalNote = why;
   toast(`Downloading on the server: ${why}. YouTube originals only sync `
         + 'upwards, so use the download history to fetch a clip onto this '
-        + 'machine.', false, 12000);
+        + 'computer.', false, 12000);
 }
 
 // Is there a companion on this machine willing to do the work? 200 with
@@ -2467,8 +2467,8 @@ async function companionCapabilities() {
     try {
       const res = await fetch(`${COMPANION_URL}/ytdl/capabilities`, {signal: ctl.signal});
       if (!res.ok) {                       // 404: a companion predating 0.8.0
-        noteLocalSkipped('the CC Sync companion on this machine is too old to '
-                         + 'download YouTube clips (upgrade it from the tray)');
+        noteLocalSkipped('the CC Sync tray on this computer is too old to '
+                         + 'download YouTube clips (take the update it offers)');
         return null;
       }
       body = await res.json();
@@ -2494,13 +2494,13 @@ async function companionCapabilities() {
   if (body && /terms/i.test(String(body.reason || ""))) {
     explainCompanionRefusal(String(body.reason));
   } else if (body) {
-    noteLocalSkipped(String(body.reason || 'this machine declined the job'));
+    noteLocalSkipped(String(body.reason || 'this computer declined the job'));
   } else if (unreachable) {
-    noteLocalSkipped('the CC Sync companion is not answering on this machine '
-                     + '(is the tray app running? self-test: open '
+    noteLocalSkipped('the CC Sync tray is not answering on this computer '
+                     + '(is it running? self-test: open '
                      + 'http://127.0.0.1:8899/status)');
   } else {
-    noteLocalSkipped('the CC Sync companion did not answer in time');
+    noteLocalSkipped('the CC Sync tray did not answer in time');
   }
   return null;
 }
@@ -2529,7 +2529,7 @@ async function dispatchLocal(jobId, quality) {
   // does not know, dispatches exactly as before.
   if (Array.isArray(cap.scope_qualities) && quality
       && !cap.scope_qualities.includes(quality)) {
-    noteLocalSkipped(`this machine only downloads `
+    noteLocalSkipped(`this computer only downloads `
       + `${cap.scope_qualities.join(', ')} and this job is ${quality}`);
     return false;
   }
@@ -2546,11 +2546,11 @@ async function dispatchLocal(jobId, quality) {
     // simply means the server worker keeps the job, which it has all along.
     if (res.status === 202) return true;
     noteLocalSkipped(res.status === 409
-      ? 'this machine is already downloading another job'
-      : `this machine declined the job (HTTP ${res.status})`);
+      ? 'this computer is already downloading another job'
+      : `this computer declined the job (HTTP ${res.status})`);
     return false;
   } catch {
-    noteLocalSkipped('the CC Sync companion stopped answering between the '
+    noteLocalSkipped('the CC Sync tray stopped answering between the '
                      + 'check and the hand-off');
     return false;
   }
@@ -2568,7 +2568,7 @@ function renderMode(job) {
   // the header this page has always had (§10, phase 1).
   const mode = state.localDownload ? job.download_mode : null;
   const live = job.phase === 'downloading';
-  badge.textContent = mode === 'local' ? 'downloading on your machine'
+  badge.textContent = mode === 'local' ? 'downloading on your computer'
     : mode === 'server' ? 'downloading on the server' : '';
   // Which editor holds the lease, for the case the answer is surprising -- a
   // title rather than a line, because for a local job it is always this editor.
@@ -2593,7 +2593,7 @@ async function lockToServer() {
   try {
     await post(`api/jobs/${state.jobId}/mode-lock`, {mode: 'server'});
     toast('handing this job back to the server: it picks up whatever your '
-          + 'machine has not finished');
+          + 'computer has not finished');
   } catch (e) {
     // A deliberate human action, unlike the dispatch above: this one says so
     // when it fails, and comes back so a blip is not a dead end.
@@ -2688,7 +2688,7 @@ function localProgressLine(job) {
   const clip = job.dl_total
     ? `clip ${Math.min(job.dl_total, (job.dl_done || 0) + 1)}/${job.dl_total}` : '';
   if (String(p.phase || '') === 'converting') {
-    return [clip, 'converting to H.264 on your machine'].filter(Boolean).join(' · ');
+    return [clip, 'converting to H.264 on your computer'].filter(Boolean).join(' · ');
   }
   const pct = p.percent == null ? '' : `${Math.round(Number(p.percent) || 0)}%`;
   const speed = fmtSpeed(p.speed);
@@ -2714,16 +2714,16 @@ async function stopLocalDownload() {
       body: JSON.stringify({job_id: jobId}),
     });
     if (res.status === 404) {
-      toast('this companion is too old to be asked to stop. Use [ CANCEL ] to '
+      toast('this CC Sync tray is too old to be asked to stop. Use [ CANCEL ] to '
             + 'end the job, or [ DOWNLOAD ON THE SERVER INSTEAD ].', true, 12000);
     } else if (res.ok) {
-      toast('asking your machine to stop: the clip it is on ends now and the '
+      toast('asking your computer to stop: the clip it is on ends now and the '
             + 'server picks up the rest');
     } else {
-      toast(`your machine would not stop it (HTTP ${res.status})`, true);
+      toast(`your computer would not stop it (HTTP ${res.status})`, true);
     }
   } catch {
-    toast('the CC Sync companion is not answering on this machine', true);
+    toast('the CC Sync tray is not answering on this computer', true);
   }
   if (btn) btn.disabled = false;
 }
@@ -2833,7 +2833,7 @@ function historyRow(d) {
     (d.downloaded_at || '').slice(0, 16).replace('T', ' ')));
 
   if (d.reveal_path) {
-    row.title = 'open this clip\'s folder on this machine';
+    row.title = 'open this clip\'s folder on this computer';
     row.onclick = () => reveal(d);
   } else {
     // A row from a build that recorded no path (YTDL-15's shape). Shown, never
@@ -2865,15 +2865,15 @@ async function reveal(d) {
     // A rejected fetch also happens when the browser blocks a plain-HTTP
     // dashboard origin from reaching 127.0.0.1 (Chrome's local-network
     // permission) with a perfectly healthy companion behind it (2026-08-12).
-    noCompanion(d, 'couldn’t reach the CC Sync companion: it may not be '
+    noCompanion(d, 'couldn’t reach the CC Sync tray: it may not be '
                 + 'running, or the browser blocked local connections (self-test: '
                 + 'open http://127.0.0.1:8899/status)');
     return;
   }
   if (res.status === 404) {
     // The tray app is there but predates this route: an upgrade, not a bug.
-    noCompanion(d, 'your companion is too old to open folders; it will be able '
-                + 'to after the next upgrade');
+    noCompanion(d, 'your CC Sync tray is too old to open folders; it will be '
+                + 'able to after the next upgrade');
     return;
   }
   let body = null;
@@ -2883,16 +2883,16 @@ async function reveal(d) {
   // at all, and ok:true when the folder opened but the clip was not in it. Both
   // are the same dead end for the editor, and both are now offerable.
   if (body && body.absent) {
-    offerFetch(d, (body && body.message) || 'that clip is not on this machine');
+    offerFetch(d, (body && body.message) || 'that clip is not on this computer');
     return;
   }
   if (!res.ok || !body || body.ok === false) {
     const message = (body && (body.message || body.error))
-      || `the companion answered HTTP ${res.status}`;
+      || `the CC Sync tray answered HTTP ${res.status}`;
     noCompanion(d, message);
     return;
   }
-  toast((body && body.message) || 'opened the folder on this machine');
+  toast((body && body.message) || 'opened the folder on this computer');
 }
 
 // ------------------------------------------------- getting a clip off the NAS
@@ -2925,20 +2925,20 @@ async function runFetch(d) {
       body: JSON.stringify({rel_path: d.reveal_path}),
     });
   } catch {
-    noCompanion(d, 'couldn’t reach the CC Sync companion to fetch that clip');
+    noCompanion(d, 'couldn’t reach the CC Sync tray to fetch that clip');
     return;
   }
   if (res.status === 404) {
     // The route landed in 0.9.4. An older tray app is an upgrade away from
     // this working, which is a different sentence from "it is broken".
-    noCompanion(d, 'your companion is too old to fetch clips from the NAS; it '
-                + 'will be able to after the next upgrade');
+    noCompanion(d, 'your CC Sync tray is too old to fetch clips from the NAS; '
+                + 'it will be able to after the next upgrade');
     return;
   }
   let body = null;
   try { body = await res.json(); } catch { /* status is all we have */ }
   if (!res.ok || !body) {
-    noCompanion(d, `the companion answered HTTP ${res.status}`);
+    noCompanion(d, `the CC Sync tray answered HTTP ${res.status}`);
     return;
   }
   if (body.state === 'downloading') {
@@ -2951,7 +2951,7 @@ async function runFetch(d) {
   }
   if (body.ok) {
     // Here now. Open the folder, which is what the original click was for.
-    toast(body.message || 'the clip is on this machine now');
+    toast(body.message || 'the clip is on this computer now');
     reveal(d);
     return;
   }

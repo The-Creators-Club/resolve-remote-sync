@@ -317,3 +317,73 @@ def test_the_drive_coming_back_clears_a_state_episode(tmp_path):
     assert reminder.remind_now() is False
     again, _n = _reminder(tmp_path)
     assert again.resume_remembered() is False
+
+
+# -- SYNC-117: the editor can silence an episode ----------------------------
+
+
+def test_muting_stops_the_balloons_and_keeps_everything_else(tmp_path):
+    """The record, the summary and `active` are untouched: the editor turned
+    off the balloon, not the fact that work is owed."""
+    reminder, notes = _reminder(tmp_path)
+    reminder.begin("2 uploads (2.3 GB left)")
+    assert len(notes.sent) == 1
+
+    assert reminder.mute_episode() is True
+    assert reminder.reminders_muted is True
+    assert reminder.active is True
+    assert reminder.summary == "2 uploads (2.3 GB left)"
+    assert (tmp_path / "state" / dr.STATE_FILENAME).exists()
+    # remind_now is still the thread's call; what stopped is the thread.
+    assert reminder._thread is None
+
+
+def test_the_drive_coming_back_ends_the_mute_with_the_episode(tmp_path):
+    reminder, _notes = _reminder(tmp_path)
+    reminder.begin("2 uploads")
+    reminder.mute_episode()
+    reminder.clear()
+    assert reminder.reminders_muted is False
+
+    # A NEW episode is not muted by the last one's click.
+    reminder.begin("1 upload")
+    assert reminder.reminders_muted is False
+    assert reminder.active is True
+
+
+def test_muting_nothing_says_so(tmp_path):
+    reminder, _notes = _reminder(tmp_path)
+    assert reminder.mute_episode() is False
+    assert reminder.reminders_muted is False
+
+
+def test_a_snooze_reminds_again_when_it_elapses(tmp_path):
+    """[ REMIND ME LATER ] is silence and then the usual cadence, not a
+    mute: the minutes are passed in seconds-per-minute terms, so a tiny
+    value is the whole test."""
+    reminder, notes = _reminder(tmp_path, interval=0.05)
+    reminder.begin("2 uploads")
+    before = len(notes.sent)
+    assert reminder.mute_episode(minutes=0.02 / 60.0) is True
+    assert reminder.reminders_muted is False   # snoozed, not muted
+
+    deadline = time.time() + 5.0
+    while len(notes.sent) == before and time.time() < deadline:
+        time.sleep(0.02)
+    assert len(notes.sent) > before
+    reminder.clear()
+
+
+def test_a_mute_is_not_written_to_the_record(tmp_path):
+    """Never a persistent opt-out of a data-safety warning: a restart with
+    the drive still out reminds again."""
+    reminder, _notes = _reminder(tmp_path)
+    reminder.begin("2 uploads")
+    reminder.mute_episode()
+    record = json.loads((tmp_path / "state" / dr.STATE_FILENAME).read_text(encoding="utf-8"))
+    assert "muted" not in json.dumps(record).lower()
+
+    again, notes = _reminder(tmp_path)
+    assert again.resume_remembered() is True
+    assert again.reminders_muted is False
+    assert notes.sent

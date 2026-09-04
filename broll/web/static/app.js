@@ -1716,11 +1716,11 @@ async function sendToResolve(mode = "append") {
         // 2026-08-12 -- the companion was healthy the whole time). Opening
         // /status directly in a tab is never gated, so it disambiguates.
         toast(
-          "Couldn't reach the companion app. It may not be running, or your " +
+          "Couldn't reach the CC Sync tray. It may not be running, or your " +
           "browser blocked the connection (look for a “local network” " +
           "permission prompt, or allow it in site settings). Self-test: open " +
           "http://127.0.0.1:8899/status - if that shows ok:true, it's the " +
-          "browser, not the companion. Downloads are in Settings.",
+          "browser, not the CC Sync tray. Downloads are in Settings.",
           "error"
         );
         return;
@@ -1736,7 +1736,7 @@ async function sendToResolve(mode = "append") {
       if (res.ok && body && body.state === "downloading") {
         if (!announcedSync) {
           announcedSync = true;
-          toast("Clip isn't on this machine yet: syncing it down, then inserting.", "");
+          toast("Clip isn't on this computer yet: syncing it down, then inserting.", "");
         }
         if (btn) btn.textContent = syncProgressLabel(body.progress);
         await new Promise((r) => setTimeout(r, 1500));
@@ -1771,15 +1771,15 @@ async function sendToResolve(mode = "append") {
       }
 
       if (!res.ok || !body || body.ok === false) {
-        let message = (body && body.message) || `Companion returned HTTP ${res.status}`;
+        let message = (body && body.message) || `The CC Sync tray returned HTTP ${res.status}`;
         // Fleet companions built before Place at Playhead existed (0.6.x-0.7.x)
         // answer an unknown mode with a bare "not implemented yet" -- true, but
         // it names no action. Newer builds refuse junk modes with their own
         // "needs an update" text, so only the legacy string is rewritten.
         if (mode === "playhead" && /not implemented yet/.test(message)) {
           message =
-            "This companion build predates Place at Playhead. Update the " +
-            "companion app (tray icon → check for updates), or use Append.";
+            "This CC Sync tray build predates Place at Playhead. Take the " +
+            "update your tray offers, or use Append.";
         }
         toast(message, "error");
         return;
@@ -1849,14 +1849,14 @@ async function checkCompanionStatus() {
     dot.className = `status-dot ${status.ok ? "status-ok" : "status-bad"}`;
     text.textContent = status.ok
       ? `connected (Resolve: ${status.resolve_connected ? "yes" : "no"}, v${status.version})`
-      : "companion reports a problem";
+      : "the CC Sync tray reports a problem";
   } catch (e) {
     dot.className = "status-dot status-bad";
     // Same caveat as the insert path: a blocked fetch (Chrome local-network
     // permission on an http:// dashboard origin) looks identical to a
     // stopped companion from here.
     text.textContent =
-      "not reachable: companion not running, or the browser blocked local " +
-      "connections (self-test: open http://127.0.0.1:8899/status)";
+      "not reachable: the CC Sync tray is not running, or the browser blocked " +
+      "local connections (self-test: open http://127.0.0.1:8899/status)";
   }
 }

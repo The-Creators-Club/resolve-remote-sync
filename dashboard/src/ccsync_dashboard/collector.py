@@ -1312,6 +1312,15 @@ class Collector:
         # the person-level fallback for devices the registry cannot place.
         base_pairs = db.base_machines(conn)
         base_editors = db.base_only_editors(conn)
+        # SUSPENDED PEOPLE AND ARCHIVED PROJECTS (DCORE-4 / DCORE-5,
+        # usability sweep 2026-09-04). Both are read as a REMOVAL of the
+        # share, never as a change to the plan: `selections` is untouched by
+        # either action, so [ RESUME ] and [ UNARCHIVE ] put back exactly
+        # what was there on the next cycle. Under-sharing is the safe
+        # direction, and the removals still go under the blast-radius brake
+        # below like every other removal this pass computes.
+        suspended = db.suspended_editors(conn)
+        archived = db.archived_project_slugs(conn)
         borrowers_of = db.fetch_borrowers_by_lender(conn)
         machine_devices: dict[tuple[str, str], str] = {}
         for row in db.fetch_machines(conn):
@@ -1358,7 +1367,13 @@ class Collector:
                 # NOT `devices`: that is the pass-wide device list, and
                 # rebinding it here to a set of ids was harmless only because
                 # nothing read it afterwards (KNOWN_BUGS DASH-6, 2026-08-11).
-                for editor_device_ids in editor_devices.values():
+                for editor, editor_device_ids in editor_devices.items():
+                    # ...except a suspended one (DCORE-4): "every editor the
+                    # dashboard knows about" is what makes this folder
+                    # unconditional, and a suspended person is exactly the
+                    # one it must stop being unconditional for.
+                    if editor in suspended:
+                        continue
                     desired |= editor_device_ids
             else:
                 # This folder's own ticks, plus the ticks of every project
@@ -1366,13 +1381,23 @@ class Collector:
                 # the lender's folder to pull the borrowed subtree (§4.1).
                 # Same device resolution, same unapproved-device warning,
                 # same blast-radius brake below.
-                plan_rows = list(selections.get(slug, []))
-                plan_editors = list(editor_selections.get(slug, []))
+                # An ARCHIVED project contributes no ticks -- its own or a
+                # borrower's. The folder is still here (archiving keeps the
+                # folder and the marker), so this is the only place its
+                # shares can go.
+                plan_rows = ([] if slug in archived
+                             else list(selections.get(slug, [])))
+                plan_editors = ([] if slug in archived
+                                else list(editor_selections.get(slug, [])))
                 for borrower in sorted(borrowers_of.get(slug, set())):
+                    if borrower in archived:
+                        continue
                     plan_rows.extend(selections.get(borrower, []))
                     plan_editors.extend(editor_selections.get(borrower, []))
-                plan_rows = [p for p in plan_rows if p not in base_pairs]
-                plan_editors = [e for e in plan_editors if e not in base_editors]
+                plan_rows = [p for p in plan_rows if p not in base_pairs
+                             and p[0] not in suspended]
+                plan_editors = [e for e in plan_editors if e not in base_editors
+                                and e not in suspended]
                 for editor, machine in plan_rows:
                     device_id = machine_devices.get((editor, machine))
                     if device_id and device_id not in id_to_editor:

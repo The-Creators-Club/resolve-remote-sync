@@ -645,7 +645,7 @@ def test_the_packages_page_carries_the_dashboard_section(world, monkeypatch):
 def test_the_section_says_so_in_bind_mount_mode(world):
     world["runtime_id_file"].unlink()
     html = world["client"].get("/partials/admin/dashboard-update").text
-    assert "updates from the base rig" in html
+    assert "updates from your wired computer" in html
     assert "UPDATE NOW" not in html
 
 

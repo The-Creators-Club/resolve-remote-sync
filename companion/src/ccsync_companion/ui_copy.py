@@ -44,7 +44,7 @@ SCAN_WHOLE_PROJECT = "Tray > Settings > SCAN WHOLE PROJECT"
 CONSOLIDATE = ("Tray > Settings > BRING AN EXISTING PROJECT'S MEDIA INTO THE "
                "SYNCED FOLDER")
 UNDO_RELINK = "Tray > Settings > UNDO THE LAST CLIP-PATH CHANGE CCSYNC MADE"
-STOP_ALL_SYNCING = "Tray > Settings > STOP ALL SYNCING ON THIS MACHINE"
+STOP_ALL_SYNCING = "Tray > Settings > STOP ALL SYNCING ON THIS COMPUTER"
 
 # [ YOUTUBE ]. Sentence case, again because that is what the buttons say.
 YOUTUBE_TERMS = "Tray > Settings > Accept YouTube Terms"
@@ -60,9 +60,9 @@ _REPAIR_PREFIX = "Tray > Settings > REPAIR "
 
 
 def remove_project(name: str = "") -> str:
-    """"Tray > Settings > REMOVE 'FF5' FROM THIS MACHINE"."""
+    """"Tray > Settings > REMOVE 'FF5' FROM THIS COMPUTER"."""
     label = str(name or "").strip() or "<project>"
-    return f"{_REMOVE_PREFIX}'{label}' FROM THIS MACHINE"
+    return f"{_REMOVE_PREFIX}'{label}' FROM THIS COMPUTER"
 
 
 def finish_grading(letter: str) -> str:
@@ -76,6 +76,37 @@ def repair_drive(letter: str) -> str:
     """"Tray > Settings > REPAIR P: NOW" - the letter is site data, so the
     caller passes app.canonical_prefix_label() (COMMERCIAL_READINESS 11)."""
     return f"{_REPAIR_PREFIX}{letter} NOW"
+
+
+# -- the one help page (SYS-21 / UX-3, sweep 2026-09-03) --------------------
+#
+# Nothing in the companion, the dashboard or any SPA linked to a single
+# document explaining how the product works: the copy said "see EDITOR_SETUP
+# step 6" (a file no editor has), "ask your admin" or nothing at all. The
+# dashboard serves the deployed HOW_IT_WORKS.md at this path, and every
+# surface that offers help builds its URL from THESE two, so the day it moves
+# is one edit here.
+HELP_URL_PATH = "/help"
+
+# What the Settings window's row is called, for the copy that points at it.
+HELP_PAGE = "Tray > Settings > HELP"
+
+
+def help_url(cfg: Any = None) -> Any:
+    """`<dashboard_url>/help`, or None on a computer with no dashboard yet.
+
+    None rather than a relative path or a guess: a help link that 404s or
+    lands on the wrong host is worse than a button that is not offered, and
+    an unconfigured companion is exactly the machine whose editor would click
+    it first."""
+    try:
+        base = str((cfg or {}).get("dashboard_url", "") or "").strip()
+    except Exception:
+        return None
+    base = base.rstrip("/")
+    if not base:
+        return None
+    return f"{base}{HELP_URL_PATH}"
 
 
 # The row each route ends at, as that row's own source spells it. The test
@@ -92,13 +123,17 @@ ROUTE_ROWS: dict[str, str] = {
     SCAN_WHOLE_PROJECT: "SCAN WHOLE PROJECT",
     CONSOLIDATE: "BRING AN EXISTING PROJECT'S MEDIA INTO THE SYNCED FOLDER",
     UNDO_RELINK: "UNDO THE LAST CLIP-PATH CHANGE CCSYNC MADE",
-    STOP_ALL_SYNCING: "STOP ALL SYNCING ON THIS MACHINE",
+    STOP_ALL_SYNCING: "STOP ALL SYNCING ON THIS COMPUTER",
     YOUTUBE_TERMS: "Accept YouTube Terms",
     YOUTUBE_SIGN_IN: "Sign in to YouTube",
     YOUTUBE_COOKIES: "Use an exported cookies.txt",
     remove_project(): "REMOVE '",
     repair_drive("P:"): "REPAIR ",
     finish_grading("P:"): "FINISH GRADING: ",
+    # The Settings section itself (SYS-21): "Settings > Help > Copy
+    # diagnostics" is the one route the sweep asked every surface to use, so
+    # the section it names is checked like every other row.
+    HELP_PAGE: "HELP",
 }
 
 # Every literal route this module publishes, for the scan test.

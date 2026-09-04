@@ -67,14 +67,14 @@ const MI_TERMINAL_STATES = ['done', 'done_with_errors', 'cancelled', 'failed'];
    plain-http dashboard origin from reaching 127.0.0.1 with the identical
    error. /status in a tab is never gated, so it disambiguates. */
 const MI_COMPANION_HINT =
-  'not reachable: companion not running, or the browser blocked local ' +
-  'connections (self-test: open http://127.0.0.1:8899/status in a tab; if ' +
-  'that shows ok:true it is the browser, not the companion)';
+  'not reachable: the CC Sync tray is not running, or the browser blocked ' +
+  'local connections (self-test: open http://127.0.0.1:8899/status in a tab; ' +
+  'if that shows ok:true it is the browser, not the tray)';
 
 const MI_TOO_OLD =
-  'your companion app is too old for music ingest: update it from the tray ' +
-  'icon (check for updates), then reload this page. Until then, dropped ' +
-  'tracks are uploaded here and indexed on the base rig.';
+  'your CC Sync tray is too old for music ingest: take the update it offers, ' +
+  'then reload this page. Until then, dropped tracks are uploaded here and ' +
+  'indexed on the indexing computer.';
 
 /* MUSIC-12 (usability sweep, 2026-09-03): the cards used to render the server
    enum straight, so a batch header read `done_with_errors on DESKTOP-7K2` and
@@ -411,7 +411,7 @@ async function miLoopback(method, path, body) {
   try { parsed = await res.json(); } catch { parsed = null; }
   if (!res.ok) {
     const err = new Error((parsed && (parsed.message || parsed.detail)) ||
-                          `companion returned HTTP ${res.status}`);
+                          `the CC Sync tray returned HTTP ${res.status}`);
     err.status = res.status;
     err.body = parsed;
     throw err;
@@ -451,7 +451,7 @@ async function miCapabilities(loud) {
   if (text) {
     text.textContent = caps.ok
       ? `connected (${bits.join(', ')})`
-      : `companion can't index yet: ${(caps.reasons || []).join('; ') || 'unknown'}`;
+      : `the CC Sync tray can't index yet: ${(caps.reasons || []).join('; ') || 'unknown'}`;
   }
   if (Array.isArray(caps.audio_exts) && caps.audio_exts.length) {
     mi.audioExts = caps.audio_exts.map(e => String(e).toLowerCase());
@@ -493,7 +493,7 @@ async function miPrepare() {
   if (mi.running || !mi.items.length) return;
   if (!mi.caps) await miCapabilities(false);
   if (!mi.caps) {
-    miSetNotice(`Your companion app is not answering, so these tracks cannot ` +
+    miSetNotice(`The CC Sync tray is not answering, so these tracks cannot ` +
                 `be staged: ${mi.capsError || MI_COMPANION_HINT}`);
     return;
   }
@@ -510,7 +510,7 @@ async function miPrepare() {
   try {
     answer = await miLoopback('POST', '/music/ingest/prepare', body);
   } catch (e) {
-    miSetNotice(`The companion could not stage this drop: ${e.message}`);
+    miSetNotice(`The CC Sync tray could not stage this drop: ${e.message}`);
     return;
   }
   mi.stagingId = answer.staging_id || null;
@@ -588,7 +588,7 @@ function miUploadItem(item) {
     item.uploadPercent = 100;
     done(true, '');
   };
-  xhr.onerror = () => done(false, 'upload failed. Is the companion still running?');
+  xhr.onerror = () => done(false, 'upload failed. Is the CC Sync tray still running?');
   xhr.send(item.file);
 }
 
@@ -717,9 +717,9 @@ function miRenderQueue() {
   body.innerHTML = '';
   if (counts.pending) {
     body.appendChild(el('div', 'row',
-      `Waiting for the base rig: ${counts.pending} track`
+      `Waiting for the indexing computer: ${counts.pending} track`
       + `${counts.pending === 1 ? '' : 's'}. They are in the library already and `
-      + 'are not searchable until the base rig indexes them.'));
+      + 'are not searchable until the indexing computer indexes them.'));
     for (const row of pending.slice(0, 20)) {
       body.appendChild(el('div', 'mi-row-meta', `◷ ${row.orig_name || row.rel_path}`));
     }
@@ -879,7 +879,7 @@ function miUpdateRow(item) {
   n.meta.classList.remove('bad', 'warn');
 
   if (item.accepted === false) {
-    n.meta.textContent = item.reason || 'the companion refused this track';
+    n.meta.textContent = item.reason || 'the CC Sync tray refused this track';
     n.meta.classList.add('bad');
   } else if (item.error) {
     n.meta.textContent = item.error;
@@ -932,7 +932,7 @@ async function miRun() {
     // Consent for the download, with the byte count, BEFORE anything starts:
     // 280 MB on a hotel connection is the editor's business, not ours.
     if (!window.confirm(
-      `The music indexing model isn't on this machine yet. Running this batch ` +
+      `The music indexing model isn't on this computer yet. Running this batch ` +
       `downloads it first (about ${miBytes(clap.download_bytes)}). Continue?`)) return;
   }
 
@@ -975,9 +975,9 @@ async function miRun() {
     miSetNotice(
       e.status === 503
         ? `${e.message} The batch is queued on the server: another of your ` +
-          `machines can run it, or drop the tracks again to upload them here ` +
-          `and let the base rig index them.`
-        : `The companion did not take the batch: ${e.message}`);
+          `computers can run it, or drop the tracks again to upload them here ` +
+          `and let the indexing computer index them.`
+        : `The CC Sync tray did not take the batch: ${e.message}`);
     miLoadBatches();
     miRenderSummary();
     return;
@@ -987,8 +987,8 @@ async function miRun() {
   mi.running = true;
   $('#mi-live').classList.remove('hidden');
   toast(el('div', 'row good', mi.runMode === 'foreground'
-    ? 'Analysing on this machine now.'
-    : 'Queued: it starts when you step away from this machine.'));
+    ? 'Analysing on this computer now.'
+    : 'Queued: it starts when you step away from this computer.'));
   miStartPolling();
   miLoadBatches();
   miRenderSummary();
@@ -1047,7 +1047,7 @@ function miRenderLive() {
     if (bits.length) box.appendChild(el('div', 'mi-gate', bits.join(' · ')));
   } else if (mi.running) {
     box.appendChild(el('div', 'muted',
-      "the companion isn't answering right now - the batch keeps its place on " +
+      "the CC Sync tray isn't answering right now - the batch keeps its place on " +
       'the server (' + MI_COMPANION_HINT + ')'));
   }
 
@@ -1071,7 +1071,7 @@ function miRenderLive() {
 async function miControl(action) {
   try {
     const answer = await miLoopback('POST', '/music/ingest/control', {action: action});
-    toast(el('div', 'row', `Companion: ${(answer && answer.state) || action}.`));
+    toast(el('div', 'row', `CC Sync tray: ${(answer && answer.state) || action}.`));
   } catch (e) {
     toast(el('div', 'row bad', e.message));
   }
@@ -1123,7 +1123,7 @@ async function miCancelUid(uid) {
     try { await miLoopback('POST', '/music/ingest/control', {action: 'cancel'}); }
     catch { /* it will hear it from the heartbeat */ }
   }
-  toast(el('div', 'row', 'Cancel requested: the machine stops within a heartbeat.'));
+  toast(el('div', 'row', 'Cancel requested: the computer stops within a heartbeat.'));
   miPollServer();
   miLoadBatches();
 }
@@ -1209,7 +1209,7 @@ function miRenderBatches() {
     }
     card.appendChild(head);
 
-    const who = [batch.machine || 'no machine yet'];
+    const who = [batch.machine || 'no computer yet'];
     if (batch.settings) {
       who.push(batch.settings.run_mode === 'foreground' ? 'foreground' : 'when idle');
     }

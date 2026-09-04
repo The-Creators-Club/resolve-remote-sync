@@ -561,7 +561,7 @@ def session(key: str = ""):
         raise ModelUnavailable(why)
     if not model_ready(key):
         raise ModelUnavailable("the music indexing model is not downloaded on "
-                               "this machine yet")
+                               "this computer yet")
     if not params_path.is_file():
         raise ModelUnavailable("the music indexing model's settings file is "
                                "missing - it will be fetched again")
@@ -579,7 +579,7 @@ def session(key: str = ""):
             want, sess_options=options, providers=_providers_for_session())
     except Exception as exc:  # noqa: BLE001
         raise ModelUnavailable("the music indexing model could not be loaded "
-                               f"on this machine ({exc})") from exc
+                               f"on this computer ({exc})") from exc
     with _lock:
         _session = loaded
         _session_key = want
@@ -909,7 +909,7 @@ def embed_file(path: Any, ffmpeg_path: str = "ffmpeg", key: str = "",
 
     samples = decode(ffmpeg_path, path, sample_rate, child_sink=child_sink)
     if samples.size == 0:
-        raise SidecarError("this file has no audio this machine could decode")
+        raise SidecarError("this file has no audio this computer could decode")
     if stop_event is not None and stop_event.is_set():
         raise SidecarError("stopped")
 

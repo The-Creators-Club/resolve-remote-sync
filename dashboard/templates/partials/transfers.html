@@ -30,7 +30,7 @@
     <tr>
       {% if scope_admin %}<td class="who" data-label="EDITOR">{{ t.editor }}</td>{% endif %}
       <td class="mono" data-label="DIRECTION">{{ "⇡" if t.direction == "up" else "⇣" }}</td>
-      <td class="mono-sm path" data-label="FILE" title="{{ t.name }}">{{ t.name }}{% if t.granularity == "project" %} <span class="chip">lane C</span>{% endif %}</td>
+      <td class="mono-sm path" data-label="FILE" title="{{ t.name }}">{{ t.name }}{% if t.granularity == "project" %} <span class="chip">folder sync</span>{% endif %}</td>
       <td class="mono" data-label="PROGRESS">{% if t.percentage is not none %}<span class="cssbar"><span class="fill" style="width:{{ [[t.percentage, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(t.percentage) }}%{% else %}-{% endif %}</td>
       <td class="mono-sm" data-label="SPEED">{% if t.speed_bps %}{{ t.speed_bps | human_bytes }}/s{% else %}-{% endif %}</td>
       <td class="muted" data-label="ETA">{{ t.eta_seconds | eta if t.eta_seconds else "-" }}</td>
@@ -63,7 +63,7 @@
       {% else %}
       <span class="mono">{{ "⇡" if q.direction == "up" else "⇣" }}</span>
       <span class="{{ 'amber-text' if q.n_files else 'muted' }}">{{ q.n_files }} file(s) · {{ q.bytes | human_bytes }}</span>
-      <span class="chip">{{ "lane C" if q.lane == "c" else ("uploads" if q.direction == "up" else "proxies") }}</span>
+      <span class="chip">{{ "folder sync" if q.lane == "c" else ("upload" if q.direction == "up" else "proxy download") }}</span>
       {% endif %}
     </summary>
     <ul class="clip-list">

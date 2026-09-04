@@ -117,6 +117,15 @@ def _assignments_view(conn: sqlite3.Connection) -> dict[str, Any]:
         # supported shape) had a clickable column for the wired half. The
         # write endpoints refuse it; this is what lets the grid say so first.
         "base_machine_cells": db.base_machines(conn),
+        # DCORE-5 (usability sweep 2026-09-04). Nothing could remove a
+        # project: a typo made a permanent row in every tick list, in this
+        # grid and in the queue. [ ARCHIVE PROJECT ] is the reversible
+        # answer, and the confirm has to be able to say how many editors
+        # still sync the thing before it is pressed -- hence the count here
+        # rather than a round trip per row.
+        "archived_projects": db.fetch_archived_projects(conn),
+        "tick_editor_counts": {
+            slug: len(set(names)) for slug, names in ticks.items()},
     }
 
 

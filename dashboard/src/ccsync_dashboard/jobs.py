@@ -139,7 +139,9 @@ SIGNAL_WORDS = {
     "gpu": "a GPU",
     # bug-hunt-2026-09-03 dash-release-jobs-6: the signal is `mode == "base"`
     # and nothing else, so it must not promise the dashboard host as well.
-    "near_media": "is a base rig, next to the media",
+    # UX-16 (2026-09-03): "base rig" leaves the copy; the setting is
+    # still `mode == "base"`, and to a reader it is a wired computer.
+    "near_media": "is wired to the server, next to the media",
 }
 
 # How much headroom over a job's stated VRAM floor counts as "it fits". A
@@ -292,7 +294,7 @@ def why_not_first(
                               rank_signals(best_facts, kind, job))
                        if bhave and not have and name == bname]
             if missing:
-                return "the first choice has %s and this machine has not" % (
+                return "the first choice has %s and this computer has not" % (
                     ", ".join(missing))
         return "the first choice " + RANK_FIELD_WORDS[field]
     return ""
@@ -327,6 +329,18 @@ REFUSE_JOBS_DISABLED = "jobs_disabled"
 # only" is the whole answer for every other machine in the fleet and listing
 # what else they lack would bury it.
 REFUSE_NOT_TARGET = "not_the_target"
+# CMEDIA-1 (usability sweep 2026-09-03). The third GPU consumer. B-roll
+# indexing and proxy generation already negotiate with each other on the
+# editor's own computer ("indexing beats proxy generation"), and the job
+# runner was outside that agreement: both gates open on the same event
+# (nobody at the keyboard), so the common case was a whisper job claimed onto
+# a computer already holding 8-12 GB of VLM weights. The OOM or the crawl was
+# then reported as a job failure and earned that computer the cooldown, for a
+# fault it did not have. The companion now sends its own gate in
+# `capabilities.jobs_gate` and this refuses on it, which also keeps a
+# saturated computer out of the ranking (it is refused before rank_key ever
+# sees it, so "longest idle" cannot promote it).
+REFUSE_LOCAL_WORK = "local_work"
 
 # THE JOB-LEVEL ANSWER, which is a different question from the per-machine
 # one. Timeline Cards' client asks exactly one thing of `why` -- "may I stop
@@ -371,6 +385,10 @@ REFUSAL_TO_REASON = {
     REFUSE_UPGRADING: REASON_ALL_BUSY,
     REFUSE_BREAKER: REASON_ALL_BUSY,
     REFUSE_BUSY_WITH_JOB: REASON_ALL_BUSY,
+    # CMEDIA-1: busy with its OWN work is the same answer to a waiting client
+    # as busy with ours - wait, it will free up. Never `idle_wait`: nobody
+    # has to stand up for this one to clear.
+    REFUSE_LOCAL_WORK: REASON_ALL_BUSY,
     REFUSE_NOT_IDLE: REASON_IDLE_WAIT,
     REFUSE_COOLDOWN: REASON_COOLDOWN,
     REFUSE_FLEET_CAP: REASON_FLEET_CAP,
@@ -478,7 +496,8 @@ def machine_facts(
         db.machine_capabilities(conn, editor, machine)
     row = conn.execute(
         "SELECT mode, halt_active, breaker_tripped, jobs_cooldown_until, "
-        "       jobs_cooldown_reason FROM machine_state "
+        "       jobs_cooldown_reason, ingest_active, music_ingest_active "
+        "  FROM machine_state "
         " WHERE editor_username=? AND machine=?", (editor, machine)).fetchone()
     upgrade = db.machine_update_request(conn, editor, machine)
     return {
@@ -495,6 +514,10 @@ def machine_facts(
                            if row is not None else ""),
         "cooldown_reason": (str(row["jobs_cooldown_reason"] or "")
                             if row is not None else ""),
+        # CMEDIA-1: the computer's OWN media work. The gate it just sent wins
+        # (it knows about proxy encodes too); the stored ingest flags are what
+        # is left for a caller reading the database later.
+        "local_work": local_work_words(caps) or _ingest_words(row),
     }
 
 
@@ -529,7 +552,8 @@ def fleet_facts(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any
     out: dict[tuple[str, str], dict[str, Any]] = {}
     for row in conn.execute(
         "SELECT editor_username, machine, mode, halt_active, breaker_tripped, "
-        "       jobs_cooldown_until, jobs_cooldown_reason "
+        "       jobs_cooldown_until, jobs_cooldown_reason, "
+        "       ingest_active, music_ingest_active "
         "  FROM machine_state ORDER BY editor_username, machine"
     ):
         key = (row["editor_username"], row["machine"])
@@ -544,6 +568,9 @@ def fleet_facts(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any
             "fleet_halt": halted,
             "cooldown_until": str(row["jobs_cooldown_until"] or ""),
             "cooldown_reason": str(row["jobs_cooldown_reason"] or ""),
+            # CMEDIA-1, from the stored flags: see _ingest_words.
+            "local_work": (local_work_words(caps_map.get(key, {}))
+                           or _ingest_words(row)),
         }
     return out
 
@@ -620,6 +647,52 @@ def first_refusal(
     return any(k == key for k, score in able if score == best)
 
 
+# What the companion's `jobs_gate.reason` says when it is doing its own
+# media work. A STATE, machine readable, with the sentence beside it in
+# `detail` ("busy indexing b-roll", "busy making proxies") so this dashboard
+# says what that computer is doing rather than inventing a guess (CMEDIA-1).
+GATE_LOCAL_WORK = "local_work"
+
+
+def _ingest_words(row: Any) -> str:
+    """What the STORED state says this computer is busy with itself.
+
+    The gate a companion sends rides its capabilities section and is not kept
+    in a column (CMEDIA-1, 2026-09-04: no schema change was owed for a fact
+    that is stale thirty seconds later), so `explain` - which answers from the
+    database, minutes or hours after the report - would otherwise have nothing
+    to say. These two flags ARE stored, on the same row this query already
+    reads, and they are the two the sweep found: an editor's own drop being
+    indexed, and an album being embedded.
+    """
+    try:
+        if row is not None and row["ingest_active"]:
+            return "busy indexing b-roll"
+        if row is not None and row["music_ingest_active"]:
+            return "busy indexing music"
+    except (IndexError, KeyError, TypeError):
+        return ""
+    return ""
+
+
+def local_work_words(capabilities: Mapping[str, Any] | None) -> str:
+    """What this computer is busy with itself, or "" (CMEDIA-1).
+
+    Read defensively at every level: a companion older than the gate sends no
+    `jobs_gate` at all, and a newer one may send a reason this build has never
+    heard of. Only `local_work` refuses; an unknown reason is not treated as a
+    refusal, because a dashboard that invents refusals from strings it does
+    not understand is a queue that stops for a typo.
+    """
+    gate = (capabilities or {}).get("jobs_gate")
+    if not isinstance(gate, Mapping):
+        return ""
+    if str(gate.get("reason") or "").strip() != GATE_LOCAL_WORK:
+        return ""
+    detail = str(gate.get("detail") or "").strip()
+    return detail or "busy with its own media work"
+
+
 def policy_refusal(facts: Mapping[str, Any], kind: str,
                    now: str | None = None,
                    job: Mapping[str, Any] | None = None) -> tuple[str, str]:
@@ -641,35 +714,45 @@ def policy_refusal(facts: Mapping[str, Any], kind: str,
     tried again.
     """
     if facts.get("fleet_halt"):
-        return REFUSE_FLEET_HALT, "the whole fleet is halted"
+        # UX-16: "stopped by your admin" is the fleet halt in the product
+        # vocabulary; "halted" never reaches a reader.
+        return REFUSE_FLEET_HALT, "syncing is stopped by your admin for the whole fleet"
     if facts.get("halt_active"):
-        return REFUSE_MACHINE_HALT, "this machine's sync is halted"
+        return REFUSE_MACHINE_HALT, "syncing is stopped on this computer"
     if facts.get("upgrading"):
-        return REFUSE_UPGRADING, "this machine has an update waiting to apply"
+        return REFUSE_UPGRADING, "this computer has an update waiting to apply"
     if facts.get("breaker_tripped"):
         return (REFUSE_BREAKER,
-                "this machine's proxy-download breaker is tripped, so it is "
+                "this computer's proxy download stopped itself, so it is "
                 "not in a state anyone should add work to")
     if facts.get("live_jobs"):
         held = facts["live_jobs"][0]
         return (REFUSE_BUSY_WITH_JOB,
-                f"this machine is already holding job #{held['id']} ({held['kind']})")
+                f"this computer is already holding job #{held['id']} ({held['kind']})")
     caps = dict(facts.get("capabilities") or {})
     if not caps:
         return (REFUSE_NO_CAPABILITIES,
-                "this machine has not reported what it can do (a companion "
+                "this computer has not reported what it can do (a companion "
                 "older than the job runner)")
     if not caps.get("jobs_enabled", True):
         return (REFUSE_JOBS_DISABLED,
-                "fleet jobs are switched off on this machine (jobs_enabled)")
+                "fleet jobs are switched off on this computer (jobs_enabled)")
     # THE MACHINE'S OWN ALLOW-LIST (v45, phase 4). Its own refusal and not
     # folded into the capability one: "this laptop does not do whisper" is a
     # setting somebody chose, and "this laptop has no GPU" is a fact about
     # the hardware. An admin looking at the why page can act on the first.
     if not db.machine_allows_kind(caps, kind):
         return (REFUSE_KIND_NOT_ALLOWED,
-                f"this machine's config allows only "
+                f"this computer's config allows only "
                 f"{', '.join(caps.get('job_kinds') or [])} jobs, not {kind}")
+    # CMEDIA-1: this computer's OWN media work, which it is better placed to
+    # know about than we are. Below `jobs_enabled` and the allow-list (a
+    # setting somebody chose outranks a passing state) and above the
+    # cooldown, because "busy indexing b-roll" is what an admin needs to
+    # read, not a timestamp.
+    busy_with = local_work_words(caps) or str(facts.get("local_work") or "")
+    if busy_with:
+        return REFUSE_LOCAL_WORK, f"this computer is {busy_with}"
     # ...AND A MACHINE THAT JUST FAILED ONE IS LEFT ALONE. Without this the
     # machine with the broken ffmpeg is first in the queue for the retry
     # every time -- failing in two seconds is exactly what keeps it idle --
@@ -679,7 +762,7 @@ def policy_refusal(facts: Mapping[str, Any], kind: str,
     if until and until > (now or db.utcnow_iso()) and not forced:
         reason = str(facts.get("cooldown_reason") or "a job failed here")
         return (REFUSE_COOLDOWN,
-                f"this machine is cooling down until {until} ({reason})")
+                f"this computer is cooling down until {until} ({reason})")
     # THE BASE RIG IS EXEMPT (MULTI_MACHINE_PLAN.md WP0): nobody sits at it,
     # and idle.py on a machine with no console session cannot answer anyway.
     # ...AND THE TWO WAYS PAST THE IDLE FLOOR (section 10): the person at
@@ -694,15 +777,15 @@ def policy_refusal(facts: Mapping[str, Any], kind: str,
         # None means cannot tell means NOT IDLE (idle.py's contract).
         if idle is None:
             return (REFUSE_NOT_IDLE,
-                    "this machine cannot say how long it has been idle, which "
+                    "this computer cannot say how long it has been idle, which "
                     "counts as somebody being at it")
         try:
             if float(idle) < floor:
                 return (REFUSE_NOT_IDLE,
-                        f"somebody is at this machine (idle {int(float(idle))}s, "
+                        f"somebody is at this computer (idle {int(float(idle))}s, "
                         f"{kind} needs {floor}s)")
         except (TypeError, ValueError):
-            return (REFUSE_NOT_IDLE, "this machine's idle answer is unreadable")
+            return (REFUSE_NOT_IDLE, "this computer's idle answer is unreadable")
     return "", ""
 
 
@@ -852,13 +935,13 @@ def explain(conn: sqlite3.Connection, job_id: int,
                 "signals": {name: have
                             for name, have, _w in rank_signals(facts, kind, job)}}
         if rank == 1:
-            line["why"] = "this machine can take it, and is first choice"
+            line["why"] = "this computer can take it, and is first choice"
             line["why_not_first"] = ""
         else:
             beaten = why_not_first(score, best_score, facts,
                                    fleet.get(best_key) or {}, kind, job)
             line["why_not_first"] = beaten
-            line["why"] = (f"this machine can take it (choice {rank} of "
+            line["why"] = (f"this computer can take it (choice {rank} of "
                            f"{len(order)}"
                            + (f"; {beaten}" if beaten else "")
                            + f"; it is offered the job anyway once it has "
@@ -874,18 +957,19 @@ def explain(conn: sqlite3.Connection, job_id: int,
     if kind not in db.JOB_KINDS:
         code = REASON_KIND_UNKNOWN
         summary = (f"this dashboard does not know the job kind {kind!r}, so no "
-                   f"machine will ever be offered it")
+                   f"computer will ever be offered it")
     elif capped:
         code = REASON_FLEET_CAP
         summary = (f"{live} {kind} job(s) are already running, which is this "
                    f"fleet's limit ({cap}); it starts as soon as one finishes")
     elif can:
         code = REASON_SCHEDULABLE
-        summary = (f"{len(can)} machine(s) can take this job; it is waiting to "
-                   f"be claimed on their next report")
+        # UX-10: "(s)" is not a word a person reads.
+        summary = (f"{len(can)} computer{'' if len(can) == 1 else 's'} can take "
+                   f"this job; it is waiting to be claimed on their next report")
     elif not lines:
         code = REASON_NO_MACHINES
-        summary = "no machine has ever reported to this dashboard"
+        summary = "no computer has ever reported to this dashboard"
     else:
         code = _blocked_reason(lines, job)
         summary = _blocked_summary(lines, job)
@@ -991,7 +1075,7 @@ def _blocked_summary(lines: list[dict[str, Any]],
         # are not the target".
         mine = [line for line in lines if line["reason"] != REFUSE_NOT_TARGET]
         if not mine:
-            return (f"this job is for {target} only, and no machine of that "
+            return (f"this job is for {target} only, and no computer of that "
                     f"name has ever reported to this dashboard")
         line = mine[0]
         return (f"this job is for {target} only, and it cannot take it: "
@@ -1002,20 +1086,21 @@ def _blocked_summary(lines: list[dict[str, Any]],
     reason, count = max(counts.items(), key=lambda kv: kv[1])
     words = {
         REFUSE_CAPABILITY: "cannot do this kind of work",
-        REFUSE_FLEET_HALT: "are under a fleet halt",
-        REFUSE_MACHINE_HALT: "have sync halted",
+        REFUSE_FLEET_HALT: "have syncing stopped by an admin, fleet wide",
+        REFUSE_MACHINE_HALT: "have syncing stopped on them",
         REFUSE_UPGRADING: "have an update waiting",
-        REFUSE_BREAKER: "have a tripped proxy-download breaker",
+        REFUSE_BREAKER: "have stopped their own proxy download",
         REFUSE_BUSY_WITH_JOB: "are already holding a job",
         REFUSE_NOT_IDLE: "have somebody sitting at them",
         REFUSE_NO_CAPABILITIES: "have not said what they can do",
         REFUSE_KIND_UNKNOWN: "would never be offered this kind",
-        REFUSE_NOT_PREFERRED: "are waiting for a better-placed machine",
+        REFUSE_NOT_PREFERRED: "are waiting for a better-placed computer",
         REFUSE_COOLDOWN: "are cooling down after failing a job",
         REFUSE_KIND_NOT_ALLOWED: "are not allowed this kind of work",
         REFUSE_JOBS_DISABLED: "have fleet jobs switched off",
         REFUSE_FLEET_CAP: "are at this fleet's limit for the kind",
-        REFUSE_NOT_TARGET: "are not the machine this job was sent to",
+        REFUSE_NOT_TARGET: "are not the computer this job was sent to",
+        REFUSE_LOCAL_WORK: "are busy with their own media work",
     }.get(reason, reason)
-    return (f"no machine can take this job right now: {count} of {len(lines)} "
-            f"{words}")
+    return (f"no computer can take this job right now: {count} of "
+            f"{len(lines)} {words}")

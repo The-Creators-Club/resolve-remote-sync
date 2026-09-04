@@ -89,7 +89,7 @@ def _leaseholder_or_410(conn, uid, editor, machine=None):
                                   'batch_uid': uid, 'reason': 'other_editor'})
     if machine and batch['machine'] != machine:
         raise HTTPException(410, {
-            'detail': f'{batch["machine"] or "another machine"} holds this batch now',
+            'detail': f'{batch["machine"] or "another computer"} holds this batch now',
             'batch_uid': uid, 'reason': 'other_machine', 'machine': batch['machine']})
     if not ingest_batches.lease_live(batch):
         raise HTTPException(410, {'detail': "this batch's lease has expired and the "

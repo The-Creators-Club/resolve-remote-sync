@@ -132,7 +132,7 @@ from ccsync_companion import site as site_mod
 # CCSYNC_CANONICAL_PREFIX/CCSYNC_TREE_NAME) so one failed fetch cannot map
 # one letter while config.toml names another. Both bootstraps changed, so
 # the shared number moves.
-INSTALLER_VERSION = "1.0.40"
+INSTALLER_VERSION = "1.0.41"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every
@@ -474,6 +474,14 @@ _RESOLVE_MAPPING_MESSAGES = {
         "launched on this Mac. Launch Resolve once, quit it, then re-run this "
         "installer (safe to re-run)."
     ),
+    # OPS-11 (usability + resilience sweep 2026-09-03): "never launched" and
+    # "not installed at all" look identical from the preference files, and the
+    # advice for one cannot be followed by the other. macos_bootstrap.sh
+    # probes for the bundle and reports this status instead.
+    "not-installed": (
+        "DaVinci Resolve is not installed on this Mac. CC Sync needs Resolve "
+        "Studio, the paid version. Install it, then run the mapping step again."
+    ),
     "format": (
         "Resolve's preference files are in a format this installer does not "
         "recognise, so the {drive}:\\ Mapped Mount was NOT set. Set it by hand: "
@@ -759,6 +767,55 @@ def verify_account(
         # _apply_identity_role, which write_identity()'s role param feeds).
         "role": resp.get("role"),
     }
+
+
+def submit_ssh_key(
+    dashboard_url: str,
+    username: str,
+    identity_token: str,
+    key_text: str,
+    machine: str = "",
+    http_post: HttpPostFn = default_http_post,
+    timeout: float = 15,
+) -> dict[str, Any]:
+    """Offer this computer's SSH public key to the dashboard (OPS-2).
+
+    POSTs {username, ssh_pubkey, machine} to {dashboard_url}/api/v1/ssh-key
+    with the identity token verify_account has just returned. The key lands
+    in a queue an admin approves in one click; nothing about this grants
+    access, and until the approval the account is exactly as it was.
+
+    Why the wizard sends it at all: the account has to exist before this
+    wizard can sign in, and until 2026-09-04 creating the account REQUIRED
+    the key this wizard generates -- a circle whose only exits were a repo
+    checkout or emailing somebody a private key (UX-14).
+
+    Never raises: this is a courtesy, not a gate. The Finish page still
+    prints the key for the editor to send by hand, and an older dashboard
+    (which 404s this route) must not turn a successful install into a failed
+    one. Returns {"ok": bool, "error": str} either way.
+    """
+    dashboard_url = normalise_dashboard_url(dashboard_url)
+    if not dashboard_url:
+        return {"ok": False, "error": "no dashboard URL configured"}
+    if not identity_token:
+        return {"ok": False, "error": "not signed in yet"}
+    key_text = (key_text or "").strip()
+    if not key_text:
+        return {"ok": False, "error": "no SSH public key to send"}
+    url = f"{dashboard_url.rstrip('/')}/api/v1/ssh-key"
+    headers = {"Content-Type": "application/json",
+               "X-CCSync-Identity": identity_token}
+    payload = {"username": username, "ssh_pubkey": key_text, "machine": machine or ""}
+    try:
+        resp = http_post(url, payload, headers, timeout)
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "error": identity_mod._http_error_message(exc)}
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        return {"ok": False, "error": str(exc)}
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        return {"ok": False, "error": "the dashboard did not accept the key"}
+    return {"ok": True, "fingerprint": resp.get("fingerprint") or ""}
 
 
 # -- tailscale / dashboard reachability ---------------------------------------

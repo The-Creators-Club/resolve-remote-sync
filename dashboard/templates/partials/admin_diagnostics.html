@@ -26,7 +26,7 @@
     <summary><span class="who">{{ b.editor }}</span>
       <span class="mono-sm">{{ b.machine }}</span>
       <span class="chip {{ "amber" if b.trigger == "lane_error" else "lane green" }}"
-            title="{% if b.trigger == "lane_error" %}a sync lane failed, so this computer sent its own diagnostics{% elif b.trigger == "admin_request" %}an admin asked this computer why{% elif b.trigger == "button" %}the editor used Copy diagnostics in the companion ({{ COMPANION_DIAGNOSTICS_PATH }}){% else %}uploaded by this computer{% endif %}">[ {{ b.trigger | upper | replace("_", " ") }} ]</span>
+            title="{% if b.trigger == "lane_error" %}a sync job failed, so this computer sent its own diagnostics{% elif b.trigger == "admin_request" %}an admin asked this computer why{% elif b.trigger == "button" %}the editor used Copy diagnostics in the companion ({{ COMPANION_DIAGNOSTICS_PATH }}){% else %}uploaded by this computer{% endif %}">[ {{ b.trigger | upper | replace("_", " ") }} ]</span>
       <span class="muted mono-sm">{{ b.received_at | ago }}{% if b.at and b.at != b.received_at %} · the computer said {{ b.at }}{% endif %}</span>
     </summary>
     <pre class="diag-text">{{ b.text }}</pre>

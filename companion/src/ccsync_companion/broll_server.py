@@ -253,7 +253,7 @@ This file has no comments (it's plain JSON), so here's what each field means:
 
   mounts
       Maps each "share" slug used in the web UI to where that share is
-      mounted on THIS machine, e.g.:
+      mounted on THIS computer, e.g.:
           {{"broll": "P:/Assets/B-roll Archive"}}   (Windows)
           {{"broll": "/Volumes/broll"}}             (macOS)
 
@@ -262,7 +262,7 @@ This file has no comments (it's plain JSON), so here's what each field means:
       entry written here wins over that. Other shares have no derivable
       root, so they still need one line each.
 
-      With the default in effect, a clip that isn't on this machine yet is
+      With the default in effect, a clip that isn't on this computer yet is
       fetched from the NAS automatically when "Send to Resolve" asks for it
       (over the same rclone remote the sync lanes use). Writing an explicit
       "broll" entry here switches that off: an explicit mount is somewhere
@@ -756,9 +756,9 @@ def build_insert_response(
             progress = fetch.get("progress") or {}
             percent = progress.get("percent")
             message = (
-                f"syncing the clip to this machine: {percent}%"
+                f"syncing the clip to this computer: {percent}%"
                 if isinstance(percent, int)
-                else "syncing the clip to this machine…"
+                else "syncing the clip to this computer…"
             )
             return 200, {"ok": False, "state": "downloading",
                          "message": message, "progress": progress}
@@ -864,14 +864,21 @@ def _ingest_floor_bytes(ccsync_cfg: Optional[dict[str, Any]],
     set only `music_ingest_free_space_floor_gb` got its number in the batch and
     b-roll's at the PUT that refuses before the first byte. Same key, one
     reader. No `kind` still means b-roll's, for the callers that predate it.
+
+    ...and the DEFAULT is the kind's too since CMEDIA-9 (sweep 2026-09-03):
+    the key was per kind and the number behind it was not, so every fleet got
+    b-roll's 20 GB for music until somebody set it, and a laptop with 15 GB
+    free was told to clear space for tracks that stage 512 MB at a time.
     """
     key = (kind.cfg_key("free_space_floor_gb") if kind is not None
            else "broll_ingest_free_space_floor_gb")
-    floor_gb = ccsync_config.coerce_numeric(ccsync_cfg or {}, key, 20)
+    default_gb = float(getattr(kind, "free_space_floor_gb", 20.0)
+                       if kind is not None else 20.0)
+    floor_gb = ccsync_config.coerce_numeric(ccsync_cfg or {}, key, default_gb)
     try:
         return int(max(0.0, float(floor_gb)) * 1_000_000_000)
     except (TypeError, ValueError):
-        return 20_000_000_000
+        return int(default_gb * 1_000_000_000)
 
 
 def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
@@ -942,7 +949,7 @@ def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
         recommended = None
     if not any(t["fits"] for t in tiers.values()):
         reasons.append(tiers["good"]["reason"] or
-                       "this machine's GPU cannot run the b-roll indexing model")
+                       "this computer's GPU cannot run the b-roll indexing model")
 
     ffmpeg_path = str(cfg.get("ffmpeg_path", "ffmpeg") or "ffmpeg").strip() or "ffmpeg"
     try:
@@ -950,7 +957,7 @@ def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
     except Exception:  # noqa: BLE001
         ffmpeg = None
     if not ffmpeg:
-        reasons.append("ffmpeg is not installed on this machine yet: it is "
+        reasons.append("ffmpeg is not installed on this computer yet: it is "
                        "fetched the first time a batch runs")
     # None, not False, when nothing has probed the encoders yet: "we have not
     # asked" and "this build has no NVENC" send an editor to different places.
@@ -965,14 +972,14 @@ def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
     rclone_path = str(cfg.get("rclone_path", "rclone") or "rclone").strip() or "rclone"
     rclone = bool(shutil.which(rclone_path) or os.path.isfile(rclone_path))
     if not rclone:
-        reasons.append("rclone is not installed on this machine, so indexed "
+        reasons.append("rclone is not installed on this computer, so indexed "
                        "clips could not be uploaded to the NAS")
 
     staging_dir = ingest_staging_root(cfg)
-    floor = _ingest_floor_bytes(cfg)
+    floor = _ingest_floor_bytes(cfg, ingest_kinds.BROLL_KIND)
     free = _free_bytes_at(staging_dir) if staging_dir is not None else None
     if staging_dir is None:
-        reasons.append("this machine has no synced tree, so there is nowhere "
+        reasons.append("this computer has no synced tree, so there is nowhere "
                        "to stage the clips")
     elif free is not None and free < floor:
         reasons.append(
@@ -986,7 +993,7 @@ def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
         except Exception:  # noqa: BLE001
             log.debug("broll ingest: busy() failed", exc_info=True)
     if busy.get("batch_uid"):
-        reasons.append("this machine is already indexing a b-roll batch")
+        reasons.append("this computer is already indexing a b-roll batch")
 
     editor = ""
     if deps is not None:
@@ -995,10 +1002,10 @@ def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
         except Exception:  # noqa: BLE001
             editor = ""
     if not editor:
-        reasons.append("nobody is signed in on this machine")
+        reasons.append("nobody is signed in on this computer")
 
     if ingestor is None:
-        reasons.append("b-roll indexing is switched off on this machine")
+        reasons.append("b-roll indexing is switched off on this computer")
 
     return {
         "ok": not reasons,
@@ -1071,13 +1078,13 @@ def build_music_ingest_capabilities(
     except Exception:  # noqa: BLE001
         ffmpeg = None
     if not ffmpeg:
-        reasons.append("ffmpeg is not installed on this machine yet: it is "
+        reasons.append("ffmpeg is not installed on this computer yet: it is "
                        "fetched the first time a batch runs")
 
     rclone_path = str(cfg.get("rclone_path", "rclone") or "rclone").strip() or "rclone"
     rclone = bool(shutil.which(rclone_path) or os.path.isfile(rclone_path))
     if not rclone:
-        reasons.append("rclone is not installed on this machine, so indexed "
+        reasons.append("rclone is not installed on this computer, so indexed "
                        "tracks could not be uploaded to the library")
 
     kind = ingest_kinds.MUSIC_KIND
@@ -1085,7 +1092,7 @@ def build_music_ingest_capabilities(
     floor = _ingest_floor_bytes(cfg, kind)
     free = _free_bytes_at(staging_dir) if staging_dir is not None else None
     if staging_dir is None:
-        reasons.append("this machine has no synced tree, so there is nowhere "
+        reasons.append("this computer has no synced tree, so there is nowhere "
                        "to stage the tracks")
     elif free is not None and free < floor:
         reasons.append(
@@ -1099,7 +1106,7 @@ def build_music_ingest_capabilities(
         except Exception:  # noqa: BLE001
             log.debug("music ingest: busy() failed", exc_info=True)
     if busy.get("batch_uid"):
-        reasons.append("this machine is already indexing a music batch")
+        reasons.append("this computer is already indexing a music batch")
 
     editor = ""
     if deps is not None:
@@ -1108,10 +1115,10 @@ def build_music_ingest_capabilities(
         except Exception:  # noqa: BLE001
             editor = ""
     if not editor:
-        reasons.append("nobody is signed in on this machine")
+        reasons.append("nobody is signed in on this computer")
 
     if ingestor is None:
-        reasons.append("music indexing is switched off on this machine")
+        reasons.append("music indexing is switched off on this computer")
 
     return {
         "ok": not reasons,
@@ -1170,7 +1177,7 @@ def pick_ingest_sources(kind: str,
     except Exception as exc:  # noqa: BLE001 - a picker is never fatal
         log.warning("broll ingest: the file picker failed (%s)", exc, exc_info=True)
         return 200, {"ok": False, "message": "the file picker could not be opened "
-                                             "on this machine"}
+                                             "on this computer"}
     if not files:
         return 200, {"ok": False, "message": "cancelled"}
     # What the picker returned is also the allow-list `prepare` measures a
@@ -1520,7 +1527,7 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         label = getattr(kind, "label", "") or "b-roll"
         self._send_json(503, {
             "ok": False,
-            "message": f"{label} indexing is not running on this machine",
+            "message": f"{label} indexing is not running on this computer",
         })
 
     def _ingest_content_type_ok(self) -> bool:

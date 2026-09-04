@@ -41,7 +41,7 @@
    sentence stays in the title; the chip is no longer the abbreviation of
    its own tooltip. #}
 <div class="mono-sm">SELECTED BY:
-  {% for e in pickers %}<span class="who">{{ e }}</span>{% if modes.get(e) == "upload_only" %} <span class="chip amber" title="upload only: this editor's computer sends its video originals to the server and downloads nothing">[ UPLOAD ONLY ]</span>{% elif modes.get(e) == "mixed" %} <span class="chip amber" title="upload only on one of this editor's computers, a full sync on another: see Settings, Assignments">[ UPLOAD ONLY ON ONE COMPUTER ]</span>{% endif %}{{ ", " if not loop.last }}{% else %}<span class="muted">nobody (not syncing to any editor)</span>{% endfor %}
+  {% for e in pickers %}<span class="who">{{ e }}</span>{% if modes.get(e) == "upload_only" %} <a class="chip amber" href="{{ term_href('Upload only') }}" title="upload only: this editor's computer sends its video originals to the server and downloads nothing">[ UPLOAD ONLY ]</a>{% elif modes.get(e) == "mixed" %} <a class="chip amber" href="{{ term_href('Upload only') }}" title="upload only on one of this editor's computers, a full sync on another: see Settings, SYNC PLANS">[ UPLOAD ONLY ON ONE COMPUTER ]</a>{% endif %}{{ ", " if not loop.last }}{% else %}<span class="muted">nobody (not syncing to any editor)</span>{% endfor %}
   {% set tick_for = tick_editor if tick_editor is defined and tick_editor else session_user %}
   {% if tick_for %}
     {# Target ONLY this fragment's own wrapper: swapping "closest main" used to
@@ -272,7 +272,7 @@
 <div class="scroll-x"><table class="editors stack">
   <thead>
     <tr><th></th><th>EDITOR</th><th title="proxies + shared project files, by size. Camera originals live on the server and are not counted">SYNCED</th><th>HAS</th><th>MISSING</th>
-        <th>MEDIA</th><th>LANES</th><th>LAST SEEN</th><th></th></tr>
+        <th>MEDIA</th><th><a href="{{ GLOSSARY_HREF }}" title="what these words mean">SYNC</a></th><th>LAST SEEN</th><th></th></tr>
   </thead>
   <tbody>
   {% for e in project.editors %}
@@ -280,16 +280,16 @@
       <td data-label="STATUS"><span class="dot {{ e.status }}">●</span></td>
       <td data-label="EDITOR">
         <span class="who">{{ e.display_name }}</span>
-        {% if e.report_only and e.mode == "base" %}<span class="chip green" title="the base rig works directly off the NAS tree; nothing syncs to it">[ BASE ]</span>{% endif %}
-        {% if e.unmapped %}<span class="chip amber" title="device not named after a TrueNAS username. Run accept_device.py --device-name">[ UNMAPPED ]</span>{% endif %}
+        {% if e.report_only and e.mode == "base" %}<span class="chip green" title="this computer is wired to the server and works directly off the tree; nothing syncs to it">[ WIRED ]</span>{% endif %}
+        {% if e.unmapped %}<span class="chip amber" title="this computer's sync identity is not named after an editor. Approve it on Settings, then USERS">[ UNMAPPED ]</span>{% endif %}
         {% if not e.report_only %}<span class="conn {{ 'on' if e.connected else 'off' }}">{{ "online" if e.connected else "offline" }}</span>{% endif %}
       </td>
       {% if e.report_only %}
-      <td class="mono muted" data-label="SYNCED" title="no Syncthing device on this machine; lane C does not apply">-</td>
+      <td class="mono muted" data-label="SYNCED" title="no Syncthing device on this computer, so folder sync does not apply">-</td>
       <td class="mono muted" data-label="HAS">-</td>
       <td class="mono muted" data-label="MISSING">-</td>
       {% else %}
-      <td class="mono" data-label="SYNCED" title="everything this machine should hold: proxies + shared project files (originals stay on the server)"><span class="cssbar"><span class="fill" style="width:{{ [[e.synced_pct or 0, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(e.synced_pct or 0) }}%</td>
+      <td class="mono" data-label="SYNCED" title="everything this computer should hold: proxies + shared project files (originals stay on the server)"><span class="cssbar"><span class="fill" style="width:{{ [[e.synced_pct or 0, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(e.synced_pct or 0) }}%</td>
       <td class="mono" data-label="HAS">{% if e.global_items is not none %}{{ e.have_items }} / {{ e.global_items }} files{% else %}-{% endif %}</td>
       <td class="mono" data-label="MISSING">{% if e.need_items %}{{ e.need_items }} files · {{ e.need_bytes | human_bytes }}{% else %}-{% endif %}</td>
       {% endif %}
@@ -299,9 +299,9 @@
           · <span title="proxies on this computer's disk / on the NAS">{{ e.media.n_proxies }}/{{ project.nas_media.n_proxies }} proxy</span>
         {% else %}<span class="muted" title="no media manifest reported yet">-</span>{% endif %}
       </td>
-      <td class="lane-cell" data-label="LANES">
+      <td class="lane-cell" data-label="SYNC">
         {% for lane in e.lanes %}
-          <span class="chip lane {{ lane.chip }}" title="{{ lane.lane }} on {{ lane.machine }}: {{ lane.state }}{% if lane.last_error %} ({{ lane.last_error }}){% endif %}">{{ lane.label }}:{{ lane.state }}</span>
+          <span class="chip lane {{ lane.chip }}" title="{{ lane.lane | lane_word }} on {{ lane.machine }}: {{ lane.state }}{% if lane.last_error %} ({{ lane.last_error }}){% endif %}">{{ lane.lane | lane_word }}: {{ lane.state }}</span>
         {% else %}
           <span class="muted" title="no companion report received">no reports</span>
         {% endfor %}
@@ -319,5 +319,5 @@
   </tbody>
 </table></div>
 {% else %}
-<div class="muted">No editor devices share this folder yet. Share it with accept_device.py.</div>
+<div class="muted">No editor computer shares this folder yet. Approve the computer on Settings, then USERS: sharing follows by itself on the next cycle.</div>
 {% endif %}

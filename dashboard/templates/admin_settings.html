@@ -14,35 +14,77 @@
     <div id="settings-error" class="banner" style="display:none"></div>
     <div id="settings-saved" class="muted"></div>
 
-    {# Hover help for the fields whose value is not self-evident from the
-       label. A dict rather than per-field markup because the inputs below are
-       one generic loop, and a second hand-written block would drift. #}
+    {# DUI-11 (usability sweep 2026-09-03): sixteen jargon fields with ONE
+       hint, in a mechanism built for hints. A first-time customer meets this
+       page immediately after the wizard, and nothing on it said which value
+       an editor's computer will refuse to sync without. One sentence and an
+       example for every field now, and the fields are in three headed groups
+       below. A dict rather than per-field markup because the inputs are one
+       generic loop, and a second hand-written block would drift. #}
     {% set FIELD_HINTS = {
-      "brand_logo": "Your studio's mark in every editor's tray and window title. Blank wears the product's own. A bare name (cc_mark_white.png) selects a mark the companion build already ships; anything with a slash is a path on the EDITOR's machine. It must be WHITE on transparent: the tray tints it to carry sync status, so a pre-coloured logo comes out a solid blob.",
+      "org_name": "Your company's full name, shown in the header, on the login page and in every editor's tray. Example: Northlight Films Ltd.",
+      "org_short": "The short form used where space is tight (the header, a browser tab). Example: Northlight.",
+      "product_name": "What this software is called in your fleet. Leave it as the product's own name unless you have a reason. Example: CC Sync.",
+      "brand_logo": "Your studio's mark in every editor's tray and window title. Blank wears the product's own. A bare name (cc_mark_white.png) selects a mark the companion build already ships; anything with a slash is a path on the EDITOR's computer. It must be WHITE on transparent: the tray tints it to carry sync status, so a pre-coloured logo comes out a solid blob.",
+      "tree_name": "The name of the top folder that holds every project on the server, and the same folder on every editor's disk. Changing it does not move anything. Example: Creators_Club.",
+      "canonical_prefix": "The drive every editor's Resolve sees the footage at. It is written into every clip path, so it must be the same on every computer. Example: P:\\",
+      "remote_root": "The full path to the tree on the server itself, as the server sees it. Example: /mnt/tank/creators/Creators_Club",
+      "smb_unc": "The Windows network address editors map that drive to. Example: \\nas\creators",
+      "dashboard_url": "The address of THIS dashboard. It must be exactly the address editors type in their browser, or Send to Resolve stops working. Example: https://nas.example.ts.net",
+      "sftp_host": "The address uploads and proxy downloads connect to. Usually the same machine as this dashboard. Example: nas.example.ts.net",
+      "sftp_port": "The port for that connection. 22 unless your server was set up differently. Example: 22",
+      "sftp_chunk_size": "How much data is sent at a time. Bigger is faster on a good link and worse on a poor one. Leave it alone unless we ask. Example: 64M",
+      "sftp_concurrency": "How many transfers run at once. Leave it alone unless we ask. Example: 8",
+      "sftp_shell_type": "Which kind of shell the server offers. Leave it as it was set up; a wrong value stops every upload. Example: unix",
+      "rclone_remote": "The internal name of the upload connection. It is generated for you; change it only if we ask. Example: ccnas",
+      "nas_syncthing_id": "The server's own sync identity, so editors' computers know they are talking to the right one. It is filled in for you when the server is set up.",
     } %}
+    {# DUI-11: the one field whose wrong value looks like a broken product
+       rather than a wrong setting (the loopback origin allow-list,
+       CLAUDE.md's 8899 note: a mismatch 403s every Send to Resolve call). #}
+    {% set FIELD_FLAGS = {
+      "dashboard_url": "This must be exactly the address editors type in their browser, or Send to Resolve stops working.",
+    } %}
+    {# Three groups, in the order a customer meets them. The sftp/rclone/
+       Syncthing six are ADVANCED and collapsed: they are set up once by the
+       installer and a customer who opens them by accident should have to
+       mean it. #}
+    {% set FIELD_GROUPS = [
+      ("[ YOUR STUDIO ]", "Who this deployment is. These names appear in the header, on the login page and in every editor's tray.",
+       ["org_name", "org_short", "product_name", "brand_logo"], false),
+      ("[ THE TREE ]", "Where the footage lives, on the server and on every editor's computer.",
+       ["tree_name", "canonical_prefix", "remote_root", "smb_unc", "dashboard_url"], false),
+      ("[ HOW EDITORS CONNECT - ADVANCED ]", "Set up once when the server was installed. A wrong value here stops syncing for everybody.",
+       ["sftp_host", "sftp_port", "sftp_chunk_size", "sftp_concurrency", "sftp_shell_type", "rclone_remote", "nas_syncthing_id"], true),
+    ] %}
 
     {# One column with 16 px inputs below --bp-phone (MOBILE_PLAN.md §4 M3,
        2026-08-30): the class is what mobile.css's admin section addresses, so
        the desktop form keeps the widths it has always had. #}
+    {% set FIELD_LABELS = {
+      "org_name": "ORG NAME", "org_short": "SHORT NAME",
+      "product_name": "PRODUCT NAME", "brand_logo": "TRAY LOGO",
+      "tree_name": "TREE NAME", "canonical_prefix": "DRIVE LETTER",
+      "remote_root": "REMOTE ROOT", "smb_unc": "SMB UNC",
+      "dashboard_url": "DASHBOARD URL", "sftp_host": "SFTP HOST",
+      "sftp_port": "SFTP PORT", "sftp_chunk_size": "SFTP CHUNK SIZE",
+      "sftp_concurrency": "SFTP CONCURRENCY", "sftp_shell_type": "SFTP SHELL TYPE",
+      "rclone_remote": "RCLONE REMOTE", "nas_syncthing_id": "NAS SYNCTHING ID",
+    } %}
     <form id="settings-form" class="admin-form" style="margin-top:0.8rem">
-      {% for key, label in [
-        ("org_name", "ORG NAME"),
-        ("org_short", "SHORT NAME"),
-        ("product_name", "PRODUCT NAME"),
-        ("brand_logo", "TRAY LOGO"),
-        ("tree_name", "TREE NAME"),
-        ("canonical_prefix", "DRIVE LETTER"),
-        ("remote_root", "REMOTE ROOT"),
-        ("smb_unc", "SMB UNC"),
-        ("dashboard_url", "DASHBOARD URL"),
-        ("sftp_host", "SFTP HOST"),
-        ("sftp_port", "SFTP PORT"),
-        ("sftp_chunk_size", "SFTP CHUNK SIZE"),
-        ("sftp_concurrency", "SFTP CONCURRENCY"),
-        ("sftp_shell_type", "SFTP SHELL TYPE"),
-        ("rclone_remote", "RCLONE REMOTE"),
-        ("nas_syncthing_id", "NAS SYNCTHING ID"),
-      ] %}
+      {% for group_label, group_blurb, group_keys, collapsed in FIELD_GROUPS %}
+      {# <details> for the advanced run and a plain block for the other two:
+         a group that is always open must not need a click to read, and one
+         that is collapsed must survive a form submit (it is inside the form,
+         so nothing here is conditionally rendered - only conditionally
+         SHOWN, and every input posts either way). #}
+      {% if collapsed %}<details class="proj-group settings-group"><summary><span class="marker">&#9656;</span> {{ group_label }}
+        <span class="muted">{{ group_blurb }}</span></summary><div class="settings-group-body">{% else %}
+      <div class="settings-group">
+        <div class="side-head" style="margin-top:1rem">{{ group_label }}
+          <span class="muted">{{ group_blurb }}</span></div>{% endif %}
+      {% for key in group_keys %}
+        {% set label = FIELD_LABELS.get(key, key | upper) %}
         {# `auto_derived` is ONLY the keys with a LIVE derived value right now
            (ui.page_admin_settings, 2026-08-30 follow-up) -- NOT "this key
            could theoretically be derived once a sidecar exists", which is
@@ -53,7 +95,10 @@
         {% set is_auto = key in auto_derived %}
         {% set hint = FIELD_HINTS.get(key, "") %}
         {% set env_val = env_hint.get(key) %}
+        {% set flag = FIELD_FLAGS.get(key, "") %}
         <label{% if hint %} title="{{ hint }}"{% endif %}>{{ label }}{% if is_auto %} <span class="muted">(auto-derived: {{ auto_derived_reason.get(key, "") }})</span>{% endif %}<br>
+          {% if hint %}<span class="muted field-hint">{{ hint }}</span><br>{% endif %}
+          {% if flag %}<span class="amber-text field-hint">{{ flag }}</span><br>{% endif %}
           <input type="text" name="{{ key }}" value="{{ manifest[key] }}"
                  {% if hint %}title="{{ hint }}"{% endif %}
                  {{ "readonly" if is_auto }}>
@@ -69,6 +114,8 @@
             env DASH_SITE_{{ key | upper }}={{ env_val }} (not applied: the row above is what is live; edit it, or Import a site.toml, to change it)
           </p>
         {% endif %}
+      {% endfor %}
+      {% if collapsed %}</div></details>{% else %}</div>{% endif %}
       {% endfor %}
       {# NAS KIND is a choice, not free text (dash-admin-7, 2026-08-21): a
          typed "TrueNAS" was published to every installer while this
@@ -104,8 +151,8 @@
         <span class="muted">set on <a href="#ai-providers">AI providers</a> below, where accepting the notice turns it on</span></label>
 
       <div class="side-head" style="margin-top:1.2rem">[ B-ROLL INDEXING MODEL ]
-        <span class="muted">The indexer on your base rig reads this choice from the dashboard;
-          it can be overridden per machine in the indexer's config.</span></div>
+        <span class="muted">The indexer on your wired computer reads this choice from the dashboard;
+          it can be overridden per computer in the indexer's config.</span></div>
       <fieldset class="model-tier-fieldset">
         <label class="radio-option"
                title="Qwen3-VL 4B: needs an NVIDIA GPU with 8 GB VRAM (or Apple Silicon with 16 GB); ~20 s per clip on an RTX 3080">

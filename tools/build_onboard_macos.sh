@@ -544,6 +544,16 @@ if ! grep -q '"is_admin"[[:space:]]*:[[:space:]]*true' "$BODY_FILE"; then
 fi
 step "logged in as $ADMIN_USER"
 
+# REL-1 (usability sweep 2026-09-04): the PUT answers `note` when it published
+# the build but did NOT make it current -- the soak gate stands at the publish
+# door now, and `--make-current` from a Mac was one of the two doors that used
+# to walk past it. Read out of the body with sed rather than a JSON parser
+# (this script has no python dependency by design); an absent field reads as
+# empty, which is the "it did what you asked" case.
+staged_note() {
+    LC_ALL=C sed -n 's/.*"note"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -n 1
+}
+
 MC=0
 [ "$MAKE_CURRENT" = 1 ] && MC=1
 PUT_URL="$DASHBOARD_URL/api/v1/admin/packages/macos/$ONBOARD_VERSION?kind=onboard&sha256=$ZIP_SHA&make_current=$MC$SIGN_QUERY"
@@ -583,7 +593,11 @@ elif [ "$PUT_CODE" != "200" ]; then
     fail "publish failed with HTTP $PUT_CODE -- see the response above. Nothing is current that was not current before."
 fi
 
-if [ "$MAKE_CURRENT" = 1 ]; then
+NOTE="$(staged_note "$BODY_FILE")"
+if [ -n "$NOTE" ]; then
+    step "macos installer v$ONBOARD_VERSION: $NOTE"
+    step "flip [ MAKE CURRENT ] on the dashboard's Packages page when you are ready."
+elif [ "$MAKE_CURRENT" = 1 ]; then
     step "published macos installer v$ONBOARD_VERSION and made it CURRENT --"
     step "a Mac's [ INSTALLER ] click now downloads ccsync-onboard-$ONBOARD_VERSION.zip"
 else

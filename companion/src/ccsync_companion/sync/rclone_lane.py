@@ -3785,9 +3785,23 @@ class RcloneLane(LaneAdapter):
         red and read as "the lane is broken", when the truth is "the lane
         was stopped on purpose and needs a human". The sequencer keeps
         rotating -- lanes A and C are untouched by a lane B trip, which is
-        the entire point of a breaker rather than a shutdown."""
+        the entire point of a breaker rather than a shutdown.
+
+        The sentence on `detail` is the EDITOR's (SYNC-106, sweep
+        2026-09-03): this string is rendered in four places an editor reads
+        (the tray line, the balloon, the Settings window and the dashboard's
+        fleet chip), and one of the trip reasons used to end "Check
+        remote_root in config.toml" -- a file under ~/.ccsync that a frozen
+        build does not expose and that is not theirs to edit. The technical
+        reason is unchanged and stays where an admin looks for it: the
+        log.error the trip itself writes, the line below, and
+        `sync_guard.lane_b_breaker.reason` on every report."""
         reason = self.breaker.reason if self.breaker is not None else "stopped"
+        said = (lane_guard.breaker_editor_reason(reason, self._breaker_cause())
+                if self.breaker is not None else reason)
+        detail = f"STOPPED (safety): {said}"
         with self._lock:
+            first = self._status.detail != detail
             self._status.state = STATE_PAUSED
             self._status.transferring = 0
             self._status.queued = 0
@@ -3796,8 +3810,22 @@ class RcloneLane(LaneAdapter):
             self._status.transfers = []
             self._status.current_project = None
             self._status.last_error = None
-            self._status.detail = f"STOPPED (safety): {reason}"
+            self._status.detail = detail
+        if first:
+            # Once per distinct trip, not once per pass: the stand-down runs
+            # on every rotation while the breaker is latched.
+            log.info("lane B stands down, breaker reason: %s", reason)
         return self.status()
+
+    def _breaker_cause(self) -> str:
+        """Which trigger fired, for `breaker_editor_reason`. Never raises: a
+        breaker that cannot say gets the sentence recovered from the reason
+        text instead, which is what a latch written by an older build has."""
+        try:
+            return str((self.breaker.report() or {}).get("cause") or "")
+        except Exception:  # noqa: BLE001
+            log.debug("lane B: could not read the breaker cause", exc_info=True)
+            return ""
 
     def _backup_dir_bytes(self) -> int:
         """Bytes this run moved into its own --backup-dir. Cheap: one run's

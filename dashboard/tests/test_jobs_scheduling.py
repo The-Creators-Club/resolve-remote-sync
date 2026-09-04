@@ -268,7 +268,7 @@ def test_why_on_a_fleet_that_cannot_do_it_at_all_says_so_in_one_sentence(conn):
     machine(conn, "ruskin", "OTHER-PC", dict(MEDIA_CAPS, ffmpeg=False, ffprobe=False))
     answer = jobs_mod.explain(conn, queue(conn, "peaks"))
     assert answer["schedulable"] is False
-    assert answer["summary"] == ("no machine can take this job right now: 2 of "
+    assert answer["summary"] == ("no computer can take this job right now: 2 of "
                                 "2 cannot do this kind of work")
 
 
@@ -627,3 +627,126 @@ def test_the_row_carries_both_levers_back_as_a_bool_and_a_name(conn):
     plain = dbmod.get_job(conn, queue(conn, "peaks"))
     assert plain["forced"] is False
     assert plain["target_machine"] == ""
+
+
+# ---------------------------------------------- CMEDIA-1: the third consumer
+#
+# Usability sweep 2026-09-03. B-roll indexing and proxy generation negotiate on
+# the editor's own computer ("indexing beats proxy generation") and the job
+# runner was outside the agreement: both gates open on the same event (nobody
+# at the keyboard), so a whisper job was claimed onto a computer already
+# holding 8-12 GB of VLM weights, OOM'd, and earned that computer the
+# per-machine cooldown for a fault it did not have.
+#
+# TWO SOURCES, ON PURPOSE. The companion sends its own gate in
+# `capabilities.jobs_gate` with the sentence beside it, which is what the
+# report and the claim read; that is a fact about this second, so it is not
+# given a column. `explain` answers from the database long afterwards, so it
+# reads the flags that ARE stored - `ingest_active`, `music_ingest_active` -
+# on the row it already selects.
+
+
+def gate(reason, detail=""):
+    """The capabilities section a companion busy with its own work reports."""
+    return {"jobs_gate": {"reason": reason, "detail": detail}}
+
+
+def indexing(conn, editor, name, what="broll"):
+    """A stubbed report from a computer that is indexing right now."""
+    section = {"active": True, "state": "running", "done": 3, "total": 12}
+    dbmod.upsert_machine_state(
+        conn, editor, name, None, dbmod.utcnow_iso(),
+        ingest=section if what == "broll" else None,
+        music=section if what == "music" else None)
+    conn.commit()
+
+
+def test_a_computer_indexing_b_roll_is_refused_and_the_why_says_what_it_is_doing(conn):
+    machine(conn, "jsmith", "EDIT-PC", MEDIA_CAPS)
+    indexing(conn, "jsmith", "EDIT-PC")
+    answer = jobs_mod.explain(conn, queue(conn, "peaks"))
+    line = answer["machines"][0]
+    assert line["ok"] is False
+    assert line["reason"] == jobs_mod.REFUSE_LOCAL_WORK
+    assert line["why"] == "this computer is busy indexing b-roll"
+
+
+def test_a_computer_embedding_music_is_refused_too(conn):
+    machine(conn, "jsmith", "EDIT-PC", MEDIA_CAPS)
+    indexing(conn, "jsmith", "EDIT-PC", what="music")
+    answer = jobs_mod.explain(conn, queue(conn, "peaks"))
+    assert answer["machines"][0]["why"] == "this computer is busy indexing music"
+
+
+def test_the_companions_own_gate_wins_and_can_say_proxies(conn):
+    """The stored flags know about indexing; only the computer knows it is
+    three minutes into a proxy encode, so the gate it just sent is preferred
+    wherever there is one - the report reply and the claim."""
+    machine(conn, "jsmith", "EDIT-PC", MEDIA_CAPS)
+    facts = jobs_mod.machine_facts(
+        conn, "jsmith", "EDIT-PC",
+        capabilities=dict(MEDIA_CAPS, **gate("local_work", "busy making proxies")))
+    reason, why = jobs_mod.policy_refusal(facts, "peaks")
+    assert reason == jobs_mod.REFUSE_LOCAL_WORK
+    assert why == "this computer is busy making proxies"
+
+
+def test_a_busy_computer_is_offered_nothing_on_its_own_report(conn):
+    machine(conn, "jsmith", "EDIT-PC", MEDIA_CAPS)
+    queue(conn, "peaks")
+    offers = jobs_mod.offers_for_machine(
+        conn, "jsmith", "EDIT-PC",
+        capabilities=dict(MEDIA_CAPS, **gate("local_work", "busy indexing b-roll")))
+    assert offers["offered"] == []
+
+
+def test_with_no_other_candidate_the_job_level_answer_is_all_busy(conn):
+    """The distinction the Timeline Cards client acts on: `all_busy` is
+    transient, so it waits; `no_capable_machine` would send it off to do the
+    work itself for ever."""
+    machine(conn, "jsmith", "EDIT-PC", MEDIA_CAPS)
+    indexing(conn, "jsmith", "EDIT-PC")
+    answer = jobs_mod.explain(conn, queue(conn, "peaks"))
+    assert answer["schedulable"] is False
+    assert answer["reason_code"] == jobs_mod.REASON_ALL_BUSY
+    assert answer["transient"] is True
+    # It CAN do this kind of work; it is busy, which is a different number.
+    assert answer["capable"] == 1
+
+
+def test_local_work_is_not_idle_for_the_ranking(conn):
+    """The saturated computer used to be FIRST: nobody is at the keyboard, so
+    it had been idle longest. Policy refuses it before rank_key ever sees it,
+    so the free computer wins even though it has been idle for an hour and the
+    busy one for two minutes."""
+    machine(conn, "jsmith", "BUSY-PC", dict(MEDIA_CAPS, idle_seconds=3600))
+    indexing(conn, "jsmith", "BUSY-PC")
+    machine(conn, "leso", "FREE-PC", dict(MEDIA_CAPS, idle_seconds=120))
+    able = jobs_mod.ranked_machines(
+        dbmod.get_job(conn, queue(conn, "peaks")), jobs_mod.fleet_facts(conn),
+        dbmod.utcnow_iso())
+    assert [key for key, _score in able] == [("leso", "FREE-PC")]
+
+
+def test_a_gate_reason_this_build_does_not_know_is_not_a_refusal(conn):
+    """A dashboard that invents refusals from strings it has never seen is a
+    queue that stops for a typo in a newer companion."""
+    machine(conn, "jsmith", "EDIT-PC", MEDIA_CAPS)
+    facts = jobs_mod.machine_facts(
+        conn, "jsmith", "EDIT-PC",
+        capabilities=dict(MEDIA_CAPS, **gate("quantum_flux", "busy being new")))
+    assert jobs_mod.policy_refusal(facts, "peaks") == ("", "")
+    assert jobs_mod.local_work_words({"jobs_gate": "not even a mapping"}) == ""
+    assert jobs_mod.local_work_words({}) == ""
+    assert jobs_mod.local_work_words(None) == ""
+
+
+def test_local_work_with_no_detail_still_says_something(conn):
+    """A companion that sends the state and no sentence must not produce an
+    empty refusal: "" would render as a computer refused for no reason."""
+    machine(conn, "jsmith", "EDIT-PC", MEDIA_CAPS)
+    facts = jobs_mod.machine_facts(
+        conn, "jsmith", "EDIT-PC",
+        capabilities=dict(MEDIA_CAPS, **gate("local_work")))
+    assert jobs_mod.policy_refusal(facts, "peaks")[1] == (
+        "this computer is busy with its own media work")

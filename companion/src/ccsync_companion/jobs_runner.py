@@ -84,6 +84,15 @@ STATE_DISABLED = "disabled"
 STATE_NO_DASHBOARD = "no_dashboard"
 STATE_HALTED = "halted"
 STATE_NO_CAPABILITY = "no_capability"
+# THE THIRD GPU CONSUMER (CMEDIA-1, sweep 2026-09-03). The b-roll and music
+# ingestors and the proxy generator already negotiate over this machine's GPU
+# through `blocked_fn` ("indexing beats proxy generation"); the job runner was
+# outside that agreement, and its gate opens on the same event theirs do
+# (`_user_is_away`). So the common case was a whisper job claimed onto a
+# machine already holding 8-12 GB of VLM weights: an OOM or a crawl, reported
+# as a job failure, which then earned the machine the dashboard's per-machine
+# cooldown for a fault it did not have.
+STATE_LOCAL_WORK = "local_work"
 STATE_RUNNING = "running"
 STATE_USER_ACTIVE = "user_active"
 STATE_RESOLVE_OPEN = "resolve_open"
@@ -112,11 +121,14 @@ GATE_SENTENCES: dict[str, tuple[bool, str]] = {
         False, "This computer is not signed in to the dashboard, so the fleet "
                "has no way to give it work."),
     STATE_HALTED: (
-        False, "The fleet is halted, so this computer is not taking work of "
-               "any kind."),
+        False, "Your admin has stopped syncing for the whole fleet, so this "
+               "computer is not taking work of any kind."),
     STATE_NO_CAPABILITY: (
         False, "This computer is not set up for any of the kinds of work the "
                "fleet queues."),
+    STATE_LOCAL_WORK: (
+        False, "This computer is busy with your own work, so it is not taking "
+               "fleet work."),
     STATE_USER_ACTIVE: (
         False, "Somebody is at this computer, so it is not taking fleet work."),
     STATE_RESOLVE_OPEN: (
@@ -209,6 +221,7 @@ class JobRunner:
         idle_probe: Any = None,
         resolve_running_fn: Optional[Callable[[], bool]] = None,
         halted_fn: Optional[Callable[[], bool]] = None,
+        blocked_fn: Optional[Callable[[], Any]] = None,
         machine_name: str = "",
         runner_fn: Optional[Callable[..., Any]] = None,
         clock: Callable[[], float] = time.monotonic,
@@ -223,6 +236,10 @@ class JobRunner:
         self._idle_probe = idle_probe
         self._resolve_running_fn = resolve_running_fn
         self._halted_fn = halted_fn
+        # CMEDIA-1: the same seam ProxyGenerator and the ingestors carry.
+        # False/None = nothing local in the way; a STRING = the sentence for
+        # what is (and True with no words, for a caller that has none).
+        self._blocked_fn = blocked_fn
         self._machine_name = machine_name
         self._runner = runner_fn or subprocess.Popen
         self._clock = clock
@@ -515,6 +532,23 @@ class JobRunner:
             log.debug("jobs: halt check failed", exc_info=True)
             return True
 
+    def _local_work_reason(self) -> str:
+        """What work of the editor's own is using this computer, or "".
+
+        Fails CLOSED like `_halted` and `_resolve_running` above: a seam that
+        cannot answer must not read as "the GPU is free"."""
+        if self._blocked_fn is None:
+            return ""
+        try:
+            answer = self._blocked_fn()
+        except Exception:
+            log.debug("jobs: blocked_fn failed", exc_info=True)
+            return "Something here could not be asked whether it is busy."
+        if not answer:
+            return ""
+        text = str(answer).strip() if not isinstance(answer, bool) else ""
+        return text or "Work of your own is running here."
+
     def _capabilities(self) -> dict[str, Any]:
         if self._capabilities_fn is None:
             return {}
@@ -581,6 +615,14 @@ class JobRunner:
                 "There is no whisper set-up here, and no ffmpeg for the "
                 "media jobs.")
             return STATE_NO_CAPABILITY
+        # CMEDIA-1: ABOVE the two gates a person can open, deliberately.
+        # Indexing beats proxy generation for the reason it beats fleet work:
+        # it is the thing the person here is waiting on, and it needs the same
+        # GPU. A volunteer click is not consent to run two GPU jobs at once.
+        local = self._local_work_reason()
+        if local:
+            self._gate_note = local
+            return STATE_LOCAL_WORK
         self._gate_note = ""
         # THE TWO GATES A PERSON CAN OPEN (§10, 2026-08-30), and only these
         # two: what comes above is capability and safety, and neither a
@@ -1041,7 +1083,7 @@ class JobRunner:
         checkout = Path(str(self.cfg.get("jobs_mulcam_pipeline", "") or "").strip())
         if not python or not checkout.name:
             raise job_paths.JobPathError(
-                "this machine has no whisper venv or MulticamPipeline checkout "
+                "this computer has no whisper venv or MulticamPipeline checkout "
                 "configured (jobs_whisper_python / jobs_mulcam_pipeline)")
         argv = [python, str(checkout / "pipeline.py"), "transcribe",
                 "--folder", str(folder), "--root", str(episode)]

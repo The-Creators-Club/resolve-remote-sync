@@ -241,7 +241,8 @@ def test_project_view_includes_report_only_machines(app_env):
     # and the page renders the report-only row (BASE chip, no missing button)
     page = client.get("/project/2025-ff4-nuclear")
     assert page.status_code == 200
-    assert "owen" in page.text and "[ BASE ]" in page.text
+    # CR-179: the chip says WIRED now; "base rig" left the copy.
+    assert "owen" in page.text and "[ WIRED ]" in page.text
     assert "69/0 orig" in page.text  # NAS inventory not seeded -> denominator 0
 
 

@@ -38,6 +38,8 @@ import os
 import sqlite3
 from typing import Any, Iterable, Mapping
 
+from . import settings as settings_mod
+
 log = logging.getLogger("ccsync.dashboard.site_store")
 
 TABLE = "site_settings"
@@ -906,6 +908,25 @@ def import_toml(text: str) -> dict[str, str]:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise SiteValidationError("_toml", f"could not parse: {exc}")
+    # SYS-20 (2026-09-04): everything this store does not own is silently
+    # ignored on import, which is right for [apps]/[stack]/secrets and WRONG
+    # for this one key. `[tree] projects_dir` changes the server scripts'
+    # behaviour and nothing else's, so a customer who pastes a site.toml
+    # carrying it would get a NAS tree under one name and a fleet that syncs
+    # nothing, with no message anywhere. Refused here rather than dropped.
+    tree_table = data.get("tree")
+    if isinstance(tree_table, dict):
+        raw_projects_dir = str(tree_table.get("projects_dir", "") or "")
+        if not settings_mod.projects_dir_is_supported(raw_projects_dir):
+            raise SiteValidationError(
+                "projects_dir",
+                f"{raw_projects_dir.strip()!r} is not supported: this build only "
+                "supports a tree whose projects live in `Projects`. The name is "
+                "written into the companion's sync engine, the fixer and the "
+                "b-roll paths, none of which read this setting. Remove the line, "
+                "or rename the folder on the server "
+                "(docs/TREE_LAYOUT_AGNOSTICISM.md section 3.2)",
+            )
     reverse_toml_key = {v: k for k, v in _TOML_KEY_NAMES.items()}
     out: dict[str, str] = {}
     for section, keys in _SECTIONS:

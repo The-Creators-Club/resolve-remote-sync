@@ -292,9 +292,11 @@ cd music\web;     .venv\Scripts\python.exe -m pytest tests -q                # o
 cd music\indexer; python -m pytest tests -q                                  # system python; the path/config half, torch-free on purpose
 cd ytdl\web;      ..\..\dashboard\.venv\Scripts\python.exe -m pytest tests -q # no venv of its own -- the deployed reality is the dashboard's
 cd tools;         ..\dashboard\.venv\Scripts\python.exe -m pytest tests -q   # stdlib-only by design; the dashboard venv has pytest + packaging
-powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-DriveMapParser.ps1   # the "installer" row is FIVE scripts: this,
-#   Test-LicenceGate.ps1, Test-PrevRollback.ps1 (wave 3), Test-ConsoleUser.ps1 (wave 4, OPS-7) and
-#   Test-SmbShareGone.ps1 (bug hunt 2026-09-03, install-onboard-3), each run the same way
+powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-DriveMapParser.ps1   # the "installer" row is SEVEN scripts: this,
+#   Test-LicenceGate.ps1, Test-PrevRollback.ps1 (wave 3), Test-ConsoleUser.ps1 (wave 4, OPS-7),
+#   Test-SmbShareGone.ps1 (bug hunt 2026-09-03, install-onboard-3), Test-ForeignDriveMiss.ps1
+#   (sweep 2026-09-04, OPS-1) and Test-UninstallEntry.ps1 (sweep 2026-09-04, OPS-17), each run
+#   the same way. `ls installer/tests/*.ps1` is the list: this comment has now been wrong twice.
 bash installer/tests/test_macos_site_values.sh                               # Git Bash; macos_bootstrap.sh's string helpers, no Mac needed
 ```
 
@@ -317,9 +319,13 @@ PATH resolves `chown` to MSYS's real one (`chown: invalid user: 'root:root'`).
 
 ## Building & shipping (existing commands — don't invent wrappers)
 
-**There is one command. It is `tools\ship.cmd`.** Everything below it is what
-that command already runs; reach for the individual scripts only to redo one
-part, never to assemble a release by hand.
+**There are two pathways, and which one applies depends on who is running it:
+`docs/RELEASE_PATHWAYS.md`.** At Alex's terminal, `tools\ship.cmd` (pathway A:
+one dashboard, Windows artefacts, an interactive password prompt). Anything
+unattended, CI + `tools/publish_latest.py` (pathway B: all four artefacts to
+the vendor feed, no password in the path - this is how 0.9.61 reached the
+fleet). Everything below is what those already run; reach for the individual
+scripts only to redo one part, never to assemble a release by hand.
 
 ```powershell
 tools\ship.cmd            # THE ship: gates -> dashboard deploy -> companion + onboard.exe build

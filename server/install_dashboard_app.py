@@ -282,6 +282,25 @@ DEFAULT_BROLL_WEB_DIR = Path(__file__).resolve().parents[1] / "broll" / "web"
 BROLL_EXCLUDE_DIRS = EXCLUDE_DIRS | {".git", ".github", "tests", "node_modules"}
 
 # --------------------------------------------------------------------------
+# The two documents the dashboard SERVES (REL-5, usability sweep 2026-09-04)
+# --------------------------------------------------------------------------
+# `docs/` is not part of the dashboard tree, so neither the licence agreement
+# the first-run wizard makes an admin accept nor the guide /help renders has
+# ever existed on a deployed server. On the image they now ride in a COPY
+# (dashboard/deploy/Dockerfile) and on an OTA bundle in TREES/FILES
+# (tools/build_dashboard_bundle.py); this is the BIND-mode third: they go into
+# <root>/app/docs, which the container already mounts at /app, because that is
+# where help._candidates and setup_engine._find_eula look.
+#
+# Shipped AFTER the app tree and never fatal: an absent guide is a degraded
+# help page, and "the dashboard is what tells everyone whether their footage
+# is syncing" outranks it. The app swap replaces <root>/app wholesale, so this
+# is re-shipped on every deploy by construction.
+LOCAL_DOCS_DIR = Path(__file__).resolve().parents[1] / "docs"
+SHIPPED_DOCS = ("HOW_IT_WORKS.md",)
+SHIPPED_DOC_TREES = ("legal",)
+
+# --------------------------------------------------------------------------
 # The music app (music/web), mounted in-process at /music
 # --------------------------------------------------------------------------
 # Deployed exactly the way broll/web is: the CODE tree ships to
@@ -633,6 +652,144 @@ def datasets_env(tree_root: str = "", host_root: str = "", probe: bool = False,
         "DASH_TREE_DATASET": tree,
         "DASH_UPDATE_SNAPSHOT_DATASET": apps,
     }
+
+
+# Where the dashboard's RECOVERY page reads snapshots. One directory whose
+# ENTRIES are snapshots, mounted read-only (recovery.py ENV_SNAPSHOT_DIR).
+SNAPSHOT_MOUNT = "/snapshots"
+
+
+def snapshot_source(tree_root: str = "", probe: bool = False,
+                    dry_run: bool = False) -> tuple[str, str]:
+    """(the host directory holding this tree's snapshots, the path from one
+    snapshot's root to the Projects tree) -- or ("", "") for "not known".
+
+    OPS-3 (usability + resilience sweep 2026-09-03). docs/BACKUP_RESTORE.md
+    opens with "start at the dashboard, not at this document", and Settings ->
+    RECOVERY needs DASH_SNAPSHOT_DIR to browse or restore anything. NOTHING
+    set it: it had zero hits in server/, INSTALL.md and SERVER.md, so every
+    install that followed the docs got a page that could only print commands,
+    and the owner found that out during an incident.
+
+    ZFS puts a dataset's snapshots under `<mountpoint>/.zfs/snapshot`, which
+    is the DATASET's, not the directory's: the tree root is often a folder
+    inside the dataset, so the Projects tree sits some way down inside each
+    snapshot. That offset is the subpath, computed rather than guessed.
+
+    ("", "") is the honest answer for a dry run, a Synology (share snapshots
+    live under `/volume<N>/@sharesnap`, which no path here can derive), a NAS
+    that did not answer, and a directory the NAS says is not there. It is
+    also the SAFE answer: a bind mount of a path that does not exist makes
+    docker CREATE it, and a stray `.zfs` directory invented inside a
+    customer's footage tree is not a thing a deploy may do. site.toml's
+    `[tree] snapshot_dir` (+ `snapshot_projects_subpath`) overrides all of
+    it, which is the way in for DSM and for any site whose snapshots are
+    mounted somewhere of its own.
+    """
+    named = site_value("tree", "snapshot_dir").strip()
+    if named:
+        sub = site_value("tree", "snapshot_projects_subpath").strip().strip("/")
+        return named.rstrip("/"), sub
+    if not probe:
+        return "", ""
+    tree_root = (tree_root or DEFAULT_CC_ROOT or "").rstrip("/")
+    dataset = probe_dataset(tree_root, dry_run)
+    if not dataset or not tree_root:
+        return "", ""
+    mountpoint = "/mnt/" + dataset.strip("/")
+    if not (tree_root == mountpoint or tree_root.startswith(mountpoint + "/")):
+        # The NAS named a dataset this tree is not under. Nothing here is
+        # worth a guess (see the docstring's bind-mount note).
+        return "", ""
+    inside = tree_root[len(mountpoint):].strip("/")
+    sub = "/".join(p for p in (inside, PROJECTS_DIRNAME) if p)
+    host = f"{mountpoint}/.zfs/snapshot"
+    if not remote_dir_exists(host, dry_run):
+        return "", ""
+    return host, sub
+
+
+def remote_dir_exists(path: str, dry_run: bool = False) -> bool:
+    """Whether the NAS has that directory. Under sudo for resolve_dataset's
+    reason (server-2): TRUENAS_USER has no traverse on the 2770 tree, so an
+    unprivileged test is False on paths that are really there. Any failure at
+    all is False, which is the direction that mounts nothing."""
+    if not path or dry_run:
+        return False
+    try:
+        rc, out, _err = run_ssh(
+            'echo "$SUDO_PW" | sudo -S -p "" sh -c '
+            + shell_quote(f"[ -d {shell_quote(path)} ] && echo yes || echo no"),
+            dry_run=False, timeout=60)
+    except Exception:                                                # noqa: BLE001
+        return False
+    return rc == 0 and "yes" in (out or "")
+
+
+def snapshot_env(tree_root: str = "", probe: bool = False,
+                 dry_run: bool = False, source: tuple[str, str] | None = None) -> dict:
+    """The two variables the RECOVERY page reads (OPS-3).
+
+    Blank is "this deployment was never given a snapshot mount", which is
+    exactly what recovery.py renders it as -- never "there are no snapshots".
+    `source` is main()'s already-probed answer, so a deploy asks the NAS once.
+    """
+    host, sub = source if source is not None else snapshot_source(
+        tree_root, probe=probe, dry_run=dry_run)
+    return {
+        "DASH_SNAPSHOT_DIR": SNAPSHOT_MOUNT if host else "",
+        "DASH_SNAPSHOT_PROJECTS_SUBPATH": sub if host else "",
+    }
+
+
+def snapshot_volumes(source: tuple[str, str] | None = None) -> list:
+    """The read-only snapshot mount, or nothing (OPS-3).
+
+    ro is not decoration: `.zfs/snapshot` is the one directory on the NAS
+    where a write is a rollback of somebody's footage.
+    """
+    host = (source or ("", ""))[0]
+    return [f"{host}:{SNAPSHOT_MOUNT}:ro"] if host else []
+
+
+def snapshot_schedule_warning(tree_root: str = "", host_root: str = "",
+                              dry_run: bool = False) -> list:
+    """The lines a deploy prints when a snapshot target is not a dataset.
+
+    OPS-9 (2026-09-03). INSTALL.md Step 4 runs setup_snapshots.py --apply and
+    stops; the trap it cannot see is that `[apps] root` must BE a dataset and
+    the deploy only ever `mkdir -p`s it, so on this fleet's own box
+    dashboard.db has never had a scheduled snapshot behind it and the
+    transcript was green. This asks the same question setup_snapshots.py
+    --list asks (an EMPTY policy: the refusal happens before the backend
+    reads or writes anything) and prints the backend's own sentence.
+
+    APPLIES NOTHING and fails no deploy: a NAS whose snapshot API is unhappy
+    must not be a NAS where the dashboard cannot be installed.
+    """
+    if dry_run:
+        return []
+    out = []
+    for label, path in (("the project tree", tree_root or DEFAULT_CC_ROOT),
+                        ("this dashboard's own data", host_root or DEFAULT_HOST_ROOT)):
+        if not path:
+            continue
+        try:
+            states = backend().ensure_snapshot_schedule(path, [], False)
+        except Exception as exc:                                     # noqa: BLE001
+            out.append(f"{label} ({path}): could not be checked ({type(exc).__name__})")
+            continue
+        out.extend(f"{label}: {detail}"
+                   for state, detail in states if state == "failed")
+    return out
+
+
+def print_snapshot_schedule_warning(tree_root: str = "", host_root: str = "",
+                                    dry_run: bool = False) -> None:
+    for line in snapshot_schedule_warning(tree_root, host_root, dry_run):
+        print(f"WARNING: no snapshot floor -- {line}", file=sys.stderr)
+        print("         Fix it, then re-check with: python setup_snapshots.py "
+              "--list --apply (docs/BACKUP_RESTORE.md)", file=sys.stderr)
 
 
 def cards_volumes() -> list:
@@ -1696,6 +1853,12 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                    # costs an SSH round trip and rendering a compose body
                    # must not.
                    tree_dataset: str = "", apps_dataset: str = "",
+                   # Where the RECOVERY page reads snapshots (OPS-3,
+                   # 2026-09-03, see snapshot_source). (host dir, subpath), or
+                   # None for "this render did not ask the NAS" -- which is
+                   # every render but main()'s, and comes out as the two
+                   # variables blank plus no mount.
+                   snapshot: tuple | None = None,
                    # WHERE THE CODE COMES FROM (2026-08-18, docs/DOCKER.md).
                    # "bind" is the default in the SIGNATURE too, not
                    # SITE_STACK_MODE: main() always passes the resolved value,
@@ -2020,6 +2183,11 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # telling operators to set them by hand since 2026-08-28
                     # and offering no way to do it (2026-09-03).
                     **datasets,
+                    # --- and where the RECOVERY page can READ them (OPS-3) ---
+                    # Blank unless the mount below is really there: the page
+                    # renders unset as "this deployment was never given a
+                    # snapshot mount", never as "there are no snapshots".
+                    **snapshot_env(source=snapshot or ("", "")),
                     # --- what GET /api/v1/site serves (see site_env) ---------
                     **site_env(port, tree_root, truenas_host, dashboard_url),
                 },
@@ -2096,6 +2264,13 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # reports "no vault is mounted here" and the dashboard is
                     # otherwise untouched.
                     *cards_volumes(),
+                    # The NAS's own snapshots, READ-ONLY, so Settings ->
+                    # RECOVERY can browse and restore from one without a root
+                    # shell (OPS-3). Absent unless the deploy VERIFIED the
+                    # directory on the NAS -- docker creates a missing bind
+                    # source, and inventing a `.zfs` inside a customer's
+                    # footage tree is not a thing a deploy may do.
+                    *snapshot_volumes(snapshot),
                     # claude-home and claude-bin are GONE (2026-08-17,
                     # COMMERCIAL_READINESS.md item 1): no CLI subprocess, so no
                     # OAuth credential volume and no agent binary inside a
@@ -2227,6 +2402,11 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
                       # compose_config was given, so the pasted FILE and the
                       # POSTed DICT cannot describe different datasets.
                       tree_dataset: str = "", apps_dataset: str = "",
+                      # The RECOVERY page's snapshot mount (OPS-3,
+                      # 2026-09-03), as (host dir, subpath). None renders the
+                      # two variables blank, which is what an operator who
+                      # pastes this file gets until a deploy fills them in.
+                      snapshot: tuple | None = None,
                       ccsync_image: str = "") -> dict:
     """Every {{NAME}} the compose template takes, defaulted from site.toml."""
     host_root = require_site_value(host_root or DEFAULT_HOST_ROOT, "[apps] root",
@@ -2303,6 +2483,10 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
         **{**datasets_env(tree_root, host_root),
            **{k: v for k, v in (("DASH_TREE_DATASET", tree_dataset),
                                 ("DASH_UPDATE_SNAPSHOT_DATASET", apps_dataset)) if v}},
+        # ...and where that dashboard can READ the snapshots (OPS-3). The
+        # FILE and the DICT describe one container, so it takes exactly what
+        # compose_config was given.
+        **snapshot_env(source=snapshot or ("", "")),
         **site,
         "NAS_APPS_ROOT": host_root,
         "NAS_TREE_ROOT": tree_root,
@@ -3723,6 +3907,43 @@ def build_prune_script(target: str, mountinfo_glob: str = "/proc/*/mountinfo") -
     )
 
 
+def ship_dashboard_docs(root: str, dry_run: bool, staging_parent: str) -> bool:
+    """Put docs/HOW_IT_WORKS.md + docs/legal/ into <root>/app/docs (REL-5).
+
+    Assembled into a temporary directory first because the two sources are a
+    FILE and a DIRECTORY in a tree this script does not otherwise ship, and
+    install_tree takes one source root. Returns True when the docs are there;
+    every failure is a printed NOTE and False, never an exception -- see the
+    module comment beside LOCAL_DOCS_DIR.
+    """
+    import tempfile
+
+    missing = [n for n in SHIPPED_DOCS if not (LOCAL_DOCS_DIR / n).is_file()]
+    missing += [n for n in SHIPPED_DOC_TREES if not (LOCAL_DOCS_DIR / n).is_dir()]
+    if missing:
+        print(f"NOTE: not shipping {', '.join(missing)} -- absent from "
+              f"{LOCAL_DOCS_DIR}. The first-run wizard will say no licence "
+              f"agreement is included in this build, and /help will say the "
+              f"guide is not installed.", file=sys.stderr)
+        return False
+    staging_local = tempfile.mkdtemp(prefix="ccsync-docs-")
+    try:
+        for name in SHIPPED_DOCS:
+            shutil.copy2(LOCAL_DOCS_DIR / name, Path(staging_local) / name)
+        for name in SHIPPED_DOC_TREES:
+            shutil.copytree(LOCAL_DOCS_DIR / name, Path(staging_local) / name)
+        ok = install_tree(root, "app/docs", Path(staging_local), dry_run,
+                          staging_slug="ccsync-docs-upload",
+                          staging_parent=staging_parent)
+    finally:
+        shutil.rmtree(staging_local, ignore_errors=True)
+    if not ok:
+        print("NOTE: the licence agreement and the help guide were NOT installed. "
+              "The dashboard is up either way; /setup will say no licence "
+              "agreement is included in this build.", file=sys.stderr)
+    return ok
+
+
 def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
                  excludes: set = EXCLUDE_DIRS,
                  staging_slug: str = "ccsync-dashboard-upload",
@@ -4913,6 +5134,13 @@ def main():
                                       staging_parent=code_staging_parent):
         return 1
 
+    # Step 2a: the licence agreement and the help guide (REL-5). Best effort:
+    # a failure here is a wizard with no EULA text and a /help that says it is
+    # not installed, which is worse than yesterday and not worth failing a
+    # deploy that has already swapped the code.
+    if push_code:
+        ship_dashboard_docs(root, args.dry_run, code_staging_parent)
+
     # Step 2b: ship the b-roll web/ tree into broll-web. Without this the
     # directory the container mounts at /broll-app is EMPTY, `from app.main
     # import app` raises ModuleNotFoundError, the mount is skipped, and the
@@ -5090,6 +5318,20 @@ def main():
     # answer goes into both the dict TrueNAS POSTs and the file DSM uploads.
     # Two df calls, and every failure is a blank, so this cannot fail a deploy.
     datasets = datasets_env(DEFAULT_CC_ROOT, root, probe=True, dry_run=args.dry_run)
+    # ...and where this container will be able to READ those snapshots, asked
+    # in the same session (OPS-3, 2026-09-03). One df and one `test -d`, both
+    # failing to "" -- a deploy is never held up by a diagnostic.
+    snapshot = snapshot_source(DEFAULT_CC_ROOT, probe=True, dry_run=args.dry_run)
+    if snapshot[0]:
+        print(f"snapshots for the recovery page: {snapshot[0]} -> "
+              f"{SNAPSHOT_MOUNT} (ro)")
+    elif not args.dry_run:
+        print("NOTE: this deploy found no snapshot directory it could mount, so "
+              "Settings -> RECOVERY can only print commands. Name one with "
+              "site.toml [tree] snapshot_dir. See docs/BACKUP_RESTORE.md.")
+    # Is there a snapshot floor under the two things that matter at all
+    # (OPS-9)? Read-only, applies nothing, fails no deploy.
+    print_snapshot_schedule_warning(DEFAULT_CC_ROOT, root, args.dry_run)
     # The create itself is the backend's: a custom_app POST on TrueNAS Apps,
     # `docker compose up -d` over SSH on DSM. Its printed lines -- including
     # the manual-YAML fallback and the SERVER-2 job wait -- moved with it
@@ -5124,6 +5366,7 @@ def main():
         cards_enabled=cards_enabled, cards_token=cards_token,
         tree_dataset=datasets["DASH_TREE_DATASET"],
         apps_dataset=datasets["DASH_UPDATE_SNAPSHOT_DATASET"],
+        snapshot=snapshot,
         mode=mode,
         ccsync_image=ccsync_image,
     )
@@ -5150,6 +5393,7 @@ def main():
                 # (2026-09-03).
                 tree_dataset=datasets["DASH_TREE_DATASET"],
                 apps_dataset=datasets["DASH_UPDATE_SNAPSHOT_DATASET"],
+                snapshot=snapshot,
             ), template=compose_template_for(mode)),
             STACK_ENV_SECRETS)
         env_file = {

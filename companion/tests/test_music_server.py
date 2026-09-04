@@ -689,6 +689,11 @@ def test_reveal_with_nothing_there_says_so_and_launches_nothing(tmp_path):
     # `error`, not `message`: the music page's api() helper reads r.error
     # first, and a message-only body would show it a blank failure.
     assert "is the share mounted?" in body["error"]
+    # ...and it says COMPUTER (wave 5 of the 2026-09-03 sweep, owner-approved
+    # 2026-09-04): the music page prints this string verbatim, beside a tray
+    # that has said "computer" since wave 4.
+    assert "is not on this computer" in body["error"]
+    assert "machine" not in body["error"]
     assert spawned == []
 
 

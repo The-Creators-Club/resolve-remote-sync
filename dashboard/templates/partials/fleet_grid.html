@@ -35,7 +35,7 @@
    healthy on every other signal this page has -- so the fleet banner is the
    only thing that makes it visible without reading every row. #}
 {% if fleet.fleet_halt and fleet.fleet_halt.active %}
-<div class="banner alarm">⛔ FLEET SYNC IS HALTED: every companion has stopped syncing.
+<div class="banner alarm">⛔ SYNCING IS STOPPED ON EVERY COMPUTER: an admin stopped the whole fleet.
   {% if fleet.fleet_halt.reason %}{{ fleet.fleet_halt.reason }}{% endif %}
   <span class="mono-sm muted">set by {{ fleet.fleet_halt.set_by }} {{ fleet.fleet_halt.set_at | ago }}</span>
 </div>
@@ -51,7 +51,7 @@
 </div>
 {% endif %}
 {% if fleet.halted %}
-<div class="banner alarm">⛔ SYNCING STOPPED on {{ fleet.halted | length }} computer{{ "s" if fleet.halted | length != 1 }}:
+<div class="banner alarm">⛔ SYNCING IS PAUSED on {{ fleet.halted | length }} computer{{ "s" if fleet.halted | length != 1 }}, by whoever is sitting at {{ "it" if fleet.halted | length == 1 else "them" }}:
   {% for m in fleet.halted %}{{ m.editor }}/{{ m.machine }}{{ ", " if not loop.last }}{% endfor %}.
 </div>
 {% endif %}
@@ -80,8 +80,9 @@
   {{ fleet.collector.enforce_refusal.folders | length }} folder(s),
   {{ fleet.collector.enforce_refusal.devices | length }} computer{{ "s" if fleet.collector.enforce_refusal.devices | length != 1 }}. Approve the pending
   devices (Settings, then USERS), then this clears itself on the next cycle. To allow a
-  removal this large deliberately, raise DASH_ENFORCE_MAX_REMOVALS (limit
-  {{ fleet.collector.enforce_refusal.limit }}).
+  removal this large deliberately, ask whoever installed this server to raise the limit
+  ({{ fleet.collector.enforce_refusal.limit }}): it is a container setting, not something
+  this page can change.
   <span class="mono-sm muted">refused {{ fleet.collector.enforce_refusal.at | ago }}</span>
 </div>
 {% endif %}
@@ -150,16 +151,21 @@
    took the whole page sideways with it. In a wrapper the scroll is the
    element's own, which is what the vocabulary allows. #}
 <div class="scroll-x"><table class="editors stack">
-  <thead><tr><th></th><th>EDITOR</th><th>COMPUTER</th><th>LANES</th><th>VERSION</th><th>LAST REPORT</th></tr></thead>
+  <thead><tr><th></th><th>EDITOR</th><th>COMPUTER</th><th><a href="{{ GLOSSARY_HREF }}" title="what these words mean">SYNC</a></th><th>VERSION</th><th>LAST REPORT</th></tr></thead>
   <tbody>
   {% for e in fleet.editors %}
     <tr>
       <td data-label="STATUS"><span class="dot {{ e.status }}"{% if e.status_reason %} title="{{ e.status_reason }}"{% endif %}>●</span></td>
       <td class="who" data-label="EDITOR">{{ e.editor_username }}
         {% if not e.verified %}<span class="chip amber" title="this companion has not signed in with verified credentials">[ UNVERIFIED ]</span>{% endif %}
+        {# DCORE-4 (2026-09-04): a suspended person's computers are turned
+           away and unshared, which on this page looks exactly like a
+           computer somebody switched off. The chip is what tells them
+           apart, and it names the one thing that undoes it. #}
+        {% if e.account_suspended %}<span class="chip amber" title="an admin paused this person on Settings, Users. Their computers are being turned away and their projects are unshared. Their sync plan is kept: RESUME puts it all back.">[ SUSPENDED ]</span>{% endif %}
       </td>
       <td class="mono-sm" data-label="COMPUTER">{{ e.machine }}</td>
-      <td class="lane-cell" data-label="LANES">
+      <td class="lane-cell" data-label="SYNC">
         {# SYS-7 (resilience sweep 2026-08-28). THE FIRST LINE OF THE ROW: one
            plain sentence for why this computer is not syncing, composed by
            health.why_not_syncing from states every one of which was already
@@ -173,14 +179,15 @@
            ticked (CR-85). #}
         {% if e.why %}
         <div class="why-line {{ "muted" if e.why.informational else "red" }}"
-             title="reason code: {{ e.why.reason }}">{{ e.why.sentence }}</div>
+             title="reason code: {{ e.why.reason }}">{{ e.why.sentence }}
+          <a class="help-link" href="{{ GLOSSARY_HREF }}" title="what these words mean">[ ? ]</a></div>
         {% endif %}
         {% for lane in e.lanes %}
           {# SYS-1 (resilience sweep 2026-08-28): a lane in `syncing` used to be
              amber for as long as it liked. chip_reason is the sentence behind a
              red one -- a stall ("no progress for 47 min"), 15 minutes of
              silence, or the lane's own error. #}
-          <span class="chip lane {{ lane.chip }}" title="{{ lane.lane }}: {{ lane.state }}{% if lane.chip_reason %} - {{ lane.chip_reason }}{% elif lane.last_error %} ({{ lane.last_error }}){% endif %}">{{ lane.label }}:{{ lane.state }}{% if lane.chip_reason and "no progress" in lane.chip_reason %} STALLED{% endif %}</span>
+          <span class="chip lane {{ lane.chip }}" title="{{ lane.lane | lane_word }}: {{ lane.state }}{% if lane.chip_reason %} - {{ lane.chip_reason }}{% elif lane.last_error %} ({{ lane.last_error }}){% endif %}">{{ lane.lane | lane_word }}: {{ lane.state }}{% if lane.chip_reason and "no progress" in lane.chip_reason %} STALLED{% endif %}</span>
         {% endfor %}
         {# Transport health (B17): the companion computes this every heavy
            tick and the server used to drop it, so a lane C riding the public
@@ -190,14 +197,14 @@
         {% if e.transport.orphan_partials %}<span class="chip amber" title="{{ chip_help('orphans', bytes=e.transport.orphan_partial_bytes | human_bytes) }}">[ ORPHANS: {{ e.transport.orphan_partials }} ]</span>{% endif %}
         {# The safety latches, first among the chips: they outrank every
            transport diagnostic beside them (item 9). #}
-        {% if e.guard.breaker_tripped %}<span class="chip red" title="{{ chip_help('breaker', reason=e.guard.breaker_reason, at=e.guard.breaker_at | ago) }}">[ PROXY DOWNLOAD STOPPED ]</span>
+        {% if e.guard.breaker_tripped %}<span class="chip red" title="{{ chip_help('breaker', reason=e.guard.breaker_reason, at=e.guard.breaker_at | ago) }}">[ PROXY DOWNLOAD STOPPED ITSELF ]</span>
           {# CR-45: only the editor's own tray could clear this, so a remote
              machine stayed parked until its owner was next at the keyboard.
              The companion does exactly what the tray click does. #}
           {% if session_is_admin %}{% if e.guard.resume_requested %}<span class="chip amber" title="waiting for {{ e.machine }} to report in and pick this up">[ RESUME ASKED ]</span>{% else %}<form class="inline-form" hx-post="/partials/admin/machines/resume-lane-b" hx-target="closest .fleet-grid-wrap" hx-swap="innerHTML">
             <input type="hidden" name="editor" value="{{ e.editor_username }}">
             <input type="hidden" name="machine" value="{{ e.machine }}">
-            <button class="btn tap" type="submit" title="clear this computer's proxy-download breaker on its next report. Only once you have checked the server.">[ RESUME ]</button>
+            <button class="btn tap" type="submit" title="let this computer start downloading proxies again on its next report. Only once you have checked the server.">[ RESUME ]</button>
           </form>{% endif %}{% endif %}{% endif %}
         {# SYNC-8 (resilience sweep 2026-08-28). The companion has been
            sending this since 0.9.x and the dashboard dropped it at the model
@@ -245,8 +252,8 @@
         {# SYNC-1 / SYS-17: the stall the COMPANION found and killed, which is
            the machine that had the evidence. The server's own detector is the
            lane chip beside it. #}
-        {% if e.guard.stalled_lane %}<span class="chip red" title="{{ chip_help('stalled', lane=e.guard.stalled_lane, seconds=e.guard.stalled_seconds, killed=("and was killed" if e.guard.stalled_killed else "and was reported without being killed"), at=e.guard.stalled_at | ago) }}">[ STALLED {{ e.guard.stalled_lane | upper }}{{ ", KILLED" if e.guard.stalled_killed }} ]</span>{% endif %}
-        {% if e.guard.halt_active %}<span class="chip red" title="{{ e.guard.halt_reason }}">[ SYNC HALTED{{ " (FLEET)" if e.guard.halt_scope == "fleet" }} ]</span>{% endif %}
+        {% if e.guard.stalled_lane %}<span class="chip red" title="{{ chip_help('stalled', lane=e.guard.stalled_lane | lane_word, seconds=e.guard.stalled_seconds, killed=("and was killed" if e.guard.stalled_killed else "and was reported without being killed"), at=e.guard.stalled_at | ago) }}">[ STALLED: {{ e.guard.stalled_lane | lane_word | upper }}{{ ", KILLED" if e.guard.stalled_killed }} ]</span>{% endif %}
+        {% if e.guard.halt_active %}<span class="chip red" title="{{ e.guard.halt_reason }}">[ {{ "STOPPED BY YOUR ADMIN" if e.guard.halt_scope == "fleet" else "SYNCING PAUSED ON THIS COMPUTER" }} ]</span>{% endif %}
         {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ chip_help('skipped_exists', n=e.guard.skipped_exists) }}">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
         {% if e.guard.trash_bytes and e.guard.trash_bytes > 5000000000 %}<span class="chip amber" title="{{ chip_help('trash', n=e.guard.trash_count) }}">[ TRASH: {{ e.guard.trash_bytes | human_bytes }} ]</span>{% endif %}
         {# B-roll ingest (BROLL_INGEST_PLAN.md §3.2, 2026-08-18): which
@@ -376,8 +383,8 @@
                   hx-target="#fleet-diagnostics" hx-swap="innerHTML"
                   title="what this computer said, {{ e.diagnostics.received_at | ago }}">[ READ THE ANSWER ]</button>{% endif %}
         {% endif %}
-        {% if e.transport.express_last_error %}<span class="chip amber" title="last express-lane failure: {{ e.transport.express_last_error }}">[ EXPRESS FAILED ]</span>
-        {% elif e.transport.express_dropped %}<span class="chip amber" title="{{ e.transport.express_dropped }} file(s) dropped by the express lane's batch cap: they still go up on the next periodic pass.">[ EXPRESS DROPPED: {{ e.transport.express_dropped }} ]</span>{% endif %}
+        {% if e.transport.express_last_error %}<span class="chip amber" title="last express upload failure: {{ e.transport.express_last_error }}">[ EXPRESS UPLOAD FAILED ]</span>
+        {% elif e.transport.express_dropped %}<span class="chip amber" title="{{ e.transport.express_dropped }} file(s) dropped by the express upload's batch cap: they still go up on the next periodic pass.">[ EXPRESS DROPPED: {{ e.transport.express_dropped }} ]</span>{% endif %}
       </td>
       {# Per-machine build, compared against the current package for THAT
          machine's own platform (see X-5) -- never the windows one by default. #}
@@ -396,7 +403,7 @@
   </tbody>
 </table></div>
 {% else %}
-<div class="muted">no companion reports yet. Set dashboard_url in each editor's ~/.ccsync/config.toml</div>
+<div class="muted">No computer has reported yet. Each companion is given this dashboard's address when it is installed: if one is running and is not here, ask that editor for Settings, then Help, then Copy diagnostics.</div>
 {% endif %}
 
 {# DASH-16 (resilience sweep 2026-08-28). A computer must never leave this

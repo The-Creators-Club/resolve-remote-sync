@@ -40,6 +40,23 @@
             </div>
             <div class="muted mono-sm" title="{{ pkg.sha256 }}">sha256 {{ pkg.sha256[:16] }}…</div>
             <a class="btn tap" href="/download/{{ plat }}">[ DOWNLOAD {{ label }} ]</a>
+            {# OPS-20 (usability sweep 2026-09-03): the editor's FIRST click
+               meets "Windows protected your PC" with "Don't run" as the
+               default button, and the way through hidden behind More info.
+               The developer side of the missing certificate is documented in
+               KNOWN_BUGS, RELEASE.md and a drift check; the editor side was
+               documented nowhere, while START_HERE.md explained the macOS
+               equivalent in detail. Drop this paragraph the day the package
+               is signed, not before. #}
+            {% if plat == "windows" %}
+              <div class="muted" style="margin-top:0.5rem; max-width: 52ch;">
+                Windows will say <strong>Windows protected your PC</strong> when you
+                run this. Click <strong>More info</strong>, then
+                <strong>Run anyway</strong>: the installer is not code-signed yet.
+                The sha256 above is the file's own fingerprint if you want to check
+                it first.
+              </div>
+            {% endif %}
           {% else %}
             {# Not an error banner: a fleet that has never published a Mac
                package is a normal state, not a fault. #}

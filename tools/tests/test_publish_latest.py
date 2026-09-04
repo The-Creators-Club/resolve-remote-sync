@@ -195,3 +195,49 @@ class TestTheBranchTipComesFromTheRemote:
         monkeypatch.setattr(pl, "run", fake_run)
         assert pl.commit_is_on_main("b" * 40, "f" * 40) is True
         assert seen["cmd"][-1] == "f" * 40
+
+
+class TestTheClosingSentenceAndTheOrderingGate:
+    """REL-9 and SYS-7 (usability + resilience sweep, 2026-09-04).
+
+    Source scans rather than a main() integration test, because main() is a
+    gh-driven download loop and the two things being pinned are a SENTENCE and
+    a REFUSAL that the rest of this file has no seam for. Both were wrong in a
+    way that only reading the file could show: the closing line printed the
+    `manual` story unconditionally, including with --make-current, and
+    including for every site on `policy = current` -- which is what this
+    studio's own site.toml uses, and where the build reaches the fleet within
+    one poll with nobody clicking anything.
+    """
+
+    SOURCE = (TOOLS / "publish_latest.py").read_text(encoding="utf-8")
+
+    def test_the_closing_line_depends_on_make_current(self):
+        assert "if args.make_current:" in self.SOURCE
+        assert "published and pointed CURRENT." in self.SOURCE
+        # ...and the STAGED half says nobody is offered it, on any policy.
+        assert "published and STAGED: the channel's `current` pointer was NOT moved" \
+            in self.SOURCE
+
+    def test_it_says_what_happens_on_both_kinds_of_site(self):
+        assert "policy = current" in self.SOURCE
+        assert "Sites on `manual` need Settings > Packages > [ CHECK NOW ] > " \
+            in self.SOURCE
+        assert "[ PUBLISH ]." in self.SOURCE
+
+    def test_the_recall_command_is_in_the_same_block(self):
+        """The sentence you want in front of you at the moment you learn the
+        build is bad."""
+        assert "--retract" in self.SOURCE
+        assert "Recall it:" in self.SOURCE
+
+    def test_the_ordering_gate_names_its_own_override(self):
+        assert "--allow-behind" in self.SOURCE
+        assert "allow_behind" in self.SOURCE
+        assert 'newest_published(channel, "dashboard", "linux")' in self.SOURCE
+
+    def test_a_channel_with_no_dashboard_record_is_not_a_refusal(self):
+        """"Could not tell" is never "refuse": a feed that carries no dashboard
+        bundle at all cannot answer the ordering question, and a companion
+        release must not be blocked by the absence of an answer."""
+        assert "carries no dashboard bundle at all" in self.SOURCE

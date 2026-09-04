@@ -375,7 +375,10 @@ def test_enforce_does_not_shadow_its_device_list(conn, fake, collector):
 
     src = inspect.getsource(Collector._run_enforce)
     assert "for devices in" not in src
-    assert "for editor_device_ids in editor_devices.values():" in src
+    # DCORE-4 (2026-09-04): the loop is `.items()` now, because a suspended
+    # editor is skipped by name. The pin is unchanged in substance: the
+    # pass-wide `devices` list must not be rebound here.
+    assert "for editor, editor_device_ids in editor_devices.items():" in src
 
 
 def test_a_locked_db_at_startup_does_not_kill_the_collector_thread(tmp_path, monkeypatch):

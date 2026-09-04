@@ -28,12 +28,13 @@
     <div class="muted" style="margin-top:0.6rem">
       {{ report_tokens.shared_count }} computer{{ "s" if report_tokens.shared_count != 1 }} still {{ "reports" if report_tokens.shared_count == 1 else "report" }} with the SHARED fleet token:
       <span class="mono-sm">{{ report_tokens.shared_machines | join(", ") }}</span>.
-      Once this is empty, set <code>DASH_SHARED_REPORT_TOKEN_ENABLED=0</code> and redeploy.
+      Once this is empty, ask whoever installed this server to switch the shared token off: it is a container setting, not something this page can change.
     </div>
   {% elif report_tokens.editor_count %}
     <div class="muted" style="margin-top:0.6rem">
-      All {{ report_tokens.editor_count }} reporting computer{{ "s" if report_tokens.editor_count != 1 }} {{ "uses" if report_tokens.editor_count == 1 else "use" }} per-editor tokens;
-      <code>DASH_SHARED_REPORT_TOKEN_ENABLED=0</code> is safe to set.
+      All {{ report_tokens.editor_count }} reporting computer{{ "s" if report_tokens.editor_count != 1 }} {{ "uses" if report_tokens.editor_count == 1 else "use" }} per-editor tokens.
+      The shared token is no longer used by anything: it is safe for whoever installed this
+      server to switch it off.
     </div>
   {% endif %}
 

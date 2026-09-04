@@ -42,6 +42,7 @@ import os
 import shutil
 import sqlite3
 import threading
+import time
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -62,7 +63,38 @@ PROBE_FILENAME = ".ccsync-setup-probe"
 # root: [0]=ccsync_dashboard, [1]=src, [2]=dashboard, [3]=repo root -- same
 # arithmetic app.py's STATIC_DIR and ui.py's TEMPLATES_DIR already use one
 # level short of.
-EULA_PATH = Path(__file__).resolve().parents[3] / "docs" / "legal" / "EULA.md"
+def _find_eula() -> Path:
+    """The first copy of the licence agreement that exists, else the repo
+    path (so the refusal names something a developer recognises).
+
+    REL-5 (usability sweep 2026-09-04): parents[3] is the REPO root in a
+    checkout and `/` in the container, where nothing has ever been -- so on
+    the image, the shape the appliance direction sells, this file was always
+    absent. The image and the OTA bundle now carry docs/legal beside the code
+    (dashboard/deploy/Dockerfile, tools/build_dashboard_bundle.TREES), which is
+    parents[2]/docs -- the same arithmetic help._candidates uses for the guide,
+    and the same override shape (DASH_EULA_DOC for a deploy that puts it
+    somewhere of its own).
+    """
+    candidates = []
+    override = os.environ.get("DASH_EULA_DOC", "").strip()
+    if override:
+        candidates.append(Path(override))
+    here = Path(__file__).resolve()
+    candidates += [
+        here.parents[2] / "docs" / "legal" / "EULA.md",   # /app/docs, both modes
+        here.parents[3] / "docs" / "legal" / "EULA.md",   # a repo checkout
+    ]
+    for path in candidates:
+        try:
+            if path.is_file():
+                return path
+        except OSError:
+            continue
+    return candidates[-1]
+
+
+EULA_PATH = _find_eula()
 
 
 def now_iso() -> str:
@@ -345,13 +377,18 @@ def eula_marker_version(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+# REL-5: WARN, not ok. The fallback's reasoning (do not block the wizard on a
+# file that may not exist at runtime) was right and is unchanged; what was
+# wrong is that the resulting state read as "accepted" to every reader -- the
+# checklist, _check_done, and any auditor. A build that ships without a licence
+# agreement is now visibly wrong rather than quietly complete.
+NO_EULA_DETAIL = ("no licence agreement is included in this build, so nothing "
+                  "has been accepted")
+
+
 def _check_eula(ctx: SetupContext) -> TaskState:
     if not EULA_PATH.is_file():
-        # Not every checkout carries docs/legal (a bare dashboard image
-        # ships templates + static, not the whole repo's docs/ tree in every
-        # build today) -- treat as accepted-not-required rather than
-        # blocking the wizard on a file that may not exist at runtime.
-        return TaskState(status="ok", detail="no EULA shipped in this build")
+        return TaskState(status="warn", detail=NO_EULA_DETAIL)
     try:
         text = EULA_PATH.read_text(encoding="utf-8")
     except OSError as exc:
@@ -370,7 +407,9 @@ def _accept_eula(ctx: SetupContext) -> TaskState:
     (accepting requires a checkbox the wizard's own form renders) -- but
     routed through run_do_it/run() too so the state machine has one writer."""
     if not EULA_PATH.is_file():
-        return TaskState(status="ok", detail="no EULA shipped in this build")
+        # Nothing to accept, so nothing IS accepted (REL-5). The wizard is not
+        # blocked; the line stays amber and says why.
+        return TaskState(status="warn", detail=NO_EULA_DETAIL)
     try:
         text = EULA_PATH.read_text(encoding="utf-8")
     except OSError as exc:
@@ -892,6 +931,110 @@ def _published_dashboard_url(ctx: SetupContext) -> str:
         return str(getattr(ctx.settings, "site_dashboard_url", "") or "")
 
 
+def _tailnet_signin_link(wait: float = 5.0) -> tuple[str, str]:
+    """(a sign-in URL for the bundled node, why there is none).
+
+    UX-21 (usability sweep 2026-09-03). APPLIANCE_INSTALL.md's step 4 was
+    `docker compose exec tailscale tailscale up` followed by `docker compose
+    logs tailscale` to read the `AuthURL is ...` line out of a log -- the one
+    step in the whole appliance install that forced a non-technical owner
+    into a terminal. tailscaled publishes that URL over the same LocalAPI
+    socket this container already reads, but only once an interactive login
+    has been STARTED, which is what `tailscale up` was doing.
+
+    So: ask for the link, and if the node has none, start the login and wait
+    a moment for it. Only ever called from the task's own button, and never
+    against a node that is already signed in -- `login-interactive` on a
+    Running node is a re-authentication nobody asked for.
+    """
+    from . import tailscale_local
+
+    if not tailscale_local.socket_present():
+        return "", ("there is no bundled Tailscale node in this deployment, so this "
+                    "dashboard has nothing to sign in")
+    node = tailscale_local.summarise(tailscale_local.status())
+    if node and node["backend_state"] == "Running":
+        return "", "this node is already signed in"
+    if node and node["auth_url"]:
+        return node["auth_url"], ""
+    if not _localapi_post("/localapi/v0/login-interactive"):
+        return "", ("the bundled Tailscale node did not accept a sign-in request "
+                    f"({_TAILNET_APPLIANCE_DOC} has the command-line way in)")
+    deadline = time.monotonic() + max(0.0, wait)
+    while True:
+        node = tailscale_local.summarise(tailscale_local.status())
+        if node and node["auth_url"]:
+            return node["auth_url"], ""
+        if node and node["backend_state"] == "Running":
+            return "", "this node is already signed in"
+        if time.monotonic() >= deadline:
+            return "", ("the bundled Tailscale node has not produced a sign-in link "
+                        "yet: press this again in a moment, or see "
+                        f"{_TAILNET_APPLIANCE_DOC}")
+        time.sleep(0.5)
+
+
+def _localapi_post(path: str, timeout: float = 3.0) -> bool:
+    """POST to the Tailscale LocalAPI over its unix socket. True on a 2xx.
+
+    tailscale_local.py is READ ONLY by design (its docstring: the login drive
+    belongs to WP B's own module), and this is the one write the wizard
+    needs, so it lives with the task that needs it rather than turning that
+    module into something a status check could mutate a node with. Bounded,
+    stdlib only, and every failure is False.
+    """
+    import http.client
+    import socket as _socket
+
+    from . import tailscale_local
+
+    if not tailscale_local.socket_present():
+        return False
+
+    class _Conn(http.client.HTTPConnection):
+        def connect(self) -> None:
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)  # type: ignore[attr-defined]
+            sock.settimeout(timeout)
+            sock.connect(tailscale_local.socket_path())
+            self.sock = sock
+
+    conn = _Conn(tailscale_local.LOCALAPI_HOST, timeout=timeout)
+    try:
+        conn.request("POST", path, body=b"",
+                     headers={"Host": tailscale_local.LOCALAPI_HOST,
+                              "Content-Length": "0"})
+        resp = conn.getresponse()
+        resp.read(1 << 16)
+        return 200 <= resp.status < 300
+    except (OSError, ValueError) as exc:
+        log.info("tailnet sign-in: LocalAPI %s failed: %s", path, exc)
+        return False
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def _run_tailnet(ctx: SetupContext) -> TaskState:
+    """The button: put a sign-in link on this page (UX-21).
+
+    Never claims success: signing in happens in the admin's browser, at
+    Tailscale, so the honest state afterwards is `todo` with the link in it
+    until the node reports Running.
+    """
+    url, why = _tailnet_signin_link()
+    if url:
+        return TaskState(status="todo",
+                         detail=f"open {url} and sign in, then press CHECK on this task")
+    if "signed in" in why or "no bundled Tailscale node" in why:
+        # Already on the tailnet, or published some other way entirely: the
+        # check's own answer is the right answer, and it is the one an admin
+        # would otherwise have to press a second button to see.
+        return _check_tailnet(ctx)
+    return TaskState(status="todo", detail=_one_line(why))
+
+
 def _check_tailnet(ctx: SetupContext) -> TaskState:
     """Two sources, in order of authority: the bundled Tailscale node's own
     LocalAPI (it knows whether it is signed in), then the URL this site
@@ -922,10 +1065,13 @@ def _check_tailnet(ctx: SetupContext) -> TaskState:
                 detail=f"this node is not signed in yet ({state}): open {node['auth_url']} "
                        "to add it to your tailnet",
             )
+        # UX-21: the button asks the node for one rather than sending the
+        # owner to `docker compose logs` for it (_tailnet_signin_link).
         return TaskState(
             status="todo",
-            detail=f"the bundled Tailscale node is {state}, with no sign-in link yet: see "
-                   f"{_TAILNET_APPLIANCE_DOC}",
+            detail=f"the bundled Tailscale node is {state}, with no sign-in link yet: "
+                   f"press GET A SIGN-IN LINK on this task ({_TAILNET_APPLIANCE_DOC} "
+                   f"is the command-line way in)",
         )
 
     url = _published_dashboard_url(ctx)
@@ -949,7 +1095,11 @@ def _check_tailnet(ctx: SetupContext) -> TaskState:
 register(Task(
     id="tailnet", title="Connect to your tailnet",
     description="Sign this node into your Tailscale network.",
-    check=_check_tailnet, run=None, optional=True,
+    # UX-21 (2026-09-04): the only task here whose run() does not finish the
+    # job. It puts the sign-in link on the page; the signing in happens in
+    # the admin's browser, at Tailscale.
+    check=_check_tailnet, run=_run_tailnet, optional=True,
+    run_label="GET A SIGN-IN LINK",
 ))
 
 

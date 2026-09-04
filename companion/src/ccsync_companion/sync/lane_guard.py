@@ -243,6 +243,79 @@ def count_local_proxies(
     return count
 
 
+# -- what an editor is told when the breaker trips (SYNC-106) --------------
+#
+# The trip reason is one string doing two jobs. As a diagnostic it is right:
+# it names the marker directories, the entry counts and the config key, which
+# is what an admin needs. As COPY it was wrong in four places at once (tray
+# line, balloon, Settings, dashboard chip), and one of the three reasons
+# ended "Check remote_root in config.toml." -- a file an editor cannot open
+# (it is under ~/.ccsync, the build is frozen) and would not be right to edit
+# if they could. So the trip carries a CAUSE, the technical sentence stays on
+# `reason` for the log, the report and copy_diagnostics, and the editor reads
+# the sentence for that cause.
+BREAKER_CAUSE_ROOT = "root_unrecognised"
+BREAKER_CAUSE_EMPTY = "remote_empty"
+BREAKER_CAUSE_SHRANK = "remote_shrank"
+BREAKER_CAUSE_PASS = "pass_deletes"
+BREAKER_CAUSE_LEAK = "cumulative_deletes"
+
+# The two facts that stop the support call, on every reason rather than only
+# on the two that happened to have them.
+_BREAKER_TAIL = ("Nothing was deleted and your uploads are still running. "
+                 "Ask your admin to check the server.")
+
+BREAKER_EDITOR_REASONS: dict[str, str] = {
+    BREAKER_CAUSE_ROOT: (
+        "The server does not look like your project tree right now, so CCSync "
+        "stopped downloading proxies before anything could be removed. "
+        + _BREAKER_TAIL),
+    BREAKER_CAUSE_EMPTY: (
+        "The server suddenly listed nothing where your proxies were last time, "
+        "so CCSync stopped downloading proxies before anything could be "
+        "removed. " + _BREAKER_TAIL),
+    BREAKER_CAUSE_SHRANK: (
+        "Far fewer files are on the server than there were last time, so CCSync "
+        "stopped downloading proxies before anything could be removed. "
+        + _BREAKER_TAIL),
+    BREAKER_CAUSE_PASS: (
+        "One proxy download pass would have cleared out far more files than "
+        "normal, so CCSync stopped it. " + _BREAKER_TAIL),
+    BREAKER_CAUSE_LEAK: (
+        "Proxy download has been clearing out files steadily for a while, so "
+        "CCSync stopped it. " + _BREAKER_TAIL),
+}
+
+# A breaker tripped by a build older than 0.9.69 has a reason and no cause,
+# and it is READ FROM DISK on the next start: the editor sentence has to be
+# recoverable from the technical one, by the half of it that cannot change
+# without the trigger changing too.
+_BREAKER_CAUSE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("does not look like the tree", BREAKER_CAUSE_ROOT),
+    ("as EMPTY", BREAKER_CAUSE_EMPTY),
+    ("shrank from", BREAKER_CAUSE_SHRANK),
+    ("one proxy-download pass moved", BREAKER_CAUSE_PASS),
+    ("slow leak", BREAKER_CAUSE_LEAK),
+    ("since it was last checked", BREAKER_CAUSE_LEAK),
+)
+
+
+def breaker_editor_reason(reason: Any, cause: Any = "") -> str:
+    """The sentence an editor reads for a trip, from its cause.
+
+    Falls back to the technical `reason` rather than to silence: a trip
+    nobody can name is still a trip the editor has to be told about."""
+    key = str(cause or "").strip()
+    if key in BREAKER_EDITOR_REASONS:
+        return BREAKER_EDITOR_REASONS[key]
+    text = str(reason or "")
+    lowered = text.lower()
+    for marker, found in _BREAKER_CAUSE_MARKERS:
+        if marker.lower() in lowered:
+            return BREAKER_EDITOR_REASONS[found]
+    return text or "Proxy download stopped itself as a safety measure. " + _BREAKER_TAIL
+
+
 class LaneBBreaker:
     """Trips lane B off and keeps it off until an operator says otherwise.
 
@@ -297,6 +370,9 @@ class LaneBBreaker:
         state = _read_json(self.state_path)
         self._tripped = bool(state.get("tripped"))
         self._reason = str(state.get("reason") or "")
+        # SYNC-106: which trigger fired, so the editor's sentence does not
+        # have to be parsed back out of the admin's one.
+        self._cause = str(state.get("cause") or "")
         self._tripped_at = str(state.get("tripped_at") or "")
         self._deletes = int(state.get("deletes") or 0)
         self._bytes = int(state.get("bytes") or 0)
@@ -332,6 +408,14 @@ class LaneBBreaker:
             return {
                 "tripped": self._tripped,
                 "reason": self._reason or None,
+                # SYNC-106: `reason` is the admin's sentence (it names the
+                # marker dirs, the counts and the config key) and stays the
+                # one the log, the report and copy_diagnostics carry;
+                # `editor_reason` is what the tray and the balloon say.
+                "cause": self._cause or None,
+                "editor_reason": (
+                    breaker_editor_reason(self._reason, self._cause)
+                    if self._tripped else None),
                 "tripped_at": self._tripped_at or None,
                 "deletes": self._deletes,
                 "bytes": self._bytes,
@@ -343,6 +427,7 @@ class LaneBBreaker:
         _write_json(self.state_path, {
             "tripped": self._tripped,
             "reason": self._reason,
+            "cause": self._cause,
             "tripped_at": self._tripped_at,
             "deletes": self._deletes,
             "bytes": self._bytes,
@@ -354,7 +439,7 @@ class LaneBBreaker:
             "remote_counts": dict(list(self._remote_counts.items())[:512]),
         })
 
-    def trip(self, reason: str) -> bool:
+    def trip(self, reason: str, cause: str = "") -> bool:
         """Latch the breaker off. Idempotent; returns True on the EDGE only,
         so callers can fire exactly one toast per trip."""
         with self._lock:
@@ -362,6 +447,7 @@ class LaneBBreaker:
                 return False
             self._tripped = True
             self._reason = str(reason)
+            self._cause = str(cause or "")
             self._tripped_at = _now_iso()
             self._persist_locked()
         log.error(
@@ -409,6 +495,7 @@ class LaneBBreaker:
             if not self._tripped:
                 return False
             reason, self._reason = self._reason, ""
+            self._cause = ""
             self._tripped = False
             self._tripped_at = ""
             self._deletes = 0
@@ -450,14 +537,16 @@ class LaneBBreaker:
                     f"the NAS root does not look like the tree: none of "
                     f"{', '.join(self.marker_dirs)} is under remote_root "
                     f"(saw {len(names)} entr{'y' if len(names) == 1 else 'ies'}). "
-                    "Check remote_root in config.toml."
+                    "Check remote_root in config.toml.",
+                    BREAKER_CAUSE_ROOT,
                 )
         if not names:
             if last > 0:
                 return self._trip_and_return(
                     f"the NAS listed {key or 'the whole tree'} as EMPTY, and it held "
                     f"{last} entries last time. Syncing from it would move every local "
-                    "proxy here into the trash."
+                    "proxy here into the trash.",
+                    BREAKER_CAUSE_EMPTY,
                 )
             return None
         if (
@@ -467,15 +556,16 @@ class LaneBBreaker:
             return self._trip_and_return(
                 f"the NAS listing for {key or 'the whole tree'} shrank from {last} to "
                 f"{len(names)} entries since the last pass -- that is not a normal "
-                "change, so proxy download stopped before anything was deleted."
+                "change, so proxy download stopped before anything was deleted.",
+                BREAKER_CAUSE_SHRANK,
             )
         with self._lock:
             self._remote_counts[key] = len(names)
             self._persist_locked()
         return None
 
-    def _trip_and_return(self, reason: str) -> str:
-        self.trip(reason)
+    def _trip_and_return(self, reason: str, cause: str = "") -> str:
+        self.trip(reason, cause)
         return reason
 
     # -- triggers 2 and 3: what a pass actually did ---------------------
@@ -541,14 +631,16 @@ class LaneBBreaker:
                 + (f"; a further {relocated} were moved to a new folder on the NAS "
                    "rather than deleted" if relocated else "")
                 + "). Nothing was deleted -- they are all recoverable -- but proxy "
-                  "download is stopped until someone checks the server."
+                  "download is stopped until someone checks the server.",
+                BREAKER_CAUSE_PASS,
             )
         if cumulative > self.max_deletes_cumulative:
             return self._trip_and_return(
                 f"proxy download has moved {cumulative} file(s) into {TRASH_DIR_NAME} "
                 f"since it was last checked (the limit is {self.max_deletes_cumulative}). "
                 "That is a slow leak rather than one bad pass; it is stopped until "
-                "someone checks the server."
+                "someone checks the server.",
+                BREAKER_CAUSE_LEAK,
             )
         return None
 
@@ -1140,10 +1232,10 @@ class HaltState:
         without it a fleet halt refuses, with the sentence the tray shows."""
         with self._lock:
             if not self._active:
-                return False, "sync is not halted"
+                return False, "syncing is not stopped"
             if self._scope == HALT_SCOPE_FLEET and not force:
                 return False, (
-                    "your administrator halted syncing for the whole fleet"
+                    "your admin stopped syncing for the whole fleet"
                     + (f": {self._reason}" if self._reason else "")
                     + ". Only they can start it again."
                 )

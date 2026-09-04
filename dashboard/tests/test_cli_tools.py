@@ -452,7 +452,7 @@ def test_the_status_walks_idle_running_done(settings, monkeypatch):
         finished.set()
 
     monkeypatch.setattr(cli_tools, "_install_claude", slow)
-    monkeypatch.setattr(cli_tools, "install_supported", lambda s: (True, ""))
+    monkeypatch.setattr(cli_tools, "install_supported", lambda s, n="": (True, ""))
     assert cli_tools.install_status(settings, name)["state"] == "idle"
     cli_tools.start_install(settings, name)
     for _ in range(50):
@@ -485,7 +485,7 @@ def test_a_failing_install_becomes_an_error_status_not_a_dead_thread(settings, m
         raise cli_tools.ToolError("the publisher answered HTTP 503")
 
     monkeypatch.setattr(cli_tools, "_install_claude", boom)
-    monkeypatch.setattr(cli_tools, "install_supported", lambda s: (True, ""))
+    monkeypatch.setattr(cli_tools, "install_supported", lambda s, n="": (True, ""))
     cli_tools.start_install(settings, name)
     for _ in range(100):
         if cli_tools.install_status(settings, name)["state"] == "error":
@@ -499,7 +499,7 @@ def test_a_failing_install_becomes_an_error_status_not_a_dead_thread(settings, m
 
 def test_an_unsupported_host_is_refused_before_a_thread_starts(settings, monkeypatch):
     monkeypatch.setattr(cli_tools, "install_supported",
-                        lambda s: (False, "this dashboard is running on win32"))
+                        lambda s, n="": (False, "this dashboard is running on win32"))
     with pytest.raises(cli_tools.ToolError) as exc:
         cli_tools.start_install(settings, cli_tools.CLAUDE_CODE)
     assert "win32" in str(exc.value)
@@ -1176,3 +1176,93 @@ def test_codex_install_is_refused_when_the_publisher_ships_no_checksum(settings,
     assert "type its full path" in str(exc.value)
     assert downloaded == []
     assert cli_tools.installed_binary(settings, cli_tools.CODEX) == ""
+
+
+# ------------------------------------------- REL-15: an install a restart ate
+
+def test_an_install_the_container_restart_ate_reads_as_interrupted(settings):
+    """REL-15 (usability sweep 2026-09-04). The live status was three module
+    globals and a daemon thread: a `docker restart` or an OOM kill during a
+    313 MB download over a slow customer link lost it entirely, and the page
+    came back saying "not installed" with no trace that anything had been in
+    flight. `_download`'s except-BaseException handles every in-process
+    failure correctly; it cannot handle SIGKILL."""
+    name = cli_tools.CLAUDE_CODE
+    cli_tools._write_inflight(settings, name, {
+        "tool": name, "started_at": "2026-09-04T09:00:00Z", "version": "2.1.234",
+        "url": "https://example.invalid/claude", "step": "downloading", "total": 100,
+    })
+    # No thread is running: this is a fresh process, exactly as after a restart.
+    status = cli_tools.install_status(settings, name)
+    assert status["state"] == "interrupted"
+    assert status["interrupted"] is True
+    assert "restarted" in status["error"]
+    assert "2026-09-04T09:00:00Z" in status["error"]
+
+
+def test_a_finished_install_clears_its_own_in_flight_record(settings):
+    name = cli_tools.CLAUDE_CODE
+    version = "2.1.234"
+    target = cli_tools.tool_root(settings, name) / version
+    target.mkdir(parents=True)
+    (target / "claude").write_text("#!/bin/sh\n", encoding="utf-8")
+    cli_tools.pointer_path(settings, name).write_text(f"{version}/claude", encoding="utf-8")
+    cli_tools._write_state(settings, name, {"installed_version": version})
+    cli_tools._write_inflight(settings, name, {"tool": name, "version": version})
+
+    status = cli_tools.install_status(settings, name)
+    assert status["interrupted"] is False
+    assert status["installed"] is True
+    assert not cli_tools.inflight_path(settings, name).exists()
+
+
+def test_stale_downloads_are_swept_and_fresh_ones_are_not(settings):
+    """Only a LATER SUCCESSFUL install pruned `.staging` before this, so a
+    container killed mid-download left up to 313 MB on the volume the fleet's
+    database lives on, for ever."""
+    import os
+    import time
+
+    staging = cli_tools.tool_root(settings, cli_tools.CLAUDE_CODE) / ".staging"
+    staging.mkdir(parents=True)
+    old = staging / "2.1.100.part"
+    new = staging / "2.1.234.part"
+    old.write_bytes(b"x")
+    new.write_bytes(b"x")
+    long_ago = time.time() - cli_tools.STALE_STAGING_SECONDS - 60
+    os.utime(old, (long_ago, long_ago))
+
+    swept = cli_tools.sweep_stale_staging(settings)
+    assert swept == [f"{cli_tools.CLAUDE_CODE}/2.1.100.part"]
+    assert not old.exists()
+    assert new.exists()
+
+
+def test_an_install_is_refused_before_a_byte_moves_when_the_volume_is_full(settings, monkeypatch):
+    """REL-7: the CLI wizard downloads up to 330 MB onto the same volume as
+    dashboard.db, and checked only that the directory was writable."""
+    from ccsync_dashboard import dashboard_update
+
+    # The container is Linux; this suite runs on the base rig. platform_key
+    # refuses first there and that refusal is a different test.
+    monkeypatch.setattr(cli_tools, "platform_key", lambda: "linux-x64")
+    monkeypatch.setattr(dashboard_update, "data_space",
+                        lambda s: {"free_bytes": 210 * 1024 * 1024,
+                                   "total_bytes": 10 ** 10, "path": "/data", "error": ""})
+    ok, why = cli_tools.install_supported(settings, cli_tools.CLAUDE_CODE)
+    assert ok is False
+    assert "free" in why and "Claude Code" in why
+    with pytest.raises(cli_tools.ToolError):
+        cli_tools.start_install(settings, cli_tools.CLAUDE_CODE)
+
+
+def test_a_volume_that_cannot_be_measured_does_not_block_an_install(settings, monkeypatch):
+    from ccsync_dashboard import dashboard_update
+
+    monkeypatch.setattr(cli_tools, "platform_key", lambda: "linux-x64")
+    monkeypatch.setattr(dashboard_update, "data_space",
+                        lambda s: {"free_bytes": -1, "total_bytes": -1,
+                                   "path": "/data", "error": "could not measure"})
+    ok, why = cli_tools.install_supported(settings, cli_tools.CLAUDE_CODE)
+    # "Could not measure" must never become "refuse everything".
+    assert ok is True and why == ""

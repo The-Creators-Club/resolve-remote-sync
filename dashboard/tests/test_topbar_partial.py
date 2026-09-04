@@ -25,7 +25,7 @@ import sys
 import pytest
 from fastapi.testclient import TestClient
 
-from ccsync_dashboard import auth
+from ccsync_dashboard import auth, ui
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
@@ -154,13 +154,19 @@ def test_only_an_admin_gets_the_settings_gear_and_the_settings_entry(tmp_path):
     worse than no control."""
     with _admin_client(tmp_path) as c:
         admin_body = as_user(c, "owen").get("/partials/topbar").text
-        assert 'class="gear-link" href="/admin/settings"' in admin_body
+        # SYS-6 (wave 4, 2026-09-04): the gear lands on HEALTH, the page that
+        # composes all four "is my fleet all right" lists, not on the site form.
+        assert f'class="gear-link" href="{ui.SETTINGS_LANDING}"' in admin_body
         assert "[ SETTINGS ]" in admin_body
+        # UX-3: the guide is one click from every page, for everyone.
+        assert '[ ? ]' in admin_body and 'href="/help"' in admin_body
         # LOGOUT ALL moved into the drawer's foot; it stays reachable.
         assert "[ LOGOUT ALL ]" in admin_body
 
         editor_body = as_user(c, "jsmith").get("/partials/topbar").text
         assert "gear-link" not in editor_body
+        # ...but HELP is not admin-only: an editor needs it most.
+        assert 'href="/help"' in editor_body
         assert "[ SETTINGS ]" not in editor_body
         assert "[ LOGOUT ALL ]" in editor_body
 

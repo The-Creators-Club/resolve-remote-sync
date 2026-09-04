@@ -70,6 +70,42 @@ def _looks_like_ed25519_pubkey(value: str) -> bool:
         return False
 
 
+# SYS-20, 2026-09-04. The ONE folder name this build's code carries, in
+# roughly a dozen places on the companion side alone (`sync/lane_guard.py`,
+# `manifest.py`, `proxy_scan.py`, `broll_fetch.py`, `fixer.py`,
+# `file_moves.py`, `sync/borrowed_folders.py`, `sync/rclone_lane.py`,
+# `app.py`). Until those read a layout from the manifest, the key is a lie.
+SUPPORTED_PROJECTS_DIR = "Projects"
+
+UNSUPPORTED_PROJECTS_DIR_MESSAGE = (
+    "refusing to start: DASH_SITE_PROJECTS_DIR={value!r} - this build only "
+    "supports a tree whose projects live in `Projects`. The name is written "
+    "into the companion's sync engine, the fixer and the b-roll paths, none "
+    "of which read this setting, so a tree under any other name would sync "
+    "nothing and say nothing. Rename the folder on the server to `Projects`, "
+    "or remove the setting. (docs/TREE_LAYOUT_AGNOSTICISM.md section 3.2; the "
+    "plan to make it real is docs/TREE_LAYOUT_PLAN.md.)"
+)
+
+
+def projects_dir_is_supported(value: str) -> bool:
+    """Blank means "the product default", which is the supported one."""
+    name = str(value or "").strip().strip("/\\")
+    return not name or name == SUPPORTED_PROJECTS_DIR
+
+
+def _refuse_unsupported_projects_dir(value: str, dev_insecure: bool) -> None:
+    """Boot refusal, on `check_boot_secrets`' terms: one hatch,
+    DASH_DEV_INSECURE=1, and it is loud in the log when it is taken."""
+    if projects_dir_is_supported(value):
+        return
+    message = UNSUPPORTED_PROJECTS_DIR_MESSAGE.format(value=str(value).strip())
+    if dev_insecure:
+        log.warning("DASH_DEV_INSECURE=1 bypassed a boot refusal: %s", message)
+        return
+    raise RuntimeError(message)
+
+
 _SITE_IDENTITY_ENV = {
     "smb_host": "DASH_SMB_HOST",
     "nas_host": "DASH_NAS_HOST (or TRUENAS_HOST)",
@@ -629,6 +665,18 @@ class Settings:
         # auth.check_boot_secrets rather than at every login.
         object.__setattr__(
             self, "auth_method", str(self.auth_method or "smb").strip().lower())
+        # SYS-20 (sweep 2026-09-03): `[tree] projects_dir` is half-wired. It
+        # is read in exactly one place (server/common.py) and by nothing
+        # else: not by the manifest, not by the companion, not by the lanes,
+        # which all say "Projects" in code. A customer who sets it therefore
+        # gets a NAS tree under one name and a fleet that syncs NOTHING,
+        # silently -- a key that cannot work should not be settable, and a
+        # silent breakage should be a refusal. Read from the environment
+        # rather than a field on purpose: there is no Settings field for it
+        # and there must not be one until TREE_LAYOUT_PLAN.md lands, because
+        # a field is a promise that the value is honoured.
+        _refuse_unsupported_projects_dir(
+            os.environ.get("DASH_SITE_PROJECTS_DIR", ""), self.dev_insecure)
 
     def packages_path(self) -> Path:
         return Path(self.packages_dir) if self.packages_dir else Path(self.db_path).parent / "packages"

@@ -122,6 +122,16 @@ def _fingerprint(key_text: str) -> str:
     return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
 
 
+def pubkey_fingerprint(key_text: str) -> str:
+    """_fingerprint, for callers outside this module (OPS-2, 2026-09-04).
+
+    The pending-key queue is not a local-accounts feature -- it exists on
+    every site, smb included -- but the fingerprint an admin approves by has
+    to be computed exactly one way, or the same key queues twice under two
+    names. Raises LocalUserError on anything that is not a public key."""
+    return _fingerprint(key_text)
+
+
 # ----------------------------------------------------------------- reads
 
 def any_users_exist(conn: sqlite3.Connection) -> bool:

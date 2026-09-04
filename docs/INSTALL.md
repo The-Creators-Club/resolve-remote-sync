@@ -84,12 +84,15 @@ Do these in order. Each one is safe to re-run.
 
 ### Step 1 — write `site.toml`
 
-```sh
+```powershell
 git clone <your checkout of this repo>
 cd resolve-remote-sync
-cp site.example.toml site.toml
-$EDITOR site.toml
+copy site.example.toml site.toml
+notepad site.toml
 ```
+
+(The base rig is a Windows machine, so that is PowerShell. On macOS or Linux:
+`cp site.example.toml site.toml && $EDITOR site.toml`.)
 
 `site.example.toml` is the annotated schema; every key is explained inline and
 again in [`CONFIG.md`](CONFIG.md). The file is meant to be readable, diffable
@@ -104,6 +107,20 @@ site's NAS.
 Minimum you must fill in: `[nas] kind/host/admin_user`, `[tree] pool_root`,
 `tree_name`, `share_name`, `smb_unc`, `[apps] root`, `[net] dashboard_url`,
 and (TrueNAS) `[net] bind_lan` / `bind_tailnet`.
+
+Two things about those keys that only bite later:
+
+- **`[apps] root` must BE a dataset, and nothing here creates one.** The
+  deploy only ever `mkdir -p`s that path, and `setup_snapshots.py` refuses to
+  schedule snapshots on a plain directory (a recursive task on the pool would
+  snapshot everything on it). Create it first, on the NAS:
+  `sudo zfs create -p tank/apps/ccsync-dashboard` (your pool and path). Skip
+  this and `dashboard.db` — the fleet's projects, editors and ticks — has no
+  point-in-time behind it, under a green install transcript. On DSM the
+  equivalent is a shared folder, which the DSM runbook creates.
+- **Not running a shared Resolve Project Server?** Set
+  `[stack] project_server = false`. It defaults to true, and Step 8's health
+  check FAILs its Postgres line by design when nothing is serving one.
 
 Pin the NAS's SSH host key while you are here:
 
@@ -120,6 +137,10 @@ is recorded and printed, and a key that later *changes* is a refusal.
 ### Step 2 — export the secrets into your shell
 
 See [§3](#3-the-secrets-and-where-they-live). Nothing below works without them.
+
+One exception, and it is the one that wastes an afternoon: on TrueNAS,
+`SYNCTHING_API_KEY` is *produced* by Step 3.1, not chosen by you. Export the
+other five now and come back for that one after Step 3.1.
 
 ### Step 3 — the server scripts, per backend
 
@@ -158,7 +179,15 @@ Syncthing profile, 127.0.0.1 binding): [`SERVER-SYNOLOGY.md`](SERVER-SYNOLOGY.md
 ```sh
 python server/setup_snapshots.py --site site.toml            # DRY RUN is the default
 python server/setup_snapshots.py --site site.toml --apply    # ...and this does it
+python server/setup_snapshots.py --site site.toml --list --apply   # ...and this CHECKS it
 ```
+
+**The third line is not optional.** Both targets — the project tree and
+`[apps] root` — must name a *dataset*; a non-zero exit means one of them is
+unprotected and names which. The usual cause is the `[apps] root` prerequisite
+in Step 1. `install_dashboard_app.py` warns about the same thing at deploy
+time, so if you saw a `WARNING: no snapshot floor` there, this is where it is
+fixed.
 
 The rule this product runs on is **snapshot before any privileged operation**.
 Configure the schedule now, not after the first incident.
@@ -189,6 +218,15 @@ python tools\release_key.py new              # %USERPROFILE%\.ccsync-release\rel
 python tools\release_key.py pubkey --quiet   # the value for DASH_RELEASE_PUBKEYS
 python tools\release_key.py bake             # bake the public half into the companion
 ```
+
+**Copy `release.key` into your password manager now.** It is on one Windows
+profile, it is never on the NAS, and no snapshot covers it. A companion trusts
+only the public keys baked into the build it is already running, so losing the
+private half means no signed publish is possible for the fleet until every
+machine is reinstalled by hand — and `RELEASE.md`'s key rotation needs the OLD
+key to publish the overlap release. The same goes for the **Android signing
+keystore** if you build the mobile app: same one-copy problem, same answer.
+`BACKUP_RESTORE.md` §1 lists both as protected by nothing.
 
 Put that public key in the container's environment as `DASH_RELEASE_PUBKEYS`
 (comma-separated; list two during a key rotation) and redeploy. With it unset,
@@ -233,13 +271,26 @@ Six values. **None of them belongs in `site.toml`, in the repo, or in a
 | Env var | Needed by | What it is |
 |---|---|---|
 | `TRUENAS_PW` (`SYNO_PW` on a Synology site) | every server script | the NAS admin password: SSH `sudo -S` **and** REST/DSM API auth |
-| `SYNCTHING_API_KEY` | `install_dashboard_app.py`, `setup_syncthing_folder.py`, `check_health.py` | Syncthing's GUI API key |
+| `SYNCTHING_API_KEY` | `install_dashboard_app.py`, `setup_syncthing_folder.py`, `check_health.py` | Syncthing's GUI API key. **Do not invent this one on TrueNAS** — see below the table |
 | `DASH_REPORT_TOKEN` | `install_dashboard_app.py` | the shared secret companions present as `X-CCSync-Token`. ≥ 24 chars, checked at boot |
 | `DASH_SESSION_SECRET` | `install_dashboard_app.py` | signs dashboard session + companion identity tokens. ≥ 24 chars, and **must stay stable across deploys** — a new value logs everyone out |
 | `BROLL_INGEST_TOKEN` | `install_dashboard_app.py`, when b-roll is on | guards the indexer's write path into `broll.db`. Mandatory when `DASH_BROLL_ENABLED=1` |
 | `DASH_RELEASE_PUBKEYS` | `install_dashboard_app.py` | *public*, not secret — but it is passed the same way. Without it, publishing is refused |
 
-Generate each with `openssl rand -hex 24`.
+Generate each with `openssl rand -hex 24` — **except `SYNCTHING_API_KEY`,
+which depends on your NAS:**
+
+- **TrueNAS:** do NOT invent it. The catalog app generates its own key on
+  first boot and nothing here can change it, so a value you made up can never
+  match and every later call (`install_dashboard_app.py`,
+  `setup_syncthing_folder.py`, `check_health.py`, `accept_device.py`) answers
+  403 with nothing pointing at the cause. Run Step 3.1
+  (`install_syncthing_app.py`) first, then read the key from
+  `http://<nas>:8384` ▸ Settings ▸ GUI ▸ API Key, export it, and carry on with
+  Step 3.2. That is the one secret Step 2 cannot fully do before Step 3.
+- **Synology:** generate it now like the rest. The bundled Syncthing service
+  is seeded from `STGUIAPIKEY` in the stack's own environment, so your value
+  is the one it uses.
 
 Optional, and preferred where it exists:
 

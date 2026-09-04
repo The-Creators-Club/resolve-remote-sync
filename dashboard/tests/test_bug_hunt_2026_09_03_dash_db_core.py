@@ -81,7 +81,7 @@ def test_copying_a_wired_machines_plan_is_refused_not_silently_empty(conn):
 
     with pytest.raises(ValueError) as excinfo:
         dbmod.copy_machine_plan(conn, "ed", "DESK", "LAP", "owen", NOW)
-    assert "wired machine" in str(excinfo.value)
+    assert "wired to the server" in str(excinfo.value)
     # ...and nothing was written to the target on the way out.
     assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ed", "LAP")] == ["projx"]
 

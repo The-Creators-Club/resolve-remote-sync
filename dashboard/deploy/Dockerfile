@@ -96,6 +96,15 @@ COPY dashboard/deploy /app/deploy
 # same reason).
 COPY dashboard/templates /app/templates
 COPY dashboard/static /app/static
+# The two documents the RUNNING dashboard serves (REL-5, usability sweep
+# 2026-09-04). `docs/` is otherwise excluded by .dockerignore, which re-includes
+# exactly these; without them setup_engine's EULA task falls back to "no
+# licence agreement is included in this build" and /help says it is not
+# installed. /app/docs, because both readers resolve it from their own
+# __file__ the way ui.py resolves /app/templates (help._candidates,
+# setup_engine._find_eula).
+COPY docs/legal /app/docs/legal
+COPY docs/HOW_IT_WORKS.md /app/docs/HOW_IT_WORKS.md
 COPY broll/web /broll-app
 COPY music/web /music-app
 COPY ytdl/web /ytdl-app

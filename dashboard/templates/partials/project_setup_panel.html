@@ -42,9 +42,9 @@
       if this looks wrong{% endif %}.
     </div>
   {% elif not setup.projects_dir_ok %}
-    <div class="muted" style="margin-top:0.8rem">The NAS Projects tree isn't mounted on the
-      dashboard (DASH_PROJECTS_DIR). Ask your admin to create/link the folder with
-      <span class="mono-sm">server/setup_tree.py</span>.</div>
+    <div class="muted" style="margin-top:0.8rem">The server's Projects tree is not mounted on this
+      dashboard, so it cannot show you the folders. Ask whoever installed this server: it is a
+      container setting, not something this page can change.</div>
   {% else %}
 
   <div class="side-head" style="margin-top:0.8rem">[ PICK THE FOLDER FOR THIS PROJECT ]</div>
@@ -133,6 +133,16 @@
       <input type="text" name="name" placeholder="new folder name" size="28" required>
       <button class="btn" type="submit">[ CREATE &amp; LINK ]</button>
     </form>
+    {# DCORE-5 (2026-09-04): who may do this, and what it costs to undo. Any
+       signed-in editor can create a project and that stays true on purpose -
+       it is how a shoot starts on a Friday night - but until now nothing on
+       screen said that a typo here becomes a project everybody sees, and
+       nothing anywhere could remove one. #}
+    <div class="muted" style="margin-top:0.4rem">Anyone signed in can create a project,
+      and it appears for everyone: in the tick lists, on SYNC PLANS and in the queue.
+      Who made it is recorded in HISTORY. Only an admin can take one back off those
+      lists, with [ ARCHIVE ] on SYNC PLANS, and even that keeps the folder and the
+      files.</div>
   {% endif %}
   {% endif %}
 

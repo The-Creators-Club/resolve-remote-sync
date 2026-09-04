@@ -15,9 +15,9 @@
              {# DUI-20: which setting made this box grey, and whose it is
                 (CR-88: the computer's own, tray then Settings then THIS
                 COMPUTER). Without it a greyed rail is a dead end. #}
-             title="{{ toggle_editor }} is a base rig: it works directly off the NAS and syncs nothing. Change it on that computer: tray, Settings, THIS COMPUTER."
+             title="{{ toggle_editor }} is wired to the server: it works directly off the NAS and syncs nothing. Change it on that computer: tray, Settings, THIS COMPUTER."
            {% else %}
-             title="sync this project to every computer {{ toggle_editor }} uses. Per-computer plans live on Settings, Assignments."
+             title="sync this project to every computer {{ toggle_editor }} uses. Per-computer plans live on Settings, SYNC PLANS."
              hx-post="/partials/selection/{{ toggle_editor }}/{{ p.slug }}/toggle?view=sidebar{{ '&slug_page=' ~ current_slug if current_slug }}{{ as_qs }}"
              hx-target="closest .projects" hx-swap="outerHTML"
              {% if p.slug in selected_slugs and toggle_editor_machines is defined and toggle_editor_machines %}
@@ -35,7 +35,7 @@
            {{ 'checked' if p.slug in selected_slugs }}>
     {# UX-17 (usability sweep 2026-09-03): [ UPLOAD ONLY ], not [ UP ]. Same
        words on this rail, on the project page and in the queue panel. #}
-    {% if upload_only_slugs is defined and p.slug in upload_only_slugs %}<span class="chip amber" title="upload only: {{ toggle_editor }}'s computer sends its video originals for this project to the server and downloads nothing. Change it on the project page or on Settings, Assignments.">[ UPLOAD ONLY ]</span>{% endif %}
+    {% if upload_only_slugs is defined and p.slug in upload_only_slugs %}<a class="chip amber" href="{{ term_href('Upload only') }}" title="upload only: {{ toggle_editor }}'s computer sends its video originals for this project to the server and downloads nothing. Change it on the project page or on Settings, SYNC PLANS.">[ UPLOAD ONLY ]</a>{% endif %}
     {% endif %}
     <a class="proj-name" href="/project/{{ p.slug }}" title="{{ p.label }}">
       <span class="dot {{ p.status }}">●</span>

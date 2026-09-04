@@ -110,6 +110,23 @@ RETIRED_IN_TEMPLATES: tuple[tuple[str, str, str], ...] = (
     ("<th>MACHINE</th>", "UX-16", "<th>COMPUTER</th>"),
     ("this machine's", "UX-16", "this computer's"),
     ("other machine(s)", "UX-16", "other computer(s), spelt out"),
+    # DUI-8 (wave 5, 2026-09-04): a repo script and a file on an editor's own
+    # computer, in copy an appliance customer reads. Neither exists for a
+    # customer with no checkout, and device approval has been a button on
+    # Settings, USERS since long before this copy was written.
+    ("accept_device.py", "DUI-8", "Approve it on Settings, then USERS"),
+    ("~/.ccsync/config.toml", "DUI-8",
+     "who to send it to; nothing on that computer offers a box to paste it into"),
+    ("DASH_RELEASE_FEED_URL", "DUI-8",
+     "ask whoever installed this server: it is a container setting"),
+    ("DASH_SHARED_REPORT_TOKEN_ENABLED", "DUI-8",
+     "ask whoever installed this server: it is a container setting"),
+    ("DASH_ENFORCE_MAX_REMOVALS", "DUI-8",
+     "ask whoever installed this server: it is a container setting"),
+    ("server/setup_tree.py", "DUI-8",
+     "ask whoever installed this server: it is a container setting"),
+    ("server/install_dashboard_app.py", "DUI-8",
+     "ask whoever installed this server to move it onto the update channel"),
 )
 
 
@@ -302,3 +319,332 @@ def test_the_unfiltered_folders_sentence_agrees_with_its_count() -> None:
     assert "(s)" not in one and "(s)" not in many
     assert "1 shared folder on this computer has" in one
     assert "3 shared folders on this computer have" in many
+
+
+# ------------------------------------------- CR-181: one vocabulary, in Python
+#
+# Wave 4 of the same sweep (2026-09-04, USABILITY_RESILIENCE_SWEEP section 4).
+# The phrase list above catches a sentence somebody already wrote; this catches
+# the NEXT one. Every word below was in this dashboard's copy on 2026-09-03 and
+# has one replacement:
+#
+#   lane            -> upload / proxy download / folder sync
+#   machine, rig    -> computer ("device" only for a Syncthing identity)
+#   halted, parked  -> paused (you did it) / stopped by your admin (a fleet
+#   breaker            halt) / stopped itself (the proxy-download brake, the
+#                      disk floor)
+#   selection       -> tick (the verb), sync plan (the set for one computer)
+#   assignment
+#
+# THE CODE KEEPS ITS NAMES. `selections` is still the table, `machine` is still
+# the column, the route segment and the form field, `fleet_halt` / `disk_park`
+# / `breaker_tripped` are still the kind ids, and `lane_report_current` is
+# still where a transfer's state is read from. So this scan looks only at
+# strings that reach a person: SQL, log and `execute` arguments, docstrings,
+# route paths and single-word constants (a key, a column, a state) are all out
+# of scope, and everything else that is left is listed with its reason.
+VOCABULARY_FILES: tuple[str, ...] = (
+    "alerts.py", "api.py", "collector.py", "db.py", "health.py",
+    "invariants.py", "jobs.py", "notices.py", "protection.py",
+    "setup_engine.py", "setup_routes.py",
+    # CR-179 (wave 4): ui.py is where the chip explanations and every htmx
+    # refusal live, so it belongs in the same scan as the modules above.
+    "ui.py",
+)
+
+RETIRED_WORDS: dict[str, str] = {
+    "lane": "upload / proxy download / folder sync",
+    "lanes": "upload / proxy download / folder sync",
+    "machine": "computer",
+    "machines": "computers",
+    "machine's": "computer's",
+    "rig": "computer",
+    "rigs": "computers",
+    "halt": "stop",
+    "halts": "stops",
+    "halted": "stopped by your admin (a fleet halt) or stopped itself",
+    "park": "stop",
+    "parked": "stopped itself",
+    "breaker": "proxy download stopped itself",
+    "breakers": "brakes that stopped themselves",
+    "selection": "tick",
+    "selections": "sync plan",
+    "assignment": "sync plan",
+    "assignments": "sync plans",
+}
+
+# (file or "", fragment, why it is allowed). A fragment matches by substring,
+# and "" matches any of the files above. EVERY entry is a place the retired
+# word is NOT copy. Some fire only if the sentence around them is re-wrapped
+# (a file name that shares a string literal with a space): they are here so
+# that reflowing a paragraph is never what turns this scan red. An identifier
+# needs no entry - `machine_state` and `lane_report_current` are one word to
+# the matcher below, on purpose.
+VOCABULARY_ALLOWED: tuple[tuple[str, str, str], ...] = (
+    ("api.py", "machine must not be blank",
+     "the validation message for the FORM FIELD named `machine`; the field, "
+     "the route segment and the column all keep that name on purpose"),
+    ("api.py", ".ccsync/machine.json",
+     "a file name on the editor's disk: the bytes, not a word"),
+    ("notices.py", ".ccsync/machine.json", "the same file name"),
+    ("invariants.py", ".ccsync/machine.json", "the same file name"),
+    ("alerts.py", "[ MOVE ON THE SERVER AND ON EVERY MACHINE ]",
+     "quoting a button LABEL back to the reader; the label lives in the "
+     "templates and is renamed there or nowhere"),
+    ("notices.py", "[ MOVE ON THE SERVER AND ON EVERY MACHINE ]",
+     "the same button label"),
+    ("alerts.py", "[ RELEASE THE HALT ]", "the same: a button label, quoted"),
+    ("ui.py", "{lane} on this computer made no progress",
+     "the PLACEHOLDER is called lane; what is substituted into it is "
+     "ui.lane_word(...), so the sentence a person reads begins "
+     "'proxy download on this computer made no progress'"),
+)
+
+
+def _sql_like(value: str) -> bool:
+    """SQL, including the FRAGMENTS the query builders concatenate.
+
+    `" AND s.machine = ?"` carries no keyword this would recognise and is
+    still not a sentence anybody reads, so a placeholder counts too.
+    """
+    upper = value.upper()
+    if "?" in value and ("=?" in value.replace(" ", "") or " IN (" in upper):
+        return True
+    return any(word in upper for word in (
+        "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "CREATE TABLE",
+        "CREATE INDEX", "ALTER TABLE", "GROUP BY", "ORDER BY", "WHERE ",
+        " AND ", " JOIN "))
+
+
+def _log_call_constants(tree: ast.AST) -> set[int]:
+    """Constants inside a log or a database call. Out of scope by the same
+    rule as a comment: these are for us, not for the person the sweep is
+    about."""
+    out: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name in {"debug", "info", "warning", "warn", "error", "exception",
+                    "critical", "execute", "executemany", "executescript"}:
+            for child in ast.walk(node):
+                if isinstance(child, ast.Constant):
+                    out.add(id(child))
+    return out
+
+
+# `_` is part of a word here on purpose: `machine_state` and
+# `lane_report_current` are identifiers a sentence may name, and only the bare
+# word is the copy problem.
+_WORD = re.compile(r"[A-Za-z][A-Za-z_']*")
+
+
+def _retired_words_in(value: str) -> list[str]:
+    return sorted({w.lower() for w in _WORD.findall(value)
+                   if w.lower() in RETIRED_WORDS})
+
+
+def _allowed(name: str, value: str) -> bool:
+    return any((not where or where == name) and fragment in value
+               for where, fragment, _why in VOCABULARY_ALLOWED)
+
+
+@pytest.mark.parametrize("name", VOCABULARY_FILES)
+def test_no_retired_word_in_python_copy(name: str) -> None:
+    path = SRC / name
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    skip = _docstring_nodes(tree) | _log_call_constants(tree)
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if id(node) in skip:
+            continue
+        value = node.value
+        # A key, a column, a state, a route: not a sentence.
+        if " " not in value.strip() or value.startswith("/"):
+            continue
+        if _sql_like(value) or _allowed(name, value):
+            continue
+        for word in _retired_words_in(value):
+            hits.append(f"{name}:{node.lineno}: CR-181 retired {word!r} "
+                        f"(say {RETIRED_WORDS[word]}) in {value[:80]!r}")
+    assert not hits, "; ".join(hits)
+
+
+def test_the_vocabulary_scan_would_catch_a_regression() -> None:
+    """The detector itself, so a silent glob can never pass this file."""
+    assert _retired_words_in("this machine is halted") == ["halted", "machine"]
+    assert _retired_words_in("this computer stopped itself") == []
+    # A word inside a longer one is not a hit: `machine_state` and
+    # `lane_report_current` are table names and must stay sayable.
+    assert _retired_words_in("the machine_state row") == []
+    assert _sql_like("SELECT machine FROM machines")
+    assert _sql_like(" AND s.machine = ?")
+    assert not _sql_like("this computer is busy indexing b-roll")
+    assert _allowed("api.py", "machine must not be blank")
+    assert not _allowed("jobs.py", "this machine is cooling down")
+
+
+# --------------------------- CR-179: one vocabulary, in the templates and JS
+#
+# The other half of CR-181's scan (wave 4, USABILITY_RESILIENCE_SWEEP section
+# 4). Same word list, same rule -- the code keeps its names -- applied to what
+# a browser paints. It is deliberately narrow about what "visible" means,
+# because the terminology table's whole point is that `machine` stays exactly
+# where it is in routes, form fields, hx-post targets, data- attributes, CSS
+# classes and Jinja expressions:
+#
+#   * text OUTSIDE any tag, with {{ ... }} and {% ... %} removed first
+#     (a Jinja expression is code, and `assignments.columns` is a view model);
+#   * the values of the attributes a person actually reads -- title,
+#     placeholder, aria-label, alt, hx-confirm, and nothing else;
+#   * every string literal in our own JS.
+#
+# So `data-machine="{{ c.machine }}"` is invisible to this scan and
+# `title="pick a machine"` is not, which is the line the sweep drew.
+VISIBLE_ATTRS = ("title", "placeholder", "aria-label", "alt", "hx-confirm")
+
+_JINJA_EXPR = re.compile(r"\{\{.*?\}\}|\{%.*?%\}", re.S)
+_TAG = re.compile(r"<[^>]*>", re.S)
+# An inline <script> or <style> in a template is CODE, and its `//`
+# comments are not HTML comments, so _visible cannot blank them. Our own
+# JS files are scanned as JS below; the inline blocks are behaviour.
+_INLINE_CODE_BLOCK = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.S | re.I)
+
+_ATTR = re.compile(
+    r"\b(" + "|".join(VISIBLE_ATTRS) + r")\s*=\s*(\"([^\"]*)\"|'([^']*)')", re.S)
+_JS_STRING = re.compile("\"([^\"\\\\\\n]*(?:\\\\.[^\"\\\\\\n]*)*)\""
+                        "|'([^'\\\\\\n]*(?:\\\\.[^'\\\\\\n]*)*)'"
+                        "|`([^`\\\\]*(?:\\\\.[^`\\\\]*)*)`", re.S)
+
+# Vendored, and not ours to rewrite.
+VENDORED_JS = ("htmx.min.js",)
+
+
+def _visible_strings(path: Path) -> list[tuple[int, str]]:
+    """(line, text) for everything on this page a person reads."""
+    text = _visible(path)
+    out: list[tuple[int, str]] = []
+    if path.suffix == ".js":
+        for m in _JS_STRING.finditer(text):
+            value = m.group(1) or m.group(2) or m.group(3) or ""
+            if value:
+                out.append((text.count("\n", 0, m.start()) + 1, value))
+        return out
+    text = _INLINE_CODE_BLOCK.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    text = _JINJA_EXPR.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    for m in _TAG.finditer(text):
+        for attr in _ATTR.finditer(m.group(0)):
+            value = attr.group(3) if attr.group(3) is not None else attr.group(4)
+            if value:
+                out.append((text.count("\n", 0, m.start()) + 1, value))
+    pos = 0
+    for m in _TAG.finditer(text):
+        chunk = text[pos:m.start()]
+        if chunk.strip():
+            out.append((text.count("\n", 0, pos) + 1, chunk))
+        pos = m.end()
+    if text[pos:].strip():
+        out.append((text.count("\n", 0, pos) + 1, text[pos:]))
+    return out
+
+
+# (file or "", fragment, why it is allowed). Same shape as
+# VOCABULARY_ALLOWED, and every entry is a place a retired word is not copy.
+TEMPLATE_VOCABULARY_ALLOWED: tuple[tuple[str, str, str], ...] = (
+    ("admin_users.html", "a device, a plan or a report",
+     "`device` for a SYNCTHING IDENTITY is the one use the terminology table "
+     "keeps: this line is about a Syncthing device with no account behind it"),
+    ("admin_users.html", "no Syncthing device reported", "the same identity"),
+    ("admin_users.html", "device list unavailable", "the same identity"),
+    ("admin_users.html", "its Syncthing device", "the same identity"),
+    ("fleet_grid.html", "no Syncthing device ever reported", "the same identity"),
+    ("fleet_grid.html", "its Syncthing device go", "the same identity"),
+    ("project_detail.html", "this computer's sync identity is not named after an editor",
+     "`device`/`sync identity` for a SYNCTHING IDENTITY is the one use the "
+     "terminology table keeps (DUI-8 rewrote this line, 2026-09-04)"),
+    ("project_detail.html", "no Syncthing device on this computer",
+     "the same identity"),
+    ("base.html", "width=device-width",
+     "the viewport meta: a CSS keyword, not a word anybody reads"),
+    ("", "MOVE ON THE SERVER AND ON EVERY MACHINE",
+     "the button's own label, which the file-move flow owns "
+     "(docs/FILE_MOVES.md); renamed there or nowhere"),
+    ("", "unused placeholder fragment",
+     "kept so the list is never empty"),
+)
+
+
+def _template_allowed(name: str, value: str) -> bool:
+    return any((not where or where == name) and fragment in value
+               for where, fragment, _why in TEMPLATE_VOCABULARY_ALLOWED)
+
+
+@pytest.mark.parametrize("path", _rendered_files(), ids=lambda p: p.name)
+def test_no_retired_word_in_rendered_copy(path: Path) -> None:
+    if path.name in VENDORED_JS:
+        pytest.skip("vendored library, not our copy")
+    hits = []
+    for line, value in _visible_strings(path):
+        # The same rule the Python half applies: a string with no space in
+        # it is a key, a route, an attribute name or a query fragment, not
+        # a sentence. `/api/v1/selection/`, `data-col-machine` and
+        # `machine=` are exactly what the terminology table leaves alone.
+        if " " not in value.strip() or value.startswith("/"):
+            continue
+        if _template_allowed(path.name, value):
+            continue
+        for word in _retired_words_in(value):
+            hits.append(f"{path.name}:{line}: CR-179 retired {word!r} "
+                        f"(say {RETIRED_WORDS[word]}) in {value.strip()[:90]!r}")
+    assert not hits, "; ".join(hits)
+
+
+def test_the_template_vocabulary_scan_would_catch_a_regression() -> None:
+    """The extractor itself: what it sees, and what it must not see."""
+    import tempfile
+
+    sample = ('<div data-machine="{{ c.machine }}" class="chip lane"\n'
+              '     hx-post="/partials/admin/machines/forget"\n'
+              '     title="pick a machine">the lane is halted</div>\n'
+              '{# a comment naming the breaker #}\n')
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "sample.html"
+        p.write_text(sample, encoding="utf-8")
+        seen = [v for _line, v in _visible_strings(p)]
+        assert any("pick a machine" in v for v in seen)
+        assert any("the lane is halted" in v for v in seen)
+        # ...and NOT the route, the data- attribute or the CSS class.
+        assert not any("forget" in v for v in seen)
+        assert not any("chip lane" in v for v in seen)
+        assert not any("c.machine" in v for v in seen)
+        # A single token is a key or a route, never a sentence.
+        assert " " not in "data-col-machine"
+        assert "/api/v1/selection/".startswith("/")
+        # A comment is out of scope, here as everywhere in this file.
+        assert not any("breaker" in v for v in seen)
+        assert _retired_words_in("pick a machine") == ["machine"]
+        js = Path(tmp) / "sample.js"
+        js.write_text('const u = "/api/v1/selection/" + e;\n'
+                      '// a comment about the breaker\n'
+                      'alert("this machine is halted");\n', encoding="utf-8")
+        js_seen = [v for _line, v in _visible_strings(js)]
+        assert "this machine is halted" in js_seen
+        assert not any("breaker" in v for v in js_seen)
+
+
+def test_the_settings_strip_is_three_labelled_runs() -> None:
+    """SYS-6: the groups ARE the list, so a page cannot be in one and not the
+    other, and every entry keeps a route that exists."""
+    flat = tuple(e for _g, entries in ui.SETTINGS_NAV_GROUPS for e in entries)
+    assert ui.SETTINGS_NAV == flat
+    assert [g for g, _e in ui.SETTINGS_NAV_GROUPS] == [
+        "Run the fleet", "Is it healthy", "When it breaks"]
+    labels = {label for _k, label, _h, _a in ui.SETTINGS_NAV}
+    assert {"SYNC PLANS", "HISTORY", "HEALTH", "HELP"} <= labels
+    # ...and the words they replaced are gone from the strip for good.
+    assert "ASSIGNMENTS" not in labels and "TIMELINE" not in labels
+    nav = (TEMPLATES / "partials" / "settings_nav.html").read_text(encoding="utf-8")
+    assert "SETTINGS_NAV_GROUPS" in nav
+    assert ui.SETTINGS_LANDING == "/admin/health"

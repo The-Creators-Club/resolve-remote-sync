@@ -162,7 +162,7 @@ def test_the_sort_control_offers_newest():
 
 def test_a_missing_waveform_is_captioned():
     assert 'No waveform yet' in APP_JS
-    assert 'the base rig has not' in APP_JS
+    assert 'the indexing computer has not' in APP_JS
     src = body(APP_JS, 'loadPeaks')
     assert 'note:' in src, 'loadPeaks returns the reason, not just the bytes'
     assert 'detail' in src, "the route's own 404 wording is kept for support"

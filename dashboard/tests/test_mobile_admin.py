@@ -178,14 +178,16 @@ def test_every_poll_m3_owns_stops_while_the_page_is_hidden():
     half of the fix (M4's pwa.js is the belt).
 
     Read from the source rather than a render because these live on the page
-    templates' own `<aside>` and wrapper divs, and because the sixteen of them
-    is the number that has to stay right."""
+    templates' own `<aside>` and wrapper divs, and because the count of them
+    is the number that has to stay right. Seventeen since wave 4 of the
+    usability sweep (2026-09-04): /admin/health carries the same 30 s sidebar
+    poll every other admin page does."""
     seen = 0
     for path in OWNED_TEMPLATES:
         for trigger in polls(path.read_text(encoding="utf-8")):
             seen += 1
             assert VISIBILITY_FILTER in trigger, (path.name, trigger)
-    assert seen == 16, seen
+    assert seen == 17, seen
 
 
 @pytest.mark.parametrize("url", ADMIN_PARTIALS)

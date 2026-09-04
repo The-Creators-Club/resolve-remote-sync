@@ -39,7 +39,11 @@
         <tr class="editor-row">
           <td class="who" data-label="USERNAME">{{ u.username }}</td>
           <td class="mono-sm" data-label="ROLE">{{ u.role }}</td>
-          <td data-label="STATUS">{% if u.disabled %}<span class="chip red">[ DISABLED ]</span>{% else %}<span class="chip green">[ ACTIVE ]</span>{% endif %}</td>
+          {# DCORE-4 (2026-09-04): two independent states, so two chips.
+             DISABLED is about signing in; SUSPENDED is about the fleet, and
+             an account can be either, both or neither. #}
+          <td data-label="STATUS">{% if u.disabled %}<span class="chip red">[ DISABLED ]</span>{% elif u.username not in (admin_users.suspended or []) %}<span class="chip green">[ ACTIVE ]</span>{% endif %}
+            {% if u.username in (admin_users.suspended or []) %}<span class="chip amber" title="an admin paused this person: their computers are turned away and their projects are unshared. The sync plan is kept. [ RESUME ] puts it back.">[ SUSPENDED ]</span>{% endif %}</td>
           <td class="mono-sm" data-label="SSH KEYS">
             {% if u.ssh_keys %}
               {% for k in u.ssh_keys %}
@@ -87,14 +91,21 @@
                was nowhere on screen, in a row where [ DELETE ] asks. ENABLE
                takes no confirm: giving somebody their login back is not a
                decision anybody regrets. #}
+            {# DCORE-1 (2026-09-04): the confirm names the consequence
+               EXACTLY. Disabling revokes sessions and report tokens and
+               their computers are turned away at the report path now, but
+               the files they already hold stay and their Syncthing devices
+               are left alone. SUSPEND beside this is the fleet-level
+               control; DELETE is the one that removes things. #}
             <form class="inline-form" hx-post="/partials/admin/users/disable"
                   hx-target="closest .admin-users-box" hx-swap="outerHTML"
-                  {% if not u.disabled %}hx-confirm="Stop {{ u.username }} signing in? Their computers keep syncing."{% endif %}>
+                  {% if not u.disabled %}hx-confirm="Stop {{ u.username }} signing in? Their computers keep their projects until you untick them."{% endif %}>
               <input type="hidden" name="username" value="{{ u.username }}">
               <input type="hidden" name="disabled" value="{{ '0' if u.disabled else '1' }}">
               <button class="btn tap" type="submit"
-                      title="a disabled account cannot sign into the dashboard or SFTP. Their computers keep syncing what they already have, their sessions and report tokens are revoked, and [ ENABLE ] here undoes it.">{% if u.disabled %}[ ENABLE ]{% else %}[ DISABLE ]{% endif %}</button>
+                      title="a disabled account cannot sign into the dashboard or SFTP, its sessions and report tokens are revoked, and its computers are turned away when they report. The files already on those computers stay there, and [ ENABLE ] here undoes all of it.">{% if u.disabled %}[ ENABLE ]{% else %}[ DISABLE ]{% endif %}</button>
             </form>
+            {% set suspend_user = u.username %}{% include "partials/admin_suspend_button.html" with context %}
             {# Deletion is the irreversible twin of DISABLE, so it is second and
                it asks first. The confirm names what survives as well as what
                goes: an admin who wanted "stop this person signing in" wants
@@ -215,10 +226,57 @@
   </div>
   {% endif %}
 
+  {% if admin_users.pending_ssh_keys %}
+  {# OPS-2 (2026-09-04): the key an editor's installer generated, offered by
+     the wizard under the identity token it had just been given. It grants
+     nothing until this button is pressed, exactly like a Syncthing device
+     waiting for approval below. #}
+  <div class="side-head" style="margin-top:1.2rem">[ SSH KEYS AWAITING APPROVAL ]
+    <span class="muted">sent up by an editor's installer. Their upload and proxy download cannot authenticate until one is approved.</span></div>
+  <div class="scroll-x">
+  <table class="editors stack">
+    <thead><tr><th>EDITOR</th><th>FINGERPRINT</th><th>FROM</th><th>SENT</th><th></th></tr></thead>
+    <tbody>
+    {% for k in admin_users.pending_ssh_keys %}
+      <tr class="editor-row">
+        <td class="who" data-label="EDITOR">{{ k.username }}</td>
+        <td class="mono-sm" data-label="FINGERPRINT" title="{{ k.key_text }}">{{ k.fingerprint }}</td>
+        <td class="mono-sm muted" data-label="FROM">{{ k.machine or "-" }}</td>
+        <td class="muted" data-label="SENT">{{ k.submitted_at | ago }}</td>
+        <td data-label="ACTIONS">
+          <form class="inline-form" hx-post="/partials/admin/users/keys/approve"
+                hx-target="closest .admin-users-box" hx-swap="outerHTML">
+            <input type="hidden" name="username" value="{{ k.username }}">
+            <input type="hidden" name="fingerprint" value="{{ k.fingerprint }}">
+            <button class="btn tap" type="submit"
+                    title="installs this key on {{ k.username }}'s account. It is what their upload and proxy download authenticate with.">[ APPROVE ]</button>
+          </form>
+          <form class="inline-form" hx-post="/partials/admin/users/keys/dismiss"
+                hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                hx-confirm="Throw away this key for {{ k.username }}? Their computer can offer it again.">
+            <input type="hidden" name="username" value="{{ k.username }}">
+            <input type="hidden" name="fingerprint" value="{{ k.fingerprint }}">
+            <button class="btn tap" type="submit"
+                    title="removes the offer only. Nothing on the account changes and that computer can offer the key again.">[ DISMISS ]</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+
   {% if not admin_users.truenas_configured %}
     {% if admin_users.auth_method != 'local' %}
-    <div class="muted">TRUENAS_PW is not configured on the dashboard, so this section is unavailable.
-      Set TRUENAS_HOST / TRUENAS_USER / TRUENAS_PW on the app and redeploy.</div>
+    {# UX-13 (2026-09-04): the NEW name first, and the two places an owner
+       can set it. The old copy named TRUENAS_PW (which settings.py has not
+       preferred since the tenancy work) and told a non-technical owner to
+       edit the container's environment and redeploy, on the page the setup
+       wizard's Editors step sends them to. #}
+    <div class="muted">This dashboard has no NAS password, so editor accounts cannot be
+      created here. Set it on <a href="/setup#nas_connect">Settings, Setup (Connect to your
+      NAS)</a>, or set DASH_NAS_PW in the container.</div>
     {% endif %}
   {% else %}
 
@@ -307,9 +365,25 @@
         <tr class="editor-row">
           <td class="who" data-label="USERNAME">{{ e.username }}</td>
           <td class="mono-sm" data-label="UID">{{ e.uid }}</td>
-          <td data-label="SSH KEY">{% if e.has_ssh_key %}<span class="chip green">[ SET ]</span>{% else %}<span class="chip red">[ MISSING ]</span>{% endif %}</td>
+          {# OPS-2 / UX-14 (2026-09-04): an account may now be created with no
+             key at all, so the row has to say what that costs and offer the
+             one control that ends it. [ UPDATE SSH KEY ] posts to the same
+             create_or_update path the create form does: one implementation,
+             and it works in NAS mode, which the local-only keys routes never
+             did. #}
+          <td data-label="SSH KEY">{% if e.has_ssh_key %}<span class="chip green">[ SET ]</span>{% else %}<span class="chip red">[ NO SSH KEY ]</span>
+            <div class="muted mono-sm">upload and proxy download will not run until a key is added</div>{% endif %}
+            <form class="inline-form" hx-post="/partials/admin/users/create"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  {% if e.has_ssh_key %}hx-confirm="Replace {{ e.username }}'s SSH key? Their upload and proxy download stop until it is in use."{% endif %}>
+              <input type="hidden" name="username" value="{{ e.username }}">
+              <input type="text" name="ssh_pubkey" placeholder="ssh-ed25519 AAAA... user@host" size="26" required>
+              <button class="btn tap" type="submit"
+                      title="installs this public key on the NAS account. It is what upload and proxy download authenticate with: the editor's installer prints it at the end, and their wizard also sends it up on its own for approval below.">{% if e.has_ssh_key %}[ UPDATE SSH KEY ]{% else %}[ ADD SSH KEY ]{% endif %}</button>
+            </form>
+          </td>
           <td data-label="SMB">{% if e.smb %}<span class="chip green">[ ON ]</span>{% else %}<span class="chip red">[ OFF ]</span>{% endif %}</td>
-          <td data-label="LOCKED">{% if e.locked %}<span class="chip red">[ LOCKED ]</span>{% else %}<span class="muted">-</span>{% endif %}</td>
+          <td data-label="LOCKED">{% if e.locked %}<span class="chip red">[ LOCKED ]</span>{% elif e.username in (admin_users.suspended or []) %}<span class="chip amber" title="an admin paused this person: their computers are turned away and their projects are unshared. The sync plan is kept. [ RESUME ] puts it back.">[ SUSPENDED ]</span>{% else %}<span class="muted">-</span>{% endif %}</td>
           <td data-label="SET PASSWORD">
             {# DUI-18 (2026-09-04): the NAS twin of the local [ SET ] above,
                and a bigger blast radius: this password is their SMB and SFTP
@@ -329,12 +403,13 @@
                confirm names everything else that goes with it. The home
                directory's fate is the NAS's own (TrueNAS keeps it, DSM does
                not) and comes back as a notice above. #}
+            {% set suspend_user = e.username %}{% include "partials/admin_suspend_button.html" with context %}
             <form class="inline-form" hx-post="/partials/admin/users/delete"
                   hx-target="closest .admin-users-box" hx-swap="outerHTML"
                   hx-confirm="Delete {{ e.username }}: their NAS account, their computers and their sync plans?">
               <input type="hidden" name="username" value="{{ e.username }}">
               <button class="btn tap" type="submit"
-                      title="their NAS account, browser sessions and report tokens go, and so do all of their computers: sync plans, status rows and Syncthing devices (they stop receiving projects). Files already on their computers stay there, and nothing in the project tree is touched.">[ DELETE ]</button>
+                      title="SUSPEND pauses them instead and keeps all of this. DELETE: their NAS account, browser sessions and report tokens go, and so do all of their computers: sync plans, status rows and Syncthing devices (they stop receiving projects). Files already on their computers stay there, and nothing in the project tree is touched.">[ DELETE ]</button>
             </form>
           </td>
         </tr>
@@ -352,8 +427,18 @@
            style="display:block;margin:0.3rem 0;width:260px">
     <input type="text" name="full_name" placeholder="full name (optional)"
            style="display:block;margin:0.3rem 0;width:260px">
-    <textarea name="ssh_pubkey" placeholder="ssh-ed25519 AAAA... user@host" rows="2" required
+    {# UX-14 / OPS-2 (2026-09-04): NOT required any more. The key this field
+       used to demand is generated by the wizard, which cannot run until the
+       account exists, so the only ways out were a repo checkout or mailing
+       somebody a private key. The account can be created without one; the
+       editor's wizard offers theirs on first sign-in (approve it above), or
+       an admin uses [ ADD SSH KEY ] on the row. #}
+    <textarea name="ssh_pubkey" placeholder="ssh-ed25519 AAAA... user@host (optional)" rows="2"
               style="display:block;margin:0.3rem 0;width:100%;max-width:520px"></textarea>
+    <div class="muted" style="margin-top:-0.1rem;margin-bottom:0.3rem">Leave this blank if
+      they have not installed yet: their installer sends the key up on first sign-in and
+      you approve it here. Upload and proxy download do not run until a key is on the
+      account.</div>
     <input type="password" name="password"
            placeholder="known password (optional; otherwise randomized and unusable for dashboard login)"
            style="display:block;margin:0.3rem 0;width:420px">

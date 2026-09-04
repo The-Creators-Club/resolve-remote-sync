@@ -308,6 +308,69 @@ def test_every_problem_builds_a_plan_with_no_placeholder_left_in_it(site):
                     assert "{" not in line, f"{problem.key} printed a placeholder"
 
 
+# ---------------------------------------- OPS-3 / UX-18 (sweep 2026-09-03)
+
+def test_an_unset_snapshot_mount_reads_as_a_deployment_that_was_never_given_one():
+    """OPS-3. `DASH_SNAPSHOT_DIR` was set by nothing until 2026-09-04, so every
+    install that followed the documentation got a RECOVERY page that could only
+    print commands -- and the sentence blamed this server's knowledge rather
+    than the deployment. It must never read as "there are no snapshots"."""
+    rows, why = recovery.list_snapshots({})
+    assert rows == []
+    assert "never given a snapshot mount" in why
+    assert recovery.ENV_SNAPSHOT_DIR in why
+
+
+def test_an_empty_snapshot_mount_is_a_different_sentence(site):
+    """A mount that is there and holds nothing is not the same fact, and only
+    one of the two is fixed by re-running the deploy."""
+    (site["tmp"] / "empty").mkdir()
+    _rows, why = recovery.list_snapshots(
+        {recovery.ENV_SNAPSHOT_DIR: str(site["tmp"] / "empty")})
+    assert "there are no snapshots" in why
+    assert "never given a snapshot mount" not in why
+
+
+def test_no_step_or_fix_sends_an_admin_to_a_checkout_of_this_repo(site):
+    """UX-18. The person on this page has a container and a browser. Naming
+    `server/setup_tree.py` or `server/setup_snapshots.py` at them is the CR-59
+    shape: advice that cannot be followed by its reader."""
+    facts = _facts(site, tasks=[{"dataset": "tank", "enabled": True}],
+                   env={**site["env"], protection.ENV_TREE_DATASET: "tank/media",
+                        protection.ENV_APPS_DATASET: "tank/apps",
+                        recovery.ENV_CONTAINER_NAME: "ccsync-dashboard"})
+    for fact in facts.values():
+        assert "server/" not in fact.fix, f"{fact.key} names a repo script"
+    for problem in recovery.PROBLEMS:
+        for step in recovery.plan(problem.key, facts)["steps"]:
+            assert "server/setup_tree.py" not in step["body"]
+            assert "server/setup_snapshots.py" not in step["body"]
+
+
+def test_the_snapshot_fix_points_at_the_wizard_rather_than_a_script(site):
+    facts = _facts(site, tasks=[{"dataset": "tank/other", "enabled": True}],
+                   env={**site["env"], protection.ENV_APPS_DATASET: "tank/apps"})
+    assert "SETUP page" in facts["apps_dataset"].fix
+
+
+def test_the_rollback_plan_says_what_an_admin_can_do_and_who_to_ask(site):
+    """The step after a rollback used to be a repo script. What is left is a
+    button to the page that re-creates a project, and one sentence naming the
+    person to ask for the part no page here can do."""
+    facts = _facts(site, tasks=[{"dataset": "tank", "enabled": True, "recursive": True}],
+                   env={**site["env"], protection.ENV_TREE_DATASET: "tank/media"})
+    steps = recovery.plan("whole_tree", facts)["steps"]
+    assert any(step["href"] == "/projects" for step in steps)
+    assert any("ask whoever installed" in step["body"] for step in steps)
+
+
+def test_the_search_index_rollback_names_the_computer_it_runs_on(site):
+    steps = recovery.plan("search_index", _facts(site))["steps"]
+    bodies = " ".join(step["body"] for step in steps)
+    assert "ask whoever publishes" in bodies
+    assert not any("base rig" in step["title"] for step in steps)
+
+
 def test_the_page_renders_with_no_nas_and_no_snapshots(site, tmp_path):
     """The page an owner opens after losing something is the last page in this
     product that may fail to render."""

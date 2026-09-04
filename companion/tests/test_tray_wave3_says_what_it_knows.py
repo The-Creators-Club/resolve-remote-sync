@@ -541,7 +541,7 @@ def test_a_config_problem_nobody_wrote_down_keeps_the_old_sentence():
 
     line = _format_lane_line_from(_status("lane_a_video_up"), paused=False,
                                   problems=True)
-    assert "this machine isn't set up yet" in line
+    assert "this computer isn't set up yet" in line
 
 
 def test_the_named_problem_is_capped_so_a_menu_stays_readable():

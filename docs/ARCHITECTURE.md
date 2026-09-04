@@ -111,6 +111,14 @@ footage*, and they are documented in full in [`SYNC_SAFETY.md`](SYNC_SAFETY.md):
   [`RESOLVE_EDIT_SAFETY.md`](RESOLVE_EDIT_SAFETY.md).
 - **Snapshot before privileged operations**, on the NAS side —
   [`BACKUP_RESTORE.md`](BACKUP_RESTORE.md).
+- **The companion supervisor** (`supervisor.py`, companion 0.9.62). The exe
+  re-entered with `--supervise`, spawned right after the crash marker is
+  written: it relaunches a companion that died *without* starting a shutdown
+  (the CR-93 `Tcl_AsyncDelete` abort class — no traceback, nothing in the
+  log), and never after a Quit, a `Stop-Process` or a self-upgrade. Three
+  times an hour at most. A tray that vanishes silently is a machine that
+  stops syncing silently, which is why this is a safety latch and not a
+  convenience.
 
 ---
 
@@ -120,7 +128,8 @@ One FastAPI process in one container. It serves:
 
 - the fleet UI (server-rendered + htmx),
 - `/api/v1/*` (see [`API.md`](API.md)),
-- and up to three **mounted sub-applications**.
+- and up to four **mounted sub-applications** (`/broll`, `/music`, `/ytdl`,
+  `/cards`).
 
 ```mermaid
 flowchart TB
@@ -164,6 +173,15 @@ best-effort:
   with background threads** that the dashboard's own shutdown stops. It also
   needs two shares nothing else here mounts — the vault `rw` and the footage
   share `ro` (`docs/DOCKER.md`). Off unless `DASH_CARDS_ENABLED=1`.
+
+**The same dashboard is what a phone gets.** There is no second site and no
+second URL: the pages are laid out for a thumb, and a web app manifest plus a
+service worker let a phone install the dashboard as an icon. Studios that want
+a real app instead of a home-screen shortcut can install the Android APK.
+[`MOBILE.md`](MOBILE.md) is the runbook, [`ANDROID.md`](ANDROID.md) the APK
+half. The manifest and the service worker must stay reachable **without a
+session** or the install silently degrades to a browser tab with an address
+bar (CR-100 — the outer `login_gate`'s `_OPEN_EXACT` list).
 
 Three rules hold for all four, and they are load-bearing:
 
@@ -570,6 +588,56 @@ mounted SPAs and the dashboard (they run in the same process, on purpose).
 
 ---
 
+## 9a. The server diagnoses itself
+
+Since 2026-08-28 the dashboard does not put its diagnoses in a log nobody
+opens. Every collector cycle evaluates a registry of alert kinds
+(`alerts.ALERT_KINDS` — data, not a chain of ifs) against state the dashboard
+already holds, writes what it finds to `notices` keyed `(kind, subject)` with
+the exact next action on the row, logs it to `alert_log`, and delivers it
+through `alerts_sink` (none in the vendor build, smtp, or an https webhook),
+plus a Monday weekly report. The home page renders the open rows as PROBLEMS
+THE SERVER FOUND.
+
+Two rules make it worth trusting, and both are the point of the design:
+
+- **An unverified check is NOT CHECKED, never OK.** A registered kind that
+  nothing evaluates renders `[ NOT CHECKED ]` on the checks panel rather than
+  green, and a check that raises becomes its own `check_failed` finding.
+- **Adding a check is adding a registry row**, and the row is registered
+  *with* its writer. A registered kind with no writer was the first build's
+  own bug.
+
+Full detail, including how to add a check: [`SELF_DIAGNOSIS.md`](SELF_DIAGNOSIS.md).
+
+---
+
+## 9b. Blast radius: what breaks what
+
+The first thing an operator needs at 2 a.m., and until 2026-09-04 it was only
+inferable from the code (08-28 sweep SYS-19). Each row is "this component is
+down", not "this component is slow".
+
+| What is down | What stops | What keeps working | What it looks like |
+|---|---|---|---|
+| **The dashboard container** | ticks, sync plans, the fleet grid, every mounted app, the upgrade channel, job scheduling | **all three sync engines**: the companion falls back to the on-disk selection cache (`selection.py`) and keeps syncing the last plan it was given | Editors notice nothing for hours. The danger is the reverse: a dashboard restored from an *old* backup silently reverts everyone's plan, and the enforce cycle then unshares to match |
+| **The NAS** | everything that moves bytes: upload, proxy download, folder sync, the dashboard (it runs there), the tree itself | local editing off whatever is already on the disk | Every lane errors; the companion only infers "offline" when both rclone lanes fail on the same project |
+| **Syncthing on the NAS** | folder sync, fleet-wide. Nothing shares, nothing arrives | upload and proxy download (they are rclone over SFTP, independent of it) | Project files and audio stop flowing while proxies keep arriving, which reads as "sync is fine" on every other field |
+| **Syncthing on one editor's computer** | that computer's folder sync only | everything else, everywhere | The companion's supervisor restarts it; after three failures it reports the error rather than pretending to be idle |
+| **The base rig** | releases, the GPU indexers, the NAS install tooling, and proxy generation for the fleet | **all sync**, the dashboard, every editor | Correctly decoupled. Proxies stop being made, so "N need proxies" climbs and never falls |
+| **One mounted app** (`/broll`, `/music`, `/ytdl`, `/cards`) | that page only | **the dashboard boots and the fleet keeps syncing** — this is the load-bearing rule of §4 | The mount reports `absent` or `degraded` and is not advertised in the nav |
+| **The Timeline Cards checkout** (`/cards-app`) | `/cards` and its jobs; a pinned media job has no executor and is `abandoned` rather than queued forever | everything else | Same as any mount: absent, never fatal |
+| **The vendor release feed** | new builds being offered; the dashboard's own self-update | the published packages already in `<data>/packages`, which the fleet can still install | Packages page shows the feed unreachable; nothing on an editor's computer changes |
+| **One companion misbehaving** | mostly itself | the fleet: reports are ceilinged, `machine` is a bounded string, and `evict_extra_machines` cleans up | The uncontained case is a computer reporting a wrong-but-plausible identity, or two computers with one `machine_id` (a cloned disk) |
+| **Tailscale** | every remote editor's access to the NAS and the dashboard at once | wired computers on the office LAN | Indistinguishable from "the NAS is down" from a remote editor's side |
+
+Two of these degrade *quietly* rather than badly, and quiet is the harder
+failure: the dashboard being down (the cache fallback is silent) and Syncthing
+on the NAS being down (proxies keep arriving). Both now have alert kinds
+behind them (§9a).
+
+---
+
 ## 10. What is stored where
 
 | Store | Location | Holds |
@@ -651,7 +719,9 @@ Deferred, and named so nobody mistakes them for oversights:
 - [`API.md`](API.md) — the HTTP surface
 - [`SYNC_SAFETY.md`](SYNC_SAFETY.md), [`BACKUP_RESTORE.md`](BACKUP_RESTORE.md),
   [`RESOLVE_EDIT_SAFETY.md`](RESOLVE_EDIT_SAFETY.md) — the safety story
+- [`SELF_DIAGNOSIS.md`](SELF_DIAGNOSIS.md) — what the server checks about itself, and how to add a check
 - [`TENANCY.md`](TENANCY.md) — who can reach whose footage
+- [`MOBILE.md`](MOBILE.md), [`ANDROID.md`](ANDROID.md) — the dashboard on a phone
 - [`DOCKER.md`](DOCKER.md), [`CI.md`](CI.md) — how the container and the tests are built
 - `SPEC.md` (repo root) — the internal architecture document, with the history
 - [`README.md`](README.md) — the docs index

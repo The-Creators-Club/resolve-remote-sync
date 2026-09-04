@@ -243,6 +243,20 @@ services:
       # task on `tank`).
       DASH_TREE_DATASET: "{{DASH_TREE_DATASET}}"
       DASH_UPDATE_SNAPSHOT_DATASET: "{{DASH_UPDATE_SNAPSHOT_DATASET}}"
+      # WHERE THIS CONTAINER CAN READ THOSE SNAPSHOTS (OPS-3, usability +
+      # resilience sweep 2026-09-03). Settings -> RECOVERY browses and
+      # restores from a snapshot without a root shell, and docs/BACKUP_RESTORE
+      # calls that the primary route -- but nothing set this until now, so
+      # every documented install got a page that could only print commands.
+      # A directory whose ENTRIES are snapshots (`.zfs/snapshot` of the tree's
+      # dataset on ZFS, `/volume<N>/@sharesnap/<share>` on DSM), mounted
+      # read-only, plus the path from ONE snapshot's root down to Projects.
+      # Blank is "this deployment was never given a snapshot mount", which is
+      # what the page says; it is NEVER read as "there are no snapshots".
+      # Pasting this file? Add the mount to the volumes below as well, e.g.
+      #   - /mnt/<pool>/<dataset>/.zfs/snapshot:/snapshots:ro
+      DASH_SNAPSHOT_DIR: "{{DASH_SNAPSHOT_DIR}}"
+      DASH_SNAPSHOT_PROJECTS_SUBPATH: "{{DASH_SNAPSHOT_PROJECTS_SUBPATH}}"
       # Unattended updates (2026-08-18, docs/MULTI_MACHINE_PLAN.md §9). "0"
       # is the vendor build: companions offer a new build in their tray and
       # an admin can push one machine at a time from Settings, Packages. "1"

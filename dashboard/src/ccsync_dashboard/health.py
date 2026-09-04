@@ -398,6 +398,18 @@ _LANE_WORDS = {
     "express": "express upload",
 }
 
+# UX-19 (usability sweep 2026-09-03), the dashboard half. The three ways sync
+# can be off are three different sentences to a reader and were four words to
+# the product: "you paused it", "your admin stopped it", "it stopped itself".
+# Where two of them are true at once the grid used to name only the first, so
+# an editor cleared the one it named and nothing started moving. These are the
+# codes that can be TRUE ALONGSIDE another one and still be worth a second
+# clause; every other reason in WHY_ORDER is either the whole answer or a
+# consequence of one of these.
+WHY_SECOND_CAUSES: tuple[str, ...] = (
+    "fleet_halt", "local_halt", "paused", "breaker_tripped", "disk_full",
+)
+
 
 def _why_get(row: Mapping[str, Any], key: str) -> Any:
     """One lookup over a fleet-grid row and its nested `guard` block.
@@ -435,7 +447,8 @@ def _duration_words(seconds: Any) -> str:
 
 def _lane_words(lane: Any) -> str:
     key = str(lane or "").strip()
-    return _LANE_WORDS.get(key) or _LANE_WORDS.get(key.upper()) or "a sync lane"
+    # UX-16 (usability sweep 2026-09-03): "lane" never reaches a reader.
+    return _LANE_WORDS.get(key) or _LANE_WORDS.get(key.upper()) or "a transfer"
 
 
 def _why_sentence(code: str, row: Mapping[str, Any]) -> str:
@@ -461,13 +474,18 @@ def _why_sentence(code: str, row: Mapping[str, Any]) -> str:
         return "Not syncing: the sync drive is pointing at the wrong place"
     if code == "disk_full":
         free = _why_get(row, "disk_root_free_bytes")
-        return (f"Not downloading proxies: the drive has {_round_bytes(free)} free"
+        # UX-19: the disk floor is the computer STOPPING ITSELF, which is a
+        # different sentence from "your admin stopped it" and from "you paused
+        # it". Say which one it is.
+        return (f"Not downloading proxies: proxy download stopped itself, the "
+                f"drive has {_round_bytes(free)} free"
                 if free is not None else
-                "Not downloading proxies: the drive is out of space")
+                "Not downloading proxies: proxy download stopped itself, the "
+                "drive is out of space")
     if code == "fleet_halt":
-        return "Not syncing: an admin has halted syncing for the whole fleet"
+        return "Not syncing: syncing is stopped by your admin for the whole fleet"
     if code == "local_halt":
-        return "Not syncing: syncing has been stopped on this computer"
+        return "Not syncing: syncing is stopped on this computer"
     if code == "paused":
         return "Not syncing: syncing is paused on this computer"
     if code == "breaker_tripped":
@@ -511,10 +529,10 @@ def _why_sentence(code: str, row: Mapping[str, Any]) -> str:
             "to explain")
 
 
-def why_not_syncing(
+def _why_first(
     row: Mapping[str, Any], now: str | None = None
 ) -> tuple[str, str] | None:
-    """(reason_code, one sentence) for why this machine is not syncing, or None.
+    """(reason_code, one sentence) for why this computer is not syncing, or None.
 
     PURE. `row` is a fleet-grid row from build_editors_view (or a bare
     machine_state row); every field is read defensively, because this has to
@@ -607,3 +625,99 @@ def why_not_syncing(
         return "syncthing_down", _why_sentence("syncthing_down", row)
 
     return None
+
+
+def _clause(sentence: str) -> str:
+    """One why-sentence turned into a second clause: the lead-in dropped.
+
+    "Not syncing: syncing is paused on this computer" is the whole answer when
+    it is alone and a repetition when it is second, and a line that says "Not
+    syncing" twice reads as two faults rather than two switches.
+    """
+    for lead in ("Not syncing safely: ", "Not syncing: ",
+                 "Not downloading proxies: ", "Nothing to download: ",
+                 "Nothing to sync: "):
+        if sentence.startswith(lead):
+            return sentence[len(lead):]
+    return sentence
+
+
+def _second_cause(row: Mapping[str, Any], first: str) -> tuple[str, str] | None:
+    """The OTHER switch that is also off, or None (UX-19).
+
+    An editor who clears the one thing the grid named and sees nothing start
+    moving has been told the truth and not the whole of it. Only the causes a
+    person can act on separately qualify (WHY_SECOND_CAUSES); a consequence
+    (a stall, a dead engine) is not a second cause, it is the same fault
+    twice.
+    """
+    halt_active = bool(_why_get(row, "halt_active"))
+    fleet_halt = bool(row.get("fleet_halt_active")) or (
+        halt_active and str(_why_get(row, "halt_scope") or "") == "fleet")
+    try:
+        disk_red = disk_status(_why_get(row, "disk_root_free_bytes"),
+                               _why_get(row, "disk_root_total_bytes"))[0] == RED
+    except (TypeError, ValueError):
+        disk_red = False
+    reported = str(_why_get(row, "blocked_reason") or "").strip()
+    live = {
+        "fleet_halt": fleet_halt,
+        "local_halt": halt_active and not fleet_halt,
+        # Nothing on this server records a pause: it is the companion's own
+        # switch and reaches us only as the reason it reported. That is
+        # exactly UX-19's pair, a pause the editor set under a stop somebody
+        # else set, and it is why this reads `reported` rather than a column.
+        "paused": reported == "paused",
+        "breaker_tripped": bool(_why_get(row, "breaker_tripped")),
+        "disk_full": disk_red,
+    }
+    for code in WHY_SECOND_CAUSES:
+        if code == first or not live.get(code):
+            continue
+        return code, _why_sentence(code, row)
+    return None
+
+
+def why_not_syncing(
+    row: Mapping[str, Any], now: str | None = None
+) -> tuple[str, str] | None:
+    """(reason_code, one sentence) for why this computer is not syncing, or None.
+
+    The code is the RANKED first cause, exactly as before. The sentence names
+    a second one when a second is true (UX-19): the ranking decides which
+    comes first, never which of the two is said. `why_causes` is the same
+    answer as a list, for a caller that wants to render them apart.
+
+    None means "no reason found", which is NOT "syncing fine" and must never
+    be rendered as a green claim; it is the absence of a sentence.
+    """
+    causes = why_causes(row, now)
+    if not causes:
+        return None
+    first_code = causes[0][0]
+    return first_code, ". Also: ".join(
+        [causes[0][1]] + [_clause(s) for _c, s in causes[1:]])
+
+
+def why_causes(
+    row: Mapping[str, Any], now: str | None = None
+) -> list[tuple[str, str]]:
+    """Every cause worth saying, ranked, first cause first. At most two.
+
+    PURE. `row` is a fleet-grid row from build_editors_view (or a bare
+    machine_state row); every field is read defensively, because this has to
+    answer correctly for a computer whose companion is three releases old and
+    against a database whose newest columns have not landed yet.
+
+    THE COMPANION'S OWN ANSWER WINS when the report carried one
+    (`sync_guard.blocked`, SYNC-15): it can see the root guard's fourth
+    answer, the licence park and its own transport, none of which reach a
+    column here. This dashboard's derivation is the fallback, and it is
+    deliberately a SUBSET -- a reason this side cannot evidence is not
+    guessed at.
+    """
+    first = _why_first(row, now)
+    if first is None:
+        return []
+    second = _second_cause(row, first[0])
+    return [first] if second is None else [first, second]

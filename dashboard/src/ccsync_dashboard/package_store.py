@@ -95,24 +95,22 @@ def make_current(
     Packages page says CURRENT. The gate lives here, beside the one in
     `store_verified_package`, so both doors ask the same question.
 
-    Deliberately NOT here: the REL-1 soak gate and the UX-9 unsigned-binary
-    typed confirmation, both of which live in `api.make_current_refusal`. They
-    are answers a human gives, and the feed poller has no human in scope;
-    extending them to the unattended path is a policy decision for the owner,
-    not something to acquire by refactor (verifier note, 2026-09-03).
+    THE SOAK AND THE UNSIGNED CHECK ARE HERE NOW (REL-1, usability sweep
+    2026-09-04). The 2026-09-03 verifier note left them out because they are
+    "answers a human gives, and the feed poller has no human in scope" -- and
+    the owner's answer to that policy question is that a site on
+    `[releases] policy = current` is exactly where a canary is worth MOST: it
+    is the one place where a build nobody has run reaches a whole fleet with
+    nobody watching. A site that wants the old behaviour sets
+    `[releases] soak_minutes = 0`, which is why that floor is zero rather than
+    a flag. `force` is never passed from here: the typed confirmation is a
+    door a human stands at.
     """
-    row = db.get_package(conn, platform, version, kind)
-    if row is None:
-        raise PackageStoreError(
-            404, f"{kind} {version} for {platform} is not published here.")
-    requires_dashboard = _row_value(row, "requires_dashboard")
-    if blocks_on_dashboard_version(kind, requires_dashboard):
-        raise PackageStoreError(
-            409,
-            f"{kind} {version} needs dashboard {requires_dashboard} and this "
-            f"dashboard is {VERSION}. Update the dashboard first, then make this "
-            f"build current.",
-        )
+    refusal = make_current_refusal(
+        conn, settings, kind=kind, platform=platform, version=version,
+        bootstrap_ok=True)
+    if refusal is not None:
+        raise PackageStoreError(*refusal)
     if not db.set_current_package(conn, platform, version, kind):
         raise PackageStoreError(
             409,
@@ -128,6 +126,201 @@ def _row_value(row: Any, key: str) -> Any:
         return row[key]
     except (IndexError, KeyError, TypeError):
         return None
+
+
+def _row_str(row: Any, key: str) -> str:
+    value = _row_value(row, key)
+    return "" if value is None else str(value)
+
+
+# --------------------------------------------------------------- the soak gate
+#
+# REL-1 (usability sweep 2026-09-04). Both functions below LIVED IN api.py
+# until this wave, which meant the gate stood at the three doors that are HTTP
+# routes and at none of the doors that are not: the vendor feed's `current`
+# policy (unattended, on a daily poller, the shape a second customer ships
+# with) and `./tools/release_macos.sh --publish --make-current` -- the exact
+# command CLAUDE.md tells the owner to run on the Mac -- both reached
+# `store_verified_package(make_current=True)` and handed the whole fleet a
+# build no computer anywhere had run.
+#
+# They are here, in the module that is the ONLY writer of companion_packages,
+# for the same reason the min_version typo refusal and the REL-4 ordering gate
+# are: a door that does not pass through this file cannot publish, so a gate
+# in this file is a gate on every door. api.py keeps one-line re-exports so
+# its three routes, ui.py's htmx twin and every existing import still name
+# `api.make_current_refusal`.
+
+
+def soak_minutes_for(conn: sqlite3.Connection, settings) -> int:
+    """How long a staged build must have run somewhere before it may be made
+    current (REL-1, resilience sweep 2026-08-28).
+
+    A `meta` row wins over the environment so a site can change it without a
+    redeploy, and the floor is ZERO minutes on purpose: an operator who wants
+    the old behaviour back sets it to 0 rather than learning a force flag.
+    """
+    raw = db.meta_get(conn, "release_soak_minutes")
+    if raw is None:
+        raw = getattr(settings, "release_soak_minutes", db.DEFAULT_SOAK_MINUTES)
+    try:
+        return max(0, int(float(str(raw).strip())))
+    except (TypeError, ValueError):
+        return db.DEFAULT_SOAK_MINUTES
+
+
+def make_current_refusal(
+    conn: sqlite3.Connection, settings, *, kind: str, platform: str, version: str,
+    force: bool = False, confirm: str = "", now: str | None = None,
+    bootstrap_ok: bool = False,
+) -> tuple[int, str] | None:
+    """(status, detail) when this build may NOT be handed to the fleet, else
+    None. THE gate (REL-1/SYS-6, REL-3, REL-4/SYS-13, 2026-08-28).
+
+    One function because there are five doors into "make current" -- the JSON
+    route, the Packages page's htmx twin, the roll-back button, a publish that
+    asks for it in the same breath, and the feed's `current` policy -- and a
+    gate that only three of them pass through is not a gate. Order matters: a
+    recall and an ordering violation are facts about the BUILD and no
+    confirmation overrides them, while the soak is a judgement about
+    EVIDENCE, which an admin is allowed to overrule in front of a typed
+    confirmation.
+
+    `force` is a HUMAN's override and nothing else: the two unattended callers
+    (the publish path below and the feed poller) never pass it, because there
+    is nobody there to type a version number into a box. `bootstrap_ok` is
+    their counterpart -- see where it is read, below.
+    """
+    row = db.get_package(conn, platform, version, kind)
+    if row is None:
+        return 404, f"no published {platform} {kind} package {version}"
+    reason = _row_str(row, "retracted_reason")
+    if _row_str(row, "retracted_at"):
+        return 409, (
+            f"{kind} {version} was RECALLED by the vendor"
+            + (f": {reason}" if reason else "")
+            + ". It cannot be made current. Roll the fleet back to a build "
+              "that was not recalled."
+        )
+    requires = _row_str(row, "requires_dashboard")
+    if blocks_on_dashboard_version(kind, requires):
+        return 409, (
+            f"{kind} {version} needs dashboard {requires} and this dashboard is "
+            f"{VERSION}. Update the dashboard first, then make this build current."
+        )
+    if not _row_str(row, "signature") and not (
+        force and str(confirm or "").strip() == str(version).strip()
+    ):
+        # UX-9 (resilience sweep 2026-08-28). An UNSIGNED build made current
+        # stops every companion upgrading, silently: they verify the record
+        # signature and refuse the offer, and the only signal anywhere was a
+        # chip on this page. A judgement about evidence rather than a fact
+        # about the build, so it goes through the SAME typed override the soak
+        # gate uses -- one mechanism, not two.
+        return 409, (
+            f"{kind} {version} has no release signature. Companions verify "
+            f"signatures, so making it current stops EVERY computer in the fleet "
+            f"from updating, silently. Republish it through tools\\ship.cmd "
+            f"instead. To make it current anyway, type the version number "
+            f"({version}) into the confirmation box."
+        )
+    if _row_value(row, "ever_current"):
+        # A ROLLBACK, not a rollout: this build has been what the fleet was
+        # offered before, so the evidence the soak gate asks for already
+        # exists. Gating it would put the gate in the way of the recovery it
+        # exists to make possible (REL-1, 2026-08-28).
+        return None
+    if bootstrap_ok and release_trust.version_above(
+            _row_str(db.get_current_package(conn, platform, kind=kind), "version"),
+            version):
+        # A DOWNGRADE asked for by an unattended door is a withdrawal, not a
+        # rollout: the vendor's channel pointer moving backwards is how a bad
+        # build is taken away from feed customers (release-pipeline-5), and a
+        # soak gate that stood in front of it would pin every fleet on the
+        # build being withdrawn. Same reasoning as `ever_current` above, for
+        # the case where THIS dashboard never had the older build current.
+        return None
+    if bootstrap_ok and not db.get_current_package(conn, platform, kind=kind):
+        # NOTHING IS CURRENT for this platform and kind, so there is no fleet
+        # to protect: every computer is being offered nothing at all, which is
+        # a worse state than one running an unsoaked build (REL-1, usability
+        # sweep 2026-09-04). The bootstrap case -- a fresh site's first
+        # publish, and the first macOS build on a site that has only ever had
+        # Windows -- where gating would leave a brand-new customer with no
+        # companion at all until somebody found the override.
+        #
+        # ONLY for the callers that pass `bootstrap_ok`: an unattended publish
+        # (this module's own path, and the feed's). The admin standing at
+        # [ MAKE CURRENT ] is refused exactly as before, with the typed
+        # override in front of them -- there is a human there, and the 08-28
+        # gate's whole sentence is written to that human.
+        return None
+    if kind != "companion" or force:
+        if force and str(confirm or "").strip() != str(version).strip():
+            return 409, (
+                f"to override the soak gate, type the version number "
+                f"({version}) into the confirmation box. Nothing changed."
+            )
+        return None
+    soak_minutes = soak_minutes_for(conn, settings)
+    if soak_minutes <= 0:
+        # ZERO IS OFF, and it has to be, because the soak gate now stands at
+        # the publish door as well (REL-1, usability sweep 2026-09-04). Zero
+        # minutes was never a way out on its own: `db.soak_state` also wants
+        # at least one computer to have REPORTED the build, which a build
+        # published thirty seconds ago never has, so a site that set 0 would
+        # have found every publish staged for ever. `[releases] soak_minutes
+        # = 0` is the documented escape for a site that wants the pre-08-28
+        # behaviour, and this is what makes that sentence true.
+        return None
+    soak = db.soak_state(conn, platform, version, soak_minutes, now)
+    if soak["ok"]:
+        return None
+    if not soak["machines"]:
+        detail = (
+            f"no computer has reported {version} yet, so nothing has run it. "
+            f"Push it to one computer first, leave it for "
+            f"{soak['soak_minutes']} min, then make it current."
+        )
+    elif soak["reverted"]:
+        detail = (
+            f"{soak['reverted']} of the {soak['machines']} computers on {version} "
+            f"had to be rolled back off it by the crash-loop guard."
+        )
+    elif soak["crashes"]:
+        detail = (
+            f"{soak['machines']} computers on {version} have reported "
+            f"{soak['crashes']} crash(es)."
+        )
+    elif not any(d["crash_count"] == 0 for d in soak["detail"]):
+        # "We could not tell" is not "fine" (resilience sweep 2026-08-28): a
+        # companion that never sent a crash section has told us nothing about
+        # whether this build stays up, and a soak is a claim that something
+        # was observed.
+        detail = (
+            f"no computer on {version} has reported its crash counter, so "
+            f"nothing here says the build stays up."
+        )
+    else:
+        detail = (
+            f"{soak['machines']} computers have been on {version} for "
+            f"{soak['minutes']} min; the soak is {soak['soak_minutes']} min."
+        )
+    return 409, (
+        f"{version} has not soaked yet: {detail} Make it current anyway by "
+        f"confirming the override."
+    )
+
+
+# The one sentence every door prints when a publish that asked to be made
+# current was published STAGED instead. One string, because the Mac scripts,
+# publish_latest, the ship and the feed's log line all have to say the same
+# thing (REL-1): a publisher who reads "staged" in four wordings on four
+# machines learns nothing about what the fleet is being offered.
+STAGED_SENTENCE = (
+    "published and STAGED: push it to one computer, let it soak, then MAKE "
+    "CURRENT."
+)
 
 
 def store_verified_package(
@@ -154,12 +347,19 @@ def store_verified_package(
     git_sha: str = "",
     git_dirty: bool = False,
     notes: str = "",
-) -> None:
+) -> str:
     """Verify the release signature over the record the CALLER assembled
     (server-chosen filename, server-counted size, server- or feed-computed
     digest -- never anything an uploader merely asserted), move `part_path`
     into its final home, insert the `companion_packages` row, optionally make
     it current, optionally prune -- one transaction, committed once.
+
+    Returns a NOTE for the publisher: "" when everything asked for was done,
+    and the soak gate's own refusal sentence when `make_current` was asked for
+    and refused (REL-1, usability sweep 2026-09-04). A publish is never 4xx'd
+    for that: the bytes are fine, they are signed, they belong on the shelf --
+    only the FLIP is in question, and refusing the whole publish is what made
+    the feed re-download and re-discard the same 40 MB on every check.
 
     Raises `PackageStoreError` and leaves `part_path` UNLINKED on any
     refusal (nothing partially applied): the signature check runs before the
@@ -224,21 +424,6 @@ def store_verified_package(
         log.info("publish declared pubkey_id %s but %s is what verified it",
                  pubkey_id, detail)
 
-    # ORDERING (REL-4 / SYS-13, 2026-08-28): a companion build that needs a
-    # newer dashboard than this one may be PUBLISHED here -- an admin who is
-    # about to update the dashboard should be able to stage it -- but it must
-    # never become what the fleet is offered. Checked in package_store rather
-    # than in the two routes so the human PUT and the feed's `current` policy
-    # cannot disagree, exactly as the min_version refusal above is.
-    if make_current and blocks_on_dashboard_version(kind, requires_dashboard):
-        part_path.unlink(missing_ok=True)
-        raise PackageStoreError(
-            409,
-            f"{kind} {version} needs dashboard {requires_dashboard} and this "
-            f"dashboard is {VERSION}. Update the dashboard first, then make this "
-            f"build current. Nothing was published.",
-        )
-
     dest_dir = settings.packages_path() / platform
     dest_dir.mkdir(parents=True, exist_ok=True)
     os.replace(part_path, dest_dir / filename)
@@ -257,9 +442,190 @@ def store_verified_package(
         # sentence with the power to strand a machine (REL-7).
         notes=notes,
     )
+    # THE FLIP, GATED (REL-1, usability sweep 2026-09-04). Asked AFTER the row
+    # is inserted and INSIDE the same transaction, because the gate reads the
+    # row: `retracted_at`, `requires_dashboard`, `signature` and
+    # `ever_current` are facts about the record that has just been written, and
+    # a copy of the predicate that read the arguments instead would be a second
+    # gate to keep in step with the first. Nothing is committed yet, so a
+    # refusal costs a `set_current_package` that never runs -- the publish
+    # itself stands.
+    #
+    # The ORDERING refusal (REL-4 / SYS-13, 2026-08-28) used to live above this
+    # as a raise that unlinked the .part and refused the whole publish; it is
+    # inside make_current_refusal now and stages instead, which is what its own
+    # comment always said should happen.
+    note = ""
     if make_current:
-        db.set_current_package(conn, platform, version, kind)
+        refusal = make_current_refusal(
+            conn, settings, kind=kind, platform=platform, version=version,
+            bootstrap_ok=True)
+        if refusal is None:
+            db.set_current_package(conn, platform, version, kind)
+        else:
+            note = f"{STAGED_SENTENCE} {refusal[1]}"
+            log.warning("%s %s %s was published STAGED rather than made current "
+                        "by %s: %s", kind, platform, version, published_by,
+                        refusal[1])
     pruned = db.prune_companion_packages(conn, platform, kind=kind) if prune else []
     conn.commit()
     for row in pruned:
         unlink_package_file(settings, row)
+    return note
+
+
+# --------------------------------------------------- what is actually running
+#
+# SYS-7 (usability sweep 2026-09-04). The drift doctor is a PowerShell script
+# on the base rig, run by hand, comparing repo vs built vs installed vs live --
+# and a second customer has no base rig and no repo, so for them it does not
+# exist. In-product, this dashboard already knows four of the five numbers and
+# showed them on three different pages with no verdict anywhere. This is the
+# verdict, in one read, for the HEALTH page's [ WHAT IS RUNNING ] box.
+#
+# Every branch is defensive and every failure is silence about THAT line, not
+# an exception: this feeds a page whose whole job is to answer when other
+# things cannot, and a box that 500s the health page would be the funniest
+# possible bug to ship in this wave.
+
+
+def _package_row_map(conn: sqlite3.Connection) -> dict[tuple[str, str], Any]:
+    try:
+        rows = db.fetch_companion_packages(conn)
+    except Exception:                                                 # noqa: BLE001
+        log.warning("could not read the published packages", exc_info=True)
+        return {}
+    return {(str(r["platform"]), str(r["version"])): r
+            for r in rows if str(r["kind"] or "") == "companion"}
+
+
+def what_is_running(conn: sqlite3.Connection, settings, app_state) -> dict[str, Any]:
+    """Dashboard vs vendor, companion vs vendor, and who is on what.
+
+    `newest_offered` is what the VENDOR has, read from `feed_offered` (v39's
+    meta row, written by every feed check) rather than the process-local
+    record cache, because a container restarted five minutes ago has an empty
+    cache and an empty cache must not read as "the vendor is offering
+    nothing". "" everywhere means NOT CHECKED, never "up to date".
+    """
+    out: dict[str, Any] = {
+        "dashboard": {"running": VERSION, "newest_offered": "", "behind": False,
+                      "image_mode": None},
+        "companions": [],
+        "feed_checked_at": "",
+        "disagreements": [],
+    }
+    try:
+        out["feed_checked_at"] = str(
+            (db.get_feed_state(conn) or {}).get("last_checked_at") or "")
+    except Exception:                                                 # noqa: BLE001
+        pass
+    # SYS-2: "why has this dashboard not updated itself", in the words the
+    # feed poller last wrote -- including, in bind-mount mode, the exact
+    # command the operator has to run on their wired computer, because there
+    # the container cannot replace its own code at all.
+    try:
+        from . import release_feed
+
+        out["dashboard_update_note"] = str(
+            db.meta_get(conn, release_feed.AUTO_UPDATE_NOTE_KEY) or "")
+    except Exception:                                                 # noqa: BLE001
+        out["dashboard_update_note"] = ""
+
+    # --- the dashboard's own code
+    try:
+        from . import dashboard_update, release_feed
+
+        out["dashboard"]["image_mode"] = bool(dashboard_update.image_mode())
+        newest = ""
+        for record in release_feed.dashboard_records(
+                release_feed.verified_records(app_state)):
+            version = str(record.get("version") or "")
+            if version and (not newest or release_trust.version_above(version, newest)):
+                newest = version
+        out["dashboard"]["newest_offered"] = newest
+        out["dashboard"]["behind"] = bool(
+            newest and release_trust.version_above(newest, VERSION))
+    except Exception:                                                 # noqa: BLE001
+        log.warning("could not read the vendor's dashboard records", exc_info=True)
+
+    # --- the companion channel, per platform
+    try:
+        offered = db.get_feed_offered(conn)
+    except Exception:                                                 # noqa: BLE001
+        offered = {}
+    rows = _package_row_map(conn)
+    try:
+        rollout = db.rollout_status(conn)["channels"]
+    except Exception:                                                 # noqa: BLE001
+        log.warning("could not read the rollout status", exc_info=True)
+        rollout = []
+    for channel in rollout:
+        platform = str(channel.get("platform") or "")
+        current = str(channel.get("current_version") or "")
+        newest = ""
+        for version in offered.get(platform, []):
+            if version and (not newest or release_trust.version_above(version, newest)):
+                newest = version
+        # One line per BUILD the fleet is actually on, with the date this
+        # dashboard published it. A version no row exists for is still listed:
+        # a computer running something this server never published is the most
+        # interesting line on the box, not one to drop for lack of a date.
+        builds: dict[str, int] = {}
+        builds[current] = int(channel.get("machines_on_current") or 0)
+        for entry in channel.get("behind") or []:
+            version = str(entry.get("version") or "")
+            if version:
+                builds[version] = builds.get(version, 0) + 1
+        out["companions"].append({
+            "platform": platform,
+            "current": current,
+            "current_published_at": _row_str(
+                rows.get((platform, current)), "published_at"),
+            "newest_offered": newest,
+            "behind_vendor": bool(newest and release_trust.version_above(newest, current)),
+            "machines_total": int(channel.get("machines_total") or 0),
+            "machines_on_current": int(channel.get("machines_on_current") or 0),
+            "builds": [
+                {"version": version, "computers": count,
+                 "published_at": _row_str(rows.get((platform, version)), "published_at"),
+                 "is_current": version == current}
+                for version, count in sorted(
+                    builds.items(),
+                    key=lambda kv: release_trust._version_tuple(kv[0]), reverse=True)
+                if version
+            ],
+        })
+
+    # --- the sentence, in SYS-2's wording
+    dash = out["dashboard"]
+    for entry in out["companions"]:
+        if entry["behind_vendor"] and dash["behind"]:
+            # The SYS-2 shape exactly: the vendor is offering a build this
+            # server cannot hand out, and the reason is this server's own
+            # version. Said once, about the dashboard, because updating it is
+            # the single action that clears every line.
+            out["disagreements"].append(
+                f"A newer CC Sync build for {entry['platform']} "
+                f"({entry['newest_offered']}) is on offer and the computers here "
+                f"are being offered {entry['current']}. Update the dashboard "
+                f"first: it is {VERSION} and the vendor is offering "
+                f"{dash['newest_offered']}."
+            )
+        elif entry["behind_vendor"]:
+            out["disagreements"].append(
+                f"The vendor is offering {entry['newest_offered']} for "
+                f"{entry['platform']} and the computers here are being offered "
+                f"{entry['current']}."
+            )
+        elif entry["machines_total"] and entry["machines_on_current"] < entry["machines_total"]:
+            out["disagreements"].append(
+                f"{entry['machines_on_current']} of {entry['machines_total']} "
+                f"{entry['platform']} computers are on {entry['current']}."
+            )
+    if dash["behind"] and not out["disagreements"]:
+        out["disagreements"].append(
+            f"This dashboard is {VERSION} and the vendor is offering "
+            f"{dash['newest_offered']}."
+        )
+    return out

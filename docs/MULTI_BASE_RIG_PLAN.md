@@ -1,5 +1,13 @@
 # Wired or remote — the role belongs to the computer, not the person
 
+> **Status as at 2026-09-04; not maintained: check `KNOWN_BUGS.md`.**
+> A plan, written 2026-08-19 and superseded in part on 2026-08-27 by CR-88.
+> Read the "STATUS - the role is the computer's since 2026-08-27" section
+> below FIRST: the WP0 note that follows it is the 08-19 wording and says
+> `effective_mode()` answers `base` when either source says so, which has
+> been untrue since CR-88 (config only). Schema numbers quoted in the work
+> packages are the 08-19 guesses, not what was migrated (SYS-19, 2026-09-04).
+
 Written 2026-08-19, from what the owner said while the tray-icon fix was
 being made:
 
@@ -45,7 +53,10 @@ wording in §2 is still owed.
 
 ## STATUS
 
-* **WP0 — DONE 2026-08-19, in repo, unshipped.** `effective_mode()` answers
+* **WP0 — DONE 2026-08-19** (shipped as companion 0.9.42; the "either source"
+  half was REPLACED on 2026-08-27 by CR-88, config only - the sentence below is
+  left as it was written, and is no longer how the code behaves).
+  `effective_mode()` answers
   `base` when either source says so (`companion/.../app.py`), the tray icon is
   green on a wired machine (`tray.compute_overall_color`), and
   `installer/windows_upgrade.ps1`'s comment about the role overriding the local

@@ -980,6 +980,44 @@ CODE_TREES_KEEP = 3
 PUBLISH_MIN_FREE_BYTES = MIN_FREE_BYTES
 
 
+def space_refusal(settings, declared_bytes: int, *, what: str = "this publish",
+                  factor: int = 3) -> str:
+    """"" if there is room for `declared_bytes`, else the sentence to refuse
+    with (REL-7, usability sweep 2026-09-04).
+
+    ONE helper, three callers: the human PUT (api._refuse_publish_without_space
+    -> 507), the vendor feed's unattended auto-publish, and the CLI wizard's
+    install. REL-5 of 08-28 put a floor on the human PUT and a gauge on the
+    page; the two writers that arrive WITHOUT a human sizing them up are the
+    ones that skipped it, and a full /data is a SQLite write failure on the
+    database that tells the whole fleet whether its footage is syncing.
+
+    `factor` is the staging multiple: a package is streamed to a .part, moved
+    into place, and pruning happens after, so three times the declared size
+    plus the floor is the same arithmetic the PUT has always used. A declared
+    size of 0 means "we do not know how big it is" and still checks the floor:
+    the floor is the part that protects the database.
+
+    A volume this cannot MEASURE returns "": do not guess, do not block.
+    Measured through `data_space`, which is also the gauge the Packages page
+    and /api/v1/health print, so the number in the refusal is the number on
+    the page.
+    """
+    try:
+        free = int(data_space(settings).get("free_bytes", -1))
+    except Exception:                                                 # noqa: BLE001
+        free = -1
+    if free < 0:
+        return ""
+    needed = max(0, int(declared_bytes or 0)) * int(factor) + PUBLISH_MIN_FREE_BYTES
+    if free >= needed:
+        return ""
+    return (f"not enough free space on the data volume: {free // (1024 * 1024)} MiB "
+            f"free, {what} needs about {needed // (1024 * 1024)} MiB. Old builds are "
+            f"pruned on publish (current plus the two newest are kept); free some "
+            f"space and try again.")
+
+
 def data_space(settings) -> dict[str, Any]:
     """The `/data` gauge for /api/v1/health and the Packages page. -1 means
     "could not measure", which must never be rendered as roomy."""

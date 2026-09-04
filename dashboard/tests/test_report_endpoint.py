@@ -201,7 +201,10 @@ def test_transport_health_is_persisted_and_shown_on_the_fleet_grid(app_env):
     assert page.status_code == 200
     assert "[ RELAYED: 1 ]" in page.text
     assert "[ ORPHANS: 3 ]" in page.text
-    assert "[ EXPRESS FAILED ]" in page.text
+    # CR-179 (wave 4, 2026-09-04): "lane" left every visible string, so the
+    # express LANE is the express UPLOAD on the page. The report field and
+    # the view model keep their names.
+    assert "[ EXPRESS UPLOAD FAILED ]" in page.text
 
 
 def test_a_direct_only_machine_is_not_flagged_as_relayed(app_env):

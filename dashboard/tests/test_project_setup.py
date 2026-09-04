@@ -159,7 +159,7 @@ def test_first_set_is_scoped_to_your_own_reported_projects(env):
     as_user(client, "jsmith")
     resp = client.put("/api/v1/project-roots", json=body)
     assert resp.status_code == 403
-    assert "any of your machines has reported" in resp.json()["detail"]
+    assert "any of your computers has reported" in resp.json()["detail"]
     assert conn.execute("SELECT COUNT(*) c FROM project_roots").fetchone()["c"] == 0
 
     # the owner can
@@ -186,7 +186,7 @@ def test_create_and_link_refuse_an_unreported_resolve_project(env):
     resp = client.post("/api/v1/projects", json=create_body(
         parent_rel="2026/CCT", name="Season 9", resolve_project="Not Mine"))
     assert resp.status_code == 422
-    assert "any of your machines has reported" in resp.json()["detail"]
+    assert "any of your computers has reported" in resp.json()["detail"]
     assert not (projects_dir / "2026" / "CCT" / "Season 9").exists() or \
         conn.execute("SELECT COUNT(*) c FROM project_roots").fetchone()["c"] == 0
 
@@ -503,7 +503,10 @@ def test_create_degrades_without_projects_dir(tmp_path):
         as_user(client, "jsmith")
         resp = client.post("/api/v1/projects", json=create_body())
         assert resp.status_code == 422
-        assert "setup_tree.py" in resp.json()["detail"]
+        # DUI-8 class (2026-09-04): the refusal names the PERSON to ask, not a
+        # script from this repo that no customer has a checkout of.
+        assert "Ask whoever installed this server" in resp.json()["detail"]
+        assert "setup_tree.py" not in resp.json()["detail"]
 
 
 # -- /project-setup page -------------------------------------------------

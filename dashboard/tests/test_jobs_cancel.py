@@ -196,7 +196,7 @@ def test_the_jobs_page_shows_a_job_and_why_it_is_not_moving(env):
     job_id = queue(conn)
     body = admin(client).get("/admin/jobs").text
     assert f"#{job_id}" in body
-    assert "no machine has ever reported to this dashboard" in body
+    assert "no computer has ever reported to this dashboard" in body
     assert "[ CANCEL ]" in body
 
 

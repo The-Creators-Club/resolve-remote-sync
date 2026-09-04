@@ -531,7 +531,8 @@ def test_the_packages_page_update_button_names_a_computer_it_did_not_find(env):
                        data={"editor": "ruskin", "machine": "GHOST"})
     assert resp.status_code == 200
     # Jinja autoescapes the quotes in repr() output.
-    assert "no machine" in resp.text and "GHOST" in resp.text and "ruskin" in resp.text
+    assert ("no computer" in resp.text and "GHOST" in resp.text
+            and "ruskin" in resp.text)
 
 
 # -- resuming proxy download from the dashboard (v26, CR-45) ----------------

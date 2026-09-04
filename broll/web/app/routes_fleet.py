@@ -98,7 +98,7 @@ def _leaseholder_or_410(conn: sqlite3.Connection, uid: str, editor: str,
         raise HTTPException(410, {"detail": "this batch is no longer yours to index",
                                   "batch_uid": uid, "reason": "other_editor"})
     if machine and batch["machine"] != machine:
-        raise HTTPException(410, {"detail": f"{batch['machine'] or 'another machine'} "
+        raise HTTPException(410, {"detail": f"{batch['machine'] or 'another computer'} "
                                             "holds this batch now",
                                   "batch_uid": uid, "reason": "other_machine",
                                   "machine": batch["machine"]})

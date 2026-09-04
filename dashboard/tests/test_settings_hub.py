@@ -26,7 +26,7 @@ import sys
 import pytest
 from fastapi.testclient import TestClient
 
-from ccsync_dashboard import auth, db
+from ccsync_dashboard import auth, db, ui
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
@@ -72,14 +72,21 @@ def strip_at(body: str) -> int:
 HUB = {
     "site": ("/admin/settings", "[ SITE ]"),
     "users": ("/admin/users", "[ USERS ]"),
-    "assignments": ("/admin/assignments", "[ ASSIGNMENTS ]"),
+    # DUI-12 / the sweep's vocabulary table (2026-09-04): the page is
+    # SYNC PLANS. The route is unchanged.
+    "assignments": ("/admin/assignments", "[ SYNC PLANS ]"),
     "transfers": ("/transfers", "[ TRANSFERS ]"),
     "setup": ("/setup", "[ SETUP ]"),
     "packages": ("/admin/packages", "[ PACKAGES ]"),
+    # SYS-6 (wave 4): the composed page, and the Settings landing.
+    "health": ("/admin/health", "[ HEALTH ]"),
+    "help": ("/help", "[ HELP ]"),
 }
-# The one an editor may open. The rest 403 or redirect for them, so the strip
+# The two an editor may open. The rest 403 or redirect for them, so the strip
 # must not offer them (see test_the_strip_offers_an_editor_only_their_pages).
-EDITOR_PAGES = ("transfers",)
+# HELP joined them in wave 4 (UX-3): an editor standing on Transfers is
+# exactly who needs the guide.
+EDITOR_PAGES = ("transfers", "help")
 
 
 @pytest.fixture(autouse=True)
@@ -152,7 +159,8 @@ def test_the_drawer_keeps_settings_lit_on_every_hub_page(client, key):
     sees where they are in the menu."""
     url, _label = HUB[key]
     body = as_user(client, "owen").get(url).text
-    assert 'drawer-current" href="/admin/settings"' in body
+    # SYS-6: the drawer's [ SETTINGS ] lands on HEALTH now, not the site form.
+    assert f'drawer-current" href="{ui.SETTINGS_LANDING}"' in body
 
 
 def test_an_editor_on_transfers_sees_it_lit_in_the_drawer(client):

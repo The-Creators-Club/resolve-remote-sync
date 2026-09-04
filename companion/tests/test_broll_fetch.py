@@ -269,7 +269,7 @@ def test_a_destination_outside_the_tree_is_refused(tmp_path):
     cfg = dict(CFG, local_root=str(tmp_path / "tree"))
     (tmp_path / "tree").mkdir()
     refusal = broll_fetch.fetch_refusal(cfg, str(tmp_path / "elsewhere" / "clip.mov"))
-    assert refusal and "outside this machine's tree" in refusal
+    assert refusal and "outside this computer's tree" in refusal
 
 
 def test_a_destination_inside_the_tree_is_allowed(tmp_path):
@@ -431,3 +431,20 @@ def test_stop_all_kills_running_children(tmp_path, rclone_present):
 
     assert proc.killed is True
     assert job.cancelled is True
+
+
+def test_no_fetch_refusal_calls_the_editors_computer_a_machine(tmp_path):
+    """Every one of these is shown by the b-roll page's "Send to Resolve"
+    toast, verbatim. Wave 5 of the 2026-09-03 sweep: one vocabulary, and a
+    computer is a computer."""
+    said = [
+        broll_fetch.prereq_error({}),
+        broll_fetch.prereq_error({"remote": "nas"}),
+        broll_fetch.fetch_refusal({"remote": "nas", "remote_root": "CC"},
+                                  str(tmp_path / "clip.mov")),
+        broll_fetch.fetch_refusal(dict(CFG, local_root=str(tmp_path / "tree")),
+                                  str(tmp_path / "elsewhere" / "clip.mov")),
+    ]
+    assert all(said), said
+    for text in said:
+        assert "machine" not in text.lower(), text

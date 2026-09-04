@@ -827,7 +827,7 @@ def write_item_result(conn, batch, item, body):
         # operator can see it is a model-version problem.
         raise HTTPException(409, {
             'detail': f'this library is indexed at {library_dim} dimensions and '
-                      f'the embedding has {dim}; the companion is running a '
+                      f'the embedding has {dim}; the CC Sync tray is running a '
                       f'different CLAP model version',
             'reason': 'model_mismatch', 'expected_dim': library_dim, 'dim': dim})
 
@@ -1021,7 +1021,7 @@ def mark_uploaded(conn, batch, item, *, size=None):
             'reason': 'not_uploaded', 'rel_path': item['dest_name']})
     if size is not None and int(size) != actual:
         raise HTTPException(409, {
-            'detail': 'the file in the library is not the size the companion sent',
+            'detail': 'the file in the library is not the size the CC Sync tray sent',
             'reason': 'size_mismatch', 'rel_path': item['dest_name'],
             'declared': int(size), 'actual': actual})
 

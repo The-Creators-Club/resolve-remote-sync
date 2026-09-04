@@ -1022,3 +1022,145 @@ def test_a_retracted_build_is_still_refused_by_the_shared_gate(env, monkeypatch)
     r = client.post("/api/v1/admin/feed/check")
     assert r.json()["applied"] == []
     assert not dbmod.get_package(conn, "windows", "0.9.72")["is_current"]
+
+
+# ------------------------------------------------- REL-7: the unattended writer
+
+def test_the_feed_refuses_to_take_a_build_onto_a_nearly_full_volume(env, monkeypatch):
+    """REL-7 (usability sweep 2026-09-04): the human PUT has had a free-space
+    floor since 08-28 and the two writers that arrive WITHOUT a human sizing
+    them up did not. This one runs unattended on a daily poller, and a full
+    /data is a SQLite write failure on the database that tells the whole fleet
+    whether its footage is syncing."""
+    from ccsync_dashboard import dashboard_update
+
+    client, conn, _settings = env
+    record, body = make_record()
+    channel, sig = make_channel([record])
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(),
+        record["url"]: body,
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    monkeypatch.setattr(dashboard_update, "data_space",
+                        lambda s: {"free_bytes": 1024, "total_bytes": 10 ** 9,
+                                   "path": "/data", "error": ""})
+    r = client.post("/api/v1/admin/feed/publish",
+                    json={"kind": "companion", "platform": "windows",
+                          "version": "0.9.0", "make_current": False})
+    assert r.status_code == 507
+    assert "could not take companion 0.9.0" in r.json()["detail"]
+    # Nothing published, and the reason is on the feed's own state so the
+    # Packages banner says it rather than a log line nobody opens.
+    assert dbmod.get_package(conn, "windows", "0.9.0") is None
+    assert "could not take companion 0.9.0" in dbmod.get_feed_state(conn)["last_error"]
+
+
+def test_an_unmeasurable_volume_never_stops_the_feed(env, monkeypatch):
+    from ccsync_dashboard import dashboard_update
+
+    client, conn, _settings = env
+    record, body = make_record()
+    channel, sig = make_channel([record])
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(),
+        record["url"]: body,
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    monkeypatch.setattr(dashboard_update, "data_space",
+                        lambda s: {"free_bytes": -1, "total_bytes": -1,
+                                   "path": "/data", "error": "could not measure"})
+    r = client.post("/api/v1/admin/feed/publish",
+                    json={"kind": "companion", "platform": "windows",
+                          "version": "0.9.0", "make_current": False})
+    assert r.status_code == 200
+    assert dbmod.get_package(conn, "windows", "0.9.0") is not None
+
+
+# ------------------------------- SYS-2: the dashboard's own unattended update
+
+def test_bind_mount_mode_names_the_command_instead_of_updating_itself(env, monkeypatch):
+    """SYS-2 / SYS-7: the container cannot replace code it does not own. The
+    answer is the exact command on the operator's own computer, recorded where
+    the HEALTH page reads it -- not a log line on a site where by definition
+    nobody is clicking anything."""
+    from ccsync_dashboard import dashboard_update, release_feed as rf
+
+    client, conn, settings = env
+    monkeypatch.setattr(dashboard_update, "image_mode", lambda: False)
+    applied = rf.apply_dashboard_policy(conn, settings, client.app.state, "current",
+                                        dbmod.utcnow_iso())
+    assert applied == ""
+    note = dbmod.meta_get(conn, rf.AUTO_UPDATE_NOTE_KEY)
+    assert "ship.cmd -DashboardOnly" in note
+
+
+def test_a_bundle_inside_the_soak_window_is_not_taken_yet(env, monkeypatch):
+    from ccsync_dashboard import dashboard_update, release_feed as rf
+
+    client, conn, settings = env
+    started = []
+    monkeypatch.setattr(dashboard_update, "status", lambda s, a: {
+        "image_mode": True, "in_progress": False, "runtime_updates": [],
+        "code_updates": [{"version": "9.9.9", "published_at": dbmod.utcnow_iso()}]})
+    monkeypatch.setattr(dashboard_update, "read_state", lambda s: {"step": "idle"})
+    monkeypatch.setattr(dashboard_update, "start_apply",
+                        lambda *a, **k: started.append(k.get("version")))
+    assert rf.apply_dashboard_policy(conn, settings, client.app.state, "current",
+                                     dbmod.utcnow_iso()) == ""
+    assert started == []
+    assert "soak is 30 min" in dbmod.meta_get(conn, rf.AUTO_UPDATE_NOTE_KEY)
+
+
+def test_a_soaked_bundle_is_applied_under_the_current_policy(env, monkeypatch):
+    from ccsync_dashboard import dashboard_update, release_feed as rf
+
+    client, conn, settings = env
+    started = []
+    monkeypatch.setattr(dashboard_update, "status", lambda s, a: {
+        "image_mode": True, "in_progress": False, "runtime_updates": [],
+        "code_updates": [{"version": "9.9.9", "published_at": "2026-01-01T00:00:00Z"}]})
+    monkeypatch.setattr(dashboard_update, "read_state", lambda s: {"step": "idle"})
+    monkeypatch.setattr(dashboard_update, "start_apply",
+                        lambda *a, **k: started.append(k.get("version")))
+    assert rf.apply_dashboard_policy(conn, settings, client.app.state, "current",
+                                     dbmod.utcnow_iso()) == "9.9.9"
+    assert started == ["9.9.9"]
+    # ...and never under `stage` or `manual`, which are about editor packages
+    # and have never governed this container's own code.
+    started.clear()
+    assert rf.apply_dashboard_policy(conn, settings, client.app.state, "stage",
+                                     dbmod.utcnow_iso()) == ""
+    assert started == []
+
+
+def test_a_bundle_that_already_failed_here_is_not_retried_unattended(env, monkeypatch):
+    from ccsync_dashboard import dashboard_update, release_feed as rf
+
+    client, conn, settings = env
+    started = []
+    monkeypatch.setattr(dashboard_update, "status", lambda s, a: {
+        "image_mode": True, "in_progress": False, "runtime_updates": [],
+        "code_updates": [{"version": "9.9.9", "published_at": "2026-01-01T00:00:00Z"}]})
+    monkeypatch.setattr(dashboard_update, "read_state",
+                        lambda s: {"step": "failed", "version": "9.9.9",
+                                   "error": "migration refused"})
+    monkeypatch.setattr(dashboard_update, "start_apply",
+                        lambda *a, **k: started.append(k.get("version")))
+    assert rf.apply_dashboard_policy(conn, settings, client.app.state, "current",
+                                     dbmod.utcnow_iso()) == ""
+    assert started == []
+    assert "will not be retried automatically" in dbmod.meta_get(
+        conn, rf.AUTO_UPDATE_NOTE_KEY)
+
+
+def test_a_runtime_update_says_it_needs_the_image_manager(env, monkeypatch):
+    from ccsync_dashboard import dashboard_update, release_feed as rf
+
+    client, conn, settings = env
+    monkeypatch.setattr(dashboard_update, "status", lambda s, a: {
+        "image_mode": True, "in_progress": False, "code_updates": [],
+        "runtime_updates": [{"version": "9.9.9", "published_at": "2026-01-01T00:00:00Z"}]})
+    assert rf.apply_dashboard_policy(conn, settings, client.app.state, "current",
+                                     dbmod.utcnow_iso()) == ""
+    assert "app manager" in dbmod.meta_get(conn, rf.AUTO_UPDATE_NOTE_KEY)

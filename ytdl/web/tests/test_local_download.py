@@ -311,7 +311,7 @@ def test_an_unnameable_machine_still_makes_a_sentence(fleet, con):
                    json=_claim_body(machine_id=LAPTOP))
     assert r.status_code == 409
     assert r.json()['detail']['detail'] == (
-        f'{USER} is already downloading this job on machine {DESKTOP}')
+        f'{USER} is already downloading this job on computer {DESKTOP}')
 
 
 def test_a_companion_that_sends_no_machine_id_behaves_exactly_as_before(fleet, con):

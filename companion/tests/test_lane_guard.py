@@ -231,7 +231,16 @@ def test_a_tripped_breaker_stops_lane_b_before_rclone_is_spawned(tmp_path):
     assert calls == []
     assert status.state == STATE_PAUSED
     assert "STOPPED (safety)" in status.detail
-    assert "empty" in status.detail
+    # ...and what follows the prefix is the EDITOR's sentence, not the trip
+    # reason (SYNC-106, wave 5 of the 2026-09-03 sweep): this string is what
+    # the tray line, the balloon, the Settings window and the dashboard chip
+    # all render. The technical reason stays on the breaker, for the log, the
+    # report and copy_diagnostics.
+    assert status.detail.endswith(
+        lane_guard.BREAKER_EDITOR_REASONS[lane_guard.BREAKER_CAUSE_EMPTY])
+    assert "listed the tree as empty" not in status.detail
+    assert breaker.reason == "the NAS listed the tree as empty"
+    assert breaker.report()["reason"] == "the NAS listed the tree as empty"
 
 
 def test_an_empty_remote_trips_the_lane_without_deleting_anything(tmp_path):
@@ -376,7 +385,7 @@ def test_an_editor_cannot_release_a_fleet_halt(tmp_path):
     halt.engage("admin stopped everything", lane_guard.HALT_SCOPE_FLEET)
     ok, message = halt.release(by="tray")
     assert ok is False
-    assert "administrator" in message
+    assert "your admin stopped syncing" in message
     assert halt.active
     ok, _ = halt.release(by="dashboard", force=True)
     assert ok and not halt.active
@@ -1162,3 +1171,76 @@ def test_a_prune_drops_the_cached_summary(tmp_path):
     assert lane_guard.trash_summary(str(tmp_path), now=3000.0)["count"] == 2
     lane_guard.prune_trash(str(tmp_path), max_age_days=14)
     assert lane_guard.trash_summary(str(tmp_path), now=3001.0)["count"] == 1
+
+
+# -- SYNC-106: two sentences, one trip --------------------------------------
+#
+# The trip reason was one string doing two jobs, and as copy it was wrong in
+# four places at once: "the NAS root does not look like the tree: none of
+# Projects, Assets is under remote_root (saw 0 entries). Check remote_root in
+# config.toml." An editor cannot open config.toml (it is under ~/.ccsync, the
+# build is frozen) and it is not their job if they could.
+
+def test_the_trip_carries_the_admins_sentence_and_the_editors(tmp_path):
+    breaker = _breaker(tmp_path)
+    reason = breaker.check_remote("", ["Documents", "Downloads"])
+    # The technical half is unchanged: it is what the log, the report and
+    # copy_diagnostics carry, and an admin can act on every word of it.
+    assert "remote_root" in reason and "config.toml" in reason
+
+    block = breaker.report()
+    assert block["cause"] == lane_guard.BREAKER_CAUSE_ROOT
+    editor = block["editor_reason"]
+    assert editor == (
+        "The server does not look like your project tree right now, so CCSync "
+        "stopped downloading proxies before anything could be removed. Nothing "
+        "was deleted and your uploads are still running. Ask your admin to "
+        "check the server.")
+    assert "config.toml" not in editor and "remote_root" not in editor
+
+
+def test_every_reason_ends_on_what_was_not_lost(tmp_path):
+    """The EMPTY and SHRANK reasons ended on the alarm. Both facts that stop
+    the support call ride every sentence now."""
+    tail = ("Nothing was deleted and your uploads are still running. "
+            "Ask your admin to check the server.")
+    for sentence in lane_guard.BREAKER_EDITOR_REASONS.values():
+        assert sentence.endswith(tail), sentence
+        assert "—" not in sentence
+
+
+def test_an_empty_listing_and_a_shrunk_one_have_their_own_words(tmp_path):
+    empty = _breaker(tmp_path / "a")
+    (tmp_path / "a").mkdir()
+    empty.check_remote("Projects/2026/X", ["a", "b", "c", "d"])
+    empty.check_remote("Projects/2026/X", [])
+    assert empty.report()["cause"] == lane_guard.BREAKER_CAUSE_EMPTY
+    assert "listed nothing" in empty.report()["editor_reason"]
+
+    (tmp_path / "b").mkdir()
+    shrank = _breaker(tmp_path / "b")
+    shrank.check_remote("Projects/2026/X", [f"d{i}" for i in range(10)])
+    shrank.check_remote("Projects/2026/X", ["d0", "d1", "d2"])
+    assert shrank.report()["cause"] == lane_guard.BREAKER_CAUSE_SHRANK
+    assert "Far fewer files" in shrank.report()["editor_reason"]
+
+
+def test_a_breaker_tripped_by_an_older_build_still_gets_the_sentence():
+    """The latch is read from disk on the next start, and a state file
+    written before 0.9.69 has a reason and no cause."""
+    said = lane_guard.breaker_editor_reason(
+        "the NAS root does not look like the tree: none of Projects is under "
+        "remote_root (saw 0 entries). Check remote_root in config.toml.")
+    assert said == lane_guard.BREAKER_EDITOR_REASONS[lane_guard.BREAKER_CAUSE_ROOT]
+    # ...and a reason nothing recognises falls back to itself, never to
+    # silence: a trip nobody can name is still a trip the editor is owed.
+    assert lane_guard.breaker_editor_reason("something new") == "something new"
+
+
+def test_the_editor_sentence_clears_with_the_latch(tmp_path):
+    breaker = _breaker(tmp_path)
+    breaker.check_remote("", ["Documents"])
+    assert breaker.report()["editor_reason"]
+    breaker.resume(by="tray")
+    assert breaker.report()["editor_reason"] is None
+    assert breaker.report()["cause"] is None

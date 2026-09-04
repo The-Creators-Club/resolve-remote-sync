@@ -228,7 +228,7 @@ def fits(tier_key: str, gpu_info: Optional[dict[str, Any]] = None) -> tuple[bool
     info = gpu_info if gpu_info is not None else gpu()
     if not info.get("present"):
         return False, (
-            "Can't index b-roll: no usable GPU on this machine "
+            "Can't index b-roll: no usable GPU on this computer "
             f"({info.get('detail') or 'no GPU detected'}). Indexing needs an "
             "NVIDIA GPU or Apple Silicon")
 
@@ -245,7 +245,7 @@ def fits(tier_key: str, gpu_info: Optional[dict[str, Any]] = None) -> tuple[bool
     # is how a support call starts.
     smaller = models.TIERS["good"] if tier_key == "best" else None
     tail = (f"choose {smaller.label}" if smaller is not None
-            else "indexing needs a bigger GPU: this batch can run on another machine")
+            else "indexing needs a bigger GPU: this batch can run on another computer")
     return False, (f"Can't index b-roll: {tier.label} needs {floor} GB {kind}, "
                    f"{whose} {_gb(have)} GB - {tail}")
 
@@ -594,10 +594,10 @@ def server(tier_key: str, cfg: Optional[dict[str, Any]] = None, *, gpu_layers: i
 
     exe = runtime_exe()
     if exe is None:
-        raise SidecarError("the b-roll indexing runtime is not installed on this machine yet")
+        raise SidecarError("the b-roll indexing runtime is not installed on this computer yet")
     if not model_ready(tier_key):
         raise SidecarError(
-            f"the {_models().tier(tier_key).label} model is not downloaded on this machine yet")
+            f"the {_models().tier(tier_key).label} model is not downloaded on this computer yet")
 
     weights, mmproj = model_files(tier_key)
     log_path = server_log_path(cfg)

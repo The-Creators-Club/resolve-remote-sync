@@ -57,7 +57,7 @@ def test_copying_from_a_wired_computer_is_a_409_not_a_500(env):
     r = client.post(
         "/api/v1/admin/machines/ruskin/LAPTOP-1/copy-plan?source=BASE-RIG")
     assert r.status_code == 409, r.text
-    assert "wired machine" in r.json()["detail"]
+    assert "wired to the server" in r.json()["detail"]
     assert "—" not in r.json()["detail"]
     # Nothing was written on the way to the refusal.
     assert dbmod.selections_for_machine(conn, "ruskin", "LAPTOP-1") == []

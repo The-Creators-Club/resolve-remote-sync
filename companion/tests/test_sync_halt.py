@@ -138,7 +138,13 @@ def test_an_editor_cannot_release_a_fleet_halt(tmp_path):
     app.halt_all_sync("admin stopped everything", lane_guard.HALT_SCOPE_FLEET)
     ok, message = app.release_halt(by="tray")
     assert ok is False
-    assert "administrator" in message
+    # The load-bearing half (wave 4 vocabulary, 2026-09-04): a fleet halt is
+    # STOPPED BY YOUR ADMIN, and the refusal has to say they are the only one
+    # who can start it again - an editor who reads only "no" goes looking for
+    # a switch that is not theirs. "admin stopped everything" after the colon
+    # is the halting admin's OWN note, interpolated; not a duplicate.
+    assert "your admin stopped syncing for the whole fleet" in message
+    assert "Only they can start it again." in message
     assert app.halt.active
 
 
@@ -456,7 +462,9 @@ def test_the_supervisor_stands_off_while_syncing_is_halted(tmp_path):
 
     app.halt_all_sync("restoring the pool")
     reason = app._syncthing_supervision_suppressed()
-    assert "halted" in reason
+    # "halted" left the copy on 2026-09-04: sync is paused (you), stopped by
+    # your admin (a fleet halt) or stopped itself (the breaker, the floor).
+    assert "stopped on this computer" in reason
 
 
 def test_a_fleet_halt_says_whose_it_is(tmp_path):

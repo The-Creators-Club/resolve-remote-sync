@@ -283,7 +283,7 @@ def _validate(key: str, raw: str) -> str:
         # fleet is broken.
         if value and not value.lower().startswith("https://"):
             raise AlertError("the webhook URL must start with https:// "
-                             "(an alert body names your editors and machines)")
+                             "(an alert body names your editors and computers)")
         return value
     if key == "alerts_timezone" and value:
         _zone(value)                       # raises AlertError on a bad name
@@ -792,7 +792,8 @@ def _who(entry: Mapping[str, Any]) -> str:
 def _lane_words(entry: Mapping[str, Any]) -> str:
     lanes = [l for l in (entry.get("lanes") or []) if isinstance(l, Mapping)]
     if not lanes:
-        return "no lane ever reported"
+        # UX-16 (2026-09-03): "lane" is our word, not a reader's.
+        return "no transfer ever reported"
     return ", ".join(f"{l.get('label') or l.get('lane')}={l.get('state')}" for l in lanes)
 
 
@@ -1029,12 +1030,12 @@ def _check_fleet_halt(ctx: Ctx) -> list[Finding]:
         return []
     return [_f(
         "the whole fleet",
-        f"Syncing is halted for every computer in the fleet. Nothing is going "
-        f"up and nothing is coming down anywhere. It was set "
+        f"Syncing is stopped by an admin for every computer in the fleet. "
+        f"Nothing is going up and nothing is coming down anywhere. It was set "
         f"{_age_words(halt.get('set_at'), ctx.now)} by "
         f"{halt.get('set_by') or 'an admin'}.",
-        "On the dashboard: FLEET, then [ RELEASE THE HALT ] when whatever it "
-        "was set for is over.",
+        "On the dashboard: SYNC STATUS, then [ RELEASE THE HALT ] when "
+        "whatever it was set for is over.",
         str(halt.get("reason") or ""))]
 
 
@@ -1044,11 +1045,11 @@ def _check_fleet_halt_expired(ctx: Ctx) -> list[Finding]:
         return []
     return [_f(
         "the whole fleet",
-        f"The fleet halt set {_age_words(halt.get('set_at'), ctx.now)} has run "
+        f"The fleet-wide stop set {_age_words(halt.get('set_at'), ctx.now)} has run "
         f"past its own expiry time, so syncing has started again on its own. "
         f"If the reason it was set is still true, nobody has been told.",
-        "On the dashboard: FLEET, and either set the halt again or confirm it "
-        "is no longer needed.",
+        "On the dashboard: SYNC STATUS, and either stop syncing again or "
+        "confirm it is no longer needed.",
         f"expires_at={halt.get('expires_at')}")]
 
 
@@ -1061,7 +1062,7 @@ def _check_disk_park(ctx: Ctx) -> list[Finding]:
         who = ctx.name(_who(e))
         out.append(_f(
             who,
-            f"{who} has parked its proxy download because the drive is nearly "
+            f"{who} has stopped its own proxy download because the drive is nearly "
             f"full ({_bytes_words(g.get('disk_root_free_bytes'))} free). That "
             f"editor will not see anybody else's new footage until there is "
             f"room.",
@@ -1240,11 +1241,12 @@ def _check_lane_stalled(ctx: Ctx) -> list[Finding]:
             continue
         who = ctx.name(_who(e))
         sentence = (e.get("why") or {}).get("sentence") or (
-            f"A sync lane on {who} is busy and nothing is moving")
+            f"A transfer on {who} is busy and nothing is moving")
         out.append(_f(
             who,
             f"{sentence}. A drive that has stopped answering reads exactly "
-            f"like this, and the other lanes on that computer wait behind it.",
+            f"like this, and the other transfers on that computer wait behind "
+            f"it.",
             "Ask that editor to quit CC Sync from the tray and start it again, and to check "
             "the sync drive opens in Explorer or Finder.",
             f"lane={g.get('stalled_lane')} seconds={g.get('stalled_seconds')} "
@@ -1267,9 +1269,9 @@ def _check_lane_error(ctx: Ctx) -> list[Finding]:
             out.append(_f(
                 f"{who} {label}",
                 f"{label} on {who} has been failing for "
-                f"{_duration_words(age)}. Whatever that lane carries is not "
-                f"moving for that editor.",
-                "Open the computer's row on the FLEET page and read the error, "
+                f"{_duration_words(age)}. Whatever that transfer carries is "
+                f"not moving for that editor.",
+                "Open the computer's row on the SYNC STATUS page and read the error, "
                 "then ask that editor to quit CC Sync from the tray and start it again.",
                 str(lane.get("last_error") or "")))
     return out
@@ -1329,7 +1331,7 @@ def _check_crashes(ctx: Ctx) -> list[Finding]:
         out.append(_f(
             who,
             f"{g['crash_count']} background task(s) on {who} have crashed and "
-            f"written a report. The tray stays up and the lanes look normal, "
+            f"written a report. The tray stays up and the transfers look normal, "
             f"which is why nobody notices.",
             # CR-88 route sweep (usability sweep 2026-09-03): the tray menu
             # has no Copy diagnostics since 2026-08-27.
@@ -1355,7 +1357,7 @@ def _check_upgrade_failed(ctx: Ctx) -> list[Finding]:
             f"nowhere, and the update will never arrive on its own. Antivirus "
             f"quarantine, a full disk and a proxy mangling the download all "
             f"look like this.",
-            "Read the error on that computer's row on the FLEET page, then "
+            "Read the error on that computer's row on the SYNC STATUS page, then "
             "install the build by hand from the dashboard's INSTALLER link.",
             str(g.get("upgrade_last_error") or "")))
     return out
@@ -1969,7 +1971,8 @@ def _check_jobs_starved(ctx: Ctx) -> list[Finding]:
         jobs_mod.REASON_NOT_ALLOWED:
             "every computer that could do it has this kind of work switched off",
         jobs_mod.REASON_HALTED:
-            "syncing is halted, and a halted computer takes no jobs",
+            "syncing is stopped, and a computer with syncing stopped takes "
+            "no jobs",
     }.get(code)
     if meaning is None:
         return []
@@ -2208,7 +2211,8 @@ def _check_platform_channel_stale(ctx: Ctx) -> list[Finding]:
             "On a Mac, in the repo: git pull && ./tools/release_macos.sh "
             "--publish --make-current, then ./tools/build_onboard_macos.sh "
             "--publish --make-current. PyInstaller cannot build a macOS "
-            "bundle on Windows, so no ship from the base rig can do this.",
+            "bundle on Windows, so no ship from a Windows computer can do "
+            "this.",
             f"{channel.get('platform')}={channel['current_version']} "
             f"{leader.get('platform')}={leader['current_version']} "
             f"behind={behind}"))
@@ -2549,7 +2553,7 @@ def _check_red_unexplained(ctx: Ctx) -> list[Finding]:
                     f"which. It is not syncing normally.")
             + " Nothing more specific could be worked out from what that "
               "computer has reported.",
-            "Open that computer's row on the FLEET page and press [ ASK WHY ], "
+            "Open that computer's row on the SYNC STATUS page and press [ ASK WHY ], "
             "then send us the diagnostics it returns.",
             f"status={e.get('status')} reason={e.get('status_reason') or ''}"))
     return out
@@ -2560,12 +2564,13 @@ def _check_red_unexplained(ctx: Ctx) -> list[Finding]:
 ALERT_KINDS: tuple[AlertKind, ...] = (
     AlertKind("breaker_tripped", SEV_ERROR, "proxy download stopped itself",
               "a computer's proxy download brake", _check_breaker),
-    AlertKind("fleet_halt", SEV_WARN, "syncing is halted for the whole fleet",
-              "the fleet halt", _check_fleet_halt),
-    AlertKind("fleet_halt_expired", SEV_WARN, "a fleet halt expired by itself",
-              "a fleet halt past its expiry", _check_fleet_halt_expired),
-    AlertKind("disk_park", SEV_ERROR, "a computer parked its downloads for space",
-              "a computer parked below its disk floor", _check_disk_park),
+    AlertKind("fleet_halt", SEV_WARN, "syncing is stopped for the whole fleet",
+              "the fleet-wide stop", _check_fleet_halt),
+    AlertKind("fleet_halt_expired", SEV_WARN, "a fleet-wide stop expired by itself",
+              "a fleet-wide stop past its expiry", _check_fleet_halt_expired),
+    AlertKind("disk_park", SEV_ERROR, "a computer stopped its own downloads for space",
+              "a computer that stopped itself below its disk floor",
+              _check_disk_park),
     AlertKind("disk_low", SEV_ERROR, "a computer is running out of space",
               "free space on editors' sync drives", _check_disk_low),
     AlertKind("machine_silent", SEV_ERROR, "a computer has gone quiet",
@@ -2578,10 +2583,10 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
               "a computer's sync engine down for an hour", _check_engine_down),
     AlertKind("nas_engine_down", SEV_ERROR, "the server's sync engine is unreachable",
               "the server's own sync engine", _check_nas_engine),
-    AlertKind("lane_stalled", SEV_ERROR, "a sync lane is stuck",
-              "lanes busy with nothing moving", _check_lane_stalled),
-    AlertKind("lane_error", SEV_ERROR, "a sync lane has been failing",
-              "lanes in error for an hour", _check_lane_error),
+    AlertKind("lane_stalled", SEV_ERROR, "a sync transfer is stuck",
+              "transfers busy with nothing moving", _check_lane_stalled),
+    AlertKind("lane_error", SEV_ERROR, "a sync transfer has been failing",
+              "transfers in error for an hour", _check_lane_error),
     AlertKind("folders_unfiltered", SEV_WARN, "a shared folder has no filter",
               "shared folders with no ignore filter", _check_folders_unfiltered),
     AlertKind("thread_restarts", SEV_WARN, "CC Sync keeps restarting itself",
@@ -2836,7 +2841,7 @@ def _lane_bytes_section(conn: sqlite3.Connection) -> list[str]:
     ).fetchall()
     if not rows:
         return []
-    lines = ["BYTES MOVED (per lane, since that lane last reset)"]
+    lines = ["BYTES MOVED (per transfer, since it last reset)"]
     for r in rows:
         lines.append(f"  {r['editor_username']}/{r['machine']} {r['lane']}: "
                      f"{_bytes_words(r['moved'])}")
@@ -2902,7 +2907,8 @@ def compose_weekly(
         by_version.setdefault(entry.get("companion_version") or "unknown", []).append(entry)
     total = len(editors)
     for version, rows in sorted(by_version.items()):
-        lines.append(f"  {version}: {len(rows)} of {total} machine(s)")
+        lines.append(f"  {version}: {len(rows)} of {total} "
+                     f"computer{'' if total == 1 else 's'}")
     for entry in editors:
         if not entry.get("companion_outdated") and not entry.get("companion_version_unknown"):
             continue

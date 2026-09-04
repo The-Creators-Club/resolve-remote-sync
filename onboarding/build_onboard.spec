@@ -25,6 +25,14 @@ BOOTSTRAP_PS1 = REPO_ROOT / "installer" / "windows_bootstrap.ps1"
 # wizard is the _MEIPASS extraction dir -- so it has to be extracted BESIDE
 # it or the bootstrap exits 1 on every wizard install (OPS-8, 2026-08-28).
 DRIVE_MAPPING_PS1 = REPO_ROOT / "installer" / "drive_mapping.ps1"
+# THE WAY OUT (OPS-17, usability sweep 2026-09-03). windows_bootstrap.ps1
+# copies this into %LOCALAPPDATA%\ccsync\bin and registers the Apps & features
+# entry that points at it -- but it looks for it BESIDE ITSELF
+# ($PSScriptRoot, which for the wizard is the _MEIPASS extraction dir), so
+# without this line onboard.exe delivered an install with no uninstaller on
+# the machine and no entry in any uninstall list. The bootstrap's else-branch
+# is deliberately quiet about it, which is exactly why this is easy to miss.
+UNINSTALL_PS1 = REPO_ROOT / "installer" / "windows_uninstall.ps1"
 COMPANION_EXE = REPO_ROOT / "companion" / "dist" / "ccsync-companion.exe"
 EULA_MD = SPEC_DIR / "assets" / "EULA.md"
 
@@ -44,6 +52,10 @@ a = Analysis(
     datas=[
         (str(BOOTSTRAP_PS1), "."),
         (str(DRIVE_MAPPING_PS1), "."),
+        # Extracted beside the bootstrap, which is where it looks for it
+        # (OPS-17). windows_uninstall.ps1 dot-sources drive_mapping.ps1 from
+        # beside ITSELF once installed, and the bootstrap copies that one too.
+        (str(UNINSTALL_PS1), "."),
         (str(COMPANION_EXE), "."),   # bundled so onboard.exe installs everything
         # Logo for the wizard window icon -- theme.apply_window_icon() reads
         # it from sys._MEIPASS/ccsync_companion/assets/icon.png.

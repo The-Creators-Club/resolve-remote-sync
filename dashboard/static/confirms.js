@@ -12,7 +12,7 @@
 
   var CURRENT_POLICY =
     "Publish new builds automatically AND make them current? " +
-    "Every editor's machine will take each new build from the vendor feed " +
+    "Every editor's computer will take each new build from the vendor feed " +
     "without anyone approving it first. " +
     "Choose 'stage' if you want to test a build before the fleet gets it.";
 

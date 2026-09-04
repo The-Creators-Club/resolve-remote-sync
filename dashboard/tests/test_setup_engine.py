@@ -127,10 +127,34 @@ def test_outstanding_required_excludes_optional_and_ok(conn):
 
 # --------------------------------------------------------------------- eula
 
-def test_eula_check_ok_when_no_eula_shipped(conn, monkeypatch, tmp_path):
+def test_eula_warns_when_no_eula_shipped(conn, monkeypatch, tmp_path):
+    """REL-5 (usability sweep 2026-09-04). This used to answer `ok` with "no
+    EULA shipped in this build", which reads as ACCEPTED to the checklist,
+    _check_done and any auditor -- on the image, where the file has never
+    existed, that was the first-run wizard ticking a licence nobody was ever
+    shown. A build with no licence agreement is now visibly wrong."""
     monkeypatch.setattr(setup_engine, "EULA_PATH", tmp_path / "missing.md")
     state = setup_engine.run_check(ctx(conn, Settings()), "eula")
-    assert state.status == "ok"
+    assert state.status == "warn"
+    assert state.detail == setup_engine.NO_EULA_DETAIL
+    accepted = setup_engine.run_do_it(ctx(conn, Settings()), "eula")
+    assert accepted.status == "warn"
+    # ...and it holds `done`, because there is nothing here to be done with.
+    assert "eula" in dict(
+        (tid, title) for tid, title in setup_engine.outstanding_for_done(conn))
+
+
+def test_eula_path_prefers_the_copy_beside_the_code(monkeypatch, tmp_path):
+    """REL-5: the image and the OTA bundle put docs/legal beside the code
+    (parents[2]/docs), which is where nothing looked before this wave. The
+    env override wins over both."""
+    doc = tmp_path / "EULA.md"
+    doc.write_text("<!-- EULA-VERSION: 9.9 -->\n", encoding="utf-8")
+    monkeypatch.setenv("DASH_EULA_DOC", str(doc))
+    assert setup_engine._find_eula() == doc
+    monkeypatch.delenv("DASH_EULA_DOC")
+    # No override: a real checkout answers a file that exists.
+    assert setup_engine._find_eula().name == "EULA.md"
 
 
 def test_eula_accept_records_the_marker_version(conn, monkeypatch, tmp_path):
@@ -557,6 +581,78 @@ def test_tailnet_accepts_a_cgnat_address(conn, monkeypatch):
     site_store.set_many(conn, {"dashboard_url": "http://100.66.62.41:8480"}, updated_by="admin")
     conn.commit()
     assert tailnet_check(conn, Settings(), monkeypatch, None).status == "ok"
+
+
+# UX-21 (usability sweep 2026-09-03): the sign-in URL used to live in
+# `docker compose logs tailscale`, which is the one step of the appliance
+# install that forced a non-technical owner into a terminal.
+
+def test_the_button_puts_a_sign_in_link_on_the_page(conn, monkeypatch):
+    monkeypatch.setattr(tailscale_local, "socket_present", lambda *a, **k: True)
+    posted = []
+    # No link until the login has been STARTED -- which is the whole reason
+    # step 4 of the appliance install needed a terminal.
+    answers = [
+        {"BackendState": "NeedsLogin", "AuthURL": "", "Self": {}, "TailscaleIPs": []},
+        {"BackendState": "NeedsLogin", "AuthURL": "https://login.tailscale.com/a/x9",
+         "Self": {}, "TailscaleIPs": []},
+    ]
+    monkeypatch.setattr(tailscale_local, "status", lambda *a, **k: answers[0])
+
+    def started(path, timeout=3.0):
+        posted.append(path)
+        answers.pop(0)          # the node publishes its AuthURL from here on
+        return True
+
+    monkeypatch.setattr(setup_engine, "_localapi_post", started)
+    state = setup_engine.get("tailnet").run(ctx(conn, Settings()))
+    assert posted == ["/localapi/v0/login-interactive"]
+    assert state.status == "todo"
+    assert "https://login.tailscale.com/a/x9" in state.detail
+
+
+def test_a_node_already_signed_in_is_never_asked_to_log_in_again(conn, monkeypatch):
+    """`login-interactive` against a Running node is a re-authentication
+    nobody asked for."""
+    monkeypatch.setattr(tailscale_local, "socket_present", lambda *a, **k: True)
+    monkeypatch.setattr(tailscale_local, "status", lambda *a, **k: {
+        "BackendState": "Running", "AuthURL": "",
+        "Self": {"DNSName": "ccsync.tail1234.ts.net."}, "TailscaleIPs": []})
+    monkeypatch.setattr(setup_engine, "_localapi_post",
+                        lambda *a, **k: pytest.fail("a signed-in node must not be posted to"))
+
+    state = setup_engine.get("tailnet").run(ctx(conn, Settings()))
+    assert state.status == "ok"
+
+
+def test_the_button_never_claims_a_sign_in_it_cannot_see(conn, monkeypatch):
+    """Signing in happens in the admin's browser, at Tailscale. A node that
+    produced no link stays `todo` and says what to press next."""
+    monkeypatch.setattr(tailscale_local, "socket_present", lambda *a, **k: True)
+    monkeypatch.setattr(tailscale_local, "status", lambda *a, **k: {
+        "BackendState": "NeedsLogin", "AuthURL": "", "Self": {}, "TailscaleIPs": []})
+    monkeypatch.setattr(setup_engine, "_localapi_post", lambda *a, **k: False)
+
+    state = setup_engine.get("tailnet").run(ctx(conn, Settings()))
+    assert state.status == "todo"
+    assert state.detail
+
+
+def test_with_no_bundled_node_the_button_is_the_ordinary_check(conn, monkeypatch):
+    """A dashboard published some other way has nothing to sign in, and the
+    check's own advice is the right advice."""
+    monkeypatch.setattr(tailscale_local, "socket_present", lambda *a, **k: False)
+    monkeypatch.setattr(tailscale_local, "status", lambda *a, **k: None)
+    monkeypatch.setattr(setup_engine, "_localapi_post",
+                        lambda *a, **k: pytest.fail("no socket, no post"))
+
+    state = setup_engine.get("tailnet").run(ctx(conn, Settings()))
+    assert state.status == "todo"
+    assert "dashboard_url" in state.detail
+
+
+def test_the_button_says_what_it_is_about_to_do(conn):
+    assert setup_engine.get("tailnet").run_label == "GET A SIGN-IN LINK"
 
 
 def test_tailnet_todo_when_the_published_url_is_not_a_tailnet_address(conn, monkeypatch):

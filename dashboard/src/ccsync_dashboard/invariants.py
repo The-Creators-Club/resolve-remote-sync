@@ -333,7 +333,7 @@ def _check_machine_has_plan(ctx: Ctx) -> Outcome:
     if empty:
         summary += f"; {len(empty)} has nothing ticked ({', '.join(sorted(empty))})"
     else:
-        summary += ", each with a plan or a base-rig role"
+        summary += ", each with a sync plan or wired to the server"
     return ok(summary)
 
 
@@ -530,8 +530,8 @@ def _check_package_floor(ctx: Ctx) -> Outcome:
         if floor and top and floor < top[0]:
             bad.append((subject,
                         f"its floor {row['min_version']} is below {top[1]}, which this "
-                        f"channel has already published, so machines holding the higher "
-                        f"floor will refuse it"))
+                        f"channel has already published, so computers holding the "
+                        f"higher floor will refuse it"))
     if bad:
         return broken(bad, f"{len(bad)} of {checked} current build(s) carry a bad floor")
     if not checked:
@@ -977,17 +977,18 @@ INVARIANTS: tuple[Invariant, ...] = (
         "A computer whose tick was never turned into a share receives nothing at "
         "all, and the tick looks exactly like it is working.",
         "Untick and re-tick that project for that computer on its project page. "
-        "If it comes back, check that computer has a sync device id on the FLEET page.",
+        "If it comes back, check that computer has a sync device id on the SYNC "
+        "STATUS page.",
         _check_plan_has_share),
     Invariant(
         "machine_has_plan", 2,
         "what each computer that reports is set to sync",
         "A computer with nothing ticked syncs nothing, which is a fine way for a "
-        "spare machine or a laptop between shoots to sit. This is here to be read, "
+        "spare computer or a laptop between shoots to sit. This is here to be read, "
         "not acted on: it never reports a problem.",
         "Nothing to do. If a computer should be syncing, tick projects for it on "
-        "the FLEET page, or set it to base rig in its own CC Sync settings if it "
-        "works straight off the server.",
+        "the SYNC STATUS page, or set it to wired in its own CC Sync settings if "
+        "it works straight off the server.",
         _check_machine_has_plan, severity="warn"),
     Invariant(
         "one_identity_per_computer", 3,
@@ -1041,7 +1042,7 @@ INVARIANTS: tuple[Invariant, ...] = (
         "deleted-file retention agrees between the server and the editors",
         "The server keeps deleted files for a year and editors' computers keep them "
         "for a month, so where a deleted file can be recovered from depends on which "
-        "machine you ask (R5).",
+        "computer you ask (R5).",
         "Nothing to press. This one is a code change, tracked as R5 in KNOWN_BUGS.",
         None, severity="warn",
         skip_reason=(

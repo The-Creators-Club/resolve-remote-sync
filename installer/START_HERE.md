@@ -16,6 +16,14 @@ shared folder instead, **copy `onboard.exe` to your Desktop first, then run
 it from there** — never run it straight off the share (it locks the file
 for everyone, and the installer refuses to run that way).
 
+**Windows will say "Windows protected your PC" the first time you run it.**
+That is SmartScreen, and it says that about any program it has not seen many
+copies of yet: this installer is not code-signed. Click **More info**, then
+**Run anyway**. If you or your IT would rather check the file first, the
+dashboard's installer page prints its sha256 beside the download, and
+`Get-FileHash .\onboard.exe` prints the same value for the copy you have.
+Nothing here asks you to turn SmartScreen off.
+
 The licence agreement is in this folder as `EULA.md` if you would rather read
 it before running anything — the wizard shows you the same document and will
 not finish without your acceptance. Your companion will not sync until it has
@@ -292,13 +300,19 @@ script with it, or the app can't report status or follow your ticks.)
   everything else (your Syncthing identity, key, drive mapping, settings) —
   nothing to re-approve. Add `-DashboardToken <value>` if your admin gives you
   one.
-- **Remove it:** `.\windows_uninstall.ps1` removes the app but keeps your
+- **Remove it, the easy way:** Windows ▸ Settings ▸ Apps ▸ Installed apps ▸
+  **CC Sync** ▸ Uninstall. The installer puts it there, so you do not need the
+  package your admin sent, and you do not need to find a script. It keeps your
+  identity so a reinstall is painless.
+- **Remove it, from the package:** `.\windows_uninstall.ps1` removes the app but keeps your
   identity so a reinstall is painless. `.\windows_uninstall.ps1 -Full` also
   removes your saved sign-in and Syncthing identity (a reinstall then needs
   your admin to re-approve you). Neither mode ever deletes your synced media in
   `<tree root>` (e.g. `C:\CCSync`).
 - **On a Mac:** updates arrive the same way (menu bar → **Update now**), and
-  removal is `./macos_uninstall.sh` — same two modes, `--full` for the
+  removal is `bash ~/.local/ccsync/bin/macos_uninstall.sh` (the installer puts
+  a copy there and names it in the last lines it prints), or
+  `./macos_uninstall.sh` — same two modes, `--full` for the
   thorough one, `--dry-run` to see what it would do first. It never touches
   your synced media on the SSD, and it leaves Resolve's Mapped Mount alone
   (it tells you how to remove that by hand if you want to).

@@ -773,7 +773,7 @@ def test_a_clip_whose_source_vanished_is_failed_with_a_sentence(tmp_path):
 
     failures = [c["body"] for c in server.calls
                 if c["url"].endswith("/status") and c["body"]["state"] == "failed"]
-    assert failures and "not on this machine" in failures[0]["error"]
+    assert failures and "not on this computer" in failures[0]["error"]
 
 
 def test_the_editor_coming_back_stops_between_stages(tmp_path):
@@ -1473,7 +1473,7 @@ def test_a_path_the_editor_never_picked_is_refused(tmp_path):
          "path": str(clip)}]})
 
     assert body["items"][0]["accepted"] is False
-    assert "not chosen on this machine" in body["items"][0]["reason"]
+    assert "not chosen on this computer" in body["items"][0]["reason"]
 
 
 def test_a_folder_pick_allows_the_whole_folder_that_was_picked(tmp_path):
@@ -1810,7 +1810,7 @@ def test_the_progress_body_names_the_failures_not_just_a_count(tmp_path):
     ing = make_ingestor(tmp_path)
     ing._batch = {"uid": "b" * 32, "state": "running", "items": [
         {"uid": "i1", "name": "one.mov", "stage": broll_ingest.ITEM_FAILED,
-         "error": "the source file is not on this machine any more"},
+         "error": "the source file is not on this computer any more"},
         {"uid": "i2", "name": "two.mov", "stage": broll_ingest.ITEM_LIVE},
     ]}
 
@@ -1818,6 +1818,6 @@ def test_the_progress_body_names_the_failures_not_just_a_count(tmp_path):
 
     assert body["failed_items"] == [
         {"name": "one.mov",
-         "error": "the source file is not on this machine any more"}]
+         "error": "the source file is not on this computer any more"}]
     assert body["batch"]["failed_items"] == body["failed_items"]
     assert ing.status()["failed_items"] == body["failed_items"]

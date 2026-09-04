@@ -24,7 +24,7 @@
     <!-- Root-relative on purpose, unlike every asset URL here: mounted under
          /music/ this is the way back out to the dashboard at the origin root.
          Standalone (dev) it harmlessly reloads this page. -->
-    <a class="btn nav-link" href="/" title="back to the CC Sync dashboard (project sync status)">[ DASHBOARD ]</a>
+    <a class="btn nav-link" href="/" title="back to the CC Sync dashboard (SYNC STATUS)">[ DASHBOARD ]</a>
   </div>
   <div class="rule">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</div>
 
@@ -112,7 +112,7 @@
   <div class="dropinner">
     <div class="dropicon">&#8623;</div>
     <strong>Drop audio to add it to the library</strong>
-    <span class="muted">Your own machine analyses it and uploads it. .ogg is transcoded to mp3.</span>
+    <span class="muted">Your own computer analyses it and uploads it. .ogg is transcoded to mp3.</span>
   </div>
 </div>
 
@@ -130,7 +130,7 @@
       <button id="mi-recheck" class="text-btn">recheck</button>
     </div>
     <p class="muted">
-      Your own machine does the work: the CC Sync companion converts, analyses
+      Your own computer does the work: the CC Sync tray converts, analyses
       with the CLAP model and uploads the finished track to the library. The
       dashboard never sees the audio.
     </p>
@@ -170,7 +170,7 @@
          in the browser read it - so a parked upload's reason existed only in
          the log of whichever indexer run happened to hit it. -->
     <div id="mi-queue" class="mi-queue hidden">
-      <h3>Waiting for the base rig</h3>
+      <h3>Waiting for the indexing computer</h3>
       <div id="mi-queue-body"></div>
     </div>
 
@@ -217,7 +217,7 @@
     <h3>Batches</h3>
     <div id="mi-scope-tabs" class="mode-toggles">
       <button type="button" class="mode-btn" data-scope="mine">Mine</button>
-      <button type="button" class="mode-btn hidden" data-scope="all">All machines</button>
+      <button type="button" class="mode-btn hidden" data-scope="all">All computers</button>
     </div>
     <div id="mi-batch-list" class="mi-batch-list"></div>
   </div>

@@ -6,7 +6,7 @@
    as what it is. Renders as nothing when the fleet is syncing. #}
 {% if halt.active %}
 <div class="banner alarm" id="fleet-halt-banner">
-  &#9940; SYNCING IS HALTED ON EVERY COMPUTER
+  &#9940; SYNCING IS STOPPED ON EVERY COMPUTER
   ({{ halt_hours }} hour{{ "s" if halt_hours != 1 }} so far, {{ halt_machines }} computer{{ "s" if halt_machines != 1 }} in the fleet).
   {% if halt.reason %}<span class="mono-sm">{{ halt.reason }}</span>{% endif %}
   <span class="mono-sm muted">set by {{ halt.set_by }} {{ halt.set_at | ago }}{% if halt.expires_at %};
@@ -19,7 +19,7 @@
 {# An expiry nobody is told about is the same trap one level down: the fleet
    started again and the person who stopped it does not know. #}
 <div class="banner" id="fleet-halt-banner">
-  &#9650; THE FLEET HALT HAS EXPIRED and syncing has started again everywhere.
+  &#9650; THE FLEET-WIDE STOP HAS EXPIRED and syncing has started again everywhere.
   {% if halt.reason %}<span class="mono-sm">It was set for: {{ halt.reason }}</span>{% endif %}
   <span class="mono-sm muted">set by {{ halt.set_by }} {{ halt.set_at | ago }}, expired {{ halt.expires_at | ago }}.</span>
 </div>

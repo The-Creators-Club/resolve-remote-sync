@@ -18,6 +18,7 @@ Two shapes:
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -94,10 +95,11 @@ def test_ui_copy_is_importable_without_the_package_starting() -> None:
     from ccsync_companion import ui_copy
 
     assert ui_copy.DIAGNOSTICS.startswith("Tray > Settings > ")
+    # ...and it says COMPUTER since the wave 4 vocabulary (2026-09-04).
     assert ui_copy.remove_project("FF5") == (
-        "Tray > Settings > REMOVE 'FF5' FROM THIS MACHINE")
+        "Tray > Settings > REMOVE 'FF5' FROM THIS COMPUTER")
     assert ui_copy.remove_project() == (
-        "Tray > Settings > REMOVE '<project>' FROM THIS MACHINE")
+        "Tray > Settings > REMOVE '<project>' FROM THIS COMPUTER")
     assert ui_copy.repair_drive("Q:") == "Tray > Settings > REPAIR Q: NOW"
     assert "Q:" in ui_copy.finish_grading("Q:")
 
@@ -350,3 +352,229 @@ def test_the_sentences_ux10_named_no_longer_say_lane_a_or_s() -> None:
                     f"ui_copy.count(n, 'file') writes a real plural.")
     # ...and the lane's letter, which is a source shape rather than a phrase.
     assert 'f"Lane {stalled.get(' not in (SRC / "app.py").read_text(encoding="utf-8")
+
+
+# -- wave 4: ONE VOCABULARY (sweep 2026-09-03 section 4) ---------------------
+#
+# The owner approved one word per concept on 2026-09-04, because the same
+# thing had four names across the tray, the Settings window and the dashboard
+# and an editor on the phone to their admin was reading a different word for
+# it on each screen:
+#
+#   * a computer is a COMPUTER in copy ("machine" stays in code, routes and
+#     DB columns; "device" is a Syncthing identity and nothing else);
+#   * sync that is not running is PAUSED (you did it), STOPPED BY YOUR ADMIN
+#     (a fleet halt) or STOPPED ITSELF (the breaker, the disk floor);
+#   * the transports are UPLOAD / PROXY DOWNLOAD / FOLDER SYNC, never a lane
+#     and never a letter;
+#   * a project is TICKED, the set of them is a SYNC PLAN.
+#
+# So: a scan for the retired words over the modules whose copy this pass
+# converted. The list is the point of the test - a module joins MODULES when
+# its strings have been read, never by loosening what counts.
+
+RETIRED_WORDS: tuple[str, ...] = (
+    "lane", "lane a", "lane b", "lane c", "machine", "base rig", "rig",
+    "halted", "parked", "breaker", "selection", "assignment",
+)
+
+# The modules converted on 2026-09-04. A partial list that FAILS is worth more
+# than a complete one that is allowed to pass, so a module joins this tuple
+# when its strings have been READ - never by loosening what counts.
+MODULES: tuple[str, ...] = (
+    "tray.py", "tray_native.py", "app.py", "ui_copy.py", "jobs_runner.py",
+    "capabilities.py", "drive_reminder.py", "eula.py", "sync/lane_guard.py",
+    # ...and the Settings window, whose own suite carries the same scan over
+    # the model it builds (test_settings_window.py). Both, deliberately: this
+    # one reads the literals, that one reads the rendered rows.
+    "settings_window.py",
+    # Wave 5, same day: the loopback server's ~15 ingest refusals and their
+    # music siblings (every one of them a sentence in the b-roll or music web
+    # UI's own toast, because the page prints the companion's `message`
+    # verbatim), the on-demand clip fetch, both ingestors, and the two windows
+    # an editor watches a fix or an index run in.
+    "broll_server.py", "music_server.py", "broll_fetch.py", "broll_ingest.py",
+    "music_ingest.py", "popup.py", "fixer.py", "sync/rclone_lane.py",
+    # ...and the two sidecars, whose refusals are RAISED into the same
+    # capability answers and the same toasts: "no usable GPU on this machine"
+    # reached an editor through broll_server's `reasons` list, so converting
+    # the caller and not the callee would have left the page saying both
+    # words in one sentence.
+    "broll_vlm_sidecar.py", "music_clap_sidecar.py",
+)
+
+# Where the word is not the concept. Each entry is the EXACT string, and each
+# one is here for a reason that is about that string, never about the effort
+# of changing it.
+VOCABULARY_ALLOWED: dict[str, str] = {
+    # A report reason code on the wire (app._report_off_cycle), read by the
+    # dashboard's log and by nobody else. Not copy.
+    "lane B resumed": "an internal report reason, never rendered",
+    # Two `self.log` lines in the ingestors. The scan subtracts the arguments
+    # of a module-level `log.…` call and cannot see a logger held on an
+    # instance, so these two reach it as if they were sentences; they are
+    # diagnostics, and the house rule exempts log lines deliberately (a scan
+    # that failed on one is a scan people learn to work around - the same
+    # reason test_the_sentences_ux10_named_no_longer_say_lane_a_or_s reads
+    # two named files rather than the package).
+    "kept %d staged file(s) the base rig still has to finish: %s":
+        "a self.log.info line in broll_ingest, not copy",
+    "%s stays on this machine for the base rig - %s":
+        "a self.log.warning line in music_ingest, not copy",
+}
+
+_WORD_RE = re.compile(r"\b(" + "|".join(RETIRED_WORDS) + r")\b", re.IGNORECASE)
+
+
+def _key_string_nodes(tree: ast.AST) -> set[int]:
+    """String literals that are DICT KEYS or lookups, not sentences.
+
+    `guard.get("parked")`, `{"reason": ...}`, `snap["machine"]`: state keys
+    are the vocabulary of the wire and the state files, which deliberately
+    did not change (CLAUDE.md: code identifiers, routes and DB columns keep
+    their names)."""
+    keys: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for key in node.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    keys.add(id(key))
+        elif isinstance(node, ast.Subscript):
+            if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+                keys.add(id(node.slice))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in ("get", "pop", "setdefault", "startswith",
+                                  "endswith", "count", "split", "rsplit",
+                                  "strip", "lstrip", "rstrip", "index", "find"):
+                for arg in node.args:
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        keys.add(id(arg))
+    return keys
+
+
+def _sentences(path: Path) -> list[str]:
+    """The visible strings of `path` that are PROSE.
+
+    Three or more words: a one- or two-word literal is a state code, a JSON
+    key, an ffmpeg flag or a menu glyph, and the sweep's finding is about
+    sentences an editor reads."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    skip = (_docstring_nodes(tree) | _log_argument_nodes(tree)
+            | _key_string_nodes(tree))
+    out = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        if id(node) in skip:
+            continue
+        if len(node.value.split()) < 3:
+            continue
+        out.append(node.value)
+    return out
+
+
+@pytest.mark.parametrize("name", MODULES)
+def test_no_retired_word_in_a_sentence_an_editor_reads(name: str) -> None:
+    bad = []
+    for text in _sentences(SRC / name):
+        if text in VOCABULARY_ALLOWED:
+            continue
+        found = _WORD_RE.findall(text)
+        if found:
+            bad.append((sorted(set(w.lower() for w in found)), text))
+    assert not bad, (
+        f"{name} says a retired word to an editor: {bad}. The vocabulary "
+        f"(sweep 2026-09-03 section 4, owner-approved 2026-09-04): a computer "
+        f"is a 'computer'; sync is 'paused' (you), 'stopped by your admin' (a "
+        f"fleet halt) or 'stopped itself' (the breaker or the disk floor); the "
+        f"transports are 'upload' / 'proxy download' / 'folder sync'. If the "
+        f"word is genuinely not the concept, add the exact string to "
+        f"VOCABULARY_ALLOWED with the reason.")
+
+
+def test_the_vocabulary_scan_would_catch_a_regression() -> None:
+    """...and that its two exemptions do not swallow a real sentence."""
+    from tempfile import NamedTemporaryFile
+
+    src = (
+        'ok = "Syncing is stopped on this computer"\n'
+        'bad = "Syncing is halted on this machine"\n'
+        'key = snap.get("machine")\n'
+        'code = "lane B resumed"\n'
+    )
+    with NamedTemporaryFile("w", suffix=".py", delete=False,
+                            encoding="utf-8") as handle:
+        handle.write(src)
+        path = Path(handle.name)
+    try:
+        found = [t for t in _sentences(path)
+                 if _WORD_RE.search(t) and t not in VOCABULARY_ALLOWED]
+    finally:
+        path.unlink(missing_ok=True)
+    assert found == ["Syncing is halted on this machine"], found
+
+
+def test_the_allow_list_has_a_reason_for_every_entry() -> None:
+    for text, why in VOCABULARY_ALLOWED.items():
+        assert text and why.strip(), text
+        assert _WORD_RE.search(text), (
+            f"{text!r} is exempted from a scan that would not have flagged it")
+
+
+# -- UX-19: a stop and a pause are two switches with one word ---------------
+#
+# With both set the menu carried "Start syncing again" and "Resume syncing
+# (currently PAUSED)" four lines apart, and clicking either left the computer
+# not syncing with nothing on screen saying there were two.
+
+def test_the_local_stop_is_named_for_its_cause_and_dated() -> None:
+    from ccsync_companion.tray import halt_release_label
+
+    label = halt_release_label({"halt": {"active": True, "scope": "local",
+                                         "at": "2026-09-04T09:12:00+00:00"}})
+    assert label.startswith("► Clear the sync stop on this computer (set ")
+    assert label.endswith(")")
+    # A stamp nothing can read drops the parenthetical rather than dating the
+    # stop to now (CR-89's rule).
+    assert halt_release_label({"halt": {"active": True, "at": "nonsense"}}) == (
+        "► Clear the sync stop on this computer")
+    assert halt_release_label({}) == "► Clear the sync stop on this computer"
+
+
+def test_two_switches_are_named_as_two() -> None:
+    from ccsync_companion.tray import _sync_line, _two_stops_line
+
+    both = {"sync_guard": {"halt": {"active": True, "scope": "local"}},
+            "paused": True, "statuses": []}
+    assert _two_stops_line(both) == (
+        "⚠ Two things are stopping sync on this computer: a stop and a pause. "
+        "Clear both to sync again.")
+    assert "and paused" in _sync_line(both)
+
+    fleet = {"sync_guard": {"halt": {"active": True, "scope": "fleet"}},
+             "paused": True, "statuses": []}
+    assert "your admin's stop and a pause" in _two_stops_line(fleet)
+
+    # One switch is one sentence, and the line is the higher-ranked one -
+    # the same order the dashboard's health.why_not_syncing uses.
+    assert _two_stops_line({"sync_guard": {"halt": {"active": True}},
+                            "paused": False}) is None
+    assert _two_stops_line({"paused": True}) is None
+
+
+# -- SYS-21 (a): one help page, one constant --------------------------------
+
+def test_the_help_page_has_one_url_and_one_route() -> None:
+    from ccsync_companion import ui_copy
+
+    assert ui_copy.HELP_URL_PATH == "/help"
+    assert ui_copy.help_url({"dashboard_url": "https://nas.example.ts.net/"}) == (
+        "https://nas.example.ts.net/help")
+    assert ui_copy.help_url({"dashboard_url": "https://nas.example.ts.net"}) == (
+        "https://nas.example.ts.net/help")
+    # None, never a relative path or a guess: a help link that lands on the
+    # wrong host is worse than a button that is not offered, and a computer
+    # with no dashboard yet is exactly the one whose editor would click it.
+    assert ui_copy.help_url({}) is None
+    assert ui_copy.help_url(None) is None
+    assert ui_copy.help_url({"dashboard_url": "   "}) is None

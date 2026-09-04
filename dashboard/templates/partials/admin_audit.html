@@ -7,7 +7,7 @@
    has to be taught about every time a route starts writing a row. #}
 <div class="admin-users-box" id="admin-audit">
   <div class="side-head">[ WHAT CHANGED ]
-    <span class="muted">Every tick, halt, resume, deletion, publish and pushed update,
+    <span class="muted">Every tick, stop, resume, deletion, publish and pushed update,
       with who did it. Kept for {{ audit_max_age_days }} days.</span></div>
 
   <form class="inline-form" style="margin-bottom:0.6rem"
@@ -50,7 +50,7 @@
   {% elif audit_query %}
     <div class="muted">nothing in the timeline matches "{{ audit_query }}"</div>
   {% else %}
-    <div class="muted">nothing has been recorded yet. Every tick, halt, deletion and
+    <div class="muted">nothing has been recorded yet. Every tick, stop, deletion and
       publish from here on lands in this list.</div>
   {% endif %}
 </div>

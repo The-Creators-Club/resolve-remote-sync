@@ -649,8 +649,20 @@ def check_now(conn, settings, app_state) -> dict[str, Any]:
     except Exception:                                                 # noqa: BLE001
         log.warning("could not record the feed's runtime-mismatch state", exc_info=True)
     refused = record_offer_state(conn, valid_records, now)
+    # SYS-2 / SYS-7 (usability sweep 2026-09-04): LAST, and after the packages
+    # on purpose. A dashboard that is about to re-exec must not do it in the
+    # middle of publishing a companion build, and the companion records are
+    # what a newer dashboard is needed FOR. Never fatal: a check that could
+    # fail over its own update advice would be worse than one that does not
+    # update itself.
+    dashboard_applied = ""
+    try:
+        dashboard_applied = apply_dashboard_policy(
+            conn, settings, app_state, effective_policy(conn, settings), now)
+    except Exception:                                                 # noqa: BLE001
+        log.warning("the unattended dashboard update check failed", exc_info=True)
     return {"ok": True, "error": None, "applied": applied, "retracted": retracted,
-            "refused": refused}
+            "refused": refused, "dashboard_applied": dashboard_applied}
 
 
 def record_offer_state(conn, valid_records: list[dict[str, Any]], now: str) -> list[str]:
@@ -762,8 +774,14 @@ def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]]
                         conn, settings, platform=platform, version=version, kind=kind)
                 except package_store.PackageStoreError as exc:
                     conn.rollback()
+                    # REL-1: the soak gate stands here too now, so this is
+                    # routinely "nothing has run it yet" rather than a fault.
+                    # It stays a WARNING because on a `current` site it is the
+                    # one line that explains why the fleet is still being
+                    # offered yesterday's build.
                     log.warning("release feed (current policy) did NOT make %s/%s %s "
-                                "current: %s", kind, platform, version, exc.detail)
+                                "current -- %s %s", kind, platform, version,
+                                package_store.STAGED_SENTENCE, exc.detail)
                     continue
                 conn.commit()
                 log.info("release feed (current policy) made %s/%s %s current again",
@@ -771,11 +789,13 @@ def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]]
                 applied.append(f"{kind}/{platform} {version}")
             continue
         # bug-hunt-2026-09-03 dash-release-jobs-3: asked BEFORE the download.
-        # store_verified_package refuses a make_current publish this dashboard
-        # is too old for, after streaming up to 200 MiB into a .part it then
-        # unlinks -- and refuses the whole publish with it, so the build was
-        # re-fetched and re-thrown-away on every check and never reached the
-        # shelf. Staging it is what its own comment says should happen.
+        # store_verified_package used to REFUSE a make_current publish this
+        # dashboard is too old for, after streaming up to 200 MiB into a .part
+        # it then unlinked -- so the build was re-fetched and re-thrown-away on
+        # every check and never reached the shelf. It stages with a note now
+        # (REL-1, 2026-09-04) and this pre-check stays: it keeps the LOG line
+        # honest about what the poller decided, and asking a question about a
+        # record is cheaper than downloading one.
         stage_only = package_store.blocks_on_dashboard_version(
             kind, record.get("requires_dashboard"))
         if stage_only:
@@ -784,7 +804,7 @@ def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]]
                      "dashboard, then make it current from the Packages page.",
                      kind, platform, version, record.get("requires_dashboard"), VERSION)
         try:
-            publish_from_feed(
+            view = publish_from_feed(
                 conn, settings, app_state, kind=kind, platform=platform, version=version,
                 make_current=(policy == "current" and not stage_only),
                 published_by="release-feed",
@@ -793,10 +813,159 @@ def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]]
             log.warning("release feed auto-publish of %s/%s %s failed: %s",
                         kind, platform, version, exc.detail)
             continue
-        applied.append(f"{kind}/{platform} {version}")
+        # REL-1: say WHICH of the two things happened. "auto-published" over a
+        # build that was staged rather than made current is the sentence that
+        # made a `current` site look like it was keeping up when it was not.
+        note = str((view or {}).get("staged_note") or "")
+        applied.append(f"{kind}/{platform} {version}" + (" (STAGED)" if note else ""))
     if applied:
         log.info("release feed (%s policy) auto-published: %s", policy, ", ".join(applied))
     return applied
+
+
+# ------------------------------------------- the dashboard's own code (SYS-2)
+#
+# "The dashboard is the one component with no unattended update path, and it
+# gates every companion update through requires_dashboard" (SYS-2 / SYS-7,
+# usability sweep 2026-09-04). One version stale and the whole fleet's
+# companion updates stop, silently, on a site where nobody clicks anything --
+# and the feed refusal that says so is the only signal, because the derived
+# alerts measure the fleet against what THIS dashboard published.
+#
+# So `policy = "current"` now means what it says for the dashboard's own code
+# too, on the ONE pathway where the container can replace it: image mode, where
+# `dashboard_update` applies a signed bundle onto the data volume and re-execs
+# (ZERO_TOUCH_PLAN.md WP K). Everything else is left exactly as it was and said
+# out loud instead:
+#
+#   * BIND-MOUNT mode: the code comes from server/install_dashboard_app.py and
+#     this container cannot replace it. The operator command is named.
+#   * A RUNTIME update (a bundle built against a different image): its
+#     dependencies are not in this container's venv, so applying it would break
+#     the boot. preflight refuses it and always did; the image comes from the
+#     NAS's own app manager.
+#
+# The soak is the SAME IDEA as the companions' (REL-1) with the only evidence a
+# dashboard bundle can have: age. There is no fleet of dashboards to canary on,
+# so "has anything run it" cannot be asked -- what can be asked is whether the
+# vendor has left it standing for the soak window, which is the window in which
+# a bad release is recalled. `soak_minutes = 0` turns this off with everything
+# else it turns off.
+
+# Where the one-line answer to "why has this dashboard not updated itself"
+# lives. A `meta` row, not a feed_state column: this wave adds no migration
+# (E1 owns v50), and a note that outlives a restart is all that is needed --
+# the HEALTH page's [ WHAT IS RUNNING ] box reads it.
+AUTO_UPDATE_NOTE_KEY = "dashboard_auto_update_note"
+
+
+def _dashboard_auto_apply_reason(conn, settings, app_state, now: str) -> tuple[str, str]:
+    """(version to apply, why not). Exactly one of the two is non-empty.
+
+    Never raises and never applies anything: every refusal is a sentence the
+    caller logs and records, because "the dashboard did not update itself" is
+    a thing an operator has to be able to read, not infer.
+    """
+    from . import dashboard_update, package_store
+
+    try:
+        state = dashboard_update.status(settings, app_state)
+    except Exception:                                                 # noqa: BLE001
+        log.warning("could not read the dashboard update state", exc_info=True)
+        return "", "the dashboard's own update state could not be read"
+    if not state.get("image_mode"):
+        return "", (
+            "this deployment updates from your wired computer, not over the air: "
+            "run  tools\\ship.cmd -DashboardOnly  there to update it")
+    if state.get("in_progress"):
+        return "", "an update to this dashboard is already running"
+    runtime = state.get("runtime_updates") or []
+    updates = state.get("code_updates") or []
+    if not updates:
+        if runtime:
+            return "", (
+                f"dashboard {runtime[0].get('version')} is on offer but was built "
+                f"against a different container image, so this container cannot "
+                f"apply it. Update the image from your NAS's own app manager "
+                f"(docs/DOCKER.md), then check again")
+        return "", ""
+    entry = updates[0]
+    version = str(entry.get("version") or "")
+    read = dashboard_update.read_state(settings)
+    if (str(read.get("step") or "") == "failed"
+            and str(read.get("version") or "") == version):
+        # Tried, and it did not work. Retrying it on every poll would be a
+        # restart loop with a signed bundle in it; the admin's own [ APPLY ]
+        # button is deliberately still there.
+        return "", (f"dashboard {version} was tried here and failed "
+                    f"({read.get('error') or 'no reason recorded'}); it will not be "
+                    f"retried automatically")
+    soak_minutes = package_store.soak_minutes_for(conn, settings)
+    published_at = str(entry.get("published_at") or "")
+    if soak_minutes > 0:
+        if not published_at:
+            return "", (f"dashboard {version} carries no publication date, so nothing "
+                        f"here can tell whether it has stood for the {soak_minutes} min "
+                        f"soak")
+        try:
+            age_minutes = db.age_seconds(published_at, now) / 60.0
+        except Exception:                                             # noqa: BLE001
+            return "", (f"dashboard {version}'s publication date could not be read, so "
+                        f"its soak cannot be measured")
+        if age_minutes < soak_minutes:
+            return "", (f"dashboard {version} was published {int(age_minutes)} min ago "
+                        f"and the soak is {soak_minutes} min")
+    return version, ""
+
+
+def apply_dashboard_policy(conn, settings, app_state, policy: str, now: str) -> str:
+    """Take a newer dashboard bundle unattended under `policy = current`.
+
+    Returns the version an apply was STARTED for, or "". The apply itself is
+    dashboard_update's, with every one of its stand-down rules intact:
+    preflight refuses a runtime mismatch, an in-flight update, a full data
+    volume and (without force) live YouTube jobs, and the boot-attempt guard
+    rolls the tree back if the new code will not start.
+    """
+    if policy != "current":
+        return ""
+    version, why = _dashboard_auto_apply_reason(conn, settings, app_state, now)
+    if not version:
+        if why:
+            log.info("release feed (current policy) is NOT updating this dashboard: %s",
+                     why)
+            try:
+                db.meta_set(conn, AUTO_UPDATE_NOTE_KEY, why)
+                conn.commit()
+            except Exception:                                         # noqa: BLE001
+                pass
+        return ""
+    from . import dashboard_update
+
+    log.warning("release feed (current policy): applying dashboard %s. The dashboard "
+                "restarts for about ten seconds when it lands.", version)
+    try:
+        db.meta_set(conn, AUTO_UPDATE_NOTE_KEY,
+                    f"taking dashboard {version} now: this server restarts for about "
+                    f"ten seconds when it lands.")
+        conn.commit()
+    except Exception:                                                 # noqa: BLE001
+        pass
+    try:
+        dashboard_update.start_apply(
+            settings, app_state, version=version, force=False,
+            started_by="release-feed (policy=current)")
+    except Exception as exc:                                          # noqa: BLE001
+        detail = getattr(exc, "detail", None) or str(exc)
+        log.warning("release feed: dashboard %s was NOT applied: %s", version, detail)
+        try:
+            db.meta_set(conn, AUTO_UPDATE_NOTE_KEY,
+                        f"dashboard {version} was not applied: {detail}")
+            conn.commit()
+        except Exception:                                             # noqa: BLE001
+            pass
+        return ""
+    return version
 
 
 def sha_conflict(existing: Any, record: dict[str, Any]) -> bool:
@@ -875,6 +1044,29 @@ def publish_from_feed(
         raise package_store.PackageStoreError(400, "feed record's url is not https -- refused")
     sha_expected = str(record.get("sha256", "")).lower()
 
+    # REL-7 (usability sweep 2026-09-04): BEFORE a byte moves, against the
+    # record's own DECLARED size -- which the human PUT never has and this
+    # path always does. This is the unattended writer: a daily poller under
+    # `stage`/`current`, streaming up to 200 MiB into the volume the SQLite
+    # database lives on with nobody looking at the free-space gauge on the
+    # Packages page. The refusal is recorded as the feed's `last_error` so the
+    # banner says it, because a log line on a `policy = current` site is a
+    # sentence nobody will ever read.
+    from . import dashboard_update
+
+    declared = int(record.get("size_bytes") or 0)
+    refusal = dashboard_update.space_refusal(
+        settings, declared, what=f"taking {kind} {version}")
+    if refusal:
+        message = (f"could not take {kind} {version}: "
+                   f"{refusal.split(': ', 1)[-1]}")
+        try:
+            db.set_feed_state(conn, last_error=message)
+            conn.commit()
+        except Exception:                                             # noqa: BLE001
+            log.warning("could not record the feed's disk-space refusal", exc_info=True)
+        raise package_store.PackageStoreError(507, message)
+
     dest_dir = settings.packages_path() / platform
     dest_dir.mkdir(parents=True, exist_ok=True)
     part = dest_dir / f"{filename}.{uuid.uuid4().hex}.part"
@@ -897,7 +1089,11 @@ def publish_from_feed(
     # settings.release_pubkeys -- belt and braces on top of _valid_records'
     # check at fetch time, and the ONLY check that matters for what actually
     # lands in companion_packages (see its docstring).
-    package_store.store_verified_package(
+    #
+    # REL-1: it returns a NOTE, not a refusal, when the flip was gated. The
+    # bytes are on the shelf either way; `staged_note` is what the caller
+    # prints and what the /check response carries.
+    note = package_store.store_verified_package(
         conn, settings,
         kind=kind, platform=platform, version=version, filename=filename,
         sha256=sha, size_bytes=size,
@@ -932,7 +1128,11 @@ def publish_from_feed(
         prune=True,
         part_path=part,
     )
-    return build_packages_view(conn, settings)
+    view = build_packages_view(conn, settings)
+    view["staged_note"] = note
+    if note:
+        log.info("release feed: %s/%s %s was %s", kind, platform, version, note)
+    return view
 
 
 def build_feed_view(conn, settings, app_state) -> dict[str, Any]:

@@ -99,7 +99,7 @@ def whisper_ready(cfg: dict[str, Any]) -> tuple[bool, str]:
     pipeline = str(cfg.get("jobs_mulcam_pipeline", "") or "").strip()
     if not python or not pipeline:
         return False, ("jobs_whisper_python and jobs_mulcam_pipeline are not "
-                       "both set in this machine's config")
+                       "both set in this computer's config")
     if not _exists(python):
         return False, f"jobs_whisper_python does not exist here: {python}"
     if not _exists(pipeline):
@@ -345,8 +345,16 @@ def _jobs_gate(
         return {}
     if not isinstance(answer, dict) or "reason" not in answer:
         return {}
-    return {"taking_work": bool(answer.get("taking_work")),
+    # `reason` is the machine-readable state (wave 3's contract) and `detail`
+    # is the one sentence beside it, which for `local_work` is the whole
+    # content of the answer: WHICH work of the editor's own is in the way
+    # (CMEDIA-1). Omitted when there is none, never sent as "".
+    gate = {"taking_work": bool(answer.get("taking_work")),
             "reason": str(answer.get("reason") or "")}
+    detail = str(answer.get("detail") or "").strip()
+    if detail:
+        gate["detail"] = detail
+    return gate
 
 
 def _volunteer_until(

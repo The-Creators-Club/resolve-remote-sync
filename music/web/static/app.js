@@ -115,8 +115,8 @@ function toast(node, ms = 6000) {
 // JSON, and caching it left the track with garbage peaks until a reload -
 // MUSIC-4, 2026-08-11).
 const NO_WAVEFORM =
-  'No waveform yet: this track was added by the fleet and the base rig has not '
-  + 'analysed it. Seeking still works.';
+  'No waveform yet: this track was added by the fleet and the indexing '
+  + 'computer has not analysed it. Seeking still works.';
 
 async function loadPeaks(id) {
   if (state.peaks.has(id)) return {data: state.peaks.get(id), note: ''};
@@ -307,7 +307,11 @@ const COMPANION = 'http://127.0.0.1:8899';
 
 async function companion(path, opts) {
   const r = await fetch(COMPANION + path, opts);
-  if (!r.ok) throw new Error(`companion ${r.status}`);
+  // The `tray ` prefix is the SENTINEL both catch blocks below test with
+  // startsWith: it separates "the tray answered with an HTTP error" from a
+  // fetch that never reached 127.0.0.1. Section 4 of the 2026-09-03 sweep
+  // renamed it together with the copy so the two cannot drift apart.
+  if (!r.ok) throw new Error(`tray HTTP ${r.status}`);
   return r.json();
 }
 
@@ -335,8 +339,8 @@ async function sendToResolve(t, action, btn, msg) {
         const pct = r.progress && Number.isInteger(r.progress.percent) ? r.progress.percent : null;
         msg.className = 'rmsg';
         msg.textContent = announced
-          ? (pct == null ? 'syncing the track to this machine…' : `syncing the track to this machine: ${pct}%`)
-          : 'track isn’t on this machine yet: syncing it down, then sending…';
+          ? (pct == null ? 'syncing the track to this computer…' : `syncing the track to this computer: ${pct}%`)
+          : 'track isn’t on this computer yet: syncing it down, then sending…';
         announced = true;
         await new Promise(res => setTimeout(res, 1500));
         continue;
@@ -364,15 +368,16 @@ async function sendToResolve(t, action, btn, msg) {
   } catch (e) {
     msg.className = 'rmsg err';
     // The two failure shapes were INVERTED here (2026-08-12): an Error
-    // starting "companion" comes from companion() after the tray app
+    // starting "tray " comes from companion() after the tray app
     // ANSWERED with an HTTP error -- it is running; while a TypeError from
     // fetch() means the request never reached 127.0.0.1 -- companion down,
     // OR the browser blocked local connections (Chrome's local-network
     // permission on an http:// dashboard origin does exactly this).
-    msg.textContent = e.message.startsWith('companion')
-      ? `the companion answered but refused the request (${e.message}), see its log`
-      : 'couldn’t reach the ccsync companion: tray app not running, or the '
-        + 'browser blocked local connections (self-test: open '
+    msg.textContent = e.message.startsWith('tray ')
+      ? `the CC Sync tray answered but refused the request (${e.message}). `
+        + 'Settings > Help > Copy diagnostics in the tray has the reason.'
+      : 'couldn’t reach the CC Sync tray: it is not running, or the browser '
+        + 'blocked local connections (self-test: open '
         + 'http://127.0.0.1:8899/status)';
   } finally {
     acts.forEach(b => { b.disabled = false; });
@@ -401,12 +406,12 @@ async function revealOnThisMachine(t, btn, msg) {
     msg.className = 'rmsg err';
     // Same two shapes sendToResolve distinguishes -- and one more here: a
     // companion older than the build that added /music/reveal answers 404,
-    // which arrives as "companion 404" rather than as silence.
-    msg.textContent = e.message.startsWith('companion')
-      ? `the companion refused the request (${e.message}): an older build has `
-        + 'no reveal; update the tray app'
-      : 'couldn’t reach the ccsync companion: tray app not running, or the '
-        + 'browser blocked local connections (self-test: open '
+    // which arrives as "tray HTTP 404" rather than as silence.
+    msg.textContent = e.message.startsWith('tray ')
+      ? `the CC Sync tray refused the request (${e.message}): an older build `
+        + 'has no reveal. Take the update your tray offers.'
+      : 'couldn’t reach the CC Sync tray: it is not running, or the browser '
+        + 'blocked local connections (self-test: open '
         + 'http://127.0.0.1:8899/status)';
   } finally {
     btn.disabled = false;
@@ -614,7 +619,7 @@ function noteUnknownHidden(answer) {
     + `${n === 1 ? 'is' : 'are'} not shown`);
   head.appendChild(note);
   const btn = el('button', 'text-btn', '[ include them ]');
-  btn.title = 'Show tracks the base rig has not analysed yet';
+  btn.title = 'Show tracks the indexing computer has not analysed yet';
   btn.onclick = () => { state.includeUnknown = true; syncUnknownToggle(); loadTracks(); };
   head.appendChild(btn);
 }
@@ -763,7 +768,7 @@ async function ingest(files) {
     if (r.mode === 'queued' && r.queued) {
       out.appendChild(el('div', 'muted',
         'nothing was analysed: this host has no GPU. They are in the library and '
-        + 'will not be searchable until the base rig indexes them'
+        + 'will not be searchable until the indexing computer indexes them'
         + (r.pending > r.queued ? ` (${r.pending} waiting in all)` : '') + '.'));
     }
     r.results.forEach(x => {

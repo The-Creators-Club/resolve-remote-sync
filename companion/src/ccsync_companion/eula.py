@@ -232,15 +232,15 @@ def acceptance_problem(path: Optional[Path] = None) -> Optional[str]:
         return None
     record = read_acceptance(path)
     if not record:
-        return ("The CC Sync licence agreement has not been accepted on this machine. "
+        return ("The CC Sync licence agreement has not been accepted on this computer. "
                 "Press [ READ AND ACCEPT THE LICENCE ] in Settings, THIS COMPUTER.")
     accepted = str(record.get("version") or "").strip()
     if not accepted:
-        return ("The licence acceptance record on this machine is unreadable. "
+        return ("The licence acceptance record on this computer is unreadable. "
                 "Press [ READ AND ACCEPT THE LICENCE ] in Settings, THIS COMPUTER.")
     if not version_at_least(accepted, EULA_VERSION):
         return (f"The CC Sync licence agreement has been updated (version {EULA_VERSION}; "
-                f"this machine accepted {accepted}). Press [ READ AND ACCEPT THE LICENCE ] "
+                f"this computer accepted {accepted}). Press [ READ AND ACCEPT THE LICENCE ] "
                 "in Settings, THIS COMPUTER.")
     return None
 

@@ -520,7 +520,7 @@ def test_a_track_that_cannot_be_embedded_is_left_for_the_base_rig(tmp_path):
     # gate and the load (a deleted cache, a half-written download). The gate
     # is still open, so the drain reaches the track and has to decide.
     sidecar.raise_on_embed = music_clap_sidecar.ModelUnavailable(
-        "the music indexing model is not downloaded on this machine yet")
+        "the music indexing model is not downloaded on this computer yet")
     _ing, server, _sidecar, queue, batch = _run_one(tmp_path, sidecar=sidecar)
     item = batch["items"][0]
 
@@ -750,7 +750,7 @@ def test_the_music_checkpoint_is_the_same_save():
 def _queued_batch(tmp_path):
     sidecar = FakeSidecar()
     sidecar.raise_on_embed = music_clap_sidecar.ModelUnavailable(
-        "the music indexing model is not downloaded on this machine yet")
+        "the music indexing model is not downloaded on this computer yet")
     return _run_one(tmp_path, sidecar=sidecar)
 
 
@@ -775,7 +775,10 @@ def test_a_queued_track_is_counted_and_the_window_can_finish(tmp_path):
 
     model = ing.progress_model()
     assert model.finished is True
-    assert "need the base rig to finish" in model.note
+    # Wave 5 of the 2026-09-03 sweep: an editor never reads "base rig",
+    # and a count is a real plural rather than "1 track(s)".
+    assert model.note == ("Waiting for the computer that is wired to the "
+                          "server: 1 track still on this computer.")
     assert ing.progress()["batch"]["queued_for_base_rig"] == 1
 
 

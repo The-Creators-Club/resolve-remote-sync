@@ -25,9 +25,10 @@
 
   {% if not dash_update.image_mode %}
     <div class="muted" style="margin-top:0.6rem">
-      This deployment updates from the base rig, not over the air: its code is bind-mounted
-      from the NAS by <span class="mono-sm">server/install_dashboard_app.py</span>.
-      Move it to the container image (docs/DOCKER.md) to update it from this page.
+      This deployment updates from your wired computer, not over the air: its code is read
+      straight off the server rather than from an installed package.
+      Ask whoever installed this server to move it onto the update channel if you want to
+      update from this page.
     </div>
   {% else %}
     <div id="dashupd-progress" class="muted" style="margin-top:0.6rem"

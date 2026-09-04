@@ -105,9 +105,9 @@ const ING_TIER_LABELS = {
    plain-http dashboard origin from reaching 127.0.0.1 with the identical
    error. /status in a tab is never gated, so it disambiguates. */
 const ING_COMPANION_HINT =
-  "not reachable: companion not running, or the browser blocked local " +
-  "connections (self-test: open http://127.0.0.1:8899/status in a tab; if " +
-  "that shows ok:true it is the browser, not the companion)";
+  "not reachable: the CC Sync tray is not running, or the browser blocked " +
+  "local connections (self-test: open http://127.0.0.1:8899/status in a tab; " +
+  "if that shows ok:true it is the browser, not the tray)";
 
 const ing = {
   open: false,
@@ -577,7 +577,7 @@ async function ingestLoopback(method, path, body) {
   try { parsed = await res.json(); } catch { parsed = null; }
   if (!res.ok) {
     const err = new Error((parsed && (parsed.message || parsed.detail)) ||
-                          `companion returned HTTP ${res.status}`);
+                          `the CC Sync tray returned HTTP ${res.status}`);
     err.status = res.status;
     err.body = parsed;
     throw err;
@@ -599,8 +599,8 @@ async function ingestCapabilities(loud) {
     // /broll/ingest route - the same "editors need a republished companion"
     // gap /music/* had. Worth its own sentence: nothing is wrong with it.
     ing.capsError = e.status === 404
-      ? "your companion app is too old for b-roll ingest: update it from the " +
-        "tray icon (check for updates), then reload this page"
+      ? "your CC Sync tray is too old for b-roll ingest: take the update it " +
+        "offers, then reload this page"
       : ING_COMPANION_HINT;
     dot.className = "status-dot status-bad";
     text.textContent = ing.capsError;
@@ -618,7 +618,7 @@ async function ingestCapabilities(loud) {
   else if (gpu.present === false) bits.push("no GPU");
   text.textContent = caps.ok
     ? `connected (${bits.join(", ")})`
-    : `companion can't index yet: ${(caps.reasons || []).join("; ") || "unknown"}`;
+    : `the CC Sync tray can't index yet: ${(caps.reasons || []).join("; ") || "unknown"}`;
   if (!ing.tier) ing.tier = ingestDefaultTier();
   ingestRenderTiers();
   ingestRenderSummary();
@@ -712,7 +712,7 @@ async function ingestPrepare() {
   // nothing on screen to say why.
   if (!ing.caps) await ingestCapabilities(false);
   if (!ing.caps) {
-    ingestSetNotice(`Your companion app is not answering, so these clips cannot ` +
+    ingestSetNotice(`The CC Sync tray is not answering, so these clips cannot ` +
                     `be staged: ${ing.capsError || ING_COMPANION_HINT}`);
     return;
   }
@@ -731,7 +731,7 @@ async function ingestPrepare() {
   try {
     answer = await ingestLoopback("POST", "/broll/ingest/prepare", body);
   } catch (e) {
-    ingestSetNotice(`The companion could not stage this drop: ${e.message}`);
+    ingestSetNotice(`The CC Sync tray could not stage this drop: ${e.message}`);
     return;
   }
   ing.stagingId = answer.staging_id || null;
@@ -880,7 +880,7 @@ function ingestUploadItem(item) {
     done(true, "");
   };
   xhr.onerror = () =>
-    done(false, "upload failed. Is the companion still running?", true);
+    done(false, "upload failed. Is the CC Sync tray still running?", true);
   xhr.onabort = () => done(
     false,
     stalled ? "the upload stopped moving." : "the upload was stopped.",
@@ -1164,7 +1164,7 @@ function ingestUpdateRow(item) {
   }
 
   if (item.accepted === false) {
-    n.meta.textContent = item.reason || "the companion refused this clip";
+    n.meta.textContent = item.reason || "the CC Sync tray refused this clip";
     n.meta.classList.add("bad");
   } else if (item.retryNote) {
     n.meta.textContent = item.retryNote;
@@ -1216,7 +1216,7 @@ function ingestRenderTiers() {
       // Named refusal, never a silently missing option: "Best is greyed out"
       // with no reason is the same bug as a tray that says nothing.
       const why = (info && (info.reason || info.detail)) ||
-        `this machine's GPU can't hold it${ing.caps && ing.caps.gpu && ing.caps.gpu.vram_gb
+        `this computer's GPU can't hold it${ing.caps && ing.caps.gpu && ing.caps.gpu.vram_gb
           ? ` (${ing.caps.gpu.vram_gb} GB VRAM)` : ""}`;
       text.appendChild(el("span", { className: "muted small", text: why }));
     } else if (info && info.cached === false) {
@@ -1283,7 +1283,7 @@ async function ingestRun() {
     const size = info.download_bytes || info.bytes || info.size_bytes;
     const how = size ? `about ${ingestBytes(size)}` : "several gigabytes";
     if (!window.confirm(
-      `The ${ing.tier} model isn't on this machine yet. Running this batch ` +
+      `The ${ing.tier} model isn't on this computer yet. Running this batch ` +
       `downloads it first (${how}). Continue?`)) return;
   }
 
@@ -1342,8 +1342,8 @@ async function ingestRun() {
       e.status === 503
         ? `${e.message} The batch is queued on the server: change the model ` +
           `and run it again, or press [ take over on this computer ] on it ` +
-          `from another of your machines.`
-        : `The companion did not take the batch: ${e.message}`);
+          `from another of your computers.`
+        : `The CC Sync tray did not take the batch: ${e.message}`);
     ingestLoadBatches();
     ingestRenderSummary();
     return;
@@ -1353,8 +1353,8 @@ async function ingestRun() {
   ing.running = true;
   $("#ingest-live").classList.remove("hidden");
   toast(ing.runMode === "foreground"
-    ? "Indexing started on this machine."
-    : "Queued: it starts when you step away from this machine.", "success");
+    ? "Indexing started on this computer."
+    : "Queued: it starts when you step away from this computer.", "success");
   ingestStartPolling();
   ingestLoadBatches();
   ingestRenderSummary();
@@ -1422,7 +1422,7 @@ function ingestRenderLive() {
   } else if (ing.running) {
     box.appendChild(el("div", {
       className: "muted small",
-      text: "the companion isn't answering right now - the batch keeps its place " +
+      text: "the CC Sync tray isn't answering right now - the batch keeps its place " +
             "on the server (" + ING_COMPANION_HINT + ")",
     }));
   }
@@ -1451,7 +1451,7 @@ function ingestRenderLive() {
 async function ingestControl(action) {
   try {
     const answer = await ingestLoopback("POST", "/broll/ingest/control", { action: action });
-    toast(`Companion: ${(answer && answer.state) || action}.`, "");
+    toast(`CC Sync tray: ${(answer && answer.state) || action}.`, "");
   } catch (e) {
     toast(e.message, "error");
   }
@@ -1504,7 +1504,7 @@ async function ingestCancelUid(uid) {
     try { await ingestLoopback("POST", "/broll/ingest/control", { action: "cancel" }); }
     catch { /* it will hear it from the heartbeat */ }
   }
-  toast("Cancel requested: the machine stops within a heartbeat.", "");
+  toast("Cancel requested: the computer stops within a heartbeat.", "");
   ingestPollServer();
   ingestLoadBatches();
 }
@@ -1581,7 +1581,7 @@ function ingestRenderBatches() {
 
     const who = [];
     if (ing.scope === "all" && batch.editor) who.push(batch.editor);
-    who.push(batch.machine || "no machine yet");
+    who.push(batch.machine || "no computer yet");
     if (batch.last_heartbeat_at) who.push(`heartbeat ${ingestAgo(batch.last_heartbeat_at)}`);
     if (batch.settings) {
       who.push(batch.settings.tier || "good");
@@ -1779,9 +1779,9 @@ const ING_GATE_LABELS = {
   "paused": "paused",
   "no-ffmpeg": "waiting for ffmpeg to be installed",
   "drive-absent": "waiting: the sync drive is not connected",
-  "misconfigured": "waiting: this machine's sync config needs fixing",
+  "misconfigured": "waiting: this computer's sync config needs fixing",
   "tier-unfit": "this GPU cannot run the chosen model",
-  "disabled": "b-roll ingest is off on this machine",
+  "disabled": "b-roll ingest is off on this computer",
   "nothing-to-do": "nothing to do",
   "running": "indexing",
 };

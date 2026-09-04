@@ -37,8 +37,14 @@ def make_repo(tmp_path: Path) -> Path:
     is supposed to leave behind."""
     root = tmp_path / "repo"
     for rel in ("dashboard/src/ccsync_dashboard", "dashboard/templates", "dashboard/static",
-                "dashboard/deploy", "broll/web/app", "music/web/musicweb", "ytdl/web/ytdlweb"):
+                "dashboard/deploy", "broll/web/app", "music/web/musicweb", "ytdl/web/ytdlweb",
+                # REL-5 (usability sweep 2026-09-04): the legal paperwork and
+                # the help guide travel with the code now, so a checkout
+                # without them is a checkout this builder refuses.
+                "docs/legal"):
         (root / rel).mkdir(parents=True)
+    (root / "docs/legal/EULA.md").write_text("<!-- EULA-VERSION: 1.0 -->\n")
+    (root / "docs/HOW_IT_WORKS.md").write_text("# How it works\n")
     (root / "dashboard/src/ccsync_dashboard/__init__.py").write_text('VERSION = "9.9.9"\n')
     (root / "dashboard/templates/base.html").write_text("<html></html>\n")
     (root / "dashboard/static/style.css").write_text("body{}\n")
@@ -76,7 +82,7 @@ def read_bundle(path: Path) -> tuple[dict, list[str]]:
 # ------------------------------------------------------------------ layout
 
 
-def test_bundle_carries_exactly_the_seven_trees(repo, tmp_path):
+def test_bundle_carries_exactly_the_seven_trees_and_the_two_documents(repo, tmp_path):
     result = bdb.build(repo, tmp_path / "out", allow_dirty=True, version="9.9.9")
     manifest, names = read_bundle(result["path"])
     assert result["path"].name == "ccsync-dashboard-9.9.9.tar.gz"
@@ -84,6 +90,12 @@ def test_bundle_carries_exactly_the_seven_trees(repo, tmp_path):
         "broll-app/app/main.py",
         "deploy/Dockerfile",
         "deploy/requirements.lock",
+        # REL-5 (usability sweep 2026-09-04): the licence agreement the
+        # first-run wizard makes an admin accept, and the guide /help renders.
+        # An over-the-air dashboard that arrived without them showed an empty
+        # licence box with a disabled [ ACCEPT ] and ticked `eula` green.
+        "docs/HOW_IT_WORKS.md",
+        "docs/legal/EULA.md",
         "music-app/musicweb/main.py",
         "src/ccsync_dashboard/__init__.py",
         "static/style.css",
@@ -91,6 +103,25 @@ def test_bundle_carries_exactly_the_seven_trees(repo, tmp_path):
         "ytdl-app/ytdlweb/main.py",
     ]
     assert set(manifest["files_sha256"]) == set(names)
+
+
+def test_a_checkout_with_no_licence_agreement_is_refused(repo, tmp_path):
+    """REL-5: not "warn and build". A bundle is what a customer's dashboard
+    installs over the air, and one that quietly dropped the EULA would put
+    every OTA site straight back into the state this wave found."""
+    import shutil
+
+    shutil.rmtree(repo / "docs" / "legal")
+    with pytest.raises(bdb.BundleError) as exc:
+        bdb.build(repo, tmp_path / "out", allow_dirty=True, version="9.9.9")
+    assert "docs/legal" in str(exc.value)
+
+    (repo / "docs" / "legal").mkdir()
+    (repo / "docs" / "legal" / "EULA.md").write_text("<!-- EULA-VERSION: 1.0 -->\n")
+    (repo / "docs" / "HOW_IT_WORKS.md").unlink()
+    with pytest.raises(bdb.BundleError) as exc:
+        bdb.build(repo, tmp_path / "out", allow_dirty=True, version="9.9.9")
+    assert "HOW_IT_WORKS" in str(exc.value)
 
 
 def test_templates_and_static_are_in_the_bundle(repo, tmp_path):

@@ -319,7 +319,7 @@ def test_why_names_the_reason_per_machine(conn):
     assert answer["schedulable"] is False
     assert len(answer["machines"]) == 2
     assert all(not m["ok"] for m in answer["machines"])
-    assert "no machine can take this job" in answer["summary"]
+    assert "no computer can take this job" in answer["summary"]
 
 
 def test_why_says_who_is_holding_it(conn):

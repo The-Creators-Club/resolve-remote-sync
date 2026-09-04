@@ -132,6 +132,17 @@ companion ever hears about it, and:
 * eight dashboard template strings and `ytdl/web/static/app.js:1867`
   (`'Projects\\' + ...`, with the hint `(P: on Windows)`) spell it out.
 
+**Status 2026-09-04 (SYS-20): now a REFUSAL, not a silent breakage.** The
+audit's own recommendation ("plumbed end to end or removed") was answered the
+cheap way round, because a key that cannot work should not be settable while
+the plumbing is unbuilt: `settings.py` refuses to boot a dashboard whose
+`DASH_SITE_PROJECTS_DIR` is anything but `Projects`, on `check_boot_secrets`'
+terms (one hatch, `DASH_DEV_INSECURE=1`, loud in the log), and
+`site_store.import_toml` refuses a pasted `site.toml` carrying one rather
+than dropping it the way it drops `[apps]` and `[stack]`. Everything below
+is still true of the CODE - nothing was plumbed - and stays here as the
+description of what `docs/TREE_LAYOUT_PLAN.md` has to fix.
+
 **Net effect:** a site that sets `projects_dir = "Clients"` today gets a NAS
 mount at `<tree>/Clients`, a collector that strips a `/data/Projects` prefix
 that never matches, a lane B that refuses the whole tree, and a fleet of

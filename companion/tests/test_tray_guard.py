@@ -61,7 +61,13 @@ def _labels(menu):
     return out
 
 
-TRIPPED = {"lane_b_breaker": {"tripped": True, "reason": "the NAS listed the tree as EMPTY"}}
+# SYNC-106: the block carries BOTH sentences since 0.9.69 - the technical
+# one for the log and the report, the editor's for every visible surface.
+TRIPPED = {"lane_b_breaker": {
+    "tripped": True,
+    "reason": "the NAS listed the tree as EMPTY, and it held 12 entries last time",
+    "cause": "remote_empty",
+}}
 HALTED_LOCAL = {"halt": {"active": True, "scope": "local", "reason": "I stopped it"}}
 HALTED_FLEET = {"halt": {"active": True, "scope": "fleet", "reason": "NAS maintenance"}}
 
@@ -70,9 +76,17 @@ HALTED_FLEET = {"halt": {"active": True, "scope": "fleet", "reason": "NAS mainte
 
 
 def test_the_breaker_line_names_the_reason():
+    """...in the EDITOR's words (SYNC-106). "the NAS listed the tree as
+    EMPTY" is the admin's half and stays in the log, the report and
+    copy_diagnostics; what the editor reads says what was not lost and who
+    to ask."""
     line = _breaker_line(TRIPPED)
     assert "PROXY DOWNLOAD STOPPED" in line
-    assert "EMPTY" in line
+    assert "The server suddenly listed nothing" in line
+    assert "Nothing was deleted and your uploads are still running." in line
+    assert "Ask your admin to check the server." in line
+    assert "EMPTY" not in line
+    assert "config.toml" not in line
 
 
 def test_no_breaker_line_when_nothing_is_tripped():
@@ -81,7 +95,7 @@ def test_no_breaker_line_when_nothing_is_tripped():
 
 
 def test_the_halt_line_distinguishes_a_fleet_halt():
-    assert "this machine" in _halt_line(HALTED_LOCAL)
+    assert "this computer" in _halt_line(HALTED_LOCAL)
     assert "everyone" in _halt_line(HALTED_FLEET)
     assert _halt_line({}) is None
 
@@ -103,7 +117,7 @@ def test_the_skipped_exists_line_says_what_will_not_happen():
 
 def test_a_tripped_breaker_puts_the_line_and_the_resume_action_in_the_menu():
     """The full advisory line (_breaker_line's own words, with the reason)
-    moved to Settings -> SYNC LANES (2026-08-27); the reduced tray menu says
+    moved to Settings -> SYNCING (2026-08-27, renamed 2026-09-04); the tray says
     only the short Sync: summary (_sync_line) plus the RESUME action, which
     stays top-level -- an editor whose syncing has stopped must not have to
     go looking for it."""
@@ -124,12 +138,14 @@ def test_stop_all_syncing_lives_in_settings_and_the_tray_only_flips_to_start():
     stays top-level: an editor staring at a stopped tray must not have to go
     looking for it."""
     labels = _labels(_build_menu(_FakeApp({})))
-    assert "Stop ALL syncing on this machine…" not in labels
-    assert "► Start syncing again" not in labels
+    assert "Stop ALL syncing on this computer…" not in labels
+    assert not any(text.startswith("► Clear the sync stop") for text in labels)
 
+    # UX-19: the row is named for its CAUSE, because "Start syncing again" is
+    # exactly what it does not do on a computer that is also paused.
     labels = _labels(_build_menu(_FakeApp(HALTED_LOCAL)))
-    assert "► Start syncing again" in labels
-    assert "Stop ALL syncing on this machine…" not in labels
+    assert "► Clear the sync stop on this computer" in labels
+    assert "Stop ALL syncing on this computer…" not in labels
 
 
 def test_a_fleet_halt_offers_no_local_start_button():
@@ -137,7 +153,7 @@ def test_a_fleet_halt_offers_no_local_start_button():
     the reduced tray menu's Sync: line says the short version."""
     labels = _labels(_build_menu(_FakeApp(HALTED_FLEET)))
     assert "Sync: stopped by your admin" in labels
-    assert "► Start syncing again" not in labels
+    assert not any(text.startswith("► Clear the sync stop") for text in labels)
 
 
 # -- the rebuild trigger ----------------------------------------------------
@@ -249,3 +265,19 @@ def test_the_rollback_line_names_the_build_that_kept_crashing():
     line = _reverted_line({"upgrade": {"reverted_from": "9.9.9"}})
     assert line is not None and "v9.9.9" in line
     assert "\u2014" not in line
+
+
+def test_a_stop_and_a_pause_together_say_there_are_two(monkeypatch):
+    """UX-19: clicking either one leaves the computer not syncing, and until
+    this the menu said nothing about the other."""
+    app = _FakeApp(HALTED_LOCAL)
+    app.is_paused = lambda: True
+    labels = _labels(_build_menu(app))
+    assert "► Clear the sync stop on this computer" in labels
+    assert "▶ Resume syncing (paused by you)" in labels
+    assert any(text.startswith("⚠ Two things are stopping sync") for text in labels)
+    assert "Sync: stopped on this computer (and paused)" in labels
+
+    # ...and one switch on its own does not grow the extra line.
+    only_stopped = _labels(_build_menu(_FakeApp(HALTED_LOCAL)))
+    assert not any(text.startswith("⚠ Two things") for text in only_stopped)

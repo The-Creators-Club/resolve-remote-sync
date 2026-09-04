@@ -172,6 +172,17 @@ owner can act on; `fix` names the button or the tray action; `detail` is the
 technical line and is never in the sentence. The order matters once:
 `red_unexplained` is last and only reports machines no other kind named.
 
+**Every one of those four strings is PRODUCT COPY and follows the sweep's one
+vocabulary** (CR-181, 2026-09-04, `USABILITY_RESILIENCE_SWEEP_2026-09-03.md`
+section 4): a **computer**, never a machine or a rig; **tick** / **sync plan**;
+**upload** / **proxy download** / **folder sync**, never "lane"; and the three
+ways sync can be off are **paused** (you did it), **stopped by your admin** (a
+fleet halt) and **stopped itself** (the proxy-download brake or the disk
+floor). "Halted", "parked" and "breaker" stay in the code, the columns and the
+kind ids - `fleet_halt`, `disk_park` and `breaker_tripped` are all still called
+that - and never reach a reader. `dashboard/tests/test_sweep_2026_09_04_copy.py`
+scans for the retired words in every string this module hands a person.
+
 Per machine (from the fleet view's `guard` section):
 
 | kind | sev | threshold |
@@ -428,7 +439,7 @@ Body, in order:
 3. `WHAT CHANGED THIS WEEK`: the last seven days of the audit ledger
    (`db.audit_since`, first 40 rows, the rest pointed at the TIMELINE page).
 4. `ALERTS SENT THIS WEEK`, failures marked `SEND FAILED`.
-5. `BYTES MOVED` per lane per machine - a live probe of `lane_report_current`
+5. `BYTES MOVED` per transfer per machine - a live probe of `lane_report_current`
    for a bytes column, omitted today because no lane report carries one; the
    section appears by itself the day one does.
 5b. `JOBS: n queued, n running, n abandoned this week` (DDIAG-2,

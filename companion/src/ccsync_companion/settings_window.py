@@ -342,8 +342,8 @@ def action_set_role(app: "CompanionApp", role: str) -> None:
             body = (
                 "Set this computer to WIRED TO THE SERVER? A wired computer "
                 "works straight off the server share, so CCSync will sync "
-                "NOTHING to it: no uploads, no proxy downloads, no shared "
-                "project files. Your admin will not be able to tick projects "
+                "NOTHING to it: no upload, no proxy download, no folder "
+                "sync. Your admin will not be able to tick projects "
                 "for it either. If this laptop keeps its own copy of the "
                 "projects, this is not the setting you want."
             )
@@ -365,12 +365,12 @@ def action_set_role(app: "CompanionApp", role: str) -> None:
             body = (
                 "Switch this computer to REMOTE EDITOR?\n\n"
                 "A REMOTE EDITOR computer syncs projects DOWN to its own "
-                "drive. If this machine's synced folder is actually the "
-                "live server share (the base rig), switching will start "
-                "DELETING files from it the moment a proxy-download pass "
-                "runs, because that lane syncs the server DOWN onto "
-                "whatever this machine calls its own copy.\n\n"
-                "If you are not sure this machine has its own separate "
+                "drive. If this computer's synced folder is actually the "
+                "live server share, switching will start "
+                "DELETING files from it the moment a proxy download runs, "
+                "because proxy download syncs the server DOWN onto "
+                "whatever this computer calls its own copy.\n\n"
+                "If you are not sure this computer has its own separate "
                 "copy of the project tree, do not do this.\n\n"
                 'Type "REMOTE" to confirm:'
             )
@@ -456,6 +456,93 @@ def action_forget_ignored_folder(app: "CompanionApp", folder: str) -> None:
             # already gone, and saying so is cheaper than a second click.
             tray_mod._notify(app, f"{folder} was not on the leave-alone list.")
     tray_mod._spawn(app, "Forget folder ignore", _do)
+
+
+def _help_url(app: "CompanionApp", anchor: str = "") -> str:
+    """Where HOW CC SYNC WORKS goes, or "" when nowhere.
+
+    ui_copy.help_url is the one place the route is spelled (wave 4). The
+    fallback exists because this window and that constant land in the same
+    wave: a build whose ui_copy half is older still gets the button rather
+    than losing the section."""
+    url = ""
+    builder = getattr(ui_copy, "help_url", None)
+    if callable(builder):
+        try:
+            url = str(builder(getattr(app, "config", {}) or {}) or "")
+        except Exception:
+            log.exception("settings: could not build the help URL")
+            url = ""
+    if not url:
+        base = str((getattr(app, "config", {}) or {}).get("dashboard_url", "")).strip()
+        if not base:
+            return ""
+        url = base.rstrip("/") + str(getattr(ui_copy, "HELP_URL_PATH", "/help"))
+    return url + anchor if url else ""
+
+
+def action_open_help(app: "CompanionApp", anchor: str = "") -> None:
+    """Open the help page in the default browser.
+
+    Its own opener rather than tray's dashboard one: webbrowser.open()
+    returns False with nothing logged when no browser could be launched
+    (tray._open_dashboard's history), and the sentence an editor needs then
+    names the help page, not the dashboard."""
+    def _do() -> None:
+        url = _help_url(app, anchor)
+        if not url:
+            tray_mod._notify(app, "This computer does not know where your "
+                                  "dashboard is, so it cannot open the help page.")
+            return
+        log.info("settings: opening help at %s", url)
+        launched = False
+        try:
+            import webbrowser
+
+            launched = bool(webbrowser.open(url))
+        except Exception:
+            log.exception("settings: could not open %s", url)
+        if not launched:
+            log.warning("settings: no browser could be launched for %s", url)
+            tray_mod._notify(app, f"Couldn't open a browser. The help page is at {url}")
+    tray_mod._spawn(app, "Open the help page", _do)
+
+
+def _rehearsal_mode() -> bool:
+    """`fixer_dry_run` (RES-15). Read through fixer so the window and the
+    thing it describes answer from the same cached value; never raises."""
+    try:
+        from . import fixer as fixer_mod
+
+        return bool(fixer_mod.dry_run_default())
+    except Exception:
+        log.exception("settings: could not tell whether FIX ALL is rehearsing")
+        return False
+
+
+def action_turn_rehearsal_off(app: "CompanionApp") -> None:
+    """[ TURN REHEARSAL OFF ] (RES-15). The key is cached once per process
+    (fixer.dry_run_default), so the cache is dropped here as well as the
+    line being written - otherwise the button would appear to do nothing
+    until the next start, which is the shape APP-11 was."""
+    def _do() -> None:
+        try:
+            saved = config_mod.set_value(config_mod.CONFIG_PATH, "fixer_dry_run", False)
+        except Exception:
+            log.exception("settings: could not turn fixer_dry_run off")
+            tray_mod._notify(app, "Couldn't save that - see the log.")
+            return
+        if not saved:
+            tray_mod._notify(app, "Couldn't save that - see the log.")
+            return
+        try:
+            from . import fixer as fixer_mod
+
+            fixer_mod.reset_dry_run_cache()
+        except Exception:
+            log.exception("settings: could not clear the rehearsal cache")
+        tray_mod._notify(app, "FIX ALL will copy files in again.")
+    tray_mod._spawn(app, "Turn rehearsal off", _do)
 
 
 def _needs_p_repair(snap: dict, app: "CompanionApp", guard: dict) -> bool:
@@ -560,12 +647,88 @@ _LANE_WORDS = {
     "off": "not synced to this computer",
     "skipped": "not synced to this computer",
 }
-_LANE_TITLES = (("A", "uploads"), ("B", "proxies"), ("C", "shared files"))
+# One vocabulary (sweep 2026-09-03 section 4, built 2026-09-04): the three
+# transports are "upload" / "proxy download" / "folder sync" everywhere an
+# editor reads them, and the word "lane" is in no visible string. The words
+# come from ui_copy.LANE_WORDS, which is what the dashboard's own API speaks.
+_LANE_TITLES = (("A", ui_copy.lane_words("A")),
+                ("B", ui_copy.lane_words("B")),
+                ("C", ui_copy.lane_words("C")))
+# The section header these three live under. A constant because the jump
+# strip (APP-17), the tests and four comments all name it.
+SYNCING_SECTION = "SYNCING"
 
 
 def _lane_words(state) -> str:
     key = str(state or "").strip().lower()
     return _LANE_WORDS.get(key, key or "not known")
+
+
+# -- SYNC-117: the reminder can be turned off, for this episode only --------
+#
+# The only way out of a balloon every 30 minutes was the drive coming back or
+# drive_reminder_minutes in a TOML file a frozen-exe editor has no reason to
+# know exists. Neither button is a persistent opt-out: the warning LINE
+# stays, the record stays, and the drive coming back clears both.
+_SNOOZE_MINUTES = 120
+
+
+def _drive_reminder(app: "CompanionApp"):
+    """The running DriveReminder, or None. Private attribute on the app
+    (app.py builds it in __init__); the public name is tried first so a
+    later rename costs nothing here."""
+    return getattr(app, "drive_reminder", None) or getattr(app, "_drive_reminder", None)
+
+
+def _drive_reminder_items(app: "CompanionApp") -> list:
+    """[ REMIND ME LATER ] / [ STOP REMINDING ME ABOUT THIS DRIVE ], while an
+    episode is open."""
+    reminder = _drive_reminder(app)
+    try:
+        if reminder is None or not reminder.active:
+            return []
+        muted = bool(getattr(reminder, "reminders_muted", False))
+    except Exception:
+        log.exception("settings: could not read the drive reminder")
+        return []
+    if muted:
+        return [Line("Reminders about this drive are off until it is plugged "
+                     "back in.", style="muted")]
+    if not hasattr(reminder, "mute_episode"):
+        return []
+    return [
+        Button("REMIND ME LATER",
+               lambda: action_mute_drive_reminder(app, _SNOOZE_MINUTES)),
+        Button("STOP REMINDING ME ABOUT THIS DRIVE",
+               lambda: action_mute_drive_reminder(app, 0)),
+    ]
+
+
+def action_mute_drive_reminder(app: "CompanionApp", minutes: float) -> None:
+    """Silence the reminder balloons without touching what is owed."""
+    def _do() -> None:
+        reminder = _drive_reminder(app)
+        try:
+            muted = bool(reminder is not None and reminder.mute_episode(minutes))
+        except Exception:
+            log.exception("settings: could not mute the drive reminder")
+            tray_mod._notify(app, f"CCSync could not do that. {ui_copy.DIAGNOSTICS}.")
+            return
+        if not muted:
+            # Nothing to mute must not render as "muted": the drive came
+            # back between the render and the click.
+            tray_mod._notify(app, "There is nothing to remind you about now.")
+            return
+        if minutes:
+            tray_mod._notify(
+                app, f"CCSync will remind you about this drive again in "
+                     f"{ui_copy.count(int(minutes), 'minute')}.")
+        else:
+            tray_mod._notify(
+                app, "CCSync will stop reminding you about this drive. Your "
+                     "unfinished syncing is still waiting for it, and Settings "
+                     "still says so.")
+    tray_mod._spawn(app, "Mute the drive reminder", _do)
 
 
 def _projects_section(app: "CompanionApp") -> list:
@@ -594,7 +757,7 @@ def _projects_section(app: "CompanionApp") -> list:
         if not isinstance(project, dict):
             continue
         slug = str(project.get("slug") or "").strip() or "a project"
-        mode = "uploads only (no proxies come down)" \
+        mode = "upload only (no proxy download)" \
             if str(project.get("mode") or "").strip().lower() == "upload_only" \
             else "full sync"
         state = str(project.get("state") or "").strip()
@@ -694,7 +857,7 @@ def _resolve_section(app: "CompanionApp", guard: dict) -> list:
     gaps = health.get("proxy_gaps") or {}
     if isinstance(gaps, dict):
         for key, phrase in (("low_space", "this disk is low on space"),
-                            ("capped", "this machine's proxy limit was reached"),
+                            ("capped", "this computer's proxy limit was reached"),
                             ("truncated", "the list was too long to finish")):
             try:
                 count = int(gaps.get(key) or 0)
@@ -750,6 +913,182 @@ def action_stop_current_job(app: "CompanionApp") -> None:
             app, "Stopping the fleet job. It goes back to the queue for another "
                  "computer." if stopped else "There is no fleet job running now.")
     tray_mod._spawn(app, "Stop the fleet job", _do)
+
+
+# -- SYS-8 / UX-11: the fleet-jobs settings are controls, not a TOML file ----
+#
+# Three per-computer keys (`jobs_enabled`, `jobs_kinds`,
+# `jobs_volunteer_minutes`) whose only interface was "remote into that
+# machine and edit ~/.ccsync/config.toml". They are written through
+# config_mod.set_value, the same one-key line patch the role switch uses, and
+# every one of them is read at construction (jobs_runner.JobsRunner.__init__,
+# capabilities.snapshot), so every one of them needs a restart to apply -
+# which the section says on the line, exactly as the role does.
+#
+# `cards_agent` is deliberately NOT here: exactly one computer in a fleet may
+# run the Timeline Cards agent, and the server is the only party that can see
+# all of them (SYS-8 (b)).
+_VOLUNTEER_CHOICES = (15, 30, 60, 120)
+
+
+def _config_on_disk() -> dict:
+    """config.toml as it will be read at the next start. Never raises: an
+    unreadable file costs the current values, not the window."""
+    try:
+        return dict(config_mod.load_config(config_mod.CONFIG_PATH) or {})
+    except Exception:
+        log.exception("settings: could not read config.toml")
+        return {}
+
+
+def _setting_changed(app: "CompanionApp", cfg: dict, key: str, default) -> bool:
+    """Whether the value on disk differs from the one THIS process started
+    with - the same test _mode_needs_restart makes, for the same reason: a
+    write to config.toml never mutates the live config. `cfg` is the file
+    read once by the caller: this runs on every render, twice a second."""
+    try:
+        on_disk = (cfg or {}).get(key, default)
+        current = (getattr(app, "config", {}) or {}).get(key, default)
+        return str(on_disk).strip().lower() != str(current).strip().lower()
+    except Exception:
+        log.exception("settings: could not compare %s with the running value", key)
+        return False
+
+
+def action_write_setting(app: "CompanionApp", key: str, value, sentence: str) -> None:
+    """Write one config.toml key and say what it will take.
+
+    Reopens the window afterwards (action_show_all_advisories' precedent):
+    every button here closes it first, and a checkbox whose window vanishes
+    reads as a click that went nowhere."""
+    def _do() -> None:
+        try:
+            saved = config_mod.set_value(config_mod.CONFIG_PATH, key, value)
+        except Exception:
+            log.exception("settings: could not write %s=%r to config.toml", key, value)
+            tray_mod._notify(app, "Couldn't save that - see the log.")
+            return
+        if not saved:
+            # APP-11: a write that cannot be read back is not a save.
+            tray_mod._notify(app, "Couldn't save that - see the log.")
+            return
+        tray_mod._notify(app, sentence)
+        show_settings(app)
+    tray_mod._spawn(app, f"Save {key}", _do)
+
+
+def _fleet_jobs_controls(app: "CompanionApp") -> list:
+    """The three settings, as rows the existing renderer already draws.
+
+    A checkbox is a Button whose label carries its own state ("[x] ..."):
+    the model has Lines and Buttons and nothing else, and a new widget type
+    would be a change to the Tk half for a control that reads perfectly well
+    as text in a monospace window."""
+    cfg = _config_on_disk()
+    items: list = []
+    enabled = bool(cfg.get("jobs_enabled", True))
+    items.append(Button(
+        f"[{'x' if enabled else ' '}] Let the fleet use this computer",
+        lambda: action_write_setting(
+            app, "jobs_enabled", not enabled,
+            "This computer will take work for the fleet again."
+            if not enabled else
+            "This computer will stop taking work for the fleet. Takes effect "
+            "the next time CCSync starts.")))
+    items.append(Line("  Fleet work runs only while you are away from this "
+                      "computer.", style="muted"))
+
+    from . import capabilities as capabilities_mod
+
+    kinds = list(getattr(capabilities_mod, "KNOWN_KINDS", ()) or ())
+    try:
+        allowed = list(capabilities_mod.job_kinds(cfg))
+    except Exception:
+        log.exception("settings: could not read this computer's job kinds")
+        allowed = []
+    for kind in kinds:
+        # An empty allow-list means EVERY kind (capabilities.job_kinds), so
+        # an unticked box is only ever an explicit exclusion.
+        on = (not allowed) or kind in allowed
+        if on:
+            remaining = [k for k in kinds if k != kind and ((not allowed) or k in allowed)]
+        else:
+            remaining = [k for k in kinds if k in allowed or k == kind]
+        # All of them ticked is written as "", not as the full list: a build
+        # that learns a new kind later must not find this computer excluded
+        # from it by a list nobody knew they were writing.
+        value = "" if len(remaining) == len(kinds) else ", ".join(remaining)
+        items.append(Button(
+            f"  [{'x' if on else ' '}] {_kind_label(kind)}",
+            (lambda kind=kind, value=value, on=on, remaining=remaining:
+             action_set_job_kind(app, kind, value, on, remaining))))
+
+    minutes = _volunteer_minutes(cfg)
+    nxt = _next_volunteer_choice(minutes)
+    items.append(Button(
+        f"LEND THIS COMPUTER FOR {ui_copy.count(minutes, 'minute')} AT A TIME "
+        f"(click for {nxt})",
+        lambda: action_write_setting(
+            app, "jobs_volunteer_minutes", nxt,
+            f"One click of 'Take fleet jobs now' will lend this computer for "
+            f"{ui_copy.count(nxt, 'minute')}. Takes effect the next time "
+            f"CCSync starts.")))
+    changed = [k for k in ("jobs_enabled", "jobs_kinds", "jobs_volunteer_minutes")
+               if _setting_changed(app, cfg, k, config_mod.DEFAULTS.get(k))]
+    if changed:
+        items.append(Line(
+            "The settings above were changed and take effect when CCSync next "
+            "starts.", style="warning"))
+    return items
+
+
+def _kind_label(kind: str) -> str:
+    """The kinds in editor English. Unknown kinds keep their own name rather
+    than being hidden: a build that grows one must still offer the box."""
+    return {
+        "whisper": "Transcribe audio (uses the graphics card)",
+        "proxy-480p": "Make small preview copies of video",
+        "audio-extract": "Pull the audio out of video",
+        "peaks": "Draw audio waveforms",
+    }.get(kind, kind)
+
+
+def _volunteer_minutes(cfg: dict) -> int:
+    try:
+        value = int(float(cfg.get("jobs_volunteer_minutes", 30) or 30))
+    except (TypeError, ValueError):
+        value = 30
+    return value if value > 0 else 30
+
+
+def _next_volunteer_choice(minutes: int) -> int:
+    """The next value the button offers, wrapping. A cycle rather than a
+    text field: the window has no text entry, and four choices cover what
+    "lend this computer" ever means."""
+    if minutes in _VOLUNTEER_CHOICES:
+        index = _VOLUNTEER_CHOICES.index(minutes)
+        return _VOLUNTEER_CHOICES[(index + 1) % len(_VOLUNTEER_CHOICES)]
+    return _VOLUNTEER_CHOICES[0]
+
+
+def action_set_job_kind(app: "CompanionApp", kind: str, value: str,
+                        was_on: bool, remaining: list) -> None:
+    """Tick or untick ONE job kind (SYS-8).
+
+    Unticking the last one is refused: `jobs_kinds = ""` means every kind
+    (capabilities.job_kinds), so "none of them" cannot be written here at
+    all, and a machine that silently took every kind when its editor had
+    just unticked the last one would be the exact opposite of the click."""
+    if was_on and not remaining:
+        tray_mod._notify(
+            app, "That is the last kind of work this computer takes. Untick "
+                 "'Let the fleet use this computer' instead.")
+        return
+    action_write_setting(
+        app, "jobs_kinds", value,
+        f"This computer will {'no longer ' if was_on else ''}take "
+        f"{_kind_label(kind).lower()} for the fleet. Takes effect the next "
+        "time CCSync starts.")
 
 
 def _jobs_section(app: "CompanionApp") -> list:
@@ -817,7 +1156,7 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
     # -- [ THIS COMPUTER ] ---------------------------------------------------
     current_role = app.effective_mode() if hasattr(app, "effective_mode") else "editor"
     computer_items: list = [
-        Line(f"Machine name: {platform.node()}"),
+        Line(f"Computer name: {platform.node()}"),
         Line(f"Current role: {_role_label(current_role)}"),
         Button(
             "REMOTE EDITOR" + ("  (current)" if current_role != "base" else ""),
@@ -856,7 +1195,7 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
     computer_items.append(Button("RESTART CCSYNC NOW", lambda: action_restart(app)))
     sections.append(Section("THIS COMPUTER", computer_items))
 
-    # -- [ SYNC LANES ] -------------------------------------------------------
+    # -- [ SYNCING ] ---------------------------------------------------------
     lane_items: list = [
         Line(tray_mod._format_lane_line_from(
             s, paused=bool(snap.get("paused")), problems=bool(snap.get("problems")),
@@ -899,6 +1238,7 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
         lane_items.append(Line(
             f"Your drive was disconnected with {snap['root_unfinished']} still to "
             f"go - plug it back in to finish syncing", style="warning"))
+    lane_items.extend(_drive_reminder_items(app))
     if snap.get("ytdl_line"):
         lane_items.append(Line(snap["ytdl_line"]))
 
@@ -965,7 +1305,7 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
             lambda: tray_mod.action_make_proxies(app)))
     if proxy_gap.get("can_generate") or tray_mod._proxy_history(proxy_gap).get("last_at"):
         lane_items.append(Button(
-            "PROXIES THIS MACHINE HAS MADE…", lambda: tray_mod.action_proxy_history(app)))
+            "PROXIES THIS COMPUTER HAS MADE…", lambda: tray_mod.action_proxy_history(app)))
 
     broll = snap.get("broll_ingest") or {}
     for text in tray_mod._ingest_lines(broll):
@@ -1007,7 +1347,7 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
         lane_items.append(Button(
             "CANCEL THE MUSIC BATCH…", lambda: tray_mod.action_cancel_music_ingest(app)))
 
-    sections.append(Section("SYNC LANES", lane_items))
+    sections.append(Section(SYNCING_SECTION, lane_items))
 
     # -- [ YOUTUBE ] ------------------------------------------------------
     if snap.get("ytdl_local_downloads") or snap.get("ytdl_youtube_signin"):
@@ -1052,9 +1392,12 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
     resolve_items = _resolve_section(app, guard)
     if resolve_items:
         sections.append(Section("RESOLVE", resolve_items))
-    job_items = _jobs_section(app)
+    # SYS-8: the status half (CMEDIA-2) and the settings half under ONE
+    # header. Two sections about the same subject, one of them named JOBS and
+    # one FLEET JOBS, is the shape the vocabulary work exists to stop.
+    job_items = _jobs_section(app) + _fleet_jobs_controls(app)
     if job_items:
-        sections.append(Section("JOBS", job_items))
+        sections.append(Section("FLEET JOBS", job_items))
 
     # -- [ ADVANCED ] -------------------------------------------------------
     advanced_items: list = [
@@ -1064,6 +1407,14 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
         Button("UNDO THE LAST CLIP-PATH CHANGE CCSYNC MADE…",
                lambda: tray_mod.action_undo_last_relink(app)),
     ]
+    # RES-15: FIX ALL copies nothing on this computer, and until now the only
+    # sign of it was a batch that reported every clip as failed.
+    if _rehearsal_mode():
+        from . import popup as popup_mod
+
+        advanced_items.append(Line(popup_mod.REHEARSAL_WARNING, style="warning"))
+        advanced_items.append(Button("TURN REHEARSAL OFF",
+                                     lambda: action_turn_rehearsal_off(app)))
     if _needs_p_repair(snap, app, guard):
         # UX-15: above the grade swap on purpose. This is the broken state
         # the toast fires about; the swap below is a thing the editor chose.
@@ -1096,14 +1447,14 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
         ))
     if not halt_active:
         advanced_items.append(Button(
-            "STOP ALL SYNCING ON THIS MACHINE…", lambda: tray_mod.action_halt_sync(app)))
+            "STOP ALL SYNCING ON THIS COMPUTER…", lambda: tray_mod.action_halt_sync(app)))
     for proj in snap.get("removable", []):
         slug = proj.get("slug", "")
         rel = proj.get("rel", "")
         label = (
             "REMOVE '" + rel.split("/")[-1] + "'"
             + (" (upload only)" if proj.get("upload_only") else "")
-            + " FROM THIS MACHINE…"
+            + " FROM THIS COMPUTER…"
         )
         advanced_items.append(Button(
             label, (lambda slug=slug, rel=rel: tray_mod.action_remove_project(app, slug, rel))))
@@ -1115,6 +1466,15 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
                lambda: tray_mod.action_copy_diagnostics(app)),
         Button("OPEN LOG", lambda: tray_mod.action_open_log(app)),
     ]
+    # UX-3 / SYS-21 (a): until now the HELP section contained no help. Both
+    # buttons open the ONE document, served by the dashboard; hidden when
+    # this computer has no dashboard URL, because a button that can only
+    # fail is worse than a section with two rows in it.
+    if _help_url(app):
+        help_items.append(Button("HOW CC SYNC WORKS",
+                                 lambda: action_open_help(app)))
+        help_items.append(Button("WHAT DO THESE MEAN?",
+                                 lambda: action_open_help(app, "#glossary")))
     upgrade_info = snap.get("upgrade_info")
     if upgrade_info:
         help_items.append(Button(
@@ -1123,7 +1483,26 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
     help_items.append(Line(f"ccsync-companion v{config_mod.VERSION}", style="muted"))
     sections.append(Section("HELP", help_items))
 
-    return sections
+    return _help_first(sections)
+
+
+def _help_first(sections: list[Section]) -> list[Section]:
+    """APP-17: HELP goes to the TOP whenever anything on this render is a
+    warning.
+
+    Eight of the advisory lines above instruct the reader to press [ COPY
+    DIAGNOSTICS FOR YOUR ADMIN ], and on a computer with something wrong the
+    SYNCING section alone is taller than the window, so that button was
+    below two sections the reader had to scroll past to find it. On a healthy
+    computer nothing moves: HELP stays where it has always been."""
+    warned = any(isinstance(item, Line) and item.style == "warning"
+                 for section in sections for item in section.items)
+    if not warned:
+        return sections
+    ordered = [s for s in sections if s.title == "HELP"]
+    if not ordered:
+        return sections
+    return ordered + [s for s in sections if s.title != "HELP"]
 
 
 # -- the Tk shell -------------------------------------------------------
@@ -1207,6 +1586,12 @@ def _build_settings_window(app: "CompanionApp", lock) -> None:
     root.protocol("WM_DELETE_WINDOW", _release_and_close)
     root.bind("<Escape>", lambda _e: _release_and_close())
 
+    # APP-17: the jump strip lives OUTSIDE the canvas, so it does not scroll
+    # away from the reader who needs it. Packed before the canvas because
+    # pack order is what puts it at the top.
+    strip = tk.Frame(root, bg=theme.BG, padx=18, pady=6)
+    strip.pack(side="top", fill="x")
+
     canvas = tk.Canvas(root, bg=theme.BG, highlightthickness=0)
     vbar = ttk.Scrollbar(root, orient="vertical", command=canvas.yview)
     body = tk.Frame(canvas, bg=theme.BG, padx=18, pady=14)
@@ -1230,13 +1615,35 @@ def _build_settings_window(app: "CompanionApp", lock) -> None:
 
     canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
+    def _jump_to(header) -> None:
+        """Scroll so `header` is at the top. Measured at CLICK time: the
+        window rebuilds itself every two seconds and a y captured at render
+        would point at whatever has since grown above it.
+
+        Not subject to the module docstring's "every button closes the
+        window" rule: this one opens nothing, spawns nothing and changes
+        nothing, and closing the window to scroll it would be absurd."""
+        try:
+            body.update_idletasks()
+            height = max(1, body.winfo_height())
+            canvas.yview_moveto(max(0.0, min(1.0, header.winfo_y() / height)))
+        except Exception:
+            log.debug("settings window: could not jump to a section", exc_info=True)
+
     def _render(sections: list[Section]) -> None:
         for child in body.winfo_children():
             child.destroy()
+        for child in strip.winfo_children():
+            child.destroy()
         for section in sections:
-            tk.Label(body, text=f"[ {section.title} ]", bg=theme.BG, fg=theme.RED,
-                     font=theme.mono(11, bold=True), justify="left", anchor="w"
-                     ).pack(anchor="w", pady=(14, 2))
+            header = tk.Label(body, text=f"[ {section.title} ]", bg=theme.BG,
+                              fg=theme.RED, font=theme.mono(11, bold=True),
+                              justify="left", anchor="w")
+            header.pack(anchor="w", pady=(14, 2))
+            theme.neon_button(
+                tk, strip, section.title,
+                (lambda header=header: _jump_to(header)), primary=False,
+            ).pack(side="left", padx=(0, 8))
             tk.Label(body, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM,
                      font=theme.mono(9)).pack(anchor="w")
             for item in section.items:

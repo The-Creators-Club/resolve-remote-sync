@@ -24,7 +24,7 @@
     <!-- Root-relative on purpose, unlike every asset URL here: mounted under
          /ytdl/ this is the way back out to the dashboard at the origin root.
          Standalone (dev) it harmlessly reloads this page. -->
-    <a class="btn nav-link" href="/" title="back to the CC Sync dashboard (project sync status)">[ DASHBOARD ]</a>
+    <a class="btn nav-link" href="/" title="back to the CC Sync dashboard (SYNC STATUS)">[ DASHBOARD ]</a>
   </div>
   <div class="rule">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</div>
 
@@ -100,7 +100,7 @@
              server's local_download flag is off. -->
         <label id="locallabel" class="switch hidden"
                title="Download onto THIS computer instead of the NAS. YouTube originals only sync upwards, so a clip the server fetches stays on the NAS until you ask for it.">
-          <input id="localdl" type="checkbox" checked> on this machine
+          <input id="localdl" type="checkbox" checked> on this computer
         </label>
         <select id="period" title="YouTube's own upload-date filter">
           <option value="">any date</option>
@@ -287,14 +287,14 @@
            what it was before the feature (plan §10, phase 1). -->
       <span id="dlmode" class="dlmode hidden"></span>
       <button id="dlserver" class="text-btn hidden"
-              title="Hand this job back to the NAS: it downloads whatever your machine has not finished. For a tethered or hotel-wifi machine, or one you are about to close.">[ DOWNLOAD ON THE SERVER INSTEAD ]</button>
+              title="Hand this job back to the NAS: it downloads whatever your computer has not finished. For a tethered or hotel-wifi computer, or one you are about to close.">[ DOWNLOAD ON THE SERVER INSTEAD ]</button>
       <!-- STOP THE MACHINE THAT IS ACTUALLY DOWNLOADING (CYT-2, 2026-09-03).
            Only ever shown while THIS computer's companion holds the job: it
            posts to the loopback, so it can stop nothing else, and a companion
            too old to answer /ytdl/progress never gets it drawn. [ CANCEL ]
            beside it is the server-side one and stays what it was. -->
       <button id="dlstop" class="text-btn hidden"
-              title="Ask the CC Sync companion on this machine to stop the clip it is downloading. The job itself stays; the server picks up what is missing.">[ STOP ]</button>
+              title="Ask the CC Sync tray on this computer to stop the clip it is downloading. The job itself stays; the server picks up what is missing.">[ STOP ]</button>
       <button id="cancel2" class="text-btn">[ CANCEL ]</button>
     </div>
     <div class="bar"><div id="dlfill" class="barfill"></div></div>

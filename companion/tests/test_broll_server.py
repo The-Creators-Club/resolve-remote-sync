@@ -2992,3 +2992,68 @@ def test_the_ingest_retry_route_reaches_the_orchestrator(tmp_path, monkeypatch):
         srv.shutdown()
         srv.server_close()
         thread.join(timeout=5)
+
+
+# -- CMEDIA-9: the staging floor is the KIND's number ------------------------
+
+def test_the_music_floor_is_musics_own_number_by_default():
+    """20 GB was sized for 40 GB camera originals. The largest thing a music
+    batch can stage is 512 MiB a file, and the b-roll number refused a drop
+    on a laptop with 15 GB free - the drop zone never even rendered."""
+    from ccsync_companion import ingest_kinds
+
+    assert ingest_kinds.BROLL_KIND.free_space_floor_gb == 20.0
+    assert ingest_kinds.MUSIC_KIND.free_space_floor_gb == 2.0
+    assert broll_server._ingest_floor_bytes({}, ingest_kinds.BROLL_KIND) == 20_000_000_000
+    assert broll_server._ingest_floor_bytes({}, ingest_kinds.MUSIC_KIND) == 2_000_000_000
+    # No kind at all still means b-roll's, for the callers that predate it.
+    assert broll_server._ingest_floor_bytes({}) == 20_000_000_000
+
+
+def test_the_config_key_still_wins_over_the_kinds_default():
+    from ccsync_companion import ingest_kinds
+
+    cfg = {"music_ingest_free_space_floor_gb": 40,
+           "broll_ingest_free_space_floor_gb": 5}
+    assert broll_server._ingest_floor_bytes(
+        cfg, ingest_kinds.MUSIC_KIND) == 40_000_000_000
+    assert broll_server._ingest_floor_bytes(
+        cfg, ingest_kinds.BROLL_KIND) == 5_000_000_000
+
+
+# -- wave 5 of the 2026-09-03 sweep: one vocabulary, on the loopback too -----
+#
+# Every one of these sentences is printed VERBATIM by the b-roll and music
+# pages (they render the companion's `message` / `reasons` and do not
+# translate them), so an editor comparing the drop zone with the tray was
+# reading "machine" on one and "computer" on the other. Owner-approved
+# 2026-09-04: a computer is a computer.
+
+def test_no_ingest_refusal_calls_the_editors_computer_a_machine():
+    """Every reason in the answer, the two sidecars' included: the b-roll and
+    music pages print this list as-is, and the GPU refusal is the one an
+    editor on a laptop reads most."""
+    broll = broll_server.build_ingest_capabilities({}, None, None)
+    music = broll_server.build_music_ingest_capabilities({}, None, None)
+    assert broll["reasons"] and music["reasons"], (
+        "a capability answer with nothing wrong proves nothing here")
+    for caps in (broll, music):
+        for said in caps["reasons"]:
+            assert "machine" not in said.lower(), said
+    # ...and the sentences are still the same sentences, not blanked.
+    assert "nobody is signed in on this computer" in broll["reasons"]
+    assert any("indexing is switched off on this computer" in r
+               for r in music["reasons"])
+
+
+def test_the_send_to_resolve_progress_line_says_computer():
+    """`message` is what the b-roll page shows while the clip it was asked to
+    insert is still being fetched down. Its KEY and its presence are the
+    contract the web UI pins (broll/web/tests); only the words moved."""
+    import ast
+
+    source = (Path(broll_server.__file__)).read_text(encoding="utf-8")
+    said = [n.value for n in ast.walk(ast.parse(source))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and n.value.startswith("syncing the clip to this")]
+    assert said and all("computer" in s for s in said), said

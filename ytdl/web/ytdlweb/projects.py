@@ -171,7 +171,7 @@ def ticked_projects(user, machine=None, local=True):
     if not config.DASH_DB:
         return {'projects': _dev_projects(), 'available': False,
                 'error': 'YTDL_DASH_DB is not set: this app has no dashboard '
-                         'database to read project selections from.'}
+                         'database to read sync plans from.'}
     path = Path(config.DASH_DB)
     if not path.is_file():
         return {'projects': [], 'available': False,

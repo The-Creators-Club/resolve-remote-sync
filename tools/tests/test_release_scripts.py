@@ -450,3 +450,61 @@ class TestRolloutIsReportedAfterAShip:
         assert "DASH_REPORT_TOKEN" in tail
         # Advisory only, exactly like the macOS line above it.
         assert tail.rstrip().endswith("exit 0")
+
+
+class TestTheDangerousSwitchIsGated:
+    """REL-4 (usability + resilience sweep, 2026-09-04). `-EmitKindExtras`
+    signs `requires_dashboard`/`arch` into the record, and a companion below
+    0.9.55 does not know those field names: its signature check fails on the
+    WHOLE record, it refuses the build silently and permanently, and the only
+    recovery is a reinstall at that desk. The precondition was written in a
+    code comment, in docs/RELEASE.md and in the owner's notes, and checked
+    nowhere -- and the switch had no .PARAMETER block either, so
+    `Get-Help ship.ps1` did not describe the most dangerous flag on it."""
+
+    def test_the_flag_is_refused_when_the_fleet_may_be_older(self):
+        assert "$KindExtrasFloor = \"0.9.55\"" in SHIP
+        assert "if ($EmitKindExtras) {" in SHIP
+        assert "-EmitKindExtras is refused" in SHIP
+        # It ASKS: the gate reads the live dashboard rather than trusting a
+        # runbook line, and it happens in step 0a, before the build.
+        assert "/api/v1/health" in SHIP.split("--- step 1")[0]
+
+    def test_a_fleet_it_cannot_read_is_a_refusal_not_a_pass(self):
+        block = SHIP[SHIP.index("if ($EmitKindExtras) {"):]
+        block = block[:block.index("# SYS-7")]
+        assert "could not read the fleet's versions" in block
+        assert "exit 1" in block
+
+    def test_every_switch_has_a_parameter_block(self):
+        names = set(re.findall(r"(?m)^\s*\[switch\]\$(\w+)", SHIP))
+        names |= {"DashboardUrl", "AdminUser", "FeedRepo", "Notes"}
+        documented = set(re.findall(r"(?m)^\.PARAMETER\s+(\w+)", SHIP))
+        assert names <= documented, sorted(names - documented)
+
+
+class TestTheOrderingGateStandsBeforeTheBuild:
+    """SYS-7 / SYS-2: publishing a companion the live dashboard is too old to
+    OFFER leaves the fleet on the build it has while every page reports it as
+    up to date. Refused in step 0a, with an override for the case where the
+    operator knows better."""
+
+    def test_the_live_dashboard_version_is_compared_with_requires_dashboard(self):
+        assert "REQUIRES_DASHBOARD" in SHIP
+        assert "Test-VersionAtLeast" in SHIP
+        assert re.search(r"(?m)^\s*\[switch\]\$AllowBehind", SHIP)
+        assert "ship.cmd -DashboardOnly" in SHIP
+
+    def test_an_unreadable_dashboard_version_says_it_did_not_check(self):
+        assert "the requires_dashboard order is NOT checked" in SHIP
+
+
+class TestTheKeyBackupIsAskedAbout:
+    """REL-14: never a refusal, always a line. Nothing in the ship,
+    publish_latest or the drift check had ever asked whether a copy of the
+    32-byte signing key exists."""
+
+    def test_the_gates_mention_the_missing_backup(self):
+        assert r".ccsync-release\backup.json" in SHIP
+        assert "no fleet can ever be updated again" in SHIP
+        assert "release_key.py backup" in SHIP

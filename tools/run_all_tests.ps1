@@ -191,7 +191,13 @@ $smbShareExit = $LASTEXITCODE
 # wizard showed DONE to a machine with no project drive.
 $global:LASTEXITCODE = 9999
 powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-ForeignDriveMiss.ps1"
-$installerExit = @($driveMapExit, $licenceExit, $prevRollbackExit, $consoleUserExit, $smbShareExit, $LASTEXITCODE) |
+$foreignDriveExit = $LASTEXITCODE
+# The Add/Remove Programs entry the uninstaller has to be able to find again
+# (OPS-17, usability + resilience sweep 2026-09-04).
+$global:LASTEXITCODE = 9999
+powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-UninstallEntry.ps1"
+$installerExit = @($driveMapExit, $licenceExit, $prevRollbackExit, $consoleUserExit, $smbShareExit,
+                   $foreignDriveExit, $LASTEXITCODE) |
     Where-Object { $_ -ne 0 } | Select-Object -First 1
 if ($null -eq $installerExit) { $installerExit = 0 }
 $results += @{ Name = "installer"; Outcome = $(if ($installerExit -eq 0) { "PASS" } else { "FAIL (exit $installerExit)" }) }

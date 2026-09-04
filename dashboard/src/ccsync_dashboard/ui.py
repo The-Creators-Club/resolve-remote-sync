@@ -19,12 +19,20 @@ from fastapi.templating import Jinja2Templates
 
 from . import (VERSION, auth, dashboard_update, db, health, local_users,
                notices, oidc, package_store, provision, release_feed, site_store)
+# UX-3: the /help route and the markdown renderer behind it. Aliased because
+# `help` is a builtin, and imported here rather than the other way round --
+# help.py defers its own `ui` import to call time, so this stays acyclic.
+from . import help as help_page
 from .api import (
     approve_username_error, build_admin_users_view, build_editors_view,
     build_packages_view, build_presence_view, build_project_view, build_projects_view,
     audit_plan_change, build_queue_view, build_report_tokens_view, build_transfers_view,
     delete_user_everywhere, forget_machine_everywhere, get_conn, normalize_device_id,
 )
+# The Users page's own writes, one implementation each (OPS-2 / DCORE-4,
+# 2026-09-04): the button must never be a softer door than the JSON route.
+from .api import approve_pending_ssh_key as api_approve_pending_ssh_key
+from .api import _blank_key_refusal as api_blank_key_refusal
 # The fleet-read redaction the JSON API applies, imported under a name that
 # says where the rule lives: ONE definition, two callers (COMMERCIAL_READINESS.md
 # §C L1, 2026-08-17). See api.py's "scoping fleet reads" block.
@@ -56,7 +64,18 @@ log = logging.getLogger("ccsync.dashboard.ui")
 # COMMERCIAL_READINESS.md item 15). "bad username or password" vs "too many
 # attempts" vs "you are not an admin" is a username-and-role oracle for anyone
 # who can reach the login page; the difference goes to the log, not the page.
-_LOGIN_REFUSED = "sign-in refused -- check your username and password, then try again"
+_LOGIN_REFUSED = "sign-in refused - check your username and password, then try again"
+# UX-22 (usability sweep 2026-09-03) asked for "no account with that name
+# here" on an unknown username, and this build does NOT say it. Two reasons,
+# both load-bearing: on every deployment that authenticates against the NAS
+# (all of them today) the question cannot be answered without a second
+# credential round-trip to the NAS from an unauthenticated route, which is a
+# free enumeration oracle AND a way to make /login do work for anyone on the
+# tailnet; and item 15 (2026-08-17) settled deliberately on ONE message for
+# every refusal, because "wrong password" versus "no such user" is exactly
+# the difference an attacker is looking for. The login page's answer to a
+# person with no account is the muted line in login.html instead, which is
+# true before they type anything.
 
 
 def human_bytes(n) -> str:
@@ -132,23 +151,95 @@ templates.env.filters["eta"] = eta
 #
 # (key, label, href, admin_only). admin_only is per ENTRY, not per strip:
 # /transfers is an editor-visible page that happens to hang here.
-SETTINGS_NAV: tuple[tuple[str, str, str, bool], ...] = (
-    ("site",        "SITE",        "/admin/settings",    True),
-    ("users",       "USERS",       "/admin/users",       True),
-    ("assignments", "ASSIGNMENTS", "/admin/assignments", True),
-    ("transfers",   "TRANSFERS",   "/transfers",         False),
-    ("setup",       "SETUP",       "/setup",             True),
-    ("packages",    "PACKAGES",    "/admin/packages",    True),
-    ("audit",       "TIMELINE",    "/admin/audit",       True),
-    ("alerts",      "ALERTS",      "/admin/alerts",      True),
-    ("jobs",        "JOBS",        "/admin/jobs",        True),
-    ("invariants",  "INVARIANTS",  "/admin/invariants",  True),
-    ("protection",  "PROTECTION",  "/admin/protection",  True),
-    ("recovery",    "RECOVERY",    "/admin/recovery",    True),
+# SYS-6 (usability sweep 2026-09-03, wave 4): the strip grew from the owner's
+# 2026-08-18 five to twelve flat entries in twelve days, six of them
+# diagnostic pages from one sweep, and read as five separate products. It is
+# THREE LABELLED RUNS now, and the groups are the list: SETTINGS_NAV is
+# derived from them so nothing can be in a run and not in the strip, or the
+# other way round.
+#
+# SETUP sits in "Run the fleet" and not in a run of its own: it is the only
+# nav that serves the wizard, and a page dropped from the one navigation that
+# reaches it is a page nobody finds again.
+SETTINGS_NAV_GROUPS: tuple[tuple[str, tuple[tuple[str, str, str, bool], ...]], ...] = (
+    ("Run the fleet", (
+        ("site",        "SITE",        "/admin/settings",    True),
+        ("users",       "USERS",       "/admin/users",       True),
+        # DUI-12 / the vocabulary table: the page is SYNC PLANS. "Assignment"
+        # left the copy on 2026-09-04; the route, the view model and the
+        # `selections` table keep their names.
+        ("assignments", "SYNC PLANS",  "/admin/assignments", True),
+        ("transfers",   "TRANSFERS",   "/transfers",         False),
+        ("packages",    "PACKAGES",    "/admin/packages",    True),
+        ("jobs",        "JOBS",        "/admin/jobs",        True),
+        # DUI-12: three different things in this navigation were called a
+        # timeline (a Resolve timeline, the mounted Timeline Cards, and the
+        # audit log). The audit log is HISTORY. The route is unchanged.
+        ("audit",       "HISTORY",     "/admin/audit",       True),
+        ("setup",       "SETUP",       "/setup",             True),
+    )),
+    ("Is it healthy", (
+        ("health",      "HEALTH",      "/admin/health",      True),
+        ("invariants",  "INVARIANTS",  "/admin/invariants",  True),
+        ("protection",  "PROTECTION",  "/admin/protection",  True),
+        ("alerts",      "ALERTS",      "/admin/alerts",      True),
+    )),
+    ("When it breaks", (
+        ("recovery",    "RECOVERY",    "/admin/recovery",    True),
+        # UX-3: the customer explainer, served at /help. Not admin-only -- an
+        # editor standing on Transfers is exactly who needs it.
+        ("help",        "HELP",        "/help",              False),
+    )),
 )
+SETTINGS_NAV: tuple[tuple[str, str, str, bool], ...] = tuple(
+    entry for _group, entries in SETTINGS_NAV_GROUPS for entry in entries)
 SETTINGS_PAGES: tuple[str, ...] = tuple(key for key, _, _, _ in SETTINGS_NAV)
+# Where [ SETTINGS ] in the drawer and the topbar's gear land (SYS-6): the
+# HEALTH page, not the site form. "Is everything all right" is the question an
+# owner opens Settings with; renaming the studio is not.
+SETTINGS_LANDING = "/admin/health"
 templates.env.globals["SETTINGS_NAV"] = SETTINGS_NAV
+templates.env.globals["SETTINGS_NAV_GROUPS"] = SETTINGS_NAV_GROUPS
 templates.env.globals["SETTINGS_PAGES"] = SETTINGS_PAGES
+templates.env.globals["SETTINGS_LANDING"] = SETTINGS_LANDING
+
+# The three transports, in the words an editor reads (the vocabulary table,
+# usability sweep 2026-09-03 section 4). api.LANE_LABELS stays "A" / "B" /
+# "C" because the JSON API, the companion's reports and every log line use
+# them; "lane" never reaches a visible string again. Keyed by the lane name
+# the report carries, so a chip can name itself from `lane.lane`.
+LANE_WORDS: dict[str, str] = {
+    "lane_a_video_up": "upload",
+    "lane_b_proxy_down": "proxy download",
+    "lane_c_syncthing": "folder sync",
+}
+
+
+def lane_word(lane: str | None) -> str:
+    """What to call one transport on a page. Unknown names answer with
+    themselves: a companion reporting a lane this build has never heard of
+    must still render a chip."""
+    return LANE_WORDS.get(str(lane or ""), str(lane or ""))
+
+
+templates.env.globals["lane_word"] = lane_word
+templates.env.filters["lane_word"] = lane_word
+
+# UX-3 / SYS-21: where a word on a page goes to be explained. Four surfaces
+# link in here (the sync line and the status chips on SYNC STATUS, the tick
+# modes on SYNC PLANS, and the topbar), so the anchor shape is written down
+# once: a heading rename in the guide that moved the glossary would otherwise
+# break four links silently.
+GLOSSARY_HREF = f"/help#{help_page.GLOSSARY_ID}"
+
+
+def term_href(term: str) -> str:
+    """The deep link to one glossary row, e.g. term_href("sync plan")."""
+    return f"/help#{help_page.TERM_PREFIX}{help_page.slugify(term)}"
+
+
+templates.env.globals["GLOSSARY_HREF"] = GLOSSARY_HREF
+templates.env.globals["term_href"] = term_href
 
 # CR-88 (2026-08-27) route sweep, usability sweep 2026-09-03: the tray's
 # right-click menu is ten items and Copy diagnostics is NOT one of them. It
@@ -172,17 +263,17 @@ templates.env.globals["COMPANION_DIAGNOSTICS_PATH"] = COMPANION_DIAGNOSTICS_PATH
 # per-machine numbers are the template's, the prose is this dict's.
 CHIP_HELP: dict[str, str] = {
     "relayed": (
-        "{n} Syncthing peer(s) connected via a RELAY, not directly: lane C on "
-        "this computer is limited to relay speed (1-5 MB/s), not the link. "
+        "{n} Syncthing peer(s) connected via a RELAY, not directly: folder sync "
+        "on this computer is limited to relay speed (1-5 MB/s), not the link. "
         "Checked {at}."),
     "direct": "{n} Syncthing peer(s) connected directly. Checked {at}.",
     "orphans": (
         "{bytes} of orphaned rclone .partial files left on the NAS by an "
-        "interrupted lane A. Never deleted automatically; remove them by hand "
+        "interrupted upload. Never deleted automatically; remove them by hand "
         "to reclaim the space."),
     "breaker": (
-        "{reason}, tripped {at}. Lane A and lane C are still running; nothing "
-        "was deleted."),
+        "{reason}, stopped {at}. Upload and folder sync are still running; "
+        "nothing was deleted."),
     "sync_engine_down": (
         "the Syncthing engine on this computer has been down since {since}"
         "{extra}"),
@@ -190,10 +281,10 @@ CHIP_HELP: dict[str, str] = {
         "this computer's clock is {abs} {direction} the server's. Proxy "
         "download uses a minimum file age, so a clock this far out can make it "
         "transfer nothing at all while reporting no error. Fix the clock on "
-        "that machine (enable automatic time)."),
+        "that computer (enable automatic time)."),
     "crashes": (
         "{n} background task(s) on this computer have crashed and written a "
-        "report{newest}. The tray stays up and the lanes look normal, so ask "
+        "report{newest}. The tray stays up and syncing looks normal, so ask "
         "the editor to open {path} in the companion and send it to you."),
     "report_refused": (
         "the last report from this computer was refused {at}: {reason}. "
@@ -205,7 +296,7 @@ CHIP_HELP: dict[str, str] = {
         "download and a full disk all look like this."),
     "unfiltered": (
         "{n} Syncthing folder(s) on this computer have no ignore filter "
-        "written{names}. Without it, lane C carries camera originals both "
+        "written{names}. Without it, folder sync carries camera originals both "
         "ways."),
     "conflicts": (
         "{n} Syncthing sync-conflict file(s) in this computer's tree. Two "
@@ -223,15 +314,17 @@ CHIP_HELP: dict[str, str] = {
     "disk": (
         "this computer's sync drive has {free} free of {total}{system}. "
         "Measured {at}. Proxy download fills a drive file by file, and "
-        ".ccsync-trash cannot prune while the breaker is tripped."),
+        ".ccsync-trash cannot prune while proxy download is stopped."),
+    # `lane` is filled through ui.lane_word (fleet_grid.html), so this
+    # reads "proxy download on this computer made no progress...".
     "stalled": (
-        "lane {lane} on this computer made no progress for {seconds} "
+        "{lane} on this computer made no progress for {seconds} "
         "second(s) {killed}, {at}. A local drive that stops answering reads "
         "exactly like this."),
     "skipped_exists": (
         "{n} file(s) exist on the NAS under the same name at a different "
-        "size. Lane A is copy --ignore-existing, so this computer's newer "
-        "versions will never upload."),
+        "size. Upload never overwrites a file already on the server, so this "
+        "computer's newer versions will never go up."),
     "trash": (
         "{n} recoverable file(s) in this computer's .ccsync-trash. Pruned "
         "automatically after 14 days."),
@@ -245,8 +338,8 @@ CHIP_HELP: dict[str, str] = {
     "volunteering": (
         "somebody at {machine} clicked 'take fleet jobs now', so this "
         "computer is offered work while they use it - until {until} UTC, or "
-        "until they click it off. Nothing else is bypassed: a halt, an update "
-        "or a tripped breaker still refuse."),
+        "until they click it off. Nothing else is bypassed: a stop, an update "
+        "or a proxy download that stopped itself still refuse."),
     # RES-6 (2026-09-03): the cards role reported green while its loop was
     # dead or 401-ing, so `connected` alone is not the question any more. The
     # companion sends a state and a detail (builder C5, 2026-09-04) and the
@@ -1089,6 +1182,12 @@ def _create_project_sync(settings, conn, parent_rel: str, name: str,
     from .api import create_tree_project
 
     created = create_tree_project(settings, conn, parent_rel, name, resolve_project, user)
+    # DCORE-5 (2026-09-04): the same audit row the JSON route writes. THIS is
+    # the path an editor's own NEW PROJECT button takes, and a project it
+    # creates is permanent until an admin archives it -- so "who made this"
+    # must not depend on which of the two doors was used.
+    db.audit(conn, user, "project.create", str(created.get("slug") or ""),
+             {"label": created.get("rel") or ""})
     conn.commit()
     return created
 
@@ -1189,8 +1288,9 @@ def partial_toggle(
             # page or a second tab would still take.
             raise HTTPException(
                 status_code=409,
-                detail="this is a base rig account: it works directly off the "
-                       "NAS and syncs nothing, so projects cannot be ticked for it",
+                detail="every computer on this account is wired to the server: they "
+                       "work directly off the NAS and sync nothing, so "
+                       "projects cannot be ticked for them",
             )
         if target is not None and (editor, target) in db.base_machines(conn):
             # CR-28 per MACHINE (dash-admin-8, 2026-08-21). The refusal above
@@ -1201,7 +1301,7 @@ def partial_toggle(
             # machines itself.
             raise HTTPException(
                 status_code=409,
-                detail=f"{target} is a wired machine: it works directly off the "
+                detail=f"{target} is wired to the server: it works directly off the "
                        "NAS and syncs nothing, so projects cannot be ticked for it",
             )
         sync_mode = wanted or db.SYNC_MODE_FULL
@@ -1624,6 +1724,136 @@ def page_admin_alerts(request: Request, conn: sqlite3.Connection = Depends(get_c
         **_sidebar_context(request, conn, None),
         **_alerts_context(request, conn),
         "nav_current": "alerts",
+    })
+
+
+# -------------------------------------------------------------------- health
+# SYS-6 (usability sweep 2026-09-03, wave 4). Four pages answered "is my fleet
+# all right" and nothing composed them, so an owner who is not an engineer had
+# no way to know which one was authoritative. This page is ONE ranked list
+# over all four sources and NO NEW DATA: every row carries the diagnosis and
+# the fix its own source already wrote, verbatim, and links to the page that
+# owns it. If a sentence here reads badly, it reads badly on the detail page
+# too, and that is where it gets fixed.
+#
+# The bands are severity, then source order. "Not checked" is its own band and
+# never folds into OK (docs/SELF_DIAGNOSIS.md, the rule wave 4 of the 08-28
+# sweep exists to hold): an unverified check is not a passing one.
+HEALTH_BAND_ORDER = ("error", "warn", "unknown")
+_HEALTH_SOURCE_ORDER = ("notice", "alert", "invariant", "protection")
+
+
+def _health_rows(request: Request, conn) -> list[dict]:
+    """Everything open, worst first. Never raises: this is the page an owner
+    opens when something is already wrong, and one source that cannot answer
+    must cost its own rows, not the page."""
+    from . import alerts as alerts_mod
+    from . import invariants as invariants_mod
+    from . import protection as protection_mod
+
+    settings = request.app.state.settings
+    rows: list[dict] = []
+
+    def add(**row) -> None:
+        rows.append(row)
+
+    try:
+        # The registry's own sentence for the kind, so a row here reads the
+        # same as the row on the notices panel rather than showing a raw key.
+        kind_what = {k["kind"]: k.get("what", "") for k in db.notice_kinds()}
+        for n in db.open_notices(conn):
+            href, href_label = db.notice_href(n.get("kind", ""), n.get("subject", ""))
+            add(source="notice", source_label="PROBLEM THE SERVER FOUND",
+                band=("error" if n.get("severity") == "error" else "warn"),
+                title=str(kind_what.get(n.get("kind"), "") or n.get("kind") or ""),
+                subject=str(n.get("subject") or ""),
+                diagnosis=str(n.get("body") or ""), fix=str(n.get("fix") or ""),
+                href=href, href_label=href_label,
+                detail_page="/#server-notices", detail_label="[ NOTICES ]")
+    except Exception:  # noqa: BLE001 - see the docstring
+        log.exception("health: could not read the open notices")
+
+    try:
+        for f in alerts_mod.scan(conn, settings, db.utcnow_iso()):
+            add(source="alert", source_label="ALERT",
+                band=("error" if f.get("severity") == "error" else "warn"),
+                title=str(f.get("title") or ""), subject=str(f.get("subject") or ""),
+                diagnosis=str(f.get("diagnosis") or ""), fix=str(f.get("fix") or ""),
+                href="", href_label="",
+                detail_page="/admin/alerts", detail_label="[ ALERTS ]")
+    except Exception:  # noqa: BLE001
+        log.exception("health: could not run the alert scan")
+
+    try:
+        for inv in invariants_mod.page_view(conn):
+            state = inv.get("state")
+            if state == db.INVARIANT_OK:
+                continue
+            band = ("unknown" if state in (db.INVARIANT_NOT_CHECKED,
+                                           db.INVARIANT_CHECK_FAILED)
+                    else ("error" if inv.get("severity") == "error" else "warn"))
+            add(source="invariant", source_label="INVARIANT",
+                band=band, title=str(inv.get("title") or ""),
+                subject=str(inv.get("detail") or ""),
+                diagnosis=str(inv.get("consequence") or ""),
+                fix=str(inv.get("fix") or ""), href="", href_label="",
+                detail_page="/admin/invariants", detail_label="[ INVARIANTS ]")
+    except Exception:  # noqa: BLE001
+        log.exception("health: could not read the invariants")
+
+    try:
+        for line in protection_mod.page_view(conn).get("lines", []):
+            state = line.get("state")
+            if state == protection_mod.OK:
+                continue
+            band = ("unknown" if state in (protection_mod.NOT_CHECKED,
+                                           protection_mod.CHECK_FAILED)
+                    else ("error" if line.get("severity") == "error" else "warn"))
+            add(source="protection", source_label="PROTECTION",
+                band=band, title=str(line.get("title") or ""),
+                subject=str(line.get("detail") or ""),
+                diagnosis=str(line.get("consequence") or ""),
+                fix=str(line.get("fix") or ""), href="", href_label="",
+                detail_page="/admin/protection", detail_label="[ PROTECTION ]")
+    except Exception:  # noqa: BLE001
+        log.exception("health: could not read the protection lines")
+
+    rows.sort(key=lambda r: (HEALTH_BAND_ORDER.index(r["band"])
+                             if r["band"] in HEALTH_BAND_ORDER else len(HEALTH_BAND_ORDER),
+                             _HEALTH_SOURCE_ORDER.index(r["source"])
+                             if r["source"] in _HEALTH_SOURCE_ORDER
+                             else len(_HEALTH_SOURCE_ORDER),
+                             r["title"], r["subject"]))
+    return rows
+
+
+def _health_context(request: Request, conn) -> dict:
+    rows = _health_rows(request, conn)
+    counts = {band: sum(1 for r in rows if r["band"] == band)
+              for band in HEALTH_BAND_ORDER}
+    # SYS-7 (usability sweep 2026-09-04): [ WHAT IS RUNNING ]. The dashboard
+    # knows four of the drift doctor's five numbers and showed them on three
+    # different pages with no verdict; a second customer has no base rig and
+    # no repo, so for them the doctor does not exist. Read through
+    # package_store.what_is_running, which is defensive line by line -- a box
+    # that could 500 the HEALTH page would be a poor joke.
+    try:
+        running = package_store.what_is_running(
+            conn, request.app.state.settings, request.app.state)
+    except Exception:  # noqa: BLE001
+        log.exception("could not build the WHAT IS RUNNING box")
+        running = None
+    return {"health_rows": rows, "health_counts": counts,
+            "health_total": len(rows), "what_is_running": running}
+
+
+@router.get("/admin/health")
+def page_admin_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    return _render(request, "admin_health.html", {
+        **_sidebar_context(request, conn, None),
+        **_health_context(request, conn),
+        "nav_current": "health",
     })
 
 
@@ -2320,12 +2550,24 @@ async def partial_admin_create_user(
 
     error = None
     if not nas_factory.nas_configured(settings):
-        error = "DASH_NAS_PW is not configured on the dashboard"
+        # UX-13 (2026-09-04): the NEW name first, and the two places an owner
+        # can actually set it. The old text named TRUENAS_PW and asked for a
+        # redeploy, which is the one thing a non-technical owner cannot do.
+        error = ("This dashboard has no NAS password, so editor accounts cannot be "
+                 "created here. Set it on Settings, Setup (Connect to your NAS), or set "
+                 "DASH_NAS_PW in the container.")
     elif not is_valid_username(username):
         error = ("username must start with a letter and contain only lowercase letters, "
                  "digits, '.', '_', '-'")
-    elif not looks_like_ssh_pubkey(ssh_pubkey):
+    elif ssh_pubkey and not looks_like_ssh_pubkey(ssh_pubkey):
         error = "does not look like an OpenSSH public key"
+    elif not ssh_pubkey and api_blank_key_refusal(request, username):
+        # OPS-2 / UX-14: blank is allowed for a NEW account and refused for
+        # an existing one, because both NAS backends write the key they are
+        # handed and a blank one erases the key that account's lanes are
+        # using. [ UPDATE SSH KEY ] on a row posts here with a real key, so
+        # it never reaches this branch.
+        error = api_blank_key_refusal(request, username)
     elif password and auth.check_password(password):
         # Optional field: blank still means "randomise it, no dashboard login".
         # A SHORT one is refused -- same floor as the set-password form.
@@ -2521,6 +2763,131 @@ async def partial_admin_disable_user(request: Request, conn: sqlite3.Connection 
     return _render(request, "partials/admin_users.html", {
         "admin_users": build_admin_users_view(settings, conn),
         "error": error,
+    })
+
+
+@router.post("/partials/admin/projects/archive")
+async def partial_admin_archive_project(request: Request,
+                                        conn: sqlite3.Connection = Depends(get_conn)):
+    """[ ARCHIVE PROJECT ] / [ UNARCHIVE ] on the SYNC PLANS page (DCORE-5).
+
+    A plain form and a redirect, not an htmx swap: this page is a grid whose
+    every row changes when a project leaves it, and re-rendering the whole
+    page is what the reader expects to see. The confirm (which names how many
+    editors still sync it) is the form's own, the way the topbar's sign-out-
+    everywhere does it -- see partials/topbar.html.
+
+    Nothing here deletes: the folder, its marker, its files and every tick
+    stay exactly where they are."""
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    slug = form.get("slug", "").strip()
+    archived = form.get("archived", "1").strip() != "0"
+    if slug:
+        if archived:
+            if db.archive_project(conn, slug, by=admin):
+                db.audit(conn, admin, "project.archive", slug,
+                         {"editors": db.project_tick_editors(conn, slug)})
+                log.warning("admin %r archived project %r from the plans page: nothing "
+                            "was deleted and its shares go on the next enforce cycle",
+                            admin, slug)
+        elif db.unarchive_project(conn, slug):
+            db.audit(conn, admin, "project.unarchive", slug, {})
+        conn.commit()
+    return RedirectResponse("/admin/assignments", status_code=303)
+
+
+@router.post("/partials/admin/users/suspend")
+async def partial_admin_suspend_user(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    """Pause (or resume) an editor's whole fleet access (DCORE-4, 2026-09-04).
+
+    NOT local-mode gated, unlike DISABLE beside it: this acts on fleet state,
+    so it is the "stop this person" button an smb site has instead of DELETE.
+    Same guards as the JSON route, which is why it goes through it."""
+    admin = _require_admin_page(request)
+    settings = request.app.state.settings
+    form = await _form(request)
+    username = form.get("username", "").strip().lower()
+    suspended = form.get("suspended", "1").strip() != "0"
+    reason = form.get("reason", "").strip()[:255]
+
+    error = None
+    notice = None
+    if not is_valid_username(username):
+        error = "not a valid username"
+    elif suspended and username == admin.strip().lower():
+        error = ("you cannot suspend the account you are signed in as - sign in as "
+                 "another admin to suspend this one")
+    elif suspended:
+        if db.suspend_editor(conn, username, by=admin, reason=reason):
+            db.audit(conn, admin, "user.suspend", username, {"reason": reason})
+            conn.commit()
+            notice = (f"{username} is suspended. Their computers are being turned away "
+                      "and their projects will be unshared within a minute. The sync "
+                      "plan is untouched: RESUME puts it all back.")
+            log.warning("admin %r suspended %r from the Users page", admin, username)
+        else:
+            error = f"{username} is not an editor this dashboard knows"
+    else:
+        db.unsuspend_editor(conn, username)
+        db.audit(conn, admin, "user.resume", username, {})
+        conn.commit()
+        notice = (f"{username} is back. Their projects are shared again on the next "
+                  "cycle, exactly as they were.")
+        log.warning("admin %r resumed %r from the Users page", admin, username)
+
+    return _render(request, "partials/admin_users.html", {
+        "admin_users": build_admin_users_view(settings, conn),
+        "error": error,
+        "notice": notice,
+    })
+
+
+@router.post("/partials/admin/users/keys/approve")
+async def partial_admin_approve_ssh_key(request: Request,
+                                        conn: sqlite3.Connection = Depends(get_conn)):
+    """Install a key an editor's wizard offered (OPS-2). One click, the same
+    implementation the JSON route uses; a refusal is this panel's banner
+    because htmx swaps the response either way."""
+    admin = _require_admin_page(request)
+    settings = request.app.state.settings
+    form = await _form(request)
+    username = form.get("username", "").strip().lower()
+    fingerprint = form.get("fingerprint", "").strip()
+
+    error = None
+    notice = None
+    try:
+        await run_in_threadpool(
+            api_approve_pending_ssh_key, request, conn, username, fingerprint, admin=admin)
+    except HTTPException as exc:
+        error = str(exc.detail)
+    else:
+        notice = (f"SSH key added for {username}. Their upload and proxy download can "
+                  "authenticate now.")
+
+    return _render(request, "partials/admin_users.html", {
+        "admin_users": build_admin_users_view(settings, conn),
+        "error": error,
+        "notice": notice,
+    })
+
+
+@router.post("/partials/admin/users/keys/dismiss")
+async def partial_admin_dismiss_ssh_key(request: Request,
+                                        conn: sqlite3.Connection = Depends(get_conn)):
+    """Throw an offered key away. Nothing is revoked: that computer still has
+    the private half and offers it again on its next sign-in."""
+    admin = _require_admin_page(request)
+    settings = request.app.state.settings
+    form = await _form(request)
+    username = form.get("username", "").strip().lower()
+    fingerprint = form.get("fingerprint", "").strip()
+    if db.drop_pending_ssh_key(conn, username, fingerprint):
+        db.audit(conn, admin, "ssh_key.dismiss", username, {"fingerprint": fingerprint})
+    conn.commit()
+    return _render(request, "partials/admin_users.html", {
+        "admin_users": build_admin_users_view(settings, conn),
     })
 
 
@@ -2918,7 +3285,7 @@ def partial_admin_cancel_job(
                 job_id, admin, state)
     notice = (f"job #{job_id} is over"
               if state == db.JOB_FAILED else
-              f"job #{job_id} will stop on its next report - the machine "
+              f"job #{job_id} will stop on its next report - the computer "
               f"running it is the only thing that can end it")
     return _render(request, "partials/admin_jobs.html",
                    _jobs_context(request, conn, show_finished=bool(finished),
@@ -3204,12 +3571,12 @@ async def partial_admin_package_push_one(
     editor, machine = editor.strip().lower(), machine.strip()
     error = None
     if not editor or not machine:
-        error = "pick a machine to push this build to"
+        error = "pick a computer to push this build to"
     elif db.get_package(conn, platform, version, "companion") is None:
         error = f"no published {platform} companion package {version}"
     elif not db.request_machine_update(conn, editor, machine, version, admin,
                                        db.utcnow_iso()):
-        error = f"no machine {machine!r} for {editor!r}"
+        error = f"no computer {machine!r} for {editor!r}"
     else:
         db.audit(conn, admin, "package.push_one", version,
                  {"platform": platform, "version": version,
@@ -3263,12 +3630,12 @@ async def partial_admin_machine_update(
         conn, ((row["platform"] if row else "") or "").strip().lower(), kind="companion",
     ) if row is not None else None
     if row is None:
-        error = f"no machine {machine!r} for {editor!r}"
+        error = f"no computer {machine!r} for {editor!r}"
     elif current is None:
-        error = "no current companion package is published for that machine's platform"
+        error = "no current companion package is published for that computer's platform"
     elif not db.request_machine_update(conn, editor, machine, current["version"],
                                        admin or "admin", db.utcnow_iso()):
-        error = f"no machine {machine!r} for {editor!r}"
+        error = f"no computer {machine!r} for {editor!r}"
     else:
         conn.commit()
     return _render(request, "partials/admin_packages.html",
@@ -3769,3 +4136,16 @@ def page_offline(request: Request):
     """
     return _render(request, "offline.html",
                    {"session_user": None, "session_is_admin": False, "csrf_token": ""})
+
+
+@router.get("/help")
+def page_help(request: Request):
+    """The customer guide, rendered (UX-3 / SYS-21a).
+
+    Behind the login gate (app.py) and brand-substituted like every other
+    page. help.py owns finding the document and turning it into HTML; a
+    server with no copy of it gets one sentence, never a 500.
+    """
+    context = help_page.page_context()
+    context["nav_current"] = "help"
+    return _render(request, "help.html", context)

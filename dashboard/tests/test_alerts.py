@@ -1317,3 +1317,263 @@ def test_every_new_kind_is_in_the_registry_and_the_weekly_list(env):
     _subject, body = alerts.compose_weekly(conn, NOW, settings)
     assert "the fleet job queue" in body
     assert "computers refusing the offer outright" in body
+
+
+# ------------------------------------------------------- CR-190: the digest
+#
+# Alex, 2026-09-04 17:09, an hour after configuring SMTP for the first time:
+# eleven separate emails inside the same minute, one per open finding. "I'm
+# getting spammed with emails now." A person gets at most ONE message per
+# check cycle now, and the daily repeat of the errors is one message too.
+# Nothing is dropped to get there: everything that was eleven mails is a block
+# in the one.
+
+
+class _CountingSMTP(_FakeSMTP):
+    """Every message this cycle handed to the mail server, in order."""
+
+    messages: list = []
+
+    @classmethod
+    def reset(cls):
+        cls.messages = []
+        return cls
+
+    def send_message(self, message):
+        type(self).seen = {"sent": True}
+        _CountingSMTP.messages.append(message)
+
+
+def _mail_bodies(messages):
+    return [m.get_content() for m in messages]
+
+
+def _error_finding(subject, kind="machine_silent", title="a computer has gone quiet"):
+    return {"kind": kind, "severity": alerts.SEV_ERROR, "title": title,
+            "subject": subject, "diagnosis": f"{subject} has gone quiet.",
+            "fix": "Ask that editor to check the tray.", "detail": "last seen never",
+            "repeat": True}
+
+
+def _digest_smtp(conn, monkeypatch):
+    """An SMTP sink with the weekly report off, counting what goes out."""
+    _configure_smtp(conn)
+    alerts.set_settings(conn, {"alerts_weekly": "0"}, "owen")
+    conn.commit()
+    _CountingSMTP.reset()
+    monkeypatch.setattr(alerts, "_smtp_class", lambda: _CountingSMTP)
+    return _CountingSMTP
+
+
+def test_eleven_open_findings_are_one_email_when_the_sink_is_turned_on(
+        env, monkeypatch):
+    """The bug itself. Eleven findings open on a site with no channel, then a
+    channel: ONE catch-up message, not eleven "we found this" mails."""
+    _client, conn, settings = env
+    alerts.set_settings(conn, {"alerts_weekly": "0"}, "owen")
+    conn.commit()
+    findings = [_warn_finding(subject=f"finding-{i}") for i in range(11)]
+    monkeypatch.setattr(alerts, "scan", lambda *_a, **_kw: findings)
+    alerts.run_cycle(conn, settings, NOW)          # no sink: eleven ok=0 rows
+
+    mail = _digest_smtp(conn, monkeypatch)
+    result = alerts.run_cycle(conn, settings, NOW)
+
+    assert len(mail.messages) == 1
+    assert result["sent"] == 11
+    subject = mail.messages[0]["Subject"]
+    assert subject == "CC Sync: here is everything currently open (11)"
+    body = _mail_bodies(mail.messages)[0]
+    assert "catch-up after an alert channel was set up" in body
+    for i in range(11):
+        assert f"finding-{i}" in body
+    # One ledger row per finding still (the dedup and _is_open read them), and
+    # every one of them naming the message it went out in.
+    rows = [r for r in dbmod.fetch_alerts(conn, limit=200)
+            if r["kind"] == "folders_unfiltered" and r["ok"] == 1]
+    assert len(rows) == 11
+    assert len({r["batch_id"] for r in rows}) == 1
+    assert rows[0]["batch_id"]
+
+
+def test_a_cycle_with_three_new_findings_is_one_message_with_three_blocks(
+        env, monkeypatch):
+    _client, conn, settings = env
+    mail = _digest_smtp(conn, monkeypatch)
+    findings = [_error_finding("a/PC"), _error_finding("b/PC"),
+                _warn_finding(subject="c/PC")]
+
+    result = alerts.deliver(conn, settings, findings, NOW)
+
+    assert len(mail.messages) == 1
+    assert result["sent"] == 3 and result["failed"] == 0
+    assert mail.messages[0]["Subject"] == "CC Sync: 3 new problem(s)"
+    body = _mail_bodies(mail.messages)[0]
+    # Worst first, and each block carries the same diagnosis and next action
+    # its own mail used to carry.
+    assert body.index("PROBLEM: a computer has gone quiet - a/PC") < \
+        body.index("TO LOOK AT: a warn - c/PC")
+    assert body.count("What to do:") == 3
+    assert "Ask that editor to check the tray." in body
+    assert "something to look at" in body
+
+
+def test_one_new_finding_names_it_in_the_subject(env, monkeypatch):
+    _client, conn, settings = env
+    mail = _digest_smtp(conn, monkeypatch)
+    alerts.deliver(conn, settings, [_error_finding("a/PC")], NOW)
+    assert mail.messages[0]["Subject"] == \
+        "CC Sync: 1 new problem: a computer has gone quiet"
+
+
+def test_the_daily_repeat_of_four_errors_is_one_message(env, monkeypatch):
+    """Rule 3: four errors still true tomorrow are one "still not fixed"
+    message listing them, one line each, not four re-reads of what was said
+    yesterday."""
+    _client, conn, settings = env
+    mail = _digest_smtp(conn, monkeypatch)
+    findings = [_error_finding(f"pc{i}/PC") for i in range(4)]
+    alerts.deliver(conn, settings, findings, NOW)
+    assert len(mail.messages) == 1
+
+    # A DAY AND A BIT: `alert_recently_sent`'s window is inclusive at exactly
+    # 24 h, so a repeat timed to the second is (correctly) still deduped.
+    alerts.deliver(conn, settings, findings, "2026-08-29T12:00:30+00:00")
+
+    assert len(mail.messages) == 2
+    subject = mail.messages[1]["Subject"]
+    assert subject.startswith("CC Sync: still not fixed after 1 day(s): ")
+    assert "and 2 more" in subject
+    body = _mail_bodies(mail.messages)[1]
+    assert "STILL NOT FIXED" in body
+    for i in range(4):
+        assert f"pc{i}/PC (open for 1 day(s))" in body
+    # A line, not a block: the diagnosis went out yesterday.
+    assert "What to do:" not in body
+
+
+def test_a_recovery_rides_the_same_message_and_is_never_its_own(env, monkeypatch):
+    _client, conn, settings = env
+    mail = _digest_smtp(conn, monkeypatch)
+    alerts.deliver(conn, settings, [_error_finding("a/PC"),
+                                    _error_finding("b/PC")], NOW)
+    assert len(mail.messages) == 1
+
+    result = alerts.deliver(conn, settings, [_error_finding("a/PC")], A_DAY_LATER)
+
+    assert len(mail.messages) == 2
+    assert result["recovered"] == 1
+    body = _mail_bodies(mail.messages)[1]
+    assert "CLEARED: a computer has gone quiet - b/PC" in body
+    assert alerts.RECOVERED_BODY in body
+    # Filed under the recovery namespace, so _is_open agrees it has cleared.
+    assert alerts._is_open(conn, "machine_silent", "b/PC") is False
+
+
+def test_what_is_open_but_not_in_this_message_is_counted_at_the_end(
+        env, monkeypatch):
+    """A warn is said once. An owner reading one message a cycle has to be
+    able to tell "nothing else is wrong" from "the rest is not in this mail"."""
+    _client, conn, settings = env
+    mail = _digest_smtp(conn, monkeypatch)
+    alerts.deliver(conn, settings, [_warn_finding(subject="old/PC")], NOW)
+
+    alerts.deliver(conn, settings, [_warn_finding(subject="old/PC"),
+                                    _error_finding("new/PC")], A_DAY_LATER)
+
+    body = _mail_bodies(mail.messages)[1]
+    assert "Still open from before: 1 (see the HEALTH page)" in body
+
+
+def test_a_webhook_still_gets_one_post_per_finding(env, monkeypatch):
+    """A webhook consumer wants structured events, so the digest default
+    flips on the sink. The flag overrides it either way."""
+    _client, conn, settings = env
+    _configure_webhook(conn)
+    alerts.set_settings(conn, {"alerts_weekly": "0"}, "owen")
+    conn.commit()
+    fake = _FakeOpener()
+    monkeypatch.setattr(alerts, "_webhook_opener", lambda: fake)
+    findings = [_error_finding("a/PC"), _error_finding("b/PC"),
+                _error_finding("c/PC")]
+
+    result = alerts.deliver(conn, settings, findings, NOW)
+
+    assert len(fake.calls) == 3
+    assert result["sent"] == 3
+    # Per-event rows carry no batch id: they really were three messages.
+    rows = [r for r in dbmod.fetch_alerts(conn, limit=50)
+            if r["kind"] == "machine_silent"]
+    assert len(rows) == 3 and {r["batch_id"] for r in rows} == {""}
+
+    alerts.set_settings(conn, {"alerts_digest": "1"}, "owen")
+    conn.commit()
+    assert alerts.digest_enabled(alerts.get_settings(conn)) is True
+
+
+def test_the_digest_default_follows_the_sink(env):
+    _client, conn, _settings = env
+    _configure_smtp(conn)
+    assert alerts.digest_enabled(alerts.get_settings(conn)) is True
+    _configure_webhook(conn)
+    assert alerts.digest_enabled(alerts.get_settings(conn)) is False
+    alerts.set_settings(conn, {"alerts_digest": "1"}, "owen")
+    assert alerts.digest_enabled(alerts.get_settings(conn)) is True
+    alerts.set_settings(conn, {"alerts_digest": "0"}, "owen")
+    _configure_smtp(conn)
+    assert alerts.digest_enabled(alerts.get_settings(conn)) is False
+
+
+def test_a_failed_digest_leaves_a_row_per_finding_and_no_sent_count(
+        env, monkeypatch):
+    _client, conn, settings = env
+    _configure_smtp(conn)
+    alerts.set_settings(conn, {"alerts_weekly": "0"}, "owen")
+    conn.commit()
+
+    class _RefusingSMTP(_FakeSMTP):
+        def send_message(self, message):
+            raise ssl.SSLCertVerificationError("self-signed certificate")
+
+    monkeypatch.setattr(alerts, "_smtp_class", lambda: _RefusingSMTP)
+    result = alerts.deliver(conn, settings, [_error_finding("a/PC"),
+                                             _error_finding("b/PC")], NOW)
+    assert result["sent"] == 0 and result["failed"] == 2
+    rows = [r for r in dbmod.fetch_alerts(conn, limit=50)
+            if r["kind"] == "machine_silent"]
+    assert len(rows) == 2 and all(r["ok"] == 0 for r in rows)
+
+
+def test_the_heartbeat_and_the_weekly_report_stay_their_own_messages(
+        env, monkeypatch):
+    _client, conn, settings = env
+    _configure_smtp(conn)
+    alerts.set_settings(conn, {"alerts_heartbeat": "1"}, "owen")
+    conn.commit()
+    _CountingSMTP.reset()
+    monkeypatch.setattr(alerts, "_smtp_class", lambda: _CountingSMTP)
+    monkeypatch.setattr(alerts, "scan", lambda *_a, **_kw: [_error_finding("a/PC")])
+
+    result = alerts.run_cycle(conn, settings, NOW)
+
+    assert result["weekly"] is True and result["heartbeat"] is True
+    subjects = [m["Subject"] for m in _CountingSMTP.messages]
+    assert len(subjects) == 3
+    assert any(s.startswith("CC Sync weekly:") for s in subjects)
+    assert any("still here" in s or "all quiet" in s for s in subjects)
+    assert any(s.startswith("CC Sync: 1 new problem:") for s in subjects)
+
+
+def test_the_page_groups_the_rows_that_shared_a_message(env, monkeypatch):
+    _client, conn, settings = env
+    _digest_smtp(conn, monkeypatch)
+    alerts.deliver(conn, settings, [_error_finding("a/PC"),
+                                    _error_finding("b/PC")], NOW)
+    groups = alerts.group_log(dbmod.fetch_alerts(conn, limit=50))
+    digest = [g for g in groups if g["count"] > 1]
+    assert len(digest) == 1 and digest[0]["count"] == 2
+
+    client = as_admin(_client)
+    page = client.get("/admin/alerts")
+    assert page.status_code == 200
+    assert "one message, 2 finding(s)" in page.text

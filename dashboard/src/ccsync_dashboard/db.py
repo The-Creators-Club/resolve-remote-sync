@@ -1721,6 +1721,22 @@ CREATE TABLE IF NOT EXISTS pending_ssh_keys (
 );
 """
 
+# v51: which rows went out in ONE message (CR-190, 2026-09-04). The owner
+# configured SMTP and got eleven separate emails inside the same minute, one
+# per open finding: "I'm getting spammed with emails now." Delivery is a
+# DIGEST now, one message per check cycle, but `alert_log` still keeps one row
+# per finding because the dedup (`alert_recently_sent`), the recovery
+# comparison (`_is_open`) and the page all read a row per (kind, subject).
+# `batch_id` is the only thing missing to show them as what they were: rows
+# that shared a message. Its own column rather than a reuse of `detail` or
+# `sent_to` -- both carry a sink's own words and both are rendered on the
+# page -- and empty on every per-event row (a webhook POST per finding really
+# was N separate messages, so grouping them would be a lie).
+SCHEMA_V51 = """
+ALTER TABLE alert_log ADD COLUMN batch_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS ix_alert_log_batch ON alert_log(batch_id, id);
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1846,6 +1862,9 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # resource, so the four unrelated groups of columns land in one step
     # rather than four.
     (50, SCHEMA_V50),
+    # 51: the alert digest's batch id (CR-190, 2026-09-04). One column, and
+    # gapless like every one before it.
+    (51, SCHEMA_V51),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -6066,16 +6085,22 @@ ALERT_DEDUP_SECONDS = 24 * 3600
 def record_alert(
     conn: sqlite3.Connection, kind: str, subject: str, sent_to: str,
     ok: bool, detail: str = "", now: str | None = None,
+    batch_id: str = "",
 ) -> int:
     """Append one row and return its id. FAILURES ARE RECORDED TOO (ok=0):
     a sink that has been refusing since Tuesday is exactly what an admin needs
     on the page, and a send that left no trace is how a fleet ends up believing
-    alerts are on."""
+    alerts are on.
+
+    `batch_id` (v51, CR-190) is the message these rows shared. Empty means
+    this row was its own message, which is what a per-event webhook send is.
+    """
     cur = conn.execute(
-        "INSERT INTO alert_log (at, kind, subject, sent_to, ok, detail) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO alert_log (at, kind, subject, sent_to, ok, detail, batch_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (now or utcnow_iso(), str(kind or ""), str(subject or "")[:400],
-         str(sent_to or "")[:400], 1 if ok else 0, str(detail or "")[:800]),
+         str(sent_to or "")[:400], 1 if ok else 0, str(detail or "")[:800],
+         str(batch_id or "")[:64]),
     )
     return int(cur.lastrowid or 0)
 

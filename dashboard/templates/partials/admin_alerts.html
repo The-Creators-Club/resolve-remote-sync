@@ -83,6 +83,19 @@
       </select>
       <span class="muted">If these stop arriving, the server itself is down.</span></label>
 
+    {# CR-190 (2026-09-04): eleven emails inside one minute, one per open
+       finding, on the owner's first hour with a sink configured. One message
+       per check is the default for a mailbox; a webhook consumer wants one
+       event per finding, so the default follows the sink and this overrides
+       it either way. #}
+    <label title="A mailbox gets one message per check with every finding in it. A webhook gets one POST per finding, because its consumer wants events.">HOW MANY MESSAGES<br>
+      <select name="alerts_digest">
+        <option value="" {% if alerts_settings.alerts_digest not in ("0", "1") %}selected{% endif %}>whatever suits the channel</option>
+        <option value="1" {% if alerts_settings.alerts_digest == "1" %}selected{% endif %}>one message per check</option>
+        <option value="0" {% if alerts_settings.alerts_digest == "0" %}selected{% endif %}>one message per problem</option>
+      </select>
+      <span class="muted">One message per check keeps a mailbox readable: everything found in that check is in it, worst first.</span></label>
+
     <div class="side-head" style="margin-top:0.8rem">[ MAIL ]</div>
     <label>SMTP HOST<br><input type="text" name="alerts_smtp_host" value="{{ alerts_settings.alerts_smtp_host }}"></label>
     <label>SMTP PORT<br><input type="text" name="alerts_smtp_port" value="{{ alerts_settings.alerts_smtp_port }}"></label>
@@ -136,15 +149,24 @@
   </div>
 
   <div class="side-head" style="margin-top:1.2rem">[ WHAT WAS SENT ]
-    <span class="muted">Newest first. A failed send is kept: a channel that has
-      been refusing since Tuesday is worse than no channel, because you believe
-      you have one.</span></div>
-  {# .stack: a row is one send (MOBILE_PLAN.md §3.2, 2026-08-30). #}
+    <span class="muted">Newest first, grouped by the message each one went out
+      in. A failed send is kept: a channel that has been refusing since Tuesday
+      is worse than no channel, because you believe you have one.</span></div>
+  {# CR-190 (2026-09-04): the ledger keeps one row per finding (the dedup and
+     the recovery comparison read it that way), so the page has to put a
+     digest back together to show what the mailbox actually received. Rows
+     with no batch id are their own message and are shown exactly as before. #}
+  {# .stack: a row is one finding (MOBILE_PLAN.md §3.2, 2026-08-30). #}
   <div class="scroll-x">
   <table class="editors stack" style="margin-top:0.6rem">
     <thead><tr><th>WHEN</th><th>KIND</th><th>SUBJECT</th><th>TO</th><th>RESULT</th></tr></thead>
     <tbody>
-    {% for row in alerts_log %}
+    {% for group in alerts_log_groups %}
+      {% if group.count > 1 %}
+        <tr><td colspan="5" class="muted mono-sm" style="padding-top:0.5rem">
+          {{ group.at }} - one message, {{ group.count }} finding(s)</td></tr>
+      {% endif %}
+      {% for row in group.rows %}
       <tr class="editor-row">
         <td class="mono-sm muted" data-label="WHEN">{{ row.at }}</td>
         <td class="mono-sm" data-label="KIND">{{ row.kind }}</td>
@@ -152,6 +174,7 @@
         <td class="mono-sm muted" data-label="TO">{{ row.sent_to or "-" }}</td>
         <td data-label="RESULT">{% if row.ok %}<span class="chip lane green">sent</span>{% else %}<span class="chip red">[ {{ row.detail or "failed" }} ]</span>{% endif %}</td>
       </tr>
+      {% endfor %}
     {% else %}
       <tr><td colspan="5" class="muted">Nothing has been sent yet.</td></tr>
     {% endfor %}

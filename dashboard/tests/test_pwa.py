@@ -278,10 +278,20 @@ def test_the_cards_install_files_are_in_open_exact():
     assert {"/cards/manifest.webmanifest", "/cards/icon.svg"} <= _OPEN_EXACT
 
 
+def test_the_cards_service_worker_is_in_open_exact():
+    """The Cards app registers a worker at /cards/sw.js for offline work
+    (Alex, 2026-09-04; the Cards repo's docs/OFFLINE-PLAN.md section 7). The
+    browser re-fetches that script on its own schedule to check for an
+    update, with none of the page's session semantics once the session has
+    expired, so a 303 to the login page there is what breaks updates -- the
+    same shape as CR-100, one path further on."""
+    assert "/cards/sw.js" in _OPEN_EXACT
+
+
 def test_the_cards_manifest_is_never_redirected_to_login(client):
     # The cards mount is absent in this suite (no checkout, no vault), so the
     # answer is a 404 -- what matters is that it is not the gate's 303.
-    for path in ("/cards/manifest.webmanifest", "/cards/icon.svg"):
+    for path in ("/cards/manifest.webmanifest", "/cards/icon.svg", "/cards/sw.js"):
         res = client.get(path, follow_redirects=False)
         assert res.status_code != 303, path
         assert "/login" not in res.headers.get("location", ""), path

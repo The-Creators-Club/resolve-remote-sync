@@ -14419,6 +14419,108 @@ on every response and are dropped by `_text_of`; the first time this is
 doubted, that is where the evidence is.
 
 
+### CR-190 - the first hour with a mail server configured was eleven emails in one minute, one per open finding - FIXED in repo 2026-09-04 (dashboard 0.7.36)
+
+**What was wrong.** The owner configured the SMTP sink at 17:09 on 2026-09-04
+and the next collector cycle sent him **eleven separate emails inside the same
+minute**, one per open finding: "CC Sync: a safety net is not there - release
+key backup", "... - restore drill", "... - snapshot", "CC Sync: something this
+system relies on ...", "CC Sync: project folders outside the tree", "CC Sync:
+footage is outside the tree", and five more. His words: **"I'm getting spammed
+with emails now."** (Alex, 2026-09-04.)
+
+Every one of them was correct, and that was the problem. `deliver()` was
+written per finding, because the dedup, the recovery comparison and the ledger
+are all per `(kind, subject)`, and delivery quietly inherited that shape:
+`_send_committed` once per finding, one mail each. Three multipliers on top of
+it, all of them by design until now:
+
+* DDIAG-4 (CR-155) makes turning a sink on RE-RAISE everything already open,
+  so the very first cycle after a channel is configured is the largest batch a
+  site will ever produce. That is right, and it is the worst possible first
+  impression of the feature.
+* An `error` repeats once a day for as long as it is true, so the four
+  error-severity findings among those eleven were four more mails every
+  morning, for ever, with the same text.
+* A recovery is its own mail, so a fleet coming back from one outage answers
+  with a burst of "cleared" messages.
+
+A mailbox is not an event stream. Eleven mails about one server is one mail's
+worth of information and ten rules in somebody's filter, and the filter is
+what kills the alarm: the whole point of `alerts.py` is that the dashboard is
+finally the thing that DISCOVERS an outage, and a sender the owner has muted
+discovers nothing.
+
+**What was built.** A digest. Nothing is dropped to get there: everything that
+would have been eleven mails is a block in one.
+
+* **One message per check cycle** (`compose_digest`, `_send_digest`). Subject
+  `CC Sync: 3 new problem(s)`, or `CC Sync: 1 new problem: <title>` when there
+  is one. The body is one block per new finding in severity order carrying
+  exactly the `diagnosis`, the `What to do:` and the `Detail:` each separate
+  mail carried, worst first.
+* **A repeat is a line, not a re-read.** A finding that was in yesterday's
+  message and has not changed appears under `STILL NOT FIXED` with how long it
+  has been open (`_open_days`, measured from the first alert AFTER the last
+  recovery, so a breaker that cleared in July and tripped this morning is one
+  day old). A day with only repeats is one mail:
+  `CC Sync: still not fixed after 1 day(s): <two titles> and 2 more`.
+* **Recoveries ride the same digest** as their own `CLEARED:` block, filed
+  under `<kind>.ok` exactly as before, so `_is_open` is unchanged.
+* **The catch-up says it is one.** `_requeue_undelivered` leaves a `meta`
+  marker (`alerts_catch_up_at`, taken and cleared by the next `deliver`) and
+  that message is `CC Sync: here is everything currently open (11)`, whose
+  first line says it is the catch-up after a channel was set up here, not
+  eleven faults found in the last ten minutes.
+* **`Still open from before: k (see the HEALTH page)`** closes the body
+  whenever something open is not in this mail (a warn already said, an error
+  that has opted out of its repeat under DDIAG-3, anything inside its dedup
+  window). One message a cycle is only honest if it can say what it is not
+  carrying.
+* **A webhook still gets one POST per finding.** Its consumer wants structured
+  events, so the default flips on the SINK (`digest_enabled`) rather than
+  becoming a product-wide rule, and `alerts_digest` ("", "1", "0" - HOW MANY
+  MESSAGES on the Alerts page) overrides it either way. Blank stays blank: it
+  means "whatever suits the channel", and folding it to a bool would freeze
+  today's default on every site that ever saved the form.
+* **The heartbeat and the weekly report stay their own messages.** They are
+  scheduled, not raised, and the heartbeat's entire meaning is that one
+  arrives every day whatever else does.
+* `send()` keeps its contract; the sink call came out of it as `_transmit`
+  (no dedup, no ledger row, still never raises), because one message can now
+  carry many findings. The network call is still outside the write lock, and
+  the delivery budget (DDIAG-1) still bounds the pass: in digest mode it is
+  one send wide, and a pass that runs out leaves no `alert_log` row, so the
+  next cycle offers everything again unchanged.
+
+**Migration: v51**, one column. `alert_log` had no free text column to carry
+it - `sent_to` and `detail` both hold the sink's own words and both are
+rendered on the page - so `alert_log.batch_id TEXT NOT NULL DEFAULT ''` plus
+`ix_alert_log_batch`. The ledger still keeps ONE ROW PER FINDING, because the
+dedup (`alert_recently_sent`), the recovery comparison (`_is_open`) and the
+page all read it that way and a collapsed row would re-send everything every
+ten minutes; `batch_id` is only what puts them back together on the page.
+WHAT WAS SENT groups by it ("2026-09-04T17:09:03Z - one message, 3
+finding(s)"); a per-event row carries no batch id, because it really was its
+own message.
+
+`docs/SELF_DIAGNOSIS.md` sections 6 and 7 carry the rule, the date and the
+owner's sentence.
+
+**Tests.** `dashboard/tests/test_alerts.py` (+11: eleven open findings on a
+sink being turned on producing ONE send with all eleven in it and eleven rows
+sharing one batch id; a cycle with three new findings producing one message
+with three blocks, worst first; a single finding named in the subject; the
+daily repeat of four errors as one "still not fixed" message with a line
+each and no repeated diagnosis; a recovery riding the same message and never
+its own; "still open from before" counting what is not in the mail; a webhook
+still getting one POST per finding with no batch id; the default following
+the sink and the flag overriding it; a failed digest leaving an ok=0 row per
+finding; the heartbeat and the weekly report staying separate; and the page
+grouping the rows that shared a message). 92 pass in `test_alerts.py`, and the
+two copy scans plus the wave-1 sweep files (442) stay green.
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

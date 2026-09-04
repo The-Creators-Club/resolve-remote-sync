@@ -52,6 +52,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from email.message import EmailMessage
 from pathlib import Path
@@ -90,6 +91,11 @@ UNDELIVERED_SUFFIX = ".undelivered"
 # The detail `send()` writes for a finding composed on a site with no sink.
 # Matched as a string in `_requeue_undelivered`, so the two must agree.
 NO_SINK_DETAIL = "no sink configured"
+
+# CR-190 (2026-09-04): the meta row `_requeue_undelivered` leaves behind, read
+# and cleared by the next `deliver`. It changes the wording of ONE message,
+# never whether it is sent.
+META_CATCH_UP = "alerts_catch_up_at"
 
 # A machine that has not reported for this long is silent. The same 24 h the
 # finding names, and deliberately far above health.STALE_EDITOR_RED_SECONDS
@@ -241,6 +247,12 @@ SETTING_KEYS: dict[str, str] = {
     # owner opts into, and a heartbeat nobody asked for is the first rule a
     # mailbox filter learns.
     "alerts_heartbeat": "bool",
+    # CR-190 (2026-09-04). "" is the sink's own default (see
+    # `digest_enabled`), "1" is one message per check cycle, "0" is one
+    # message per finding. THREE values, not a bool: the right answer differs
+    # per sink, and a site that has never touched this must follow the sink it
+    # picks rather than a value frozen the day it saved the form.
+    "alerts_digest": "tri",
 }
 
 _DEFAULTS = {
@@ -276,6 +288,13 @@ def _validate(key: str, raw: str) -> str:
         if value in ("1", "0", ""):
             return value or "0"
         raise AlertError(f"{key}: must be '1' or '0'")
+    if kind == "tri":
+        # Blank is a THIRD value here and is kept as blank, unlike "bool"
+        # above, which folds it to "0": blank means "whatever this sink's
+        # default is", and folding it would freeze today's default for ever.
+        if value in ("1", "0", ""):
+            return value
+        raise AlertError(f"{key}: must be '1', '0' or blank")
     if kind == "https":
         # https ONLY, and refused at the moment it is typed rather than at
         # 03:00 on a Sunday when the first alert goes out in the clear. A
@@ -304,6 +323,27 @@ def get_settings(conn: sqlite3.Connection) -> dict[str, str]:
     except sqlite3.Error:
         stored = {}
     return {key: stored.get(key, _DEFAULTS.get(key, "")) for key in SETTING_KEYS}
+
+
+def digest_enabled(values: Mapping[str, str]) -> bool:
+    """Is one message per check cycle this site's shape? (CR-190, 2026-09-04)
+
+    ONE EMAIL PER CYCLE, from the owner's first hour with a sink configured:
+    eleven separate messages inside the same minute, one per open finding,
+    "I'm getting spammed with emails now" (Alex, 2026-09-04). A person reads a
+    mailbox; eleven mails about one server is one mail's worth of information
+    and ten rules in a filter.
+
+    A WEBHOOK IS NOT A PERSON. Its consumer wants structured events - one
+    POST per finding, each with its own subject and kind - so the default
+    flips on the sink rather than being a product-wide rule. `alerts_digest`
+    overrides it either way for the site whose webhook feeds a chat channel a
+    human actually reads.
+    """
+    raw = (values.get("alerts_digest") or "").strip()
+    if raw in ("1", "0"):
+        return raw == "1"
+    return (values.get("alerts_sink") or SINK_NONE) != SINK_WEBHOOK
 
 
 def set_settings(
@@ -369,6 +409,16 @@ def _requeue_undelivered(conn: sqlite3.Connection) -> int:
     if moved:
         log.info("alerts: a sink was configured; %d finding(s) that were "
                  "never delivered will be raised again on the next check", moved)
+        try:
+            # CR-190 (2026-09-04): the next delivery is a CATCH-UP, and it
+            # says so in its first line. Without this the owner's first
+            # message from a channel they have just configured reads as
+            # eleven brand new faults discovered in the last ten minutes.
+            # A meta row, so a container replaced between the save and the
+            # next collector cycle still gets it right.
+            db.meta_set(conn, META_CATCH_UP, db.utcnow_iso())
+        except sqlite3.Error:
+            log.debug("alerts: could not mark the catch-up", exc_info=True)
     return moved
 
 
@@ -2813,8 +2863,121 @@ def compose_recovered(kind: str, subject: str) -> tuple[str, str]:
     title = KIND_BY_NAME[kind].title if kind in KIND_BY_NAME else kind
     line = f"CC Sync: cleared - {title} - {subject}" if subject else \
         f"CC Sync: cleared - {title}"
-    return line, (f"{line}\n\nThis has cleared on its own or somebody fixed it. "
-                  f"No action is needed.\n")
+    return line, f"{line}\n\n{RECOVERED_BODY}\n"
+
+
+RECOVERED_BODY = ("This has cleared on its own or somebody fixed it. "
+                  "No action is needed.")
+
+# How many titles the "still not fixed" subject line names before it counts
+# the rest. A subject line is read in a list of subject lines.
+DIGEST_SUBJECT_TITLES = 2
+
+_RULE = "-" * 60
+
+
+def _digest_item(finding: Mapping[str, Any], mode: str, days: int = 0) -> dict[str, Any]:
+    """One entry in a digest. `mode` is "new" (a full block), "repeat" (one
+    line, because the same block went out yesterday and nothing has changed)
+    or "cleared" (its own short block, never its own mail)."""
+    kind = str(finding.get("kind") or "")
+    return {
+        "kind": kind,
+        # What the ledger row is filed under. A recovery keeps its own
+        # namespace (`<kind>.ok`), which is what `_is_open` compares against.
+        "record_kind": kind + RECOVERED_SUFFIX if mode == "cleared" else kind,
+        "subject": str(finding.get("subject") or ""),
+        "severity": str(finding.get("severity")
+                        or (KIND_BY_NAME[kind].severity if kind in KIND_BY_NAME
+                            else SEV_WARN)),
+        "title": str(finding.get("title")
+                     or (KIND_BY_NAME[kind].title if kind in KIND_BY_NAME else kind)),
+        "mode": mode,
+        "body": _finding_body(finding) if mode != "cleared" else RECOVERED_BODY,
+        "days": int(days or 0),
+    }
+
+
+def _headline(item: Mapping[str, Any]) -> str:
+    subject = str(item.get("subject") or "")
+    return f"{item.get('title')} - {subject}" if subject else str(item.get("title"))
+
+
+def compose_digest(
+    items: list[dict[str, Any]], *, still_open: int = 0, catch_up: bool = False,
+) -> tuple[str, str]:
+    """(mail subject, plain text) for a WHOLE check cycle (CR-190, 2026-09-04).
+
+    ONE MESSAGE PER CYCLE. The owner configured SMTP on 2026-09-04 at 17:09
+    and received eleven emails inside the same minute, one per open finding:
+    "I'm getting spammed with emails now." Nothing is dropped to fix that -
+    everything that would have been eleven mails is a block in this one, in
+    severity order, carrying the same diagnosis and the same next action each
+    of those mails carried.
+
+    Three shapes of entry, because they are three different things to a
+    reader: a NEW finding is a block, a finding that was in yesterday's
+    message and has not changed is one line (the daily repeat of an error is
+    a nudge, not a re-read), and a RECOVERY rides here as its own short block
+    rather than as the separate "cleared" mail it used to be.
+
+    PURE, like `compose_alert`: what a message says and how it is delivered
+    are separate decisions and only the first is worth a test.
+    """
+    order = {SEV_ERROR: 0, SEV_WARN: 1}
+    ranked = sorted(items, key=lambda i: order.get(str(i.get("severity")), 2))
+    new = [i for i in ranked if i["mode"] == "new"]
+    repeats = [i for i in ranked if i["mode"] == "repeat"]
+    cleared = [i for i in ranked if i["mode"] == "cleared"]
+    open_now = len(new) + len(repeats)
+
+    if catch_up:
+        subject = f"CC Sync: here is everything currently open ({open_now})"
+        opening = ("This is everything this server has open right now. It is "
+                   "the catch-up after an alert channel was set up here, not "
+                   f"{open_now} new fault(s) in the last ten minutes.")
+    elif new:
+        subject = (f"CC Sync: 1 new problem: {new[0]['title']}" if len(new) == 1
+                   else f"CC Sync: {len(new)} new problem(s)")
+        opening = ("What this server found in its last check is below, worst "
+                   "first.")
+    elif repeats:
+        days = max(int(i.get("days") or 1) for i in repeats)
+        named = ", ".join(_headline(i) for i in repeats[:DIGEST_SUBJECT_TITLES])
+        rest = len(repeats) - DIGEST_SUBJECT_TITLES
+        if rest > 0:
+            named += f" and {rest} more"
+        subject = f"CC Sync: still not fixed after {days} day(s): {named}"
+        opening = ("Nothing new. These are still true, and nobody has acted "
+                   "on them yet.")
+    elif cleared:
+        subject = (f"CC Sync: cleared - {_headline(cleared[0])}"
+                   if len(cleared) == 1
+                   else f"CC Sync: {len(cleared)} problem(s) cleared")
+        opening = "Good news only in this one."
+    else:
+        # Never reached: `deliver` does not compose a digest with nothing in
+        # it. Written anyway, because a subject line built from an empty list
+        # is the sort of thing that reaches a mailbox at 03:00.
+        subject = "CC Sync: nothing to report"
+        opening = ""
+
+    body = [subject, "", opening, ""]
+    for item in new:
+        label = "PROBLEM" if item["severity"] == SEV_ERROR else "TO LOOK AT"
+        body += [_RULE, f"{label}: {_headline(item)}", "", item["body"], ""]
+    if repeats:
+        body += [_RULE, "STILL NOT FIXED", ""]
+        body += [f"  {_headline(i)} (open for {max(1, int(i.get('days') or 1))} "
+                 f"day(s))" for i in repeats]
+        body += ["", "The full description of each of these went out when it "
+                     "was first found. Nothing about them has changed.", ""]
+    for item in cleared:
+        body += [_RULE, f"CLEARED: {_headline(item)}", "", item["body"], ""]
+    if still_open > 0:
+        body += [f"Still open from before: {still_open} (see the HEALTH page)", ""]
+    body.append("Open the CC Sync dashboard for the full picture.")
+    return subject, "\n".join(body)[:MAX_BODY_CHARS]
 
 
 def _lane_bytes_section(conn: sqlite3.Connection) -> list[str]:
@@ -3140,6 +3303,50 @@ def _send_smtp(values: Mapping[str, str], password: str,
     return ", ".join(recipients)
 
 
+def _transmit(
+    conn: sqlite3.Connection, settings: Any, subject: str, text: str,
+    *, label: str,
+) -> dict[str, Any]:
+    """Hand ONE message to this site's sink. No dedup, no ledger row.
+
+    Split out of `send()` for the digest (CR-190, 2026-09-04): one message can
+    now carry many findings, so "deliver this text" and "write down what
+    happened to each finding in it" are two decisions rather than one. NEVER
+    RAISES, for the reason `send` gives: this runs on the collector thread and
+    a mail server that is down must not take the poll cycle with it.
+    """
+    values = get_settings(conn)
+    sink = values.get("alerts_sink") or SINK_NONE
+    if sink == SINK_NONE:
+        # Not a delivery and not an exception: the caller records it, because
+        # "we composed an alert and this site has no sink" is a fact the
+        # Alerts page shows and the honest answer to "why did nobody get told".
+        return {"ok": False, "sink": sink, "sent_to": "", "detail": NO_SINK_DETAIL}
+    try:
+        if sink == SINK_WEBHOOK:
+            url = (values.get("alerts_webhook_url") or "").strip()
+            # bug-hunt-2026-09-03 dash-collector-5: the ORIGIN goes in the
+            # ledger, never the full URL. `alert_log.sent_to` is rendered on
+            # the Alerts page and travels in every database backup, and a
+            # Slack/Teams/Discord URL's path is the credential.
+            sent_to = url_origin(url) or "webhook"
+            detail = _send_webhook(url, subject, text)
+        else:
+            password, _source = read_password(settings)
+            sent_to = _send_smtp(values, password, subject, text)
+            detail = "sent"
+    except AlertError as exc:
+        log.warning("alerts: %s alert could not be delivered: %s", label, exc)
+        return {"ok": False, "sink": sink, "sent_to": "", "detail": str(exc)}
+    except Exception as exc:                                        # noqa: BLE001
+        # Fault isolation of last resort: this runs inside the collector's
+        # cycle, and no sink's surprise may end that thread.
+        log.exception("alerts: unexpected failure delivering a %s alert", label)
+        return {"ok": False, "sink": sink, "sent_to": "",
+                "detail": f"{type(exc).__name__}: {str(exc)[:160]}"}
+    return {"ok": True, "sink": sink, "sent_to": sent_to, "detail": detail}
+
+
 def send(
     conn: sqlite3.Connection, settings: Any, subject: str, text: str,
     *, kind: str = KIND_TEST, dedup_subject: str | None = None,
@@ -3159,48 +3366,15 @@ def send(
     every cycle and fill the ledger with failures nobody can read.
     """
     now = now or db.utcnow_iso()
-    values = get_settings(conn)
-    sink = values.get("alerts_sink") or SINK_NONE
+    sink = get_settings(conn).get("alerts_sink") or SINK_NONE
     key = subject if dedup_subject is None else dedup_subject
     if dedup and db.alert_recently_sent(conn, kind, key, now, ok_only=False):
         return {"ok": True, "sink": sink, "sent_to": "",
                 "detail": "already sent today", "deduped": True}
-    if sink == SINK_NONE:
-        # Recorded, not silently dropped: "we composed an alert and this site
-        # has no sink" is a fact the Alerts page shows, and it is the honest
-        # answer to "why did nobody get told".
-        db.record_alert(conn, kind, key, "", False, NO_SINK_DETAIL, now)
-        return {"ok": False, "sink": sink, "sent_to": "",
-                "detail": NO_SINK_DETAIL, "deduped": False}
-    try:
-        if sink == SINK_WEBHOOK:
-            url = (values.get("alerts_webhook_url") or "").strip()
-            # bug-hunt-2026-09-03 dash-collector-5: the ORIGIN goes in the
-            # ledger, never the full URL. `alert_log.sent_to` is rendered on
-            # the Alerts page and travels in every database backup, and a
-            # Slack/Teams/Discord URL's path is the credential.
-            sent_to = url_origin(url) or "webhook"
-            detail = _send_webhook(url, subject, text)
-        else:
-            password, _source = read_password(settings)
-            sent_to = _send_smtp(values, password, subject, text)
-            detail = "sent"
-    except AlertError as exc:
-        log.warning("alerts: %s alert could not be delivered: %s", kind, exc)
-        db.record_alert(conn, kind, key, "", False, str(exc), now)
-        return {"ok": False, "sink": sink, "sent_to": "", "detail": str(exc),
-                "deduped": False}
-    except Exception as exc:                                        # noqa: BLE001
-        # Fault isolation of last resort: this runs inside the collector's
-        # cycle, and no sink's surprise may end that thread.
-        log.exception("alerts: unexpected failure delivering a %s alert", kind)
-        db.record_alert(conn, kind, key, "", False,
-                        f"{type(exc).__name__}: {str(exc)[:160]}", now)
-        return {"ok": False, "sink": sink, "sent_to": "",
-                "detail": f"{type(exc).__name__}", "deduped": False}
-    db.record_alert(conn, kind, key, sent_to, True, detail, now)
-    return {"ok": True, "sink": sink, "sent_to": sent_to, "detail": detail,
-            "deduped": False}
+    outcome = _transmit(conn, settings, subject, text, label=kind)
+    db.record_alert(conn, kind, key, outcome["sent_to"], outcome["ok"],
+                    outcome["detail"], now)
+    return {**outcome, "deduped": False}
 
 
 def _is_open(conn: sqlite3.Connection, kind: str, subject: str) -> bool:
@@ -3244,6 +3418,80 @@ def _send_committed(conn: sqlite3.Connection, *args: Any, **kwargs: Any) -> dict
         conn.commit()
 
 
+def _open_days(conn: sqlite3.Connection, kind: str, subject: str, now: str) -> int:
+    """How many days this (kind, subject) has been open, for the "still not
+    fixed after N day(s)" line (CR-190).
+
+    Measured from the FIRST alert after the last recovery, not from the first
+    row ever: a breaker that tripped in July, cleared, and tripped again this
+    morning has been open since this morning. Unknown reads as 1 day, which
+    is the shortest a repeat can be (the dedup window is 24 h).
+    """
+    cleared = db.last_alert_at(conn, kind + RECOVERED_SUFFIX, subject, ok_only=False)
+    rows = _rows(conn,
+                 "SELECT MIN(at) AS first_at FROM alert_log "
+                 "WHERE kind=? AND subject=? AND at > ?",
+                 (kind, subject, cleared or ""))
+    first_at = str(rows[0]["first_at"] or "") if rows else ""
+    age = _age(first_at, now)
+    if age is None:
+        return 1
+    return max(1, int(age // 86400))
+
+
+def _batch_id() -> str:
+    """The id shared by every `alert_log` row that went out in one message."""
+    return uuid.uuid4().hex[:16]
+
+
+def _take_catch_up(conn: sqlite3.Connection) -> bool:
+    """Is this delivery the catch-up after a sink was configured, and clear
+    the flag (CR-190).
+
+    Cleared whether or not the message goes out: the findings in it get their
+    ledger rows either way (`send`'s rule - a failure is recorded), so a
+    second "here is everything currently open" a cycle later would list
+    nothing. Best effort, like every other read of `meta` from this thread.
+    """
+    try:
+        if not db.meta_get(conn, META_CATCH_UP):
+            return False
+        db.meta_delete(conn, META_CATCH_UP)
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def _send_digest(
+    conn: sqlite3.Connection, settings: Any, items: list[dict[str, Any]],
+    now: str, *, still_open: int, catch_up: bool,
+) -> dict[str, Any]:
+    """One message for the whole cycle, then ONE LEDGER ROW PER FINDING.
+
+    The rows stay per finding (CR-190): the dedup, `_is_open`'s recovery
+    comparison and the page all read a row per (kind, subject), and a digest
+    that collapsed them into one row would silently re-send everything every
+    ten minutes. `batch_id` is what puts them back together on the page.
+
+    `conn.commit()` either side for `_send_committed`'s reason: THE NETWORK
+    CALL MUST NOT SIT UNDER THE WRITE LOCK.
+    """
+    subject, text = compose_digest(items, still_open=still_open,
+                                   catch_up=catch_up)
+    conn.commit()
+    try:
+        outcome = _transmit(conn, settings, subject, text, label="digest")
+    finally:
+        conn.commit()
+    batch = _batch_id()
+    for item in items:
+        db.record_alert(conn, item.get("record_kind") or item["kind"],
+                        item["subject"], outcome["sent_to"],
+                        outcome["ok"], outcome["detail"], now, batch_id=batch)
+    conn.commit()
+    return outcome
+
+
 def deliver(
     conn: sqlite3.Connection, settings: Any, findings: list[dict[str, Any]], now: str,
     *, budget_seconds: float | None = None,
@@ -3262,13 +3510,23 @@ def deliver(
     the collector watchdog to replace the container mid-pass, which loses the
     same messages AND takes the dashboard with them. `clock` is injected so a
     test can spend the budget without waiting for it.
+
+    CR-190 (2026-09-04): on a DIGEST sink (`digest_enabled`) none of that is
+    one message per finding any more. Everything this pass would have sent -
+    new findings, the daily repeat of the errors, and the recoveries - is
+    gathered and handed to `_send_digest` as ONE message, with one
+    `alert_log` row per finding behind it. The counters keep their meanings
+    so the collector's note and the budget notice do not change.
     """
-    sent = failed = recovered = undelivered = 0
+    sent = failed = recovered = undelivered = still_open = 0
     # Read at CALL time, never bound as a default argument: the module
     # constant is what an operator or a test changes, and a default captured
     # at import cannot be changed by either.
     budget = ALERT_CYCLE_BUDGET_SECONDS if budget_seconds is None else budget_seconds
     deadline = clock() + max(0.0, float(budget))
+    digest = digest_enabled(get_settings(conn))
+    catch_up = digest and _take_catch_up(conn)
+    pending: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for finding in findings:
         kind = str(finding["kind"])
@@ -3279,6 +3537,24 @@ def deliver(
         # DDIAG-3: a finding may opt OUT of its kind's daily repeat while
         # staying open. Nothing may opt in: the repeat rule is the severity's.
         if was_open and (severity != SEV_ERROR or not finding.get("repeat", True)):
+            # CR-190: counted, because the digest ends with "Still open from
+            # before: N". An owner who now gets one message a cycle must be
+            # able to tell "nothing else is wrong" from "the rest is not in
+            # this mail".
+            still_open += 1
+            continue
+        dedup = was_open or severity != SEV_ERROR
+        if digest:
+            # The dedup runs HERE in digest mode rather than inside `send()`:
+            # one message carries many findings, so what goes in it has to be
+            # settled before it is composed. Same predicate, same window.
+            if dedup and db.alert_recently_sent(conn, kind, subject, now,
+                                                ok_only=False):
+                still_open += 1
+                continue
+            pending.append(_digest_item(
+                finding, "repeat" if was_open else "new",
+                days=_open_days(conn, kind, subject, now) if was_open else 0))
             continue
         if clock() >= deadline:
             # Left for the next pass, and NOT recorded: an alert_log row is
@@ -3287,8 +3563,7 @@ def deliver(
             continue
         mail_subject, text = compose_alert(kind, subject, _finding_body(finding))
         result = _send_committed(conn, settings, mail_subject, text, kind=kind,
-                                 dedup_subject=subject, now=now,
-                                 dedup=was_open or severity != SEV_ERROR)
+                                 dedup_subject=subject, now=now, dedup=dedup)
         if result["deduped"]:
             continue
         sent += 1 if result["ok"] else 0
@@ -3303,6 +3578,14 @@ def deliver(
     for kind, subject in _open_subjects(conn, checked_kinds):
         if (kind, subject) in seen:
             continue
+        if digest:
+            # CR-190: the good news rides the same message. A recovery that
+            # was its own mail is how a fleet coming back from one outage
+            # sent six of them inside a minute.
+            pending.append(_digest_item({"kind": kind, "subject": subject},
+                                        "cleared"))
+            recovered += 1
+            continue
         if clock() >= deadline:
             # A recovery left unsent stays OPEN in the ledger, so it is said
             # next pass. Losing the good news for ten minutes is the cheap
@@ -3315,8 +3598,56 @@ def deliver(
                                  now=now, dedup=False)
         recovered += 1
         failed += 0 if result["ok"] else 1
+
+    if pending:
+        if clock() >= deadline:
+            # In digest mode the budget is one send wide, so this is all or
+            # nothing - and nothing means no ledger row, which means the next
+            # cycle offers every one of them again unchanged.
+            undelivered += len(pending)
+            recovered = 0
+        else:
+            outcome = _send_digest(conn, settings, pending, now,
+                                   still_open=still_open, catch_up=catch_up)
+            if outcome["ok"]:
+                sent += len(pending) - recovered
+            else:
+                # Every finding in a message that did not go out is a failure,
+                # exactly as it would have been as its own mail.
+                failed += len(pending)
     return {"sent": sent, "failed": failed, "recovered": recovered,
             "undelivered": undelivered}
+
+
+def group_log(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """WHAT WAS SENT, grouped by the message each row went out in (CR-190).
+
+    The ledger still holds one row per finding - the dedup and the recovery
+    comparison read it that way - so the page has to put a digest back
+    together to show what the mailbox actually received. Rows with no
+    `batch_id` (every per-event send, and every row written before v51) are
+    their own group: they really were their own message, and inventing a
+    grouping for them would be a claim about a mailbox nobody can check.
+
+    Input order is preserved (newest first); a batch is grouped where its
+    first row appears, which for rows written in one transaction is
+    contiguous anyway.
+    """
+    groups: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        batch = str(row.get("batch_id") or "")
+        if batch and batch in by_id:
+            by_id[batch]["rows"].append(row)
+            continue
+        group = {"batch_id": batch, "at": str(row.get("at") or ""), "rows": [row]}
+        groups.append(group)
+        if batch:
+            by_id[batch] = group
+    for group in groups:
+        group["count"] = len(group["rows"])
+        group["ok"] = all(r.get("ok") for r in group["rows"])
+    return groups
 
 
 def _open_subjects(

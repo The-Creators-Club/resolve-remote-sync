@@ -1709,7 +1709,10 @@ def _alerts_context(request: Request, conn, error: str = "",
         "alerts_kinds": [{"kind": k.kind, "severity": k.severity,
                           "title": k.title, "what": k.what}
                          for k in alerts.ALERT_KINDS],
-        "alerts_log": db.fetch_alerts(conn, limit=200),
+        # CR-190 (2026-09-04): grouped by the message the rows went out in,
+        # so the page shows what the mailbox received rather than eleven
+        # entries for one email.
+        "alerts_log_groups": alerts.group_log(db.fetch_alerts(conn, limit=200)),
         "alerts_interval_minutes": int(
             max(1.0, getattr(settings, "interval_alerts", 600.0)) // 60),
         "error": error,

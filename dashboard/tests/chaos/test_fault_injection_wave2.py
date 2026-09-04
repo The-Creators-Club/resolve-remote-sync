@@ -162,6 +162,12 @@ OPEN_TO_A_BROWSER_WITH_NO_SESSION = (
     # for before anyone has signed in.
     "/cards/manifest.webmanifest",
     "/cards/icon.svg",
+    # And its service worker (Alex, 2026-09-04; the Cards repo's
+    # docs/OFFLINE-PLAN.md section 7): the browser re-fetches a worker on its
+    # own schedule to check for an update, without the page's session
+    # semantics once that session has expired, and a 303 there is a "new
+    # worker" that is really the login page.
+    "/cards/sw.js",
 )
 
 

@@ -86,7 +86,11 @@ MAX_SUBJECTS = db.INVARIANT_MAX_SUBJECTS
 # collector thread, which has no FastAPI app to ask.
 PWA_MOUNT_ASSETS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("the dashboard itself", ("/manifest.webmanifest", "/sw.js")),
-    ("Timeline Cards at /cards/", ("/cards/manifest.webmanifest", "/cards/icon.svg")),
+    # /cards/sw.js joined the pair on 2026-09-04 (Alex; the Cards repo's
+    # docs/OFFLINE-PLAN.md section 7): the worker's periodic update fetch runs
+    # with none of the page's session semantics once the session has expired.
+    ("Timeline Cards at /cards/",
+     ("/cards/manifest.webmanifest", "/cards/icon.svg", "/cards/sw.js")),
 )
 
 # The proxy convention (`<dir>/Proxy/<stem>.mov|.mp4` beside

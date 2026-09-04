@@ -827,7 +827,9 @@ def test_13_reads_the_real_sign_in_gate_and_finds_every_pwa_file_open(conn):
     says so instead of a phone silently installing a shortcut."""
     outcome = invariants._check_mount_assets_open(_ctx(conn))
     assert outcome.state == dbmod.INVARIANT_OK
-    assert "4" in outcome.detail
+    # Five since 2026-09-04: the Cards app's own service worker joined its
+    # manifest and icon (Alex; the Cards repo's docs/OFFLINE-PLAN.md 7).
+    assert "5" in outcome.detail
 
 
 def test_13_names_a_pwa_file_the_gate_would_swallow(conn, monkeypatch):

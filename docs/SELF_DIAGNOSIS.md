@@ -370,6 +370,11 @@ raises; it is logged, recorded `ok=0`, and shown under `WHAT WAS SENT` with
 the reason, because a channel that has been refusing since Tuesday is worse
 than no channel: you believe you have one.
 
+**How many messages a cycle produces is the sink's, not the product's**
+(CR-190, 2026-09-04): `smtp` (and `none`) send ONE digest per check cycle,
+`webhook` sends one POST per finding, and `alerts_digest` overrides either.
+See section 7.
+
 `[ SEND A TEST ]` (`POST /api/v1/admin/alerts/test`) sends one message
 through the configured sink with dedup OFF - an admin pressing it twice is
 asking twice, and a silent "already sent today" is exactly the answer that
@@ -413,6 +418,54 @@ is a counter in memory.
   period with no channel, and the next scan raises every open subject with a
   real sink behind it. The page says so on save: "Saved. The next check will
   send everything that is currently open."
+
+### One message per cycle: the digest (CR-190, 2026-09-04)
+
+The owner configured the SMTP sink at 17:09 on 2026-09-04 and received
+**eleven separate emails inside the same minute**, one per open finding
+("CC Sync: a safety net is not there - release key backup", "... - restore
+drill", "... - snapshot", "CC Sync: project folders outside the tree", "CC
+Sync: footage is outside the tree", ...). Four of them were error severity, so
+they would have repeated as four more mails every day. His words: **"I'm
+getting spammed with emails now."**
+
+The rule, from that day: **a person gets at most ONE email per check cycle,
+and the daily repeats are one email, not N.** Nothing is dropped to get there.
+
+* **Every cycle's deliveries are one message** (`alerts.compose_digest`,
+  `alerts._send_digest`). Subject `CC Sync: N new problem(s)`, or
+  `CC Sync: 1 new problem: <title>` when there is one. The body is one block
+  per new finding in severity order, carrying exactly the `diagnosis`, the
+  `What to do:` and the `Detail:` each separate mail carried.
+* **A finding that was in yesterday's message and has not changed is one
+  line**, under `STILL NOT FIXED`, with how long it has been open. The daily
+  repeat of the errors is therefore one mail listing them all, subject
+  `CC Sync: still not fixed after N day(s): <titles>`; re-reading yesterday's
+  diagnosis is not what a repeat is for.
+* **Recoveries ride the same digest** as their own `CLEARED:` block. A fleet
+  coming back from one outage used to send six "cleared" mails in a minute.
+* **The catch-up is one message too.** `_requeue_undelivered` leaves a `meta`
+  marker (`alerts_catch_up_at`) and the next delivery is
+  `CC Sync: here is everything currently open (N)`, whose first line says it
+  is the catch-up after a channel was configured, not N faults found in the
+  last ten minutes.
+* **`Still open from before: k (see the HEALTH page)`** closes the body
+  whenever something open is not in this mail (a warn already said, an error
+  that has opted out of its repeat, anything inside its dedup window). One
+  message a cycle is only safe if it can say what it is not carrying.
+* **A webhook keeps one POST per finding.** Its consumer wants structured
+  events, so the default flips on the sink (`alerts.digest_enabled`), and
+  `alerts_digest` ("", "1", "0", the HOW MANY MESSAGES control on the page)
+  overrides it either way. Blank stays blank on purpose: it means "whatever
+  suits the channel", and folding it to a 0/1 would freeze today's default.
+* **The heartbeat and the weekly report stay their own messages.** They are
+  scheduled, not raised, and the heartbeat's whole meaning is that one arrives
+  every day whatever else does.
+* **`alert_log` still keeps one row per finding**, because the dedup
+  (`alert_recently_sent`), the recovery comparison (`_is_open`) and the page
+  all read it that way. `batch_id` (v51) is the message those rows shared, and
+  WHAT WAS SENT groups by it: "one message, 3 finding(s)". Per-event rows
+  carry no batch id, because they really were separate messages.
 
 ## 8. The weekly report
 

@@ -111,6 +111,17 @@ _OPEN_EXACT = {
     # already serves both before its own gate for the same reason; neither
     # names a path, a token or anything the login page does not.
     "/cards/manifest.webmanifest", "/cards/icon.svg",
+    # And its service worker (Alex, 2026-09-04; the Cards repo's
+    # docs/OFFLINE-PLAN.md section 7). A service worker's PERIODIC update
+    # fetch is made by the browser on its own schedule, not by the page, and
+    # once the session has expired it carries none of the page's session
+    # semantics: behind this gate that fetch is a 303 to /login, which is a
+    # valid 200 as far as the update check is concerned, so the worker either
+    # never updates or installs the login page as its own script. Same terms
+    # as the two above: GET only, no secret in it (code with a version in it,
+    # exactly like the dashboard's own /sw.js), and the mount still serves
+    # it. Opening it does not open anything else under /cards/.
+    "/cards/sw.js",
 }
 
 # The setup API prefix (ZERO_TOUCH_PLAN.md WP D). A prefix, not exact paths,

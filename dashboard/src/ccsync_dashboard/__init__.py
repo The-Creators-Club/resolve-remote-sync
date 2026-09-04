@@ -28,4 +28,4 @@
 # set by the person AT a machine, from their tray -- opens that machine's
 # idle gate while they work. Schema v46, `commands.jobs.forced` on the report
 # reply, `ids` on the claim. Pairs with companion 0.9.61.
-VERSION = "0.7.35"
+VERSION = "0.7.36"

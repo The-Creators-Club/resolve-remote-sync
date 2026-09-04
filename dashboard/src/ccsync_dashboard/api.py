@@ -4949,6 +4949,7 @@ COMMAND_STALE_SECONDS = 24 * 3600
 
 def _command_delivery(
     conn: sqlite3.Connection, editor: str, machine: str, now: str | None = None,
+    targeted_staged: bool = False,
 ) -> dict[str, Any]:
     """What a parked per-machine request will actually do, in words (DCORE-13).
 
@@ -4988,6 +4989,12 @@ def _command_delivery(
         applies = (f"on that computer's next report, usually within "
                    f"{COMPANION_REPORT_SECONDS} s. It was last heard from "
                    f"{_ago_phrase(age)}")
+    if targeted_staged:
+        # CR-191: a staged build is offered to nobody, so this push is also
+        # what makes the build reachable by that one computer. Saying so is
+        # the difference between "the fleet is taking this" and "one canary
+        # is", which is the whole of the soak flow (REL-1).
+        applies += ", as a targeted offer of a staged build"
     return {
         "queued_for": f"{editor}/{machine}",
         "applies": applies,
@@ -5039,26 +5046,41 @@ def api_push_machine_update(
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"no computer {machine!r} for {editor!r}")
+    plat = (row["platform"] or "").strip().lower()
     version = ((payload.version if payload else None) or "").strip()
     if not version:
-        current = db.get_current_package(
-            conn, (row["platform"] or "").strip().lower(), kind="companion")
+        current = db.get_current_package(conn, plat, kind="companion")
         if current is None:
             raise HTTPException(
                 status_code=409,
                 detail="no current companion package is published for that computer's platform",
             )
         version = current["version"]
+    # A version this channel does not carry is refused HERE, in words
+    # (CR-191, 2026-09-04). The push names a version and the companion takes
+    # the offer it is holding for it, so a typo used to be accepted, queued,
+    # and answered on the machine with "pushed update to v0.9.71 IGNORED:
+    # this machine is not being offered that build" in a log on somebody
+    # else's PC. A staged build is fine: pushing one is what stages it on a
+    # canary (see targeted_staged_package).
+    record = db.get_package(conn, plat, version, kind="companion")
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{version} is not in this channel for {plat or 'that platform'}",
+        )
+    staged = not bool(_row_value(record, "is_current"))
     # DCORE-13: what was already parked, read BEFORE this write overwrites it,
     # so the answer can say "you were already waiting on this one".
     pending_before = bool(db.pending_machine_request(conn, editor, machine)["update"])
     if not db.request_machine_update(conn, editor, machine, version, admin, db.utcnow_iso()):
         raise HTTPException(status_code=404, detail=f"no computer {machine!r} for {editor!r}")
     conn.commit()
-    log.info("%s asked %s/%s to update to v%s", admin, editor, machine, version)
+    log.info("%s asked %s/%s to update to v%s (%s)", admin, editor, machine, version,
+             "staged, offered to this computer only" if staged else "the current build")
     return {"ok": True, "editor": editor, "machine": machine, "version": version,
-            "pending_before": pending_before,
-            **_command_delivery(conn, editor, machine)}
+            "pending_before": pending_before, "staged": staged,
+            **_command_delivery(conn, editor, machine, targeted_staged=staged)}
 
 
 @router.delete("/admin/machines/{editor}/{machine}/update")
@@ -5437,17 +5459,56 @@ def _arch_matches(record_arch: str, machine_arch: str) -> bool:
     return rec == mach
 
 
+def targeted_staged_package(
+    conn: sqlite3.Connection, plat: str, editor: str, machine: str,
+) -> sqlite3.Row | None:
+    """The build ONE machine is being offered because an admin pushed it
+    there (CR-191, 2026-09-04).
+
+    The soak gate (REL-1) publishes a build STAGED and tells the publisher to
+    "push it to one computer, let it soak, then MAKE CURRENT" -- but the offer
+    a machine polls was the channel's CURRENT build and nothing else, and
+    `commands.upgrade` names a version whose BYTES have to come from an offer
+    the companion is already holding. So the canary click could never do
+    anything: on 2026-09-04 18:45 the base rig answered a push of 0.9.70 with
+    "pushed update to v0.9.70 IGNORED: this machine is not being offered that
+    build (holding nothing)", and the whole soak flow was impossible through
+    the dashboard.
+
+    A pending push is therefore an OFFER of exactly that version, to exactly
+    that machine. Nothing about the offer is special otherwise: same record,
+    same signature, same downgrade floor, same refusals below -- the companion
+    cannot tell a targeted offer from a fleet one, which is why no companion
+    needed a change to be fixed by this. Every other machine keeps seeing
+    current. The targeted offer ENDS when the push does: the report handler
+    clears the request the moment the machine reports that version (or later),
+    and DELETE .../update withdraws it.
+    """
+    wanted = str(db.pending_machine_request(conn, editor, machine)["update"] or "").strip()
+    if not wanted:
+        return None
+    return db.get_package(conn, plat, wanted, kind="companion")
+
+
 def _upgrade_info(
     conn: sqlite3.Connection, platform: str | None, running: str | None,
-    arch: str | None = None,
+    arch: str | None = None, editor: str | None = None,
+    machine: str | None = None,
 ) -> dict[str, Any] | None:
     """The conditional `upgrade` key for report/verify responses.
 
-    Present only when a current package exists for the platform AND the
+    Present only when a package to offer exists for the platform AND the
     companion reported a running version that DIFFERS from it. "Different",
     not "newer": that makes an admin rollback get offered to the fleet like
     any other update, with zero extra machinery. Absent key = up to date
     (old companions that never send their version just never see it).
+
+    The package to offer is the channel's CURRENT build, unless this machine
+    has a pending push for a version of its own (CR-191) -- see
+    targeted_staged_package. `editor`/`machine` are optional because
+    /verify knows a username and no computer: an offer aimed at one computer
+    can only be made where the computer is named, which is the report reply,
+    which is also the only place `commands.upgrade` rides.
 
     An absent or unknown `platform` offers NOTHING (see X-5): coercing it to
     "windows" is how a macOS companion got handed a Windows .exe.
@@ -5457,8 +5518,13 @@ def _upgrade_info(
         return None
     # kind='companion' explicitly: the fleet must never be offered the
     # onboarding installer as a self-upgrade -- upgrade.py would rename it
-    # over the running companion exe.
+    # over the running companion exe. get_package below is asked for the same
+    # kind for the same reason.
     current = db.get_current_package(conn, plat, kind="companion")
+    if editor and machine:
+        targeted = targeted_staged_package(conn, plat, editor, machine)
+        if targeted is not None:
+            current = targeted
     if current is None or not running or running == current["version"]:
         return None
     # Three reasons to offer NOTHING rather than this build (resilience sweep
@@ -8677,8 +8743,15 @@ def api_report(
     # Upgrade channel: piggyback on the report reply so an out-of-date
     # companion learns about the current build with no extra request. Key
     # absent = up to date (or nothing published, or version unreported).
+    #
+    # The machine is named here (and cannot be at /verify), so this is the one
+    # reply that can carry a build offered to ONE computer -- the staged build
+    # an admin has pushed to it (CR-191). It has to be this reply anyway:
+    # `commands.upgrade` below names a version and nothing else, and the bytes
+    # come from the offer in this same block.
     upgrade = _upgrade_info(conn, payload.platform, payload.companion_version,
-                            getattr(payload, "arch", None))
+                            getattr(payload, "arch", None),
+                            editor=editor, machine=machine)
     if upgrade is not None:
         result["upgrade"] = upgrade
     # New-project onboarding: the auto-match above already ran, so this is

@@ -77,6 +77,13 @@
               <div class="muted mono-sm" style="margin-bottom:0.2rem">
                 canary: {{ p.soak.machines }} computer{{ "s" if p.soak.machines != 1 }} on {{ p.version }}
                 for {{ p.soak.minutes }} min, {{ p.soak.crashes }} crashes
+                {#- CR-191 (2026-09-04): the crash counter is a LIFETIME count of
+                    files on that computer's disk, and reading it as this build's
+                    is what refused 0.9.70 over 16 markers written weeks ago by
+                    0.9.66 and older. The gate counts the ones written since this
+                    build started running there; say which these are. #}
+                {%- if p.soak.crashes and not p.soak.crashes_on_version and not p.soak.crashes_unknown %} (none since {{ p.version }} started there)
+                {%- elif p.soak.crashes_on_version %} ({{ p.soak.crashes_on_version }} computer{{ "s" if p.soak.crashes_on_version != 1 }} crashed since {{ p.version }} started there){% endif %}
                 {%- if p.soak.reverted %}, {{ p.soak.reverted }} rolled back{% endif %}
                 (soak {{ p.soak.soak_minutes }} min)
               </div>

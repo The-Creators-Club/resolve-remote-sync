@@ -287,25 +287,54 @@ def make_current_refusal(
             f"{soak['reverted']} of the {soak['machines']} computers on {version} "
             f"had to be rolled back off it by the crash-loop guard."
         )
-    elif soak["crashes"]:
+    elif soak.get("crashes_on_version"):
+        # CR-191 (2026-09-04): "crashes" is the LIFETIME count on those
+        # machines' disks and this used to refuse on it. The base rig's 16
+        # UncleanExit markers (CR-144: the installer's Stop-Process, the Cards
+        # test gate sweeping 8899, dev restarts) were all written weeks ago by
+        # 0.9.66 and older, and they blocked 0.9.70 with a sentence that named
+        # neither fact. What refuses now is a crash written SINCE this build
+        # started running somewhere, and the sentence says which is which.
         detail = (
             f"{soak['machines']} computers on {version} have reported "
-            f"{soak['crashes']} crash(es)."
+            f"{soak['crashes']} crash(es), and {soak['crashes_on_version']} "
+            f"of those computers have crashed since {version} started running "
+            f"there."
         )
-    elif not any(d["crash_count"] == 0 for d in soak["detail"]):
+    elif soak.get("crashes_unknown") and not any(
+            d.get("crash_origin") == db.CRASHES_NONE for d in soak["detail"]):
         # "We could not tell" is not "fine" (resilience sweep 2026-08-28): a
         # companion that never sent a crash section has told us nothing about
         # whether this build stays up, and a soak is a claim that something
-        # was observed.
-        detail = (
-            f"no computer on {version} has reported its crash counter, so "
-            f"nothing here says the build stays up."
-        )
+        # was observed. Since CR-191 this also covers a crash counter whose
+        # newest file cannot be dated: a count nobody can attribute is not
+        # evidence for the build either way.
+        if soak["crashes"]:
+            detail = (
+                f"{soak['crashes']} crash(es) are on record on the "
+                f"{soak['machines']} computers on {version} and nothing says "
+                f"when they were written, so they cannot be told apart from "
+                f"this build's."
+            )
+        else:
+            detail = (
+                f"no computer on {version} has reported its crash counter, so "
+                f"nothing here says the build stays up."
+            )
     else:
         detail = (
             f"{soak['machines']} computers have been on {version} for "
             f"{soak['minutes']} min; the soak is {soak['soak_minutes']} min."
         )
+        if soak["crashes"] and not soak.get("crashes_unknown"):
+            # CR-191: say it before the admin reads the number on the page and
+            # concludes the build is crashing. These are old markers, and the
+            # only thing holding the release back is the clock.
+            detail += (
+                f" The {soak['crashes']} crash(es) on record there were all "
+                f"written before {version} started running, so none of them "
+                f"are its."
+            )
     return 409, (
         f"{version} has not soaked yet: {detail} Make it current anyway by "
         f"confirming the override."

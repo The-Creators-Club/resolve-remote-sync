@@ -1824,14 +1824,24 @@ def _check_soak(ctx: Ctx) -> list[Finding]:
                                   db.DEFAULT_SOAK_MINUTES, now=ctx.now)
         except sqlite3.Error:
             continue
-        if not (state.get("crashes") or state.get("reverted")):
+        # CR-191 (2026-09-04): crashes_on_version, not the LIFETIME `crashes`
+        # count -- the same misreading that refused 0.9.70 over 16 markers
+        # written weeks ago by older builds would have raised this alert
+        # against every staged build on a machine that has ever crashed.
+        if not (state.get("crashes_on_version") or state.get("reverted")):
             continue
+        said = []
+        if state.get("crashes_on_version"):
+            said.append(f"crashed on {state['crashes_on_version']} computer(s) "
+                        f"since it started running there")
+        if state.get("reverted"):
+            said.append(f"been put back on the old build by "
+                        f"{state['reverted']} computer(s)")
         out.append(_f(
             f"{r['version']} ({r['platform']})",
             f"The build being trialled on one computer before the fleet gets "
-            f"it, {r['version']}, has {state.get('crashes')} crash(es) and "
-            f"{state.get('reverted')} computer(s) that put themselves back on "
-            f"the old build. It must not be handed to everybody.",
+            f"it, {r['version']}, has {' and '.join(said)}. It must not be "
+            f"handed to everybody.",
             "On the dashboard: SETTINGS, PACKAGES, and recall that build.",
             json.dumps(state.get("detail") or [], sort_keys=True)[:300]))
     return out

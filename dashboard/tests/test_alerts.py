@@ -527,11 +527,20 @@ def _publish(conn, version, *, rollout, is_current, platform="windows"):
          NOW, "owen", 1 if is_current else 0, "companion", rollout))
 
 
-def _machine_on(client, version, machine="RUSKIN-PC"):
+def _machine_on(client, version, machine="RUSKIN-PC", conn=None):
     body = payload({"crashes": {"count": 3, "newest": NOW}})
     body["machine"] = machine
     body["companion_version"] = version
     client.post("/api/v1/report", json=body, headers=report_headers())
+    if conn is not None:
+        # CR-191: the crash has to be NEWER than the moment this build started
+        # running here, or it is one of an older build's and no longer counts
+        # against the soak. The report writes `companion_version_since` from
+        # the real clock, and this suite's NOW is a fixed date in the past.
+        conn.execute(
+            "UPDATE machine_state SET companion_version_since=? WHERE machine=?",
+            ("2026-08-28T11:00:00+00:00", machine))
+        conn.commit()
 
 
 def test_a_staged_build_older_than_current_has_lost_its_trial(env):
@@ -553,7 +562,7 @@ def test_a_staged_build_newer_than_current_still_fails_its_soak(env):
     _publish(conn, "0.9.65", rollout="current", is_current=True)
     _publish(conn, "0.10.0", rollout="staged", is_current=False)
     conn.commit()
-    _machine_on(client, "0.10.0")
+    _machine_on(client, "0.10.0", conn=conn)
     findings = alerts.scan(conn, settings, NOW)
     assert any(f["kind"] == "soak_failed" for f in findings)
 

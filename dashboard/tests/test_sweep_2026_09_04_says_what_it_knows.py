@@ -190,6 +190,11 @@ def test_a_machine_nobody_has_heard_from_is_not_promised_thirty_seconds(env):
     report(client)
     conn.execute("UPDATE machine_state SET reported_at=? WHERE machine='EDIT-PC'",
                  ("2026-08-20T12:00:00+00:00",))
+    # CR-191: the push refuses a version this channel does not carry, so the
+    # build has to exist before the delivery wording can be asked about.
+    dbmod.insert_companion_package(
+        conn, version="0.9.67", platform="windows", filename="c.exe",
+        sha256="a" * 64, size_bytes=1, published_by="owen", now=NOW)
     conn.commit()
     as_admin(client)
     body = client.post("/api/v1/admin/machines/jsmith/EDIT-PC/update",

@@ -14521,6 +14521,123 @@ grouping the rows that shared a message). 92 pass in `test_alerts.py`, and the
 two copy scans plus the wave-1 sweep files (442) stay green.
 
 
+### CR-191 - a staged build is offered to nobody, so the push that is supposed to soak it can never apply, and the soak gate then counts an older build's crashes against it - FIXED in repo 2026-09-04 (dashboard 0.7.37)
+
+**Seen live.** 2026-09-04 18:45, base rig `alex/Creator_1` on companion 0.9.66.
+Companion 0.9.70 was published to the studio channel STAGED (the REL-1 soak
+gate: a build no computer has run is staged until one has). The admin pushed it
+at that one machine, `POST /api/v1/admin/machines/alex/Creator_1/update
+{"version":"0.9.70"}`, which answered ok and queued the command. The companion
+answered:
+
+    pushed update to v0.9.70 IGNORED: this machine is not being offered that
+    build (holding nothing)
+
+Making it current was then refused as well:
+
+    0.9.70 has not soaked yet: 1 computers on 0.9.70 have reported 16
+    crash(es). Make it current anyway by confirming the override.
+
+**Cause, part 1 (the offer).** `api._upgrade_info` built the report reply's
+`upgrade` key from `db.get_current_package` and nothing else, so the only build
+any machine was ever offered was the channel's CURRENT one for its platform. A
+STAGED build is current for nobody. `commands.upgrade` deliberately carries a
+version and nothing else - the bytes come from the signed offer the companion
+is already holding (`app._apply_pushed_update`, `upgrade._accept_offer`) - so a
+push naming a build the machine is not being offered is refused ON the machine,
+correctly, by design. The two halves together mean the flow the gate's own
+sentence prescribes, "push it to one computer, let it soak, then MAKE CURRENT",
+was impossible through the dashboard: the only build you could push was the one
+the fleet already had. Nothing was wrong on the companion side, and nothing
+there needed changing.
+
+**Cause, part 2 (the crashes).** `machine_state.crash_count` is a LIFETIME
+high-water count of files in `~/.ccsync/crashes` on the machine's own disk (it
+only falls when somebody empties the directory), and `db.soak_state` read it as
+"crashes on the build being soaked". The base rig's 16 were UncleanExit markers
+from KNOWN_BUGS CR-144 - the installer's Stop-Process during an upgrade, the
+Cards test gate sweeping port 8899, dev restarts - every one written weeks ago
+by 0.9.66 and older. The refusal was unanswerable except by overriding the
+gate, which is how a gate stops being believed. The same misreading fed the
+`soak_failed` alert.
+
+**Fix (dashboard only, additive; no companion change and no wire-format
+change).**
+
+1. A pending per-machine push IS an offer of that exact version to that exact
+   computer: `api.targeted_staged_package` (read from
+   `db.pending_machine_request`), consulted by `_upgrade_info` when it is given
+   an editor and a machine, which is the report reply and only the report reply
+   (`/verify` knows a username and no computer, and `commands.upgrade` rides
+   the report reply anyway). Same record, same signature, same downgrade floor,
+   same REL-3 recall / REL-4 ordering / REL-16 arch refusals - a companion
+   cannot tell a targeted offer from a fleet one. Every other machine keeps
+   seeing current. The offer ends when the push does: the report handler
+   already clears the request the moment the machine reports that version or
+   later, and `DELETE .../update` withdraws it.
+2. `api_push_machine_update` refuses a version this channel does not carry for
+   that platform, in a sentence: `404 "0.9.71 is not in this channel for
+   windows"`. It also returns `staged: true` and its `applies` sentence ends
+   ", as a targeted offer of a staged build" when that is what was queued.
+3. The soak gate counts only crashes that can be attributed to the build:
+   `db.crash_origin` dates the newest crash file (the reported
+   `crash_newest` filename carries its UTC stamp; a plain ISO stamp is accepted
+   too) against `companion_version_since` on that machine. `none` = every crash
+   predates the build here, `some` = at least one was written since it started,
+   `unknown` = nothing on record says which, and UNKNOWN is still not a pass.
+   `soak_state` gained `crashes_on_version` / `crashes_unknown` and keeps the
+   lifetime `crashes` for the page. The refusal sentences now name whose
+   crashes they are ("... and 1 of those computers have crashed since 0.9.70
+   started running there", or, when the clock is the only thing holding the
+   build, "The 16 crash(es) on record there were all written before 0.9.70
+   started running, so none of them are its"). The `soak_failed` alert fires on
+   `crashes_on_version`, not the lifetime count.
+4. `[ PUSH TO ONE COMPUTER ]` on a staged row was already present and already
+   posts the staged version; the canary line beside it now says whether those
+   crashes are this build's.
+
+**Files.**
+
+- `dashboard/src/ccsync_dashboard/api.py` - `targeted_staged_package` (new),
+  `_upgrade_info` (editor/machine), the report call site,
+  `api_push_machine_update` (channel check, `staged`), `_command_delivery`
+  (`targeted_staged`).
+- `dashboard/src/ccsync_dashboard/db.py` - `crash_file_time`, `crash_origin`,
+  `CRASHES_NONE/SOME/UNKNOWN`, `soak_state`, `machines_running_version`
+  (carries `crash_newest`).
+- `dashboard/src/ccsync_dashboard/package_store.py` - `make_current_refusal`
+  wording and predicate.
+- `dashboard/src/ccsync_dashboard/alerts.py` - `soak_failed`.
+- `dashboard/templates/partials/admin_packages.html` - the canary line.
+- `docs/RELEASE.md` - "Every door to make current".
+
+**Tests.** `dashboard/tests/test_release_channel.py`: a machine with a pending
+push for a staged version is offered it (and gets `commands.upgrade` in the
+same reply); a machine without one is still offered current; the targeted offer
+ends when the machine reports that version, and when the push is withdrawn; a
+recalled build is offered to nobody, canary included; the push refusal for a
+version this channel does not carry; the `staged` / "targeted offer" wording;
+old crashes do not hold a build back; one crash since the build started still
+refuses; the time-only refusal says the old crashes are not this build's; an
+undatable crash counter is still not a pass; `crash_origin` unit cases.
+`companion/tests/test_upgrade.py`: an offer above the running build is accepted
+as it stands (why no companion needed changing).
+Updated for the new behaviour:
+`dashboard/tests/test_sweep_2026_09_04_says_what_it_knows.py` (the push now
+needs a published version) and `dashboard/tests/test_alerts.py` (the canary's
+crash has to be newer than the build it is meant to indict).
+Run: `test_release_channel`, `test_packages`, `test_alerts`,
+`test_multi_machine`, `test_sweep_2026_09_04_says_what_it_knows`,
+`test_sweep_2026_09_04_copy`, `test_no_em_dash`, `test_templates_wave3`,
+`test_report_endpoint`, `test_hardening`, plus every other suite touching
+soak/crash/update - all green; companion `test_upgrade.py` 168 passed.
+
+**Deploy note.** Dashboard-only. Nothing here needs a companion newer than
+0.9.3 (which is where `commands.upgrade` landed), and the offer a companion
+receives is byte-identical in shape to yesterday's. Uncommitted; no VERSION
+bump made.
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

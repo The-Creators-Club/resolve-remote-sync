@@ -905,6 +905,28 @@ Three carve-outs, all deliberate:
   away from feed customers, and a gate in front of it would pin every fleet
   on the build being withdrawn.
 
+**The push is what makes a staged build reachable** (CR-191, 2026-09-04). A
+staged build is offered to nobody, and `commands.upgrade` names a version whose
+bytes have to come from an offer the companion already holds - so until this
+fix the canary click could not do anything at all, and the base rig answered a
+push of 0.9.70 with `pushed update to v0.9.70 IGNORED: this machine is not
+being offered that build (holding nothing)`. A pending push is now a TARGETED
+OFFER of exactly that version to exactly that computer (`api.
+targeted_staged_package`, on the report reply only): same record, same
+signature, same downgrade floor, and every other computer still sees current.
+It ends when the push does - the machine reports that version, or an admin
+withdraws it. The push route refuses a version the channel does not carry
+("0.9.71 is not in this channel for windows") and says "as a targeted offer of
+a staged build" when that is what it queued.
+
+**The soak counts THIS build's crashes** (CR-191). `crash_count` is a lifetime
+high-water count of files in `~/.ccsync/crashes`, and reading it as the build's
+refused 0.9.70 over 16 UncleanExit markers (KNOWN_BUGS CR-144) written weeks
+earlier by 0.9.66 and older. `db.crash_origin` dates the newest crash file
+against the moment that build started running on that machine: crashes that
+predate it no longer hold a release back, one written since still refuses, and
+a counter nobody can date is UNKNOWN, which is not a pass.
+
 An admin standing at `[ MAKE CURRENT ]` is refused exactly as before, with the
 typed override in front of them. **`[releases] soak_minutes = 0` now really is
 the way back to the pre-08-28 behaviour** -- zero used to leave the "has any

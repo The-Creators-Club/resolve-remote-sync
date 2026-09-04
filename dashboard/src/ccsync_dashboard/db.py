@@ -4029,6 +4029,93 @@ def retracted_packages(
 
 DEFAULT_SOAK_MINUTES = 30
 
+# What `crash_origin` answers. A crash counter is a LIFETIME high-water count
+# of files in ~/.ccsync/crashes on the machine's own disk: it is not per-build
+# and it only goes down when somebody empties the directory.
+CRASHES_NONE = "none"           # every crash file predates this build here
+CRASHES_SOME = "some"           # at least one was written since it started
+CRASHES_UNKNOWN = "unknown"     # nothing on record says which
+
+# `crash_newest` is the FILENAME crash_report.write_report chose:
+# "<when with ':' and '-' stripped>-<thread>.json", e.g.
+# "20260904T184500+0000-MainThread.json". Only the leading stamp is read, and
+# it is UTC by construction (datetime.now(timezone.utc)).
+_CRASH_NAME_STAMP = re.compile(r"^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})")
+
+
+def crash_file_time(crash_newest: str | None) -> str | None:
+    """The UTC timestamp inside a reported crash FILENAME, or None.
+
+    None for a name this server does not recognise: a machine's crash file
+    naming is the companion's, and a future rename must read as "cannot tell"
+    rather than as a time.
+    """
+    raw = str(crash_newest or "").strip()
+    if not raw:
+        return None
+    match = _CRASH_NAME_STAMP.match(raw)
+    if match is None:
+        # A machine that reports a plain ISO timestamp instead of a filename
+        # is answering the same question in the other shape. Accepted rather
+        # than refused: this value is a companion's, and both spellings say
+        # when the newest crash was.
+        try:
+            return parse_iso(raw).isoformat()
+        except (ValueError, TypeError):
+            return None
+    y, mo, d, h, mi, s = match.groups()
+    try:
+        return dt.datetime(int(y), int(mo), int(d), int(h), int(mi), int(s),
+                           tzinfo=dt.timezone.utc).isoformat()
+    except ValueError:
+        return None
+
+
+def crash_origin(crash_count: Any, crash_newest: str | None,
+                 since: str | None) -> str:
+    """Do a machine's crash files belong to the build it is running NOW?
+    (CR-191, 2026-09-04.)
+
+    The soak gate used to read `crash_count` as "crashes on this build" and
+    refuse to make one current on the strength of it. On the base rig that
+    number was 16 UncleanExit markers from KNOWN_BUGS CR-144 -- the
+    installer's Stop-Process during an upgrade, the Cards test gate sweeping
+    port 8899, dev restarts -- every one of them written weeks ago by 0.9.66
+    and older, and none of them evidence of anything at all about 0.9.70. The
+    refusal was unanswerable except by overriding the gate, which is how a
+    gate stops being believed.
+
+    The evidence available server-side is the COUNT and the newest crash
+    file's name, and that is enough for the question the gate actually asks:
+    a newest crash that predates the moment this build started running here
+    means none of them are its. Deliberately not a schema baseline and
+    deliberately not a companion change: this has to answer correctly for
+    builds already in the field tonight.
+
+    UNKNOWN is not NONE. A companion too old to send a crash section, an
+    unparseable `companion_version_since`, a crash counter with no newest
+    name: none of those observed the build staying up, and the soak is a
+    claim that something was observed.
+    """
+    if crash_count is None:
+        return CRASHES_UNKNOWN
+    try:
+        count = int(crash_count)
+    except (TypeError, ValueError):
+        return CRASHES_UNKNOWN
+    if count <= 0:
+        return CRASHES_NONE
+    newest = crash_file_time(crash_newest)
+    if not newest or not since:
+        return CRASHES_UNKNOWN
+    try:
+        # STRICTLY before: a crash file written in the same second the version
+        # first appeared is the crash of the build that was replaced OR of the
+        # new one, and "cannot tell" is the answer that keeps the gate honest.
+        return CRASHES_NONE if age_seconds(newest, since) > 0 else CRASHES_SOME
+    except (ValueError, TypeError):
+        return CRASHES_UNKNOWN
+
 
 def soak_state(
     conn: sqlite3.Connection, platform: str, version: str,
@@ -4047,16 +4134,32 @@ def soak_state(
     companion_version_since, a machine that has never reported a crash
     section): a soak is a claim that something was observed, so an absence of
     observation can never satisfy it.
+
+    THE CRASHES THAT COUNT ARE THIS BUILD'S (CR-191, 2026-09-04). `crashes`
+    is still the lifetime figure, because that is what the machine reported
+    and the page prints it; what the gate reads is `crash_origin` per machine,
+    and a pile of markers written by an older build weeks ago no longer holds
+    a release back. `crashes_on_version` and `crashes_unknown` count the
+    machines, not the files: server-side there is one timestamp per machine to
+    reason from, and one crash that IS this build's is already a refusal.
     """
     now = now or utcnow_iso()
     machines = machines_running_version(conn, platform, version)
     best_minutes = 0.0
     crashes = 0
+    crashes_on_version = 0
+    crashes_unknown = 0
     reverted = 0
     passed = 0
     for m in machines:
         crash_count = m.get("crash_count")
         crashes += int(crash_count or 0)
+        origin = crash_origin(crash_count, m.get("crash_newest"), m.get("since"))
+        m["crash_origin"] = origin
+        if origin == CRASHES_SOME:
+            crashes_on_version += 1
+        elif origin == CRASHES_UNKNOWN:
+            crashes_unknown += 1
         if m.get("reverted_from"):
             reverted += 1
         try:
@@ -4067,7 +4170,7 @@ def soak_state(
         m["minutes"] = minutes
         best_minutes = max(best_minutes, minutes)
         if (minutes >= float(soak_minutes)
-                and crash_count == 0
+                and origin == CRASHES_NONE
                 and not m.get("reverted_from")):
             passed += 1
     return {
@@ -4076,6 +4179,8 @@ def soak_state(
         "machines": len(machines),
         "minutes": int(best_minutes),
         "crashes": crashes,
+        "crashes_on_version": crashes_on_version,
+        "crashes_unknown": crashes_unknown,
         "reverted": reverted,
         "soak_minutes": int(soak_minutes),
         "passed": passed,
@@ -4083,6 +4188,8 @@ def soak_state(
         "detail": [
             {"editor_username": m["editor_username"], "machine": m["machine"],
              "minutes": int(m.get("minutes") or 0), "crash_count": m.get("crash_count"),
+             "crash_origin": m.get("crash_origin"),
+             "crash_newest": m.get("crash_newest"),
              "reverted_from": m.get("reverted_from")}
             for m in machines
         ],
@@ -4216,6 +4323,10 @@ def machines_running_version(
             "companion_version": r["companion_version"],
             "since": r["companion_version_since"] or r["received_at"] or r["reported_at"],
             "crash_count": r["crash_count"],
+            # CR-191: the NAME of the newest crash file, which carries its UTC
+            # stamp -- the only thing here that can say whether a lifetime
+            # crash counter has anything to do with the build being soaked.
+            "crash_newest": _row_value(r, "crash_newest"),
             # v35's column (the dashboard-self-update work package lands it
             # after this one): read defensively so this works before it
             # exists. A build the crash-loop guard had to undo is not a

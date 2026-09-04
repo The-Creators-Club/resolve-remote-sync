@@ -102,7 +102,7 @@ def publish(client, version, *, platform="windows", kind="companion",
 
 
 def report(client, *, editor="jsmith", machine="EDIT-PC", version="0.1.0",
-           platform="windows", crashes=None, extra=None):
+           platform="windows", crashes=None, crash_newest=None, extra=None):
     payload = {
         "editor_name": editor,
         "machine": machine,
@@ -112,7 +112,8 @@ def report(client, *, editor="jsmith", machine="EDIT-PC", version="0.1.0",
         "lanes": [{"name": "lane_a_video_up", "state": "idle"}],
     }
     if crashes is not None:
-        payload["sync_guard"] = {"crashes": {"count": crashes, "newest": None}}
+        payload["sync_guard"] = {"crashes": {"count": crashes,
+                                             "newest": crash_newest}}
     payload.update(extra or {})
     return client.post(
         "/api/v1/report", json=payload,
@@ -766,3 +767,205 @@ def test_the_gate_at_the_publish_door_never_refuses_the_bytes(env):
     row = dbmod.get_package(conn, "windows", "0.3.0")
     path = settings.packages_path() / "windows" / row["filename"]
     assert path.read_bytes() == b"v3-bytes"
+
+
+# =============================================================== CR-191
+#
+# 2026-09-04 18:45, base rig alex/Creator_1 on 0.9.66. 0.9.70 was published
+# STAGED (the REL-1 soak gate), the admin pushed it to that one machine, the
+# route answered ok -- and the companion logged
+#
+#   pushed update to v0.9.70 IGNORED: this machine is not being offered that
+#   build (holding nothing)
+#
+# because the offer a machine polls was the channel's CURRENT build and a
+# staged build is current for nobody. `commands.upgrade` names a version and
+# the bytes come from the offer in hand, so the canary click could never do
+# anything and the flow the gate's own sentence prescribes ("push it to one
+# computer, let it soak, then MAKE CURRENT") was impossible through the
+# dashboard.
+
+def _canary_env(client, conn, *, current="0.2.0", staged="0.3.0"):
+    """A fleet on `current` with `staged` published and offered to nobody."""
+    publish(client, current)
+    client.post(f"/api/v1/admin/packages/windows/{current}/current"
+                f"?force=1&confirm={current}")
+    publish(client, staged)
+    report(client, version=current, crashes=0)
+    return current, staged
+
+
+def test_a_staged_build_is_offered_to_the_machine_it_was_pushed_to(env):
+    client, conn, _settings = env
+    _canary_env(client, conn)
+    assert client.post("/api/v1/admin/machines/jsmith/EDIT-PC/update",
+                       json={"version": "0.3.0"}).status_code == 200
+
+    reply = report(client, version="0.2.0", crashes=0).json()
+    assert reply["upgrade"]["version"] == "0.3.0"
+    assert reply["upgrade"]["kind"] == "companion"
+    assert reply["upgrade"]["signature"]          # signed like any other
+    assert reply["commands"]["upgrade"]["version"] == "0.3.0"
+
+
+def test_a_machine_with_no_push_is_still_offered_current(env):
+    """The targeted offer is targeted: everybody else sees the fleet's build."""
+    client, conn, _settings = env
+    _canary_env(client, conn)
+    client.post("/api/v1/admin/machines/jsmith/EDIT-PC/update",
+                json={"version": "0.3.0"})
+
+    other = report(client, machine="OTHER-PC", version="0.1.0", crashes=0).json()
+    assert other["upgrade"]["version"] == "0.2.0"
+    assert "upgrade" not in other["commands"]
+
+
+def test_the_targeted_offer_ends_when_the_machine_reports_that_version(env):
+    """The push is fulfilled, the request is cleared, and the machine stops
+    being offered a build the fleet is not on."""
+    client, conn, _settings = env
+    _canary_env(client, conn)
+    client.post("/api/v1/admin/machines/jsmith/EDIT-PC/update",
+                json={"version": "0.3.0"})
+
+    reply = report(client, version="0.3.0", crashes=0).json()
+    assert "upgrade" not in reply["commands"]
+    assert dbmod.machine_update_request(conn, "jsmith", "EDIT-PC") is None
+    # ...and the next report is not offered the staged build again: the
+    # targeted offer is over, and what this machine sees is the channel's
+    # current build, exactly like every other computer.
+    assert _upgrade_info(conn, "windows", "0.3.0",
+                         editor="jsmith", machine="EDIT-PC")["version"] == "0.2.0"
+
+
+def test_a_withdrawn_push_withdraws_the_offer(env):
+    client, conn, _settings = env
+    _canary_env(client, conn)
+    client.post("/api/v1/admin/machines/jsmith/EDIT-PC/update",
+                json={"version": "0.3.0"})
+    client.delete("/api/v1/admin/machines/jsmith/EDIT-PC/update")
+
+    reply = report(client, version="0.2.0", crashes=0).json()
+    assert "upgrade" not in reply          # 0.2.0 IS current: nothing to offer
+    assert _upgrade_info(conn, "windows", "0.1.0",
+                         editor="jsmith", machine="EDIT-PC")["version"] == "0.2.0"
+
+
+def test_a_recalled_build_is_not_offered_even_to_a_canary(env):
+    """REL-3 outranks the push: a build the vendor pulled is offered to
+    nobody, targeted or not."""
+    client, conn, _settings = env
+    _canary_env(client, conn)
+    client.post("/api/v1/admin/machines/jsmith/EDIT-PC/update",
+                json={"version": "0.3.0"})
+    dbmod.retract_package(conn, "companion", "windows", "0.3.0",
+                          "it eats projects", dbmod.utcnow_iso())
+    conn.commit()
+
+    # Nothing at all, which is what REL-3 does with a recalled build: there is
+    # no "refused offer" shape in the protocol, and the recall is loud on the
+    # packages page instead.
+    assert _upgrade_info(conn, "windows", "0.1.0",
+                         editor="jsmith", machine="EDIT-PC") is None
+
+
+def test_pushing_a_version_this_channel_does_not_carry_is_refused(env):
+    client, conn, _settings = env
+    _canary_env(client, conn)
+    r = client.post("/api/v1/admin/machines/jsmith/EDIT-PC/update",
+                    json={"version": "0.9.71"})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "0.9.71 is not in this channel for windows"
+    assert dbmod.machine_update_request(conn, "jsmith", "EDIT-PC") is None
+
+
+def test_pushing_a_staged_build_says_that_is_what_it_is(env):
+    client, conn, _settings = env
+    _canary_env(client, conn)
+    staged = client.post("/api/v1/admin/machines/jsmith/EDIT-PC/update",
+                         json={"version": "0.3.0"}).json()
+    assert staged["staged"] is True
+    assert "as a targeted offer of a staged build" in staged["applies"]
+
+    current = client.post("/api/v1/admin/machines/jsmith/EDIT-PC/update",
+                          json={"version": "0.2.0"}).json()
+    assert current["staged"] is False
+    assert "targeted offer" not in current["applies"]
+
+
+# ---------------------------------------------------------- CR-191, part 2
+#
+# The same evening, [ MAKE CURRENT ] on 0.9.70 was refused with "1 computers
+# on 0.9.70 have reported 16 crash(es)". All 16 were the base rig's LIFETIME
+# UncleanExit markers (KNOWN_BUGS CR-144: the installer's Stop-Process during
+# an upgrade, the Cards test gate sweeping port 8899, dev restarts), written
+# weeks earlier by 0.9.66 and older. `crash_count` is a high-water count of
+# files in ~/.ccsync/crashes, not a per-build number.
+
+def test_crashes_written_before_the_build_started_do_not_hold_it_back(env):
+    client, conn, _settings = env
+    publish(client, "0.2.0")
+    report(client, version="0.2.0", crashes=16,
+           crash_newest="20260810T101500+0000-MainThread.json")
+    backdate_soak(conn, 120)          # the build started here 2 h ago, today
+
+    r = client.post("/api/v1/admin/packages/windows/0.2.0/current")
+    assert r.status_code == 200, r.text
+    assert dbmod.get_current_package(conn, "windows")["version"] == "0.2.0"
+
+
+def test_one_crash_since_the_build_started_still_refuses(env):
+    client, conn, _settings = env
+    publish(client, "0.2.0")
+    report(client, version="0.2.0", crashes=16,
+           crash_newest=dbmod.utcnow_iso().replace(":", "").replace("-", "")
+           + "-MainThread.json")
+    backdate_soak(conn, 120)
+
+    r = client.post("/api/v1/admin/packages/windows/0.2.0/current")
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "16 crash(es)" in detail
+    assert "since 0.2.0 started running there" in detail
+    assert dbmod.get_current_package(conn, "windows") is None
+
+
+def test_the_time_only_refusal_says_the_old_crashes_are_not_this_builds(env):
+    """An admin reading "16 crashes" on the packages page while the clock is
+    what is holding the build must not conclude the build is crashing."""
+    client, conn, _settings = env
+    publish(client, "0.2.0")
+    report(client, version="0.2.0", crashes=16,
+           crash_newest="20260810T101500+0000-MainThread.json")
+    backdate_soak(conn, 2)
+
+    detail = client.post("/api/v1/admin/packages/windows/0.2.0/current").json()["detail"]
+    assert "soak is 30 min" in detail
+    assert "none of them are its" in detail
+
+
+def test_a_crash_counter_nobody_can_date_is_still_not_a_pass(env):
+    """Cannot tell is not fine: a count with no newest file name could be
+    this build's, and the soak is a claim that something was observed."""
+    client, conn, _settings = env
+    publish(client, "0.2.0")
+    report(client, version="0.2.0", crashes=3)      # newest: None
+    backdate_soak(conn, 120)
+
+    r = client.post("/api/v1/admin/packages/windows/0.2.0/current")
+    assert r.status_code == 409
+    assert "3 crash(es)" in r.json()["detail"]
+
+
+def test_crash_origin_reads_both_spellings_of_a_newest_crash(env):
+    """The wire value is the crash FILE's name; a machine that sends a plain
+    ISO stamp is answering the same question."""
+    since = "2026-09-04T12:00:00+00:00"
+    assert dbmod.crash_origin(0, None, since) == dbmod.CRASHES_NONE
+    assert dbmod.crash_origin(None, None, since) == dbmod.CRASHES_UNKNOWN
+    assert dbmod.crash_origin(4, "nonsense.json", since) == dbmod.CRASHES_UNKNOWN
+    assert dbmod.crash_origin(
+        4, "20260901T090000+0000-MainThread.json", since) == dbmod.CRASHES_NONE
+    assert dbmod.crash_origin(
+        4, "20260904T130000+0000-MainThread.json", since) == dbmod.CRASHES_SOME
+    assert dbmod.crash_origin(4, "2026-09-04T13:00:00+00:00", since) == dbmod.CRASHES_SOME

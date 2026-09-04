@@ -1905,3 +1905,23 @@ def test_an_unsigned_notes_key_is_carried_but_never_rewritten():
     bare = upgrade_mod.parse_upgrade(
         {"upgrade": {"version": "0.5.0", "url": "/x", "sha256": "a" * 64}})
     assert "notes" not in bare
+
+
+def test_an_offer_above_the_running_build_is_accepted_as_it_stands(tmp_path):
+    """CR-191 (2026-09-04). The dashboard can now aim ONE build at ONE
+    computer -- the staged build an admin pushed there -- and the whole
+    reason no companion had to change for that is this: an offer is judged on
+    its signature, its kind/platform and this machine's downgrade floor, and
+    never on whether it is what the rest of the fleet is being offered. A
+    build ahead of everybody else's is an ordinary offer here.
+
+    The live failure was on the other side of the same handshake: with no
+    offer in hand the companion logged "pushed update to v0.9.70 IGNORED:
+    this machine is not being offered that build (holding nothing)" and the
+    push could never apply."""
+    mgr = UpgradeManager(_cfg())
+    info = _info(version="9.9.10")
+    ok, reason = mgr._accept_offer(info)
+    assert (ok, reason) == (True, "")
+    mgr.note_report_response({"ok": True, "upgrade": info})
+    assert mgr.available["version"] == "9.9.10"

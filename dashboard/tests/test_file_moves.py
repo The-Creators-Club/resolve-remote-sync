@@ -44,6 +44,20 @@ def env(tmp_path):
                         projects_dir=str(projects))
     app = create_app(settings)
     with TestClient(app) as client:
+        # The real Collector thread starts on lifespan entry and its FIRST
+        # cycle calls api.reconcile_file_moves on its own connection
+        # (collector.run_cycle, unconditional of the due kinds). That pass
+        # finishes any `pending` row whose destination exists, which turns a
+        # move this suite deliberately left pending into an offered command
+        # -- and whether it lands before or after a test's own
+        # record_file_move is pure thread scheduling. It fell the other way on
+        # the GitHub Windows runner in release-windows run 33857486694
+        # (2026-09-04): the collector's connect+migrate finished late, so
+        # test_an_interrupted_move_is_completed_or_quarantined_on_the_next_pass
+        # saw the move already reconciled and offered. Reconciliation is this
+        # module's subject, so it is called explicitly in the tests that want
+        # it and nothing else may run it behind them.
+        client.app.state.collector.stop()
         conn = dbmod.connect(tmp_path / "moves.db")
         now = dbmod.utcnow_iso()
         dbmod.upsert_project(conn, D_SLUG, DRONE, f"/data/{D_SLUG}", now)

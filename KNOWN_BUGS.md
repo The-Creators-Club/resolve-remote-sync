@@ -11483,6 +11483,655 @@ with generated placeholders rather than a literal. Test in `test_collector.py`,
 that the two names are the same object's contents and that a row of each free
 kind leaves the endpoint unconvinced.
 
+## Usability + resilience sweep, wave 2: the alarm reaches someone (CR-155..CR-164, 2026-09-04)
+
+`docs/USABILITY_RESILIENCE_SWEEP_2026-09-03.md` section 5, wave 2. The
+08-28 self-diagnosis layer was found by the sweep to have reached nobody:
+forty checks, ten invariants and a weekly report, delivered to a sink that
+defaults to `none`, on a home panel whose "what to do" was prose, over a
+fleet whose mounts, jobs, refusals and yt-dlp state had no registry row at
+all. Wave 2 is that gap, built by ten Opus builders on disjoint files (the
+alert registry last, because it reads fields the companion, mount and
+rollout builders were adding). Waves 3 to 5 stay in the plan.
+
+Dashboard **0.7.32** with **schema v48** (`companion_packages.made_current_at`,
+`machine_state.upgrade_refused_*`), companion **0.9.67**. No installer change.
+
+**Deploy order: the dashboard first, then the companions.** 0.9.67 reports
+`sync_guard.upgrade.refused_*` and `sync_guard.ytdlp`, both additive, and the
+alert kinds that read them live in 0.7.32; the other way round is harmless
+but silent. **Two visible changes on day one for every live site:** the SETUP
+badge lights up until an admin sets an alert destination or records a skip
+for each of the three gate tasks (CR-158), and the `alerts_sink` protection
+line is now `error`, not `warn` (CR-155), so a studio with no sink sees a
+red line on the protection page, a standing notice on the home panel and
+invariant 15 broken, all saying the same thing on purpose.
+
+### CR-155 - every detector this server has was running into an empty room, and silence meant nothing - FIXED in repo 2026-09-04 (dashboard 0.7.32)
+
+**What was wrong.** Four holes in the one mechanism that delivers all the
+others (usability + resilience sweep 2026-09-03, SYS-1 / DDIAG-3 / DDIAG-4 /
+DDIAG-16 / DDIAG-17):
+
+* The vendor default is `alerts_sink = none`, which is right, and NOTHING said
+  so. The one panel whose stated principle is "a safety net this server cannot
+  positively verify renders as MISSING, never as silence" carried lines for
+  snapshots, signing keys, backup drills and versioning, and none for the fact
+  that no human would ever be told when any of them broke. The only place the
+  state appeared was the Alerts page, which is where somebody who already
+  trusts the alarm goes.
+* A sink that WAS configured and had delivered nothing since March looked
+  identical to a working one from every page in the product.
+* Every alert is composed and sent by the thing being watched. A container
+  that is off, a collector past its restart limit, a NAS powered down and a
+  healthy fleet all produced the same experience: no mail. The weekly report
+  was the only proof of life and it is a week wide.
+* On the vendor default every finding still got an `alert_log` row (ok=0, "no
+  sink configured") so the page could answer "why was nobody told" - but that
+  row is what `_is_open` and the dedup window read. The day an admin finally
+  configured SMTP, every `warn` open since before then counted as already said
+  and would never be sent, on the one day the owner is most likely to be
+  watching for a first message. 17 of the registry's kinds are warns.
+* `machine_silent` is an `error`, and an error repeats once a day for as long
+  as it is true, so a laptop that was retired, rebuilt under a new hostname or
+  taken on a three-week shoot mailed the owner the same sentence 21 times. The
+  fix text never mentioned that the row can be removed.
+
+**What was built.**
+
+* A ninth `ProtectionLine("alerts_sink", ...)`, `error`: "somebody is told when
+  this server finds a problem". Green needs a configured sink AND a successful
+  send inside 30 days. Its consequence sentence counts `alerts.ALERT_KINDS`
+  rather than carrying a number that goes stale.
+* `alerts.sink_deliverable(conn, now="") -> (ok, one line in editor English)`,
+  the ONE verdict shared by that line and invariant 15 (`alerts_deliverable`),
+  so the panel and the invariant can never disagree. It raises rather than
+  answering False when the ledger cannot be read, and both callers turn that
+  into `[ CANNOT VERIFY ]`: could not ask is never no.
+* A dead-man's heartbeat: `alerts_heartbeat` (default off, on the Alerts page
+  beside the weekly toggle) sends one short message a calendar day while a
+  sink is set, `CC Sync: all quiet - 8 computer(s), 0 problem(s)`, from the
+  counts the cycle already has. Owed durably like the weekly report (the DATE
+  of the last `heartbeat` row in `alert_log`, in the site's zone), never a
+  registry kind, never a raised problem, and NOT the weekly report doubling as
+  one. The page says the only thing that makes it worth a mail a day: "If
+  these stop arriving, the server itself is down."
+* `set_settings` re-opens what was never delivered when the sink leaves
+  `none`: those rows are re-filed under `<kind>.undelivered`, so they stay on
+  WHAT WAS SENT as the record of a period with no channel and stop making a
+  subject look raised. The save answers "Saved. The next check will send
+  everything that is currently open."
+* `SILENT_GIVE_UP_DAYS = 14`, through a new per-finding `repeat=False` (a
+  finding may opt out of its kind's daily repeat; nothing may opt in). The row
+  stays OPEN deliberately - a subject that leaves the scan is declared
+  RECOVERED, and "this has cleared, no action is needed" about a computer that
+  is dead is a worse lie than the daily mail - and the fix now names
+  `[ FORGET ]` on the FLEET row.
+
+No migration: `alerts_heartbeat` is a new key with a default in the existing
+alerts settings store. `docs/SELF_DIAGNOSIS.md` sections 7, 8a and 14 carry
+the rules.
+
+**Tests.** `dashboard/tests/test_alerts.py` (+16: the five `sink_deliverable`
+states, the heartbeat's once-a-calendar-day and its absence from the registry
+and from CURRENTLY OPEN, the weekly not doubling as it, a warn open under no
+sink being delivered on the cycle after SMTP is configured, a change between
+two real sinks re-raising nothing, the save sentence on the page, and a
+computer silent for a fortnight said once with `[ FORGET ]` in its fix);
+`dashboard/tests/test_protection.py` (+4: the line's severity and copy, the
+count read from the registry, the shared verdict, and an unreadable ledger
+rendering CANNOT VERIFY). 40 + 57 pass in the alerts, protection and wave-1
+sweep files; the two copy scans (313) stay green.
+
+### CR-156 - the invariant checker looked only inside the deployment: five more for what the vendor published, what is deployed and what is rendered - FIXED in repo 2026-09-04 (dashboard 0.7.32)
+SYS-17 of the usability + resilience sweep 2026-09-03. The ten built
+invariants all look at state that has gone wrong INSIDE one deployment;
+every recent ledger entry a machine could have caught is about the
+relationship between what the vendor published, what this server is deployed
+with, and what it renders, and none of the ten looks there. Five rows in
+`invariants.INVARIANTS` (the registry is data, so the ledger, the page, the
+notices, the alert kind and the weekly report picked them up with no second
+edit):
+
+* **11 `fleet_current_with_vendor`** - the newest companion build the vendor
+  feed offers is published here and is current. Read from
+  `db.get_feed_offered` (the durable `{platform: [version]}` every feed check
+  writes, SYS-2's other half) and never from the network: this runs on the
+  collector's single thread. NOT CHECKED with no `DASH_RELEASE_FEED_URL`, and
+  NOT CHECKED with a feed that has recorded nothing yet, saying which. It
+  tells "published but not current" from "never published", and compares
+  two-digit minors numerically (0.10.0 is above 0.9.9).
+* **12 `dashboard_meets_requirements`** - this dashboard's VERSION is at or
+  above the `requires_dashboard` of every non-retracted record in the
+  channel. It calls `package_store.blocks_on_dashboard_version` rather than
+  comparing again, because a predicate duplicated between the writer and the
+  checker is SYS-16's shape, and an unparseable requirement has to block here
+  for the reason it blocks at publish time. A record can arrive from a
+  restored backup or be left behind by a rolled-back dashboard, and then it
+  sits on the shelf for ever with nothing saying so.
+* **13 `mount_assets_open`** (CR-100) - every mounted app's installable-app
+  files are in `app._OPEN_EXACT`, so the outer `login_gate` does not 303 them.
+  Computed from the gate's own set, not by fetching: an HTTP call to
+  ourselves from inside a collector cycle is a way to deadlock a worker pool,
+  and the fetch proves nothing the set does not. `PWA_MOUNT_ASSETS` is the
+  list (the dashboard's manifest and `sw.js`, Timeline Cards' manifest and
+  icon), so the next mount that ships a PWA is one row. Deliberately NOT
+  narrowed to the mounts enabled at this site: the regression is in the code,
+  and a check that only looked at enabled mounts would go quiet on exactly
+  the vendor build such a regression would ship in.
+* **14 `cards_tree_matches_source`** - registered with a `skip_reason`, like
+  invariant 8, because NOTHING RECORDS WHAT WAS SHIPPED.
+  `install_dashboard_app.install_tree` uploads the checkout, verifies count
+  and bytes, and swaps the directory, keeping no commit id, file list or
+  checksum, and `CARDS_EXCLUDE_DIRS` drops `.git`, so the served tree carries
+  no provenance either: hashing it would be hashing it against itself. To
+  make this checkable the deploy has to WRITE what it shipped (source commit
+  plus a per-file sha256 manifest into `<host-root>/cards-web`, or into
+  `meta`) and then the check is a walk and a compare. Inventing a source of
+  truth here was refused; `[ NOT CHECKED ]` with that sentence is the honest
+  page entry, and CR-101 (a hand copy on the NAS with a `.bak` beside it) is
+  the fault it would catch.
+* **15 `alerts_deliverable`** (SYS-1) - a destination is configured and the
+  last message sent to it arrived, through `alerts.sink_deliverable`, reached
+  by `getattr` so an older alerts module renders NOT CHECKED rather than
+  raising every pass. That helper RAISES rather than answering False when it
+  cannot read the ledger, precisely so this renders "not checked" instead of
+  inventing "no destination"; `warn`, because a warn is said once and an
+  error repeats daily into a channel that by definition is not working.
+
+`docs/SELF_DIAGNOSIS.md` section 13 lists all five, with invariant 14's
+missing record written up beside invariant 10's narrowings.
+
+Other sites of this shape: none. The five are the whole of SYS-17's proposal;
+`tools/check_mobile_origin.py` still asks only the dashboard's own manifest
+(SYS-11's other half, unchanged here).
+
+Tests: `dashboard/tests/test_invariants.py`, fifteen more (53 in the file,
+all green). Three existing ones were narrowed rather than weakened: the
+empty-database sweep exempts `mount_assets_open` by key and says why (its
+subject is the served code, not the deployment's data), and two that asserted
+"no `invariant_broken` notice is open" now assert on their own subject, since
+a test deployment has no alert destination either and that is a second, real
+finding standing open beside the first.
+
+### CR-157 - the alarm panel names pages nobody can click, judges a dead laptop's year-old reading, and never reads this server's own crash files - FIXED in repo 2026-09-04 (dashboard 0.7.32)
+Wave 2's self-diagnosis half. No schema change: every fact added here is a
+property of the KIND or of state the dashboard already holds.
+
+* **DDIAG-8** - the owner's only alarm panel told a non-technical person to
+  navigate by memory to a page whose name was written in prose, three levels
+  into a twelve-entry settings strip, when every one of those targets is a URL
+  this codebase knows. `NOTICE_KINDS` entries now carry an optional `href`
+  (a string, or a callable of the SUBJECT for the kinds whose destination is
+  the project the subject names), resolved by `db.notice_href` and rendered
+  after the WHAT TO DO sentence as `[ TAKE ME THERE ]`. A column would have
+  needed a migration for a fact that never varies per row. **The prose stays**:
+  the alert sink mails the same sentence and a mail body has no link to offer.
+* **DDIAG-9** - `_check_machine_space` selected `disk_at` and never read it, so
+  every `machine_state` row was judged on whatever number it last reported,
+  however old: a machine that reported 40 GB free and was then retired held an
+  un-clearable warn for ever, because the only way to clear it was for the same
+  machine to report again with more space. It now skips (and therefore clears)
+  a reading older than `MACHINE_DISK_STALE_HOURS = 48`. That is its own line,
+  not alerts' gone-quiet line: this is not "could not check", it is "this
+  reading is not about now", and a silent machine is `machine_silent`'s
+  business - saying it twice in different words is worse than saying it once.
+* **DDIAG-3 (the notice half)** - a machine silent past
+  `SILENT_GIVE_UP_DAYS = 14` becomes one standing `machine_forgotten` (warn)
+  naming the editor, the computer and when it last reported, with the action
+  nothing had ever pointed at: FLEET, `[ FORGET ]` on its row. It clears when
+  the machine reports again or when the row is forgotten. The alert side gives
+  up at the same threshold.
+* **DDIAG-7** - each of `/broll`, `/music`, `/ytdl` and `/cards` computes a
+  careful tri-state with a sentence in `detail`, and that sentence reached the
+  container log and the authenticated health body only; on the page the topbar
+  link simply disappeared, so "where has B-ROLL gone" had no answer anywhere.
+  `feature_not_mounted` (warn, subject the mount name) is written per mount
+  that is not `mounted`, from `mount_status.snapshot()`. That module is
+  imported defensively: with no `mount_status` in the build nothing is written
+  AND nothing is cleared, and the kind renders `[ NOT CHECKED ]`, because a
+  status this pass could not read is not evidence the four pages are up.
+* **SYS-1 (c)** - while `alerts_sink` is `none`, `alerts_sink_none` (warn)
+  stands open on the home panel: "Nobody is being told when this server finds
+  a problem." Forty checks, ten invariants and a weekly report ran into an
+  empty room on the vendor default, and the panel whose premise is that an
+  unverifiable safety net is reported carried no line for the one that
+  delivers all the others. Clears the moment a sink is set.
+* **DDIAG-10** - `crash_report.py` has written `<data>/crashes/*.json` since
+  2026-08-17 and nothing ever read that directory: the collector thread dying
+  was a fact only somebody with a shell in the container could reach, which is
+  exactly the person this product assumes does not exist. `server_crash_report`
+  (error) counts the files newer than this process's start - a module-level
+  stamp in `notices.py`, because `run_checks` is handed `(conn, settings)` on
+  the collector's thread and can reach neither `app.state` nor the app - and
+  `GET /admin/diagnostics/crash-reports.zip` (admin only, beside the
+  diagnostics bundles) hands over the newest 20, zipped in memory. Nothing is
+  written into the data volume to serve it, and the files are NOT re-redacted:
+  `crash_report.build_report` passes the message and the traceback through
+  `redact` before the file is ever written, so what is on disk is already the
+  redacted form and a second pass could only make it less faithful. The button
+  shows on the diagnostics panel only when there are reports to send.
+
+Files: `dashboard/src/ccsync_dashboard/{notices.py,db.py,ui.py}`,
+`dashboard/templates/partials/{notices.html,admin_diagnostics.html}`,
+`dashboard/tests/{test_notices.py,test_notices_sweep_wave2.py}`.
+
+### CR-158 - The setup wizard said Done with nobody to tell, no signing key and no snapshot - FIXED in repo 2026-09-04 (dashboard 0.7.32)
+
+**Symptom.** A new site finished the wizard, saw `Done: OK, setup complete`, and
+had: no alert destination (`alerts_sink = none`, the vendor default), so all
+forty-odd checks, the ten invariants and the weekly report ran into an empty
+room; no `DASH_RELEASE_PUBKEYS`, so every publish 503s and the fleet can never
+be updated from that dashboard; and no snapshot schedule, which CR-10 has never
+had applied on either of the vendor's own two NASes. All three are named on the
+protection panel, which a customer on their first day has not found. The wizard
+had a "Protect your data" step and nothing at all for "who should we tell"
+(SYS-1, SYS-18, usability sweep 2026-09-03).
+
+**Cause.** `setup_engine.TASKS` held twelve tasks, none about alerting, and
+`_check_done` waited only on `outstanding_required`, i.e. the six non-optional
+tasks. Everything an appliance customer most needs and is least likely to do
+unprompted was optional, unmentioned and invisible.
+
+**Fix.** A thirteenth task, `alerts` ("Who should we tell?"), takes ONE
+destination on the wizard (an email address reusing the existing SMTP settings
+shape, or an https webhook) through `alerts.set_settings`, with
+`[ SEND A TEST ]` on the same code path as the ALERTS page's own test button
+(`compose_alert(KIND_TEST)` + `alerts.send`, dedup off). An address saved with
+no mail server behind it is a `warn` naming the missing piece and pointing at
+Settings, then ALERTS, never a green tick. A fourteenth task, `release_key`,
+reports the signing key by COUNT only. `GATE_TASK_IDS = (release_key,
+snapshots, alerts)` is the first-boot completeness gate: `_check_done` refuses
+while any of the three is neither satisfied nor explicitly accepted, and names
+what is outstanding by TITLE, with the wizard linking each name to its row.
+`[ SKIP - I understand ]` records the acceptance under a second `setup_tasks`
+row (`skip:<id>`), because the task's own row is what the next CHECK
+overwrites with the state of the world, and a decision that un-does itself on
+a button press is not a decision. A skip cannot turn any protection line
+green: `protection._check_release_keys`, `_check_snapshot_*` and
+`_check_alerts_sink` read the settings, the NAS's own task list and
+`alert_log`, never `setup_tasks` (pinned by a test).
+
+**Files.** `dashboard/src/ccsync_dashboard/setup_engine.py`,
+`setup_routes.py` (`POST /api/v1/setup/alerts`, `POST /api/v1/setup/alerts/test`,
+`gate` / `skip_recorded_at` / `outstanding_for_done` on the task list),
+`dashboard/templates/setup.html`, `dashboard/static/setup.js`,
+`dashboard/tests/test_setup_engine.py`, `dashboard/tests/test_setup_routes.py`.
+
+**No migration.** The skip record uses the existing `setup_tasks` store under
+an id nothing else walks.
+
+**Watch for.** A dashboard deployed to an existing site now reports the wizard
+as unfinished until an admin either sets a destination or presses
+[ SKIP - I understand ] on each of the three. That is the point, but it means
+the SETUP nav badge lights up on every deployment on the day this ships.
+
+### CR-159 - a machine that REFUSED a build, and a yt-dlp past its shelf life, told nobody - FIXED in repo 2026-09-04 (companion 0.9.67)
+Wave 2's companion half: two states the machine already knew and reported
+nowhere.
+
+* **REL-3** - an offer refused at RECEIPT (a rejected signature, a build below
+  this machine's downgrade floor, a wrong kind/platform record, plain HTTP to a
+  public host) makes no attempt, so REL-8's counters stayed all-zero and the
+  Packages page rendered a machine that can never take a build identically to
+  one that had simply not reported yet. The only evidence was one `log.error`
+  in that editor's `companion.log`. `UpgradeManager` now remembers the verdict
+  (`last_refusal`, read through `refusal()`), the report carries
+  `sync_guard.upgrade.refused_version` / `refused_reason` / `refused_at` (null,
+  never absent), and diagnostics names it. It **self-clears** on the next
+  accepted offer and once the machine is running the refused version: a
+  `[ REFUSING 0.9.65 ]` chip beside a machine already on 0.9.65 is the alarm
+  that cries wolf.
+* **REL-3 (retry)** - `_run_auto_update` / `_run_pushed_update` re-armed a
+  refusal every flat 600 s for ever, because "no-offer" is not "failed". A
+  refusal now backs off on the failed-attempt curve (10 min, 1 h, then 6 h)
+  and is deliberately **NOT written to the attempts ledger**: nothing was
+  downloaded, and `[ FAILED xN ]` has to keep meaning "N downloads went
+  wrong". A withdrawn offer keeps the short flat timer - there is nothing
+  wrong with that machine.
+* **CYT-7** - the max-age rule (08-28 YT-1) detects a yt-dlp drifting past its
+  shelf life and publishes it with `ok=True`, which is honest (it can still
+  probably download) and is exactly why nothing surfaced it: `capabilities()`
+  only reads `ok`, there was no tray line, and the manager's status was not in
+  the report at all. The verdict went to one INFO line a day in a log nobody
+  opens, so the first person to learn was the editor whose download failed.
+  Now: `sync_guard.ytdlp` {version, action, ok, stale, age_days, message,
+  checked_at}, **absent** when the manager never published one (absent must not
+  read as stale); `capabilities().warning`, which never refuses the job; and one
+  Settings > YOUTUBE line ("YouTube downloads on this computer may start
+  failing: the downloader is 43 days old and could not update itself").
+  `stale` is `action == "stale"` alone - a machine with no usable binary at all
+  is a different alarm.
+
+The dashboard half (the `[ REFUSING ... ]` chip and the `upgrade_refused` /
+`ytdlp_stale` alert kinds) is B2's; the fields are additive inside the existing
+`guard` dict, so an older dashboard ignores them.
+
+### CR-160 - a mount that did not take said so nowhere a human looks, and the unblock plugin's install failed into a log - FIXED in repo 2026-09-04 (dashboard 0.7.32, ytdl web)
+Wave 2's "the alarm reaches someone" half for the four optional mounts:
+
+* **DDIAG-7 / BROLL-2 / MUSIC-10** - `/broll`, `/music`, `/ytdl` and `/cards`
+  each computed a careful tri-state, and only `mount_cards` returned the
+  SENTENCE that went with it. The other three ended in a `log.error` inside the
+  container and a topbar link that silently disappeared, so an editor asking
+  where B-ROLL had gone had no page that could answer and the forty-kind
+  self-diagnosis registry had no evidence to read. `mount_broll`, `mount_music`
+  and `mount_ytdl` now answer `(status, detail)` exactly as `mount_cards` does,
+  with a sentence on every non-mounted branch (vault/data root not writable by
+  the container's uid, checkout did not import, site switch off, no usable
+  ingest token). The boot block records all four in a new module-level registry,
+  `mount_status.record/snapshot`, which the alert checks and the notice writers
+  read from the collector thread with no app object in hand, and
+  `GET /api/v1/health` gained `mounts: {name: {status, detail}}` beside the
+  existing `cards` block. `app.state.*_status` / `*_mounted` are unchanged, so
+  `ui.py` and the topbar are untouched; `*_detail` is new beside them.
+* **MUSIC-10, second half** - `publish_db --which music` can land a `music.db`
+  written by a newer musicweb. `musicweb.db.ensure_schema` then raised inside
+  EVERY request while the mount reported MOUNTED and the nav went on offering
+  the link. The mount's storage probe already ran that check; it now recognises
+  the refusal and reports DEGRADED at boot with `the music database was written
+  by a newer version of the music app than this server runs`, and b-roll's
+  identical guard is handled the same way.
+* **YTWEB-5** - the deployment's real PO-token path is the pip-installed
+  `bgutil-ytdlp-pot-provider` plugin, not the sidecar `pot_provider` reports on,
+  and its boot install failing was invisible to every health key: CR-73 (DNS not
+  up in the container's first seconds) and CR-84 (`[Errno 13]` into a read-only
+  `/venv`) each ran for days behind four `run.sh: WARNING:` lines, with editors
+  seeing 1.8 MiB/s downloads and "the downloaded file is empty". `run.sh` now
+  writes `<data>/unblock-site/plugin_install.json`
+  (`{ok, error, at, attempts, version}`, pip's own last words included) on
+  SUCCESS as well as on failure - a marker that exists only when things are
+  broken cannot be told from a run.sh too old to write one - and exports its
+  path as `YTDL_PLUGIN_INSTALL_MARKER`. `/ytdl/api/health` gained
+  `plugin_install: {ok, state, error, at, attempts, version}`, where `ok: null`
+  means NOT CHECKED and never OK, and the SPA's "no PO-token sidecar is
+  configured. That is normal" tooltip - flatly untrue on exactly the boots that
+  mattered - is replaced by the plugin's failure when there is one.
+* **YTWEB-2 (prep)** - every ytdl signal an owner needs (`yt_dlp_stale`,
+  `yt_dlp_age_days`, `pot_provider`, `cookies_state`, `last_download.ok`,
+  `canary.last`, `claude`, `worker_alive`, `plugin_install`) was computed on the
+  health ROUTE and therefore visible only to an editor who opened /ytdl and read
+  a pip's tooltip. The body is built by `ytdlweb.routes_api.health_snapshot(app,
+  *, allow_probe=True)` now, and the dashboard reaches it in process through
+  `ccsync_dashboard.ytdl.health_snapshot(app) -> dict | None` (None when /ytdl is
+  not serving). `allow_probe=False` on that path: the PO-token answer is the last
+  cached one, because a collector cycle that can make itself slow while
+  diagnosing is one somebody turns off, and nothing there imports `ytdlweb` - an
+  off site pays no yt-dlp import, which is what the site switch is for.
+
+Nothing added here can raise out of the boot block: `_record_mount` swallows
+everything, the registry's `record()` cannot throw, and the health block falls
+back to `app.state` for a mount that never recorded.
+
+### CR-161 - the JOBS page hid everything that failed, and had no way to try it again - FIXED in repo 2026-09-04 (dashboard 0.7.32)
+Wave 2's fleet-queue half (DDIAG-11):
+
+* `failed` and `abandoned` are terminal and the page listed OPEN jobs only
+  (`db.list_jobs(conn, state="open")`), so a fleet that had just spent its
+  retry budget on twelve whisper jobs - one machine with a broken ffmpeg is
+  the documented case - showed the operator "Nothing is queued or running."
+  No count, no list, no `last_error`, and the only way back was to retype the
+  kind, the root, the relative path and the episode from nothing.
+* `db.finished_jobs` (terminal states, window on `updated_at` so a job queued
+  on Monday and abandoned an hour ago is news this morning) and
+  `db.count_abandoned_jobs`, both 24 h by default. The count is on every
+  render of `[ THE QUEUE ]`; the list only when asked for.
+* `[ SHOW FINISHED ]` on the JOBS page: state, kind, the (root, relative
+  path) pair, WHO held it last, when, and the **whole** `last_error` and not
+  the open list's 120-character slice - the sentence ffmpeg wrote is what
+  tells "this clip is bad" from "that computer is broken". An empty queue
+  with abandoned work now says so in its own line instead of stopping at
+  "Nothing is queued or running."
+* The 15 s poll MOVED from the page's wrapper div onto the partial itself, so
+  it re-emits its own URL with the toggle in it. A wrapper polling a fixed URL
+  closed the finished list every 15 seconds.
+* `POST /api/v1/jobs/{id}/retry` (admin, the cancel gate exactly) and
+  `[ TRY AGAIN ]` / `tools/jobs.py retry <id>`: the same kind, inputs,
+  requires, cost, priority and section 10 levers under a NEW id, with
+  `inputs.retry_of` naming the origin. **The old row is left exactly as it
+  was** - the attempt history is the only evidence anybody has for a bad clip
+  as against a broken machine, and a retry that reopened the row would erase
+  it. Two 409s, both sentences: a job that has not finished (nothing forces a
+  row terminal behind a live ffmpeg, so it is cancelled first) and a job whose
+  previous retry is still on the queue.
+* No migration: a retry is a new row, and `retry_of` rides `inputs`, which
+  every runner reads by key and ignores what it does not know.
+* `docs/API.md` §6c documents the route and the field.
+
+### CR-162 - the chaos suites were parameterised over the sweep before last, so nothing in CR-125..CR-154 had an injection - FIXED in repo 2026-09-04 (tests)
+
+SYS-10, wave 2. Against ~10,600 test functions in 421 files this repo had 28
+fault injections, and all 28 were written against the shapes of the 2026-08-28
+sweep. Since then CI found four defects in one run (CR-94) and the chaos
+suites found two the five build packages had missed (SYS-18a/b) - and
+**everything else in the last thirty entries was found by the owner using the
+product**. So the two chaos modules got a sibling each, written against the
+newer ledger on the same two rules: every assertion is an OBSERVABLE (a
+notice, a refusal, a safe state - never a log line, which is UX-10's whole
+point), and nothing sleeps, spawns, opens a window or reaches the network.
+
+**Ten shapes, in `dashboard/tests/chaos/test_fault_injection_wave2.py` (28
+tests) and `companion/tests/chaos/test_fault_injection_wave2.py` (12):**
+
+* **SYS-2** - a vendor build whose `requires_dashboard` is above this
+  dashboard is staged and never made current (REL-4's refusal, correct), and
+  the site then reads as fully up to date everywhere while the whole fleet has
+  stopped updating. Parameterised over an above-us requirement, an
+  UNPARSEABLE one (which must also block) and an ordinary one (which must stay
+  silent, or the banner cries wolf the way CR-139's three findings-about-
+  nothing did). Asserted as the `feed_publish_refused` NOTICE plus
+  `db.get_feed_offered`, never the log line that was the only statement
+  before wave 1 - and a second test that it CLEARS once the dashboard is
+  updated (CR-140: a finding the operator cannot clear is worse than none).
+* **CR-100 / SYS-11** - a phone fetches a manifest with no cookie jar.
+  Parameterised over all six installable surfaces, `/cards/manifest.webmanifest`
+  and `/cards/icon.svg` included: the gate must not answer a redirect, whether
+  or not a cards checkout exists on the machine (a 404 still proves the
+  request reached routing). The converse pins that opening a manifest did not
+  open the app: `/cards/`, `/cards/api/state` and `/settings` still need a
+  session.
+* **SYS-3 / CR-95** - every `disabled`/`readonly` in `dashboard/templates/` is
+  either CONDITIONAL on a name the server computes (found in
+  `dashboard/src`, following `{% set %}` aliases one hop, so
+  `is_auto` resolves to `setup_routes`' `auto_derived`) or listed in
+  `COSMETIC_DISABLES` with a reason. **Seven sites today, zero violations**,
+  so the test is green rather than an xfail. The allow-list is keyed
+  `template#id-or-name`, not by file, so a new unconditional disable in an
+  already-listed template still fails; both branches were negative-tested.
+  The two cosmetic entries: the display-only `ai_cli_providers` mirror
+  (the real switch is accepting the AI-providers notice) and the EULA
+  [ ACCEPT ] button setup.js enables.
+* **CR-141** - a report is no longer atomic (1+N+M transactions), which is a
+  CONTRACT now. The injection fails the SECOND project's media replace with
+  `database is locked` and asserts the first project's rows survived and the
+  machine is still on the fleet grid; a second test asserts the self-healing
+  half, that the next report fills in what was lost.
+* **CR-154** - parameterised over `db.SYNCTHING_FREE_KINDS` itself, because
+  the defect was the collector's gate and the query drifting apart: a
+  successful cycle of each free kind must leave `/api/v1/health` unconvinced,
+  and a real Syncthing-backed cycle must still convince it.
+* **CR-149 (the 0.9.66 follow-up)** - the loopback's two bind doors. A
+  `broll_server.start` that behaves like the OS (first bind wins, every later
+  one EADDRINUSEs) is driven through both orders and then through a real
+  two-thread race: one bind, the handle still ours, `loopback.bound` true.
+  Plus the shutdown half - a retry during teardown must not re-take the port
+  the self-upgrade's replacement is about to want.
+* **CR-149 APP-1 / CR-27** - an EULA park and a signed-out machine are each
+  named in `sync_guard.blocked` AND take the tray off green with every lane
+  idle, which is exactly the state that used to paint green above "up to
+  date". The converse keeps green reachable.
+* **COMP-CORE-2 / AUDIT_2 CORE-H8** - a pushed update (`commands.upgrade` /
+  `auto_update`, neither of which has an editor in scope) arriving mid-popup
+  or mid-consolidate is refused and `upgrade.apply` is never reached; the
+  same push a minute later installs, because a stand-down is transient.
+* **CR-93** - the injection is the COLLECTION itself: a worker thread runs
+  `gc.collect()` while another thread's dialog sits in a closure cycle. The
+  interpreter must still be pinned afterwards (1.8 MB, deliberate; the
+  alternative is `Tcl_AsyncDelete` and no traceback), freeable only by the
+  thread that built it, and `release_root` from the wrong thread must destroy
+  and free nothing. Fake roots, not real Tk - conftest `_no_real_tk_windows`
+  makes a real one a failure and the native proof lives in
+  `test_tk_release_native.py` - which is also what makes it identical on the
+  macOS runner.
+
+Both modules carry the parent's registry pin (a numbered section per
+injection, so one cannot be dropped while the count stays true in the
+report). **Nothing here is platform-gated**: no drive letters, no NFC/NFD, no
+Tk, no wall-clock sleeps, which is the CR-138..CR-144 lesson (three red macOS
+CI builds on tests that assumed a Windows runner). `dashboard/tests/chaos`
+43 passed, `companion/tests/chaos` 31 passed.
+
+**CR-101 is not covered**: the page-throttle-after-a-root-switch shape lives
+in the MulticamPipeline repo, not here.
+
+### CR-163 - "did it actually reach the fleet" had no answer anywhere, and a computer REFUSING a build looked exactly like one that had not reported yet - FIXED in repo 2026-09-04 (dashboard 0.7.32, schema v48, tools)
+Wave 2's release half (REL-6, and REL-3's page half):
+
+* **REL-6** - `ship` ended on a PREDICTION ("editors' trays will offer v0.9.66
+  on their next report") and nothing ever said whether they took it. The drift
+  doctor's only fleet lines were the per-machine `machine behind:` wall, which
+  in the first minute after a ship is every machine in the fleet, i.e. exactly
+  what a SUCCESSFUL ship looks like. There was no adoption number on the
+  Packages page either, and the one automatic signal (`versions_behind`) needs
+  a machine to be three published builds behind, so a fleet that stopped
+  upgrading after one release stayed silent for months.
+  * schema **v48** adds `companion_packages.made_current_at`: the rollout clock
+    had no start time. `published_at` is the signer's, `staged_at` is when the
+    bytes landed, and a build can sit staged for a week and be made current in
+    a second. Stamped in `db.set_current_package`, the one writer every door
+    goes through; **backfilled NULL**, because for a build already current we
+    do not know, and a COALESCE onto `published_at` would date a rollout to a
+    moment nobody was offered anything - the false "stalled for six days" a
+    rollout alert must never invent.
+  * `db.rollout_status(conn)` is the one query-only helper the three readers
+    share: per (kind, platform) channel, `current_version`, `made_current_at`,
+    `machines_total`, `machines_on_current`, `reverts`, `failed_attempts`,
+    `behind[]` and `refusing[]`. `behind` is STRICTLY older by
+    `version_tuple`, never `!= current`: a base rig running tomorrow's build
+    did not fail to upgrade, and counting it as one is how an adoption number
+    stops being believed.
+  * on the page: a `[ ROLLOUT ]` block above OUT-OF-DATE COMPUTERS
+    ("2 of 3 on 0.9.66 (1 behind: ruskin on RUSKIN-PC 0.9.65, 3d ago) -
+    0 reverts, 0 failed attempts").
+  * in `tools/check_deploy_drift.ps1`: the same line as a `[ ROLLOUT ]` block
+    with `-AdminUser`, plus **`-Watch`** - re-read every 60 s, one line per
+    pass, until every platform is fully on its current build or Ctrl+C. A
+    dashboard that reports no rollout is NOT complete: an absent answer must
+    never end a watch with "everyone has it".
+  * in `tools/ship.ps1`, after "ship complete": the counts, read from
+    `/api/v1/health` on the fleet credential the ship already holds (the
+    dashboard login is read inside `build_editor_package.ps1` and never leaves
+    it, so a second password prompt at the end of a ship was not an option).
+    Health's block carries **counts only, no names**; who is behind stays on
+    the admin packages view. Advisory: it never changes the exit code.
+* **REL-3 (the page half only; the alert and the companion's report field are
+  elsewhere in this wave)** - an offer refused at RECEIPT (`release signature
+  rejected`, below the downgrade floor, plain HTTP) makes no attempt, so
+  `upgrade_attempts` stays 0 and the machine rendered identically to one that
+  had simply not reported yet: `[ 0.9.65 ]`, `[ UPDATE NOW ]`, no chip. v48
+  adds `machine_state.upgrade_refused_version` / `_reason` / `_at` as the home
+  for `sync_guard.upgrade.refused_*`; the row now carries
+  `[ REFUSING 0.9.66 ]` with the reason in the title, and `[ UPDATE NOW ]` is
+  replaced by "This computer refuses the current build: <reason>. Pushing it
+  again will not change that." - the button queued a request that can never be
+  honoured and then said "asked" for ever. Every reader treats absent/NULL as
+  "not refusing", never "refusing for an unknown reason", so a fleet of
+  companions too old to send the field reads exactly as it did before.
+
+
+### CR-164 - the job queue, the release channel's own adoption, both yt-dlps, the 8899 loopback and the b-roll platform were in no diagnosis channel at all - FIXED in repo 2026-09-04 (dashboard 0.7.32)
+Wave 2's alerts half. Sixteen kinds added to `alerts.ALERT_KINDS` (40 rows
+before this wave, 59 after it), each with its writer, each reading state that
+already existed and none of them costing the collector a network call, a
+subprocess or a walk:
+
+* **DDIAG-2 / DDIAG-6** - grep for `job` in `alerts.py` returned only the
+  COLLECTOR's background jobs. The whole fleet queue, whose own module says "a
+  scheduler that quietly assigns nothing looks exactly like a fleet with
+  nothing to do", was diagnosed on `/admin/jobs` and nowhere else, and nothing
+  on the home page links there. `jobs_starved` (warn: the oldest queued job
+  over 6 h old whose `reason_code` is `no_capable_machine`, `kind_not_allowed`
+  or `halted` - never `all_busy`, `idle_wait`, `fleet_cap` or `cooling_down`,
+  which are the scheduler working), `jobs_abandoned` (warn: one finding for the
+  24 h window, not one per job) and `jobs_pinned_no_executor` (error: pinned
+  work with no Timeline Cards mount behind it, or a row this container holds
+  whose heartbeat stopped an hour ago - DDIAG-6's stranding, read from the
+  queue because the executor object is on `app.state` and the scan has no app).
+  `jobs.explain` is asked about ONE job, the oldest, and only once the six
+  hours are up: it reads the whole fleet, and the `Ctx` rule forbids that per
+  row. The weekly report gains `JOBS: n queued, n running, n abandoned this
+  week`, printed every week including all zeros.
+* **REL-3** - a machine that REFUSES an offer (a signature it will not trust, a
+  version below its downgrade floor, plain HTTP) makes no attempt, so
+  `upgrade_attempts` stays 0 and Packages renders it identically to one that
+  has not reported yet; the evidence was one `log.error` in that editor's
+  companion.log. B10 added the v48 columns and the readers and **nothing wrote
+  them**: `db.store_upgrade_state` predates them. `api._store_upgrade_refusal`
+  is the writer (its own statement beside that function, the LATCH rule so a
+  computer that stops refusing clears its own chip), `UpgradeIn` grew the three
+  fields, and `upgrade_refused` (error) is the alarm. Its fix text says
+  [ UPDATE NOW ] cannot fix a refusal, because it cannot.
+* **REL-6** - `versions_behind` needs a computer to be THREE published builds
+  behind, so a fleet that stopped updating after one release was silent for
+  months. `rollout_stalled` (warn) asks the other question, off
+  `db.rollout_status`: a channel made current over 48 h ago with a computer
+  that has REPORTED since and is still behind. A NULL `made_current_at` is
+  "cannot tell" and stays silent rather than dating a rollout to a moment
+  nobody was offered anything.
+* **REL-13** - the Mac half of every ship was a yellow advisory in a terminal's
+  scrollback, twice per ship, and Mac builds have been owed across many ships
+  (one Mac sat on 0.9.2 for weeks). `platform_channel_stale` (warn) fires when
+  one platform's current build is over 7 days older than the other's by
+  `made_current_at`, or more than 2 builds behind when the stamps are missing,
+  and its next action is the two Mac commands verbatim.
+* **CYT-7** - the yt-dlp max-age rule publishes "43 days old and it could not
+  update itself" with `ok=True`, so `capabilities()` never surfaced it, no tray
+  line carried it and the report had no field for it. The companion half (B6)
+  shipped `sync_guard.ytdlp` and the dashboard ingested nothing: `YtdlpIn` is
+  declared now (an extra would have been named in the ignored-sections banner
+  and dropped, SYS-3 for the third time) and `api._store_ytdlp_state` files it
+  in `meta` under `ytdlp:<editor>/<machine>` - deliberately NOT a column, since
+  v48 had landed and this is one opaque verdict two checks read once a cycle.
+  `ytdlp_stale` (warn, body is the companion's own message) and `ytdlp_failed`
+  (error, no usable binary at all) are kept apart exactly as the companion
+  keeps them apart.
+* **CMEDIA-3, dashboard half** - `loopback_down` (warn) off the v47 columns:
+  the feature is on and the port is not ours. `enabled` false is a choice and
+  all-NULL is a companion too old to say, and neither fires.
+* **YTWEB-2 / YTWEB-5** - not one of the forty checks was about /ytdl, though
+  every signal was already computed on its health route. Five kinds read
+  `ytdl.health_snapshot` in process (no probe, no HTTP, no database):
+  `ytdl_worker_dead` (error), `ytdl_downloads_failing` (warn, and only when the
+  CANARY failed too - one bad video is not a broken downloader),
+  `ytdl_pot_provider_unreachable` (warn, `unreachable` only, never
+  `unconfigured` or `unknown`), `ytdl_plugin_install_failed` (warn, CR-73 and
+  CR-84's four WARNING lines in a container log) and `ytdl_stale` (warn).
+  **Nothing alerts on `cookies_state == "anonymous"`**: since CR-80 that is the
+  healthy state. That function takes the app object and the scan has none, so
+  `alerts._ytdl_health` takes the mount's status from `mount_status` (DDIAG-7's
+  registry, built for exactly this reader) and hands it in on a stand-in.
+* **BROLL-2** - the b-roll platform's one row in the registry was
+  `ingest_staging`, which is about the SYNC drop folder. `broll_batch_stuck`
+  (warn: a non-terminal ingest batch with no heartbeat for a day) and
+  `broll_share_expiring` (warn: a live client link inside 7 days of expiry, out
+  of `client_shares.db` where it lives, never out of `broll.db`) read those
+  files on their own READ-ONLY connections and are silent when the mount is
+  absent. Its fourth kind, `broll_index_stale`, is deliberately NOT built and
+  is named in `docs/SELF_DIAGNOSIS.md` so its absence is visible: the question
+  needs a walk of the archive share, and a filesystem walk on the collector's
+  single thread is the one thing `Ctx` forbids.
+
+Nothing here duplicates the notices bridge: `feature_not_mounted`,
+`alerts_sink_none`, `machine_forgotten` and `server_crash_report` are notice
+kinds, and `_check_notices` already carries the error ones to the sink.
+
+Deploy note: the four alarms that read a companion's report
+(`upgrade_refused`, `ytdlp_stale`, `ytdlp_failed`, `loopback_down`) stay silent
+until the fleet is on a build that sends those sections, which is the correct
+direction - an absent section is "that computer has not said", never "it is
+fine".
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

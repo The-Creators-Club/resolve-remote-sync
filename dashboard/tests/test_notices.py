@@ -127,6 +127,11 @@ def test_run_checks_never_raises_with_every_check_broken(conn, monkeypatch):
     for name in ("_check_collector_jobs", "_check_collector_alarms", "_check_tree",
                 "_check_identity_collisions", "_check_machine_space",
                 "_check_dashboard_space", "_check_release_feed", "_check_accounts",
+                # wave 2 of the usability sweep 2026-09-03 (DDIAG-3, DDIAG-7,
+                # SYS-1c, DDIAG-10): every check in the tuple, or this stops
+                # being the rule it says it is.
+                "_check_forgotten_machines", "_check_feature_mounts",
+                "_check_alerts_sink", "_check_server_crashes",
                 "_check_pending_devices", "_check_plan_without_share"):
         monkeypatch.setattr(notices, name, boom)
     ran = notices.run_checks(conn, settings, NOW, pending_devices={}, folder_devices={})

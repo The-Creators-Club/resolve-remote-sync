@@ -78,6 +78,15 @@ def build_world(tmp_path: Path, *, image_mode: bool, exits: list[str]) -> dict:
     stub.write_text(
         "#!/bin/sh\n"
         f'echo "$@" >> "{log}"\n'
+        # The unblock install's MARKER write (YTWEB-5, 2026-09-03) also runs
+        # through $VENV/bin/python, with its script on stdin ("-" as argv[1]).
+        # Answered and dropped here: it is neither a code-root selection nor an
+        # app launch, so it must not consume one of this world's exit codes and
+        # must not appear in the PYTHONPATH log, which is the record of what
+        # the APP was started with.
+        'case "$1" in\n'
+        f'  -) echo "MARKER $2 ok=$3 attempts=$4" >> "{log}"; exit 0 ;;\n'
+        'esac\n'
         f'echo "PYTHONPATH=$PYTHONPATH" >> "{pypath_log}"\n'
         'case "$1" in\n'
         f'  *select_code_root.py) echo "{tmp_path}/selected-root"; exit 0 ;;\n'
@@ -183,6 +192,15 @@ def test_image_mode_installs_the_unblock_plugin_where_it_can_actually_write(tmp_
         assert line.endswith(":" + site.as_posix()), line
     assert f"PYTHONPATH={tmp_path}/selected-root:{site.as_posix()}" in proc.stdout
 
+    # ...and the install wrote down what happened, beside the plugin (YTWEB-5,
+    # 2026-09-03). CR-73 and CR-84 each ran for days with four WARNING lines in
+    # a container log as the entire evidence of this step.
+    marker = [c for c in world["log"].read_text().splitlines()
+              if c.startswith("MARKER ")]
+    assert marker, world["log"].read_text()
+    assert "/unblock-site/plugin_install.json" in marker[0], marker
+    assert "ok=1" in marker[0], marker
+
 
 def test_bind_mount_mode_still_installs_the_unblock_plugin_into_the_venv(tmp_path):
     """The live fleet's shape is untouched: there /venv is a bind mount owned
@@ -226,6 +244,16 @@ def test_a_failed_unblock_install_prints_pips_own_error(tmp_path):
     assert "Permission denied" in proc.stderr
     assert "youtube_unblock dependency install FAILED" in proc.stderr
     assert not (world["data"] / ".requirements-unblock-hash").exists()
+
+    # YTWEB-5: and it is written down, with pip's own words and how many tries
+    # it took, where /ytdl's health route reads it. A marker that only ever
+    # says "fine" is a marker nobody can tell from a run.sh too old to write
+    # one, so the failure is recorded as loudly as the success.
+    marker = [c for c in world["log"].read_text().splitlines()
+              if c.startswith("MARKER ")]
+    assert marker, world["log"].read_text()
+    assert "ok=0" in marker[0], marker
+    assert "attempts=4" in marker[0], marker
 
 
 def test_run_sh_has_no_carriage_returns():

@@ -24,15 +24,28 @@ truncated and comes from our own exceptions, not from a credential.
 from __future__ import annotations
 
 import datetime as dt
+import io
 import logging
 import shutil
+import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
 # alerts is imported for its SILENT_SECONDS threshold only (dash-collector-6):
 # "a machine has gone quiet" has to mean the same number in both modules.
 # alerts imports db and health, never notices, so this is not a cycle.
-from . import alerts, db
+from . import alerts, crash_report, db
+
+# DDIAG-7 (usability sweep 2026-09-03). mount_status records what each of the
+# four optional mounts did at boot. Imported defensively because it is a
+# sibling work package: a build without it writes no mount notice at all
+# (the kind then renders [ NOT CHECKED ], which is honest) rather than
+# refusing to import the module the whole self-diagnosis pass lives in.
+try:  # pragma: no cover - exercised both ways by the tests, via monkeypatch
+    from . import mount_status
+except ImportError:  # pragma: no cover
+    mount_status = None  # type: ignore[assignment]
 
 log = logging.getLogger("ccsync.dashboard.notices")
 
@@ -51,8 +64,29 @@ PENDING_DEVICE_HOURS = 24
 EDITOR_WITHOUT_MACHINE_DAYS = 30
 # A feed that has not been reachable for this long is not a blip.
 FEED_STALE_HOURS = 48
+# DDIAG-9: how old a stamped reading may be before it stops being a fact about
+# a machine TODAY. Deliberately looser than alerts' "this machine has gone
+# quiet" line: a laptop that was off over a long weekend has not changed its
+# free space, and a machine that is genuinely silent is machine_silent's
+# business, said once rather than twice in different words.
+MACHINE_DISK_STALE_HOURS = 48
+# DDIAG-3: past this, a silent computer stops being a daily alert and becomes
+# one standing notice naming [ FORGET ]. Read from alerts when that module
+# carries it, so the two halves of the same give-up rule cannot drift; the
+# fallback is here because notices.py must import against an older alerts.
+SILENT_GIVE_UP_DAYS = int(getattr(alerts, "SILENT_GIVE_UP_DAYS", 14) or 14)
 # Caps, so one broken condition cannot write a hundred rows.
 MAX_ROWS_PER_KIND = 20
+
+# DDIAG-10: "since this server started". run_checks is handed (conn, settings)
+# on the collector's thread and can reach neither app.state nor the ASGI app,
+# and this module is imported once while the process is coming up, so its
+# import is the boot to within a second or two -- which is the precision the
+# question ("has anything crashed since we started") needs.
+_PROCESS_STARTED = time.time()
+# The newest N crash files the download hands over. crash_report keeps at most
+# MAX_CRASH_FILES on disk anyway; this states the ceiling at the route.
+CRASH_ZIP_MAX_FILES = 20
 
 
 def _hours_since(ts: str, now: str) -> float | None:
@@ -62,17 +96,21 @@ def _hours_since(ts: str, now: str) -> float | None:
         return None
 
 
-def _stale_reading(ts: Any, now: str) -> bool:
+def _stale_reading(ts: Any, now: str, hours: float = MACHINE_DISK_STALE_HOURS) -> bool:
     """Whether a measurement is too old to say anything about today
     (bug-hunt-2026-09-03 dash-collector-6). A reading with NO timestamp is
     treated as stale: an unstamped number cannot be shown to be current, and
-    the safe direction for a notice nobody can clear is not to open it."""
+    the safe direction for a notice nobody can clear is not to open it.
+
+    The ceiling is a parameter because every judgement made on a STAMPED
+    reading has to make it (DDIAG-9), and they do not all age at the same
+    rate."""
     if not ts:
         return True
     age = _hours_since(str(ts), now)
     if age is None:
         return True
-    return age * 3600.0 > alerts.SILENT_SECONDS
+    return age > float(hours)
 
 
 def _since(ts: str, now: str) -> str:
@@ -114,6 +152,13 @@ def run_checks(
         _check_dashboard_space,
         _check_release_feed,
         _check_accounts,
+        # usability sweep 2026-09-03, wave 2: DDIAG-3, DDIAG-7, SYS-1(c) and
+        # DDIAG-10. Each is registered in db.NOTICE_KINDS WITH the writer
+        # beside it, never a kind nothing writes.
+        _check_forgotten_machines,
+        _check_feature_mounts,
+        _check_alerts_sink,
+        _check_server_crashes,
     )
     ran = 0
     for check in checks:
@@ -530,8 +575,11 @@ def _check_machine_space(conn, settings, now: str) -> None:
         # Without this gate a retired laptop's last reading kept a warn open
         # for ever, with a fix ("untick a project for that computer") that
         # nobody can act on, because the only way to clear was for the same
-        # machine to report again with more space. The threshold is the one
-        # alerts.py uses for "this machine has gone quiet".
+        # machine to report again with more space. DDIAG-9 gave it its own
+        # ceiling (MACHINE_DISK_STALE_HOURS) rather than borrowing alerts'
+        # gone-quiet line: this is not "could not check", it is "this reading
+        # is not about now", and the skip CLEARS both kinds for that subject
+        # through the two clear_notices_of_kind calls below.
         if _stale_reading(row["disk_at"], now):
             continue
         free = row["free"]
@@ -560,6 +608,179 @@ def _check_machine_space(conn, settings, now: str) -> None:
                 now=now)
     db.clear_notices_of_kind(conn, "machine_disk_low", open_disks, now=now)
     db.clear_notices_of_kind(conn, "machine_trash_oversize", open_trash, now=now)
+
+
+def _check_forgotten_machines(conn, settings, now: str) -> None:
+    """DDIAG-3: a computer nobody is going to hear from again.
+
+    `machine_silent` is an ALERT at error severity, and an error re-sends once
+    a day for as long as it is true, so a laptop that was retired, reinstalled
+    under another hostname or taken on a three-week shoot produced twenty-one
+    identical mails whose fix ("ask that editor to check the tray icon") could
+    never be carried out. Past the give-up line the alert side stops and this
+    takes over: one standing warn, said once, naming the button that ends it.
+
+    It clears when the machine reports again (its subject drops out of the
+    open set) or when the row is forgotten (it is no longer selected at all).
+    """
+    cutoff = (db.parse_iso(now) - dt.timedelta(days=SILENT_GIVE_UP_DAYS)).isoformat()
+    open_subjects: list[str] = []
+    for row in conn.execute(
+        "SELECT editor_username, machine, received_at FROM machine_state "
+        "WHERE received_at IS NOT NULL AND received_at <> '' AND received_at < ? "
+        "ORDER BY received_at LIMIT ?", (cutoff, MAX_ROWS_PER_KIND),
+    ):
+        subject = f"{row['editor_username']}/{row['machine']}"
+        open_subjects.append(subject)
+        db.notice(
+            conn, "machine_forgotten", "warn", subject,
+            body=(f"{row['editor_username']}'s computer {row['machine']} last reported "
+                  f"{_since(str(row['received_at']), now)}, so this server has stopped "
+                  "asking about it. Nothing is syncing to or from that computer, and "
+                  "anything ticked for it is sitting unapplied."),
+            fix=("If that computer is gone for good, open FLEET and press [ FORGET ] on "
+                 "its row so this stops. If it is coming back, no action is needed."),
+            now=now)
+    db.clear_notices_of_kind(conn, "machine_forgotten", open_subjects, now=now)
+
+
+# ------------------------------------------------------------ mounted apps
+
+# The four optional mounts, in the words the topbar uses for their links.
+_MOUNT_LABELS = {
+    "broll": "B-ROLL",
+    "music": "MUSIC",
+    "ytdl": "YOUTUBE",
+    "cards": "TIMELINE CARDS",
+}
+
+
+def _check_feature_mounts(conn, settings, now: str) -> None:
+    """DDIAG-7: a page that did not start says so somewhere a human looks.
+
+    Each mount already computes a tri-state with a sentence in `detail` ("the
+    vault root is not mounted (/vault)", "the checkout did not import"). That
+    sentence reached the container log and the authenticated health body; on
+    the page the topbar link simply disappeared, so an editor asking "where
+    has B-ROLL gone" met an owner with no page that answers.
+
+    With no `mount_status` module in this build nothing is written and nothing
+    is cleared: a status this pass could not read is not evidence that the
+    four pages are up."""
+    snapshot = getattr(mount_status, "snapshot", None) if mount_status else None
+    if snapshot is None:
+        return
+    statuses = snapshot() or {}
+    if not isinstance(statuses, dict):
+        return
+    open_names: list[str] = []
+    for name, value in statuses.items():
+        try:
+            status, detail = value
+        except (TypeError, ValueError):
+            continue
+        if str(status) == "mounted":
+            continue
+        label = _MOUNT_LABELS.get(str(name), str(name).upper())
+        open_names.append(str(name))
+        db.notice(
+            conn, "feature_not_mounted", "warn", str(name),
+            body=(f"The {label} page is not available on this server: "
+                  f"{str(detail or status)[:200]}. Editors will not see the link in "
+                  "the menu."),
+            fix=("Check the container's bind mounts (docs/DOCKER.md), then restart the "
+                 "dashboard."),
+            now=now)
+    db.clear_notices_of_kind(conn, "feature_not_mounted", open_names, now=now)
+
+
+# --------------------------------------------------------------- the sink
+
+def _check_alerts_sink(conn, settings, now: str) -> None:
+    """SYS-1(c): the mechanism that delivers every other diagnosis.
+
+    Forty checks, ten invariants and a weekly report, and the vendor default
+    is that they are told to nobody. The panel whose premise is that a safety
+    net this server cannot verify is reported had no line for the one that
+    carries all the others."""
+    sink = str((alerts.get_settings(conn) or {}).get("alerts_sink") or alerts.SINK_NONE)
+    if sink == alerts.SINK_NONE:
+        db.notice(
+            conn, "alerts_sink_none", "warn", "alerts",
+            body=("Nobody is being told when this server finds a problem. Everything on "
+                  "this panel is found whether or not anyone is looking at it, and with "
+                  "no address or webhook set the first anyone hears of a stopped sync is "
+                  "an editor asking."),
+            fix=("Set an address or a webhook on Settings, Alerts, then press "
+                 "[ SEND A TEST ]."),
+            now=now)
+    else:
+        db.clear_notice(conn, "alerts_sink_none", "alerts", now=now)
+
+
+# ------------------------------------------------- this server's own crashes
+
+def crash_files(settings, limit: int = CRASH_ZIP_MAX_FILES) -> list[Path]:
+    """The newest crash reports on disk, newest first. Never raises: an
+    unreadable directory reads as no reports, because the caller is either a
+    check inside the collector cycle or a download an admin pressed."""
+    try:
+        directory = crash_report.crash_dir(settings)
+        files = [p for p in directory.glob("*.json") if p.is_file()]
+    except Exception:  # noqa: BLE001 - see the docstring
+        return []
+    files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    return files[:int(limit)]
+
+
+def crash_zip_bytes(settings, limit: int = CRASH_ZIP_MAX_FILES) -> tuple[bytes, int]:
+    """(zip bytes, file count) for [ DOWNLOAD CRASH REPORTS ].
+
+    Built in MEMORY: the data volume is the one this server warns about
+    filling up, and a download must never write into it. The files are NOT
+    re-redacted -- crash_report.build_report passes both the exception message
+    and the traceback through `redact` before the file is ever written, so
+    what is on disk is already the redacted form, and a second pass would only
+    be able to make the text less faithful."""
+    buf = io.BytesIO()
+    files = crash_files(settings, limit)
+    written = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in files:
+            try:
+                zf.writestr(path.name, path.read_bytes())
+                written += 1
+            except OSError:
+                log.warning("crash report %s could not be read for the download", path.name)
+    return buf.getvalue(), written
+
+
+def _check_server_crashes(conn, settings, now: str) -> None:
+    """DDIAG-10: the dashboard's own crash files get a reader.
+
+    Editors' crash counts ride the report channel and become an alert; this
+    server's own were visible only to somebody with a shell in the container.
+    `collector_stale` and `watchdog_restart` report the symptom and never
+    point at the file that holds the cause."""
+    recent = 0
+    for path in crash_files(settings, limit=CRASH_ZIP_MAX_FILES):
+        try:
+            if path.stat().st_mtime >= _PROCESS_STARTED:
+                recent += 1
+        except OSError:
+            continue
+    if not recent:
+        db.clear_notice(conn, "server_crash_report", "this server", now=now)
+        return
+    db.notice(
+        conn, "server_crash_report", "error", "this server",
+        body=(f"This server's own background tasks have crashed {recent} time(s) since "
+              "it started. The details are saved on the server. Whatever that task was "
+              "doing (setting projects up, sharing them, measuring them) stopped when "
+              "it fell over."),
+        fix=("Send us the crash files: Settings, Diagnostics, "
+             "[ DOWNLOAD CRASH REPORTS ]"),
+        now=now)
 
 
 def _check_dashboard_space(conn, settings, now: str) -> None:

@@ -1079,7 +1079,33 @@ Read-only: no files, no registry, no processes, no git writes; GETs only
   works if that response is ever trimmed to `ok` + `version`), compared with
   the repo's dashboard `VERSION`. With `-AdminUser`, also the current and
   published Windows packages and every machine behind them.
+- **ROLLOUT** — with `-AdminUser`, the adoption line per platform (see below).
 - **VERDICT** — installed vs repo, in one line.
+
+### Did it reach the fleet? (2026-09-04, REL-6)
+
+`ship` ends with a prediction — "editors' trays will offer v0.9.66 on their
+next report" — and until this landed nothing anywhere said whether they took
+it. The minute after a ship *every* machine is behind, so the doctor's wall of
+`machine behind:` lines is just what a successful ship looks like.
+
+Two places answer it now, from the same numbers (`db.rollout_status`, whose
+clock is `companion_packages.made_current_at`, schema v48):
+
+- **`ship`**, after `ship complete`: `rollout: 1 of 7 computers on 0.9.66
+  (windows), 6 behind`. Counts only, no names — the ship holds the fleet
+  credential, not a dashboard login.
+- **the doctor's `[ ROLLOUT ]` block**, with `-AdminUser`: the same line with
+  the holdouts named and aged, plus `[ REFUSING ]` for a computer that has
+  turned the build down (REL-3 — nothing on the Packages page can fix that
+  one). Add **`-Watch`** to re-read it every 60 s, one line per pass, until
+  every platform is fully on its current build or you press Ctrl+C:
+
+```powershell
+.\tools\check_deploy_drift.ps1 -AdminUser <your-dashboard-admin> -Watch
+```
+
+The same line is on **Settings → Packages**, above OUT-OF-DATE COMPUTERS.
 
 Example of it doing its job (base rig, 2026-07-25, before this build landed):
 

@@ -18,7 +18,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Iterator, Literal, Mapping
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
@@ -1285,6 +1285,10 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
         # Best-effort: a health route that cannot answer is worse than one
         # that answers without this block.
         "collector_alarms": _collector_alarms_block(conn),
+        # REL-6 (usability sweep 2026-09-04): "did it actually reach the
+        # fleet". Counts only, no names -- see _rollout_block. Best-effort,
+        # like the two blocks above it.
+        "rollout": _rollout_block(conn),
         # REL-11 / REL-5 (resilience sweep 2026-08-28). A feed that has been
         # unreachable for six weeks was visible on exactly one admin page, and
         # nothing anywhere measured the volume the SQLite database lives on --
@@ -1307,7 +1311,42 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
         # Deliberately NOT part of `ok`: an absent optional feature is not an
         # unhealthy dashboard, and the healthcheck restarts on `ok`.
         "cards": _cards_block(request),
+        # THE FOUR OPTIONAL MOUNTS, each as (status, detail) (DDIAG-7 /
+        # BROLL-2 / MUSIC-10 / YTWEB-2, 2026-09-03). `cards` above keeps its
+        # own richer block -- an editor's tooling reads it -- and this is the
+        # one place all four answer the same question in the same shape: why
+        # a page an editor expects is not in the menu. Deliberately NOT part
+        # of `ok`, for the reason `cards` is not: an absent optional feature
+        # is not an unhealthy dashboard, and the container healthcheck
+        # restarts on `ok`.
+        "mounts": _mounts_block(request),
     }
+
+
+def _mounts_block(request: Request) -> dict[str, dict[str, str]]:
+    """{name: {status, detail}} for /broll, /music, /ytdl and /cards.
+
+    Read from `mount_status`, which the boot block wrote and the ytdl feature
+    gate keeps current, and falling back to app.state for a mount that never
+    recorded (a partially applied code bundle, or a create_app that died in
+    the middle of the block). Best-effort: a health route that cannot answer
+    this still has to answer.
+    """
+    from . import mount_status
+
+    out: dict[str, dict[str, str]] = {}
+    try:
+        recorded = mount_status.snapshot()
+    except Exception:  # noqa: BLE001 - a health route always answers
+        recorded = {}
+    for name in ("broll", "music", "ytdl", "cards"):
+        status, detail = recorded.get(name, ("", ""))
+        if not status:
+            state = request.app.state
+            status = str(getattr(state, f"{name}_status", "") or "unknown")
+            detail = str(getattr(state, f"{name}_detail", "") or "")
+        out[name] = {"status": status, "detail": detail}
+    return out
 
 
 def _cards_block(request: Request) -> dict[str, Any]:
@@ -1365,6 +1404,34 @@ def _feed_and_space_block(request: Request, conn: sqlite3.Connection) -> dict[st
     except Exception:  # noqa: BLE001
         log.exception("could not measure free space on the data volume")
     return out
+
+
+def _rollout_block(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """The adoption COUNTS per platform, for a caller holding the fleet
+    credential rather than an admin session (REL-6, usability sweep
+    2026-09-04).
+
+    tools/ship.ps1 ends with "editors' trays will offer v0.9.66 on their next
+    report" and nothing ever said whether they took it. The ship holds the
+    report token and no dashboard login (the publish's password is read inside
+    build_editor_package.ps1 and never leaves it), so this is the only door it
+    has. NO NAMES: who is behind is an admin question and stays on the admin
+    packages view -- this block is the number, and the number is what a ship
+    can print without asking the operator to log in a second time.
+    """
+    try:
+        rollout = db.rollout_status(conn)
+    except Exception:  # noqa: BLE001
+        log.exception("could not compute the rollout status")
+        return []
+    return [
+        {"platform": c["platform"], "current_version": c["current_version"],
+         "made_current_at": c["made_current_at"],
+         "machines_total": c["machines_total"],
+         "machines_on_current": c["machines_on_current"],
+         "behind": len(c["behind"]), "refusing": len(c["refusing"])}
+        for c in rollout["channels"]
+    ]
 
 
 def _collector_alarms_block(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -4989,6 +5056,14 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
         for r in db.fetch_machines(conn)
         if r.get("update_requested_version")
     }
+    # REL-6 / REL-3 (usability sweep 2026-09-04): the adoption numbers, and
+    # which machines are REFUSING the build they are being offered. One read
+    # for the page, the API and the drift doctor, so the three cannot disagree.
+    rollout = db.rollout_status(conn, now)
+    refusals = {
+        (r["editor"], r["machine"]): r
+        for chan in rollout["channels"] for r in chan["refusing"]
+    }
     outdated = [
         {
             "editor_username": e["editor_username"],
@@ -5006,6 +5081,11 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
                     "upgrade_version", "upgrade_attempts", "upgrade_last_error",
                     "upgrade_last_attempt_at", "upgrade_reverted_from")
             },
+            # REL-3: an offer refused at RECEIPT makes no attempt, so the two
+            # counters above stay empty and this machine used to render
+            # identically to one that had not reported yet. None is "not
+            # refusing", never "we could not tell".
+            "refused": refusals.get((e["editor_username"], e["machine"])),
         }
         for e in editors["editors"]
         if e["companion_outdated"]
@@ -5056,6 +5136,10 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
             "machines_by_platform": machines_by_platform,
             "arch_gaps": arch_gaps,
             "retracted": retracted,
+            # REL-6: adoption, per platform. Read by the page, by
+            # tools/check_deploy_drift.ps1's [ ROLLOUT ] block and by the
+            # rollout_stalled alert.
+            "rollout": rollout,
             # REL-5: the volume every one of these packages is written to.
             "data": _data_space_block(settings),
             "dashboard_version": VERSION}
@@ -6245,6 +6329,17 @@ class UpgradeIn(_BoundedSectionIn):
     last_attempt_at: str | None = Field(default=None, max_length=64)
     reverted_from: str | None = Field(default=None, max_length=64)
     starts_this_version: int | None = Field(default=None, ge=0)
+    # REL-3 (usability sweep 2026-09-04). An offer refused at RECEIPT -- a
+    # signature this build will not trust, a version below its downgrade
+    # floor, plain HTTP to a public host -- makes no attempt, so `attempts`
+    # stays 0 and the machine renders exactly like one that has simply not
+    # seen the push. These three are the only evidence that the one upgrade
+    # failure which can NEVER self-heal is happening; they were in that
+    # editor's own companion.log and nowhere else. Always sent by a 0.9.67
+    # companion, null when nothing is refused.
+    refused_version: str | None = Field(default=None, max_length=64)
+    refused_reason: str | None = Field(default=None, max_length=500)
+    refused_at: str | None = Field(default=None, max_length=64)
 
 
 class SyncConflictsIn(_BoundedSectionIn):
@@ -6411,6 +6506,34 @@ class LoopbackIn(_BoundedSectionIn):
     since: str | None = Field(default=None, max_length=64)
 
 
+class YtdlpIn(_BoundedSectionIn):
+    """`sync_guard.ytdlp`: that computer's yt-dlp sidecar (CYT-7, 2026-09-04).
+
+    The max-age rule publishes "yt-dlp 2026.07.04 is 43 days old and it could
+    not update itself" with `ok=True`, so `capabilities()` never surfaced it,
+    no tray line carried it and the report had no field for it: the verdict
+    went to one INFO line a day in an editor's companion.log. That is CR-80's
+    shape re-dated, the detector being an editor whose download failed.
+
+    ABSENT on a companion too old to say and on one whose manager never
+    started, which must never read as "it is fine" -- so this dashboard
+    stores what it is sent and reports nothing about a computer that sent
+    none. `stale` (old but probably working) and `action == "failed"` (no
+    usable binary at all) are two different alarms and are kept apart here
+    for the same reason the companion keeps them apart.
+    """
+    version: str | None = Field(default=None, max_length=64)
+    # none|installed|updated|checked|stale|failed|disabled. Deliberately not
+    # an enum: a newer companion knowing an action this build does not must
+    # not 422 its whole report (the BlockedIn.reason rule).
+    action: str | None = Field(default=None, max_length=32)
+    ok: bool | None = None
+    stale: bool | None = None
+    age_days: int | None = Field(default=None, ge=0)
+    message: str | None = Field(default=None, max_length=500)
+    checked_at: str | None = Field(default=None, max_length=64)
+
+
 class SyncGuardIn(BaseModel):
     """The companion's `sync_guard` section (item 9, 2026-08-17).
 
@@ -6478,6 +6601,11 @@ class SyncGuardIn(BaseModel):
     # be able to say "8899 is taken on that machine" -- an undeclared sub-key
     # reaches nobody (SYS-3, SYNC-8).
     loopback: LoopbackIn | None = None
+    # CYT-7 (usability sweep 2026-09-04): the yt-dlp sidecar's daily verdict.
+    # Declared for the same reason as loopback: an extra is accepted, named
+    # in the ignored-sections banner and then dropped, which is the third
+    # repeat of SYS-3 and not a home for an alarm.
+    ytdlp: YtdlpIn | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -6517,6 +6645,7 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
     stray = guard.stray_projects
     staging = guard.ingest_staging
     loopback = guard.loopback
+    ytdlp = guard.ytdlp
     restart_records = [] if restarts is None else [
         r for r in (restarts.sequencer, restarts.watcher, restarts.media_tree)
         if r is not None
@@ -6605,6 +6734,17 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
             upgrade.last_attempt_at if upgrade is not None else None),
         "upgrade_reverted_from": (
             upgrade.reverted_from if upgrade is not None else None),
+        # v48 (REL-3). Written by _store_upgrade_refusal and NOT by
+        # db.store_upgrade_state, which predates the columns; the same latch
+        # rule as the group above, so a machine that stops refusing (the
+        # admin installed the build by hand, a later offer was taken) clears
+        # its own chip rather than carrying last week's refusal for ever.
+        "upgrade_refused_version": (
+            upgrade.refused_version if upgrade is not None else None),
+        "upgrade_refused_reason": (
+            upgrade.refused_reason if upgrade is not None else None),
+        "upgrade_refused_at": (
+            upgrade.refused_at if upgrade is not None else None),
         # v38 (wave 4's ingest contract). db.store_resolve_health writes these,
         # not the upsert's INSERT -- same shape and the same reasoning as
         # blocked_* and upgrade_*, and the same LATCH rule: an absent
@@ -6648,7 +6788,81 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
             (loopback.error or None) if loopback is not None else None),
         "loopback_since": (
             (loopback.since or None) if loopback is not None else None),
+        # CYT-7. NOT a column: see _store_ytdlp_state for why this one lives
+        # in `meta`. None is "this computer said nothing about yt-dlp".
+        "ytdlp": (None if ytdlp is None
+                  else ytdlp.model_dump(exclude_none=False)),
     }
+
+
+def _store_upgrade_refusal(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    guard: Mapping[str, Any] | None,
+) -> None:
+    """The three v48 `upgrade_refused_*` columns (REL-3, 2026-09-04).
+
+    Its own statement, beside db.store_upgrade_state rather than inside it,
+    for the reason that function gives about itself: the big INSERT is edited
+    by every work package that touches the report, and this trio has a rule
+    of its own. That rule is the LATCH rule, not a COALESCE: an `upgrade`
+    section with no refusal in it is how a companion spells "I am not
+    refusing anything now", and preserving yesterday's refusal would leave
+    [ REFUSING 0.9.65 ] on the Packages page after the admin installed it by
+    hand.
+
+    A report with no guard section at all (a companion too old to send one)
+    leaves the columns alone: it has said nothing, which is not the same as
+    "nothing is refused".
+    """
+    if guard is None or not guard.get("at"):
+        return
+    conn.execute(
+        """UPDATE machine_state
+              SET upgrade_refused_version=?, upgrade_refused_reason=?,
+                  upgrade_refused_at=?
+            WHERE editor_username=? AND machine=?""",
+        (guard.get("upgrade_refused_version"), guard.get("upgrade_refused_reason"),
+         guard.get("upgrade_refused_at"), editor, machine),
+    )
+
+
+# The `meta` key one computer's yt-dlp verdict is stored under, prefix plus
+# "<editor>/<machine>". Read by alerts._check_ytdlp_stale / _ytdlp_failed.
+YTDLP_META_PREFIX = "ytdlp:"
+
+
+def _store_ytdlp_state(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    guard: Mapping[str, Any] | None,
+) -> None:
+    """`sync_guard.ytdlp` -> `meta` (CYT-7, 2026-09-04).
+
+    NOT a machine_state column, and the choice is worth the sentence: v48 had
+    already landed in this wave, the schema number for the next one belongs
+    to whoever needs a table, and this is a small opaque verdict that exactly
+    two alert checks read once per collector cycle. `meta` is where the rest
+    of this product keeps "the last answer, no history" (the collector's
+    brakes, the protection panel's verdicts, the stored alert counts). If a
+    third reader ever wants to chip it on the grid, promote it to columns
+    then; a column per field would be four migrations of guessing which
+    fields matter.
+
+    Same LATCH rule as every other guard sub-section: written from any
+    guard-bearing report, and an ABSENT section deletes the row rather than
+    preserving it, because a companion that has stopped sending one (the
+    feature was switched off, the manager never started, a downgrade) has
+    stopped knowing, and a stale "43 days old" alarm from March is worse than
+    silence. The row outlives a forgotten computer; the checks only read
+    computers the fleet view still has, so a stray key alarms about nobody.
+    """
+    if guard is None or not guard.get("at"):
+        return
+    key = f"{YTDLP_META_PREFIX}{editor}/{machine}"
+    state = guard.get("ytdlp")
+    if not state:
+        db.meta_delete(conn, key)
+        return
+    db.meta_set_json(conn, key, state)
 
 
 # --------------------------------------------------- tolerant report sections
@@ -7611,6 +7825,14 @@ def api_report(
     # the three above -- a Send-to-Resolve button that cannot work must not
     # be invisible on the only page anybody watches.
     db.store_loopback_state(
+        conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
+    # v48 (REL-3) and CYT-7: the update this computer REFUSED at receipt, and
+    # its yt-dlp sidecar's daily verdict. Same shape and the same latch rule
+    # as the four above; both are alarms that until now existed only in one
+    # line of that editor's own log.
+    _store_upgrade_refusal(
+        conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
+    _store_ytdlp_state(
         conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
     # An overridden "Remove from this machine" destroyed a local copy the
     # gate said was not caught up. There is nowhere on the grid for a
@@ -8825,6 +9047,34 @@ def api_cancel_job(
                    f"this job is already {job['state']}")
     log.info("job #%s cancelled by %s (%s)", job_id, admin, state)
     return {"ok": True, "state": state, "job": db.get_job(conn, job_id)}
+
+
+@router.post("/jobs/{job_id}/retry")
+def api_retry_job(
+    job_id: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """Queue the same work again, under a NEW id. Admin only, like cancel.
+
+    DDIAG-11 (2026-09-04). The fleet abandoning a job is the documented
+    outcome of one machine with a broken ffmpeg eating a whole retry budget,
+    and until now the only way back was to retype the kind, the root, the
+    relative path and the episode from nothing.
+
+    THE OLD ROW IS LEFT EXACTLY AS IT WAS. A retry that reopened it would
+    rewrite the attempt history, which is the only evidence anybody has for
+    "this clip fails everywhere" as against "that computer is broken".
+    """
+    admin = _require_admin(request)
+    new_id, refusal = db.retry_job(conn, job_id, created_by=admin)
+    if new_id is None:
+        raise HTTPException(
+            status_code=404 if not refusal else 409,
+            detail=refusal or "no such job")
+    conn.commit()
+    log.info("job #%s re-queued as #%s by %s", job_id, new_id, admin)
+    return {"ok": True, "retry_of": job_id, "job": db.get_job(conn, new_id),
+            "why": jobs_mod.explain(
+                conn, new_id, jobs_mod.fleet_caps(request.app.state.settings))}
 
 
 @router.post("/jobs/claim")

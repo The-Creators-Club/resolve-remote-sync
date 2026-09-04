@@ -887,6 +887,9 @@ def capabilities(deps: Deps) -> dict:
     result = {
         "ok": False,
         "reason": None,
+        # CYT-7: an advisory that does NOT refuse the job (see below). Always
+        # present so the SPA can read one shape.
+        "warning": None,
         "editor": deps.editor(),
         "ytdlp_version": status.get("version"),
         "template_version": ytdl_common.TEMPLATE_VERSION,
@@ -944,6 +947,13 @@ def capabilities(deps: Deps) -> dict:
     if not status.get("ok"):
         result["reason"] = str(status.get("message") or "yt-dlp is not ready on this machine")
         return result
+    # CYT-7 (usability sweep 2026-09-03): a yt-dlp past its shelf life that
+    # could not update itself is published with ok=True -- it can still very
+    # probably download -- so it passed the test above and reached no human at
+    # all. It is a WARNING and never a refusal: blocking the download would
+    # send the job to the server for a binary that mostly still works.
+    if str(status.get("action") or "") == ytdlp_manager.ACTION_STALE:
+        result["warning"] = str(status.get("message") or "") or None
     if not _ffmpeg_location(deps.cfg):
         # The SAME call build_argv makes, so a capability that said yes is a
         # capability whose `--ffmpeg-location` will be there (COMP-BROLL-5).

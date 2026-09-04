@@ -17,9 +17,11 @@
     </p>
     {# Polled, unlike the alerts page: nothing here is typed into, and the
        interesting states (a job claimed, a percentage climbing, a machine
-       coming back from a cooldown) all change on their own. #}
-    <div hx-get="/partials/admin/jobs" hx-trigger="every 15s [document.visibilityState === 'visible']" hx-swap="innerHTML">
-      {% include "partials/admin_jobs.html" %}
-    </div>
+       coming back from a cooldown) all change on their own.
+
+       The poll moved ONTO the partial itself (DDIAG-11, 2026-09-04) so it can
+       carry the [ SHOW FINISHED ] toggle in its own URL: a wrapper polling a
+       fixed URL closed the finished list every 15 seconds. #}
+    {% include "partials/admin_jobs.html" %}
   </main>
 {% endblock %}

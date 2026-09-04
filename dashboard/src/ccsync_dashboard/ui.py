@@ -17,8 +17,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, PlainTextResponse,
                                RedirectResponse, Response)
 from fastapi.templating import Jinja2Templates
 
-from . import (VERSION, auth, dashboard_update, db, health, local_users, oidc,
-               package_store, provision, release_feed, site_store)
+from . import (VERSION, auth, dashboard_update, db, health, local_users,
+               notices, oidc, package_store, provision, release_feed, site_store)
 from .api import (
     approve_username_error, build_admin_users_view, build_editors_view,
     build_packages_view, build_presence_view, build_project_view, build_projects_view,
@@ -1204,6 +1204,13 @@ def partial_transfers(request: Request, conn: sqlite3.Connection = Depends(get_c
 
 def _notices_context(conn, error: str | None = None) -> dict:
     open_rows = db.open_notices(conn)
+    # DDIAG-8 (usability sweep 2026-09-03): the destination is a property of
+    # the KIND, resolved here rather than in the template so the registry
+    # stays the one place it is written down and a callable's failure cannot
+    # reach Jinja.
+    for row in open_rows:
+        row["href"], row["href_label"] = db.notice_href(row.get("kind", ""),
+                                                        row.get("subject", ""))
     # UX-6 (usability sweep 2026-09-03): the clean state used to read "Every
     # check below ran and found nothing wrong" over a panel that renders
     # [ NOT CHECKED ] for any kind nothing has ever evaluated, which is the
@@ -1639,12 +1646,20 @@ async def partial_admin_alerts_save(request: Request,
     values = {k: v for k, v in form.items() if k in alerts.SETTING_KEYS}
     error = ""
     notice = ""
+    # DDIAG-4 (2026-09-04): the sink BEFORE the save, so the page can promise
+    # the one thing an admin who has just switched mail on is waiting for.
+    # Everything open today was recorded undelivered while there was no
+    # channel, and alerts.set_settings re-opens it.
+    before = alerts.get_settings(conn).get("alerts_sink") or alerts.SINK_NONE
     try:
-        alerts.set_settings(conn, values, user)
+        saved = alerts.set_settings(conn, values, user)
         db.audit(conn, user, "alerts.settings", "alerts",
                  {"sink": values.get("alerts_sink", "")})
         conn.commit()
-        notice = "saved."
+        turned_on = (before == alerts.SINK_NONE
+                     and (saved.get("alerts_sink") or before) != alerts.SINK_NONE)
+        notice = ("Saved. The next check will send everything that is "
+                  "currently open." if turned_on else "saved.")
     except alerts.AlertError as exc:
         conn.rollback()
         error = str(exc)
@@ -2544,7 +2559,7 @@ async def partial_admin_set_fleet_halt(
 
 
 def _jobs_context(request: Request, conn, *, error: str | None = None,
-                  notice: str | None = None) -> dict:
+                  notice: str | None = None, show_finished: bool = False) -> dict:
     from . import jobs as jobs_mod
 
     settings = request.app.state.settings
@@ -2565,8 +2580,26 @@ def _jobs_context(request: Request, conn, *, error: str | None = None,
             "why": answer.get("summary", ""),
             "machines": answer.get("machines", []),
         })
+    # WHAT THE FLEET GAVE UP ON (DDIAG-11, 2026-09-04). The count is on every
+    # render because "Nothing is queued or running." over twelve abandoned
+    # whisper jobs was the whole of an operator's view of them; the list
+    # itself is only read when they ask for it.
+    finished = []
+    if show_finished:
+        for job in db.finished_jobs(conn, limit=100):
+            finished.append({
+                **job,
+                "label": db.job_label(job["kind"]),
+                # A retry is offered on the two states that mean the work did
+                # not happen. `done` is here to be read, not to be redone.
+                "retryable": job["state"] in (db.JOB_FAILED, db.JOB_ABANDONED),
+            })
     return {
         "jobs": rows,
+        "finished": finished,
+        "show_finished": show_finished,
+        "abandoned": db.count_abandoned_jobs(conn),
+        "window_hours": db.JOB_FINISHED_WINDOW_HOURS,
         "depth": db.queue_depth(conn),
         "kinds": [{"kind": kind, "label": db.job_label(kind),
                    "running": running.get(kind, 0),
@@ -2590,14 +2623,50 @@ def page_admin_jobs(request: Request, conn: sqlite3.Connection = Depends(get_con
 
 
 @router.get("/partials/admin/jobs")
-def partial_admin_jobs(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+def partial_admin_jobs(
+    request: Request, finished: int = 0,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    # `finished` rides the poll URL the partial re-emits for itself
+    # (DDIAG-11): the page refreshes every 15 s, and a toggle the next refresh
+    # closes is a toggle nobody can read a list through.
     _require_admin_page(request)
-    return _render(request, "partials/admin_jobs.html", _jobs_context(request, conn))
+    return _render(request, "partials/admin_jobs.html",
+                   _jobs_context(request, conn, show_finished=bool(finished)))
+
+
+@router.post("/partials/admin/jobs/{job_id}/retry")
+def partial_admin_retry_job(
+    job_id: int, request: Request, finished: int = 0,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    """[ TRY AGAIN ]. The same work, a new id, and the old row untouched.
+
+    DDIAG-11 (2026-09-04): after the fleet spends a retry budget the operator
+    had no way back but to retype the root, the relative path and the episode
+    from nothing. A refusal is a sentence in the banner, never a stack
+    trace on a page somebody opened because something had already gone
+    wrong."""
+    admin = _require_admin_page(request)
+    new_id, refusal = db.retry_job(conn, job_id, created_by=admin)
+    if new_id is None:
+        return _render(request, "partials/admin_jobs.html",
+                       _jobs_context(request, conn, show_finished=bool(finished),
+                                     error=refusal or f"there is no job #{job_id}"))
+    conn.commit()
+    log.info("job #%s re-queued as #%s from the jobs page by %s",
+             job_id, new_id, admin)
+    return _render(
+        request, "partials/admin_jobs.html",
+        _jobs_context(request, conn, show_finished=bool(finished),
+                      notice=f"job #{job_id} is on the queue again as #{new_id}. "
+                             f"The old one is left as it was."))
 
 
 @router.post("/partials/admin/jobs/{job_id}/cancel")
 def partial_admin_cancel_job(
-    job_id: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+    job_id: int, request: Request, finished: int = 0,
+    conn: sqlite3.Connection = Depends(get_conn),
 ):
     """[ CANCEL ]. The same three answers the API route gives, in a sentence.
 
@@ -2610,7 +2679,7 @@ def partial_admin_cancel_job(
     conn.commit()
     if state is None:
         return _render(request, "partials/admin_jobs.html",
-                       _jobs_context(request, conn,
+                       _jobs_context(request, conn, show_finished=bool(finished),
                                      error=f"job #{job_id} has already finished"))
     log.warning("job #%s cancelled from the jobs page by %s (%s)",
                 job_id, admin, state)
@@ -2619,7 +2688,8 @@ def partial_admin_cancel_job(
               f"job #{job_id} will stop on its next report - the machine "
               f"running it is the only thing that can end it")
     return _render(request, "partials/admin_jobs.html",
-                   _jobs_context(request, conn, notice=notice))
+                   _jobs_context(request, conn, show_finished=bool(finished),
+                                 notice=notice))
 
 
 # --------------------------------------------------------- installer download
@@ -3025,7 +3095,28 @@ def partial_admin_diagnostics(
         bundles = db.newest_diagnostics_per_machine(conn)
     return _render(request, "partials/admin_diagnostics.html", {
         "diagnostics": {"bundles": bundles, "editor": editor, "machine": machine},
+        "crash_reports": len(notices.crash_files(request.app.state.settings)),
     })
+
+
+@router.get("/admin/diagnostics/crash-reports.zip")
+def admin_crash_reports_zip(request: Request):
+    """[ DOWNLOAD CRASH REPORTS ] (DDIAG-10, usability sweep 2026-09-03).
+
+    crash_report.py has written <data>/crashes/*.json since 2026-08-17 and
+    nothing ever read that directory: the collector thread dying was a fact
+    only somebody with a shell in the container could get at, and that person
+    is the one this whole sweep assumes does not exist.
+
+    ADMIN ONLY, like the diagnostics bundles beside it: a traceback names this
+    server's paths. The zip is built in memory (notices.crash_zip_bytes) and
+    nothing is written into the data volume to serve it."""
+    _require_admin_page(request)
+    payload, count = notices.crash_zip_bytes(request.app.state.settings)
+    return Response(
+        content=payload, media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="ccsync-crash-reports.zip"',
+                 "X-CCSync-Crash-Files": str(count)})
 
 
 @router.post("/partials/admin/machines/forget-lost")

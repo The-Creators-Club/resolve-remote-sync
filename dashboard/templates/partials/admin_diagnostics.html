@@ -7,6 +7,15 @@
    editor's paths, their Resolve project and their tree. #}
 <div class="side-head" style="margin-top:2rem">[ WHAT THESE COMPUTERS SAID ]
   <span class="muted">diagnostics each companion uploaded. Newest first.</span></div>
+{# DDIAG-10 (usability sweep 2026-09-03): the SERVER's own crash files, which
+   nothing read for the first two weeks they existed. Shown only when there
+   are some: a permanently visible download of an empty zip is a button that
+   teaches an owner it means nothing. #}
+{% if crash_reports %}
+<div class="mono-sm" style="margin-top:0.5rem">This server has {{ crash_reports }} saved
+  crash report(s) of its own.
+  <a class="btn tap" href="/admin/diagnostics/crash-reports.zip">[ DOWNLOAD CRASH REPORTS ]</a></div>
+{% endif %}
 {# A .rule element, not 100 box-drawing characters: the text rule was
    100 glyphs wide whatever the viewport, so a phone scrolled sideways
    to see nothing (MOBILE_PLAN.md §3.2, 2026-08-30). #}

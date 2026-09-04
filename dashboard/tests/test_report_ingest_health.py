@@ -608,3 +608,77 @@ def test_the_tick_route_answers_with_the_warning_and_still_ticks(app_env):
     body = r.json()
     assert body["changed"] is True                    # it REFUSES NOTHING
     assert "400 GB of proxies" in (body["warning"] or "")
+
+
+# ------------------------------------------- REL-3 / CYT-7 (sweep 2026-09-04)
+#
+# Two sync_guard sub-sections whose columns (v48) and whose readers landed in
+# the same wave as their ingest. A section that is declared, stored and never
+# read is the shape of SYS-3; one that is READ from a column nothing writes is
+# a check that can never fire, which is worse, because the page says it is
+# green.
+
+def test_a_refused_offer_lands_in_the_v48_columns(app_env):
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(sync_guard={"upgrade": {
+        "version": "0.9.66", "attempts": 0,
+        "refused_version": "0.9.67",
+        "refused_reason": "release signature rejected",
+        "refused_at": NOW}}), headers=report_headers())
+    row = conn.execute(
+        "SELECT upgrade_refused_version, upgrade_refused_reason, "
+        "       upgrade_refused_at FROM machine_state "
+        " WHERE editor_username='jsmith' AND machine='EDIT-PC'").fetchone()
+    assert row["upgrade_refused_version"] == "0.9.67"
+    assert row["upgrade_refused_reason"] == "release signature rejected"
+    assert row["upgrade_refused_at"] == NOW
+    # ...and the LATCH rule: the next report with no refusal in it clears
+    # them, so [ REFUSING 0.9.67 ] comes off the page by itself once the
+    # admin has installed that build by hand.
+    client.post("/api/v1/report", json=payload(sync_guard={"upgrade": {
+        "version": "0.9.67", "attempts": 0}}), headers=report_headers())
+    row = conn.execute(
+        "SELECT upgrade_refused_version FROM machine_state "
+        " WHERE editor_username='jsmith' AND machine='EDIT-PC'").fetchone()
+    assert row["upgrade_refused_version"] is None
+
+
+def test_a_report_with_no_guard_leaves_a_refusal_alone(app_env):
+    """A companion too old to send a guard section has SAID NOTHING, which is
+    not the same as "nothing is refused"."""
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(sync_guard={"upgrade": {
+        "refused_version": "0.9.67", "refused_reason": "below the floor",
+        "refused_at": NOW}}), headers=report_headers())
+    client.post("/api/v1/report", json=payload(), headers=report_headers())
+    row = conn.execute(
+        "SELECT upgrade_refused_version FROM machine_state "
+        " WHERE editor_username='jsmith' AND machine='EDIT-PC'").fetchone()
+    assert row["upgrade_refused_version"] == "0.9.67"
+
+
+def test_the_yt_dlp_verdict_is_stored_and_cleared(app_env):
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(sync_guard={"ytdlp": {
+        "version": "2026.07.04", "action": "stale", "ok": True, "stale": True,
+        "age_days": 43, "message": "it could not update itself",
+        "checked_at": NOW}}), headers=report_headers())
+    stored = dbmod.meta_get_json(conn, f"{apimod.YTDLP_META_PREFIX}jsmith/EDIT-PC")
+    assert stored["stale"] is True and stored["age_days"] == 43
+    # An ABSENT section deletes it: a companion that stopped sending one has
+    # stopped knowing, and a stale verdict from March is worse than silence.
+    client.post("/api/v1/report", json=payload(sync_guard={"upgrade": {}}),
+                headers=report_headers())
+    assert dbmod.meta_get_json(
+        conn, f"{apimod.YTDLP_META_PREFIX}jsmith/EDIT-PC") is None
+
+
+def test_neither_section_is_reported_as_ignored(app_env):
+    """Declared, not merely allowed as an extra: an undeclared sub-key is
+    accepted, named in the ignored-sections banner and then dropped, which is
+    where sync_guard.syncthing_supervisor spent months."""
+    body = apimod.ReportIn(**payload(sync_guard={
+        "ytdlp": {"action": "checked", "ok": True},
+        "upgrade": {"refused_version": "0.9.67", "refused_reason": "nope"},
+    }))
+    assert apimod.undeclared_report_sections(body) == []

@@ -23,6 +23,7 @@ routes tomorrow (§4: it stays its own repo and is a CLIENT of this API).
     python tools/jobs.py watch 12
     python tools/jobs.py queue
     python tools/jobs.py cancel 12
+    python tools/jobs.py retry 12     # the same work, a new id, old row kept
 
 PATHS ARE (ROOT NAME, RELATIVE PATH) PAIRS AND NOTHING ELSE (§4.1). The vault
 is `X:\\` on creator-1, `/vault` in the Timeline Cards container and a UNC
@@ -357,6 +358,28 @@ def cmd_cancel(client: Client, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_retry(client: Client, args: argparse.Namespace) -> int:
+    """Queue a finished job's work again, under a new id (DDIAG-11).
+
+    The old row is left exactly as it was, here and on the dashboard: an
+    attempt history that a retry rewrites cannot tell "this clip fails
+    everywhere" from "that computer is broken". A job that has NOT finished
+    is refused with a sentence rather than cancelled helpfully on the way
+    past.
+    """
+    answer = client.call("POST", f"/api/v1/jobs/{args.job_id}/retry")
+    job = answer.get("job") or {}
+    why = answer.get("why") or {}
+    print(f"job #{args.job_id} is on the queue again as #{job.get('id')} "
+          f"({job.get('kind')})")
+    print(f"  {job.get('inputs', {}).get('root')}:"
+          f"{job.get('inputs', {}).get('rel_path')}")
+    print(f"  {why.get('summary') or 'no scheduling answer'}")
+    if args.watch:
+        return watch(client, int(job["id"]), args.timeout)
+    return EXIT_OK
+
+
 def cmd_queue(client: Client, args: argparse.Namespace) -> int:
     """How deep the queue is, per kind -- the same signal the report reply
     carries to every companion so it can back off by itself."""
@@ -489,6 +512,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("cancel", help="stop a job")
     s.add_argument("job_id", type=int)
 
+    s = sub.add_parser("retry", help="queue a finished job's work again")
+    s.add_argument("job_id", type=int)
+    s.add_argument("--watch", action="store_true")
+    s.add_argument("--timeout", type=float, default=3600)
+
     sub.add_parser("queue", help="how deep the queue is, and the per-kind caps")
 
     s = sub.add_parser("watch", help="follow a job to its end")
@@ -498,7 +526,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"submit": cmd_submit, "list": cmd_list, "why": cmd_why,
-            "watch": cmd_watch, "cancel": cmd_cancel, "queue": cmd_queue}
+            "watch": cmd_watch, "cancel": cmd_cancel, "queue": cmd_queue,
+            "retry": cmd_retry}
 
 
 def main(argv: list[str] | None = None, http: Http | None = None) -> int:

@@ -180,7 +180,9 @@ def test_no_sink_is_a_protection_line_that_says_nobody_is_told(conn):
         protection.Ctx(conn, _settings(), NOW, tasks_fn=lambda: None, env={}))
     assert row.state == protection.BROKEN
     assert "nobody is told" in row.detail
-    assert protection.BY_KEY["alerts_sink"].severity == "warn"
+    # SYS-1 (a), wave 2 of the same sweep, made this an ERROR: a fresh
+    # install really is unprotected in the way that matters most.
+    assert protection.BY_KEY["alerts_sink"].severity == "error"
 
 
 def test_a_sink_that_has_delivered_nothing_for_a_month_is_the_same_hole(
@@ -202,7 +204,7 @@ def test_a_sink_that_has_delivered_nothing_for_a_month_is_the_same_hole(
 def test_the_weekly_report_carries_the_alarm_is_off_line(conn):
     protection.run_cycle(conn, _settings(), NOW, tasks_fn=lambda: None)
     text = "\n".join(protection.weekly_lines(conn))
-    assert "somebody is told when this breaks" in text
+    assert "somebody is told when this server finds a problem" in text
 
 
 def test_a_pass_with_no_sink_does_not_read_as_a_broken_mail_server(

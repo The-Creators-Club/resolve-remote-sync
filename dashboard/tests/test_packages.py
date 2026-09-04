@@ -1327,3 +1327,159 @@ def test_a_placeholder_release_pubkey_counts_as_none_configured():
     assert Settings.from_env(
         {"DASH_RELEASE_PUBKEYS": f"{TEST_PUBKEY}, REPLACE_ME"}
     ).release_pubkeys == (TEST_PUBKEY,)
+
+
+# -- the rollout (REL-6 / REL-3, usability sweep 2026-09-04) ----------------
+
+
+def _report_from(client, editor, machine, version, platform="windows"):
+    payload = report_payload(version)
+    payload["editor_name"] = editor
+    payload["machine"] = machine
+    payload["platform"] = platform
+    return client.post("/api/v1/report", json=payload, headers=report_headers(editor))
+
+
+def _fleet_of_three(env):
+    """Two machines on the build about to be made current, one behind it."""
+    client, conn, _settings = env
+    _report_from(client, "jsmith", "EDIT-PC", "0.2.0")
+    _report_from(client, "leso", "MAC-1", "0.2.0")
+    _report_from(client, "ruskin", "RUSKIN-PC", "0.1.0")
+    publish(as_user(client, "owen"), "0.2.0", body=b"v2", make_current=1)
+    clear_user(client)
+    return client, conn
+
+
+def _refuse(conn, editor, machine, version, reason, at="2026-09-04T09:00:00+00:00"):
+    """What builder B6's report field will write. Written directly here: the
+    columns are v48's and the point of the test is that a reader treats them
+    defensively either way."""
+    conn.execute(
+        "UPDATE machine_state SET upgrade_refused_version=?, upgrade_refused_reason=?, "
+        "upgrade_refused_at=? WHERE editor_username=? AND machine=?",
+        (version, reason, at, editor, machine),
+    )
+    conn.commit()
+
+
+def test_v48_records_when_a_build_was_made_current_and_backfills_null(env):
+    """REL-6: the rollout clock. A build that has never been current has no
+    stamp -- NULL is "cannot tell", never published_at, which would date a
+    rollout to a moment nobody was offered anything."""
+    client, conn, _settings = env
+    assert dbmod.SCHEMA_VERSION >= 48
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(companion_packages)")}
+    assert "made_current_at" in columns
+
+    as_user(client, "owen")
+    publish(client, "0.2.0", body=b"v2")                    # staged, not current
+    assert dbmod.get_package(conn, "windows", "0.2.0")["made_current_at"] is None
+
+    publish(client, "0.3.0", body=b"v3", make_current=1)
+    stamp = dbmod.get_package(conn, "windows", "0.3.0")["made_current_at"]
+    assert stamp
+    # A build that was published and never offered still has no stamp.
+    assert dbmod.get_package(conn, "windows", "0.2.0")["made_current_at"] is None
+
+    # A rollback stamps the build it goes back to, and the build it comes off
+    # KEEPS its stamp: that is when it was handed out.
+    dbmod.set_current_package(conn, "windows", "0.2.0", now="2026-09-04T08:00:00+00:00")
+    conn.commit()
+    assert dbmod.get_package(conn, "windows", "0.2.0")["made_current_at"] == "2026-09-04T08:00:00+00:00"
+    assert dbmod.get_package(conn, "windows", "0.3.0")["made_current_at"] == stamp
+
+
+def test_rollout_status_counts_the_fleet_and_names_the_holdout(env):
+    client, conn = _fleet_of_three(env)
+    _refuse(conn, "ruskin", "RUSKIN-PC", "0.2.0", "release signature rejected")
+
+    status = dbmod.rollout_status(conn)
+    windows = [c for c in status["channels"] if c["platform"] == "windows"]
+    assert len(windows) == 1
+    chan = windows[0]
+    assert chan["kind"] == "companion"
+    assert chan["current_version"] == "0.2.0"
+    assert chan["made_current_at"]
+    assert chan["machines_total"] == 3
+    assert chan["machines_on_current"] == 2
+    assert [b["machine"] for b in chan["behind"]] == ["RUSKIN-PC"]
+    assert chan["behind"][0]["editor"] == "ruskin"
+    assert chan["behind"][0]["version"] == "0.1.0"
+    assert chan["behind"][0]["last_seen"]
+    assert chan["refusing"] == [{
+        "editor": "ruskin", "machine": "RUSKIN-PC", "version": "0.2.0",
+        "reason": "release signature rejected", "at": "2026-09-04T09:00:00+00:00",
+    }]
+    assert chan["reverts"] == 0 and chan["failed_attempts"] == 0
+    # Nothing here is a write.
+    assert dbmod.get_current_package(conn, "windows")["version"] == "0.2.0"
+
+
+def test_rollout_status_never_counts_a_newer_machine_as_behind(env):
+    """A base rig running tomorrow's build did not fail to upgrade. Counting
+    it as behind is how an adoption number stops being believed."""
+    client, conn, _settings = env
+    _report_from(client, "jsmith", "EDIT-PC", "0.9.10")
+    publish(as_user(client, "owen"), "0.9.9", body=b"v9", make_current=1)
+    clear_user(client)
+    chan = dbmod.rollout_status(conn)["channels"][0]
+    assert chan["behind"] == []
+    assert chan["machines_on_current"] == 0     # ahead is not "on it" either
+    assert chan["machines_total"] == 1
+
+
+def test_a_machine_with_no_refusal_reported_is_not_refusing(env):
+    """Absent means not refusing, never "refusing for an unknown reason": a
+    fleet of companions too old to send the field must read unchanged."""
+    _client, _conn, settings = env
+    client, conn = _fleet_of_three(env)
+    chan = dbmod.rollout_status(conn)["channels"][0]
+    assert chan["refusing"] == []
+    view = build_packages_view(conn, settings)
+    assert all(m["refused"] is None for m in view["outdated_machines"])
+
+
+def test_the_packages_page_prints_the_adoption_line(env):
+    """REL-6 (a): the number that says whether the ship was taken, on the page
+    that publishes it."""
+    client, conn = _fleet_of_three(env)
+    resp = as_user(client, "owen").get("/admin/packages")
+    assert resp.status_code == 200
+    assert "[ ROLLOUT ]" in resp.text
+    assert "2 of 3 on 0.2.0" in resp.text
+    assert "ruskin on RUSKIN-PC 0.1.0" in resp.text
+    assert "0 reverts, 0 failed attempts" in resp.text
+
+
+def test_a_refusing_machine_says_so_instead_of_offering_update_now(env):
+    """REL-3's page half: [ UPDATE NOW ] on a machine that has REFUSED the
+    build queues a request that can never be honoured."""
+    client, conn = _fleet_of_three(env)
+    resp = as_user(client, "owen").get("/admin/packages")
+    assert "[ UPDATE NOW ]" in resp.text                     # before the refusal
+
+    _refuse(conn, "ruskin", "RUSKIN-PC", "0.2.0", "release signature rejected")
+    resp = as_user(client, "owen").get("/admin/packages")
+    assert "[ REFUSING 0.2.0 ]" in resp.text
+    assert "release signature rejected" in resp.text
+    assert "This computer refuses the current build" in resp.text
+    assert "Pushing it again will not change that." in resp.text
+    assert "[ UPDATE NOW ]" not in resp.text
+
+
+def test_health_carries_the_rollout_counts_for_the_ship_and_no_names(env):
+    """tools/ship.ps1 holds the fleet credential and no dashboard login, so
+    the counts ride on /api/v1/health. WHO is behind stays admin-only."""
+    client, conn = _fleet_of_three(env)
+    _refuse(conn, "ruskin", "RUSKIN-PC", "0.2.0", "release signature rejected")
+    body = client.get("/api/v1/health", headers={"X-CCSync-Token": "sekrit"}).json()
+    assert body["rollout"] == [{
+        "platform": "windows", "current_version": "0.2.0",
+        "made_current_at": body["rollout"][0]["made_current_at"],
+        "machines_total": 3, "machines_on_current": 2,
+        "behind": 1, "refusing": 1,
+    }]
+    assert "RUSKIN-PC" not in str(body["rollout"])
+    # ...and an unauthenticated caller still gets ok+version and nothing else.
+    assert "rollout" not in client.get("/api/v1/health").json()

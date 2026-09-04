@@ -408,3 +408,45 @@ class TestLoadSecretsNeverMaterialisesPlaintext:
 
     def test_emptiness_is_tested_on_the_secure_string_itself(self):
         assert "$secure.Length -eq 0" in self.SAVE
+
+
+class TestRolloutIsReportedAfterAShip:
+    """REL-6 (usability sweep 2026-09-04). "did it actually reach the fleet"
+    had no answer anywhere: ship ended on a PREDICTION, and the drift doctor's
+    only fleet lines were the per-machine "machine behind" wall, which is what
+    every successful ship looks like in its first minute.
+
+    Source-level, like every assertion in this file: PowerShell that talks to
+    a live dashboard cannot be executed on a test host."""
+
+    def test_the_doctor_prints_a_rollout_block(self):
+        assert "ROLLOUT (has the fleet taken it?)" in DRIFT
+        assert "function Get-RolloutLines" in DRIFT
+        # ...from the view's own numbers, not recomputed here.
+        assert 'PSObject.Properties["rollout"]' in DRIFT
+
+    def test_the_doctor_has_a_watch_switch_that_needs_an_admin(self):
+        assert re.search(r"(?m)^\s*\[switch\]\$Watch", DRIFT)
+        assert "ROLLOUT WATCH (every 60 s; Ctrl+C to stop)" in DRIFT
+        assert "-Watch needs -AdminUser" in DRIFT
+        assert "Start-Sleep -Seconds 60" in DRIFT
+
+    def test_an_unanswerable_rollout_never_reads_as_finished(self):
+        """A dashboard that reports no rollout at all must not end a watch
+        with "everyone has it"."""
+        body = DRIFT[DRIFT.index("function Test-RolloutComplete"):]
+        body = body[:body.index("\nWrite-Host")]
+        assert "if (-not $rollout -or -not $rollout.Value) { return $false }" in body
+        assert "if ($channels.Count -eq 0) { return $false }" in body
+
+    def test_ship_prints_the_rollout_after_ship_complete(self):
+        tail = SHIP[SHIP.index("ship complete."):]
+        assert "computers on" in tail
+        assert "check_deploy_drift.ps1 -AdminUser" in tail
+        # It reads the FLEET credential's route: the dashboard login belongs
+        # to build_editor_package.ps1 and never leaves it, so a second
+        # password prompt at the end of a ship is not an option.
+        assert "/api/v1/health" in tail
+        assert "DASH_REPORT_TOKEN" in tail
+        # Advisory only, exactly like the macOS line above it.
+        assert tail.rstrip().endswith("exit 0")

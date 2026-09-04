@@ -31,7 +31,8 @@ from starlette.requests import ClientDisconnect
 from . import (
     ai_providers, api, assignments, auth, broll, cards, cards_exec, cards_tunnel,
     cli_tools, crash_report,
-    dashboard_update, db, internal_sftp, jobs, local_users, music, notices,
+    dashboard_update, db, internal_sftp, jobs, local_users, mount_status, music,
+    notices,
     oidc, release_feed,
     secrets_boot, sessions, setup_api, setup_routes, site_store, ui, ytdl,
 )
@@ -1292,6 +1293,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # in-process call and leaves these three routes exactly where they are).
     app.include_router(cards_tunnel.router)
 
+    # Whatever a previous app in this process decided is not evidence about
+    # this one (DDIAG-7): the registry is module-level on purpose, so a second
+    # create_app -- a test, a reload -- starts it empty rather than inheriting
+    # four stale verdicts.
+    mount_status.reset()
+
     # Mounted AFTER the routers so a b-roll route can never shadow a dashboard
     # one, and behind a flag so the fleet dashboard never depends on the b-roll
     # code being present. mount_broll() reports mounted/absent/degraded; only a
@@ -1300,11 +1307,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # `settings` as well as the token since 2026-08-18: BrollGate mints the
     # ingest panel's identity (X-CCSync-User/X-CCSync-Admin) from the session
     # cookie with settings.session_secret, the way YtdlGate already does.
-    app.state.broll_status = (
+    #
+    # (status, detail) since DDIAG-7 / BROLL-2 (2026-09-03): the reason a
+    # mount did not take used to exist only as a log line inside the
+    # container, so an editor asking where B-ROLL went had nothing to be
+    # told. `_record_mount` puts every verdict on app.state AND in
+    # `mount_status`, which the alert checks and the boot notices read.
+    app.state.broll_status, app.state.broll_detail = (
         broll.mount_broll(app, broll_ingest_token, settings) if settings.broll_enabled
-        else broll.ABSENT
+        else (broll.ABSENT, "the b-roll platform is switched off on this server "
+                            "(DASH_BROLL_ENABLED)")
     )
     app.state.broll_mounted = app.state.broll_status == broll.MOUNTED
+    _record_mount(app, "broll", app.state.broll_status, app.state.broll_detail,
+                  broll.MOUNTED)
 
     # Same contract for the music platform, and mounted the same way: after the
     # routers, best-effort, tri-state, only advertised when it fully took. Still
@@ -1314,16 +1330,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # without it simply reports ABSENT. `settings` since 2026-08-18: MusicGate
     # mints the ingest panel's identity from the session cookie the way
     # BrollGate does. See music.py.
-    app.state.music_status = music.mount_music(app, settings)
+    app.state.music_status, app.state.music_detail = music.mount_music(app, settings)
     app.state.music_mounted = app.state.music_status == music.MOUNTED
+    _record_mount(app, "music", app.state.music_status, app.state.music_detail,
+                  music.MOUNTED)
 
     # And the YouTube downloader, on the same terms as music -- shipping the
     # tree is the switch, no flag and no token. It gets `settings` rather than
     # nothing because its gate mints the identity the sub-app authorises on
     # (which projects a job may download into), and that identity is decoded
     # from the session cookie with settings.session_secret. See ytdl.py.
-    app.state.ytdl_status = ytdl.mount_ytdl(app, settings)
+    app.state.ytdl_status, app.state.ytdl_detail = ytdl.mount_ytdl(app, settings)
     app.state.ytdl_mounted = app.state.ytdl_status == ytdl.MOUNTED
+    _record_mount(app, "ytdl", app.state.ytdl_status, app.state.ytdl_detail,
+                  ytdl.MOUNTED)
 
     # And Timeline Cards (phase 3, 2026-08-30), LAST of the four and after
     # cards_tunnel's router above -- so the three `/cards/agent/*` fleet
@@ -1334,9 +1354,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # (Starlette runs no lifespan for a mounted app).
     app.state.cards_status, app.state.cards_detail = cards.mount_cards(app, settings)
     app.state.cards_mounted = app.state.cards_status == cards.MOUNTED
-    if app.state.cards_status != cards.MOUNTED:
-        log.info("Timeline Cards is %s: %s", app.state.cards_status,
-                 app.state.cards_detail)
+    _record_mount(app, "cards", app.state.cards_status, app.state.cards_detail,
+                  cards.MOUNTED)
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -1350,6 +1369,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return FileResponse(str(favicon_file), media_type="image/x-icon")
 
     return app
+
+
+def _record_mount(app: FastAPI, name: str, status: str, detail: str,
+                  mounted_value: str) -> None:
+    """Publish one mount's verdict, and say so once in the log. Never raises.
+
+    DDIAG-7 (2026-09-03). Nothing in the boot block may raise -- a dashboard
+    that will not start because an optional feature could not describe itself
+    is the exact failure the tri-state exists to prevent -- so every step here
+    is wrapped, including the logging.
+    """
+    try:
+        mount_status.record(name, status, detail)
+        if status != mounted_value:
+            log.info("the %s mount is %s: %s", name, status, detail)
+    except Exception:  # noqa: BLE001 - a diagnostic never stops a boot
+        pass
 
 
 def run() -> None:

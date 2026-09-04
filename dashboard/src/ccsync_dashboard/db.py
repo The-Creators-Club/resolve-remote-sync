@@ -1594,6 +1594,35 @@ ALTER TABLE machine_state ADD COLUMN loopback_error TEXT;
 ALTER TABLE machine_state ADD COLUMN loopback_since TEXT;
 """
 
+# v48: when a build was handed to the fleet, and what a machine REFUSED
+# (REL-6 / REL-3, usability sweep 2026-09-04).
+#
+# `made_current_at` is the clock every rollout question is asked against.
+# `published_at` is the SIGNER's, `staged_at` is when the bytes landed, and
+# neither is when the fleet was first offered this build -- a build can sit
+# staged for a week and then be made current in a second, so "is anyone taking
+# it" had no start time to measure from. Backfilled NULL on purpose: for a
+# build already current when this migration runs we genuinely do not know, and
+# a COALESCE onto published_at would date a rollout to a moment nobody was
+# ever offered anything (which is exactly the false "stalled for six days"
+# a rollout alert must never invent). NULL reads as "cannot tell".
+#
+# The three `upgrade_refused_*` columns are REL-3's half. An offer a companion
+# refuses at RECEIPT (a signature it will not trust, a version below its
+# downgrade floor, plain HTTP) produces no attempt, so `upgrade_attempts`
+# stays 0 and the machine renders exactly like one that has simply not
+# reported yet -- the one upgrade failure that can never self-heal was the one
+# with no evidence anywhere but that editor's own log. They are the home for
+# `sync_guard.upgrade.refused_version` / `refused_reason` / `refused_at`;
+# every reader here treats absent/NULL as "not refusing", so a fleet whose
+# companions are too old to send them is unchanged rather than wrong.
+SCHEMA_V48 = """
+ALTER TABLE companion_packages ADD COLUMN made_current_at TEXT;
+ALTER TABLE machine_state ADD COLUMN upgrade_refused_version TEXT;
+ALTER TABLE machine_state ADD COLUMN upgrade_refused_reason TEXT;
+ALTER TABLE machine_state ADD COLUMN upgrade_refused_at TEXT;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1705,6 +1734,9 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # 47: the loopback server's health (CMEDIA-3, usability sweep
     # 2026-09-04). Its own step, and gapless like every one before it.
     (47, SCHEMA_V47),
+    # 48: the rollout clock and the refused offer (REL-6 / REL-3, usability
+    # sweep 2026-09-04). One step, and gapless like every one before it.
+    (48, SCHEMA_V48),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -2620,7 +2652,37 @@ NOTICE_SEVERITIES = ("info", "warn", "error")
 # one that is merely quiet. The PROBLEMS panel renders this list with a tick
 # beside every kind that has no open notice; the alerts sink reads the
 # severity; the tests walk it.
-NOTICE_KINDS: dict[str, dict[str, str]] = {
+#
+# `href` (DDIAG-8, usability sweep 2026-09-03) is optional and belongs to the
+# KIND, not to the row: the panel used to tell a non-technical owner to
+# navigate by memory to a page whose name was written in prose, three levels
+# into a twelve-entry settings strip, when every one of those targets is a URL
+# this codebase already knows. It is a str, or a callable taking the notice's
+# SUBJECT and returning one (the enforce/inventory kinds, whose destination is
+# the project the subject names). A column would have needed a migration for a
+# fact that never varies per row. The prose stays: a mail body has no links to
+# offer, and `fix` is what the sink sends.
+
+
+def _slug_href(subject: str) -> str:
+    """The project page when the subject IS a project slug, the fleet page
+    otherwise (DDIAG-8). Deliberately a shape test and not a lookup: this runs
+    per rendered row and must not take a database connection, and a link to
+    the fleet page is a harmless miss where a 404 would not be."""
+    slug = str(subject or "").strip()
+    if slug and all(ch.isalnum() or ch in "._-" for ch in slug):
+        return f"/project/{slug}"
+    return "/fleet"
+
+
+def _plan_pair_href(subject: str) -> str:
+    """`plan_without_share`'s subject is "editor/machine -> slug", and the
+    untick-and-re-tick its fix names is on that project's page."""
+    _, _, slug = str(subject or "").partition("->")
+    return _slug_href(slug.strip()) if slug.strip() else "/fleet"
+
+
+NOTICE_KINDS: dict[str, dict[str, Any]] = {
     # -- discovery and provisioning (collector.py / provision.py) ----------
     "project_container_marker": {"severity": "error", "what":
         "a project marker dropped on a folder that CONTAINS projects, which hides them all"},
@@ -2640,42 +2702,57 @@ NOTICE_KINDS: dict[str, dict[str, str]] = {
         "a shared-folder link between projects could not be resolved"},
     # -- the collector itself ----------------------------------------------
     "collector_cycle_failed": {"severity": "error", "what":
-        "one of the background jobs that keeps the fleet in step is failing"},
+        "one of the background jobs that keeps the fleet in step is failing",
+        "href": "/fleet#fleet-diagnostics"},
     "collector_db_write_failed": {"severity": "error", "what":
-        "the dashboard could not write to its own database"},
+        "the dashboard could not write to its own database",
+        "href": "/admin/packages"},
     "collector_watchdog_restart": {"severity": "warn", "what":
-        "the background job thread died and had to be restarted"},
+        "the background job thread died and had to be restarted",
+        "href": "/fleet#fleet-diagnostics"},
     "syncthing_unreachable": {"severity": "error", "what":
-        "the sync engine on this server is not answering"},
+        "the sync engine on this server is not answering",
+        "href": "/fleet#fleet-diagnostics"},
     # -- the tree -----------------------------------------------------------
     "projects_dir_missing": {"severity": "error", "what":
         "the projects folder on the server is missing or not mounted"},
     "inventory_refused": {"severity": "error", "what":
-        "the server's file count collapsed, so the last good one is being kept"},
+        "the server's file count collapsed, so the last good one is being kept",
+        "href": _slug_href},
     "enforce_refusal": {"severity": "error", "what":
-        "too many share removals in one pass, so none were applied"},
+        "too many share removals in one pass, so none were applied",
+        "href": _slug_href},
     "deactivation_refusal": {"severity": "error", "what":
         "too many projects would have been marked gone at once, so none were"},
     "ignored_report_sections": {"severity": "warn", "what":
-        "a computer is sending information this dashboard is too old to store"},
+        "a computer is sending information this dashboard is too old to store",
+        "href": "/admin/packages"},
     # -- identity and plans --------------------------------------------------
     "duplicate_machine_id": {"severity": "error", "what":
-        "one computer identity claimed by two hostnames (a cloned machine)"},
+        "one computer identity claimed by two hostnames (a cloned machine)",
+        "href": "/fleet"},
     "duplicate_device_id": {"severity": "error", "what":
-        "one Syncthing device id claimed by two computers"},
+        "one Syncthing device id claimed by two computers",
+        "href": "/fleet"},
     "pending_device_approval": {"severity": "warn", "what":
-        "a computer has been waiting to be approved for the sync network"},
+        "a computer has been waiting to be approved for the sync network",
+        "href": "/admin/users"},
     "plan_without_share": {"severity": "error", "what":
-        "a project is ticked for a computer that is not being sent it"},
+        "a project is ticked for a computer that is not being sent it",
+        "href": _plan_pair_href},
     "share_without_plan": {"severity": "warn", "what":
-        "a computer is being sent a project nobody ticked for it"},
+        "a computer is being sent a project nobody ticked for it",
+        "href": "/fleet"},
     "editor_without_machine": {"severity": "info", "what":
-        "an editor account no computer has ever reported for"},
+        "an editor account no computer has ever reported for",
+        "href": "/admin/users"},
     # -- the invariant checker (SYS-9, wave 5) --------------------------------
     "invariant_broken": {"severity": "error", "what":
-        "a fact this system relies on has stopped being true (the invariant checks)"},
+        "a fact this system relies on has stopped being true (the invariant checks)",
+        "href": "/admin/invariants"},
     "invariant_check_failed": {"severity": "error", "what":
-        "one of the invariant checks could not run, so that fact is unchecked"},
+        "one of the invariant checks could not run, so that fact is unchecked",
+        "href": "/admin/invariants"},
     # -- what is protected (SYS-14, wave 5) -----------------------------------
     # The INVERTED default: a safety mechanism this server cannot positively
     # verify is reported, not passed over. `protection_unverifiable` is a warn
@@ -2683,40 +2760,82 @@ NOTICE_KINDS: dict[str, dict[str, str]] = {
     # whose schedules have no API (DSM), and an error would train an owner to
     # ignore the panel that carries the real ones.
     "protection_missing": {"severity": "error", "what":
-        "a safety net this system relies on is not there (snapshots, signing, backups)"},
+        "a safety net this system relies on is not there (snapshots, signing, backups)",
+        "href": "/admin/protection"},
     "protection_unverifiable": {"severity": "warn", "what":
-        "a safety net this server cannot check, so it is unknown rather than fine"},
+        "a safety net this server cannot check, so it is unknown rather than fine",
+        "href": "/admin/protection"},
     # -- space ---------------------------------------------------------------
     "dashboard_disk_low": {"severity": "error", "what":
-        "the volume this dashboard writes to is nearly full"},
+        "the volume this dashboard writes to is nearly full",
+        "href": "/admin/packages"},
     "machine_disk_low": {"severity": "warn", "what":
-        "an editor's computer is nearly out of room for footage"},
+        "an editor's computer is nearly out of room for footage",
+        "href": "/fleet"},
     "machine_trash_oversize": {"severity": "warn", "what":
-        "deleted-file safety copies on a computer have grown large"},
+        "deleted-file safety copies on a computer have grown large",
+        "href": "/fleet"},
+    # DDIAG-3 (usability sweep 2026-09-03). A machine that has been retired,
+    # reinstalled under another hostname or taken on a three-week shoot was an
+    # `error` ALERT re-mailed once a day for ever. Past the give-up line it
+    # becomes this: a standing warn on the panel, naming the one action that
+    # ends it. Written by notices._check_forgotten_machines.
+    "machine_forgotten": {"severity": "warn", "what":
+        "a computer stopped reporting long enough that we gave up asking about it",
+        "href": "/fleet"},
+    # -- the mounted apps (DDIAG-7, usability sweep 2026-09-03) ---------------
+    # Each of /broll, /music, /ytdl and /cards computes a careful tri-state
+    # with a sentence in `detail`, and that sentence went to the container log
+    # and the authenticated health body only: on the page the topbar link
+    # simply disappeared, so "where has B-ROLL gone" had no answer anywhere.
+    "feature_not_mounted": {"severity": "warn", "what":
+        "one of the extra pages (b-roll, music, YouTube, cards) did not start on this server",
+        "href": "/fleet#fleet-diagnostics"},
     # -- the release channel ---------------------------------------------------
     "feed_unreachable": {"severity": "warn", "what":
-        "the vendor release feed cannot be reached, so no new builds arrive"},
+        "the vendor release feed cannot be reached, so no new builds arrive",
+        "href": "/admin/packages"},
     # SYS-2 (2026-09-04). "Deploy the dashboard before the companions" is a
     # refusal the feed poller makes correctly and used to state only in a log
     # line, on a site whose policy is `current` and where nobody clicks
     # anything: the fleet then reads as up to date for ever because the build
     # that would have made it outdated was never published here.
     "feed_publish_refused": {"severity": "error", "what":
-        "a new build for the fleet cannot be handed out until this dashboard is updated"},
+        "a new build for the fleet cannot be handed out until this dashboard is updated",
+        "href": "/admin/packages"},
     "feed_runtime_mismatch": {"severity": "warn", "what":
-        "a build on offer was made for a different system than this one"},
+        "a build on offer was made for a different system than this one",
+        "href": "/admin/packages"},
     # -- configuration and faults ---------------------------------------------
     "insecure_secret": {"severity": "error", "what":
         "a password or token in this server's configuration has quotes or spaces around it"},
     "dev_insecure": {"severity": "error", "what":
         "this server is running with its security checks relaxed"},
     "server_error": {"severity": "error", "what":
-        "a page or an API call failed with an error"},
+        "a page or an API call failed with an error",
+        "href": "/fleet#fleet-diagnostics"},
     # DDIAG-1 (2026-09-04). The pass ran out of its delivery budget, so some
     # of what it found was left for the next cycle. Written by alerts.run_cycle
     # (never registered without its writer, finding 1 of the 08-28 fix pass).
     "alerts_delivery_slow": {"severity": "warn", "what":
-        "sending the alerts took so long that some were left for the next pass"},
+        "sending the alerts took so long that some were left for the next pass",
+        "href": "/admin/alerts"},
+    # SYS-1(c) (usability sweep 2026-09-03). Every detector in this product
+    # runs into an empty room on the vendor default, and the panel that
+    # reports what is NOT there had no line for the mechanism that delivers
+    # all the others. Written by notices._check_alerts_sink.
+    "alerts_sink_none": {"severity": "warn", "what":
+        "nobody is being told when this server finds a problem",
+        "href": "/admin/alerts"},
+    # DDIAG-10 (usability sweep 2026-09-03). crash_report.py has written
+    # <data>/crashes/*.json since 2026-08-17 and nothing has ever read that
+    # directory: the collector's own thread dying was visible only to somebody
+    # with a shell in the container, which is the person this whole sweep
+    # assumes does not exist.
+    "server_crash_report": {"severity": "error", "what":
+        "this server's own background tasks have crashed since it started",
+        "href": "/admin/diagnostics/crash-reports.zip",
+        "href_label": "[ DOWNLOAD CRASH REPORTS ]"},
 }
 
 
@@ -2730,6 +2849,25 @@ def notice_kinds() -> list[dict[str, str]]:
         {"kind": kind, "severity": spec["severity"], "what": spec["what"]}
         for kind, spec in sorted(NOTICE_KINDS.items())
     ]
+
+
+def notice_href(kind: str, subject: str = "") -> tuple[str, str]:
+    """(href, label) for one notice's [ TAKE ME THERE ] button, or ("", "").
+
+    DDIAG-8. Never raises: a callable that cannot make sense of a subject
+    costs a button, and a panel that 500s over a link is worse than one that
+    tells you the page's name in words."""
+    spec = NOTICE_KINDS.get(str(kind)) or {}
+    href = spec.get("href")
+    if callable(href):
+        try:
+            href = href(subject)
+        except Exception:  # noqa: BLE001 - see the docstring
+            href = ""
+    href = str(href or "")
+    if not href:
+        return "", ""
+    return href, str(spec.get("href_label") or "[ TAKE ME THERE ]")
 
 
 def notice_counts(conn: sqlite3.Connection) -> dict[str, int]:
@@ -3299,7 +3437,8 @@ def get_current_package(
 
 
 def set_current_package(
-    conn: sqlite3.Connection, platform: str, version: str, kind: str = "companion"
+    conn: sqlite3.Connection, platform: str, version: str, kind: str = "companion",
+    now: str | None = None,
 ) -> bool:
     """Point `current` at (kind, platform, version). False if that version is
     unknown, or has been RETRACTED by the vendor. Currency is per (kind,
@@ -3321,6 +3460,14 @@ def set_current_package(
 
     `rollout` moves with `is_current` in the same two statements: a build that
     is no longer offered to the fleet is back on the shelf, not current.
+
+    `made_current_at` is stamped HERE, in the one writer, because it is the
+    start of the rollout clock and every door has to start it (REL-6, usability
+    sweep 2026-09-04): the question "did it actually reach the fleet" had no
+    moment to count from, and published_at is the signer's. Re-pointing at a
+    build restarts its clock -- a rollback is a new rollout of an old build.
+    The rows it moves OFF keep their stamp: it says when they were last
+    handed to the fleet, which is what a rollback needs to explain itself.
     """
     row = get_package(conn, platform, version, kind)
     if row is None or _row_value(row, "retracted_at"):
@@ -3336,9 +3483,9 @@ def set_current_package(
         # actually runs, and a build it HAS been offered has already produced
         # that evidence -- refusing to go back to it would be the gate working
         # against the recovery it exists to make possible.
-        "UPDATE companion_packages SET is_current=1, rollout='current', ever_current=1 "
-        "WHERE kind=? AND platform=? AND version=?",
-        (kind, platform, version),
+        "UPDATE companion_packages SET is_current=1, rollout='current', ever_current=1, "
+        "made_current_at=? WHERE kind=? AND platform=? AND version=?",
+        (now or utcnow_iso(), kind, platform, version),
     )
     return True
 
@@ -3466,6 +3613,107 @@ def soak_state(
             for m in machines
         ],
     }
+
+
+def rollout_status(
+    conn: sqlite3.Connection, now: str | None = None
+) -> dict[str, Any]:
+    """"did it actually reach the fleet" (REL-6, usability sweep 2026-09-04).
+
+    Query-only. One channel per (kind, platform) that has a CURRENT build,
+    each carrying the adoption line the Packages page, the drift doctor and
+    the rollout alert all print from the same numbers:
+
+        {"generated_at": iso,
+         "channels": [{
+            "kind": "companion", "platform": "windows",
+            "current_version": "0.9.66",
+            "made_current_at": iso or None,   # None = a build made current
+                                              # before v48: cannot tell
+            "machines_total": 7, "machines_on_current": 5,
+            "reverts": 0, "failed_attempts": 0,
+            "behind":   [{"editor", "machine", "version", "last_seen"}],
+            "refusing": [{"editor", "machine", "version", "reason", "at"}],
+         }]}
+
+    Only `companion` channels are built: an editor's machine reports which
+    companion it is running and nothing reports which INSTALLER it was
+    installed from, so an onboard channel could only ever answer "0 of 0",
+    which reads as a fleet that has taken nothing.
+
+    `behind` is STRICTLY older by version_tuple, never "!= current": a base
+    rig running tomorrow's build is not a machine that failed to upgrade, and
+    counting it as one is how an adoption number stops being believed.
+
+    `refusing` is the offer a companion turned down at receipt (REL-3) -- a
+    signature it will not trust, a version below its downgrade floor. Read
+    defensively: a companion too old to send it, or a database that has not
+    grown the columns, is "not refusing", never "refusing for an unknown
+    reason". A refusing machine is also in `behind`, because it IS behind;
+    what the refusal adds is that no button on the page can fix it.
+    """
+    now = now or utcnow_iso()
+    machines: list[dict[str, Any]] = []
+    for r in conn.execute("SELECT * FROM machine_state").fetchall():
+        machines.append({
+            "editor": r["editor_username"],
+            "machine": r["machine"],
+            "version": r["companion_version"],
+            "platform": str(_row_value(r, "platform") or "windows").strip().lower(),
+            "last_seen": r["received_at"] or r["reported_at"],
+            "reverted_from": _row_value(r, "upgrade_reverted_from"),
+            "attempts": _row_value(r, "upgrade_attempts"),
+            "refused_version": _row_value(r, "upgrade_refused_version"),
+            "refused_reason": _row_value(r, "upgrade_refused_reason"),
+            "refused_at": _row_value(r, "upgrade_refused_at"),
+        })
+    channels: list[dict[str, Any]] = []
+    rows = conn.execute(
+        "SELECT * FROM companion_packages WHERE kind='companion' AND is_current=1 "
+        "ORDER BY platform"
+    ).fetchall()
+    for pkg in rows:
+        platform = str(pkg["platform"] or "").strip().lower()
+        current = str(pkg["version"] or "")
+        current_key = version_tuple(current)
+        mine = [m for m in machines if m["platform"] == platform and m["version"]]
+        behind = []
+        refusing = []
+        on_current = 0
+        reverts = 0
+        attempts = 0
+        for m in mine:
+            if m["reverted_from"]:
+                reverts += 1
+            try:
+                attempts += int(m["attempts"] or 0)
+            except (TypeError, ValueError):
+                pass
+            if str(m["version"]) == current:
+                on_current += 1
+            elif current_key and version_tuple(m["version"]) < current_key:
+                behind.append({"editor": m["editor"], "machine": m["machine"],
+                               "version": m["version"], "last_seen": m["last_seen"]})
+            if m["refused_version"]:
+                refusing.append({
+                    "editor": m["editor"], "machine": m["machine"],
+                    "version": m["refused_version"],
+                    "reason": str(m["refused_reason"] or ""),
+                    "at": m["refused_at"],
+                })
+        channels.append({
+            "kind": "companion",
+            "platform": platform,
+            "current_version": current,
+            "made_current_at": _row_value(pkg, "made_current_at") or None,
+            "machines_total": len(mine),
+            "machines_on_current": on_current,
+            "reverts": reverts,
+            "failed_attempts": attempts,
+            "behind": behind,
+            "refusing": refusing,
+        })
+    return {"generated_at": now, "channels": channels}
 
 
 def machines_running_version(
@@ -7935,6 +8183,116 @@ def queued_jobs(
     sql += " ORDER BY priority DESC, id ASC LIMIT ?"
     args.append(max(1, min(int(limit), 1000)))
     return [job_row(r) for r in conn.execute(sql, args)]  # type: ignore[misc]
+
+
+# How far back the JOBS page's [ SHOW FINISHED ] list and the abandoned count
+# look (DDIAG-11, 2026-09-04). A day, because the question the count answers
+# is "did the fleet give up on anything while I was not watching" and the
+# person asking it looks once a morning.
+JOB_FINISHED_WINDOW_HOURS = 24
+
+# Where a re-queued job records the row it came from (DDIAG-11). In `inputs`
+# and not a new column: a retry is a NEW row with the SAME inputs, every
+# runner reads that dict by key and ignores what it does not know, and the
+# alternative was a migration for a breadcrumb.
+JOB_RETRY_OF = "retry_of"
+
+
+def finished_jobs(
+    conn: sqlite3.Connection, hours: float = JOB_FINISHED_WINDOW_HOURS,
+    limit: int = 100, now: str | None = None,
+) -> list[dict[str, Any]]:
+    """Terminal jobs from the last `hours`, newest first.
+
+    DDIAG-11 (2026-09-04): the jobs page listed OPEN jobs only, so a fleet
+    that had spent its retry budget on twelve whisper jobs read "Nothing is
+    queued or running." and the abandoned work was visible to nobody without
+    a terminal.
+
+    `updated_at` and not `created_at` is the window: a job queued on Monday
+    and abandoned an hour ago is news this morning, and one queued an hour
+    ago and finished then is not interesting twice.
+    """
+    now = now or utcnow_iso()
+    args: list[Any] = [_iso_minus(now, int(max(0.0, float(hours)) * 3600))]
+    args.extend(JOB_TERMINAL_STATES)
+    args.append(max(1, min(int(limit), 1000)))
+    sql = ("SELECT * FROM jobs WHERE updated_at >= ?"
+           "   AND state IN (%s) ORDER BY id DESC LIMIT ?"
+           % ",".join("?" * len(JOB_TERMINAL_STATES)))
+    return [job_row(r) for r in conn.execute(sql, args)]  # type: ignore[misc]
+
+
+def count_abandoned_jobs(
+    conn: sqlite3.Connection, hours: float = JOB_FINISHED_WINDOW_HOURS,
+    now: str | None = None,
+) -> int:
+    """How many jobs the fleet gave up on in the window (DDIAG-11).
+
+    Its own query rather than a len() over `finished_jobs`, because this one
+    is on every render of the queue head and the list is not."""
+    now = now or utcnow_iso()
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM jobs WHERE state=? AND updated_at >= ?",
+        (JOB_ABANDONED,
+         _iso_minus(now, int(max(0.0, float(hours)) * 3600)))).fetchone()
+    return int(row["n"]) if row is not None else 0
+
+
+def open_retry_of(conn: sqlite3.Connection, job_id: int) -> int | None:
+    """The id of an unfinished job that is already a new attempt at this one.
+
+    Read in Python and not with json_extract: the breadcrumb lives in a JSON
+    column whose shape this code owns, the open queue is bounded, and a SQL
+    function that is compiled out of some SQLite builds is not something to
+    make a refusal depend on.
+    """
+    for row in list_jobs(conn, state="open", limit=1000):
+        try:
+            origin = int((row.get("inputs") or {}).get(JOB_RETRY_OF) or 0)
+        except (TypeError, ValueError):
+            continue
+        if origin == int(job_id):
+            return int(row["id"])
+    return None
+
+
+def retry_job(
+    conn: sqlite3.Connection, job_id: int, created_by: str = "",
+    now: str | None = None,
+) -> tuple[int | None, str]:
+    """Queue the same work again. -> (new job id, "") or (None, why not).
+
+    DDIAG-11. THE OLD ROW IS NOT TOUCHED: a resurrection would rewrite the
+    attempt history, and "this failed three times on two machines and then
+    worked" is the only record anybody has of a bad clip. The new row carries
+    the same kind, inputs, requirements, cost, priority and section 10 levers,
+    plus `inputs.retry_of`.
+
+    Two refusals, both sentences a person reads: a job that has not finished
+    (cancel it first, and nothing forces a row terminal behind a live ffmpeg)
+    and a job whose retry is still on the queue.
+    """
+    job = get_job(conn, int(job_id))
+    if job is None:
+        return None, ""
+    state = str(job.get("state") or "")
+    if state not in JOB_TERMINAL_STATES:
+        return None, (f"job #{job_id} is {state} and has not finished, so there "
+                      f"is nothing to try again yet. Cancel it first.")
+    open_id = open_retry_of(conn, int(job_id))
+    if open_id is not None:
+        return None, (f"job #{open_id} is already a new attempt at job #{job_id} "
+                      f"and it is still on the queue.")
+    inputs = dict(job.get("inputs") or {})
+    inputs[JOB_RETRY_OF] = int(job_id)
+    new_id = create_job(
+        conn, str(job.get("kind") or ""), inputs, dict(job.get("requires") or {}),
+        dict(job.get("cost") or {}), created_by=created_by,
+        priority=int(job.get("priority") or 0), now=now,
+        forced=bool(job.get("forced")),
+        target_machine=(str(job.get("target_machine") or "") or None))
+    return new_id, ""
 
 
 def job_requirements_met(

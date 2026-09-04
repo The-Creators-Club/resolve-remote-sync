@@ -22,7 +22,12 @@
       <span class="chip {{ 'red' if n.severity == 'error' else ('amber' if n.severity == 'warn' else '') }}">[ {{ n.severity | upper }} ]</span>
       <span class="mono-sm">{{ n.subject }}</span>
       <div style="margin-top:0.35rem">{{ n.body }}</div>
-      {% if n.fix %}<div class="mono-sm" style="margin-top:0.35rem">WHAT TO DO: {{ n.fix }}</div>{% endif %}
+      {% if n.fix %}<div class="mono-sm" style="margin-top:0.35rem">WHAT TO DO: {{ n.fix }}
+        {# DDIAG-8 (usability sweep 2026-09-03): the sentence stays, because a
+           mailed alert carries the same text and has no link to offer. The
+           button is the same destination, for the owner who is standing on
+           this panel rather than reading it in a mail. #}
+        {% if n.href %}<a class="btn tap" href="{{ n.href }}">{{ n.href_label }}</a>{% endif %}</div>{% endif %}
       <div class="muted mono-sm" style="margin-top:0.35rem">
         first seen {{ n.first_seen | ago }} · last seen {{ n.last_seen | ago }}
         <form class="inline-form notice-dismiss" hx-post="/partials/notices/{{ n.id }}/dismiss"

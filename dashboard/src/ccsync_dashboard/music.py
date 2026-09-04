@@ -314,8 +314,14 @@ def _add_in_repo_music_web() -> bool:
     return True
 
 
-def mount_music(app: FastAPI, settings: Settings | None = None) -> str:
-    """Mount the music app at /music. Returns MOUNTED / ABSENT / DEGRADED.
+def mount_music(app: FastAPI, settings: Settings | None = None) -> tuple[str, str]:
+    """Mount the music app at /music. -> (status, detail).
+
+    (status, detail) since MUSIC-10 (2026-09-03), the shape `mount_cards` has
+    always answered: an absent or degraded mount used to be a `log.error`
+    inside the container and a nav link that silently vanished, so the owner's
+    only diagnosis was to read a log. The sentence returned here is what the
+    health route, `mount_status` and the self-diagnosis notice carry.
 
     The import is guarded and the failure is logged rather than raised, so a
     deployment whose music tree is missing, stale or mid-upgrade -- or one whose
@@ -347,7 +353,8 @@ def mount_music(app: FastAPI, settings: Settings | None = None) -> str:
     except Exception as e:  # noqa: BLE001 - see module docstring
         log.warning("music UI not mounted (%s: %s); dashboard continues without it",
                     type(e).__name__, e)
-        return ABSENT
+        return ABSENT, (f"the music checkout did not import "
+                        f"({type(e).__name__}: {e})")
 
     _declare_login_gated()
 
@@ -366,11 +373,36 @@ def mount_music(app: FastAPI, settings: Settings | None = None) -> str:
                   "writable by this container's uid, and the nav link is hidden",
                   type(e).__name__, e)
         app.mount(MOUNT_PATH, gated)
-        return DEGRADED
+        if _schema_too_new(e):
+            # MUSIC-10, second half. `publish_db --which music` can land a
+            # music.db written by a newer musicweb; musicweb.db then raises
+            # inside EVERY request while the mount reported MOUNTED and the
+            # nav went on offering the link. The refusal is checked once, at
+            # the mount's storage probe, and answered as a state with a
+            # reason instead of a 500 per page load.
+            return DEGRADED, ("the music database was written by a newer "
+                              "version of the music app than this server "
+                              f"runs, so no /music page can open it ({e})")
+        return DEGRADED, ("the music data root could not be prepared "
+                          f"({type(e).__name__}: {e}); every /music request "
+                          "will fail until DATA_ROOT is writable by this "
+                          "container's uid")
 
     app.mount(MOUNT_PATH, gated)
     log.info("music UI mounted at %s", MOUNT_PATH)
-    return MOUNTED
+    return MOUNTED, "serving /music"
+
+
+def _schema_too_new(exc: BaseException) -> bool:
+    """Is this musicweb's "the database was written by a newer app" refusal?
+
+    MUSIC-10. `musicweb.db.ensure_schema` raises a plain RuntimeError reading
+    `FATAL: database at ... has user_version=N, newer than this app supports`,
+    and it is not ours to give an exception class to, so the text is what is
+    matched. A miss costs the generic detail sentence, never a wrong state.
+    """
+    text = f"{exc}"
+    return "user_version" in text and "newer than this app supports" in text
 
 
 def _declare_login_gated() -> None:

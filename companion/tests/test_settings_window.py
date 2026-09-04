@@ -705,3 +705,64 @@ def test_the_repair_button_names_the_site_drive():
     app.canonical_prefix_label = lambda: "Q:"
     labels = _flat_labels(build_settings_model(_tray_snapshot(app), app))
     assert "REPAIR Q: NOW" in labels
+
+
+# -- CYT-7 (usability sweep 2026-09-03): a stale yt-dlp names itself ---------
+
+
+class _FakeYtDlp:
+    def __init__(self, status):
+        self._status = status
+
+    def status(self):
+        return dict(self._status)
+
+
+def _youtube_app(status):
+    app = _FakeApp({"dashboard_url": "", "ytdl_local_downloads": True},
+                   identity=_FakeIdentity("owen"))
+    app.ytdlp = _FakeYtDlp(status) if status is not None else None
+    return app
+
+
+def test_a_stale_ytdlp_gets_one_warning_line_in_editor_english():
+    """The max-age rule's verdict used to live in one INFO line a day. The
+    first person who learned this machine's downloader was three release
+    cycles old was the editor whose download failed."""
+    from ccsync_companion import ytdlp_manager
+
+    app = _youtube_app({"ok": True, "version": "2026.07.04",
+                        "action": ytdlp_manager.ACTION_STALE,
+                        "message": "yt-dlp 2026.07.04 is 43 days old"})
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "YOUTUBE"))
+    warning = next(l for l in lines if "may start failing" in l)
+    assert "downloader" in warning
+    assert "—" not in warning                      # house rule
+
+
+def test_a_downloader_that_could_not_be_installed_says_so():
+    from ccsync_companion import ytdlp_manager
+
+    app = _youtube_app({"ok": False, "version": None,
+                        "action": ytdlp_manager.ACTION_FAILED,
+                        "message": "could not install yt-dlp"})
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "YOUTUBE"))
+    assert any("could not be installed here" in l for l in lines)
+
+
+def test_a_healthy_downloader_says_nothing():
+    """A warning that stands when nothing is wrong is one editors learn to
+    read past."""
+    from ccsync_companion import ytdlp_manager
+
+    app = _youtube_app({"ok": True, "version": "2026.08.28",
+                        "action": ytdlp_manager.ACTION_NONE,
+                        "message": "yt-dlp 2026.08.28 is current"})
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "YOUTUBE"))
+    assert not any("may start failing" in l for l in lines)
+
+
+def test_no_sidecar_manager_is_not_a_warning():
+    app = _youtube_app(None)
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "YOUTUBE"))
+    assert not any("may start failing" in l for l in lines)

@@ -1362,6 +1362,10 @@ class CompanionApp:
         # wait on -- one report the dashboard actually took.
         self._upgrade_attempts: dict[str, Any] = {}
         self._upgrade_reverted_from = ""
+        # REL-3: the in-memory twin for a REFUSED offer, which is deliberately
+        # not in the ledger above (see _note_upgrade_refusal).
+        self._upgrade_refusal_version = ""
+        self._upgrade_refusal_count = 0
         self._version_starts = 1
         self._report_accepted = threading.Event()
         # macOS took the tree away from us, rather than the editor unplugging
@@ -5274,6 +5278,63 @@ class CompanionApp:
             log.exception("update back-off check failed")
         return ""
 
+    def upgrade_refusal(self) -> Optional[dict[str, Any]]:
+        """The build this machine is REFUSING, or None (REL-3).
+
+        Never raises, and tolerant of an upgrader that has never run (a
+        stub in the tests, a build with the manager not constructed): the
+        report cycle carries the alarm and must not be the thing that breaks
+        on a diagnostic."""
+        try:
+            fn = getattr(self.upgrade, "refusal", None)
+            if fn is None:
+                return None
+            record = fn()
+            return dict(record) if isinstance(record, dict) and record else None
+        except Exception:
+            log.exception("upgrade refusal read failed")
+            return None
+
+    def ytdlp_report(self) -> dict[str, Any]:
+        """`sync_guard.ytdlp` = the sidecar manager's last check (CYT-7).
+
+        {} when there is no manager at all. Never raises, and never runs the
+        binary: status() is a lock-guarded read of the daily result, which is
+        the rule ytdl_executor.capabilities() obeys for the same reason."""
+        manager = getattr(self, "ytdlp", None)
+        if manager is None:
+            return {}
+        try:
+            return ytdlp_mod.status_report(manager.status())
+        except Exception:
+            log.exception("ytdlp status read failed")
+            return {}
+
+    def _note_upgrade_refusal(self, wanted: str) -> float:
+        """REL-3: how long to wait after a REFUSED offer of `wanted`.
+
+        The same curve as a failed attempt (10 min, 1 h, then 6 h), because a
+        refusal is the class of failure that can never self-heal on its own
+        -- the flat 600 s re-arm asked the dashboard for the same
+        un-installable build every ten minutes for ever. NOT written to the
+        attempts ledger: nothing was downloaded, and `[ FAILED xN ]` on the
+        Packages page has to keep meaning "N downloads went wrong". In memory
+        only, since the offer that provokes it arrives on every report."""
+        try:
+            if self._upgrade_refusal_version != wanted:
+                self._upgrade_refusal_version = wanted
+                self._upgrade_refusal_count = 0
+            self._upgrade_refusal_count += 1
+            return upgrade_mod.upgrade_backoff_seconds(self._upgrade_refusal_count)
+        except Exception:
+            log.exception("could not back off the refused update")
+            return PUSHED_UPDATE_FAILED_RETRY_SECONDS
+
+    def _upgrade_was_refused(self, wanted: str) -> bool:
+        """Is `wanted` missing because this machine REFUSED it? (REL-3)"""
+        record = self.upgrade_refusal() or {}
+        return str(record.get("version") or "") == str(wanted or "").strip()
+
     def _note_upgrade_failure(self, wanted: str) -> float:
         """Count one failed install of `wanted` and return the wait before the
         next try. Never raises."""
@@ -5538,10 +5599,25 @@ class CompanionApp:
             # report has been accepted with it (_note_report_accepted).
             record = dict(self._upgrade_attempts or {})
             record["reverted_from"] = self._upgrade_reverted_from
+            # REL-3 (usability sweep 2026-09-03): plus the offer this machine
+            # REFUSED at receipt, if any. A refusal makes no attempt, so
+            # without these three fields a machine that can never take a
+            # build renders on Packages exactly like one that simply has not
+            # reported yet.
             guard["upgrade"] = upgrade_mod.upgrade_report(
-                record, self._version_starts)
+                record, self._version_starts, self.upgrade_refusal())
         except Exception:
             log.exception("upgrade report failed")
+        try:
+            # CYT-7 (usability sweep 2026-09-03): the yt-dlp sidecar's daily
+            # verdict. Absent on a machine whose manager never started, which
+            # is a companion too old to send one or a build with the feature
+            # off -- both of which the dashboard must not read as "stale".
+            ytdlp_state = self.ytdlp_report()
+            if ytdlp_state:
+                guard["ytdlp"] = ytdlp_state
+        except Exception:
+            log.exception("ytdlp report failed")
         try:
             # CMEDIA-3 (usability sweep 2026-09-04): whether "Send to Resolve"
             # can work on this machine at all. Always present, healthy shape
@@ -6288,6 +6364,12 @@ class CompanionApp:
                 # swap or an exec that did not work -- is.
                 if outcome == "failed":
                     wait = self._note_upgrade_failure(wanted)
+                elif outcome == "no-offer" and self._upgrade_was_refused(wanted):
+                    # REL-3: "no-offer" is also what a REFUSED offer looks
+                    # like from here (note_report_response drops it), and
+                    # that one cannot come good by being asked again in ten
+                    # minutes for ever.
+                    wait = self._note_upgrade_refusal(wanted)
                 else:
                     wait = (PUSHED_UPDATE_FAILED_RETRY_SECONDS if outcome == "no-offer"
                             else PUSHED_UPDATE_RETRY_SECONDS)
@@ -6397,6 +6479,8 @@ class CompanionApp:
                 # Same split as the auto path (REL-8).
                 if outcome == "failed":
                     wait = self._note_upgrade_failure(wanted)
+                elif outcome == "no-offer" and self._upgrade_was_refused(wanted):
+                    wait = self._note_upgrade_refusal(wanted)   # REL-3, as above
                 else:
                     wait = (PUSHED_UPDATE_FAILED_RETRY_SECONDS if outcome == "no-offer"
                             else PUSHED_UPDATE_RETRY_SECONDS)
@@ -7160,7 +7244,7 @@ class CompanionApp:
             report = upgrade_mod.upgrade_report(
                 dict(self._upgrade_attempts or {},
                      reverted_from=self._upgrade_reverted_from),
-                self._version_starts)
+                self._version_starts, self.upgrade_refusal())
             out.append(f"  starts on this version: {report['starts_this_version']}")
             out.append(f"  last attempted build: {report['version'] or 'none'}")
             out.append(f"  failed attempts: {report['attempts']}"
@@ -7173,6 +7257,11 @@ class CompanionApp:
             if report["reverted_from"]:
                 out.append("  rolled back automatically from v"
                            f"{report['reverted_from']} (it kept crashing)")
+            if report["refused_version"]:
+                # REL-3: the failure class that makes no attempt at all, so
+                # none of the counters above can carry it.
+                out.append(f"  REFUSING v{report['refused_version']} since "
+                           f"{report['refused_at']}: {report['refused_reason']}")
             old = upgrade_mod.old_exe_path()
             out.append(f"  rollback copy: {old if old and old.exists() else 'none'}")
         except Exception as exc:

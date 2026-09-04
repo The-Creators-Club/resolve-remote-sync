@@ -18,7 +18,9 @@ this build" until 2026-08-18, on the theory that WP B/C/F/G would each
 `replace()` their own entry from their own module; a shipped product cannot
 say that to a customer, and none of those modules exists, so they are real
 checks in this file now. `replace()` remains for the day one of them wants
-its entry back.
+its entry back. Two more optional tasks joined them on 2026-09-04
+(`release_key`, `alerts`): with `snapshots` they are the COMPLETENESS GATE
+that `done` will not report Done past, skipped or satisfied (SYS-18).
 
 Every check answers from what this container can see WITHOUT reaching out:
 the databases, the settings, the tree mount, a unix socket, and (only where
@@ -90,10 +92,18 @@ class SetupContext:
     without importing it at module load time, which would make an absent
     work package an import error instead of a graceful "not implemented")."""
 
-    def __init__(self, conn: sqlite3.Connection, settings: Any, app: Any = None) -> None:
+    def __init__(self, conn: sqlite3.Connection, settings: Any, app: Any = None,
+                 payload: dict[str, Any] | None = None) -> None:
         self.conn = conn
         self.settings = settings
         self.app = app
+        # SYS-1 (usability sweep 2026-09-03): the `alerts` task's action needs
+        # a VALUE from the admin (an address or a webhook URL), which no other
+        # task's run() does. Carried here rather than as a run() argument so
+        # the one state machine (run_do_it) stays the only writer; a task that
+        # gets no payload must behave as though the button was pressed with an
+        # empty form, never raise.
+        self.payload: dict[str, Any] = dict(payload or {})
 
 
 @dataclasses.dataclass
@@ -256,8 +266,74 @@ def run_skip(ctx: SetupContext, task_id: str) -> TaskState:
     with _lock_for(task_id):
         state = TaskState(status="skipped", detail="skipped by admin", at=now_iso())
         save_state(ctx.conn, task_id, state)
+        # SYS-18 (usability sweep 2026-09-03): the task's OWN row is what
+        # run_check overwrites with whatever the world looks like the next
+        # time anybody presses CHECK, so a skip stored only there survives
+        # until the first re-check and then quietly un-skips itself. The
+        # completeness gate below reads this second row instead, which nothing
+        # else writes: "I understand, later" is a decision with a date on it,
+        # not a status. `setup_tasks` has no foreign key and list_states only
+        # walks the registry, so the extra id is invisible everywhere else.
+        save_state(ctx.conn, SKIP_RECORD_PREFIX + task_id, state)
         ctx.conn.commit()
         return state
+
+
+# ------------------------------------------------- the completeness gate
+#
+# SYS-18 (usability sweep 2026-09-03) walked the first day of a second
+# customer: no release signing key (so every publish 503s), no snapshot
+# schedule (CR-10 has never been applied on either of the vendor's own two
+# NASes), and no alert destination (SYS-1, so nothing this server finds is
+# told to anybody). All three were reachable only by finding a panel, and the
+# wizard said Done regardless. These three block Done until they are done or
+# an admin explicitly accepts the risk.
+#
+# They stay optional=True, i.e. skippable: a skip is what makes this a gate
+# rather than a wall, and the three PROTECTION lines that cover the same
+# ground (protection.LINES: `release_keys`, `snapshot_tree`/`snapshot_apps`,
+# `alerts_sink`) read the real world, never these rows, so a skip here cannot
+# turn any of them green. Verified 2026-09-04 against protection.py:
+# _check_release_keys reads settings.release_pubkeys, _check_snapshot_* the
+# NAS's own task list, _check_alerts_sink alerts.get_settings plus alert_log.
+GATE_TASK_IDS: tuple[str, ...] = ("release_key", "snapshots", "alerts")
+
+# The `setup_tasks` id a recorded skip is stored under, per task.
+SKIP_RECORD_PREFIX = "skip:"
+
+
+def skip_record(conn: sqlite3.Connection, task_id: str) -> TaskState | None:
+    """When an admin accepted this task's absence, or None if they never
+    did. Read by the gate and reported by the wizard, so a skipped step is
+    shown as skipped rather than as done."""
+    row = conn.execute(
+        "SELECT status, detail, at FROM setup_tasks WHERE id=?",
+        (SKIP_RECORD_PREFIX + task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return TaskState(status="skipped", detail=row["detail"] or "", at=row["at"])
+
+
+def outstanding_for_done(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """(id, title) of everything `done` is still waiting on: every required
+    task that is not ok, plus any gate task that is neither satisfied nor
+    explicitly accepted (SYS-18)."""
+    states = list_states(conn)
+    out: list[tuple[str, str]] = [
+        (t.id, t.title) for t in TASKS
+        if not t.optional and t.id != "done" and states[t.id].status != "ok"
+    ]
+    for task_id in GATE_TASK_IDS:
+        task = get(task_id)
+        if task is None:                    # a build without one of the three
+            continue
+        if states[task_id].status in ("ok", "skipped"):
+            continue
+        if skip_record(conn, task_id) is not None:
+            continue
+        out.append((task_id, task.title))
+    return out
 
 
 # ------------------------------------------------------------------- eula
@@ -740,9 +816,15 @@ register(Task(
 # ---------------------------------------------------------------------- done
 
 def _check_done(ctx: SetupContext) -> TaskState:
-    outstanding = [t for t in outstanding_required(ctx.conn) if t != "done"]
+    """SYS-18: this used to wait on the six required tasks only, so a
+    dashboard with no signing key, no snapshot schedule and nobody to tell
+    reported itself set up. It now names what is missing by TITLE rather than
+    by task id: the id is what the API and this file call it, the title is
+    what the checklist above the sentence prints."""
+    outstanding = outstanding_for_done(ctx.conn)
     if outstanding:
-        return TaskState(status="todo", detail=f"waiting on: {', '.join(outstanding)}")
+        titles = ", ".join(title for _tid, title in outstanding)
+        return TaskState(status="todo", detail=f"waiting on: {titles}")
     return TaskState(status="ok", detail="setup complete")
 
 
@@ -1202,4 +1284,166 @@ register(Task(
     description="Publish the current companion build for Windows and macOS.",
     check=_check_software, run=_run_software, optional=True,
     run_label="CHECK NOW",
+))
+
+
+# -------------------------------------------------------------- release_key
+#
+# SYS-18 item 2 (usability sweep 2026-09-03): with no DASH_RELEASE_PUBKEYS
+# every publish 503s, and the only place that says so is the protection panel,
+# which a new customer has not found yet. There is no run(): the key arrives
+# as an environment variable and takes a redeploy, exactly like the secrets
+# task's generated values.
+
+def _check_release_key(ctx: SetupContext) -> TaskState:
+    """Only a COUNT is reported, never a key. Same rule and same source as
+    protection._check_release_keys, deliberately: two readers of one setting,
+    so a skip here cannot make that line green."""
+    keys = tuple(getattr(ctx.settings, "release_pubkeys", ()) or ())
+    if keys:
+        return TaskState(status="ok", detail=f"{len(keys)} release signing key configured"
+                                             if len(keys) == 1 else
+                                             f"{len(keys)} release signing keys configured")
+    return TaskState(
+        status="todo",
+        detail="no release signing key: this server refuses every build until "
+               "DASH_RELEASE_PUBKEYS holds the public half of your release key, so your "
+               "editors' computers can never be updated from here. Set it and redeploy "
+               "(docs/RELEASE.md). Skipping means updates wait until you do",
+    )
+
+
+register(Task(
+    id="release_key", title="Signing key for updates",
+    description="The key this server checks every CC Sync build against.",
+    check=_check_release_key, run=None, optional=True,
+))
+
+
+# ------------------------------------------------------------------ alerts
+#
+# SYS-1(b) (usability sweep 2026-09-03): forty-odd checks, ten invariants and
+# a weekly report, and the vendor default sends them nowhere. The full form
+# lives on Settings, then ALERTS; this task takes the ONE field that matters
+# on day one (where to send it) and hands everything else to that page.
+#
+# Everything here goes through alerts.py's public functions. This module adds
+# no alerting logic of its own: it decides nothing about what is sent, only
+# whether there is anywhere to send it.
+
+def _alerts_next_step() -> str:
+    return "open Settings, then ALERTS"
+
+
+def _check_alerts(ctx: SetupContext) -> TaskState:
+    """Green once a destination is configured AND the pieces that destination
+    needs to work are there.
+
+    A sink set to smtp with no mail server behind it is the state that feels
+    safest and is not (protection.py's phrase for the same trap), so it is a
+    warn naming the missing piece rather than a tick. The protection panel
+    goes further and stays red until something has actually been DELIVERED;
+    this task is about the first click, not about proof of delivery.
+    """
+    from . import alerts
+
+    values = alerts.get_settings(ctx.conn)
+    sink = str(values.get("alerts_sink") or alerts.SINK_NONE)
+    if sink == alerts.SINK_NONE:
+        return TaskState(
+            status="todo",
+            detail="nobody is being told: this server checks dozens of things about your "
+                   "fleet and has nowhere to send what it finds. Add an email address or a "
+                   "webhook URL. With nobody to tell, the first anyone hears of a stopped "
+                   "sync is an editor asking",
+        )
+    if sink == alerts.SINK_WEBHOOK:
+        url = str(values.get("alerts_webhook_url") or "")
+        if not url:
+            return TaskState(status="warn",
+                             detail=f"the webhook channel is chosen but no URL is set: "
+                                    f"{_alerts_next_step()}")
+        return TaskState(status="ok", detail=f"alerts go to {alerts.mask_url(url)}")
+    to = str(values.get("alerts_smtp_to") or "")
+    if not to:
+        return TaskState(status="warn",
+                         detail=f"email is chosen but no address is set: {_alerts_next_step()}")
+    host = str(values.get("alerts_smtp_host") or "")
+    if not host:
+        return TaskState(
+            status="warn",
+            detail=f"we have an address ({to}) but not the mail server that would send to it: "
+                   f"{_alerts_next_step()} and fill in the mail server",
+        )
+    if str(values.get("alerts_smtp_user") or ""):
+        try:
+            password, _source = alerts.read_password(ctx.settings)
+        except Exception:                                             # noqa: BLE001
+            password = ""
+        if not password:
+            return TaskState(
+                status="warn",
+                detail=f"we have an address ({to}) and a mail server, but no password for "
+                       f"{values.get('alerts_smtp_user')}: {_alerts_next_step()}",
+            )
+    return TaskState(status="ok", detail=f"alerts go to {to} through {host}")
+
+
+def _run_alerts(ctx: SetupContext) -> TaskState:
+    """Save the one destination the wizard asks for: `payload['email']` or
+    `payload['webhook']`, never both.
+
+    Pressed with neither (the checklist's own button, which has no form
+    behind it) this changes nothing and says where the form is, rather than
+    writing a half-configured sink an admin never asked for.
+    """
+    from . import alerts
+
+    email = str(ctx.payload.get("email") or "").strip()
+    webhook = str(ctx.payload.get("webhook") or "").strip()
+    if email and webhook:
+        return TaskState(
+            status="todo",
+            detail="pick one: an email address or a webhook URL, not both. "
+                   "Both together are on Settings, then ALERTS",
+        )
+    if not email and not webhook:
+        state = _check_alerts(ctx)
+        if state.status == "ok":
+            return state
+        return TaskState(
+            status=state.status,
+            detail="enter an email address or a webhook URL under WHO SHOULD WE TELL above, "
+                   f"or {_alerts_next_step()} for the full form",
+        )
+    if email:
+        if "@" not in email or email.startswith("@") or email.endswith("@"):
+            return TaskState(status="fail",
+                             detail=f"{email} does not look like an email address")
+        values = {"alerts_sink": alerts.SINK_SMTP, "alerts_smtp_to": email}
+        # A relay refuses mail with no envelope sender, and a first-day admin
+        # has no opinion about which address that should be: default it to the
+        # one they just typed, and only when nothing is stored, so the ALERTS
+        # page stays authoritative once it has been used.
+        if not str(alerts.get_settings(ctx.conn).get("alerts_smtp_from") or ""):
+            values["alerts_smtp_from"] = email
+    else:
+        values = {"alerts_sink": alerts.SINK_WEBHOOK, "alerts_webhook_url": webhook}
+    try:
+        alerts.set_settings(ctx.conn, values, "setup:alerts")
+    except alerts.AlertError as exc:
+        # Validation refusals are written for the admin who typed the value
+        # (https only, port ranges), so they are shown as they are.
+        return TaskState(status="fail", detail=_one_line(exc))
+    ctx.conn.commit()
+    return _check_alerts(ctx)
+
+
+register(Task(
+    id="alerts", title="Who should we tell?",
+    description="This server checks dozens of things about your fleet every few minutes. "
+                "It needs somewhere to send what it finds. With nobody to tell, the first "
+                "anyone hears of a stopped sync is an editor asking.",
+    check=_check_alerts, run=_run_alerts, optional=True,
+    run_label="SAVE A DESTINATION",
 ))

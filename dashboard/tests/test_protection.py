@@ -499,3 +499,43 @@ def test_an_admin_can_record_a_date_and_a_bad_one_is_refused(tmp_path):
             assert protection.read_acks(conn)["restore_drill"]["by"] == "owen"
         finally:
             conn.close()
+
+
+# ---------------------------------------- SYS-1 / DDIAG-16: the ninth line
+#
+# Wave 2 of the 2026-09-04 sweep, "the alarm reaches someone". The panel had
+# eight lines about safety nets and none about whether their failure ever
+# reaches a person, which is the mechanism that delivers all the others.
+
+def test_the_alarm_being_switched_off_is_an_error_line_on_this_panel(conn):
+    line = protection.BY_KEY["alerts_sink"]
+    assert line.severity == "error"
+    assert line.title == "somebody is told when this server finds a problem"
+    assert line.what == "whether a problem here reaches a person"
+    assert "[ SEND A TEST ]" in line.fix
+
+
+def test_the_consequence_counts_the_checks_rather_than_claiming_a_number(conn):
+    """A number typed into copy is wrong within a wave. This one is read from
+    the registry that would make it wrong."""
+    assert (f"checks {len(alerts.ALERT_KINDS)} things"
+            in protection.BY_KEY["alerts_sink"].consequence)
+
+
+def test_the_line_is_the_shared_verdict_and_not_a_second_opinion(conn,
+                                                                monkeypatch):
+    """Invariant 15 and this panel must never disagree about whether the
+    alarm can reach anybody, so both read alerts.sink_deliverable."""
+    monkeypatch.setattr(alerts, "sink_deliverable",
+                        lambda *_a, **_kw: (True, "the post arrived"))
+    assert protection._check_alerts_sink(_ctx(conn)).detail == "the post arrived"
+
+
+def test_a_ledger_that_cannot_be_read_is_cannot_verify_not_missing(conn,
+                                                                   monkeypatch):
+    """The rule this whole module exists for: could not ask is never no."""
+    def boom(*_a, **_kw):
+        raise sqlite3.OperationalError("no such table: alert_log")
+
+    monkeypatch.setattr(alerts, "sink_deliverable", boom)
+    assert protection._check_alerts_sink(_ctx(conn)).state == protection.NOT_CHECKED

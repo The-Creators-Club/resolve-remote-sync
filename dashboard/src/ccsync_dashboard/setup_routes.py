@@ -37,9 +37,10 @@ router = APIRouter(prefix="/api/v1")
 log = logging.getLogger("ccsync.dashboard.setup_routes")
 
 
-def _ctx(request: Request, conn: sqlite3.Connection) -> setup_engine.SetupContext:
+def _ctx(request: Request, conn: sqlite3.Connection,
+         payload: dict | None = None) -> setup_engine.SetupContext:
     return setup_engine.SetupContext(
-        conn=conn, settings=request.app.state.settings, app=request.app
+        conn=conn, settings=request.app.state.settings, app=request.app, payload=payload
     )
 
 
@@ -116,11 +117,28 @@ def api_setup_tasks(request: Request, conn: sqlite3.Connection = Depends(get_con
                 # always so a client never has to know the default
                 # ("DO IT") -- see Task.run_label.
                 "run_label": task.run_label,
+                # SYS-18: a skip an admin recorded, which survives the next
+                # CHECK writing the task's own row back to what the world
+                # looks like. Present on every task, meaningful on the three
+                # in setup_engine.GATE_TASK_IDS.
+                "skip_recorded_at": (skip.at if (skip := setup_engine.skip_record(conn, task.id))
+                                     else None),
+                # One of the three that hold Done back until they are done or
+                # accepted, so the page can say [ SKIP - I understand ] there
+                # and plain [ SKIP ] on a step nothing waits for.
+                "gate": task.id in setup_engine.GATE_TASK_IDS,
                 **states[task.id].as_dict(),
             }
             for task in setup_engine.TASKS
         ],
         "outstanding_required": setup_engine.outstanding_required(conn),
+        # What `done` is waiting on, by id and title, so the page can link to
+        # each one instead of printing a sentence a reader has to match up
+        # against the table above it (SYS-18).
+        "outstanding_for_done": [
+            {"id": task_id, "title": title}
+            for task_id, title in setup_engine.outstanding_for_done(conn)
+        ],
     }
 
 
@@ -191,6 +209,64 @@ def api_setup_eula_accept(request: Request, conn: sqlite3.Connection = Depends(g
     ctx = _ctx(request, conn)
     state = setup_engine.run_do_it(ctx, "eula")
     return state.as_dict()
+
+
+# ----------------------------------------------------------------- alerts
+
+class AlertsDestinationIn(BaseModel):
+    """One destination, not a form: the full set of alert settings lives on
+    Settings, then ALERTS (SYS-1(b), usability sweep 2026-09-03). Capped
+    generously; `alerts._validate` is what actually decides a value is
+    acceptable, so this model can never disagree with that page."""
+    email: str = Field(default="", max_length=320)
+    webhook: str = Field(default="", max_length=1024)
+
+
+@router.post("/setup/alerts")
+def api_setup_alerts(
+    payload: AlertsDestinationIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict:
+    """The `alerts` task's [ SAVE ], through run_do_it like every other task
+    action, so the wizard's state machine has one writer."""
+    user = require_setup_access(request, conn)
+    ctx = _ctx(request, conn, {"email": payload.email, "webhook": payload.webhook})
+    state = setup_engine.run_do_it(ctx, "alerts")
+    if state.status not in ("fail",) and (payload.email or payload.webhook):
+        # The SINK, never the address: this table is read by a page, and an
+        # address is a person (api_admin_site_put's rule, SYS-11).
+        from . import alerts as alerts_mod
+
+        db.audit(conn, user or "setup", "alerts.settings", "alerts",
+                 {"sink": alerts_mod.get_settings(conn).get("alerts_sink", "")})
+        conn.commit()
+    return state.as_dict()
+
+
+@router.post("/setup/alerts/test")
+def api_setup_alerts_test(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """[ SEND A TEST ], the same code path as the ALERTS page's own test
+    button (ui.partial_admin_alerts_test): compose_alert(KIND_TEST) and
+    alerts.send with dedup OFF, because an admin pressing the button twice is
+    asking twice and a silent "already sent today" is exactly the answer that
+    makes somebody believe a broken sink works. Sync, not async: the send
+    talks to a mail server, so FastAPI runs it on a threadpool worker."""
+    require_setup_access(request, conn)
+    from . import alerts
+
+    subject, text = alerts.compose_alert(
+        alerts.KIND_TEST, "test",
+        "This is a test of the CC Sync alert channel. Nothing is wrong.")
+    result = alerts.send(conn, request.app.state.settings, subject, text,
+                         kind=alerts.KIND_TEST, dedup=False)
+    conn.commit()
+    return {
+        "ok": bool(result.get("ok")),
+        "sent_to": result.get("sent_to") or "",
+        "detail": str(result.get("detail") or ""),
+    }
 
 
 # ------------------------------------------------------------- admin/site

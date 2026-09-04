@@ -16,6 +16,7 @@ purpose:
     the check. Without it an editor could post any slug and drop 40 videos into
     a project they do not sync.
 """
+import json
 import logging
 import os
 import re
@@ -128,6 +129,31 @@ def health(request: Request):
     PO-token probe, which is cached for a minute.
     """
     current_user(request)
+    return health_snapshot(request.app)
+
+
+def health_snapshot(app_or_state=None, *, allow_probe=True):
+    """The health body, built without a request. -> dict.
+
+    YTWEB-2 (2026-09-03): every signal an operator needs about this
+    downloader -- a stale yt-dlp, a dead worker, a flagged cookie jar, a
+    PO-token helper that stopped answering -- was computed here and visible
+    ONLY to an editor who opened /ytdl and read a pip's tooltip. CR-80 and
+    CR-83 both ran for days on exactly that: the detector was an editor. The
+    dashboard mounts this app in-process, so its self-diagnosis checks call
+    THIS function (ccsync_dashboard.ytdl.health_snapshot) rather than making
+    an HTTP request to their own single-worker uvicorn.
+
+    `app_or_state` is accepted and unused: every signal here comes from a
+    module-level cache or an import, not from app state, and the parameter is
+    there so a caller with an app object in hand needs no special case.
+
+    `allow_probe=False` is what the in-process caller passes. It means the
+    PO-token state is the last cached answer instead of a fresh one-second
+    HTTP probe -- a collector cycle asking how the downloader is must not be
+    able to make itself slow. Nothing else in here does I/O beyond reading
+    the small evidence files.
+    """
     cached = claude_cli.health()
     paths = ytdl_evidence.snapshot()
     return {
@@ -173,7 +199,16 @@ def health(request: Request):
         'cookies_state': ytdl_evidence.cookie_jar_state(config.COOKIES_FILE),
         # 'unconfigured' | 'ok' | 'unreachable'. CR-73 sat undetected for days
         # behind a sidecar that was configured and not answering.
-        'pot_provider': _pot_provider_state(),
+        'pot_provider': _pot_provider_state(allow_probe=allow_probe),
+        # THE OTHER PO-token path, and the one the shipped compose actually
+        # uses (YTWEB-5, 2026-09-03): the pip-installed
+        # bgutil-ytdlp-pot-provider plugin, whose boot install failed for
+        # DAYS in CR-73 (DNS not up yet) and CR-84 ([Errno 13] into a
+        # read-only /venv) with four WARNING lines in a container log as the
+        # entire evidence. run.sh now writes its outcome to a marker file
+        # and this reads it: {ok, error, at, attempts, version}, or
+        # {'ok': None} when nothing has written one.
+        'plugin_install': _plugin_install_state(),
         # {'anonymous'|'cookies': {ok, error, at, video_id, source}}. A key is
         # present only once that path has actually been tried.
         'paths': paths,
@@ -317,12 +352,79 @@ def _probe_pot(base_url):
         return 'unreachable'
 
 
-def _pot_provider_state():
-    """'unconfigured' | 'ok' | 'unreachable', from a cached probe.
+# WHERE run.sh LEAVES ITS ACCOUNT OF THE UNBLOCK PLUGIN INSTALL (YTWEB-5,
+# 2026-09-03). The same directory the plugin itself is installed into in image
+# mode (`UNBLOCK_SITE=/data/unblock-site` in dashboard/deploy/run.sh), so it
+# survives an image update exactly as the plugin does; run.sh exports the path
+# it actually used, and this constant is the fallback for a container booted by
+# an older run.sh.
+PLUGIN_INSTALL_MARKER_ENV = 'YTDL_PLUGIN_INSTALL_MARKER'
+PLUGIN_INSTALL_MARKER_DEFAULT = '/data/unblock-site/plugin_install.json'
+
+
+def plugin_install_marker_path():
+    """The marker file run.sh writes, from the environment or the default."""
+    return (os.environ.get(PLUGIN_INSTALL_MARKER_ENV) or '').strip()         or PLUGIN_INSTALL_MARKER_DEFAULT
+
+
+def _plugin_install_state():
+    """What happened the last time the unblock plugin was installed.
+
+    YTWEB-5. The deployment's real PO-token path is a pip-installed plugin on
+    PYTHONPATH, not the sidecar `pot_provider` reports on, and its install
+    failing was invisible to every health key here -- CR-73's symptom was
+    1.8 MiB/s downloads and "the file is empty" for days, diagnosed only by
+    reading a container log. run.sh writes the outcome, success and failure
+    alike, and this reads it.
+
+    `ok: None` means NOT CHECKED, never OK: no marker at all is either an
+    older run.sh or a boot that never got that far, and both are states an
+    admin should be able to tell from "installed fine". One small file read;
+    no import of the plugin, no subprocess.
+    """
+    out = {'ok': None, 'state': 'unknown', 'error': '', 'at': '',
+           'attempts': 0, 'version': ''}
+    if (os.environ.get('DASH_SITE_YOUTUBE_UNBLOCK') or '0').strip() != '1':
+        # The feature is off, so nothing was meant to be installed. Not a
+        # fault, and not silence either: 'off' is an answer.
+        out['state'] = 'off'
+        return out
+    path = plugin_install_marker_path()
+    try:
+        with open(path, encoding='utf-8-sig') as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return out
+    except Exception as exc:  # noqa: BLE001 - health must never 500
+        log.debug('plugin install marker unreadable at %s (%s: %s)', path,
+                  type(exc).__name__, exc)
+        out['error'] = 'the install marker could not be read'
+        return out
+    if not isinstance(data, dict):
+        return out
+    out['ok'] = bool(data.get('ok'))
+    out['state'] = 'ok' if out['ok'] else 'failed'
+    out['error'] = str(data.get('error') or '')
+    out['at'] = str(data.get('at') or '')
+    out['version'] = str(data.get('version') or '')
+    try:
+        out['attempts'] = int(data.get('attempts') or 0)
+    except (TypeError, ValueError):
+        out['attempts'] = 0
+    return out
+
+
+def _pot_provider_state(allow_probe=True):
+    """'unconfigured' | 'ok' | 'unreachable' | 'unknown', from a cached probe.
 
     Refreshed LAZILY on the request path, never on a timer: a dashboard nobody
     is looking at should not be probing anything, and the first page load after
     the cache goes stale pays one second at worst.
+
+    `allow_probe=False` (YTWEB-2, the dashboard's in-process caller) returns
+    the cached answer or 'unknown' -- never a fresh HTTP call. 'unknown' is
+    deliberately not 'unreachable': a check that has not been able to ask must
+    not raise an alarm about a sidecar that may be perfectly well.
     """
     base_url = (os.environ.get(downloader.POT_BASE_URL_ENV) or '').strip()
     if not base_url:
@@ -333,6 +435,9 @@ def _pot_provider_state():
     with _pot_lock:
         if _pot_cache['state'] and (now - _pot_cache['at']) < _POT_TTL:
             return _pot_cache['state']
+        cached_state = _pot_cache['state']
+    if not allow_probe:
+        return cached_state or 'unknown'
     state = _probe_pot(base_url)
     with _pot_lock:
         _pot_cache['state'] = state

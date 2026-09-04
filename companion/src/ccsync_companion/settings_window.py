@@ -519,6 +519,13 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
     # -- [ YOUTUBE ] ------------------------------------------------------
     if snap.get("ytdl_local_downloads") or snap.get("ytdl_youtube_signin"):
         yt_items: list = []
+        # CYT-7 (usability sweep 2026-09-03): FIRST, because a downloader
+        # that cannot update itself is the thing that will make the buttons
+        # below stop working, and the editor is the only person on this
+        # machine who can see it.
+        ytdlp_line = tray_mod.ytdlp_warning_line(snap.get("ytdlp_status"))
+        if ytdlp_line:
+            yt_items.append(Line(ytdlp_line, style="warning"))
         if snap.get("ytdl_local_downloads"):
             yt_items.append(Button(
                 "Accept YouTube Terms ✓" if snap.get("ytdl_attested")

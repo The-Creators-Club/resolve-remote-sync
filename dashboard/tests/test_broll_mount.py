@@ -553,7 +553,9 @@ def test_a_mount_with_no_settings_serves_search_but_stamps_nothing(tmp_path, bro
     from fastapi import FastAPI
 
     host = FastAPI()
-    assert broll.mount_broll(host, TOKEN) == broll.MOUNTED
+    status, detail = broll.mount_broll(host, TOKEN)
+    assert status == broll.MOUNTED
+    assert detail
     with TestClient(host) as c:
         c.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
         assert c.get("/broll/api/ingest-batches").json()["user"] is None

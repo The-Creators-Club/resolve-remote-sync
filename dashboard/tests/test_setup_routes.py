@@ -379,3 +379,100 @@ def test_the_window_stays_shut_on_smb_and_oidc(tmp_path):
         app = create_app(settings)
         with TestClient(app) as client:
             assert client.get("/api/v1/setup/tasks").status_code == 401
+
+
+# ------------------------------- SYS-1(b) / SYS-18: the alert destination
+#
+# The wizard's thirteenth task and the completeness gate (usability sweep
+# 2026-09-03, wave 2, 2026-09-04). The engine's own behaviour is pinned in
+# test_setup_engine.py; these are the routes.
+
+def test_the_task_list_carries_the_two_new_tasks_and_the_gate(env):
+    client, conn, settings = env
+    as_user(client, "owen")
+    body = client.get("/api/v1/setup/tasks").json()
+    tasks = {t["id"]: t for t in body["tasks"]}
+    assert {"alerts", "release_key"} <= set(tasks)
+    assert tasks["alerts"]["title"] == "Who should we tell?"
+    assert tasks["alerts"]["optional"] is True and tasks["alerts"]["can_run"] is True
+    for task_id in ("alerts", "release_key", "snapshots"):
+        assert tasks[task_id]["gate"] is True, task_id
+    assert tasks["editors"]["gate"] is False
+    outstanding = {row["id"] for row in body["outstanding_for_done"]}
+    assert {"alerts", "release_key", "snapshots"} <= outstanding
+    assert all(row["title"] for row in body["outstanding_for_done"])
+
+
+def test_a_recorded_skip_is_reported_to_the_page(env):
+    client, conn, settings = env
+    as_user(client, "owen")
+    assert client.post("/api/v1/setup/tasks/alerts/skip").json()["status"] == "skipped"
+    # A CHECK writes the task's own row back to what the world looks like; the
+    # decision is still recorded, and the page still says so.
+    client.post("/api/v1/setup/tasks/alerts/check")
+    tasks = {t["id"]: t for t in client.get("/api/v1/setup/tasks").json()["tasks"]}
+    assert tasks["alerts"]["status"] == "todo"
+    assert tasks["alerts"]["skip_recorded_at"]
+    assert "alerts" not in {row["id"] for row in
+                            client.get("/api/v1/setup/tasks").json()["outstanding_for_done"]}
+
+
+def test_setup_alerts_needs_a_session_in_this_worktree(env):
+    client, conn, settings = env
+    resp = client.post("/api/v1/setup/alerts", json={"email": "owner@studio.example"})
+    assert resp.status_code == 401
+
+
+def test_setup_alerts_saves_a_webhook_and_audits_the_sink_only(env):
+    from ccsync_dashboard import alerts
+
+    client, conn, settings = env
+    as_user(client, "owen")
+    resp = client.post("/api/v1/setup/alerts",
+                       json={"webhook": "https://hooks.example/T000/B000"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    assert alerts.get_settings(conn)["alerts_sink"] == alerts.SINK_WEBHOOK
+    rows = conn.execute(
+        "SELECT action, detail_json FROM fleet_audit WHERE action='alerts.settings'").fetchall()
+    assert rows, "a destination change is an admin action worth recording"
+    assert "B000" not in str(rows[0]["detail_json"])
+
+
+def test_setup_alerts_refuses_both_at_once(env):
+    client, conn, settings = env
+    as_user(client, "owen")
+    resp = client.post("/api/v1/setup/alerts",
+                       json={"email": "a@b.example", "webhook": "https://hooks.example/x"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "todo"
+    assert "pick one" in resp.json()["detail"]
+
+
+def test_setup_alerts_test_reports_that_there_is_nobody_to_tell(env):
+    """No sink configured: the test send fails, says so, and never raises."""
+    client, conn, settings = env
+    as_user(client, "owen")
+    resp = client.post("/api/v1/setup/alerts/test")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False and body["detail"]
+
+
+def test_setup_alerts_test_goes_through_the_alerts_module(env, monkeypatch):
+    from ccsync_dashboard import alerts
+
+    client, conn, settings = env
+    as_user(client, "owen")
+    seen = {}
+
+    def fake_send(conn_, settings_, subject, text, **kw):
+        seen.update({"subject": subject, "kind": kw.get("kind"), "dedup": kw.get("dedup")})
+        return {"ok": True, "sink": "webhook", "sent_to": "https://hooks.example",
+                "detail": "sent", "deduped": False}
+
+    monkeypatch.setattr(alerts, "send", fake_send)
+    body = client.post("/api/v1/setup/alerts/test").json()
+    assert body["ok"] is True and body["sent_to"] == "https://hooks.example"
+    # Same contract as the ALERTS page's own button: a test kind, dedup off.
+    assert seen["kind"] == alerts.KIND_TEST and seen["dedup"] is False

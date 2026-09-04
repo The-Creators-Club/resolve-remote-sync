@@ -437,6 +437,15 @@ def satisfy_required_tasks(conn, tmp_path, monkeypatch, settings, app=None):
     setup_engine.run_do_it(ctx(conn, storage_settings), "storage")
     setup_engine.save_state(conn, "syncthing",
                             setup_engine.TaskState("ok", "device id x", setup_engine.now_iso()))
+    accept_the_gate(conn, settings)
+
+
+def accept_the_gate(conn, settings):
+    """SYS-18 (2026-09-04): a release key, a snapshot schedule and an alert
+    destination hold Done back until they are done or explicitly accepted.
+    These two tests are about the SIX required tasks, so they take the skip."""
+    for task_id in setup_engine.GATE_TASK_IDS:
+        setup_engine.run_skip(ctx(conn, settings), task_id)
 
 
 def test_done_is_ok_on_a_nas_auth_deployment(conn, tmp_path, monkeypatch):
@@ -475,6 +484,7 @@ def test_done_ok_only_once_every_required_task_is_ok(conn, tmp_path, monkeypatch
     settings2 = Settings(db_path=str(tmp_path / "d.db"), projects_dir=str(tree_root / "Projects"))
     setup_engine.run_do_it(ctx(conn, settings2), "storage")
     setup_engine.save_state(conn, "syncthing", setup_engine.TaskState("ok", "device id x", setup_engine.now_iso()))
+    accept_the_gate(conn, settings)
 
     final = setup_engine.run_check(ctx(conn, settings), "done")
     assert final.status == "ok"
@@ -841,3 +851,228 @@ def test_software_run_survives_a_raising_feed_client(conn, monkeypatch):
         "software")
     assert state.status in ("todo", "warn")
     assert "feed exploded" in state.detail
+
+
+# ------------------------------- SYS-1(b) / SYS-18: alerts, the key, the gate
+#
+# The thirteenth task ("Who should we tell?"), the release-key task, and the
+# refusal to say Done while any of the three is neither done nor accepted
+# (usability sweep 2026-09-03, wave 2, 2026-09-04).
+
+def alerts_settings(conn, **values):
+    from ccsync_dashboard import alerts
+
+    alerts.set_settings(conn, values, "test")
+    conn.commit()
+
+
+def gate_settings(tmp_path, **kw):
+    return Settings(db_path=str(tmp_path / "d.db"), **kw)
+
+
+def clear_task(conn, task_id):
+    """Un-do both halves of a skip: the task's own row and the record the
+    completeness gate reads."""
+    conn.execute("DELETE FROM setup_tasks WHERE id IN (?, ?)",
+                 (task_id, setup_engine.SKIP_RECORD_PREFIX + task_id))
+    conn.commit()
+
+
+# ------------------------------------------------------------------ alerts
+
+def test_the_alerts_task_is_registered_optional_and_runnable():
+    task = setup_engine.get("alerts")
+    assert task is not None
+    assert task.title == "Who should we tell?"
+    assert task.optional is True and task.run is not None
+
+
+def test_alerts_is_todo_while_nobody_is_being_told(conn, tmp_path):
+    state = setup_engine.run_check(ctx(conn, gate_settings(tmp_path)), "alerts")
+    assert state.status == "todo"
+    assert "nobody is being told" in state.detail
+    assert "an editor asking" in state.detail
+
+
+def test_alerts_do_it_saves_one_address(conn, tmp_path):
+    from ccsync_dashboard import alerts
+
+    settings = gate_settings(tmp_path)
+    ctx_ = setup_engine.SetupContext(conn=conn, settings=settings, app=_FakeApp(),
+                                     payload={"email": "owner@studio.example"})
+    state = setup_engine.run_do_it(ctx_, "alerts")
+    stored = alerts.get_settings(conn)
+    assert stored["alerts_sink"] == alerts.SINK_SMTP
+    assert stored["alerts_smtp_to"] == "owner@studio.example"
+    # The envelope sender defaults to the one address a first-day admin typed.
+    assert stored["alerts_smtp_from"] == "owner@studio.example"
+    # An address with no mail server behind it is not a green tick.
+    assert state.status == "warn"
+    assert "not the mail server" in state.detail and "ALERTS" in state.detail
+
+
+def test_alerts_is_ok_once_the_mail_server_is_there(conn, tmp_path):
+    alerts_settings(conn, alerts_smtp_host="smtp.example", alerts_smtp_from="a@b.example")
+    ctx_ = setup_engine.SetupContext(conn=conn, settings=gate_settings(tmp_path), app=_FakeApp(),
+                                     payload={"email": "owner@studio.example"})
+    state = setup_engine.run_do_it(ctx_, "alerts")
+    assert state.status == "ok"
+    assert "owner@studio.example" in state.detail and "smtp.example" in state.detail
+
+
+def test_alerts_do_it_saves_a_webhook(conn, tmp_path):
+    from ccsync_dashboard import alerts
+
+    ctx_ = setup_engine.SetupContext(conn=conn, settings=gate_settings(tmp_path), app=_FakeApp(),
+                                     payload={"webhook": "https://hooks.example/abcdef"})
+    state = setup_engine.run_do_it(ctx_, "alerts")
+    assert state.status == "ok"
+    assert alerts.get_settings(conn)["alerts_sink"] == alerts.SINK_WEBHOOK
+    # Masked past its origin, like every other surface that prints it.
+    assert "hooks.example" in state.detail and "abcdef" not in state.detail
+
+
+def test_alerts_refuses_both_at_once(conn, tmp_path):
+    from ccsync_dashboard import alerts
+
+    ctx_ = setup_engine.SetupContext(
+        conn=conn, settings=gate_settings(tmp_path), app=_FakeApp(),
+        payload={"email": "a@b.example", "webhook": "https://hooks.example/x"})
+    state = setup_engine.run_do_it(ctx_, "alerts")
+    assert state.status == "todo" and "pick one" in state.detail
+    assert alerts.get_settings(conn)["alerts_sink"] == alerts.SINK_NONE
+
+
+def test_alerts_with_an_empty_form_changes_nothing_and_says_where_to_type(conn, tmp_path):
+    from ccsync_dashboard import alerts
+
+    state = setup_engine.run_do_it(ctx(conn, gate_settings(tmp_path)), "alerts")
+    assert state.status == "todo"
+    assert "WHO SHOULD WE TELL" in state.detail
+    assert alerts.get_settings(conn)["alerts_sink"] == alerts.SINK_NONE
+
+
+def test_alerts_refuses_something_that_is_not_an_address(conn, tmp_path):
+    from ccsync_dashboard import alerts
+
+    ctx_ = setup_engine.SetupContext(conn=conn, settings=gate_settings(tmp_path), app=_FakeApp(),
+                                     payload={"email": "owner"})
+    state = setup_engine.run_do_it(ctx_, "alerts")
+    assert state.status == "fail" and "owner" in state.detail
+    assert alerts.get_settings(conn)["alerts_sink"] == alerts.SINK_NONE
+
+
+def test_alerts_passes_a_bad_webhook_refusal_through(conn, tmp_path):
+    """alerts.py refuses http:// at the moment it is typed; the wizard shows
+    that refusal rather than a generic failure."""
+    ctx_ = setup_engine.SetupContext(conn=conn, settings=gate_settings(tmp_path), app=_FakeApp(),
+                                     payload={"webhook": "http://hooks.example/x"})
+    state = setup_engine.run_do_it(ctx_, "alerts")
+    assert state.status == "fail" and "https://" in state.detail
+
+
+def test_alerts_can_be_skipped_and_is_shown_as_skipped(conn, tmp_path):
+    state = setup_engine.run_skip(ctx(conn, gate_settings(tmp_path)), "alerts")
+    assert state.status == "skipped" and state.at
+    assert setup_engine.load_state(conn, "alerts").status == "skipped"
+
+
+# -------------------------------------------------------------- release key
+
+def test_release_key_is_todo_with_no_key_configured(conn, tmp_path):
+    state = setup_engine.run_check(ctx(conn, gate_settings(tmp_path)), "release_key")
+    assert state.status == "todo"
+    assert "DASH_RELEASE_PUBKEYS" in state.detail
+
+
+def test_release_key_is_ok_with_a_key_and_never_prints_it(conn, tmp_path):
+    settings = gate_settings(tmp_path, release_pubkeys=("ed25519:AAAA-secretish",))
+    state = setup_engine.run_check(ctx(conn, settings), "release_key")
+    assert state.status == "ok"
+    assert "secretish" not in state.detail
+
+
+# ------------------------------------------------------- the recorded skip
+
+def test_a_recorded_skip_survives_the_next_check(conn, tmp_path):
+    """The task's own row is overwritten by CHECK. The gate reads the second
+    row, so "I understand, later" is not undone by pressing CHECK."""
+    settings = gate_settings(tmp_path)
+    setup_engine.run_skip(ctx(conn, settings), "alerts")
+    setup_engine.run_check(ctx(conn, settings), "alerts")
+    assert setup_engine.load_state(conn, "alerts").status == "todo"
+    record = setup_engine.skip_record(conn, "alerts")
+    assert record is not None and record.status == "skipped" and record.at
+
+
+def test_no_skip_record_exists_until_somebody_skips(conn):
+    assert setup_engine.skip_record(conn, "alerts") is None
+
+
+# ---------------------------------------------------- the completeness gate
+
+@pytest.mark.parametrize("missing", ["release_key", "snapshots", "alerts"])
+def test_done_refuses_while_any_one_of_the_three_is_absent(conn, tmp_path, monkeypatch, missing):
+    settings = gate_settings(tmp_path, admin_users=frozenset({"alex"}))
+    satisfy_required_tasks(conn, tmp_path, monkeypatch, settings)
+    setup_engine.run_check(ctx(conn, settings), "admin")
+    clear_task(conn, missing)
+
+    state = setup_engine.run_check(ctx(conn, settings), "done")
+    assert state.status == "todo", missing
+    assert setup_engine.get(missing).title in state.detail
+    assert missing in [tid for tid, _title in setup_engine.outstanding_for_done(conn)]
+
+
+def test_done_names_what_is_outstanding_by_title_not_by_id(conn, tmp_path, monkeypatch):
+    settings = gate_settings(tmp_path, admin_users=frozenset({"alex"}))
+    satisfy_required_tasks(conn, tmp_path, monkeypatch, settings)
+    setup_engine.run_check(ctx(conn, settings), "admin")
+    clear_task(conn, "alerts")
+    state = setup_engine.run_check(ctx(conn, settings), "done")
+    assert "Who should we tell?" in state.detail
+    assert "waiting on: alerts" not in state.detail
+
+
+def test_done_is_ok_once_the_three_are_accepted(conn, tmp_path, monkeypatch):
+    settings = gate_settings(tmp_path, admin_users=frozenset({"alex"}))
+    satisfy_required_tasks(conn, tmp_path, monkeypatch, settings)   # skips the three
+    setup_engine.run_check(ctx(conn, settings), "admin")
+    state = setup_engine.run_check(ctx(conn, settings), "done")
+    assert state.status == "ok", setup_engine.outstanding_for_done(conn)
+
+
+def test_done_is_ok_once_the_three_are_really_done(conn, tmp_path, monkeypatch):
+    """No skip anywhere: a key in the settings, a fresh /data backup, and a
+    webhook to tell."""
+    settings = gate_settings(tmp_path, admin_users=frozenset({"alex"}),
+                             release_pubkeys=("ed25519:AAAA",))
+    satisfy_required_tasks(conn, tmp_path, monkeypatch, settings)
+    for task_id in setup_engine.GATE_TASK_IDS:
+        clear_task(conn, task_id)
+    setup_engine.run_check(ctx(conn, settings), "admin")
+    write_backup(tmp_path, "20260904T090000Z-manual", dbmod.utcnow_iso())
+    alerts_settings(conn, alerts_sink="webhook", alerts_webhook_url="https://hooks.example/x")
+    for task_id in setup_engine.GATE_TASK_IDS:
+        assert setup_engine.run_check(ctx(conn, settings), task_id).status == "ok", task_id
+
+    state = setup_engine.run_check(ctx(conn, settings), "done")
+    assert state.status == "ok", setup_engine.outstanding_for_done(conn)
+
+
+def test_a_skip_leaves_the_protection_line_red(conn, tmp_path):
+    """SYS-18's condition: skipping is accepting a risk, not clearing it. The
+    protection panel reads the WORLD (alerts.get_settings, the NAS's own task
+    list, settings.release_pubkeys) and never setup_tasks, so this holds by
+    construction; the test pins the construction."""
+    from ccsync_dashboard import protection
+
+    settings = gate_settings(tmp_path)
+    for task_id in setup_engine.GATE_TASK_IDS:
+        setup_engine.run_skip(ctx(conn, settings), task_id)
+    outcomes = {line.key: line.check(protection.Ctx(conn=conn, settings=settings,
+                                                    now=dbmod.utcnow_iso()))
+                for line in protection.LINES
+                if line.key in ("release_keys", "alerts_sink")}
+    assert outcomes["release_keys"].state == protection.BROKEN
+    assert outcomes["alerts_sink"].state == protection.BROKEN

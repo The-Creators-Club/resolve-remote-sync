@@ -1174,3 +1174,87 @@ def test_the_ytdlp_keys_are_never_a_config_problem(tmp_path):
         "ytdlp_path": 5,
     })
     assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# CYT-7 (usability sweep 2026-09-03): the verdict reaches a human
+#
+# The max-age rule detects a drifting binary and publishes it with ok=True,
+# so its message went to one INFO line a day in a log nobody opens. These
+# pin the three places it now surfaces: the report, capabilities(), the tray.
+# ---------------------------------------------------------------------------
+
+
+def test_status_report_carries_the_stale_verdict():
+    world = _World(installed=_days_ago(43), update_ok=False)
+    status = _manager(world, min_version=None).ensure()
+    report = ytdlp_mod.status_report(status, _NOW)
+    assert report["action"] == ytdlp_mod.ACTION_STALE
+    assert report["stale"] is True
+    assert report["ok"] is True                  # it can still probably download
+    assert report["age_days"] == 43
+    assert report["version"] == _days_ago(43)
+    assert "could not update" in report["message"]
+    assert report["checked_at"] == "2026-08-28T12:00:00Z"
+
+
+def test_status_report_of_a_healthy_binary_is_not_stale():
+    world = _World(installed=_days_ago(2))
+    report = ytdlp_mod.status_report(_manager(world).ensure(), _NOW)
+    assert report["stale"] is False
+    assert report["action"] == ytdlp_mod.ACTION_NONE
+    assert report["age_days"] == 2
+
+
+def test_status_report_keeps_failed_apart_from_stale():
+    """A machine with NO usable binary is a different alarm from one with an
+    old binary, and folding them here would cost the difference."""
+    report = ytdlp_mod.status_report(
+        {"ok": False, "version": None, "action": ytdlp_mod.ACTION_FAILED,
+         "message": "could not install yt-dlp", "checked_at": _NOW})
+    assert report["stale"] is False
+    assert report["action"] == ytdlp_mod.ACTION_FAILED
+    assert report["age_days"] is None
+    assert report["version"] is None
+
+
+@pytest.mark.parametrize("junk", [None, {}, "", "not-a-dict", 7])
+def test_status_report_of_nothing_is_empty_not_healthy(junk):
+    """"We have not checked" and "it is fine" must not render the same: the
+    dashboard reads an absent section as "a companion too old to send one"."""
+    assert ytdlp_mod.status_report(junk) == {}
+
+
+def test_status_report_survives_a_junk_status():
+    report = ytdlp_mod.status_report(
+        {"ok": "yes", "version": 7, "action": None, "message": None,
+         "checked_at": "not-a-number"})
+    assert report["checked_at"] is None
+    assert report["age_days"] is None
+    assert report["message"] is None
+
+
+def test_the_app_report_block_survives_a_manager_that_never_ran(tmp_path, inert_resolve):
+    app = _app({}, tmp_path)
+    app.ytdlp = None
+    assert app.ytdlp_report() == {}
+    assert "ytdlp" not in app.sync_guard()
+
+
+def test_the_app_report_block_carries_the_stale_verdict(tmp_path, inert_resolve):
+    world = _World(installed=_days_ago(43), update_ok=False)
+    app = _app({}, tmp_path)
+    app.ytdlp = _manager(world, min_version=None)
+    app.ytdlp.ensure()
+    assert app.sync_guard()["ytdlp"]["stale"] is True
+
+
+def test_the_app_report_block_never_raises(tmp_path, inert_resolve):
+    class _Boom:
+        def status(self):
+            raise RuntimeError("boom")
+
+    app = _app({}, tmp_path)
+    app.ytdlp = _Boom()
+    assert app.ytdlp_report() == {}
+    assert "ytdlp" not in app.sync_guard()

@@ -573,7 +573,9 @@ def test_a_mount_with_no_settings_serves_search_but_stamps_nothing(tmp_path, mus
     updated must get a working search UI with the ingest panel 401ing, not a
     dashboard that will not boot."""
     host = FastAPI()
-    assert music.mount_music(host) == music.MOUNTED
+    status, detail = music.mount_music(host)
+    assert status == music.MOUNTED
+    assert detail
     with TestClient(host) as c:
         c.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
         assert c.get("/music/api/ingest-batches").json()["user"] is None

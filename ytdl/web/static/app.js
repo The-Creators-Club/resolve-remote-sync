@@ -495,9 +495,23 @@ function renderEvidence(h) {
            'a PO-token sidecar is configured but did not answer. Downloads can '
            + 'be slow, empty or bot-checked until it does. See ytdl/web/DEPLOY.md.');
   } else if (pot === 'unconfigured') {
-    setPip('#healthpot', 'PO token off', '',
-           'no PO-token sidecar is configured on this server. That is normal '
-           + 'unless YouTube starts bot-checking it.');
+    // ...unless the OTHER PO-token path failed (YTWEB-5, 2026-09-03). This
+    // deployment ships no sidecar URL on purpose and uses the pip-installed
+    // plugin instead, so "that is normal" was flatly untrue on exactly the
+    // boots where the plugin install had failed - which is what CR-73 and
+    // CR-84 both looked like from this page.
+    const plug = h.plugin_install == null ? null : h.plugin_install;
+    if (plug && plug.state === 'failed') {
+      setPip('#healthpot', 'PO token missing', 'off',
+             'the PO-token plugin could not be installed on this server, so '
+             + 'downloads can be slow, empty or bot-checked. An admin needs to '
+             + 'restart the dashboard container with network access. '
+             + (plug.error ? 'It said: ' + String(plug.error).slice(0, 200) : ''));
+    } else {
+      setPip('#healthpot', 'PO token off', '',
+             'no PO-token sidecar is configured on this server. That is normal '
+             + 'unless YouTube starts bot-checking it.');
+    }
   } else {
     setPip('#healthpot', '', '');
   }

@@ -51,7 +51,7 @@ from typing import Any, Callable
 
 from fastapi import FastAPI
 
-from . import api, auth, db, site_store
+from . import api, auth, db, mount_status, site_store
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -404,16 +404,22 @@ class YtdlFeatureGate:
     """
 
     def __init__(self, app: FastAPI, settings: Settings, status: str,
-                 sub_app: Any | None) -> None:
+                 sub_app: Any | None, detail: str = "") -> None:
         self._dash = app
         self._settings = settings
         self._sub = sub_app
         self.status = status
+        # DDIAG-7 (2026-09-03): the SENTENCE that goes with the status,
+        # carried here as well as on app.state because this gate is what
+        # rewrites both when the site switch flips mid-run. Defaulted so a
+        # caller (or a test) built with four arguments still works.
+        self.detail = detail
         # What the loaded sub-app's state is, remembered separately from
         # `status`: an off-then-on again site has to be put back to the state
         # its mount actually has (a DEGRADED one must not come back as
         # MOUNTED and be advertised in the nav).
         self._loaded_status = status if sub_app is not None else ABSENT
+        self._loaded_detail = detail if sub_app is not None else ""
         self._enabled = sub_app is not None
         self._checked_at = time.monotonic() if sub_app is not None else 0.0
         self._failed_at = 0.0
@@ -427,25 +433,35 @@ class YtdlFeatureGate:
         self._checked_at = now
         return self._enabled
 
-    def _record(self, status: str) -> None:
+    def _record(self, status: str, detail: str | None = None) -> None:
         """Keep app.state in step, so the nav stops advertising a feature that
         has just been turned off (and starts advertising one that has just been
-        turned on, from the first request that reaches here)."""
+        turned on, from the first request that reaches here).
+
+        Since DDIAG-7 it also keeps `mount_status` in step, which is what the
+        alert checks and the boot notices read: a downloader turned off (or
+        broken) three hours into a container's life must not still be reported
+        as whatever it was at boot."""
+        if detail is not None:
+            self.detail = detail
         if status == self.status:
             return
         self.status = status
         try:
             self._dash.state.ytdl_status = status
             self._dash.state.ytdl_mounted = status == MOUNTED
+            self._dash.state.ytdl_detail = self.detail
         except Exception:  # noqa: BLE001 - a mount is not worth a 500
             pass
+        mount_status.record("ytdl", status, self.detail)
 
     def _current(self) -> Any | None:
         if not self._feature_on():
-            self._record(DISABLED)
+            self._record(DISABLED, "this site has not enabled the YouTube "
+                                   "downloader ([features] youtube_download)")
             return None
         if self._sub is not None:
-            self._record(self._loaded_status)
+            self._record(self._loaded_status, self._loaded_detail)
             return self._sub
         with self._lock:
             if self._sub is not None:
@@ -453,14 +469,15 @@ class YtdlFeatureGate:
             now = time.monotonic()
             if self._failed_at and (now - self._failed_at) < LOAD_RETRY_SECONDS:
                 return None
-            status, gated = load_ytdl_app(self._settings)
+            status, detail, gated = load_ytdl_app(self._settings)
             if gated is None:
                 self._failed_at = now
-                self._record(status)
+                self._record(status, detail)
                 return None
             self._sub = gated
             self._loaded_status = status
-            self._record(status)
+            self._loaded_detail = detail
+            self._record(status, detail)
             log.info("ytdl UI loaded on demand: this site enabled the YouTube "
                      "downloader while the dashboard was running")
             return gated
@@ -476,8 +493,13 @@ class YtdlFeatureGate:
         await sub(scope, receive, send)
 
 
-def load_ytdl_app(settings: Settings) -> tuple[str, Any | None]:
-    """Import the sub-app and wrap it in its gate. -> (status, gated or None).
+def load_ytdl_app(settings: Settings) -> tuple[str, str, Any | None]:
+    """Import the sub-app and wrap it in its gate. -> (status, detail, gated).
+
+    The middle value is DDIAG-7's sentence (2026-09-03): every branch that
+    used to end in a log line inside the container now says what happened in
+    words an owner can act on, because the only other evidence of a failed
+    mount is a nav link that silently disappeared.
 
     Everything about the import is best-effort (see the module docstring): a
     deployment whose ytdl tree is missing, stale or mid-upgrade -- or whose
@@ -496,7 +518,8 @@ def load_ytdl_app(settings: Settings) -> tuple[str, Any | None]:
     except Exception as e:  # noqa: BLE001 - see module docstring
         log.warning("ytdl UI not mounted (%s: %s); dashboard continues without it",
                     type(e).__name__, e)
-        return ABSENT, None
+        return ABSENT, (f"the ytdl checkout did not import "
+                        f"({type(e).__name__}: {e})"), None
 
     gated = YtdlGate(ytdl_app, settings.session_secret, settings)
 
@@ -522,9 +545,12 @@ def load_ytdl_app(settings: Settings) -> tuple[str, Any | None]:
                   "DEGRADED -- every /ytdl request will fail until YTDL_DATA_ROOT "
                   "is writable by this container's uid, and the nav link is hidden",
                   type(e).__name__, e)
-        return DEGRADED, gated
+        return DEGRADED, ("the ytdl data root could not be prepared "
+                          f"({type(e).__name__}: {e}); every /ytdl request "
+                          "will fail until YTDL_DATA_ROOT is writable by this "
+                          "container's uid"), gated
 
-    return MOUNTED, gated
+    return MOUNTED, "serving /ytdl", gated
 
 
 def _install_fleet_stamp_trust() -> bool:
@@ -549,8 +575,12 @@ def _install_fleet_stamp_trust() -> bool:
         return False
 
 
-def mount_ytdl(app: FastAPI, settings: Settings) -> str:
-    """Mount the ytdl app at /ytdl. Returns MOUNTED / DISABLED / ABSENT / DEGRADED.
+def mount_ytdl(app: FastAPI, settings: Settings) -> tuple[str, str]:
+    """Mount the ytdl app at /ytdl. -> (status, detail).
+
+    (status, detail) since DDIAG-7 (2026-09-03), the shape `mount_cards` has
+    always answered. The status is one of MOUNTED / DISABLED / ABSENT /
+    DEGRADED and the detail is the sentence that goes with it.
 
     The site switch comes first and short-circuits everything else: the feature
     is OFF unless this site turned it on (2026-08-17). Since 2026-08-21 that
@@ -587,21 +617,24 @@ def mount_ytdl(app: FastAPI, settings: Settings) -> str:
                  "downloader ([features] youtube_download in site.toml / on "
                  "Settings / DASH_SITE_YOUTUBE_DOWNLOAD=1). See "
                  "docs/legal/YOUTUBE_FEATURE_NOTICE.md")
-        app.mount(MOUNT_PATH, YtdlFeatureGate(app, settings, DISABLED, None))
-        return DISABLED
+        app.mount(MOUNT_PATH, YtdlFeatureGate(app, settings, DISABLED, None,
+                                             "this site has not enabled the "
+                                             "YouTube downloader"))
+        return DISABLED, ("this site has not enabled the YouTube downloader "
+                          "([features] youtube_download)")
 
-    status, gated = load_ytdl_app(settings)
+    status, detail, gated = load_ytdl_app(settings)
     if gated is None:
         # ABSENT: there is nothing to serve and a per-request retry would walk
         # sys.path (and import yt-dlp) on every poll. Left unmounted, as it has
         # always been -- deploying the tree is a deployment, and a deployment
         # restarts the container.
-        return status
+        return status, detail
 
-    app.mount(MOUNT_PATH, YtdlFeatureGate(app, settings, status, gated))
+    app.mount(MOUNT_PATH, YtdlFeatureGate(app, settings, status, gated, detail))
     if status == MOUNTED:
         log.info("ytdl UI mounted at %s", MOUNT_PATH)
-    return status
+    return status, detail
 
 
 def _install_ai_provider_lookup(ytdl_app: Any, settings: Settings) -> bool:
@@ -691,3 +724,53 @@ def _init_ytdl_storage() -> None:
     except (ImportError, AttributeError) as e:
         log.debug("ytdl canary not available (%s: %s); health will report it "
                   "disabled", type(e).__name__, e)
+
+
+def health_snapshot(app: FastAPI) -> dict[str, Any] | None:
+    """Every ytdl health signal, in process, or None if /ytdl is not serving.
+
+    YTWEB-2 (2026-09-03). The signals the self-diagnosis checks need --
+    `yt_dlp_stale`, `yt_dlp_age_days`, `pot_provider`, `cookies_state`,
+    `last_download.ok`, `canary.last`, `claude`, `worker_alive`,
+    `plugin_install` -- are all computed already, on the sub-app's
+    `GET /ytdl/api/health`. An alert check running on the collector thread
+    cannot make an HTTP request to its own process (it would need a session,
+    and a dashboard that deadlocks its own worker pool while diagnosing itself
+    is a worse bug than the one it is looking for), so the route's body is
+    built by a plain function upstream and this is the one way in.
+
+    SIDE-EFFECT FREE AND FAST, deliberately: `allow_probe=False` means the
+    PO-token state is whatever the last page load cached rather than a fresh
+    one-second HTTP probe, and nothing here opens a database or spawns a
+    process. A collector cycle must not be able to make itself slow by asking
+    how the downloader is.
+
+    None, never a raise and never a half-filled dict: "we could not ask" and
+    "we asked and it is fine" are different answers, and the checks are
+    written to say the first one out loud.
+    """
+    status = getattr(app.state, "ytdl_status", None)
+    if status not in (MOUNTED, DEGRADED):
+        return None
+    # sys.modules only. Importing ytdlweb here would import yt-dlp inside a
+    # collector cycle on a site that has the feature switched OFF, which is
+    # the one thing the site switch exists to prevent (COMMERCIAL_READINESS
+    # item 2).
+    routes_api = sys.modules.get("ytdlweb.routes_api")
+    snap = getattr(routes_api, "health_snapshot", None)
+    if not callable(snap):
+        return None
+    try:
+        return dict(snap(app, allow_probe=False))
+    except TypeError:
+        # An older ytdl tree whose health_snapshot takes no keyword. Worth one
+        # retry rather than reporting the downloader unmeasurable: the probe
+        # it may then run is the same one an open page runs every minute.
+        try:
+            return dict(snap(app))
+        except Exception as e:  # noqa: BLE001 - a diagnostic never raises
+            log.debug("ytdl health snapshot failed (%s: %s)", type(e).__name__, e)
+            return None
+    except Exception as e:  # noqa: BLE001 - a diagnostic never raises
+        log.debug("ytdl health snapshot failed (%s: %s)", type(e).__name__, e)
+        return None

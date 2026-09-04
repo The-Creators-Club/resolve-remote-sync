@@ -46,6 +46,7 @@ import pytest
 
 from ccsync_companion import broll_server, loopback_guard, music_server, ytdl_common
 from ccsync_companion import ytdl_executor as ex
+from ccsync_companion import ytdlp_manager
 from ccsync_companion import ytdl_server
 
 LABEL = "2026/FF5/Energy Transition"
@@ -309,8 +310,9 @@ def manifest_for(clips=None, quality="1080p", label=LABEL, rel_dir=REL_DIR,
 
 
 class FakeYtDlpManager:
-    def __init__(self, ok=True, version="2026.08.11", message="yt-dlp is current"):
-        self._status = {"ok": ok, "version": version, "action": "none",
+    def __init__(self, ok=True, version="2026.08.11", message="yt-dlp is current",
+                 action="none"):
+        self._status = {"ok": ok, "version": version, "action": action,
                         "message": message}
 
     def status(self):
@@ -1533,6 +1535,27 @@ def test_capabilities_passes_the_sidecars_own_message_through(tmp_path):
                                   message="no yt-dlp on this machine")
     cap = ex.capabilities(deps)
     assert cap["ok"] is False and cap["reason"] == "no yt-dlp on this machine"
+
+
+def test_a_stale_binary_warns_and_does_not_refuse_the_job(tmp_path):
+    """CYT-7 (usability sweep 2026-09-03). The max-age rule publishes a
+    drifting binary with ok=True -- it can still very probably download -- so
+    it passed the `ok` test above and reached nobody. It is a WARNING here and
+    never a refusal: sending the job to the server for a binary that mostly
+    works costs the editor the thing the feature exists to give them."""
+    deps = make_deps(tmp_path)
+    deps.ytdlp = FakeYtDlpManager(
+        action=ytdlp_manager.ACTION_STALE,
+        message="yt-dlp 2026.07.04 is 43 days old and it could not update itself")
+    cap = ex.capabilities(deps)
+    assert cap["ok"] is True and cap["reason"] is None
+    assert "43 days old" in cap["warning"]
+
+
+def test_a_healthy_binary_carries_no_warning(tmp_path):
+    """Always present, never invented: the SPA reads one shape."""
+    cap = ex.capabilities(make_deps(tmp_path))
+    assert cap["warning"] is None
 
 
 def test_no_sidecar_manager_at_all_is_no_capability(tmp_path):

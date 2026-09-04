@@ -897,6 +897,9 @@ def test_upgrade_report_is_always_a_full_shape(tmp_path):
     assert empty == {
         "version": None, "attempts": 0, "last_error": None,
         "last_attempt_at": None, "reverted_from": None, "starts_this_version": 1,
+        # REL-3 (2026-09-04): null, never absent, on the same reasoning as
+        # the counters above.
+        "refused_version": None, "refused_reason": None, "refused_at": None,
     }
     path = tmp_path / "upgrade_attempts.json"
     upgrade_mod.note_upgrade_attempt(path, "9.9.9", upgrade_mod.ERROR_EXEC, now=0.0)
@@ -1738,3 +1741,103 @@ def test_a_leading_slash_url_keeps_a_dashboard_path_prefix(tmp_path):
                          floor_file=tmp_path / "floor.json")
     assert mgr.download_and_verify(_info(url="/api/v1/x"), tmp_path) is not None
     assert calls[0][0] == "http://100.64.0.1:8480/ccsync/api/v1/x"
+
+
+# -- REL-3: a machine that REFUSES an offer says so (usability sweep 2026-09-03)
+#
+# The failure class that makes no attempt at all: a rejected signature, a
+# build below the downgrade floor, plain HTTP to a public host. last_failure
+# and the attempts ledger can never carry it, so until this the only evidence
+# was one log.error in that editor's companion.log.
+
+
+def test_a_refused_offer_is_remembered_with_its_reason(tmp_path):
+    mgr = UpgradeManager(_cfg(), floor_file=tmp_path / "floor.json")
+    mgr.note_report_response({"upgrade": _info(seed=OTHER_SEED)})
+    assert mgr.available is None
+    refusal = mgr.refusal()
+    assert refusal["version"] == "9.9.9"
+    assert "signature" in refusal["reason"]
+    assert refusal["at"].endswith("Z")
+
+
+def test_a_build_below_the_floor_is_a_refusal_too(tmp_path):
+    floor_file = tmp_path / "floor.json"
+    mgr = UpgradeManager(_cfg(), floor_file=floor_file)
+    mgr.note_report_response({"upgrade": _info(version="9.9.9", min_version="9.9.9")})
+    mgr.note_report_response({"upgrade": _info(version="9.9.8", min_version="0.0.0")})
+    refusal = mgr.refusal()
+    assert refusal["version"] == "9.9.8"
+    assert "downgrade floor" in refusal["reason"]
+
+
+def test_an_accepted_offer_clears_the_refusal(tmp_path):
+    mgr = UpgradeManager(_cfg(), floor_file=tmp_path / "floor.json")
+    mgr.note_report_response({"upgrade": _info(seed=OTHER_SEED)})
+    assert mgr.refusal() is not None
+    mgr.note_report_response({"upgrade": _info(version="9.9.10")})
+    assert mgr.refusal() is None
+
+
+def test_the_refusal_clears_once_that_version_is_running(tmp_path):
+    """A `[ REFUSING 0.9.65 ]` chip beside a machine already on 0.9.65 is the
+    alarm that cries wolf: an admin may have installed it by hand."""
+    mgr = UpgradeManager(_cfg(), floor_file=tmp_path / "floor.json")
+    mgr.note_report_response({"upgrade": _info(seed=OTHER_SEED)})
+    assert mgr.refusal() is not None
+    mgr.last_refusal = dict(mgr.last_refusal, version=config_mod.VERSION)
+    assert mgr.refusal() is None
+    assert mgr.last_refusal is None
+
+
+def test_an_unrankable_refused_version_is_still_reported(tmp_path):
+    """"unknown" is not "we have caught up": a nightly or a mangled version
+    string must keep the alarm up rather than silently retire it."""
+    mgr = UpgradeManager(_cfg(), floor_file=tmp_path / "floor.json")
+    mgr._note_refusal("nightly", "release signature rejected (no trusted key)")
+    assert mgr.refusal()["version"] == "nightly"
+
+
+def test_a_refused_download_records_the_transport_reason(tmp_path):
+    """Plain HTTP to a PUBLIC host is refused inside download_and_verify,
+    after _accept_offer has already passed."""
+    mgr = UpgradeManager(_cfg(dashboard_url="http://dashboard.example.com"),
+                         http_open=_fake_open(b"new-exe-bytes"),
+                         floor_file=tmp_path / "floor.json")
+    assert mgr.download_and_verify(_info(), tmp_path) is None
+    assert mgr.last_failure == upgrade_mod.ERROR_REFUSED
+    assert mgr.refusal()["version"] == "9.9.9"
+    assert mgr.refusal()["reason"]
+
+
+def test_an_off_origin_url_is_recorded_as_a_refusal(tmp_path):
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"new-exe-bytes"),
+                         floor_file=tmp_path / "floor.json")
+    assert mgr.download_and_verify(
+        _info(url="http://evil.example.com/x.exe"), tmp_path) is None
+    assert "dashboard's own host" in mgr.refusal()["reason"]
+
+
+def test_upgrade_report_carries_the_refusal_triple():
+    report = upgrade_mod.upgrade_report(
+        {}, 1, {"version": "0.9.65", "reason": "release signature rejected",
+                "at": "2026-09-04T08:12:01Z"})
+    assert report["refused_version"] == "0.9.65"
+    assert report["refused_reason"] == "release signature rejected"
+    assert report["refused_at"] == "2026-09-04T08:12:01Z"
+    # ...and the attempts ledger is untouched: a refusal is not a failed
+    # download, and [ FAILED xN ] on the dashboard has to keep its meaning.
+    assert report["attempts"] == 0
+    assert report["last_error"] is None
+
+
+def test_upgrade_report_nulls_the_refusal_when_there_is_none():
+    report = upgrade_mod.upgrade_report({"version": "0.9.65", "attempts": 2}, 3)
+    assert report["refused_version"] is None
+    assert report["refused_reason"] is None
+    assert report["refused_at"] is None
+
+
+@pytest.mark.parametrize("junk", [None, "", {}, "not-a-dict", 7])
+def test_upgrade_report_survives_junk_in_the_refusal_slot(junk):
+    assert upgrade_mod.upgrade_report({}, 1, junk)["refused_version"] is None

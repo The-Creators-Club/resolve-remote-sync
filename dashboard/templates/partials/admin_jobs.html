@@ -8,16 +8,25 @@
    to the row it is about -- because the person who notices a lane spinning is
    not holding a terminal.
 
-   Open jobs only, newest first. A finished one is history and ages out on its
-   own (JOBS_MAX_AGE_DAYS); a queued one nobody can run is the whole reason
-   this page exists and never ages out at all. #}
-<div id="admin-jobs">
+   Open jobs first, newest first. A queued job nobody can run is the whole
+   reason this page exists and never ages out at all.
+
+   [ SHOW FINISHED ] (DDIAG-11, 2026-09-04) is the other half: `failed` and
+   `abandoned` are terminal, so a fleet that had just spent its retry budget
+   on twelve whisper jobs showed an operator "Nothing is queued or running."
+   The poll lives on THIS element and carries the toggle in its own URL - the
+   page refreshes every 15 s, and a list the next refresh closes is a list
+   nobody can read. #}
+<div id="admin-jobs"
+     hx-get="/partials/admin/jobs{% if show_finished %}?finished=1{% endif %}"
+     hx-trigger="every 15s [document.visibilityState === 'visible']"
+     hx-swap="outerHTML">
   {% if error %}<div class="banner">▲ {{ error }}</div>{% endif %}
   {% if notice %}<div class="banner">{{ notice }}</div>{% endif %}
 
   <div class="admin-users-box">
     <div class="side-head">[ THE QUEUE ]
-      <span class="muted">{{ depth.queued }} queued, {{ depth.running }} running{% if depth.pinned %}, {{ depth.pinned }} pinned here{% endif %}{% if depth.oldest_age_s is not none %} · the oldest has waited {{ depth.oldest_age_s | round | int }}s{% endif %}</span></div>
+      <span class="muted">{{ depth.queued }} queued, {{ depth.running }} running{% if depth.pinned %}, {{ depth.pinned }} pinned here{% endif %}{% if abandoned %}, {{ abandoned }} abandoned in the last {{ window_hours }} h{% endif %}{% if depth.oldest_age_s is not none %} · the oldest has waited {{ depth.oldest_age_s | round | int }}s{% endif %}</span></div>
     {# The capacity chips. .mono-sm is `white-space: nowrap` (style.css), and
        six chips on one unbreakable line was 633 px at 390: the class is what
        mobile.css's admin section lets wrap (round 2, 2026-08-30). #}
@@ -35,8 +44,26 @@
     </div>
   </div>
 
+  {# The toggle, defined once and used in both places it belongs: under an
+     empty queue, where it is the only thing worth clicking, and above the
+     finished list itself. #}
+  {% macro finished_toggle() %}
+    <button class="btn tap" type="button"
+            hx-get="/partials/admin/jobs{% if not show_finished %}?finished=1{% endif %}"
+            hx-target="#admin-jobs" hx-swap="outerHTML"
+            title="jobs that ended in the last {{ window_hours }} hours: what was done, what failed, and what the fleet gave up on">[ {{ "HIDE" if show_finished else "SHOW" }} FINISHED ]</button>
+  {% endmacro %}
+
   {% if not jobs %}
     <p class="muted" style="margin-top:0.8rem">Nothing is queued or running.</p>
+    {# DDIAG-11: "nothing is running" and "the fleet gave up on twelve things
+       overnight" are not the same sentence, and the second one used to be
+       invisible on this page. #}
+    {% if abandoned %}
+      <p class="muted" style="margin-top:0.4rem">{{ abandoned }} job{{ "s" if abandoned != 1 }} {{ "were" if abandoned != 1 else "was" }} abandoned in the last {{ window_hours }} h. {{ finished_toggle() }}</p>
+    {% else %}
+      <p style="margin-top:0.4rem">{{ finished_toggle() }}</p>
+    {% endif %}
   {% else %}
   {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row here is one job, so on a
      phone each becomes a block of labelled lines rather than eight columns
@@ -69,7 +96,7 @@
         <td class="muted mono-sm" data-label="AGE">{{ job.created_at | ago }}</td>
         <td class="mono-sm" data-label="WHY">{{ job.why }}{% if job.attempts %} <span class="muted">({{ job.attempts }} attempt{{ "s" if job.attempts != 1 }}{% if job.last_error %}: {{ job.last_error[:120] }}{% endif %})</span>{% endif %}</td>
         <td>
-          <form class="inline-form" hx-post="/partials/admin/jobs/{{ job.id }}/cancel"
+          <form class="inline-form" hx-post="/partials/admin/jobs/{{ job.id }}/cancel{% if show_finished %}?finished=1{% endif %}"
                 hx-target="#admin-jobs" hx-swap="outerHTML"
                 hx-confirm="Stop job #{{ job.id }}? It is killed where it runs and not retried.">
             {# .tap and a short confirm (MOBILE_PLAN.md §4 M3, 2026-08-30):
@@ -97,6 +124,57 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
+  <p style="margin-top:0.6rem">{{ finished_toggle() }}</p>
+  {% endif %}
+
+  {# WHAT ENDED (DDIAG-11). The full `last_error` and not a 120-character
+     slice of it: this list is opened by somebody who has to decide whether
+     the clip is bad or the computer is, and the sentence ffmpeg wrote is the
+     evidence. [ TRY AGAIN ] queues the SAME inputs under a NEW id and leaves
+     this row alone - an attempt history that can be rewritten is not a
+     history. #}
+  {% if show_finished %}
+  <div class="admin-users-box" style="margin-top:1rem">
+    <div class="side-head">[ FINISHED IN THE LAST {{ window_hours }} HOURS ]</div>
+    {% if not finished %}
+      <p class="muted" style="margin-top:0.6rem">Nothing has finished in the last {{ window_hours }} hours.</p>
+    {% else %}
+    <div class="scroll-x">
+    <table class="editors stack" style="margin-top:0.6rem">
+      <thead><tr>
+        <th>JOB</th><th>KIND</th><th>STATE</th><th>WHAT</th>
+        <th>LAST HELD BY</th><th>WHEN</th><th>WHY IT ENDED</th><th></th>
+      </tr></thead>
+      <tbody>
+      {% for job in finished %}
+        <tr class="editor-row">
+          <td class="mono-sm" data-label="JOB">#{{ job.id }}</td>
+          <td class="mono-sm" data-label="KIND">{{ job.label }}</td>
+          <td class="mono-sm" data-label="STATE">{{ job.state | upper }}{% if job.state == "abandoned" %} <span class="chip amber" title="every attempt failed and the retry budget for this kind ran out. Nothing will pick it up again on its own.">[ GAVE UP ]</span>{% endif %}</td>
+          {# The (root, relative path) pair, which is the only spelling of a
+             job's paths anywhere: the vault is a drive letter here and a
+             container mount there. #}
+          <td class="mono-sm" data-label="WHAT">{{ job.inputs.get("root", "") }}:{{ job.inputs.get("rel_path", "") }}{% if job.inputs.get("retry_of") %} <span class="muted" title="this job was itself a new attempt at job #{{ job.inputs.get('retry_of') }}">(retry of #{{ job.inputs.get("retry_of") }})</span>{% endif %}</td>
+          <td class="who" data-label="LAST HELD BY">{% if job.claimed_machine %}{{ job.claimed_by }}/{{ job.claimed_machine }}{% else %}<span class="muted">nobody</span>{% endif %}</td>
+          <td class="muted mono-sm" data-label="WHEN">{{ job.updated_at | ago }}</td>
+          <td class="mono-sm" data-label="WHY IT ENDED">{% if job.last_error %}{{ job.last_error }}{% else %}<span class="muted">-</span>{% endif %}{% if job.attempts %} <span class="muted">({{ job.attempts }} attempt{{ "s" if job.attempts != 1 }})</span>{% endif %}</td>
+          <td>
+            {% if job.retryable %}
+            <form class="inline-form" hx-post="/partials/admin/jobs/{{ job.id }}/retry?finished=1"
+                  hx-target="#admin-jobs" hx-swap="outerHTML"
+                  hx-confirm="Queue job #{{ job.id }} again? It goes back on as a new job.">
+              <button class="btn tap" type="submit"
+                      title="the same work, on the queue again under a new number. This row stays as it is, so the attempt history is still true.">[ TRY AGAIN ]</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% endif %}
   </div>
   {% endif %}
 </div>

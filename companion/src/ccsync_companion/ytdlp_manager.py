@@ -361,6 +361,46 @@ def version_floor_is_rankable(minimum: Any) -> bool:
     return upgrade_mod.parse_version(minimum) is not None
 
 
+def status_report(status: Any, now_ts: Optional[float] = None) -> dict[str, Any]:
+    """`sync_guard.ytdlp`: the daily check's verdict, for the fleet grid.
+
+    CYT-7 (usability sweep 2026-09-03). The max-age rule detects a binary
+    drifting out of date and publishes it with ok=True (it can still very
+    probably download), so the message went to one INFO line a day in an
+    editor's companion.log and reached nobody. This is that verdict as the
+    report carries it, so the dashboard can raise `ytdlp_stale` on it.
+
+    {} for a status that was never published -- "we have not checked" and
+    "it is fine" must not render the same. Never raises."""
+    if not isinstance(status, dict) or not status:
+        return {}
+    action = str(status.get("action") or "").strip()
+    version_str = str(status.get("version") or "").strip() or None
+    checked = status.get("checked_at")
+    return {
+        "version": version_str,
+        "action": action or None,
+        "ok": bool(status.get("ok")),
+        # STALE only. ACTION_FAILED is the other unhappy answer and it is a
+        # different alarm on the dashboard (no binary at all, versus one that
+        # is old): folding them here would cost the difference.
+        "stale": action == ACTION_STALE,
+        "age_days": version_age_days(version_str, now_ts),
+        "message": str(status.get("message") or "")[:300] or None,
+        "checked_at": _iso_utc(checked),
+    }
+
+
+def _iso_utc(stamp: Any) -> Optional[str]:
+    """Epoch seconds as the spelling every other report field uses
+    (reporter._iso_utc's twin; this module stamps checked_at with its own
+    injectable clock, which a test moves)."""
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(stamp)))
+    except Exception:
+        return None
+
+
 def version_age_days(current: Any, now_ts: Optional[float] = None) -> Optional[int]:
     """How many days old a yt-dlp version string is, or None.
 

@@ -297,6 +297,39 @@ section could only ever describe one of them. Its `warning` is a model refusal
 ("this fleet has no release feed configured…") and shows on the grid on the
 same terms.
 
+`sync_guard.upgrade` (REL-8, 2026-08-28) is this machine's update telemetry
+and is **always present**, all-zero shape included: `version`, `attempts`,
+`last_error`, `last_attempt_at`, `reverted_from`, `starts_this_version`. Since
+2026-09-04 (REL-3) it also carries the refusal triple, `null` when there is
+nothing to say:
+
+```json
+"upgrade": {
+  "version": "0.9.65", "attempts": 0, "last_error": null,
+  "last_attempt_at": null, "reverted_from": null, "starts_this_version": 3,
+  "refused_version": "0.9.65",
+  "refused_reason": "release signature rejected (no trusted key)",
+  "refused_at": "2026-09-04T08:12:01Z"
+}
+```
+
+A refusal happens at *receipt* and makes no attempt, so the counters above can
+never carry it: a rejected signature, a build below the machine's downgrade
+floor or plain HTTP to a public host would otherwise render on Packages
+exactly like a machine that has simply not reported yet. The companion clears
+the triple when an offer is accepted or once it is running the refused version,
+and backs its retry off on the failed-attempt curve (10 min, 1 h, 6 h) instead
+of asking every 600 s for ever.
+
+`sync_guard.ytdlp` (CYT-7, 2026-09-04) is the yt-dlp sidecar's last daily
+check: `version`, `action` (`none` / `installed` / `updated` / `checked` /
+`stale` / `failed` / `disabled`), `ok`, `stale`, `age_days`, `message`,
+`checked_at`. **Absent** on a machine whose sidecar manager has never
+published one, which is a companion too old to send it: absent must not read
+as stale. `stale` is `action == "stale"` alone, i.e. a binary past its shelf
+life that could not update itself; `failed` (no usable binary at all) is a
+different alarm.
+
 Oversized sections are **sliced to the ceiling, not rejected** — a 422 used to
 take the whole machine off the fleet grid. What was dropped comes back in
 `truncated` and is logged on both sides. The three diagnostic sections above go
@@ -1110,6 +1143,7 @@ refusal** -- an unknown requirement must never read as satisfied.
 | `GET /api/v1/jobs/{id}/why` | -- | `{job, schedulable, reason_code, transient, capable, running, cap, summary, machines:[{editor, machine, ok, reason, why, rank, score, signals, why_not_first}]}` |
 | `GET /api/v1/jobs/queue` | -- | `{queue:{queued, running, pinned, oldest_age_s}, kinds:[{kind, running, cap}], pinning:{available, why_not}}` |
 | `POST /api/v1/jobs/{id}/cancel` | -- | `{ok, state, job}`; **409** for a job that has already finished |
+| `POST /api/v1/jobs/{id}/retry` | -- | `{ok, retry_of, job, why}` -- the NEW job, with the same receipt a submission gets; **404** unknown, **409** for a job that has not finished or already has an open retry |
 
 `why` is **"unschedulable, and why", per machine**, and it exists from the
 first commit on purpose: a scheduler that quietly assigns nothing looks
@@ -1158,6 +1192,25 @@ Nothing forces a row terminal behind a live ffmpeg -- a machine that never
 answers keeps the job until its lease expires, because saying "stopped" while
 a child is still writing into the vault is how a half-made proxy gets
 published.
+
+**Retrying is a NEW ROW, never a resurrection** (DDIAG-11, 2026-09-04).
+`POST /jobs/{id}/retry` queues the same `kind`, `inputs`, `requires`, `cost`,
+`priority`, `force` and `target_machine` under a new id and **leaves the old
+row exactly as it was**: the attempt history is the only evidence anybody has
+for "this clip fails everywhere" as against "that one computer is broken",
+and a retry that rewrote it would destroy the reason it was kept. The new
+job's `inputs` carry one extra key, `retry_of: <old id>` -- in `inputs`
+because every runner reads that dict by key and ignores what it does not
+know, and the alternative was a migration for a breadcrumb. A retry of a
+retry names its immediate origin.
+
+Two refusals, both `409` with a sentence: a job that has not finished (`done`,
+`failed` and `abandoned` are the terminal states; a `queued`, held or `pinned`
+job is cancelled first, and nothing forces a row terminal behind a live
+ffmpeg), and a job whose previous retry is still on the queue. The operator's
+view of the same thing is Settings -> JOBS, `[ SHOW FINISHED ]` (the last 24 h
+of terminal jobs with their full `last_error`, and the abandoned count in the
+queue head) and `tools/jobs.py retry <id>`.
 
 These are session routes, so a non-browser client sends the CSRF token
 `POST /api/v1/login` now returns as `csrf` (it is an HMAC over that session's

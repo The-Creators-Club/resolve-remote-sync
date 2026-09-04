@@ -393,3 +393,39 @@ def test_a_submission_without_them_is_byte_for_byte_the_old_one():
          ("POST", "/api/v1/jobs"): (200, {"job": a_job(), "why": {}})})
     body = http.calls[-1][3]
     assert "force" not in body and "target_machine" not in body
+
+
+# ------------------------------------------------------------------- retry
+# DDIAG-11 (2026-09-04). The fleet giving up on a job used to leave an
+# operator retyping the kind, the root and the relative path from nothing.
+
+
+def test_retry_posts_to_the_retry_route_and_names_the_new_number(capsys):
+    _code, http = run(
+        ["retry", "12"],
+        {("POST", "/api/v1/login"): (200, LOGIN_OK),
+         ("POST", "/api/v1/jobs/12/retry"): (200, {
+             "ok": True, "retry_of": 12,
+             "job": a_job(id=31, inputs={"root": "vault", "rel_path": "V/2026/A",
+                                         "retry_of": 12}),
+             "why": {"summary": "queued: 1 machine could take this"}})})
+    method, url, _headers, body = http.calls[-1]
+    assert (method, url) == ("POST", f"{URL}/api/v1/jobs/12/retry")
+    assert body is None, "a retry names no inputs: the old row holds them"
+    out = capsys.readouterr().out
+    assert "job #12 is on the queue again as #31" in out
+    assert "vault:V/2026/A" in out
+    assert "1 machine could take this" in out
+
+
+def test_retrying_a_live_job_prints_the_dashboards_sentence(capsys):
+    """The refusal is the useful half: a job nothing has finished is not
+    cancelled helpfully on the way past."""
+    code, _http = run(
+        ["retry", "12"],
+        {("POST", "/api/v1/login"): (200, LOGIN_OK),
+         ("POST", "/api/v1/jobs/12/retry"): (409, {
+             "detail": "job #12 is running and has not finished, so there is "
+                       "nothing to try again yet. Cancel it first."})})
+    assert code == jobs_cli.EXIT_CALL
+    assert "has not finished" in capsys.readouterr().err

@@ -47,6 +47,7 @@ import shutil
 import smtplib
 import sqlite3
 import ssl
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -56,7 +57,7 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from . import db, health
+from . import db, health, mount_status
 
 log = logging.getLogger("ccsync.dashboard.alerts")
 
@@ -71,17 +72,49 @@ SEV_WARN = "warn"
 # The report is scheduled, not triggered, so it is not a kind in the registry.
 KIND_WEEKLY = "weekly"
 KIND_TEST = "test"
+# DDIAG-17 (2026-09-04): the dead-man's beat. Scheduled like the weekly
+# report and for the same reason NOT a registry kind - it reports no
+# condition, so it must never be counted as a raised problem, never be
+# recovered and never appear on CURRENTLY OPEN.
+KIND_HEARTBEAT = "heartbeat"
 
 # The suffix a RECOVERED record is filed under. A separate kind namespace
 # rather than a column, so "is this subject currently alerted" is one
 # comparison of two timestamps and no migration.
 RECOVERED_SUFFIX = ".ok"
 
+# DDIAG-4 (2026-09-04): where a row that was NEVER SENT goes when a sink is
+# finally configured. See `_requeue_undelivered`.
+UNDELIVERED_SUFFIX = ".undelivered"
+
+# The detail `send()` writes for a finding composed on a site with no sink.
+# Matched as a string in `_requeue_undelivered`, so the two must agree.
+NO_SINK_DETAIL = "no sink configured"
+
 # A machine that has not reported for this long is silent. The same 24 h the
 # finding names, and deliberately far above health.STALE_EDITOR_RED_SECONDS
 # (6 h): the grid may redden at six hours, but waking somebody by mail wants a
 # threshold no laptop lid closed over lunch can reach.
 SILENT_SECONDS = 24 * 3600
+
+# DDIAG-3 (2026-09-04). `machine_silent` is an ERROR, and an error repeats
+# once a day for as long as it is true, so a laptop that was retired, rebuilt
+# under a new hostname or taken on a three-week shoot mailed the owner the
+# same sentence 21 times. After a fortnight of silence the computer is no
+# longer this check's business: it is a standing notice on the home panel
+# (`machine_forgotten`, filed by notices.py) and a [ FORGET ] button on the
+# FLEET row, not a daily alarm. The give-up is deliberately far past the
+# longest shoot anyone here has been on.
+SILENT_GIVE_UP_DAYS = 14
+
+# DDIAG-16 (2026-09-04). How recently the sink must have delivered SOMETHING
+# for this server to believe it still works. A mailbox that started bouncing
+# in March is the same hole as no sink at all, and the only place a failed
+# send is stated is the Alerts page, which is where somebody who already
+# trusts the alarm goes. 30 days is wider than any real quiet spell - the
+# weekly report alone puts four successful sends inside it - so a window with
+# nothing in it is evidence rather than a slow month.
+SEND_EVIDENCE_MAX_AGE_SECONDS = 30 * 24 * 3600
 
 # Five minutes, not the grid's one minute: the chip is free and a mail is not.
 CLOCK_SKEW_ALERT_SECONDS = 5 * 60
@@ -98,6 +131,45 @@ VERSIONS_BEHIND_ALERT = 3
 # be wrong on both ends.
 DATA_DISK_RED_PERCENT = 5.0
 DATA_DISK_WARN_PERCENT = 10.0
+
+# DDIAG-2 (2026-09-04). The fleet job queue, whose own module says "THE
+# FAILURE MODE OF A SCHEDULER IS INVISIBLE: a scheduler that quietly assigns
+# nothing looks exactly like a fleet with nothing to do", was diagnosed
+# nowhere but /admin/jobs, which nothing links to from the home page. Six
+# hours is deliberately long: an idle floor, a busy fleet and a machine that
+# is asleep all legitimately leave work queued for an hour, and only a
+# reason_code that no amount of waiting can change is worth a message.
+JOBS_STARVED_SECONDS = 6 * 3600
+# The window "the fleet gave up on some work" asks about, matching
+# db.JOB_FINISHED_WINDOW_HOURS' day so the page and the alert count the same
+# jobs.
+JOBS_ABANDONED_HOURS = 24
+# DDIAG-6: a pinned row held by this container's own worker whose heartbeat
+# stopped. The executor beats every 10 s (cards_exec.POLL_SECONDS), so an
+# hour of silence is a worker that is gone rather than a long encode.
+PINNED_STALE_SECONDS = 3600
+
+# REL-6 (2026-09-04). How long after a build was MADE CURRENT a fleet still
+# sitting on the old one stops being a normal rollout and becomes a stalled
+# one. Two days covers a weekend, a shoot and a laptop that was off; past it,
+# a computer that has reported since and is still behind is not busy taking
+# the update, it is not taking it.
+ROLLOUT_STALLED_SECONDS = 48 * 3600
+# REL-13: how far one platform's channel may fall behind another's before it
+# is a finding. macOS bundles cannot be cross-built from Windows, so "the Mac
+# half is owed" has been true across many ships and was recorded only as a
+# yellow line in a terminal's scrollback.
+PLATFORM_CHANNEL_STALE_SECONDS = 7 * 24 * 3600
+PLATFORM_CHANNEL_STALE_BUILDS = 2
+
+# BROLL-2: a b-roll ingest batch nobody is working on. The lease is minutes
+# wide, so a day of no heartbeat is a batch whose companion went away for
+# good rather than one between two clips.
+BROLL_BATCH_STUCK_SECONDS = 24 * 3600
+# How near its expiry a client link is worth a warning. A week is enough
+# notice to ask the client whether they still need it, and short enough that
+# the warning is about THIS link rather than a standing list.
+BROLL_SHARE_EXPIRY_SECONDS = 7 * 24 * 3600
 
 WEEKLY_WEEKDAY = 0          # Monday, datetime.weekday()
 WEEKLY_HOUR = 8             # 08:00 site-local
@@ -165,6 +237,10 @@ SETTING_KEYS: dict[str, str] = {
     "alerts_webhook_url": "https",
     "alerts_timezone": "str",
     "alerts_weekly": "bool",
+    # DDIAG-17 (2026-09-04). Off by default: one mail a day is a cost the
+    # owner opts into, and a heartbeat nobody asked for is the first rule a
+    # mailbox filter learns.
+    "alerts_heartbeat": "bool",
 }
 
 _DEFAULTS = {
@@ -173,6 +249,7 @@ _DEFAULTS = {
     "alerts_smtp_tls": "1",
     "alerts_smtp_verify_tls": "1",
     "alerts_weekly": "1",
+    "alerts_heartbeat": "0",
 }
 
 
@@ -236,6 +313,7 @@ def set_settings(
     port must change nothing rather than half-applying (site_store.set_many's
     rule). Unknown keys are refused, not ignored."""
     normalised = {key: _validate(key, raw) for key, raw in values.items()}
+    was = get_settings(conn).get("alerts_sink") or SINK_NONE
     # bug-hunt-2026-09-03 dash-collector-5: the page renders the webhook URL
     # MASKED past its origin, so a form submitted with that field untouched
     # posts the mask back. Treat "the mask of what is stored" as "unchanged"
@@ -254,7 +332,44 @@ def set_settings(
             "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
             (key, value, now, str(updated_by or "?")),
         )
+    if was == SINK_NONE and (normalised.get("alerts_sink") or was) != SINK_NONE:
+        _requeue_undelivered(conn)
     return normalised
+
+
+def _requeue_undelivered(conn: sqlite3.Connection) -> int:
+    """Make everything that is open today sendable again (DDIAG-4).
+
+    On the vendor default every finding still gets an `alert_log` row, ok=0
+    "no sink configured", deliberately: the page has to be able to answer
+    "why was nobody told". But that row is ALSO what `_is_open` and the dedup
+    window read, so the day an admin finally configures SMTP every warn that
+    was already open counted as said, and would not be sent again until it had
+    cleared and come back - on the one day the owner is most likely to be
+    watching for a first message. 17 of the registry's kinds are warns.
+
+    Those rows are re-filed under `<kind>.undelivered` instead of deleted:
+    they stay on WHAT WAS SENT, where they are the honest record of a period
+    with no channel, but they no longer make a subject look raised. The next
+    scan therefore re-raises every open subject with a real sink behind it.
+
+    Best effort by design - a database an older build migrated may have no
+    `alert_log` at all, and a settings save must not fail on the bookkeeping
+    about it. Returns how many rows were moved.
+    """
+    try:
+        cur = conn.execute(
+            "UPDATE alert_log SET kind = kind || ? "
+            "WHERE ok = 0 AND detail = ? AND kind NOT LIKE ?",
+            (UNDELIVERED_SUFFIX, NO_SINK_DETAIL, "%" + UNDELIVERED_SUFFIX))
+    except sqlite3.Error:
+        log.exception("alerts: could not re-open what was never delivered")
+        return 0
+    moved = int(cur.rowcount or 0)
+    if moved:
+        log.info("alerts: a sink was configured; %d finding(s) that were "
+                 "never delivered will be raised again on the next check", moved)
+    return moved
 
 
 # ------------------------------------------------------------ the password
@@ -390,6 +505,56 @@ def settings_view(conn: sqlite3.Connection, settings: Any) -> dict[str, Any]:
         "timezone": timezone_name(conn),
     }
 
+def sink_deliverable(conn: sqlite3.Connection, now: str = "") -> tuple[bool, str]:
+    """Would anything this server finds right now actually reach a person?
+
+    DDIAG-16 / SYS-1 (2026-09-04). The one answer three callers share: the
+    `alerts_sink` protection line, invariant 15 (`alerts_deliverable`) and
+    anything later that needs the same fact. Returns (ok, one line an owner
+    can read) - never a code, because every caller of this renders the string
+    straight to a person.
+
+    Green needs BOTH halves. A sink that was configured once and has
+    delivered nothing for a month is the same hole as no sink at all, and it
+    is the more dangerous of the two because it feels safe.
+
+    Raises `sqlite3.Error` if the ledger cannot be read at all, and
+    ValueError/TypeError on a timestamp it cannot parse. That is not a False:
+    a caller that cannot ask must render "not checked", never "no". The two
+    callers today catch it and do exactly that.
+    """
+    now = now or db.utcnow_iso()
+    sink = get_settings(conn).get("alerts_sink") or SINK_NONE
+    if sink == SINK_NONE:
+        return False, ("no mail server and no webhook is set, so nothing this "
+                       "server finds is ever sent to anybody")
+    ok_row = conn.execute(
+        "SELECT at FROM alert_log WHERE ok = 1 ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    last_ok = str(ok_row["at"]) if ok_row else ""
+    bad_row = conn.execute(
+        "SELECT at, detail FROM alert_log WHERE ok = 0 AND detail <> ? "
+        "ORDER BY id DESC LIMIT 1", (NO_SINK_DETAIL,)
+    ).fetchone()
+    # A row recorded while this site had no sink is not evidence about the
+    # channel: it is the record of the setting it has just left behind.
+    if not last_ok:
+        if bad_row:
+            return False, (f"the {sink} channel is set up and has never "
+                           f"managed to send anything: "
+                           f"{str(bad_row['detail'] or '')[:120]}")
+        return False, (f"the {sink} channel is set up but nothing has ever "
+                       f"been sent through it")
+    if bad_row and str(bad_row["at"] or "") > last_ok:
+        return False, (f"the last message this server tried to send did not "
+                       f"go out: {str(bad_row['detail'] or '')[:120]}")
+    age = db.age_seconds(last_ok, now)
+    if age > SEND_EVIDENCE_MAX_AGE_SECONDS:
+        return False, (f"nothing has been delivered through the {sink} "
+                       f"channel since {last_ok[:10]}")
+    return True, (f"the {sink} channel delivered something "
+                  f"{int(max(0.0, age) // 3600)} hour(s) ago")
+
 
 # ----------------------------------------------------------------- the clock
 
@@ -498,6 +663,87 @@ def weekly_due(conn: sqlite3.Connection, now: str) -> bool:
     return last_dt < slot
 
 
+def heartbeat_due(conn: sqlite3.Connection, now: str) -> bool:
+    """Whether today's proof of life is owed (DDIAG-17, 2026-09-04).
+
+    ONE PER CALENDAR DAY in the site's own zone, and the comparison is the
+    DATE of the last heartbeat row against today's - not "24 hours since the
+    last one", which drifts an hour later every day until it lands in the
+    middle of the night. Durable like `weekly_due`: the ledger decides, so a
+    container replaced four times before lunch still sends one.
+
+    Off unless a sink is set. A heartbeat that cannot be delivered is not a
+    heartbeat, and recording one every cycle on a site with no sink would
+    fill the ledger with the fact that it has no sink.
+    """
+    values = get_settings(conn)
+    if (values.get("alerts_heartbeat") or "0") != "1":
+        return False
+    if (values.get("alerts_sink") or SINK_NONE) == SINK_NONE:
+        return False
+    zone, _name = _zone_or_utc(conn)
+    try:
+        today = db.parse_iso(now).astimezone(zone).date()
+    except (ValueError, TypeError):
+        return False
+    last = db.last_alert_at(conn, KIND_HEARTBEAT, ok_only=False)
+    if not last:
+        return True
+    try:
+        return db.parse_iso(last).astimezone(zone).date() < today
+    except (ValueError, TypeError):
+        # The failure direction of a liveness beat is to send: silence is
+        # what this feature exists to make meaningful.
+        return True
+
+
+def _machine_count(conn: sqlite3.Connection) -> int:
+    """How many computers this server knows about. `_rows`' rule: a database
+    an older build migrated has no `machines` table, and that reads as none
+    rather than as an exception inside a delivery."""
+    rows = _rows(conn, "SELECT COUNT(*) AS n FROM machines")
+    return int(rows[0]["n"] or 0) if rows else 0
+
+
+def compose_heartbeat(
+    conn: sqlite3.Connection, counts: Mapping[str, int],
+) -> tuple[str, str]:
+    """The daily "still here" message (DDIAG-17).
+
+    Every alert in this product is composed and sent BY the thing being
+    watched, so a container that is off, a collector past its restart limit,
+    a NAS that is powered down and a healthy fleet all produce the same
+    experience: no mail. This is the one message whose ABSENCE is the
+    information, which is why the body says so in the body: an owner who
+    deletes these unread still learns the rule from the one that stopped.
+
+    The counts are the ones `run_cycle` already has. Nothing is measured here.
+    """
+    machines = _machine_count(conn)
+    errors = int(counts.get(SEV_ERROR) or 0)
+    warns = int(counts.get(SEV_WARN) or 0)
+    state = "all quiet" if not errors else "still here"
+    subject = (f"CC Sync: {state} - {machines} computer(s), "
+               f"{errors} problem(s)")
+    body = [
+        subject,
+        "",
+        "This is the daily proof that the CC Sync server is running and can "
+        "still send you mail.",
+        "IF THESE STOP ARRIVING, THE SERVER ITSELF IS DOWN. Nothing else "
+        "tells you that: an alarm system that only speaks when something is "
+        "wrong sounds exactly the same switched off.",
+        "",
+        f"Computers known to this server: {machines}",
+        f"Problems open right now: {errors}",
+        f"Things to look at: {warns}",
+        "",
+        "Turn this off on the dashboard: SETTINGS, ALERTS, DAILY 'STILL "
+        "HERE' MESSAGE.",
+    ]
+    return subject, "\n".join(body) + "\n"
+
+
 # ---------------------------------------------------------------- the phrasing
 
 def _age_words(stamp: Any, now: str) -> str:
@@ -555,8 +801,16 @@ def _lane_words(entry: Mapping[str, Any]) -> str:
 Finding = dict            # {"subject", "diagnosis", "fix", "detail"}
 
 
-def _f(subject: str, diagnosis: str, fix: str, detail: str = "") -> Finding:
-    return {"subject": subject, "diagnosis": diagnosis, "fix": fix, "detail": detail}
+def _f(subject: str, diagnosis: str, fix: str, detail: str = "",
+       *, repeat: bool = True) -> Finding:
+    """One finding. `repeat=False` (DDIAG-3, 2026-09-04) says "still true,
+    still worth showing, but do not mail it again while it stays true" - the
+    warn repeat rule on a finding an error kind produced. It is NOT the same
+    as dropping the finding: a subject that leaves the scan is declared
+    RECOVERED, and "this has cleared, no action is needed" about a computer
+    that has been dead for a fortnight is a worse lie than the daily mail."""
+    return {"subject": subject, "diagnosis": diagnosis, "fix": fix,
+            "detail": detail, "repeat": repeat}
 
 
 @dataclass(frozen=True)
@@ -590,7 +844,7 @@ class Ctx:
     """
 
     def __init__(self, conn: sqlite3.Connection, settings: Any, now: str) -> None:
-        from .api import build_editors_view
+        from .api import YTDLP_META_PREFIX, build_editors_view
 
         self.conn = conn
         self.settings = settings
@@ -612,6 +866,34 @@ class Ctx:
             self.base_only: set[str] = db.base_only_editors(conn)
         except sqlite3.Error:
             self.base_only = set()
+        # What the four optional mounts decided at boot (DDIAG-7's registry).
+        # A module global rather than app state, because this runs on the
+        # collector thread with no app object in hand.
+        self.mounts: dict[str, tuple[str, str]] = mount_status.snapshot()
+        # REL-6 / REL-3: the release channel's adoption picture, one read for
+        # the two checks that ask about it. `channels: []` on a database that
+        # has published nothing, which is not a fault.
+        try:
+            self.rollout: dict[str, Any] = db.rollout_status(conn, now=now)
+        except sqlite3.Error:
+            log.debug("alerts: could not read the rollout picture", exc_info=True)
+            self.rollout = {"generated_at": now, "channels": []}
+        # CYT-7: each computer's yt-dlp verdict, keyed "<editor>/<machine>",
+        # as api._store_ytdlp_state filed it. Absent means that computer has
+        # said nothing about yt-dlp, which must not read as "it is fine".
+        self.ytdlp: dict[str, Any] = {}
+        for row in _rows(conn, "SELECT key, value FROM meta WHERE key LIKE ?",
+                         (f"{YTDLP_META_PREFIX}%",)):
+            try:
+                self.ytdlp[str(row["key"])[len(YTDLP_META_PREFIX):]] = json.loads(
+                    row["value"])
+            except (ValueError, TypeError):
+                continue
+        # YTWEB-2: the /ytdl stack's own health, in process, or None when
+        # this dashboard is not serving it. Gathered ONCE for the five checks
+        # that read it, and side-effect free by contract (no probe, no
+        # database, no subprocess).
+        self.ytdl: dict[str, Any] | None = _ytdl_health(self.mounts)
         # Machines a more specific kind has already named, so the catch-all
         # ("red for an hour and we cannot say why") does not repeat them.
         self.named: set[str] = set()
@@ -637,6 +919,81 @@ def _rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[Any]:
         return list(conn.execute(sql, params))
     except sqlite3.Error:
         return []
+
+
+def _ytdl_health(mounts: Mapping[str, tuple[str, str]]) -> dict[str, Any] | None:
+    """The /ytdl stack's health signals, or None when it is not serving.
+
+    YTWEB-2 (2026-09-04). `ytdl.health_snapshot` is the published way in and
+    it takes the app object, because the mount records its verdict on
+    `app.state`. THERE IS NO APP HERE: the scan runs on the collector thread
+    and from `/api/v1/health`'s handler, so the status comes from
+    `mount_status` (the module-level registry DDIAG-7 added for exactly this
+    class of reader) and is handed to that function on a stand-in carrying
+    the one attribute it reads. The alternative was a second copy of its
+    sys.modules lookup here, which would drift.
+
+    None on any failure: "we could not ask" and "we asked and it is fine"
+    are different answers, and every check below is written to say the first
+    one by reporting nothing rather than by inventing a green.
+    """
+    status = (mounts.get("ytdl") or ("", ""))[0]
+    if not status:
+        return None
+    try:
+        from types import SimpleNamespace
+
+        from . import ytdl as ytdl_mount
+
+        return ytdl_mount.health_snapshot(
+            SimpleNamespace(state=SimpleNamespace(ytdl_status=status)))
+    except Exception:                                               # noqa: BLE001
+        log.debug("alerts: could not read the ytdl health snapshot", exc_info=True)
+        return None
+
+
+def _sqlite_ro(path: Any) -> sqlite3.Connection | None:
+    """A READ-ONLY connection to another component's database, or None.
+
+    BROLL-2. `broll.db` and `client_shares.db` are not this dashboard's
+    database and are held open read-write by the mounted app, so the two
+    checks that read them open their own connection, ask one indexed
+    question and close it. Read-only at the URI level rather than by
+    convention: nothing in a diagnostic may write to a customer's index, and
+    a b-roll checkout whose file is missing, locked or newer than this code
+    is "could not ask", which the callers report as no finding.
+    """
+    try:
+        if not path or not Path(str(path)).exists():
+            return None
+        conn = sqlite3.connect(f"file:{Path(str(path)).as_posix()}?mode=ro",
+                               uri=True, timeout=1.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+    except (sqlite3.Error, OSError, ValueError):
+        log.debug("alerts: could not open %s read-only", path, exc_info=True)
+        return None
+
+
+def _broll_paths() -> tuple[Any, Any]:
+    """(broll.db, client_shares.db) from the mounted b-roll app's own config,
+    or (None, None). `sys.modules` only: importing the b-roll tree inside a
+    collector cycle on a site that does not have it is the one thing the
+    mount's tri-state exists to avoid."""
+    config = sys.modules.get("app.config")
+    if config is None:
+        return None, None
+    try:
+        return config.get_db_path(), config.get_data_root() / "client_shares.db"
+    except Exception:                                               # noqa: BLE001
+        return None, None
+
+
+def _broll_mounted(ctx: "Ctx") -> bool:
+    """Is the b-roll app serving here at all? Its checks are silent when it
+    is not: a dashboard with no b-roll mount is a supported deployment, and
+    the mount's own absence is reported once by `feature_not_mounted`."""
+    return (ctx.mounts.get("broll") or ("", ""))[0] in ("mounted", "degraded")
 
 
 # --------------------------------------------------------------- the checks
@@ -746,6 +1103,13 @@ def _check_silent(ctx: Ctx) -> list[Finding]:
         if e.get("received_at") and (age is None or age < SILENT_SECONDS):
             continue
         who = ctx.name(_who(e))
+        # DDIAG-3 (2026-09-04): past the give-up this is said once and not
+        # again while it stays true. A fortnight of silence is not an outage
+        # anybody is going to act on this morning, and 21 identical mails
+        # about a laptop that was retired is how an owner learns to filter
+        # this sender. It stays OPEN on the page and becomes the standing
+        # `machine_forgotten` notice on the home panel.
+        given_up = age is not None and age > SILENT_GIVE_UP_DAYS * 86400
         out.append(_f(
             who,
             f"{who} has not been in touch since "
@@ -753,8 +1117,10 @@ def _check_silent(ctx: Ctx) -> list[Finding]:
             f"dashboard shows for that computer is frozen at that moment, so a "
             f"green row there means nothing right now.",
             "Ask that editor to check the CC Sync tray icon is running and "
-            "that the computer is on and online.",
-            f"last known state: {_lane_words(e)}"))
+            "that the computer is on and online. If that computer is gone for "
+            "good, open FLEET and press [ FORGET ] on its row so this stops.",
+            f"last known state: {_lane_words(e)}",
+            repeat=not given_up))
     return out
 
 
@@ -1561,6 +1927,602 @@ def _check_protection_unverifiable(ctx: Ctx) -> list[Finding]:
     return _protection_findings(ctx, (protection.NOT_CHECKED, protection.CHECK_FAILED))
 
 
+# ------------------------------------------------- the fleet job queue (DDIAG-2)
+#
+# The queue's own module says it: "THE FAILURE MODE OF A SCHEDULER IS
+# INVISIBLE: a scheduler that quietly assigns nothing looks exactly like a
+# fleet with nothing to do." Until 2026-09-04 the whole of it was diagnosed on
+# /admin/jobs and nowhere else, and nothing on the home page links there.
+
+def _queued_head(ctx: Ctx) -> Any:
+    """The oldest QUEUED job, or None. `_rows`' rule: a database migrated by a
+    build that predates the jobs table reads as an empty queue."""
+    rows = _rows(ctx.conn,
+                 "SELECT id, kind, created_at FROM jobs WHERE state='queued' "
+                 "ORDER BY id ASC LIMIT 1")
+    return rows[0] if rows else None
+
+
+def _check_jobs_starved(ctx: Ctx) -> list[Finding]:
+    """Work queued for six hours that no amount of waiting will place.
+
+    `jobs.explain` is asked about ONE job, the oldest, and only once the six
+    hours are up: it reads the whole fleet's capabilities, and the Ctx rule
+    forbids doing that per row. The three reason codes below are the ones a
+    person has to act on. `all_busy`, `idle_wait`, `fleet_cap` and
+    `cooling_down` are deliberately NOT here: each of them is the scheduler
+    working, and a queue that empties itself tonight is not a fault.
+    """
+    head = _queued_head(ctx)
+    if head is None:
+        return []
+    age = _age(head["created_at"], ctx.now)
+    if age is None or age < JOBS_STARVED_SECONDS:
+        return []
+    from . import jobs as jobs_mod
+
+    info = jobs_mod.explain(ctx.conn, int(head["id"]), now=ctx.now) or {}
+    code = str(info.get("reason_code") or "")
+    meaning = {
+        jobs_mod.REASON_NO_CAPABLE:
+            "no computer in the fleet can do this kind of work",
+        jobs_mod.REASON_NOT_ALLOWED:
+            "every computer that could do it has this kind of work switched off",
+        jobs_mod.REASON_HALTED:
+            "syncing is halted, and a halted computer takes no jobs",
+    }.get(code)
+    if meaning is None:
+        return []
+    depth = _rows(ctx.conn, "SELECT COUNT(*) AS n FROM jobs WHERE state='queued'")
+    queued = int(depth[0]["n"]) if depth else 1
+    return [_f(
+        "the fleet queue",
+        f"{queued} job(s) have been waiting for the fleet to pick them up, the "
+        f"oldest for {_duration_words(age)}, and {meaning}. Nothing is going to "
+        f"take them: this queue will not empty by itself.",
+        "Open Settings, JOBS: the WHY line under each job names the computer "
+        "that would have to change.",
+        f"job #{head['id']} kind={head['kind']} reason={code} queued={queued}")]
+
+
+def _check_jobs_abandoned(ctx: Ctx) -> list[Finding]:
+    """Jobs the fleet spent its whole retry budget on and gave up.
+
+    One finding for the window, not one per job: a fleet that abandons twelve
+    whisper jobs has one broken computer, and twelve messages about it is the
+    shape MAX_FINDINGS_PER_KIND exists to prevent.
+    """
+    since = _iso_minus(ctx.now, JOBS_ABANDONED_HOURS * 3600)
+    rows = _rows(ctx.conn,
+                 "SELECT id, kind, last_error FROM jobs WHERE state='abandoned' "
+                 "AND updated_at >= ? ORDER BY id DESC LIMIT 40", (since,))
+    if not rows:
+        return []
+    kinds = ", ".join(sorted({str(r["kind"]) for r in rows}))
+    first_error = next((str(r["last_error"]) for r in rows if r["last_error"]), "")
+    ids = ",".join(str(r["id"]) for r in rows[:10])
+    return [_f(
+        "the fleet queue",
+        f"The fleet gave up on {len(rows)} job(s) in the last day ({kinds}). "
+        f"Whatever they were for did not happen: a proxy was not made, a "
+        f"transcript was not written, and nothing anywhere else says so.",
+        "Settings, JOBS, [ SHOW FINISHED ], then [ TRY AGAIN ] once the "
+        "computer that failed it is fixed.",
+        f"ids={ids} last_error={first_error[:120]}")]
+
+
+def _check_jobs_pinned_no_executor(ctx: Ctx) -> list[Finding]:
+    """A job pinned to this dashboard that this dashboard cannot run (DDIAG-6).
+
+    Pinning is the last resort: the fleet spent its retry budget, so the job
+    was handed to the dashboard's own Timeline Cards worker. That worker
+    exists only while /cards is mounted, and the mount fails to `absent` for
+    ordinary reasons an image update causes. A container that goes down
+    mid-encode and comes back without it leaves rows nothing will ever return
+    again, on no lease and with no expiry, while the jobs page still says the
+    dashboard is running them.
+
+    Two shapes, both read from the queue itself rather than from an executor
+    object this thread cannot reach: pinned work with no Timeline Cards mount
+    behind it at all, and a row this container marked as in hand whose
+    heartbeat stopped an hour ago.
+    """
+    rows = _rows(ctx.conn,
+                 "SELECT id, kind, claimed_machine, heartbeat_at, updated_at "
+                 "FROM jobs WHERE state='pinned' LIMIT 40")
+    if not rows:
+        return []
+    out: list[Finding] = []
+    cards = (ctx.mounts.get("cards") or ("", ""))[0]
+    if cards and cards != "mounted":
+        out.append(_f(
+            "the dashboard's own worker",
+            f"{len(rows)} job(s) were pinned to this server because no computer "
+            f"in the fleet could finish them, and the Timeline Cards worker "
+            f"that was going to run them is not loaded here any more. They "
+            f"will wait for ever, and the jobs page says they are in hand.",
+            "Check the container's bind mounts and restart the dashboard "
+            "(docs/DOCKER.md), then Settings, JOBS to see them move.",
+            f"cards mount={cards} pinned={len(rows)}"))
+    stale = [r for r in rows
+             if str(r["claimed_machine"] or "")
+             and (_age(r["heartbeat_at"] or r["updated_at"], ctx.now) or 0.0)
+             > PINNED_STALE_SECONDS]
+    if stale:
+        ids = ",".join(str(r["id"]) for r in stale[:10])
+        out.append(_f(
+            "a stranded pinned job",
+            f"{len(stale)} job(s) are marked as being run by this server right "
+            f"now, and nothing has reported progress on them for over an hour. "
+            f"That is what a container restarted mid-encode leaves behind, and "
+            f"nothing releases them on its own.",
+            "Settings, JOBS, then [ CANCEL ] on each one and queue it again.",
+            f"ids={ids}"))
+    return out
+
+
+# ----------------------------------------------------- the channel (REL-3/6/13)
+
+def _check_upgrade_refused(ctx: Ctx) -> list[Finding]:
+    """A computer that REFUSES the offer, rather than failing to install it.
+
+    REL-3. A refusal happens at receipt (a signature this build will not
+    trust, a version below its downgrade floor, plain HTTP to a public host),
+    so no attempt is ever made: `upgrade_attempts` stays 0 and the machine
+    renders identically to one that has simply not reported yet. It is
+    strictly worse than a merely outdated computer, because no button on the
+    page can fix it.
+    """
+    out = []
+    for r in _rows(ctx.conn,
+                   "SELECT editor_username, machine, upgrade_refused_version, "
+                   "upgrade_refused_reason, upgrade_refused_at FROM machine_state "
+                   "WHERE upgrade_refused_version IS NOT NULL "
+                   "AND upgrade_refused_version != '' LIMIT 40"):
+        who = ctx.name(f"{r['editor_username']}/{r['machine']}")
+        reason = str(r["upgrade_refused_reason"] or "it did not say why")
+        out.append(_f(
+            who,
+            f"{who} is turning down every update it is offered. It refused "
+            f"{r['upgrade_refused_version']} "
+            f"({_age_words(r['upgrade_refused_at'], ctx.now)}) and gave this "
+            f"reason: {reason}. It never downloaded anything, so it will keep "
+            f"refusing, and pressing the update button on this dashboard "
+            f"cannot change that.",
+            "Settings, PACKAGES: publish a build that computer will accept, or "
+            "install it there by hand from the INSTALLER link. [ UPDATE NOW ] "
+            "cannot fix a refusal.",
+            f"refused={r['upgrade_refused_version']} "
+            f"at={r['upgrade_refused_at']}"))
+    return out
+
+
+def _check_rollout_stalled(ctx: Ctx) -> list[Finding]:
+    """A build that has been current for two days and is not being taken.
+
+    REL-6. `versions_behind` needs a computer to be THREE published builds
+    behind, so a fleet that stopped updating after one release is silent for
+    months. This asks the other question: not "how far behind is that
+    computer" but "did the thing we shipped on Tuesday actually arrive".
+
+    A channel whose `made_current_at` is NULL is a build made current before
+    the column existed: the answer is "cannot tell", and it is silence here
+    rather than a rollout dated to a moment nobody was ever offered anything.
+    Only computers that have REPORTED inside the window count: one that is
+    switched off is not refusing an update, it is switched off, and
+    `machine_silent` is the kind that owns that.
+    """
+    out = []
+    for channel in ctx.rollout.get("channels") or []:
+        made = channel.get("made_current_at")
+        age = _age(made, ctx.now) if made else None
+        if age is None or age < ROLLOUT_STALLED_SECONDS:
+            continue
+        live = [b for b in channel.get("behind") or []
+                if (_age(b.get("last_seen"), ctx.now)
+                    or (ROLLOUT_STALLED_SECONDS + 1)) <= ROLLOUT_STALLED_SECONDS]
+        if not live:
+            continue
+        names = ", ".join(f"{b['editor']}/{b['machine']} on {b['version']}"
+                          for b in live[:6])
+        out.append(_f(
+            f"{channel.get('platform') or '?'} companion "
+            f"{channel.get('current_version')}",
+            f"{channel.get('current_version')} has been the current CC Sync "
+            f"build for {channel.get('platform')} computers since "
+            f"{_age_words(made, ctx.now)}, and "
+            f"{channel.get('machines_on_current')} of "
+            f"{channel.get('machines_total')} have taken it. {len(live)} "
+            f"computer(s) have reported since then and are still on an older "
+            f"build: {names}.",
+            "Settings, PACKAGES, then [ UPDATE NOW ] on each computer that is "
+            "behind. One that is refusing the offer is reported separately.",
+            f"platform={channel.get('platform')} "
+            f"reverts={channel.get('reverts')} "
+            f"failed_attempts={channel.get('failed_attempts')}"))
+    return out
+
+
+def _check_platform_channel_stale(ctx: Ctx) -> list[Finding]:
+    """One platform's build left behind by the other's (REL-13).
+
+    A macOS bundle cannot be cross-built from Windows, so every ship prints a
+    yellow advisory naming the two Mac commands and then exits 0. That signal
+    exists twice per ship, in a terminal's scrollback, and Mac builds have
+    been owed across many ships (one Mac sat on 0.9.2 for weeks). Nothing
+    durable recorded it, so nothing reminded anybody on a day they were not
+    shipping.
+
+    Two measures, because the first one only works on builds this dashboard
+    stamped: DAYS since each channel was made current, and, when either stamp
+    is missing, how many builds the leading platform has published that the
+    lagging one's current version is behind.
+    """
+    channels = [c for c in (ctx.rollout.get("channels") or [])
+                if c.get("current_version")]
+    if len(channels) < 2:
+        return []
+    published: dict[str, list[tuple]] = {}
+    for r in _rows(ctx.conn,
+                   "SELECT platform, version FROM companion_packages "
+                   "WHERE kind='companion' "
+                   "AND (retracted_at IS NULL OR retracted_at='')"):
+        tup = db.version_tuple(r["version"])
+        if tup:
+            published.setdefault(str(r["platform"]), []).append(tup)
+    leader = max(channels,
+                 key=lambda c: db.version_tuple(c["current_version"]) or ())
+    out = []
+    for channel in channels:
+        if channel is leader:
+            continue
+        mine = db.version_tuple(channel["current_version"]) or ()
+        theirs = db.version_tuple(leader["current_version"]) or ()
+        if not mine or not theirs or mine >= theirs:
+            continue
+        behind = len([v for v in published.get(str(leader.get("platform")), [])
+                      if v > mine])
+        stamp_gap = None
+        if channel.get("made_current_at") and leader.get("made_current_at"):
+            mine_age = _age(channel["made_current_at"], ctx.now)
+            their_age = _age(leader["made_current_at"], ctx.now)
+            if mine_age is not None and their_age is not None:
+                stamp_gap = mine_age - their_age
+        if stamp_gap is not None:
+            if stamp_gap < PLATFORM_CHANNEL_STALE_SECONDS:
+                continue
+            evidence = (f"it was published {_duration_words(stamp_gap)} before "
+                        f"the {leader.get('platform')} one")
+        else:
+            if behind <= PLATFORM_CHANNEL_STALE_BUILDS:
+                continue
+            evidence = f"it is {behind} builds behind"
+        out.append(_f(
+            f"the {channel.get('platform')} channel",
+            f"The current CC Sync build for {channel.get('platform')} "
+            f"computers is {channel['current_version']} and {evidence}. "
+            f"{leader.get('platform')} computers are on "
+            f"{leader['current_version']}. Every fix since then is missing on "
+            f"that half of the fleet, and nothing will offer it to them until "
+            f"somebody builds it.",
+            "On a Mac, in the repo: git pull && ./tools/release_macos.sh "
+            "--publish --make-current, then ./tools/build_onboard_macos.sh "
+            "--publish --make-current. PyInstaller cannot build a macOS "
+            "bundle on Windows, so no ship from the base rig can do this.",
+            f"{channel.get('platform')}={channel['current_version']} "
+            f"{leader.get('platform')}={leader['current_version']} "
+            f"behind={behind}"))
+    return out
+
+
+# ------------------------------------------- each computer's own tools (CYT-7)
+
+def _check_ytdlp_stale(ctx: Ctx) -> list[Finding]:
+    """A computer whose yt-dlp is old and could not update itself.
+
+    CYT-7. The max-age rule publishes this verdict with `ok=True` (the binary
+    can still very probably download), so `capabilities()` never surfaced it,
+    the browser toast never fired and the message went to one INFO line a day
+    in that editor's companion.log. Only computers the fleet view still has
+    are looked at: a stored verdict for a forgotten computer alarms nobody.
+    """
+    out = []
+    for e in ctx.editors:
+        record = ctx.ytdlp.get(_who(e)) or {}
+        if not record.get("stale"):
+            continue
+        who = ctx.name(_who(e))
+        message = str(record.get("message") or "").strip() or (
+            "YouTube breaks these tools deliberately, so downloads on that "
+            "computer will start failing.")
+        out.append(_f(
+            who,
+            f"The YouTube downloader on {who} is out of date and could not "
+            f"update itself. {message}",
+            "Ask that editor to quit CC Sync from the tray and start it again "
+            "while they are online: it updates the downloader at startup. If "
+            "it keeps happening, send us their companion log.",
+            f"version={record.get('version')} age_days={record.get('age_days')} "
+            f"checked={record.get('checked_at')}"))
+    return out
+
+
+def _check_ytdlp_failed(ctx: Ctx) -> list[Finding]:
+    """No usable yt-dlp at all on that computer: a different alarm from stale.
+
+    The companion keeps `failed` and `stale` apart on purpose (one is a
+    binary that is old, the other is a binary that is not there), and folding
+    them here would cost the difference between "it will start failing" and
+    "it fails now".
+    """
+    out = []
+    for e in ctx.editors:
+        record = ctx.ytdlp.get(_who(e)) or {}
+        if str(record.get("action") or "") != "failed":
+            continue
+        who = ctx.name(_who(e))
+        message = str(record.get("message") or "").strip() or (
+            "The download tool could not be installed or updated there.")
+        out.append(_f(
+            who,
+            f"{who} has no working YouTube downloader. {message} Every YouTube "
+            f"download that computer is asked to do will fail, and the request "
+            f"goes back to the server to do instead.",
+            "Ask that editor to quit CC Sync from the tray and start it again "
+            "while they are online. If it still fails, that computer's "
+            "antivirus or its network is blocking the download tool.",
+            f"version={record.get('version')} "
+            f"checked={record.get('checked_at')}"))
+    return out
+
+
+def _check_loopback_down(ctx: Ctx) -> list[Finding]:
+    """"Send to Resolve" cannot work on that computer (CMEDIA-3).
+
+    The 8899 loopback is the one companion service a WEB PAGE depends on.
+    When the port is held (the absorbed standalone BRoll Companion, a
+    leftover process after a crash) the companion logged one warning and ran
+    happily for ever with no listener, and what the editor saw was the b-roll
+    page saying the tray app is not running: wrong in its first clause, and
+    it sends them to restart something that is already running.
+
+    `enabled` false is a choice, not a fault, and all-NULL is a companion too
+    old to say. Only "the feature is on and the port is not ours" is a
+    finding.
+    """
+    out = []
+    for e in ctx.editors:
+        g = ctx.guard(e)
+        if not g.get("loopback_enabled") or g.get("loopback_bound") is None:
+            continue
+        if g.get("loopback_bound"):
+            continue
+        who = ctx.name(_who(e))
+        error = str(g.get("loopback_error") or "the port could not be taken")
+        out.append(_f(
+            who,
+            f"The b-roll and music pages cannot send anything to Resolve on "
+            f"{who}: the port they talk to it on is held by something else, "
+            f"since {_age_words(g.get('loopback_since'), ctx.now)}. The page "
+            f"tells that editor CC Sync is not running, which is not what is "
+            f"wrong.",
+            "Quit whatever holds port 8899 on that computer (an old BRoll "
+            "Companion, a leftover process), then restart the CC Sync tray.",
+            f"port={g.get('loopback_port')} error={error[:200]}"))
+    return out
+
+
+# ----------------------------------------------- the YouTube stack (YTWEB-2/5)
+
+def _check_ytdl_worker_dead(ctx: Ctx) -> list[Finding]:
+    """The download worker thread on this server is not running.
+
+    Nothing queued will ever start, and the page shows jobs sitting at
+    "waiting" with no error on any of them.
+    """
+    snap = ctx.ytdl
+    if snap is None or snap.get("worker_alive") is not False:
+        return []
+    return [_f(
+        "the YouTube downloader",
+        "The download worker on this server is not running, so every YouTube "
+        "download anybody starts will sit in the queue for ever with no error "
+        "on it.",
+        "Restart the ccsync container on the NAS, then open the YOUTUBE page "
+        "and check the health strip is green.",
+        "worker_alive=false")]
+
+
+def _check_ytdl_downloads_failing(ctx: Ctx) -> list[Finding]:
+    """The last real download failed AND the canary agrees.
+
+    Two signals, because one is not evidence: a single failed download is
+    usually one bad video (private, age-gated, geo-blocked). The canary is a
+    known-good clip this server extracts on a timer, so a canary that failed
+    too is the downloader itself being broken. With no canary result there is
+    no finding: crying wolf on one bad URL is how a health strip stops being
+    read.
+    """
+    snap = ctx.ytdl
+    if snap is None:
+        return []
+    last = snap.get("last_download")
+    if not isinstance(last, Mapping) or last.get("ok") is not False:
+        return []
+    canary = snap.get("canary")
+    latest = canary.get("last") if isinstance(canary, Mapping) else None
+    if not isinstance(latest, Mapping) or latest.get("ok") is not False:
+        return []
+    return [_f(
+        "the YouTube downloader",
+        "Downloading from YouTube is failing on this server. The last real "
+        "download failed and so did the test clip this server fetches by "
+        "itself, which means it is the downloader rather than one bad video. "
+        "YouTube changes its site to break these tools deliberately.",
+        "Settings, then check for a dashboard update: a newer build carries a "
+        "newer download tool. Until then, editors can download on their own "
+        "computer from the YOUTUBE page.",
+        f"path={last.get('path')} error={str(last.get('error') or '')[:160]}")]
+
+
+def _check_ytdl_pot_provider(ctx: Ctx) -> list[Finding]:
+    """A PO-token sidecar that is configured and not answering.
+
+    ONLY `unreachable`. `unconfigured` is the shipped compose's normal state
+    (the pip-installed plugin is the path this deployment actually uses) and
+    `unknown` is "not asked yet"; alerting on either would be an amber pip
+    nobody can clear, which is the failure this module exists to stop
+    repeating.
+    """
+    snap = ctx.ytdl
+    if snap is None or str(snap.get("pot_provider") or "") != "unreachable":
+        return []
+    return [_f(
+        "the YouTube downloader",
+        "The helper this server uses to prove to YouTube that it is not a bot "
+        "is configured and is not answering. Downloads will be slow, and some "
+        "will come back empty.",
+        "Check the PO-token helper named by YTDL_POT_BASE_URL is running, or "
+        "unset it (docs/DOCKER.md); this server then falls back to the plugin "
+        "it installs at boot.",
+        "pot_provider=unreachable")]
+
+
+def _check_ytdl_plugin_install(ctx: Ctx) -> list[Finding]:
+    """The anti-bot plugin's BOOT INSTALL failed (YTWEB-5).
+
+    The real PO-token path on the shipped compose is a pip-installed plugin
+    on PYTHONPATH, not the sidecar `pot_provider` reports on. Its install
+    failed for days twice (CR-73: DNS not up in the first seconds; CR-84: a
+    read-only /venv), and the entire evidence was four WARNING lines in a
+    container log: what an editor saw was 1.8 MiB/s downloads and "the file
+    is empty".
+    """
+    snap = ctx.ytdl
+    if snap is None:
+        return []
+    state = snap.get("plugin_install")
+    if not isinstance(state, Mapping) or str(state.get("state") or "") != "failed":
+        return []
+    return [_f(
+        "the YouTube downloader",
+        f"The anti-bot plugin this server needs for YouTube did not install "
+        f"when the container started, after {state.get('attempts') or 0} "
+        f"attempt(s). Downloads will crawl and some will arrive empty, and "
+        f"nothing on the download page says why.",
+        "Read the container log on the NAS for the plugin install lines, then "
+        "restart the ccsync container once the network is up (docs/DOCKER.md).",
+        f"error={str(state.get('error') or '')[:200]} at={state.get('at')}")]
+
+
+def _check_ytdl_stale(ctx: Ctx) -> list[Finding]:
+    """This server's own yt-dlp is past its shelf life.
+
+    The same rule as CYT-7's per computer, on the copy in this container: it
+    is the one signal that would have shown CR-80 and CR-83 coming, and in
+    both the stale version was reported by an editor who could not download.
+    """
+    snap = ctx.ytdl
+    if snap is None or not snap.get("yt_dlp_stale"):
+        return []
+    return [_f(
+        "the YouTube downloader",
+        f"The YouTube download tool on this server is "
+        f"{snap.get('yt_dlp_age_days')} days old. YouTube breaks these tools "
+        f"deliberately, so downloads here will start failing, and the newer "
+        f"one arrives with a dashboard update.",
+        "Settings, then [ CHECK NOW ] under the dashboard update panel, and "
+        "install the build it offers.",
+        f"version={snap.get('yt_dlp_version')} "
+        f"age_days={snap.get('yt_dlp_age_days')}")]
+
+
+# --------------------------------------------------------- b-roll (BROLL-2)
+
+def _check_broll_batch_stuck(ctx: Ctx) -> list[Finding]:
+    """An ingest batch nobody has worked on for a day.
+
+    Read out of `broll.db` on its own read-only connection: it is another
+    component's database and the mounted app holds it open. Anything that
+    cannot be read is no finding rather than a fault here, because the b-roll
+    mount's own absence is reported once, by `feature_not_mounted`.
+    """
+    if not _broll_mounted(ctx):
+        return []
+    path, _shares = _broll_paths()
+    conn = _sqlite_ro(path)
+    if conn is None:
+        return []
+    try:
+        rows = list(conn.execute(
+            "SELECT uid, editor, machine, share, state, n_items, n_done, "
+            "       created_at, last_heartbeat_at "
+            "  FROM ingest_batches "
+            " WHERE state IN ('queued','claimed','running') LIMIT 40"))
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        age = _age(r["last_heartbeat_at"] or r["created_at"], ctx.now)
+        if age is None or age < BROLL_BATCH_STUCK_SECONDS:
+            continue
+        who = f"{r['editor']}/{r['machine'] or 'no computer'}"
+        out.append(_f(
+            f"b-roll batch {r['share']}",
+            f"A b-roll indexing job for {r['share']} has not moved for "
+            f"{_duration_words(age)} ({r['n_done'] or 0} of {r['n_items'] or 0} "
+            f"clips done, started by {who}). Those clips are not searchable "
+            f"and nothing is working on them.",
+            "Ask that editor to reopen the b-roll ingest panel on that "
+            "computer, or cancel the batch on the B-ROLL page.",
+            f"uid={r['uid']} state={r['state']}"))
+    return out
+
+
+def _check_broll_share_expiring(ctx: Ctx) -> list[Finding]:
+    """A client link that stops working within the week.
+
+    `client_shares.db`, deliberately NOT tables inside `broll.db`: publishing
+    the index must never be able to take a customer's client links with it,
+    and this check reads the ledger where it lives.
+    """
+    if not _broll_mounted(ctx):
+        return []
+    _index, path = _broll_paths()
+    conn = _sqlite_ro(path)
+    if conn is None:
+        return []
+    try:
+        rows = list(conn.execute(
+            "SELECT id, title, expires_at FROM client_folders "
+            " WHERE revoked_at IS NULL AND expires_at IS NOT NULL "
+            "   AND expires_at != '' LIMIT 40"))
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        # `_age` is now minus then, so an expiry still in the future is
+        # NEGATIVE. Already expired (>= 0) is not a warning: the link is gone
+        # and the client has met it.
+        left = _age(r["expires_at"], ctx.now)
+        if left is None or left > 0 or -left > BROLL_SHARE_EXPIRY_SECONDS:
+            continue
+        title = str(r["title"] or "a client folder")
+        out.append(_f(
+            f"client link: {title}",
+            f"The client link for {title} stops working in "
+            f"{_duration_words(left)}. Whoever you sent it to will get a page "
+            f"saying the link has expired, and nothing tells them who to ask.",
+            "Open B-ROLL, CLIENT FOLDERS, and either extend the expiry date or "
+            "let it lapse on purpose.",
+            f"expires_at={r['expires_at']}"))
+    return out
+
+
 def _check_red_unexplained(ctx: Ctx) -> list[Finding]:
     """The catch-all. Runs LAST, and only for machines no other check named.
 
@@ -1681,6 +2643,53 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
     AlertKind("protection_unverifiable", SEV_WARN,
               "a safety net this server cannot check",
               "safety mechanisms this server can verify", _check_protection_unverifiable),
+    # DDIAG-2 / DDIAG-6 (2026-09-04): the fleet job queue, which had no entry
+    # in any diagnosis channel at all.
+    AlertKind("jobs_starved", SEV_WARN, "work is queued and nobody is taking it",
+              "the fleet job queue", _check_jobs_starved),
+    AlertKind("jobs_abandoned", SEV_WARN, "the fleet gave up on some work",
+              "jobs the fleet abandoned", _check_jobs_abandoned),
+    AlertKind("jobs_pinned_no_executor", SEV_ERROR,
+              "a job is pinned here and nothing here can run it",
+              "pinned jobs against this dashboard's own worker",
+              _check_jobs_pinned_no_executor),
+    # REL-3 / REL-6 / REL-13 (2026-09-04): did the build we shipped actually
+    # arrive, and is one of the two platforms being left behind.
+    AlertKind("upgrade_refused", SEV_ERROR, "a computer is refusing every update",
+              "computers refusing the offer outright", _check_upgrade_refused),
+    AlertKind("rollout_stalled", SEV_WARN, "a new build is not being taken",
+              "adoption of the current build", _check_rollout_stalled),
+    AlertKind("platform_channel_stale", SEV_WARN, "one platform's build is behind",
+              "the two platforms' channels against each other",
+              _check_platform_channel_stale),
+    # CYT-7 / CMEDIA-3: the tools on each editor's own computer.
+    AlertKind("ytdlp_stale", SEV_WARN, "a computer's YouTube downloader is old",
+              "each computer's yt-dlp", _check_ytdlp_stale),
+    AlertKind("ytdlp_failed", SEV_ERROR,
+              "a computer has no working YouTube downloader",
+              "computers with no usable yt-dlp", _check_ytdlp_failed),
+    AlertKind("loopback_down", SEV_WARN,
+              "Send to Resolve cannot work on a computer",
+              "the 8899 loopback on each computer", _check_loopback_down),
+    # YTWEB-2 / YTWEB-5: the /ytdl stack on this server.
+    AlertKind("ytdl_worker_dead", SEV_ERROR, "the YouTube downloader is not running",
+              "the download worker on this server", _check_ytdl_worker_dead),
+    AlertKind("ytdl_downloads_failing", SEV_WARN, "YouTube downloads are failing",
+              "downloads on this server", _check_ytdl_downloads_failing),
+    AlertKind("ytdl_pot_provider_unreachable", SEV_WARN,
+              "the YouTube anti-bot helper is not answering",
+              "the PO-token sidecar", _check_ytdl_pot_provider),
+    AlertKind("ytdl_plugin_install_failed", SEV_WARN,
+              "the YouTube anti-bot plugin did not install",
+              "the plugin install at boot", _check_ytdl_plugin_install),
+    AlertKind("ytdl_stale", SEV_WARN, "this server's YouTube downloader is old",
+              "yt-dlp on this server", _check_ytdl_stale),
+    # BROLL-2: the b-roll platform, which had one row in this registry and it
+    # was about the SYNC drop folder.
+    AlertKind("broll_batch_stuck", SEV_WARN, "a b-roll indexing job has stopped",
+              "b-roll ingest batches", _check_broll_batch_stuck),
+    AlertKind("broll_share_expiring", SEV_WARN, "a client link is about to expire",
+              "client links near their expiry", _check_broll_share_expiring),
     AlertKind("red_unexplained", SEV_ERROR, "a computer is not syncing",
               "computers red with no specific cause", _check_red_unexplained),
 )
@@ -1927,6 +2936,24 @@ def compose_weekly(
 
     lines += _lane_bytes_section(conn)
 
+    # 3c. The fleet queue, in one line (DDIAG-2, 2026-09-04). Printed every
+    #     week including "0 queued, 0 running, 0 abandoned": the queue is
+    #     invisible on every other page an owner opens, and a line that
+    #     appeared only on bad weeks would make its absence read as good news.
+    #     `_rows`' rule, so a database with no jobs table prints nothing at
+    #     all rather than a made-up zero.
+    queue = _rows(conn, "SELECT state, COUNT(*) AS n FROM jobs GROUP BY state")
+    if queue:
+        counts = {str(r["state"]): int(r["n"]) for r in queue}
+        abandoned = _rows(
+            conn, "SELECT COUNT(*) AS n FROM jobs WHERE state='abandoned' "
+                  "AND updated_at >= ?", (week_ago,))
+        lines.append(
+            f"JOBS: {counts.get('queued', 0)} queued, "
+            f"{counts.get('running', 0)} running, "
+            f"{int(abandoned[0]['n']) if abandoned else 0} abandoned this week")
+        lines.append("")
+
     # 3b. What is protected, and what only looks protected (SYS-14, wave 5).
     #     A STANDING block, printed whether or not anything is wrong: "no
     #     snapshot schedule is configured on this NAS" has to be a line in
@@ -2136,9 +3163,9 @@ def send(
         # Recorded, not silently dropped: "we composed an alert and this site
         # has no sink" is a fact the Alerts page shows, and it is the honest
         # answer to "why did nobody get told".
-        db.record_alert(conn, kind, key, "", False, "no sink configured", now)
+        db.record_alert(conn, kind, key, "", False, NO_SINK_DETAIL, now)
         return {"ok": False, "sink": sink, "sent_to": "",
-                "detail": "no sink configured", "deduped": False}
+                "detail": NO_SINK_DETAIL, "deduped": False}
     try:
         if sink == SINK_WEBHOOK:
             url = (values.get("alerts_webhook_url") or "").strip()
@@ -2243,7 +3270,9 @@ def deliver(
         seen.add((kind, subject))
         severity = finding.get("severity", SEV_WARN)
         was_open = _is_open(conn, kind, subject)
-        if was_open and severity != SEV_ERROR:
+        # DDIAG-3: a finding may opt OUT of its kind's daily repeat while
+        # staying open. Nothing may opt in: the repeat rule is the severity's.
+        if was_open and (severity != SEV_ERROR or not finding.get("repeat", True)):
             continue
         if clock() >= deadline:
             # Left for the next pass, and NOT recorded: an alert_log row is
@@ -2356,6 +3385,19 @@ def run_cycle(
             weekly = bool(outcome["ok"])
             result["failed"] += 0 if outcome["ok"] else 1
     counts = open_counts(findings)
+    heartbeat = False
+    if heartbeat_due(conn, now):
+        # DDIAG-17 (2026-09-04). Sent through `send` like anything else, so a
+        # failure is recorded and shows on WHAT WAS SENT; dedup OFF because
+        # `heartbeat_due` IS the schedule, exactly as it is for the weekly
+        # report. It is not a registry kind, so it can never count as a
+        # problem, be recovered, or reach CURRENTLY OPEN - and it is NOT the
+        # weekly report doubling as one: a proof of life a week wide leaves
+        # six days in which "no mail" means nothing at all.
+        subject, text = compose_heartbeat(conn, counts)
+        outcome = send(conn, settings, subject, text, kind=KIND_HEARTBEAT,
+                       dedup_subject="heartbeat", now=now, dedup=False)
+        heartbeat = bool(outcome["ok"])
     # Finding 3 (resilience sweep 2026-08-28 fix pass): the LAST scan's open
     # counts, so the topbar chip (ui._alert_counts_safe) can show a number on
     # every page without re-running forty checks per render. Written here,
@@ -2383,8 +3425,8 @@ def run_cycle(
         note = f"{result['failed']} alert(s) could not be delivered"
     elif counts.get(SEV_ERROR):
         note = f"{counts[SEV_ERROR]} problem(s) open"
-    return {**result, "weekly": weekly, "open": counts, "note": note,
-            "sink": sink}
+    return {**result, "weekly": weekly, "heartbeat": heartbeat,
+            "open": counts, "note": note, "sink": sink}
 
 
 def _record_delivery_budget(

@@ -71,6 +71,17 @@
         <option value="0" {% if alerts_settings.alerts_weekly != "1" %}selected{% endif %}>off</option>
       </select>
     </label>
+    {# DDIAG-17 (2026-09-04): the dead-man's beat. Every other message here is
+       composed and sent BY the thing being watched, so a container that is off
+       and a fleet with nothing wrong look identical from the mailbox. This is
+       the one message whose ABSENCE is the information, which is why the note
+       beside it says so on the page and not only in the body. #}
+    <label title="One short message a day while a channel is set up. It is not the weekly report: a proof of life a week wide leaves six days in which no mail means nothing.">DAILY "STILL HERE" MESSAGE<br>
+      <select name="alerts_heartbeat">
+        <option value="1" {% if alerts_settings.alerts_heartbeat == "1" %}selected{% endif %}>on (one a day)</option>
+        <option value="0" {% if alerts_settings.alerts_heartbeat != "1" %}selected{% endif %}>off</option>
+      </select>
+      <span class="muted">If these stop arriving, the server itself is down.</span></label>
 
     <div class="side-head" style="margin-top:0.8rem">[ MAIL ]</div>
     <label>SMTP HOST<br><input type="text" name="alerts_smtp_host" value="{{ alerts_settings.alerts_smtp_host }}"></label>

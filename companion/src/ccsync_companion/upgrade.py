@@ -453,12 +453,18 @@ def mark_revert_announced(path: Path) -> None:
     _write_json(path, record)
 
 
-def upgrade_report(record: Any, starts_this_version: Any = 1) -> dict:
+def upgrade_report(record: Any, starts_this_version: Any = 1,
+                   refusal: Any = None) -> dict:
     """The `sync_guard.upgrade` block (REL-8 telemetry, REL-2's revert).
 
     Always sent, including the all-zero shape: "this machine has never failed
     an update" is an answer the fleet grid needs, and an absent section would
-    be indistinguishable from a companion too old to send one."""
+    be indistinguishable from a companion too old to send one.
+
+    `refusal` is UpgradeManager.refusal() (REL-3): a refused offer never
+    becomes an attempt, so the three fields below are the only trace of a
+    machine that cannot take any build at all. Null, never absent, for the
+    same reason the counters above are always sent."""
     record = record if isinstance(record, dict) else {}
     try:
         attempts = int(record.get("attempts") or 0)
@@ -469,6 +475,7 @@ def upgrade_report(record: Any, starts_this_version: Any = 1) -> dict:
     except (TypeError, ValueError):
         starts = 1
     last_at = record.get("last_attempt_at")
+    refused = refusal if isinstance(refusal, dict) else {}
     return {
         "version": str(record.get("version") or "") or None,
         "attempts": attempts,
@@ -478,6 +485,9 @@ def upgrade_report(record: Any, starts_this_version: Any = 1) -> dict:
                             and not isinstance(last_at, bool) else None),
         "reverted_from": str(record.get("reverted_from") or "") or None,
         "starts_this_version": starts,
+        "refused_version": str(refused.get("version") or "") or None,
+        "refused_reason": str(refused.get("reason") or "") or None,
+        "refused_at": str(refused.get("at") or "") or None,
     }
 
 
@@ -1220,6 +1230,14 @@ class UpgradeManager:
         # wrong-arch binary (exec-failed) from a full disk, none of which
         # looked any different from "hasn't seen the push yet".
         self.last_failure = ""
+        # REL-3 (usability sweep 2026-09-03): the offer this machine REFUSED
+        # at receipt, which last_failure above cannot carry -- a refusal
+        # makes no attempt, so nothing is ever counted and the ledger stays
+        # all-zero. A rejected signature, a build below the downgrade floor
+        # and plain HTTP to a public host are exactly the failures no button
+        # on the Packages page can fix, and until this existed the only
+        # evidence was one log.error in that editor's companion.log.
+        self.last_refusal: Optional[dict[str, Any]] = None
 
     def _log_transport_once(self, note: str) -> None:
         if note and not self._transport_note_logged:
@@ -1233,7 +1251,20 @@ class UpgradeManager:
         Called on EVERY offer as it arrives and again inside
         download_and_verify: the tray must not show "Update available" for a
         build that would be refused at the click, and the download path must
-        not depend on having been told about the offer through the tray."""
+        not depend on having been told about the offer through the tray.
+
+        Every verdict is remembered (REL-3), because the report is the only
+        place a refusal can reach an admin."""
+        ok, reason = self._check_offer(info)
+        if ok:
+            self._clear_refusal()
+        else:
+            version = info.get("version") if isinstance(info, dict) else None
+            self._note_refusal(version, reason)
+        return ok, reason
+
+    def _check_offer(self, info: dict[str, Any]) -> tuple[bool, str]:
+        """_accept_offer's verdict, with no memory of its own."""
         try:
             ok, detail = verify_offer(info)
             if not ok:
@@ -1307,6 +1338,43 @@ class UpgradeManager:
         self._refusal_logged = key
         log.error("upgrade: REFUSING the offered build v%s -- %s", version, reason)
 
+    def _note_refusal(self, version: Any, reason: Any) -> None:
+        """Remember WHICH build was refused and WHY (REL-3). Never raises.
+
+        Overwrites: the newest refusal is the one an admin has to act on, and
+        a machine refusing two builds is refusing the current one for the
+        same reason it refused the last."""
+        try:
+            self.last_refusal = {
+                "version": str(version or "").strip() or None,
+                "reason": str(reason or "").strip() or None,
+                "at": _iso_utc(time.time()),
+            }
+        except Exception:
+            log.debug("upgrade: could not record the refusal", exc_info=True)
+
+    def _clear_refusal(self) -> None:
+        self.last_refusal = None
+
+    def refusal(self) -> Optional[dict[str, Any]]:
+        """The standing refusal, or None (REL-3). Never raises.
+
+        Self-clearing on version: a machine that is now RUNNING the build it
+        refused (an admin installed it by hand, or a later offer was taken)
+        has nothing left to report, and a `[ REFUSING 0.9.65 ]` chip beside a
+        machine already on 0.9.65 would be the alarm that cries wolf."""
+        record = self.last_refusal
+        if not isinstance(record, dict) or not record:
+            return None
+        try:
+            if compare_to_running(record.get("version")) in (
+                    VERSION_SAME, VERSION_OLDER):
+                self.last_refusal = None
+                return None
+        except Exception:
+            log.debug("upgrade: refusal version compare failed", exc_info=True)
+        return dict(record)
+
     @property
     def available(self) -> Optional[dict[str, Any]]:
         with self._lock:
@@ -1372,6 +1440,11 @@ class UpgradeManager:
                 "(%r vs dashboard_url %r)", url, base,
             )
             self.last_failure = ERROR_REFUSED
+            # REL-3: the origin/transport refusals below are refusals too,
+            # and _accept_offer (which records them) has already passed.
+            self._note_refusal(
+                info.get("version"),
+                "the update URL is not on the dashboard's own host")
             return None
         parsed_url = urllib.parse.urlparse(url)
         if not parsed_url.scheme and not parsed_url.netloc:
@@ -1388,6 +1461,8 @@ class UpgradeManager:
             if not base:
                 log.warning("upgrade: dashboard_url is not configured -- cannot download")
                 self.last_failure = ERROR_REFUSED
+                self._note_refusal(info.get("version"),
+                                   "dashboard_url is not configured on this machine")
                 return None
             if url.startswith("/"):
                 url = base + url
@@ -1399,6 +1474,9 @@ class UpgradeManager:
                         "dashboard's own host (%r against %r -> %r)", url, base, resolved,
                     )
                     self.last_failure = ERROR_REFUSED
+                    self._note_refusal(
+                        info.get("version"),
+                        "the update URL resolves off the dashboard's own host")
                     return None
                 log.info(
                     "upgrade: the offered URL %r is relative -- resolved against "
@@ -1411,6 +1489,7 @@ class UpgradeManager:
         if not ok_transport:
             self.last_failure = ERROR_REFUSED
             self._log_refusal(info.get("version"), note)
+            self._note_refusal(info.get("version"), note)
             return None
         self._log_transport_once(note)
         headers = {}

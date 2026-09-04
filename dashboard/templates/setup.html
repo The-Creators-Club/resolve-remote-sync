@@ -49,6 +49,27 @@
       </form>
     </section>
 
+    {# ------------------------------------------------- alert destination #}
+    {# SYS-1(b) (usability sweep 2026-09-03): the wizard had a step for
+       protecting the data and none for "who should we tell". One field, the
+       one that matters on day one; everything else about alerting is on
+       Settings, then ALERTS. #}
+    <section class="card" style="margin-top:1rem">
+      <div class="side-head">[ 4. WHO SHOULD WE TELL? ]</div>
+      <p class="muted">This server checks dozens of things about your fleet every few minutes.
+        It needs somewhere to send what it finds. With nobody to tell, the first anyone hears
+        of a stopped sync is an editor asking.</p>
+      <form id="setup-alerts-form">
+        <label>EMAIL ADDRESS<br><input type="text" name="email" placeholder="you@yourstudio.com"></label>
+        <label>OR A WEBHOOK URL<br><input type="text" name="webhook" placeholder="https://..."></label>
+        <button class="btn" type="submit">[ SAVE ]</button>
+        <button class="btn" type="button" id="setup-alerts-test">[ SEND A TEST ]</button>
+        <span id="setup-alerts-status" class="muted"></span>
+      </form>
+      <p class="muted">Email is sent through the mail server on Settings, then ALERTS. If you
+        have not set one up yet, save the address here and finish there.</p>
+    </section>
+
     {# ------------------------------------------------------- the checklist #}
     <section style="margin-top:1rem">
       <div class="side-head">[ CHECKLIST ]

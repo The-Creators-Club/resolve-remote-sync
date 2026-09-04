@@ -140,6 +140,46 @@
     });
   });
 
+  // ------------------------------------------------------ alert destination
+
+  // SYS-1(b) (usability sweep 2026-09-03). The SAVE goes through the task's
+  // own run() (POST /api/v1/setup/alerts), so the checklist row below and
+  // this form can never report different things.
+  document.addEventListener("DOMContentLoaded", function () {
+    var form = document.getElementById("setup-alerts-form");
+    if (!form) return;
+    var status = document.getElementById("setup-alerts-status");
+    form.addEventListener("submit", function (evt) {
+      evt.preventDefault();
+      var payload = {
+        email: form.email.value.trim(),
+        webhook: form.webhook.value.trim(),
+      };
+      api("/api/v1/setup/alerts", {method: "POST", body: JSON.stringify(payload)})
+        .then(function (state) {
+          status.textContent = state.detail || state.status;
+          refreshTasks();
+        })
+        .catch(function (err) { showError("could not save a destination: " + err.message); });
+    });
+    var testBtn = document.getElementById("setup-alerts-test");
+    if (testBtn) {
+      testBtn.addEventListener("click", function () {
+        testBtn.disabled = true;
+        status.textContent = "sending...";
+        api("/api/v1/setup/alerts/test", {method: "POST"})
+          .then(function (result) {
+            status.textContent = result.ok
+              ? ("test sent to " + (result.sent_to || "the destination you set") + ".")
+              : ("the test could not be sent: " + result.detail);
+            refreshTasks();
+          })
+          .catch(function (err) { showError("could not send a test: " + err.message); })
+          .finally(function () { testBtn.disabled = false; });
+      });
+    }
+  });
+
   // -------------------------------------------------------------- checklist
 
   var STATUS_CLASS = {ok: "green", warn: "amber", fail: "red", todo: "", skipped: ""};
@@ -149,12 +189,25 @@
     tbody.innerHTML = "";
     data.tasks.forEach(function (task) {
       var tr = document.createElement("tr");
+      // The anchor Done's own row links to (SYS-18).
+      tr.id = "setup-task-" + task.id;
       var chipClass = STATUS_CLASS[task.status] || "";
+      var detail = task.detail || "";
+      // A recorded skip outlives the next CHECK, which writes the row back to
+      // what the world looks like. Said out loud so a step an admin accepted
+      // never reads as done, and never as forgotten either.
+      if (task.skip_recorded_at && task.status !== "skipped") {
+        detail += ' <span class="muted">(you chose to skip this on '
+          + task.skip_recorded_at.slice(0, 10) + ')</span>';
+      }
       tr.innerHTML =
         '<td>' + task.title + (task.optional ? ' <span class="muted">(optional)</span>' : '') + '</td>' +
         '<td><span class="chip ' + chipClass + '">' + task.status.toUpperCase() + '</span></td>' +
-        '<td class="muted">' + (task.detail || "") + '</td>' +
+        '<td class="muted">' + detail + '</td>' +
         '<td class="task-actions"></td>';
+      if (task.id === "done") {
+        renderDoneLinks(tr, data.outstanding_for_done || []);
+      }
       var actions = tr.querySelector(".task-actions");
       actions.appendChild(actionButton("CHECK", function () { return taskAction(task.id, "check"); }));
       if (task.can_run) {
@@ -162,9 +215,27 @@
                                          function () { return taskAction(task.id, "run"); }));
       }
       if (task.optional && task.status !== "skipped") {
-        actions.appendChild(actionButton("SKIP", function () { return taskAction(task.id, "skip"); }));
+        // A step Done waits for is skipped on purpose or not at all, so its
+        // button says what pressing it means (SYS-18).
+        actions.appendChild(actionButton(task.gate ? "SKIP - I understand" : "SKIP",
+                                         function () { return taskAction(task.id, "skip"); }));
       }
       tbody.appendChild(tr);
+    });
+  }
+
+  // Done names what it is waiting for, and every name is a link to the row
+  // that fixes it (SYS-18): a sentence listing five titles is otherwise
+  // something a reader has to match up against the table by eye.
+  function renderDoneLinks(tr, outstanding) {
+    if (!outstanding.length) return;
+    var cell = tr.children[2];
+    outstanding.forEach(function (item) {
+      cell.appendChild(document.createTextNode(" "));
+      var link = document.createElement("a");
+      link.href = "#setup-task-" + item.id;
+      link.textContent = "[ " + item.title.toUpperCase() + " ]";
+      cell.appendChild(link);
     });
   }
 

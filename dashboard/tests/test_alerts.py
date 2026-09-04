@@ -556,3 +556,764 @@ def test_a_staged_build_newer_than_current_still_fails_its_soak(env):
     _machine_on(client, "0.10.0")
     findings = alerts.scan(conn, settings, NOW)
     assert any(f["kind"] == "soak_failed" for f in findings)
+
+
+# ==================================================================== wave 2
+#
+# "The alarm reaches someone" (usability + resilience sweep 2026-09-04):
+# SYS-1 / DDIAG-16 the sink is a protection line, DDIAG-17 the dead-man's
+# heartbeat, DDIAG-4 turning a sink on re-raises what is already open, and
+# DDIAG-3 a computer that has been gone a fortnight stops being a daily mail.
+
+THREE_WEEKS_LATER = "2026-09-18T12:00:00+00:00"
+
+
+def _warn_finding(subject="jsmith/EDIT-PC", kind="folders_unfiltered"):
+    return {"kind": kind, "severity": alerts.SEV_WARN, "title": "a warn",
+            "subject": subject, "diagnosis": "something to look at",
+            "fix": "look at it", "detail": ""}
+
+
+# ------------------------------------------------- SYS-1: sink_deliverable()
+
+def test_no_sink_is_not_deliverable_and_says_so_in_english(env):
+    _client, conn, _settings = env
+    deliverable, detail = alerts.sink_deliverable(conn, NOW)
+    assert deliverable is False
+    assert "nothing this server finds is ever sent" in detail
+
+
+def test_a_channel_that_has_never_delivered_is_not_deliverable(env):
+    _client, conn, _settings = env
+    _configure_webhook(conn)
+    deliverable, detail = alerts.sink_deliverable(conn, NOW)
+    assert deliverable is False
+    assert "nothing has ever been sent" in detail
+
+
+def test_a_channel_whose_last_send_failed_is_not_deliverable(env):
+    _client, conn, _settings = env
+    _configure_webhook(conn)
+    dbmod.record_alert(conn, "test", "test", "webhook", True, "sent", NOW)
+    dbmod.record_alert(conn, "test", "test", "", False, "boom", A_DAY_LATER)
+    conn.commit()
+    deliverable, detail = alerts.sink_deliverable(conn, A_DAY_LATER)
+    assert deliverable is False
+    assert "did not go out" in detail
+
+
+def test_a_month_of_silence_on_a_configured_channel_is_the_same_hole(env):
+    """DDIAG-16: a mailbox that stopped accepting mail in March looks
+    identical to a working one from every page in this product."""
+    _client, conn, _settings = env
+    _configure_webhook(conn)
+    dbmod.record_alert(conn, "weekly", "weekly", "webhook", True, "sent", NOW)
+    conn.commit()
+    assert alerts.sink_deliverable(conn, A_DAY_LATER)[0] is True
+    assert alerts.sink_deliverable(conn, THREE_WEEKS_LATER)[0] is True
+    assert alerts.sink_deliverable(conn, "2026-10-28T12:00:00+00:00")[0] is False
+
+
+def test_the_no_sink_rows_are_not_evidence_about_a_new_channel(env):
+    """A row recorded while the site had no sink says nothing about the
+    channel it has just been given."""
+    _client, conn, _settings = env
+    dbmod.record_alert(conn, "machine_silent", "a/PC", "", False,
+                       alerts.NO_SINK_DETAIL, NOW)
+    _configure_webhook(conn)
+    dbmod.record_alert(conn, "test", "test", "webhook", True, "sent", NOW)
+    conn.commit()
+    deliverable, _detail = alerts.sink_deliverable(conn, NOW)
+    assert deliverable is True
+
+
+# ------------------------------------------------------ DDIAG-17: heartbeat
+
+def test_the_heartbeat_is_off_by_default_and_needs_a_channel(env):
+    _client, conn, _settings = env
+    assert alerts.get_settings(conn)["alerts_heartbeat"] == "0"
+    assert alerts.heartbeat_due(conn, NOW) is False
+    alerts.set_settings(conn, {"alerts_heartbeat": "1"}, "owen")
+    conn.commit()
+    assert alerts.heartbeat_due(conn, NOW) is False
+    _configure_webhook(conn)
+    assert alerts.heartbeat_due(conn, NOW) is True
+
+
+def test_one_heartbeat_a_calendar_day_and_not_one_per_cycle(env, monkeypatch):
+    _client, conn, settings = env
+    _configure_webhook(conn)
+    alerts.set_settings(conn, {"alerts_heartbeat": "1", "alerts_weekly": "0"},
+                        "owen")
+    conn.commit()
+    fake = _FakeOpener()
+    monkeypatch.setattr(alerts, "_webhook_opener", lambda: fake)
+    monkeypatch.setattr(alerts, "scan", lambda *_a, **_kw: [])
+
+    first = alerts.run_cycle(conn, settings, NOW)
+    assert first["heartbeat"] is True
+    assert len(fake.calls) == 1
+    subject = json.loads(fake.calls[0].data.decode("utf-8"))["subject"]
+    assert subject.startswith("CC Sync: all quiet")
+    assert "computer" in subject and "problem" in subject
+
+    for _ in range(10):
+        assert alerts.run_cycle(conn, settings, NOW)["heartbeat"] is False
+    assert len(fake.calls) == 1
+
+    assert alerts.run_cycle(conn, settings, A_DAY_LATER)["heartbeat"] is True
+    assert len(fake.calls) == 2
+
+
+def test_the_heartbeat_is_never_a_problem_and_never_recovers(env, monkeypatch):
+    """It reports no condition: it must not be a registry kind, must not
+    reach CURRENTLY OPEN, and must never produce a cleared message."""
+    _client, conn, settings = env
+    _configure_webhook(conn)
+    alerts.set_settings(conn, {"alerts_heartbeat": "1", "alerts_weekly": "0"},
+                        "owen")
+    conn.commit()
+    monkeypatch.setattr(alerts, "_webhook_opener", lambda: _FakeOpener())
+    monkeypatch.setattr(alerts, "scan", lambda *_a, **_kw: [])
+
+    result = alerts.run_cycle(conn, settings, NOW)
+
+    assert alerts.KIND_HEARTBEAT not in {k.kind for k in alerts.ALERT_KINDS}
+    assert not any(result["open"].values())
+    assert alerts.KIND_HEARTBEAT not in {
+        kind for kind, _subject in alerts._open_subjects(
+            conn, {k.kind for k in alerts.ALERT_KINDS})}
+    kinds = {r["kind"] for r in dbmod.fetch_alerts(conn, limit=50)}
+    assert alerts.KIND_HEARTBEAT in kinds
+    assert alerts.KIND_HEARTBEAT + alerts.RECOVERED_SUFFIX not in kinds
+
+
+def test_the_weekly_report_does_not_double_as_the_heartbeat(env, monkeypatch):
+    _client, conn, settings = env
+    _configure_webhook(conn)
+    monkeypatch.setattr(alerts, "_webhook_opener", lambda: _FakeOpener())
+    monkeypatch.setattr(alerts, "scan", lambda *_a, **_kw: [])
+    result = alerts.run_cycle(conn, settings, NOW)
+    assert result["weekly"] is True
+    assert result["heartbeat"] is False
+    assert alerts.heartbeat_due(conn, NOW) is False
+
+
+# ------------------------------ DDIAG-4: turning a sink on re-raises what is
+#                                         already open
+
+def test_turning_the_sink_on_delivers_the_warns_that_were_already_open(
+        env, monkeypatch):
+    """The finding: on the vendor default every finding gets an ok=0 no-sink
+    row, and that row is what `_is_open` reads. A warn is said once, so the
+    day SMTP is configured every warn open since before then was already
+    said and would never be sent."""
+    _client, conn, settings = env
+    alerts.set_settings(conn, {"alerts_weekly": "0"}, "owen")
+    conn.commit()
+    monkeypatch.setattr(alerts, "scan", lambda *_a, **_kw: [_warn_finding()])
+
+    alerts.run_cycle(conn, settings, NOW)
+    row = [r for r in dbmod.fetch_alerts(conn, limit=50)
+           if r["kind"] == "folders_unfiltered"][0]
+    assert row["ok"] == 0 and row["detail"] == alerts.NO_SINK_DETAIL
+
+    fake = _FakeOpener()
+    monkeypatch.setattr(alerts, "_webhook_opener", lambda: fake)
+    _configure_webhook(conn)
+
+    result = alerts.run_cycle(conn, settings, NOW)
+
+    assert result["sent"] == 1
+    assert len(fake.calls) == 1
+    kinds = {r["kind"] for r in dbmod.fetch_alerts(conn, limit=50)}
+    assert "folders_unfiltered" + alerts.UNDELIVERED_SUFFIX in kinds
+
+
+def test_a_sink_change_between_two_real_sinks_re_raises_nothing(env, monkeypatch):
+    _client, conn, settings = env
+    _configure_webhook(conn)
+    fake = _FakeOpener()
+    monkeypatch.setattr(alerts, "_webhook_opener", lambda: fake)
+    monkeypatch.setattr(alerts, "scan", lambda *_a, **_kw: [_warn_finding()])
+    alerts.set_settings(conn, {"alerts_weekly": "0"}, "owen")
+    conn.commit()
+    alerts.run_cycle(conn, settings, NOW)
+    assert len(fake.calls) == 1
+
+    alerts.set_settings(conn, {"alerts_sink": alerts.SINK_WEBHOOK,
+                               "alerts_webhook_url": "https://other.example/hook"},
+                        "owen")
+    conn.commit()
+    alerts.run_cycle(conn, settings, NOW)
+    assert len(fake.calls) == 1
+
+
+def test_the_save_page_promises_what_the_next_check_will_do(env):
+    """The one sentence an admin who has just switched mail on is waiting
+    for. It is on the page, not only in the code."""
+    client, conn, _settings = env
+    as_admin(client)
+    response = client.post("/partials/admin/alerts/save",
+                           data={"alerts_sink": "webhook",
+                                 "alerts_webhook_url": "https://x.example/h"})
+    assert response.status_code == 200
+    assert "The next check will send everything that is currently open" in \
+        response.text
+
+
+# ---------------------------------------------- DDIAG-3: the silence give-up
+
+def _quiet_since(client, conn, when=NOW):
+    client.post("/api/v1/report", json=payload(), headers=report_headers())
+    conn.execute(
+        "UPDATE lane_report_current SET received_at=? "
+        "WHERE editor_username='jsmith' AND machine='EDIT-PC'", (when,))
+    conn.commit()
+
+
+def test_a_day_of_silence_is_still_a_daily_alarm(env):
+    client, conn, settings = env
+    _quiet_since(client, conn)
+    silent = [f for f in alerts.scan(conn, settings, A_DAY_LATER)
+              if f["kind"] == "machine_silent"]
+    assert silent and silent[0]["repeat"] is True
+    assert "[ FORGET ]" in silent[0]["fix"]
+
+
+def test_a_computer_gone_a_fortnight_stops_being_a_daily_mail(env, monkeypatch):
+    """DDIAG-3: a retired laptop produced 21 identical emails. It stays OPEN
+    on the page (dropping it would send "this has cleared, no action is
+    needed" about a computer that is dead), and it stops being sent."""
+    client, conn, settings = env
+    _quiet_since(client, conn)
+    _configure_webhook(conn)
+    alerts.set_settings(conn, {"alerts_weekly": "0"}, "owen")
+    conn.commit()
+    fake = _FakeOpener()
+    monkeypatch.setattr(alerts, "_webhook_opener", lambda: fake)
+
+    silent = [f for f in alerts.scan(conn, settings, THREE_WEEKS_LATER)
+              if f["kind"] == "machine_silent"]
+    assert silent and silent[0]["repeat"] is False
+
+    first = alerts.deliver(conn, settings, silent, THREE_WEEKS_LATER)
+    assert first["sent"] == 1
+    later = alerts.deliver(conn, settings, silent, "2026-09-19T12:00:00+00:00")
+    assert later["sent"] == 0 and later["recovered"] == 0
+    assert len(fake.calls) == 1
+
+
+# ------------------------------------------------------------- wave 2 (B2)
+#
+# "The alarm reaches someone": the fleet job queue (DDIAG-2 / DDIAG-6), the
+# release channel's own adoption (REL-3 / REL-6 / REL-13), each computer's
+# yt-dlp and 8899 loopback (CYT-7 / CMEDIA-3), the /ytdl stack (YTWEB-2 /
+# YTWEB-5) and the b-roll platform (BROLL-2). One quiet shape and one firing
+# shape per kind, because a check that cannot fire and a check that always
+# fires are the same bug from different sides.
+
+import sqlite3 as _sqlite3
+import sys as _sys
+import types as _types
+
+from ccsync_dashboard import db as _db
+from ccsync_dashboard import mount_status as _mount_status
+
+
+def kinds_of(findings):
+    return {f["kind"] for f in findings}
+
+
+def one(findings, kind):
+    rows = [f for f in findings if f["kind"] == kind]
+    assert rows, f"{kind} did not fire: {sorted(kinds_of(findings))}"
+    return rows[0]
+
+
+@pytest.fixture
+def mounts():
+    """The module-level mount registry, restored after the test.
+
+    It is process-global on purpose (DDIAG-7), so a test that records a mount
+    and leaves it recorded fails whichever test runs next.
+    """
+    before = _mount_status.snapshot()
+    yield _mount_status
+    _mount_status.reset()
+    for name, (status, detail) in before.items():
+        _mount_status.record(name, status, detail)
+
+
+# ------------------------------------------------------------ the job queue
+
+def _queue(conn, kind="whisper", hours_old=9, now=NOW):
+    created = alerts._iso_minus(now, int(hours_old * 3600))
+    job_id = _db.create_job(conn, kind, {"src": ["tree", "a/b.mov"]}, now=created)
+    conn.commit()
+    return job_id
+
+
+def test_a_fresh_queue_is_not_starved(env):
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload(), headers=report_headers())
+    _queue(conn, hours_old=1)
+    assert "jobs_starved" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def test_work_nothing_can_take_is_starved(env):
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload(), headers=report_headers())
+    _queue(conn, hours_old=9)
+    finding = one(alerts.scan(conn, settings, NOW), "jobs_starved")
+    assert "no computer in the fleet can do this kind of work" in finding["diagnosis"]
+    assert "Settings, JOBS" in finding["fix"]
+
+
+def test_no_abandoned_jobs_is_quiet(env):
+    _client, conn, settings = env
+    _queue(conn, hours_old=1)
+    assert "jobs_abandoned" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def test_abandoned_jobs_are_reported_once_for_the_window(env):
+    _client, conn, settings = env
+    for _ in range(3):
+        job_id = _queue(conn, hours_old=30)
+        conn.execute("UPDATE jobs SET state='abandoned', last_error='no ffmpeg', "
+                     "updated_at=? WHERE id=?", (NOW, job_id))
+    conn.commit()
+    findings = [f for f in alerts.scan(conn, settings, NOW)
+                if f["kind"] == "jobs_abandoned"]
+    assert len(findings) == 1
+    assert "gave up on 3 job(s)" in findings[0]["diagnosis"]
+    assert "[ TRY AGAIN ]" in findings[0]["fix"]
+
+
+def test_a_pinned_job_with_cards_mounted_is_quiet(env, mounts):
+    _client, conn, settings = env
+    mounts.record("cards", "mounted", "")
+    job_id = _queue(conn, kind="proxy-480p", hours_old=30)
+    conn.execute("UPDATE jobs SET state='pinned' WHERE id=?", (job_id,))
+    conn.commit()
+    assert "jobs_pinned_no_executor" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def test_a_pinned_job_with_no_cards_mount_is_an_error(env, mounts):
+    _client, conn, settings = env
+    mounts.record("cards", "absent", "the vault root is not mounted (/vault)")
+    job_id = _queue(conn, kind="proxy-480p", hours_old=30)
+    conn.execute("UPDATE jobs SET state='pinned' WHERE id=?", (job_id,))
+    conn.commit()
+    finding = one(alerts.scan(conn, settings, NOW), "jobs_pinned_no_executor")
+    assert finding["severity"] == alerts.SEV_ERROR
+    assert "wait for ever" in finding["diagnosis"]
+
+
+def test_a_pinned_job_this_container_stopped_beating_on(env, mounts):
+    _client, conn, settings = env
+    mounts.record("cards", "mounted", "")
+    job_id = _queue(conn, kind="peaks", hours_old=30)
+    conn.execute(
+        "UPDATE jobs SET state='pinned', claimed_machine=?, heartbeat_at=? "
+        "WHERE id=?",
+        (_db.PIN_HOLDER, alerts._iso_minus(NOW, 4 * 3600), job_id))
+    conn.commit()
+    finding = one(alerts.scan(conn, settings, NOW), "jobs_pinned_no_executor")
+    assert "stranded" in finding["subject"]
+
+
+def test_the_weekly_report_carries_the_queue(env):
+    _client, conn, settings = env
+    _queue(conn, hours_old=1)
+    _subject, body = alerts.compose_weekly(conn, NOW, settings)
+    assert "JOBS: 1 queued, 0 running, 0 abandoned this week" in body
+
+
+# --------------------------------------------------------- the release channel
+
+def guard_upgrade(**fields):
+    return {"upgrade": {"version": "0.9.66", "attempts": 0, **fields}}
+
+
+def test_a_computer_taking_updates_is_not_refusing(env):
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload(guard_upgrade()),
+                headers=report_headers())
+    assert "upgrade_refused" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def test_a_refused_offer_is_stored_and_alerted(env):
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload(guard_upgrade(
+        refused_version="0.9.67",
+        refused_reason="release signature rejected",
+        refused_at=NOW)), headers=report_headers())
+    finding = one(alerts.scan(conn, settings, NOW), "upgrade_refused")
+    assert finding["severity"] == alerts.SEV_ERROR
+    assert "release signature rejected" in finding["diagnosis"]
+    assert "cannot fix a refusal" in finding["fix"]
+
+
+def test_a_refusal_that_stops_clears_itself(env):
+    """The LATCH rule: the next guard-bearing report with no refusal in it is
+    how a computer says it is not refusing any more."""
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload(guard_upgrade(
+        refused_version="0.9.67", refused_reason="below the downgrade floor",
+        refused_at=NOW)), headers=report_headers())
+    client.post("/api/v1/report", json=payload(guard_upgrade()),
+                headers=report_headers())
+    assert "upgrade_refused" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def publish(conn, version, platform="windows", now=NOW, current=True):
+    _db.insert_companion_package(
+        conn, version=version, platform=platform, filename=f"c-{version}.exe",
+        sha256="0" * 64, size_bytes=1, published_by="owen", now=now)
+    if current:
+        _db.set_current_package(conn, platform, version, now=now)
+    conn.commit()
+
+
+def test_a_build_taken_by_the_fleet_is_not_stalled(env):
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload(), headers=report_headers())
+    publish(conn, "0.9.55", now=alerts._iso_minus(NOW, 5 * 24 * 3600))
+    assert "rollout_stalled" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def test_a_build_nobody_takes_is_stalled(env):
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload(), headers=report_headers())
+    publish(conn, "0.9.66", now=alerts._iso_minus(NOW, 5 * 24 * 3600))
+    finding = one(alerts.scan(conn, settings, NOW), "rollout_stalled")
+    assert "0 of 1 have taken it" in finding["diagnosis"]
+    assert "jsmith/EDIT-PC on 0.9.55" in finding["diagnosis"]
+
+
+def test_a_build_made_current_before_v48_says_nothing(env):
+    """`made_current_at` NULL is "cannot tell", never "stalled for six days"."""
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload(), headers=report_headers())
+    publish(conn, "0.9.66", now=alerts._iso_minus(NOW, 5 * 24 * 3600))
+    conn.execute("UPDATE companion_packages SET made_current_at=NULL")
+    conn.commit()
+    assert "rollout_stalled" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def test_two_channels_shipped_together_are_quiet(env):
+    _client, conn, settings = env
+    publish(conn, "0.9.66", platform="windows", now=NOW)
+    publish(conn, "0.9.66", platform="macos", now=NOW)
+    assert "platform_channel_stale" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def test_a_mac_channel_left_behind_names_the_two_commands(env):
+    _client, conn, settings = env
+    publish(conn, "0.9.66", platform="windows", now=NOW)
+    publish(conn, "0.9.60", platform="macos",
+            now=alerts._iso_minus(NOW, 30 * 24 * 3600))
+    finding = one(alerts.scan(conn, settings, NOW), "platform_channel_stale")
+    assert "release_macos.sh --publish --make-current" in finding["fix"]
+    assert "build_onboard_macos.sh --publish --make-current" in finding["fix"]
+
+
+def test_a_channel_with_no_stamps_is_measured_in_builds(env):
+    _client, conn, settings = env
+    for version in ("0.9.63", "0.9.64", "0.9.65", "0.9.66"):
+        publish(conn, version, platform="windows", now=NOW)
+    publish(conn, "0.9.62", platform="macos", now=NOW)
+    conn.execute("UPDATE companion_packages SET made_current_at=NULL")
+    conn.commit()
+    finding = one(alerts.scan(conn, settings, NOW), "platform_channel_stale")
+    assert "4 builds behind" in finding["diagnosis"]
+
+
+# ----------------------------------------------- each computer's own tools
+
+def test_a_fresh_yt_dlp_on_a_computer_is_quiet(env):
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload({
+        "ytdlp": {"version": "2026.09.01", "action": "checked", "ok": True,
+                  "stale": False, "age_days": 3, "message": None,
+                  "checked_at": NOW}}), headers=report_headers())
+    kinds = kinds_of(alerts.scan(conn, settings, NOW))
+    assert "ytdlp_stale" not in kinds and "ytdlp_failed" not in kinds
+
+
+def test_a_stale_yt_dlp_uses_the_computers_own_message(env):
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload({
+        "ytdlp": {"version": "2026.07.04", "action": "stale", "ok": True,
+                  "stale": True, "age_days": 43,
+                  "message": "yt-dlp 2026.07.04 is 43 days old and it could "
+                             "not update itself",
+                  "checked_at": NOW}}), headers=report_headers())
+    finding = one(alerts.scan(conn, settings, NOW), "ytdlp_stale")
+    assert "43 days old" in finding["diagnosis"]
+    assert finding["severity"] == alerts.SEV_WARN
+
+
+def test_a_computer_with_no_usable_yt_dlp_is_an_error(env):
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload({
+        "ytdlp": {"version": None, "action": "failed", "ok": False,
+                  "stale": False, "age_days": None,
+                  "message": "the download tool could not be installed",
+                  "checked_at": NOW}}), headers=report_headers())
+    finding = one(alerts.scan(conn, settings, NOW), "ytdlp_failed")
+    assert finding["severity"] == alerts.SEV_ERROR
+
+
+def test_a_computer_that_stops_sending_a_verdict_stops_alarming(env):
+    """An ABSENT section deletes the stored verdict: a companion that has
+    stopped saying has stopped knowing, and March's "43 days old" is worse
+    than silence."""
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload({
+        "ytdlp": {"action": "stale", "stale": True, "age_days": 43}}),
+        headers=report_headers())
+    client.post("/api/v1/report", json=payload({}), headers=report_headers())
+    assert "ytdlp_stale" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def test_a_held_loopback_port_is_reported(env):
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload({
+        "loopback": {"enabled": True, "bound": False, "port": 8899,
+                     "error": "port 8899 is in use", "since": NOW}}),
+        headers=report_headers())
+    finding = one(alerts.scan(conn, settings, NOW), "loopback_down")
+    assert "8899" in finding["fix"]
+
+
+def test_a_bound_loopback_and_a_switched_off_one_are_both_quiet(env):
+    client, conn, settings = env
+    client.post("/api/v1/report", json=payload({
+        "loopback": {"enabled": True, "bound": True, "port": 8899,
+                     "error": "", "since": ""}}), headers=report_headers())
+    assert "loopback_down" not in kinds_of(alerts.scan(conn, settings, NOW))
+    client.post("/api/v1/report", json=payload({
+        "loopback": {"enabled": False, "bound": False, "port": 8899,
+                     "error": "", "since": ""}}), headers=report_headers())
+    assert "loopback_down" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+# --------------------------------------------------------- the YouTube stack
+
+HEALTHY_YTDL = {
+    "worker_alive": True, "yt_dlp_stale": False, "yt_dlp_age_days": 2,
+    "yt_dlp_version": "2026.09.01", "pot_provider": "unconfigured",
+    "cookies_state": "anonymous",
+    "last_download": {"ok": True, "path": "anonymous", "error": ""},
+    "canary": {"enabled": True, "last": {"ok": True}},
+    "plugin_install": {"ok": True, "state": "ok", "error": "", "at": NOW,
+                       "attempts": 1, "version": "1.3.1"},
+}
+
+
+def ytdl_health(monkeypatch, **overrides):
+    snap = dict(HEALTHY_YTDL)
+    snap.update(overrides)
+    monkeypatch.setattr(alerts, "_ytdl_health", lambda mounts: snap)
+    return snap
+
+
+def test_a_healthy_ytdl_stack_raises_nothing(env, monkeypatch):
+    _client, conn, settings = env
+    ytdl_health(monkeypatch)
+    kinds = kinds_of(alerts.scan(conn, settings, NOW))
+    assert not {k for k in kinds if k.startswith("ytdl_")}
+
+
+def test_an_absent_ytdl_mount_raises_nothing(env, monkeypatch):
+    """None is "we could not ask", and it must not become a green or a red."""
+    _client, conn, settings = env
+    monkeypatch.setattr(alerts, "_ytdl_health", lambda mounts: None)
+    kinds = kinds_of(alerts.scan(conn, settings, NOW))
+    assert not {k for k in kinds if k.startswith("ytdl_")}
+    assert alerts.CHECK_FAILED.kind not in kinds
+
+
+def test_a_dead_download_worker_is_an_error(env, monkeypatch):
+    _client, conn, settings = env
+    ytdl_health(monkeypatch, worker_alive=False)
+    assert one(alerts.scan(conn, settings, NOW),
+               "ytdl_worker_dead")["severity"] == alerts.SEV_ERROR
+
+
+def test_one_bad_video_is_not_a_broken_downloader(env, monkeypatch):
+    _client, conn, settings = env
+    ytdl_health(monkeypatch,
+                last_download={"ok": False, "path": "anonymous", "error": "403"},
+                canary={"enabled": True, "last": {"ok": True}})
+    assert "ytdl_downloads_failing" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def test_a_failed_download_and_a_failed_canary_is_a_finding(env, monkeypatch):
+    _client, conn, settings = env
+    ytdl_health(monkeypatch,
+                last_download={"ok": False, "path": "anonymous", "error": "403"},
+                canary={"enabled": True, "last": {"ok": False}})
+    assert one(alerts.scan(conn, settings, NOW), "ytdl_downloads_failing")
+
+
+def test_an_unconfigured_pot_provider_is_not_a_problem(env, monkeypatch):
+    _client, conn, settings = env
+    ytdl_health(monkeypatch, pot_provider="unconfigured")
+    assert "ytdl_pot_provider_unreachable" not in kinds_of(
+        alerts.scan(conn, settings, NOW))
+
+
+def test_a_configured_pot_provider_that_stopped_answering_is(env, monkeypatch):
+    _client, conn, settings = env
+    ytdl_health(monkeypatch, pot_provider="unreachable")
+    assert one(alerts.scan(conn, settings, NOW), "ytdl_pot_provider_unreachable")
+
+
+def test_an_anonymous_cookie_jar_is_the_healthy_state(env, monkeypatch):
+    """CR-80 inverted the 2026-08-11 rule: signed-in cookies are the CAUSE
+    now, so nothing here may alarm on `anonymous`."""
+    _client, conn, settings = env
+    ytdl_health(monkeypatch, cookies_state="anonymous")
+    assert not {k for k in kinds_of(alerts.scan(conn, settings, NOW))
+                if k.startswith("ytdl_")}
+
+
+def test_a_failed_plugin_install_names_its_error(env, monkeypatch):
+    _client, conn, settings = env
+    ytdl_health(monkeypatch, plugin_install={
+        "ok": False, "state": "failed", "error": "[Errno 13] /venv is read-only",
+        "at": NOW, "attempts": 3, "version": ""})
+    finding = one(alerts.scan(conn, settings, NOW), "ytdl_plugin_install_failed")
+    assert "3 attempt(s)" in finding["diagnosis"]
+    assert "Errno 13" in finding["detail"]
+
+
+def test_a_plugin_install_nobody_recorded_is_not_a_failure(env, monkeypatch):
+    _client, conn, settings = env
+    ytdl_health(monkeypatch, plugin_install={"ok": None, "state": "unknown",
+                                             "error": "", "at": "",
+                                             "attempts": 0, "version": ""})
+    assert "ytdl_plugin_install_failed" not in kinds_of(
+        alerts.scan(conn, settings, NOW))
+
+
+def test_this_servers_stale_yt_dlp_is_a_finding(env, monkeypatch):
+    _client, conn, settings = env
+    ytdl_health(monkeypatch, yt_dlp_stale=True, yt_dlp_age_days=61)
+    assert "61 days old" in one(alerts.scan(conn, settings, NOW),
+                                "ytdl_stale")["diagnosis"]
+
+
+def test_the_ytdl_seam_reads_the_mount_registry(env, mounts, monkeypatch):
+    """`_ytdl_health` has no app object: it takes the status from
+    mount_status and hands ytdl.health_snapshot a stand-in carrying it."""
+    _client, conn, _settings = env
+    mounts.reset()
+    assert alerts._ytdl_health(mounts.snapshot()) is None
+    fake = _types.ModuleType("ytdlweb.routes_api")
+    fake.health_snapshot = lambda app, allow_probe=True: {"worker_alive": True}
+    monkeypatch.setitem(_sys.modules, "ytdlweb.routes_api", fake)
+    mounts.record("ytdl", "mounted", "")
+    assert alerts._ytdl_health(mounts.snapshot()) == {"worker_alive": True}
+
+
+# ------------------------------------------------------------------- b-roll
+
+def _broll_dbs(tmp_path, batches=(), shares=()):
+    index = tmp_path / "broll.db"
+    conn = _sqlite3.connect(index)
+    conn.execute("CREATE TABLE ingest_batches (uid TEXT, editor TEXT, "
+                 "machine TEXT, share TEXT, state TEXT, n_items INT, "
+                 "n_done INT, created_at TEXT, last_heartbeat_at TEXT)")
+    conn.executemany("INSERT INTO ingest_batches VALUES (?,?,?,?,?,?,?,?,?)",
+                     batches)
+    conn.commit()
+    conn.close()
+    ledger = tmp_path / "client_shares.db"
+    conn = _sqlite3.connect(ledger)
+    conn.execute("CREATE TABLE client_folders (id INT, title TEXT, "
+                 "expires_at TEXT, revoked_at TEXT)")
+    conn.executemany("INSERT INTO client_folders VALUES (?,?,?,?)", shares)
+    conn.commit()
+    conn.close()
+    return index, ledger
+
+
+def test_broll_checks_are_silent_when_broll_is_not_mounted(env, mounts,
+                                                           monkeypatch, tmp_path):
+    _client, conn, settings = env
+    mounts.reset()
+    paths = _broll_dbs(tmp_path, batches=[
+        ("u1", "jsmith", "EDIT-PC", "FF5", "running", 40, 2,
+         "2026-08-01T00:00:00+00:00", "2026-08-01T00:00:00+00:00")])
+    monkeypatch.setattr(alerts, "_broll_paths", lambda: paths)
+    kinds = kinds_of(alerts.scan(conn, settings, NOW))
+    assert "broll_batch_stuck" not in kinds
+
+
+def test_a_moving_batch_is_not_stuck(env, mounts, monkeypatch, tmp_path):
+    _client, conn, settings = env
+    mounts.record("broll", "mounted", "")
+    paths = _broll_dbs(tmp_path, batches=[
+        ("u1", "jsmith", "EDIT-PC", "FF5", "running", 40, 2, NOW, NOW)])
+    monkeypatch.setattr(alerts, "_broll_paths", lambda: paths)
+    assert "broll_batch_stuck" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def test_a_batch_with_no_heartbeat_for_a_day_is_stuck(env, mounts,
+                                                      monkeypatch, tmp_path):
+    _client, conn, settings = env
+    mounts.record("broll", "mounted", "")
+    old = alerts._iso_minus(NOW, 3 * 24 * 3600)
+    paths = _broll_dbs(tmp_path, batches=[
+        ("u1", "jsmith", "EDIT-PC", "FF5", "running", 40, 2, old, old)])
+    monkeypatch.setattr(alerts, "_broll_paths", lambda: paths)
+    finding = one(alerts.scan(conn, settings, NOW), "broll_batch_stuck")
+    assert "FF5" in finding["subject"]
+    assert "2 of 40" in finding["diagnosis"]
+
+
+def test_a_client_link_with_months_left_is_quiet(env, mounts, monkeypatch,
+                                                 tmp_path):
+    _client, conn, settings = env
+    mounts.record("broll", "mounted", "")
+    paths = _broll_dbs(tmp_path, shares=[
+        (1, "Acme cut 3", "2026-12-01T00:00:00+00:00", None)])
+    monkeypatch.setattr(alerts, "_broll_paths", lambda: paths)
+    assert "broll_share_expiring" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def test_a_client_link_expiring_this_week_is_reported(env, mounts, monkeypatch,
+                                                      tmp_path):
+    _client, conn, settings = env
+    mounts.record("broll", "mounted", "")
+    soon = alerts._iso_minus(NOW, -3 * 24 * 3600)
+    paths = _broll_dbs(tmp_path, shares=[(1, "Acme cut 3", soon, None),
+                                         (2, "Revoked one", soon, NOW)])
+    monkeypatch.setattr(alerts, "_broll_paths", lambda: paths)
+    findings = [f for f in alerts.scan(conn, settings, NOW)
+                if f["kind"] == "broll_share_expiring"]
+    assert len(findings) == 1
+    assert "Acme cut 3" in findings[0]["subject"]
+
+
+def test_every_new_kind_is_in_the_registry_and_the_weekly_list(env):
+    """Adding a check is adding a registry row: the dedup, the recovery
+    message, the page and the report's "checked and found nothing wrong" list
+    all come from it, so a kind that is only a function is a kind nobody is
+    told about."""
+    _client, conn, settings = env
+    registered = {k.kind for k in alerts.ALERT_KINDS}
+    for kind in ("jobs_starved", "jobs_abandoned", "jobs_pinned_no_executor",
+                 "upgrade_refused", "rollout_stalled", "platform_channel_stale",
+                 "ytdlp_stale", "ytdlp_failed", "loopback_down",
+                 "ytdl_worker_dead", "ytdl_downloads_failing",
+                 "ytdl_pot_provider_unreachable", "ytdl_plugin_install_failed",
+                 "ytdl_stale", "broll_batch_stuck", "broll_share_expiring"):
+        assert kind in registered, kind
+    _subject, body = alerts.compose_weekly(conn, NOW, settings)
+    assert "the fleet job queue" in body
+    assert "computers refusing the offer outright" in body

@@ -193,8 +193,60 @@ if [ "${DASH_SITE_YOUTUBE_UNBLOCK:-0}" = "1" ]; then
                 $PIP_HASH_FLAG_UNBLOCK -r "$REQS_UNBLOCK"
         fi
     }
+    # WHAT HAPPENED HERE, WRITTEN DOWN (YTWEB-5, 2026-09-03). Until now the
+    # entire evidence of this install was four `run.sh: WARNING:` lines in a
+    # container log: CR-73 (DNS not up in the container's first seconds) and
+    # CR-84 (`[Errno 13]` into a read-only /venv) each ran for days behind
+    # them, with the symptom showing up as 1.8 MiB/s downloads and "the
+    # downloaded file is empty" and the diagnosis reachable only by a
+    # `docker logs`. The marker is written on SUCCESS as well as on failure --
+    # a state file that only exists when things are broken cannot tell "fine"
+    # from "this run.sh is too old to write one" -- and /ytdl's health route
+    # reads it (ytdlweb.routes_api._plugin_install_state).
+    #
+    # It lives beside the plugin itself, so an image update carries the two
+    # together, and the path is exported because only this script knows which
+    # of the two layouts is in play.
+    UNBLOCK_MARKER="${UNBLOCK_SITE:-$VENV}/plugin_install.json"
+    export YTDL_PLUGIN_INSTALL_MARKER="$UNBLOCK_MARKER"
+    UNBLOCK_VERSION="$(sed -n 's/^[Bb]gutil-ytdlp-pot-provider==\([^ ;\\]*\).*/\1/p' "$REQS_UNBLOCK" | head -1)"
+    # Written through python, not printf: pip's last words are the whole point
+    # of the `error` key and they arrive with quotes, backslashes and newlines
+    # in them. A hand-rolled JSON string here would produce a marker the
+    # health route cannot parse on exactly the boots that matter.
+    write_unblock_marker() {
+        "$VENV/bin/python" - "$UNBLOCK_MARKER" "$1" "$2" "$3" "$UNBLOCK_VERSION" <<'PYMARKER' 2>/dev/null || true
+import json, os, sys, tempfile, time
+
+path, ok, attempts, error, version = sys.argv[1:6]
+payload = {
+    "ok": ok == "1",
+    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "attempts": int(attempts or 0),
+    # Capped: pip can print a hundred lines and this file is read on a
+    # request path. The first lines are the ones that name the cause.
+    "error": (error or "")[:4000],
+    "version": version or "",
+}
+try:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+    os.replace(tmp, path)
+except OSError:
+    # A marker we cannot write is a diagnostic lost, never a boot stopped.
+    pass
+PYMARKER
+    }
     want_unblock="$(md5sum "$REQS_UNBLOCK" | cut -d' ' -f1)"
     have_unblock="$(cat "$STAMP_UNBLOCK" 2>/dev/null || true)"
+    if [ "$want_unblock" = "$have_unblock" ] && [ ! -f "$UNBLOCK_MARKER" ]; then
+        # Nothing to install and no marker: this container was first booted by
+        # a run.sh from before the marker existed. Record the state we are in
+        # rather than leaving the health route to report NOT CHECKED forever.
+        write_unblock_marker 1 0 ""
+    fi
     if [ "$want_unblock" != "$have_unblock" ]; then
         echo "run.sh: youtube_unblock is on -- installing $REQS_UNBLOCK"
         # RETRIED with short sleeps (CR-73, 2026-08-24): the only failure seen
@@ -207,10 +259,13 @@ if [ "${DASH_SITE_YOUTUBE_UNBLOCK:-0}" = "1" ]; then
         # nothing looked wrong but one boot-time WARNING nobody was watching.
         unblock_ok=""
         unblock_err=""
+        unblock_tries=0
         for unblock_delay in 5 15 30 0; do
+            unblock_tries=$((unblock_tries + 1))
             if unblock_err="$(unblock_install 2>&1)"; then
                 printf '%s' "$want_unblock" > "$STAMP_UNBLOCK"
                 unblock_ok=1
+                write_unblock_marker 1 "$unblock_tries" ""
                 break
             fi
             if [ "$unblock_delay" != "0" ]; then
@@ -229,6 +284,10 @@ if [ "${DASH_SITE_YOUTUBE_UNBLOCK:-0}" = "1" ]; then
             echo "run.sh: WARNING: until this succeeds; everything else keeps" >&2
             echo "run.sh: WARNING: running. pip said:" >&2
             printf '%s\n' "$unblock_err" >&2
+            # ...and, since YTWEB-5, somewhere an admin can reach without a
+            # `docker logs`: /ytdl's health route and the dashboard's own
+            # self-diagnosis read this file.
+            write_unblock_marker 0 "$unblock_tries" "$unblock_err"
         fi
     fi
 fi

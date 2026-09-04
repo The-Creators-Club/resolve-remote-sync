@@ -184,6 +184,27 @@
     </div>
   {% endfor %}
 
+  {# REL-6 (usability sweep 2026-09-04): "did it actually reach the fleet".
+     The minute after a ship every machine is in the table below, which is the
+     NORMAL state of a successful ship and carried no rollout meaning at all;
+     this line is the number that does. Same data as the drift doctor's
+     [ ROLLOUT ] block and the rollout alert, from db.rollout_status. #}
+  {% if packages.rollout and packages.rollout.channels %}
+    <div class="side-head" style="margin-top:1.2rem">[ ROLLOUT ]</div>
+    {% for c in packages.rollout.channels %}
+      <div class="muted" style="margin-top:0.3rem">
+        <span class="mono-sm">{{ c.platform }}</span>:
+        {{ c.machines_on_current }} of {{ c.machines_total }} on {{ c.current_version }}
+        {%- if c.behind %} ({{ c.behind | length }} behind:
+          {%- for b in c.behind %} {{ b.editor }} on {{ b.machine }} {{ b.version or "?" }}, {{ b.last_seen | ago }}{{ ";" if not loop.last }}{% endfor %})
+        {%- endif %}
+        - {{ c.reverts }} revert{{ "s" if c.reverts != 1 }}, {{ c.failed_attempts }} failed attempt{{ "s" if c.failed_attempts != 1 }}
+        {%- if c.made_current_at %} - current since {{ c.made_current_at | ago }}{% endif %}
+        {%- if c.refusing %} <span class="chip red" title="{% for r in c.refusing %}{{ r.editor }}/{{ r.machine }}: {{ r.reason }}{{ " | " if not loop.last }}{% endfor %}">[ {{ c.refusing | length }} REFUSING ]</span>{% endif %}
+      </div>
+    {% endfor %}
+  {% endif %}
+
   <div class="side-head" style="margin-top:1.2rem">[ OUT-OF-DATE COMPUTERS ]</div>
   {% if packages.outdated_machines %}
     {# .stack: a row is one machine (MOBILE_PLAN.md §3.2, 2026-08-30). #}
@@ -197,6 +218,11 @@
           <td class="mono-sm" data-label="COMPUTER">{{ m.machine }}</td>
           <td class="mono-sm" data-label="RUNNING"><span class="chip amber">[ {{ m.companion_version or "?" }} ]</span>
             {% if m.upgrade and m.upgrade.upgrade_reverted_from %}<span class="chip amber" title="this computer installed {{ m.upgrade.upgrade_reverted_from }}, could not start it, and put itself back on the build it is running. Do not make that build current.">[ REVERTED FROM {{ m.upgrade.upgrade_reverted_from }} ]</span>{% endif %}
+            {# REL-3 (usability sweep 2026-09-04): an offer refused at receipt
+               makes no attempt, so this machine used to render exactly like
+               one that had simply not reported yet. It is strictly worse than
+               out of date: nothing on this page can fix it. #}
+            {% if m.refused %}<span class="chip red" title="{{ m.refused.reason or "no reason reported" }}{% if m.refused.at %} (refused {{ m.refused.at | ago }}){% endif %}">[ REFUSING {{ m.refused.version }} ]</span>{% endif %}
           </td>
           <td class="muted" data-label="LAST REPORT">{{ m.received_at | ago }}</td>
           {# Pushed update (2026-08-18): the editor does not have to click
@@ -217,6 +243,11 @@
                 <input type="hidden" name="machine" value="{{ m.machine }}">
                 <button class="btn" type="submit" title="withdraw the request">[ CANCEL ]</button>
               </form>
+            {% elif m.refused %}
+              {# The button is gone rather than disabled: a push here queues a
+                 request this computer has already turned down, and the page
+                 then says "asked" for ever (REL-3). #}
+              <span class="muted">This computer refuses the current build: {{ m.refused.reason or "no reason reported" }}. Pushing it again will not change that.</span>
             {% else %}
               <form class="inline-form" hx-post="/partials/admin/machines/update"
                     hx-target="closest .admin-packages-box" hx-swap="outerHTML">

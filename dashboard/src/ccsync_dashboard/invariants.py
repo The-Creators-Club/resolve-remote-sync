@@ -69,6 +69,26 @@ FLOOR_UPLOAD_ONLY = "0.9.54"
 # says more than the list. Mirrors alerts.MAX_FINDINGS_PER_KIND's reasoning.
 MAX_SUBJECTS = db.INVARIANT_MAX_SUBJECTS
 
+# The installable-app files a browser fetches with NO cookie jar, per mounted
+# app (SYS-17 invariant 13). CR-100: the cards page links its manifest
+# document-relative, the outer `login_gate` answered that fetch with a 303 to
+# /login, and Chrome therefore judged the page not installable and made a
+# plain shortcut. The cards handler had served both before its OWN gate since
+# 2026-08-29; the gate in front of it had not, and
+# `tools/check_mobile_origin.py` passed throughout because it only ever asked
+# the dashboard's own manifest, which has been open since M4 (SYS-11: a
+# parity check that compares a thing against itself).
+#
+# Data, not a chain of ifs, for the reason the registry is: the next mount
+# that ships a PWA (b-roll's client-share prefix is the obvious candidate)
+# adds a row here and is checked from that moment. The paths are literals
+# rather than a walk of the mounted apps because this check runs on the
+# collector thread, which has no FastAPI app to ask.
+PWA_MOUNT_ASSETS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("the dashboard itself", ("/manifest.webmanifest", "/sw.js")),
+    ("Timeline Cards at /cards/", ("/cards/manifest.webmanifest", "/cards/icon.svg")),
+)
+
 # The proxy convention (`<dir>/Proxy/<stem>.mov|.mp4` beside
 # `<dir>/<stem>.<ext>`), keyed on the STEM exactly as proxy_scan.py keys it.
 PROXY_DIR = "proxy"
@@ -711,6 +731,233 @@ def _check_proxy_pairs(ctx: Ctx) -> Outcome:
     return ok(f"{checked} proxy file(s) across {walked} project(s), each with its original")
 
 
+def _newest(versions: Iterable[str]) -> str:
+    """The highest dotted-numeric version in `versions`, or "".
+
+    `db.version_tuple` answers () for anything it cannot parse, which sorts
+    below every real version, so a vendor record with a nonsense version can
+    never become the thing the fleet is measured against.
+    """
+    best = ""
+    best_key: tuple[int, ...] = ()
+    for version in versions:
+        key = db.version_tuple(version)
+        if key and key > best_key:
+            best, best_key = str(version), key
+    return best
+
+
+def _check_fleet_current_with_vendor(ctx: Ctx) -> Outcome:
+    """SYS-17 invariant 11: the newest build the VENDOR offers is the build
+    this dashboard is handing out.
+
+    SYS-2 is the shape this exists for. REL-4/SYS-13's refusal (a companion
+    whose `requires_dashboard` is above this dashboard is staged, never made
+    current) is correct, and its only output was a log line plus a `continue`.
+    On a `policy = "current"` site nobody clicks anything, so nobody sees the
+    refusal, and every derived view then measures the fleet against what THIS
+    dashboard published: with the publish refused, that shelf is stale, every
+    machine reads as 0 releases behind, and the fleet grid, the Packages page
+    and the weekly report all agree that nothing is wrong while the fleet's
+    updates have stopped for good.
+
+    Read from `db.get_feed_offered` (the durable {platform: [version]} the
+    feed check writes on every pass), never from the network: this runs on
+    the collector's single thread, and a check that fetched would be a check
+    that could hang enforce behind a vendor's web server.
+    """
+    if not str(getattr(ctx.settings, "release_feed_url", "") or "").strip():
+        return not_checked("no vendor feed is configured here "
+                           "(DASH_RELEASE_FEED_URL), so this server has nothing "
+                           "to compare its own channel against")
+    offered = db.get_feed_offered(ctx.conn)
+    if not offered:
+        state = db.get_feed_state(ctx.conn)
+        why = " (the last check reported an error)" if state.get("last_error") else ""
+        return not_checked("no check of the vendor feed has recorded what it "
+                           f"offers yet{why}, so this server does not know what "
+                           "the newest build is")
+    bad: list[tuple[str, str]] = []
+    evidence: list[str] = []
+    checked = 0
+    for platform in sorted(offered):
+        newest = _newest(offered.get(platform) or ())
+        if not newest:
+            continue
+        checked += 1
+        current = db.get_current_package(ctx.conn, platform, kind="companion")
+        running = str(current["version"]) if current else ""
+        if running == newest:
+            evidence.append(f"{platform} {newest}")
+            continue
+        row = db.get_package(ctx.conn, platform, newest, kind="companion")
+        if row is None:
+            bad.append((f"{platform} {newest}",
+                        f"the vendor offers {newest} for {platform} and this "
+                        f"server has not published it"
+                        + (f"; computers here are being offered {running}"
+                           if running else "; no build here is current")))
+        elif not row["is_current"]:
+            bad.append((f"{platform} {newest}",
+                        f"{newest} is published here but not current, so "
+                        f"computers on {platform} are still being offered "
+                        + (running or "nothing")))
+        elif db.version_tuple(running) < db.version_tuple(newest):
+            # Belt and braces: is_current is the served pointer, so this only
+            # fires on a row that says current and is not the newest offered.
+            bad.append((f"{platform} {newest}",
+                        f"computers on {platform} are being offered {running}"))
+    if bad:
+        return broken(bad, f"{len(bad)} of {checked} platform(s) are behind the vendor")
+    if not checked:
+        return not_checked("the vendor feed's record of what it offers carries "
+                           "no readable version number")
+    return ok(f"{checked} platform(s) on the newest build the vendor offers "
+              f"({', '.join(evidence)})")
+
+
+def _check_dashboard_meets_requirements(ctx: Ctx) -> Outcome:
+    """SYS-17 invariant 12: this dashboard is new enough for every build in
+    its own channel.
+
+    The same fact REL-4/SYS-13 enforces at publish time, asked as a standing
+    question. A record can also arrive from a restored backup, from an older
+    build's publish, or be left behind by a dashboard that was rolled BACK
+    after the record was stored, and in each of those cases the build sits on
+    the shelf and can never be made current with nothing saying so.
+
+    `package_store.blocks_on_dashboard_version` is called rather than a
+    second comparison of our own: a predicate duplicated between the writer
+    and the checker is SYS-16's shape, and an unparseable requirement has to
+    block here for exactly the reason it blocks there.
+    """
+    from . import VERSION, package_store, release_trust
+
+    rows = list(db.fetch_companion_packages(ctx.conn))
+    if not rows:
+        return not_checked("no build has been published to this dashboard yet")
+    bad: list[tuple[str, str]] = []
+    checked = 0
+    stated = 0
+    for row in rows:
+        if row["retracted_at"]:
+            # A recalled build is never served and never made current, so a
+            # requirement it carries costs the fleet nothing.
+            continue
+        checked += 1
+        wanted = str(row["requires_dashboard"] or "").strip()
+        if not wanted:
+            continue
+        stated += 1
+        kind = str(row["kind"])
+        if kind == "companion":
+            blocks = package_store.blocks_on_dashboard_version(kind, wanted)
+        else:
+            above = release_trust.version_above(wanted, VERSION)
+            blocks = True if above is None else bool(above)
+        if blocks:
+            bad.append((f"{kind}/{row['platform']} {row['version']}",
+                        f"it needs dashboard {wanted} and this dashboard is "
+                        f"{VERSION}, so it can never be handed to the fleet "
+                        f"from here"))
+    if bad:
+        return broken(bad, f"{len(bad)} of {checked} build(s) need a newer dashboard")
+    if not checked:
+        return not_checked("every build on this dashboard has been recalled, so "
+                           "there is nothing on offer to check")
+    return ok(f"dashboard {VERSION} meets what all {checked} build(s) in this "
+              f"channel ask for ({stated} of them ask for anything)")
+
+
+def _check_mount_assets_open(ctx: Ctx) -> Outcome:
+    """SYS-17 invariant 13 (CR-100): a mounted app's installable-app files
+    are not swallowed by the sign-in gate.
+
+    A browser fetches a manifest, a service worker and an icon WITHOUT the
+    session cookie. Behind `app.login_gate` those answered a 303 to /login,
+    so Chrome had no manifest, judged the page not installable, and its
+    Install button produced a home-screen shortcut that opens with the URL
+    bar (the owner, from a phone, 2026-09-02).
+
+    Computed from the gate's OWN open set rather than by fetching anything:
+    this runs on the collector's single thread, an HTTP call to ourselves
+    from inside a collector cycle is a way to deadlock a worker pool, and the
+    fetch would prove nothing the set does not. Nothing here is
+    deployment-specific, so a mount that is turned off at this site is
+    checked too: the regression it catches is in the code, and a check that
+    only looked at the enabled mounts would go quiet on the vendor build,
+    which is the build the regression would ship in.
+    """
+    try:
+        from . import app as app_module
+
+        open_exact = set(getattr(app_module, "_OPEN_EXACT", ()) or ())
+    except Exception as exc:                                          # noqa: BLE001
+        return not_checked("this server could not read its own sign-in gate's "
+                           f"list of open addresses ({type(exc).__name__})")
+    if not open_exact:
+        return not_checked("this server's sign-in gate published no list of "
+                           "open addresses to check")
+    bad: list[tuple[str, str]] = []
+    checked = 0
+    for label, paths in PWA_MOUNT_ASSETS:
+        for path in paths:
+            checked += 1
+            if path not in open_exact:
+                bad.append((path,
+                            f"{label}: the sign-in gate sends this to the "
+                            f"sign-in page instead, so a phone gets no app "
+                            f"details and Install makes a plain shortcut"))
+    if bad:
+        return broken(bad, f"{len(bad)} of {checked} installable-app file(s) are "
+                           f"behind the sign-in gate")
+    return ok(f"{checked} installable-app file(s) across "
+              f"{len(PWA_MOUNT_ASSETS)} page(s) are served without a sign-in")
+
+
+def _check_alerts_deliverable(ctx: Ctx) -> Outcome:
+    """SYS-17 invariant 15 (SYS-1): there is somewhere for an alarm to go,
+    and the last thing sent there arrived.
+
+    The sink logic is `alerts`'s, not this module's: a second implementation
+    of "is this destination working" would be a second answer to disagree
+    with the Alerts page. Reached through `getattr` because a build whose
+    alerts module predates the helper must render NOT CHECKED rather than
+    raise every pass.
+    """
+    from . import alerts
+
+    helper = getattr(alerts, "sink_deliverable", None)
+    if helper is None:
+        return not_checked("this build cannot ask the alerts side whether its "
+                           "destination works (helper not present in this build)")
+    try:
+        # The pass's own clock, so the staleness half of the answer is the
+        # same instant the rest of this cycle was measured at. A helper that
+        # does not take one is called as it was documented, with the
+        # connection alone.
+        try:
+            answer = helper(ctx.conn, ctx.now)
+        except TypeError:
+            answer = helper(ctx.conn)
+        good, detail = answer
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        # `sink_deliverable` raises rather than answering False when it
+        # cannot read the ledger or parse a timestamp, precisely so a caller
+        # renders "not checked" here instead of "no destination".
+        return not_checked("this server could not read its own record of what "
+                           f"it has sent ({type(exc).__name__}), so it cannot "
+                           "say whether an alarm would reach anybody")
+    detail = str(detail or "")
+    if good:
+        return ok(detail or "a destination is configured and the last message "
+                            "sent to it arrived")
+    return broken([("the alerts destination",
+                    detail or "no destination is configured, so nothing this "
+                              "server finds reaches anybody")],
+                  detail or "no destination is configured")
+
+
 def _seen_within(ts: Any, now: str, seconds: float) -> bool:
     """True when `ts` is a timestamp this recent. An unparseable one is NOT
     recent: the clone signature must be evidence of two live machines, and
@@ -818,6 +1065,64 @@ INVARIANTS: tuple[Invariant, ...] = (
         "On the server, look at the folder named below: either put the original "
         "footage back beside it or delete the leftover Proxy folder.",
         _check_proxy_pairs, severity="warn"),
+    # 11 to 15 (SYS-17, 2026-09-04). The first ten look at state that has
+    # gone wrong INSIDE one deployment. These five look at the relationship
+    # between what the vendor published, what this server is deployed with,
+    # and what it renders, which is where most of the last thirty ledger
+    # entries lived and where none of the first ten looks.
+    Invariant(
+        "fleet_current_with_vendor", 11,
+        "the newest CC Sync build the vendor offers is the one this server hands out",
+        "If this server cannot hand out the newest build, every computer stays on "
+        "the one it has and this dashboard reports them all as up to date: the "
+        "fleet's updates stop and nothing anywhere says so.",
+        "On Settings, Packages: check the vendor feed, and update the DASHBOARD "
+        "first if the new build asks for a newer one. The computers are offered "
+        "the new build straight after.",
+        _check_fleet_current_with_vendor),
+    Invariant(
+        "dashboard_meets_requirements", 12,
+        "this dashboard is new enough for every build in its own channel",
+        "A build that needs a newer dashboard than this one sits on the shelf for "
+        "ever: it can be seen on the Packages page and can never be given to a "
+        "computer.",
+        "On Settings, Packages: update the DASHBOARD, then make the build below "
+        "current. Retract it instead if it was published here by mistake.",
+        _check_dashboard_meets_requirements),
+    Invariant(
+        "mount_assets_open", 13,
+        "the pages that install onto a phone are served without a sign-in",
+        "A phone fetches an app's details before anybody signs in. If the sign-in "
+        "page is sent instead, Install makes a plain browser shortcut with the "
+        "address bar showing rather than the full-screen app.",
+        "This one is a code change, not a setting: send us the file names below. "
+        "They belong in the sign-in gate's open list (app._OPEN_EXACT).",
+        _check_mount_assets_open),
+    Invariant(
+        "cards_tree_matches_source", 14,
+        "the Timeline Cards page on this server matches the checkout it was shipped from",
+        "A page fixed by hand on the server is undone by the next deployment, and "
+        "a page the deployment missed keeps a fault everybody thinks was fixed. "
+        "Neither can be seen from here.",
+        "Nothing to press. Re-run the deployment (server/install_dashboard_app.py) "
+        "if the page and the repository are thought to differ; it re-ships the "
+        "whole tree from the checkout.",
+        None, severity="warn",
+        skip_reason=(
+            "nothing records which checkout the Timeline Cards page here was "
+            "shipped from: the deployment copies the files and keeps no commit "
+            "id, file list or checksum of them, so there is nothing to compare "
+            "the served page against")),
+    Invariant(
+        "alerts_deliverable", 15,
+        "there is somewhere for an alarm to go, and the last one sent arrived",
+        "With no destination set, or one that has been refusing since Tuesday, "
+        "everything this server finds waits on a page for somebody to open. That "
+        "is how an outage runs for eighteen hours.",
+        "On Settings, Alerts: set an email or webhook destination and press "
+        "[ SEND A TEST ]. If one is set already, the reason the last message "
+        "failed is under WHAT WAS SENT on the same page.",
+        _check_alerts_deliverable, severity="warn"),
 )
 
 BY_KEY: dict[str, Invariant] = {inv.key: inv for inv in INVARIANTS}

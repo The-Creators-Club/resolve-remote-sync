@@ -165,7 +165,7 @@ body; the exception's message is never stored).
 
 ## 4. What the server checks (alerts)
 
-`alerts.ALERT_KINDS` is a tuple of forty `AlertKind(kind, severity, title,
+`alerts.ALERT_KINDS` is a tuple of fifty-nine `AlertKind(kind, severity, title,
 what, check)` rows evaluated by `scan()` every alerts cycle into findings of
 `{subject, diagnosis, fix, detail}`. The diagnosis is one or two sentences an
 owner can act on; `fix` names the button or the tray action; `detail` is the
@@ -216,6 +216,64 @@ Fleet and server:
 | `key_drain` | warn | machines still on the old sign-in key 7 days after rotation |
 | `weekly_send_failed` | error | the last weekly report was not delivered through a CONFIGURED sink; silent on a site whose sink is `none`, where the report is recorded generated-not-sent instead |
 
+**The fleet job queue** (added 2026-09-04, usability sweep wave 2, DDIAG-2 /
+DDIAG-6). The queue's own module says "a scheduler that quietly assigns
+nothing looks exactly like a fleet with nothing to do", and until this it was
+diagnosed on `/admin/jobs` and nowhere else:
+
+| kind | sev | fires when |
+|---|---|---|
+| `jobs_starved` | warn | the oldest QUEUED job is over 6 h old and `jobs.explain` answers `no_capable_machine`, `kind_not_allowed` or `halted`. `all_busy` / `idle_wait` / `fleet_cap` / `cooling_down` are deliberately absent: those are the scheduler working |
+| `jobs_abandoned` | warn | anything abandoned in the last 24 h. ONE finding for the window, not one per job: a fleet that abandons twelve whisper jobs has one broken computer |
+| `jobs_pinned_no_executor` | error | a pinned job with no Timeline Cards mount behind it (DDIAG-6: the boot-time release sits inside `executor.available()`), or a row this container holds whose heartbeat stopped an hour ago |
+
+**The release channel reaching the fleet** (2026-09-04, REL-3 / REL-6 /
+REL-13). `versions_behind` needs a computer to be three builds behind, so a
+fleet that stopped updating after ONE release was silent for months:
+
+| kind | sev | fires when |
+|---|---|---|
+| `upgrade_refused` | error | `machine_state.upgrade_refused_*` (v48) is set: that computer turned the offer down at receipt, made no attempt, and no button on the page can fix it |
+| `rollout_stalled` | warn | a channel made current over 48 h ago with a computer that has REPORTED since and is still behind. Silent when `made_current_at` is NULL (a build made current before v48: cannot tell) |
+| `platform_channel_stale` | warn | one platform's current build is over 7 days older than the other's by `made_current_at`, or more than 2 builds behind when the stamps are missing. The fix is the two Mac commands verbatim, because PyInstaller cannot cross-build a macOS bundle |
+
+**Each computer's own tools** (2026-09-04, CYT-7 / CMEDIA-3), from
+`sync_guard`:
+
+| kind | sev | fires when |
+|---|---|---|
+| `ytdlp_stale` | warn | that computer's yt-dlp is past its shelf life and could not update itself. The body is the COMPANION's own message; the verdict used to reach one INFO line a day in an editor's log |
+| `ytdlp_failed` | error | `action == "failed"`: no usable binary at all, which is a different alarm from an old one |
+| `loopback_down` | warn | the 8899 loopback is enabled and not bound. `enabled` false is a choice and all-NULL is a companion too old to say; neither fires |
+
+**The YouTube stack on this server** (2026-09-04, YTWEB-2 / YTWEB-5), from
+`ytdl.health_snapshot` in process (no probe, no HTTP):
+
+| kind | sev | fires when |
+|---|---|---|
+| `ytdl_worker_dead` | error | `worker_alive` is False: everything queued sits for ever with no error on it |
+| `ytdl_downloads_failing` | warn | the last real download failed AND the canary failed too. One failed download alone is usually one bad video, and crying wolf on it is how a health strip stops being read |
+| `ytdl_pot_provider_unreachable` | warn | `pot_provider == "unreachable"` ONLY. `unconfigured` is the shipped compose's normal state and `unknown` is "not asked" |
+| `ytdl_plugin_install_failed` | warn | the anti-bot plugin's BOOT install failed (CR-73, CR-84), carrying its error and attempt count |
+| `ytdl_stale` | warn | this container's own yt-dlp is past `YTDLP_MAX_AGE_DAYS`. The one signal that would have shown CR-80 and CR-83 coming |
+
+**Nothing alerts on `cookies_state == "anonymous"`**: since CR-80 that is the
+HEALTHY state, and the 2026-08-11 "cookies are mandatory" rule is inverted.
+
+**The b-roll platform** (2026-09-04, BROLL-2), read from `broll.db` and
+`client_shares.db` on their own read-only connections, silent when the mount
+is absent:
+
+| kind | sev | fires when |
+|---|---|---|
+| `broll_batch_stuck` | warn | a non-terminal ingest batch with no heartbeat for 24 h: those clips are not searchable and nothing is working on them |
+| `broll_share_expiring` | warn | a live client link inside 7 days of its expiry. An already-expired one is not a warning: the client has met it |
+
+BROLL-2's fourth kind, `broll_index_stale`, is NOT built: deciding "no new
+clip in 90 days while the archive has newer files" needs a walk of the
+archive share, and a filesystem walk on the collector's single thread is the
+one thing `Ctx` forbids. It is named here so its absence is visible.
+
 Each kind is capped at 40 findings per cycle (`MAX_FINDINGS_PER_KIND`) so one
 fleet-wide condition cannot fill a mailbox.
 
@@ -233,7 +291,7 @@ It matters twice more. `deliver()` sends recovery messages only for kinds whose
 check actually RAN this cycle: a kind that failed has said nothing about its
 subjects, and declaring them recovered would be "could not check" rendered as
 "fine" in its purest form. And the weekly report has a `COULD NOT BE CHECKED`
-section beside `CHECKED AND FOUND NOTHING WRONG (n of 40)`, so a clean report
+section beside `CHECKED AND FOUND NOTHING WRONG (n of 59)`, so a clean report
 is distinguishable from a report whose checks all crashed.
 
 The notices side has the same posture in a different shape: `run_checks()`
@@ -325,6 +383,25 @@ is a counter in memory.
   is only declared for kinds whose check ran this cycle (section 5).
 * **Unparseable timestamps** read as "not recently sent": the failure
   direction of the dedup is "say it again", never "stay quiet".
+* **A finding may opt out of its kind's daily repeat** (`_f(..., repeat=False)`,
+  DDIAG-3, 2026-09-04) while staying open. `machine_silent` uses it past
+  `SILENT_GIVE_UP_DAYS` (14): a retired laptop was an `error` for ever, so it
+  mailed the owner the same sentence 21 times. It is deliberately not DROPPED
+  from the scan - a subject that leaves the scan is declared RECOVERED, and
+  "this has cleared, no action is needed" about a computer that is dead is a
+  worse lie than the daily mail. Nothing may opt IN: the repeat rule stays the
+  severity's. The fix text now names `[ FORGET ]` on the FLEET row.
+* **Turning a sink on re-raises everything that is already open** (DDIAG-4,
+  2026-09-04). With `alerts_sink = none` every finding still gets an
+  `alert_log` row (ok=0, "no sink configured") so the page can answer "why was
+  nobody told" - but that row is also what `_is_open` and the dedup window
+  read, so the day an admin configured SMTP every warn open since before then
+  counted as said and would not be sent again until it had cleared and come
+  back. `set_settings` now re-files those rows under `<kind>.undelivered` when
+  the sink leaves `none`: they stay on WHAT WAS SENT as the honest record of a
+  period with no channel, and the next scan raises every open subject with a
+  real sink behind it. The page says so on save: "Saved. The next check will
+  send everything that is currently open."
 
 ## 8. The weekly report
 
@@ -354,14 +431,41 @@ Body, in order:
 5. `BYTES MOVED` per lane per machine - a live probe of `lane_report_current`
    for a bytes column, omitted today because no lane report carries one; the
    section appears by itself the day one does.
+5b. `JOBS: n queued, n running, n abandoned this week` (DDIAG-2,
+   2026-09-04), printed every week including all zeros: the queue is invisible
+   on every other page an owner opens, and a line that appeared only on bad
+   weeks would make its absence read as good news. Omitted entirely on a
+   database with no `jobs` table, rather than printed as a zero nobody
+   measured.
 6. `RECOVERABLE FILES IN .ccsync-trash` per machine that reported a figure.
    `.stversions` is not listed: no companion measures it, and a zero nobody
    measured would read as "nothing to clean up".
-7. `CHECKED AND FOUND NOTHING WRONG (n of 40)`, one line per quiet kind by
+7. `CHECKED AND FOUND NOTHING WRONG (n of 59)`, one line per quiet kind by
    its `what`, then `COULD NOT BE CHECKED` when any check raised.
 
 The finding also asked for "no snapshot schedule is configured on this NAS"
 as a standing red line (SYS-14). That check is not in the registry.
+
+## 8a. The daily heartbeat
+
+DDIAG-17, 2026-09-04. Every message in this document is composed and sent BY
+the thing being watched, so a container that is off, a collector thread past
+its restart limit, a NAS that is powered down and a Tailscale link that is
+gone all produce exactly the same experience as a healthy fleet: no mail. The
+weekly report was the only proof of life, and it is a week wide.
+
+`alerts_heartbeat` (default **off**, editable on the Alerts page beside the
+weekly toggle) sends ONE short message a day while a sink is set: subject
+`CC Sync: all quiet - 8 computer(s), 0 problem(s)`, from the counts
+`run_cycle` already has. `heartbeat_due` compares the DATE of the last
+`heartbeat` row in `alert_log` against today's in `alerts_timezone` - a
+calendar day, not "24 hours since", which drifts an hour later every day until
+it lands in the middle of the night - so it is durable across a container
+replacement exactly as `weekly_due` is. It is NOT a registry kind: it reports
+no condition, so it can never count as a raised problem, be recovered or reach
+CURRENTLY OPEN. The weekly report does not double as it, and the page says the
+only thing that makes any of it worth a mail a day: "If these stop arriving,
+the server itself is down."
 
 ## 9. Cadence, `/api/v1/health` and cost
 
@@ -378,7 +482,7 @@ as a standing red line (SYS-14). That check is not in the registry.
 * `/api/v1/health` gains `notices: {error, warn}` (a count that cannot be read
   is one `error`) and `open_alerts: {error, warn}` - the latter from a LIVE
   `alerts.scan()` on every call, which walks the whole fleet view and all
-  forty checks; a scan that cannot run returns `{error: 1, warn: 0,
+  fifty-nine checks; a scan that cannot run returns `{error: 1, warn: 0,
   scan_failed: true}`, never zero. Both blocks are in the AUTHENTICATED body
   only: the container healthcheck's unauthenticated probe (every 60 s, 5 s
   timeout) gets `{ok, version}` before that block is built and never triggers
@@ -410,6 +514,13 @@ resilience sweep 2026-08-28 fix pass `[ OK ]` requires evidence
 an unwritten kind now renders `[ NOT CHECKED ]` instead. Still write the
 check promptly: `[ NOT CHECKED ]` is honest, not a substitute for the
 diagnosis.
+
+A `NOTICE_KINDS` entry may also carry **`href`** and **`href_label`**
+(DDIAG-8, 2026-09-04). The destination is a property of the KIND, not of the
+row, so it lives in the registry and needs no column: the panel renders it
+after the sentence as a `[ TAKE ME THERE ]` button (`href_label` overrides
+that wording). Keep the prose fix as well - a mail body has no links to
+offer, and the sentence is what an owner reads there.
 
 **An alert.** Add one `AlertKind(kind, severity, title, what, check)` row to
 `alerts.ALERT_KINDS`, above `red_unexplained`. `check(ctx)` returns
@@ -548,6 +659,16 @@ Numbered as SYS-9 numbers them.
 | 8 | `versioning_agrees` | `.stversions` retention agrees between NAS-side and editor-side (R5) | **NOT CHECKED, by design** |
 | 9 | `snapshot_schedule` | the customer's data is on a snapshot schedule (SYS-14's standing red line) | checked when the NAS can be asked |
 | 10 | `proxy_pairs` | every `Proxy/<stem>.*` on the server has its original beside it, a camera proxy suffix (Sony `S03`) allowed for | checked, `warn` |
+| 11 | `fleet_current_with_vendor` | the newest companion build the VENDOR feed offers (`db.get_feed_offered`, written by every feed check) is published here and is current (SYS-2) | checked when a feed is configured and one check has recorded what it offers |
+| 12 | `dashboard_meets_requirements` | this dashboard's `VERSION` is at or above the `requires_dashboard` of every non-retracted record in the channel, through `package_store.blocks_on_dashboard_version` rather than a second comparison | checked once anything is published |
+| 13 | `mount_assets_open` | every mounted app's installable-app files (`PWA_MOUNT_ASSETS`: the dashboard's manifest and `sw.js`, Timeline Cards' manifest and icon) are in `app._OPEN_EXACT`, so the outer gate does not 303 them (CR-100) | checked always, from the gate's own set and never by fetching |
+| 14 | `cards_tree_matches_source` | the served `cards-web` tree matches the checkout it was shipped from (CR-101 was hand-copied with a `.bak`) | **NOT CHECKED, for want of a record: see below** |
+| 15 | `alerts_deliverable` | a sink is configured and its last send arrived, through `alerts.sink_deliverable` (SYS-1) | checked, `warn`; NOT CHECKED on a build without that helper or a ledger it cannot read |
+
+Invariants 11 to 15 were added 2026-09-04 for SYS-17: the first ten look at
+state that has gone wrong INSIDE one deployment, and every recent ledger entry
+a machine could have caught is about the relationship between what the vendor
+published, what this server is deployed with, and what it renders.
 
 Three deliberate narrowings, each so the check can be honest rather than
 loud:
@@ -601,6 +722,20 @@ loud:
   `invariants.CAMERA_PROXY_SUFFIXES` is tried a second time with the suffix
   stripped, case-insensitively; matching under neither stem is still broken,
   because that is footage really gone.
+* **Invariant 14 is registered with a `skip_reason`, like invariant 8**
+  (2026-09-04). Nothing on this server records which checkout the Timeline
+  Cards tree came from: `install_dashboard_app.install_tree` uploads the
+  files, verifies count and bytes, and swaps the directory, keeping no commit
+  id, file list or checksum, and `CARDS_EXCLUDE_DIRS` drops `.git` from the
+  upload, so the served tree carries no provenance either. Hashing it would
+  therefore be hashing it against itself. To make this checkable the deploy
+  would have to WRITE what it shipped - the source commit and a per-file
+  sha256 manifest into `<host-root>/cards-web` (or into `meta` through the
+  dashboard) at install time - and then the check is a walk and a compare.
+  Until somebody records it, the honest page entry is `[ NOT CHECKED ]` with
+  that sentence on it: CR-101 was fixed by a hand copy on the NAS with a
+  `.bak` beside it, and the next `install_dashboard_app.py` run is still the
+  only thing that reconciles a tree edited that way.
 
 ### NOT CHECKED is not OK
 
@@ -727,6 +862,19 @@ and the container healthcheck have each made once already.
 | somebody has actually restored from a backup this year | a recorded date under 365 days old |
 | files deleted on the server are kept for a year | every project's live Syncthing folder carries versioning with a `maxAge` |
 | deleted-file copies on editors' computers are within their limit | every reporting machine's `.ccsync-trash` is under 50 GB (the 14-day half of the rule is not reported by any companion, and the line says so) |
+| somebody is told when this server finds a problem | a sink is configured AND `alert_log` holds a successful send inside 30 days |
+
+**The ninth line** (SYS-1 / DDIAG-16, 2026-09-04) is the panel's own
+mechanism: eight lines about safety nets and none about whether their failure
+ever reaches a person. It is `error`, so a vendor default with no sink says so
+out loud on PROBLEMS THE SERVER FOUND, and its consequence sentence counts
+`alerts.ALERT_KINDS` rather than naming a number that goes stale. Green needs
+BOTH halves, because a mailbox that started bouncing in March is the same hole
+as no sink at all and it is the more dangerous of the two. The verdict itself
+is **`alerts.sink_deliverable(conn) -> (ok, one line in editor English)`**,
+shared with invariant 15 (`alerts_deliverable`) so the panel and the invariant
+can never disagree; it RAISES rather than answering False when the ledger
+cannot be read, and both callers turn that into `[ CANNOT VERIFY ]`.
 
 Both dataset names come from the site manifest (`[tree] dataset`,
 `[apps] dataset`) or, unset, from the deploy's own lookup on the NAS -

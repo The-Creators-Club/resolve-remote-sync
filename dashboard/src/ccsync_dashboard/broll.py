@@ -400,9 +400,29 @@ def _add_in_repo_broll_web() -> bool:
     return True
 
 
+def _schema_too_new(exc: BaseException) -> bool:
+    """Is this the "the database was written by a newer app" refusal?
+
+    MUSIC-10's shape, and b-roll's `db.ensure_schema` carries the same guard
+    (`FATAL: database at ... has user_version=N, newer than this app
+    supports`). Matched on the text because it is a plain RuntimeError in both
+    trees and neither is ours to give an exception class to; a miss costs the
+    generic detail sentence, never a wrong mount state.
+    """
+    text = f"{exc}"
+    return "user_version" in text and "newer than this app supports" in text
+
+
 def mount_broll(app: FastAPI, ingest_token: str,
-                settings: Settings | None = None) -> str:
-    """Mount the b-roll app at /broll. Returns MOUNTED / ABSENT / DEGRADED.
+                settings: Settings | None = None) -> tuple[str, str]:
+    """Mount the b-roll app at /broll. -> (status, detail).
+
+    (status, detail) since BROLL-2 (2026-09-03), exactly as `mount_cards`
+    has always answered: every non-mounted branch used to end in a
+    `log.error`/`log.warning` inside the container and a nav link that
+    silently disappeared, so no page could say WHY. The detail is a sentence
+    an owner can act on and it is what `mount_status`, the health route and
+    the self-diagnosis notice all carry.
 
     `settings` is what BrollGate mints the ingest panel's identity from (the
     session secret, and whether that editor is an admin). It defaults to None
@@ -423,7 +443,8 @@ def mount_broll(app: FastAPI, ingest_token: str,
         # app.py refuses to build the app at all in this case; this is the
         # belt to that brace, so no other caller can mount without a token.
         log.error("b-roll UI NOT mounted: no usable BROLL_INGEST_TOKEN")
-        return ABSENT
+        return ABSENT, ("no usable BROLL_INGEST_TOKEN is configured, so the "
+                        "b-roll ingest write path cannot be guarded")
     try:
         # The b-roll package is imported as top-level `app` -- a generic name it
         # kept when broll/web was folded into this repo. Safe here only because
@@ -441,7 +462,8 @@ def mount_broll(app: FastAPI, ingest_token: str,
     except Exception as e:  # noqa: BLE001 - see module docstring
         log.warning("b-roll UI not mounted (%s: %s); dashboard continues without it",
                     type(e).__name__, e)
-        return ABSENT
+        return ABSENT, (f"the b-roll checkout did not import "
+                        f"({type(e).__name__}: {e})")
 
     gated = BrollGate(broll_app, ingest_token, settings)
     _install_fleet_stamp_trust()
@@ -458,11 +480,22 @@ def mount_broll(app: FastAPI, ingest_token: str,
                   "is writable by this container's uid, and the nav link is hidden",
                   type(e).__name__, e)
         app.mount(MOUNT_PATH, gated)
-        return DEGRADED
+        if _schema_too_new(e):
+            # MUSIC-10's second half, b-roll's copy: a broll.db published from
+            # a base rig running a newer web app. DEGRADED with the reason at
+            # BOOT beats MOUNTED plus a 500 on every request, which is what
+            # the nav would otherwise keep advertising.
+            return DEGRADED, ("the b-roll database was written by a newer "
+                              "version of the b-roll app than this server "
+                              f"runs, so no /broll page can open it ({e})")
+        return DEGRADED, ("the b-roll data root could not be prepared "
+                          f"({type(e).__name__}: {e}); every /broll request "
+                          "will fail until it is writable by this container's "
+                          "uid")
 
     app.mount(MOUNT_PATH, gated)
     log.info("b-roll UI mounted at %s", MOUNT_PATH)
-    return MOUNTED
+    return MOUNTED, "serving /broll"
 
 
 def _install_fleet_stamp_trust() -> bool:

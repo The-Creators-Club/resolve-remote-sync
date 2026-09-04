@@ -7359,3 +7359,145 @@ def test_a_disabled_loopback_is_never_retried(tmp_path, monkeypatch):
     app._broll_server = None
     assert app.retry_loopback_bind() is False
     assert called == []
+
+
+# -- REL-3 (usability sweep 2026-09-03): a REFUSED build is reported --------
+#
+# The failure class that makes no attempt at all, so REL-8's counters can
+# never carry it: a rejected signature, a build below the downgrade floor,
+# plain HTTP to a public host. On Packages a refusing machine used to render
+# identically to one that had simply not reported yet.
+
+
+def _refusal(version="9.9.65"):
+    return {"version": version,
+            "reason": "release signature rejected (no trusted key)",
+            "at": "2026-09-04T08:12:01Z"}
+
+
+def test_sync_guard_carries_the_refused_build(tmp_path):
+    app = _make_app(tmp_path)
+    app.upgrade.last_refusal = _refusal()
+    block = app.sync_guard()["upgrade"]
+    assert block["refused_version"] == "9.9.65"
+    assert "signature" in block["refused_reason"]
+    assert block["refused_at"] == "2026-09-04T08:12:01Z"
+    # The attempts ledger is untouched: nothing was downloaded, and
+    # [ FAILED xN ] on the dashboard has to keep meaning what it means.
+    assert block["attempts"] == 0 and block["last_error"] is None
+
+
+def test_sync_guard_nulls_the_refusal_when_there_is_none(tmp_path):
+    block = _make_app(tmp_path).sync_guard()["upgrade"]
+    assert block["refused_version"] is None
+    assert block["refused_reason"] is None
+    assert block["refused_at"] is None
+
+
+def test_the_report_survives_an_upgrader_that_never_ran(tmp_path):
+    app = _make_app(tmp_path)
+    app.upgrade = None
+    assert app.upgrade_refusal() is None
+    assert app.sync_guard()["upgrade"]["refused_version"] is None
+
+
+def test_a_reader_that_raises_is_not_a_failed_report(tmp_path):
+    class _Boom:
+        def refusal(self):
+            raise RuntimeError("boom")
+
+    app = _make_app(tmp_path)
+    app.upgrade = _Boom()
+    assert app.upgrade_refusal() is None
+    assert "upgrade" in app.sync_guard()
+
+
+def test_a_refused_offer_backs_off_on_the_failed_curve(tmp_path, monkeypatch):
+    """Not the flat 600 s re-arm for ever: a refusal is the one class of
+    failure that cannot come good by being asked again in ten minutes."""
+    from ccsync_companion import app as app_mod
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app, _applied = _update_app(tmp_path, monkeypatch)
+    app.upgrade.last_refusal = _refusal("9.9.9")
+    monkeypatch.setattr(app, "apply_upgrade", lambda **kw: "no-offer")
+    clock = [1000.0]
+    monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock[0])
+
+    waits = []
+    for _ in range(3):
+        app._run_auto_update("9.9.9", first_attempt=False)
+        waits.append(app._auto_update_retry_at - clock[0])
+    assert waits == list(upgrade_mod.UPGRADE_BACKOFF_SECONDS)
+    # ...and the sixth-in-a-row is still 6 h, never zero.
+    for _ in range(3):
+        app._run_auto_update("9.9.9", first_attempt=False)
+    assert app._auto_update_retry_at - clock[0] == \
+        upgrade_mod.UPGRADE_BACKOFF_SECONDS[-1]
+    # NOT in the ledger: a refusal downloads nothing.
+    assert app._upgrade_attempts.get("attempts") in (None, 0)
+
+
+def test_a_withdrawn_offer_is_not_a_refusal(tmp_path, monkeypatch):
+    """"no-offer" also means the admin rolled `current` back to our version
+    while a thread was in flight. That one keeps the short flat timer: there
+    is nothing wrong with this machine."""
+    from ccsync_companion import app as app_mod
+
+    app, _applied = _update_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(app, "apply_upgrade", lambda **kw: "no-offer")
+    clock = [1000.0]
+    monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock[0])
+
+    app._run_auto_update("9.9.9", first_attempt=False)
+    assert app._auto_update_retry_at - clock[0] == \
+        app_mod.PUSHED_UPDATE_FAILED_RETRY_SECONDS
+
+
+def test_a_refusal_of_another_build_does_not_back_this_one_off(tmp_path, monkeypatch):
+    from ccsync_companion import app as app_mod
+
+    app, _applied = _update_app(tmp_path, monkeypatch)
+    app.upgrade.last_refusal = _refusal("9.9.65")
+    monkeypatch.setattr(app, "apply_upgrade", lambda **kw: "no-offer")
+    clock = [1000.0]
+    monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock[0])
+
+    app._run_auto_update("9.9.9", first_attempt=False)
+    assert app._auto_update_retry_at - clock[0] == \
+        app_mod.PUSHED_UPDATE_FAILED_RETRY_SECONDS
+
+
+def test_the_refused_backoff_restarts_for_a_new_build(tmp_path, monkeypatch):
+    """A newly published build is always worth one immediate try: the whole
+    point of publishing a fix is that the machine takes it."""
+    from ccsync_companion import app as app_mod
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app, _applied = _update_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(app, "apply_upgrade", lambda **kw: "no-offer")
+    clock = [1000.0]
+    monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock[0])
+
+    app.upgrade.last_refusal = _refusal("9.9.9")
+    app._run_auto_update("9.9.9", first_attempt=False)
+    app._run_auto_update("9.9.9", first_attempt=False)
+    app.upgrade.last_refusal = _refusal("9.9.10")
+    app._run_auto_update("9.9.10", first_attempt=False)
+    assert app._auto_update_retry_at - clock[0] == \
+        upgrade_mod.UPGRADE_BACKOFF_SECONDS[0]
+
+
+def test_a_pushed_update_refused_at_receipt_backs_off_the_same_way(tmp_path, monkeypatch):
+    from ccsync_companion import app as app_mod
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app, _applied = _update_app(tmp_path, monkeypatch)
+    app.upgrade.last_refusal = _refusal("9.9.9")
+    monkeypatch.setattr(app, "apply_upgrade", lambda **kw: "no-offer")
+    clock = [1000.0]
+    monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock[0])
+
+    app._run_pushed_update("9.9.9@now", "9.9.9", first_attempt=False)
+    assert app._pushed_update_retry_at - clock[0] == \
+        upgrade_mod.UPGRADE_BACKOFF_SECONDS[0]

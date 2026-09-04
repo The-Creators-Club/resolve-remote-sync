@@ -887,4 +887,38 @@ if ($localDrift.Count -gt 0) {
 }
 Save-ShipStep -Step "local" -Version $CompanionVersion -InstallerVersion $InstallerVersion
 Write-Step "ship complete. Editors' trays will offer v$CompanionVersion on their next report."
+
+# --- the rollout line (REL-6, usability sweep 2026-09-04) -------------------
+#
+# The line above was the last thing this script ever said, and it is a
+# PREDICTION: nothing anywhere then said whether the fleet took the build.
+# /api/v1/health answers the fleet credential this ship already holds (the
+# dashboard login belongs to build_editor_package.ps1 and never leaves it), so
+# the counts are free here; WHO is behind needs an admin session, which is
+# what the drift doctor's -Watch is for. Advisory: it never changes the exit
+# code, exactly like the macOS advisory above.
+$rolloutText = ""
+try {
+    $rolloutText = Invoke-CurlWithToken -Uri "$DashboardUrl/api/v1/health" `
+        -Token $env:DASH_REPORT_TOKEN -ExtraArgs @("--max-time", "15")
+}
+catch { $rolloutText = "" }
+$rolloutPrinted = $false
+if ($rolloutText) {
+    try {
+        $health = ($rolloutText | Out-String | ConvertFrom-Json)
+        foreach ($c in @($health.rollout)) {
+            $line = "rollout: $($c.machines_on_current) of $($c.machines_total) computers on $($c.current_version) ($($c.platform))"
+            if ($c.behind -gt 0) { $line += ", $($c.behind) behind" }
+            if ($c.refusing -gt 0) { $line += ", $($c.refusing) REFUSING it" }
+            Write-Step $line
+            $rolloutPrinted = $true
+        }
+    }
+    catch { $rolloutPrinted = $false }
+}
+if (-not $rolloutPrinted) {
+    Write-Step "NOTE: could not read the rollout numbers (a dashboard older than 2026-09-04 does not report them)."
+}
+Write-Step "follow it: .\tools\check_deploy_drift.ps1 -AdminUser $AdminUser -Watch  (names who is behind, re-reads every 60 s)"
 exit 0

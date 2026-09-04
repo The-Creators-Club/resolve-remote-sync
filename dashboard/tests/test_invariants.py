@@ -75,8 +75,15 @@ def test_the_whole_registry_evaluates_on_an_empty_database(conn):
     assert {r["key"] for r in results} == set(invariants.BY_KEY)
     for result in results:
         assert result["state"] in dbmod.INVARIANT_STATES
-        # An empty deployment can prove nothing, so nothing may claim OK...
-        assert result["state"] != dbmod.INVARIANT_OK
+        # An empty deployment can prove nothing about its own DATA, so
+        # nothing that reads the database may claim OK. `mount_assets_open`
+        # (SYS-17 invariant 13) is exempt because its subject is the SERVED
+        # CODE and not this deployment's state: the sign-in gate's open list
+        # is the same on a fresh container as on a full one, and a check that
+        # answered "not checked" on an empty database would go quiet on
+        # exactly the vendor build a CR-100 regression would ship in.
+        if result["key"] not in ("mount_assets_open",):
+            assert result["state"] != dbmod.INVARIANT_OK, result["key"]
         # ...and every not-checked verdict says what would make it checkable.
         if result["state"] == dbmod.INVARIANT_NOT_CHECKED:
             assert result["detail"]
@@ -111,10 +118,14 @@ def test_a_fixed_invariant_closes_its_own_notice(conn):
                          syncthing_device_id=DEV_A)
     dbmod.add_selection(conn, "ruskin", "ff5", "owen", NOW, machine="DESKTOP-1")
     invariants.run_cycle(conn, _settings(), NOW, folder_devices={"ff5": []})
-    assert any(n["kind"] == "invariant_broken" for n in dbmod.open_notices(conn))
+    subject = "plan_has_share: ruskin/DESKTOP-1 -> ff5"
+    assert any(n["subject"] == subject for n in dbmod.open_notices(conn))
 
     invariants.run_cycle(conn, _settings(), LATER, folder_devices={"ff5": [DEV_A]})
-    assert not any(n["kind"] == "invariant_broken" for n in dbmod.open_notices(conn))
+    # By subject, not by kind: an empty test deployment has no alert
+    # destination either (invariant 15), and that notice is a different fact
+    # standing open beside this one.
+    assert not any(n["subject"] == subject for n in dbmod.open_notices(conn))
     stored = dbmod.fetch_invariant_results(conn)["plan_has_share"]
     assert stored["state"] == dbmod.INVARIANT_OK
     # The broken subject row is gone, not left behind as history: this table
@@ -129,9 +140,9 @@ def test_the_alert_kind_reports_a_broken_invariant_with_its_fix(conn):
     invariants.run_cycle(conn, _settings(), NOW, folder_devices={"ff5": []})
 
     findings = alerts.scan(conn, _settings(), NOW)
-    mine = [f for f in findings if f["kind"] == "invariant_broken"]
-    assert mine, [f["kind"] for f in findings]
-    assert "ruskin/DESKTOP-1 -> ff5" in mine[0]["subject"]
+    mine = [f for f in findings if f["kind"] == "invariant_broken"
+            and "ruskin/DESKTOP-1 -> ff5" in f["subject"]]
+    assert mine, [f["subject"] for f in findings if f["kind"] == "invariant_broken"]
     assert mine[0]["fix"] == invariants.BY_KEY["plan_has_share"].fix
     # The consequence sentence is the registry's, written once.
     assert invariants.BY_KEY["plan_has_share"].consequence in mine[0]["diagnosis"]
@@ -672,3 +683,241 @@ def test_a_verdict_still_deletes_the_subjects_it_did_not_name(conn, monkeypatch)
     assert dbmod.broken_invariants(conn) == []
     assert [r["subject"] for r in dbmod.open_notices(conn)
             if r["kind"] == "invariant_broken"] == []
+
+
+# ------------------------------------------- SYS-17: invariants 11 to 15
+#
+# The first ten look at state that has gone wrong inside one deployment.
+# These five look at the relationship between what the vendor published, what
+# this server is deployed with, and what it renders.
+
+def _feed_settings(**kw) -> Settings:
+    return _settings(release_feed_url="https://example.invalid/channel.json", **kw)
+
+
+def test_11_is_not_checked_without_a_feed_and_without_a_check(conn):
+    """Two different silences, both honest. No feed configured is a supported
+    deployment; a feed configured and never successfully checked is a warm-up,
+    and neither is evidence that the fleet has the newest build."""
+    no_feed = invariants._check_fleet_current_with_vendor(_ctx(conn))
+    assert no_feed.state == dbmod.INVARIANT_NOT_CHECKED
+    assert "DASH_RELEASE_FEED_URL" in no_feed.detail
+
+    cold = invariants._check_fleet_current_with_vendor(
+        _ctx(conn, settings=_feed_settings()))
+    assert cold.state == dbmod.INVARIANT_NOT_CHECKED
+    assert cold.detail
+
+    dbmod.set_feed_state(conn, last_error="connection refused")
+    with_error = invariants._check_fleet_current_with_vendor(
+        _ctx(conn, settings=_feed_settings()))
+    assert with_error.state == dbmod.INVARIANT_NOT_CHECKED
+    assert "error" in with_error.detail
+
+
+def test_11_names_the_platform_the_vendor_has_moved_past(conn):
+    """SYS-2's shape: the vendor offers 0.9.66, this dashboard could not
+    publish it, and every other view reads the fleet as up to date because
+    they all measure against this server's own shelf."""
+    _publish(conn, "0.9.60")
+    dbmod.set_current_package(conn, "windows", "0.9.60")
+    dbmod.set_feed_offered(conn, {"windows": ["0.9.60", "0.9.66"]})
+
+    outcome = invariants._check_fleet_current_with_vendor(
+        _ctx(conn, settings=_feed_settings()))
+    assert outcome.state == dbmod.INVARIANT_BROKEN
+    subject, detail = outcome.subjects[0]
+    assert subject == "windows 0.9.66"
+    assert "has not published it" in detail and "0.9.60" in detail
+
+
+def test_11_knows_published_but_not_current_from_never_published(conn):
+    _publish(conn, "0.9.60")
+    dbmod.set_current_package(conn, "windows", "0.9.60")
+    _publish(conn, "0.9.66")
+    dbmod.set_feed_offered(conn, {"windows": ["0.9.66"]})
+
+    outcome = invariants._check_fleet_current_with_vendor(
+        _ctx(conn, settings=_feed_settings()))
+    assert outcome.state == dbmod.INVARIANT_BROKEN
+    assert "published here but not current" in outcome.subjects[0][1]
+
+    dbmod.set_current_package(conn, "windows", "0.9.66")
+    fixed = invariants._check_fleet_current_with_vendor(
+        _ctx(conn, settings=_feed_settings()))
+    assert fixed.state == dbmod.INVARIANT_OK
+    # A green row carries its evidence, or it means nothing.
+    assert "windows 0.9.66" in fixed.detail
+
+
+def test_11_compares_two_digit_minors_numerically(conn):
+    """0.10.0 is above 0.9.9 (the owner's versioning rule): a string compare
+    would report the fleet as ahead of the vendor and tick green."""
+    _publish(conn, "0.10.0")
+    dbmod.set_current_package(conn, "windows", "0.10.0")
+    dbmod.set_feed_offered(conn, {"windows": ["0.9.9", "0.10.0"]})
+    outcome = invariants._check_fleet_current_with_vendor(
+        _ctx(conn, settings=_feed_settings()))
+    assert outcome.state == dbmod.INVARIANT_OK
+
+
+def test_12_names_the_build_that_needs_a_newer_dashboard(conn):
+    """REL-4/SYS-13's refusal asked as a standing question: a record can also
+    arrive from a restored backup or be left behind by a dashboard that was
+    rolled back, and then it sits on the shelf for ever with nothing saying
+    so."""
+    from ccsync_dashboard import VERSION
+
+    empty = invariants._check_dashboard_meets_requirements(_ctx(conn))
+    assert empty.state == dbmod.INVARIANT_NOT_CHECKED
+
+    dbmod.insert_companion_package(
+        conn, version="0.9.70", platform="windows", filename="c.exe",
+        sha256="sha", size_bytes=10, published_by="owen", now=NOW,
+        kind="companion", requires_dashboard="99.0.0")
+    outcome = invariants._check_dashboard_meets_requirements(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_BROKEN
+    subject, detail = outcome.subjects[0]
+    assert subject == "companion/windows 0.9.70"
+    assert "99.0.0" in detail and VERSION in detail
+
+
+def test_12_is_ok_when_every_record_asks_for_no_more_than_this_build(conn):
+    from ccsync_dashboard import VERSION
+
+    _publish(conn, "0.9.66")                       # no stated requirement
+    dbmod.insert_companion_package(
+        conn, version="0.9.67", platform="macos", filename="c.dmg",
+        sha256="sha", size_bytes=10, published_by="owen", now=NOW,
+        kind="companion", requires_dashboard=VERSION)
+    outcome = invariants._check_dashboard_meets_requirements(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_OK
+    assert VERSION in outcome.detail
+
+
+def test_12_ignores_a_recalled_build(conn):
+    """A retracted record is never served and never made current, so a
+    requirement it carries costs the fleet nothing."""
+    dbmod.insert_companion_package(
+        conn, version="0.9.70", platform="windows", filename="c.exe",
+        sha256="sha", size_bytes=10, published_by="owen", now=NOW,
+        kind="companion", requires_dashboard="99.0.0")
+    conn.execute("UPDATE companion_packages SET retracted_at=?, "
+                 "retracted_reason='bad build' WHERE version='0.9.70'", (NOW,))
+    outcome = invariants._check_dashboard_meets_requirements(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_NOT_CHECKED
+    assert outcome.detail
+
+
+def test_12_blocks_on_a_requirement_it_cannot_read(conn):
+    """`package_store.blocks_on_dashboard_version`'s rule, shared rather than
+    re-implemented: a stated requirement nobody can parse is refused at
+    publish time, so it must be reported here too."""
+    dbmod.insert_companion_package(
+        conn, version="0.9.70", platform="windows", filename="c.exe",
+        sha256="sha", size_bytes=10, published_by="owen", now=NOW,
+        kind="companion", requires_dashboard="latest")
+    outcome = invariants._check_dashboard_meets_requirements(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_BROKEN
+
+
+def test_13_reads_the_real_sign_in_gate_and_finds_every_pwa_file_open(conn):
+    """CR-100 as a standing check. This asserts against `app._OPEN_EXACT`
+    itself, so the day somebody tidies one of those literals away the pass
+    says so instead of a phone silently installing a shortcut."""
+    outcome = invariants._check_mount_assets_open(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_OK
+    assert "4" in outcome.detail
+
+
+def test_13_names_a_pwa_file_the_gate_would_swallow(conn, monkeypatch):
+    from ccsync_dashboard import app as app_module
+
+    trimmed = set(app_module._OPEN_EXACT) - {"/cards/manifest.webmanifest"}
+    monkeypatch.setattr(app_module, "_OPEN_EXACT", trimmed)
+    outcome = invariants._check_mount_assets_open(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_BROKEN
+    subject, detail = outcome.subjects[0]
+    assert subject == "/cards/manifest.webmanifest"
+    assert "Install makes a plain shortcut" in detail
+
+
+def test_13_is_not_checked_when_the_gate_publishes_no_list(conn, monkeypatch):
+    from ccsync_dashboard import app as app_module
+
+    monkeypatch.setattr(app_module, "_OPEN_EXACT", set())
+    outcome = invariants._check_mount_assets_open(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_NOT_CHECKED
+    assert outcome.detail
+
+
+def test_14_is_registered_and_says_what_nobody_records(conn):
+    """Nothing on this server records which checkout the Timeline Cards tree
+    came from: install_dashboard_app.py ships the files and keeps no commit
+    id, manifest or checksum (`.git` is excluded from the upload), so there
+    is nothing to hash the served tree against. Registered with the reason
+    rather than invented, and rather than left off the page: an absent
+    invariant is invisible, an unchecked one is not."""
+    inv = invariants.BY_KEY["cards_tree_matches_source"]
+    assert inv.check is None and inv.skip_reason
+    assert "commit id" in inv.skip_reason
+
+    verdict = {r["key"]: r for r in invariants.evaluate(_ctx(conn))}
+    mine = verdict["cards_tree_matches_source"]
+    assert mine["state"] == dbmod.INVARIANT_NOT_CHECKED
+    assert mine["detail"] == inv.skip_reason
+
+
+def test_15_reports_what_the_alerts_side_says_about_its_destination(conn, monkeypatch):
+    monkeypatch.setattr(alerts, "sink_deliverable",
+                        lambda *a, **kw: (True, "the smtp channel delivered "
+                                                "something 2 hour(s) ago"),
+                        raising=False)
+    good = invariants._check_alerts_deliverable(_ctx(conn))
+    assert good.state == dbmod.INVARIANT_OK
+    assert "delivered" in good.detail
+
+    monkeypatch.setattr(alerts, "sink_deliverable",
+                        lambda *a, **kw: (False, "the mail server refused the "
+                                                 "sign-in"),
+                        raising=False)
+    bad = invariants._check_alerts_deliverable(_ctx(conn))
+    assert bad.state == dbmod.INVARIANT_BROKEN
+    assert bad.subjects[0][1] == "the mail server refused the sign-in"
+
+
+def test_15_is_not_checked_when_the_helper_is_absent_or_cannot_answer(conn, monkeypatch):
+    """A build whose alerts module predates the helper, and a ledger that
+    cannot be read, are both "could not check" - never "no destination",
+    which is a diagnosis this check would then be inventing."""
+    monkeypatch.delattr(alerts, "sink_deliverable", raising=False)
+    missing = invariants._check_alerts_deliverable(_ctx(conn))
+    assert missing.state == dbmod.INVARIANT_NOT_CHECKED
+    assert "not present in this build" in missing.detail
+
+    def unreadable(*_a, **_kw):
+        raise sqlite3.OperationalError("no such table: alert_log")
+
+    monkeypatch.setattr(alerts, "sink_deliverable", unreadable, raising=False)
+    unread = invariants._check_alerts_deliverable(_ctx(conn))
+    assert unread.state == dbmod.INVARIANT_NOT_CHECKED
+    assert "OperationalError" in unread.detail
+
+    monkeypatch.setattr(alerts, "sink_deliverable", lambda *a, **kw: "yes",
+                        raising=False)
+    nonsense = invariants._check_alerts_deliverable(_ctx(conn))
+    assert nonsense.state == dbmod.INVARIANT_NOT_CHECKED
+
+
+def test_the_five_new_rows_are_numbered_and_ordered_as_sys_17_numbers_them(conn):
+    """The number is what the ledger, the page and the finding read against
+    each other; a duplicate would make two rows the same invariant to a
+    reader."""
+    numbers = [inv.number for inv in invariants.INVARIANTS]
+    assert numbers == sorted(numbers) and len(numbers) == len(set(numbers))
+    by_number = {inv.number: inv.key for inv in invariants.INVARIANTS}
+    assert by_number[11] == "fleet_current_with_vendor"
+    assert by_number[12] == "dashboard_meets_requirements"
+    assert by_number[13] == "mount_assets_open"
+    assert by_number[14] == "cards_tree_matches_source"
+    assert by_number[15] == "alerts_deliverable"

@@ -66,6 +66,12 @@
 .PARAMETER Quiet
     Suppress the explanatory footer; print the facts only.
 
+.PARAMETER Watch
+    After the report, re-read the rollout every 60 seconds and print only that
+    one line per pass, until every platform is fully on its current build or
+    you press Ctrl+C. Needs -AdminUser: the numbers come from the admin-only
+    packages view (REL-6, usability sweep 2026-09-04).
+
 .EXAMPLE
     .\tools\check_deploy_drift.ps1
 
@@ -76,7 +82,8 @@
 param(
     [string]$DashboardUrl = "",
     [string]$AdminUser = "",
-    [switch]$Quiet
+    [switch]$Quiet,
+    [switch]$Watch
 )
 
 $ErrorActionPreference = "Stop"
@@ -158,6 +165,88 @@ function Format-Age {
     if ($span.TotalDays -ge 1) { return "$([int]$span.TotalDays)d ago" }
     if ($span.TotalHours -ge 1) { return "$([int]$span.TotalHours)h ago" }
     return "$([int]$span.TotalMinutes)m ago"
+}
+
+# --- the rollout (REL-6, usability sweep 2026-09-04) -----------------------
+#
+# "did it actually reach the fleet" had no answer anywhere. The minute after a
+# ship EVERY machine is in outdated_machines, so the wall of "machine behind"
+# lines below is simply what a successful ship looks like and carries no
+# rollout meaning at all. These two functions turn the same view into the one
+# number that does, from `rollout` (db.rollout_status) so the page, this
+# doctor and the rollout alert cannot disagree.
+function Format-StampAge {
+    param([string]$Stamp)
+    if (-not $Stamp) { return "never" }
+    try {
+        $t = [datetime]::Parse($Stamp, [cultureinfo]::InvariantCulture,
+                               [System.Globalization.DateTimeStyles]::RoundtripKind)
+    }
+    catch { return $Stamp }
+    # A stamp with no offset is read as UTC rather than as local time: the
+    # dashboard writes UTC, and reading it as local would age every line by
+    # the operator's own timezone.
+    if ($t.Kind -eq [System.DateTimeKind]::Unspecified) {
+        $t = [datetime]::SpecifyKind($t, [System.DateTimeKind]::Utc)
+    }
+    $span = [datetime]::UtcNow - $t.ToUniversalTime()
+    if ($span.TotalDays -ge 1) { return "$([int]$span.TotalDays)d" }
+    if ($span.TotalHours -ge 1) { return "$([int]$span.TotalHours)h" }
+    if ($span.TotalMinutes -ge 1) { return "$([int]$span.TotalMinutes)m" }
+    return "just now"
+}
+
+function Get-RolloutLines {
+    param($Packages)
+    $lines = @()
+    $rollout = $null
+    if ($Packages) { $rollout = $Packages.PSObject.Properties["rollout"] }
+    if (-not $rollout -or -not $rollout.Value) { return $null }
+    foreach ($c in $rollout.Value.channels) {
+        $text = "$($c.platform): $($c.machines_on_current) of $($c.machines_total) on $($c.current_version)"
+        if ($c.behind -and @($c.behind).Count -gt 0) {
+            $who = (@($c.behind) | ForEach-Object {
+                "$($_.editor) on $($_.machine) $(if ($_.version) { $_.version } else { '?' }), $(Format-StampAge $_.last_seen)"
+            }) -join "; "
+            $text += " ($(@($c.behind).Count) behind: $who)"
+        }
+        $text += " - $($c.reverts) reverts, $($c.failed_attempts) failed attempts"
+        if ($c.made_current_at) { $text += " - current since $(Format-StampAge $c.made_current_at) ago" }
+        foreach ($r in @($c.refusing)) {
+            $text += "`n        REFUSING $($r.version): $($r.editor) on $($r.machine) -- $($r.reason)"
+        }
+        $lines += [pscustomobject]@{
+            Text = $text
+            # Per CHANNEL, not per fleet: a Windows ship that every Windows
+            # machine has taken is a finished rollout even while the macOS
+            # channel is six versions behind (REL-13).
+            Complete = ($c.machines_total -ge 1 -and
+                        $c.machines_on_current -ge $c.machines_total -and
+                        @($c.refusing).Count -eq 0)
+        }
+    }
+    return $lines
+}
+
+function Test-RolloutComplete {
+    param($Packages)
+    $rollout = $null
+    if ($Packages) { $rollout = $Packages.PSObject.Properties["rollout"] }
+    # A dashboard that reports no rollout at all is NOT complete: an absent
+    # answer must never end a watch with "everyone has it".
+    if (-not $rollout -or -not $rollout.Value) { return $false }
+    $channels = @($rollout.Value.channels)
+    if ($channels.Count -eq 0) { return $false }
+    foreach ($c in $channels) {
+        if ($c.machines_total -lt 1) { return $false }
+        if ($c.machines_on_current -lt $c.machines_total) { return $false }
+        # A refusing machine is not a rollout in progress: it will never take
+        # this build on its own (REL-3). It counts against completion, and the
+        # line printed beside it names the machine and the reason, so a watch
+        # that never finishes is a watch that has already told you why.
+        if (@($c.refusing).Count -gt 0) { return $false }
+    }
+    return $true
 }
 
 Write-Host "=================================================================="
@@ -594,6 +683,28 @@ if ($AdminUser -and $DashboardUrl) {
                     Write-Drift "no macos companion package published at all (repo v$RepoVersion) -- Mac build lagging, run tools/release_macos.sh on the Mac (advisory)"
                 }
             }
+            # ROLLOUT (REL-6): the adoption number, printed BEFORE the wall of
+            # per-machine lines below, because immediately after a ship every
+            # machine is in that wall and only this line says whether the ship
+            # is being taken.
+            Write-Head "ROLLOUT (has the fleet taken it?)"
+            $rolloutLines = Get-RolloutLines -Packages $pkgs
+            if ($null -eq $rolloutLines) {
+                Write-Unknown "this dashboard reports no rollout numbers -- it is older than 2026-09-04 (REL-6)"
+            }
+            elseif (@($rolloutLines).Count -eq 0) {
+                Write-Unknown "no companion build is current for any platform -- the fleet is offered nothing"
+            }
+            else {
+                foreach ($line in @($rolloutLines)) {
+                    if ($line.Complete) { Write-Ok $line.Text } else { Write-Drift $line.Text }
+                }
+                if (-not (Test-RolloutComplete -Packages $pkgs)) {
+                    Write-Host "        => re-run with -Watch to follow it: .\tools\check_deploy_drift.ps1 -AdminUser $AdminUser -Watch" -ForegroundColor Yellow
+                }
+            }
+
+            Write-Head "PACKAGE CHANNEL (per machine)"
             foreach ($o in $pkgs.outdated_machines) {
                 Write-Drift "machine behind: $($o.machine) ($($o.editor_username)) on v$($o.companion_version), last seen $($o.received_at)"
             }
@@ -625,6 +736,48 @@ if ($installedVersion -and $RepoVersion) {
 }
 else {
     Write-Unknown "cannot compare installed vs repo (version undetermined above)"
+}
+
+# --- -Watch: follow the rollout (REL-6) ------------------------------------
+#
+# One line per pass, nothing else: the question this switch answers is "is
+# anyone taking it yet", and a full report every minute buries the one number
+# that moves. Read-only, like the rest of this doctor -- it re-GETs the same
+# admin packages view on the session opened above.
+if ($Watch) {
+    if (-not $dashSession) {
+        Write-Unknown "-Watch needs -AdminUser: the rollout numbers come from the admin-only packages view"
+    }
+    else {
+        Write-Head "ROLLOUT WATCH (every 60 s; Ctrl+C to stop)"
+        while ($true) {
+            try {
+                $pkgs = Invoke-RestMethod -Method Get -Uri "$DashboardUrl/api/v1/admin/packages" `
+                    -WebSession $dashSession -TimeoutSec 15
+            }
+            catch {
+                # A dashboard restarting mid-ship is the normal case here, not
+                # a reason to end the watch.
+                Write-Unknown "$(Get-Date -Format 'HH:mm:ss') packages query failed: $($_.Exception.Message)"
+                Start-Sleep -Seconds 60
+                continue
+            }
+            $lines = Get-RolloutLines -Packages $pkgs
+            if ($null -eq $lines) {
+                Write-Unknown "this dashboard reports no rollout numbers -- nothing to watch (REL-6)"
+                break
+            }
+            foreach ($line in @($lines)) {
+                $stamp = Get-Date -Format 'HH:mm:ss'
+                if ($line.Complete) { Write-Ok "$stamp $($line.Text)" } else { Write-Drift "$stamp $($line.Text)" }
+            }
+            if (Test-RolloutComplete -Packages $pkgs) {
+                Write-Ok "every computer that reports is on its platform's current build"
+                break
+            }
+            Start-Sleep -Seconds 60
+        }
+    }
 }
 
 if (-not $Quiet) {

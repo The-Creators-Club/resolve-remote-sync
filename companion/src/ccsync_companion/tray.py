@@ -1132,6 +1132,45 @@ def _youtube_warning_line(snap: dict) -> str:
     return "⚠ YouTube sign-in no longer works (Google rotated the session). Sign in again"
 
 
+def _ytdlp_status(app: "CompanionApp") -> dict:
+    """The sidecar manager's cached verdict, or {} (CYT-7).
+
+    A lock-guarded dict read that does no I/O, which is the only kind of
+    getter the snapshot may hold: see _tray_snapshot's docstring."""
+    manager = getattr(app, "ytdlp", None)
+    if manager is None:
+        return {}
+    try:
+        return dict(manager.status() or {})
+    except Exception:
+        log.debug("tray: ytdlp status read failed", exc_info=True)
+        return {}
+
+
+def ytdlp_warning_line(status: Optional[dict]) -> str:
+    """The Settings > YOUTUBE line for a yt-dlp that is past its shelf life
+    or was never installed, or "" when there is nothing to say (CYT-7,
+    usability sweep 2026-09-03).
+
+    Until this existed the max-age rule wrote its verdict to companion.log
+    once a day and to nothing else, so the first person to learn that this
+    machine's downloader was three release cycles old was the editor whose
+    download failed. It is advisory: nothing here stops a download, because
+    a stale yt-dlp usually still works and the fallback costs the editor
+    time either way."""
+    status = status or {}
+    action = str(status.get("action") or "")
+    if action == ytdlp_manager.ACTION_STALE:
+        age = ytdlp_manager.version_age_days(status.get("version"))
+        old = f"is {age} days old" if age else "is out of date"
+        return ("⚠ YouTube downloads on this computer may start failing: "
+                f"the downloader {old} and could not update itself")
+    if action == ytdlp_manager.ACTION_FAILED:
+        return ("⚠ YouTube downloads on this computer are running on the "
+                "server: the downloader could not be installed here")
+    return ""
+
+
 def _maybe_warn_youtube_session(app: "CompanionApp", snap: dict) -> None:
     """Balloon ONCE per transition into stale/expired; the menu line carries
     it after that. Remembered on the app object, not on disk: a restart may
@@ -2278,6 +2317,10 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
          lambda: (ytdl_cookies.health(getattr(app, "config", {}))
                   if snap.get("ytdl_youtube_signin") else {"status": "none"}),
          {"status": "none"})
+    # CYT-7: the yt-dlp sidecar's last daily verdict, for the Settings >
+    # YOUTUBE warning line. No I/O -- ytdlp_manager.status() is a lock-guarded
+    # read of the cached result, the same one capabilities() uses.
+    _get("ytdlp_status", lambda: _ytdlp_status(app), {})
     _get("sequencer_line", lambda: _sequencer_line(app), None)
     _get("current_project_line", lambda: _current_project_line(app), None)
     # Cheap by construction: resolve_bridge records this on the way out of

@@ -14638,6 +14638,185 @@ receives is byte-identical in shape to yesterday's. Uncommitted; no VERSION
 bump made.
 
 
+## Timeline Cards, 2026-09-05 (CR-192, CR-193, CR-194)
+
+Three defects the owner hit on the cards page in one sitting, all in the
+**MulticamPipeline checkout** the `/cards` mount imports - another repo,
+carrying no version of ours, so they reach the page only after a checkout
+refresh AND a container restart (`docs/CARDS_DEPLOY.md`; Python modules load
+once, and the page scripts are concatenated at request time but read from
+that checkout). Fixed there, uncommitted, NOT deployed.
+
+### CR-192 - clicking a clip on the lane while zoomed in jumps the strip away from where the mouse was - FIXED in the MulticamPipeline repo 2026-09-05 (cards checkout)
+
+**Seen live.** 2026-09-05, Alex, zoomed in on the lane: a tap on the visible
+middle of a long cut re-centred the strip, so the frame under the pointer was
+gone and the next click landed somewhere else.
+
+**Cause.** `page/06-trim.js`, `showCard()`. The strip is meant to pan only to a
+clip NONE of which is on screen - the jump on a clip already in view was
+removed on 2026-08-28 and the comment above the line says so - but the
+condition was never narrowed to match: `if(x0<20||x1>W-20)` fires when EITHER
+edge is off the strip, and zoomed in that is every clip longer than the view.
+The comment and the code had disagreed since that day; `laneUp`'s tap path
+(`03-lane.js`, `showCard(headOf(d.s.uid),false)`) is what walked into it.
+
+**Fix.** `if(x1<20||x0>W-20)`: wholly off, both edges, or the strip stays put.
+The centring arithmetic is unchanged, and `laneDraw()` still runs either way so
+the selection repaints.
+
+**Files.** `multicam_pipeline/cards/page/06-trim.js` (one condition and a dated
+comment).
+
+**Tests.** `tests/test_lane_page.js` (node-only, no server) pulls the real
+`if(LANE){const sg=segOf(uid)...}` fragment out of the page and evaluates it
+against stubbed lane geometry (`laneX` is the page's own `10+(t-LX)*LZ`): a cut
+whose start is off the left edge but whose body fills the view leaves `LX`
+alone and still draws; a cut wholly off the right pans; a cut wholly off the
+left pans; a small cut in view is left alone. Checked against the old condition
+too - the first of those fails there, so the test is not vacuous.
+
+### CR-193 - Q and W on the lane opened the transcript and toggled the stack instead of ripple-trimming - FIXED in the MulticamPipeline repo 2026-09-05 (cards checkout)
+
+**Seen live.** 2026-09-05, Alex, on the NAS page: "Q and W ... just opening the
+transcript window". README documents Q / W as the lane's ripple-trim keys.
+
+**Cause.** `page/04-lane-keys.js`, `laneKeymap()`. Q and W reach `LKMAP` only
+through the preset's `trimRippleStartToPlayhead` /
+`trimRippleEndToPlayhead`, and the page served under the dashboard has no
+preset to read them from: `keys.lane_keys()` is `{}` in the container (there is
+no Resolve there), and `api/keys`' fallback `engine.agent_keys` is only ever
+set IN MEMORY, by an agent push. With no agent since the container last
+restarted, `api/keys` answered `{}`, the page fell back to `LKEYS_DEFAULT` -
+Resolve's own defaults, where that command is Ctrl+Shift+[ / ] - so neither key
+was in the map, `laneKey()` returned false and the keydown fell through to the
+cards' own handler in `07-conform.js`, where Q is `openSel()` and W toggles the
+stack.
+
+**Fix, two halves.**
+
+1. `laneKeymap()` adds the page's own `put('q','triphead')` /
+   `put('w','triptail')` beside the existing `put('e','extend')`, LAST. `put()`
+   never overwrites, so a preset that binds q or w elsewhere still wins, and
+   the keys are NOT added to `LKEYS_DEFAULT` (that object is Resolve's own
+   defaults, and lying in it would be a second bug).
+2. The preset an agent pushes is now cached on disk, so a container restart no
+   longer costs the whole layout (F blade, X / Z nudge, and everything else
+   Alex's preset carries) until some agent happens to push again:
+   `AgentLink._take_keys` writes `<data>/cards_lane_keys.json` beside the
+   mirror and the pick (tmp + `os.replace`, never on an empty payload, every
+   failure swallowed with a log line - a preset cache must not cost the server
+   a push), and `_load_keys` restores it in `__init__` so
+   `getattr(engine,"agent_keys",None)` is populated before any agent connects.
+   The handler's precedence is untouched: `lane_keys() or agent_keys or {}`.
+
+**Files.** `multicam_pipeline/cards/page/04-lane-keys.js`,
+`multicam_pipeline/cards/config.py` (`KEYS_FILE`),
+`multicam_pipeline/cards/agent.py` (`keys_path`, `_load_keys`, `_take_keys`,
+the `/agent/state` call site), `multicam_pipeline/cards/project_agent.py` (its
+own `/agent/state` call site).
+
+**Tests.** `tests/test_lane_page.js` runs the real `laneKeymap` over
+`LKEYS_DEFAULT` and asserts `q` -> `triphead`, `w` -> `triptail`, that the
+defaults themselves carry no ripple-trim command, that a preset binding `q` to
+`controlPlayForward` keeps the preset's meaning, and that a preset putting
+ripple trim on other keys is obeyed there. `tests/test_handler.py` proves the
+cache: a push carrying keys writes the file, a FRESH `AgentLink` on the same
+data dir has the whole layout before any agent connects, and a later push with
+an empty `keys` never erases it.
+
+**Deploy note.** Cards checkout only. Nothing in CC Sync changes; the page
+picks up the JS on a checkout refresh, the cache needs the container restart
+that a refresh already implies.
+
+### CR-194 - offline on a laptop: every call stalled 21 s, listen showed "the browser would not start playback", edits did nothing - FIXED in the MulticamPipeline repo 2026-09-05 (cards checkout)
+
+**Seen live.** 2026-09-05, Alex, on the Razer with the internet off, the first
+real no-network test. The project had been downloaded for offline; the page
+opened at `https://truenas.tail26290e.ts.net:9443/cards/` and rendered from the
+copy - cards, lane, peaks all there - but pressing listen showed the red "the
+browser would not start playback - tap again" line with an `AbortError`, and
+edits did nothing.
+
+**Cause.** The whole offline road keyed on `navigator.onLine === false`, in
+both halves: `15-offline.js` (`oflFetch`, the boot copy-chooser, `oflSync`, the
+panel, the `online` / `offline` listeners) and `sw.js` (`mediaAnswer`
+network-first behind the flag, `shellAnswer` network-first with no timeout).
+**On a laptop that flag is TRUE whenever any non-loopback interface is up** -
+Tailscale's virtual adapter alone keeps it true, and so does Wi-Fi to a router
+with no upstream. The tailnet host then still resolved (MagicDNS is local) and
+the TCP connect was a black hole, so every fetch waited out the OS SYN timeout
+(~21 s on Windows) before rejecting and the copy answered 21 s late, once per
+call, with a once-a-second poll piling up behind it.
+
+The red line was the same stall through the worker: the `<audio>` element's
+load went to the network, so `el.play()` was still pending; the editor tapped
+again; `lanePause` called `pause()`; and the pending play rejected with
+`AbortError` ("interrupted by a call to pause()"), which `03-lane.js` surfaced
+as a refusal. It never was one.
+
+**Fix, three halves** (`docs/OFFLINE-PLAN.md` §2, "the verdict is MEASURED").
+
+1. **The page measures the server.** `OFLNET = {up, at}` is owned by
+   `oflProbe()`: a raw `NETFETCH` of `api/offline/rev` under an
+   `AbortController` deadline of 3 s. Any HTTP answer is up (it asks whether
+   the server is THERE, not whether it is happy); a rejection or the deadline
+   is down; `navigator.onLine === false` is still an immediate down, because
+   it is never wrong in that direction. Down means `oflFetch` answers from the
+   copy with no network attempt at all. Up keeps today's network-first, but
+   races it against 8 s - longer than any JSON answer this page waits on (the
+   state poll is once a *second*), short enough that a host that goes dark
+   mid-session costs ONE stall and not one per call - and a call that times
+   out is aborted and left to die. While down it re-probes every 20 s, on the
+   `online` event and on `visibilitychange` to visible; the first up paints
+   and runs `oflSync()` exactly as the `online` listener did. The boot chooser
+   and `oflSync`'s gate read the verdict, never the flag, and the panel and
+   the drawer badge say which it is ("server unreachable, working from the
+   copy").
+2. **The worker takes the audio off the network.** `mediaAnswer` is
+   CACHE-FIRST whenever the clip is in `cards-media`: a downloaded clip is
+   immutable bytes ([ REFRESH ] never re-fetches media), so the copy is never
+   the stale answer. Only a miss goes out, with the Range handling unchanged.
+   `shellAnswer` races the network against 4 s and then serves the cached
+   shell, and skips the network outright when the flag says offline or when
+   the page has handed it the verdict (`postMessage {type:'cards-net', up}`).
+3. **An `AbortError` on `el.play()` is no longer shown.** It is always our own
+   `pause()` or a new load, never the browser refusing; `NotAllowedError` and
+   `NotSupportedError` still say what they are.
+
+**Idempotency.** An edit POST that hits the 8 s deadline but actually landed
+cannot be sent twice without a human: it is queued with the copy's `base_rev`,
+and the next sync's `api/offline/rev` shows the server ahead of that revision,
+so `replay_plan` answers `stop` and the edit goes to the conflict panel with
+[ KEEP MINE ] / [ DROP MINE ]. The other half is unchanged (`sent.rev` in both
+`oflSync` and `sw.js`'s `swReplay`: an op whose expected revision the server
+has consumed is dropped, never re-sent).
+
+**Files.** `multicam_pipeline/cards/page/15-offline.js` (the verdict,
+`oflTimed`, `oflProbe`, the chooser, `oflFetch`, `oflSeen`, `oflSync`'s gate
+and its now-synchronous re-entry guard, the panel and badge lines, the boot
+listeners), `multicam_pipeline/cards/page/sw.js` (`mediaAnswer`, `shellAnswer`,
+`cards-net`), `multicam_pipeline/cards/page/03-lane.js` (the `AbortError`
+case), `docs/OFFLINE-PLAN.md`, `tests/golden/page.html` (regenerated).
+
+**Tests.** `tests/test_offline_page.js` (121 checks now) gained a network that
+NEVER answers with `navigator.onLine` true: the page measures the server down,
+answers `api/state` / `api/doc` / `api/cardwords` from the copy without
+waiting (exactly one request is left hanging, the probe), an edit is applied
+and queued rather than lost or hung, and when the network comes back the probe
+flips up and the replay goes out through the edit's own route. The boot
+chooser adopts the one copy on an unreachable server and does NOT adopt it on
+a reachable one. For `sw.js`: a cached clip is answered 200 whole and 206
+ranged with nothing on the wire even with the flag true, and a navigation on a
+hanging network gets the cached shell after its deadline (and at once when the
+page has told it). The deadlines are injectable (`window.__oflMs`,
+`self.__cardsSwMs`) so the suite still runs in milliseconds.
+
+**Deploy note.** Cards checkout only, like CR-192 and CR-193. `sw.js` is
+versioned by the page bundle's hash, so a checkout refresh is a new shell
+cache name and installed apps update themselves on the next load.
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

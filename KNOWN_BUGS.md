@@ -15025,7 +15025,7 @@ treats the index as changed and re-marks.
 a rebuild exactly one row carries `.cur` and it is the current one.
 
 
-## Timeline Cards, 2026-09-06 evening (CR-199, CR-200, CR-201, CR-202)
+## Timeline Cards, 2026-09-06 evening (CR-199, CR-200, CR-201, CR-202, CR-203)
 
 A second batch in the **MulticamPipeline checkout** the same day, from the
 owner at his desk: three defects fixed, one investigated and left for a
@@ -15128,7 +15128,7 @@ fallback that happened to catch it.
 without the fix); `test_project_engine.py`, `test_handler.py`,
 `test_offline.py`, `test_offline_page.js` green.
 
-### CR-202 - the lane at medium-high zoom: responsiveness and frame rate drop - OPEN; take three (2026-09-06) cleared the JS draw path, the CJK text and GPU raster halves are being measured next
+### CR-202 - the lane at medium-high zoom: responsiveness and frame rate drop, intermittently - FIXED in the MulticamPipeline repo 2026-09-06 (cards checkout): the waveform was a 1,900-sub-contour GPU path per frame
 
 **Report** (2026-09-06, Alex, after three earlier rounds): "on high zoom
 levels, even after ALL the rounds of fixes, the lane in timeline cards is
@@ -15159,17 +15159,75 @@ ever showed it. (3) The per-notch rewrap of every visible clip.
 **Owner's ruling, the same evening:** "at high zoom the playhead running
 off the screen is not a problem. It's very clear that there are distinct
 performance issues at medium-high zoom, responsiveness and frame rate drop
-significantly." So (1) is not the complaint and take three measured the
-wrong thing. Two blind spots it left, being measured now: the fixture's cards
-are LATIN and the owner's project is Mandarin (canvas text in `system-ui` has
-no CJK glyphs, so every measure and draw goes through per-glyph font
-fallback, and `wrapText` wraps CJK per character - a 300-char card is 300
-`measureText` calls of growing prefixes per wrap - with the most text on
-screen at exactly the medium zoom named); and GPU raster / compositor time,
-which `performance.now()` around JS never sees. The still-useful proposals:
-a linear `wrapText`, a CJK-capable lane font, card elements cached instead of
-`querySelector` per frame, and an opt-in frame meter in the lane hint line so
-the laptop can be read directly.
+significantly", and later "it's also intermittent, so performance will just
+go from really good to randomly dropping and there's sometimes very little
+visible reason why." So (1) is not the complaint and take three measured the
+wrong thing.
+
+**Cause (take four, the same evening, a Chrome trace on the real Civil
+Defence project with its real audio peaks, RTX 3080).** The page's JS falls
+with zoom exactly as three rounds of `performance.now()` said. The cost is on
+the GPU, which no page timer sees: the waveform was drawn as ONE path of one
+`rect` per pixel column per visible clip (~1,900 sub-contours on a 1920 px
+canvas), filled once, every frame. Skia's GPU path renderer is cheap for a
+few hundred sub-contours and leaves its fast path above roughly a thousand,
+so the moment the widest clip on screen passes ~1,000 px the waveform's GPU
+raster steps from 0.19 ms (LZ 12, 777 px) to 1.78 ms (LZ 16, 1,036 px) and
+3.0 ms (LZ 40), never below 1.5 ms again, and 1.6x that with a 320 px lane;
+re-rasterised every frame because the head moves. Blanking the text changed
+nothing; blanking the waveform removed 80 % of the GPU frame. It is
+INTERMITTENT because it depends on which clips happen to be on screen (a
+long cut scrolling into view flips it on, a run of short ones off) and
+because the browser shares the GPU with Resolve. Chinese text and font
+fallback were measured and cleared (within 6 % of Latin in steady state; the
+per-character wrap costs 1.5-2.3 ms once per zoom notch, not per frame). The
+2026-08-28 change that replaced "a fillRect per column" with one path is
+what created the shape.
+
+**Fixed.** The waveform is rasterised once per clip into an offscreen bitmap
+(keyed by cut, clip, source offset and gain; a window of the visible span
+plus one viewport either side, capped at 4,096 px; 24 bitmaps / 8 M device
+pixels LRU; freed on lane close and on a normalisation change) and blitted
+1:1 per frame; a zoom gesture in progress draws direct for 300 ms so a wheel
+burst allocates nothing. Measured after: 0.00-0.16 ms of GPU per frame from
+LZ 5 to 240, independent of clip width; LZ 35 playback GPU 3.44 -> 1.16 ms a
+frame, the 320 px lane 5.31 -> 1.07. The extend ghost keeps the direct loop
+(one clip, only during a drag). Full write-up: that repo's
+`docs/LANE-ZOOM-PERF-INVESTIGATION.md`, "take four, and the fix".
+
+**Tests.** `tests/test_lane_page.js` +19 (one offscreen raster then only
+`drawImage`, one blit per visible clip, invalidation on zoom / gain / fill,
+none on a pan, the window cap, the LRU bound, free on close). The perf gate
+still cannot see this: `tests/fixtures/perf_canvas` ships no media, so the
+waveform never draws there. Still open from take three: the 144 Hz panel and
+the owner's laptop have never been measured directly; the opt-in frame meter
+proposal stands.
+
+### CR-203 - "semantic search says this is the offline copy, and I am online" - FIXED in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Report** (2026-09-06, Alex, at his desk, online): "trying to do semantic
+search and I am online but it's giving me offline error"; a reload changed
+nothing.
+
+**Cause.** `api/search` is one synchronous POST that takes about a minute
+cold (the modal says so). Since CR-194, every call from a browser holding an
+offline copy of the project runs under the seam's 8 s call deadline; when it
+fires the page declares the server dark, flips itself to the offline copy for
+20 s and answers the POST from the copy, which for a route the copy cannot
+answer is "that needs the server, and this is the offline copy". A
+legitimately long call was read as a dead server, on every attempt.
+
+**Fixed.** Nine routes whose handlers honestly run long (`api/search`,
+`api/search/reset`, `api/search/scopes`, `api/corpus`, `api/gsearch`,
+`api/embed`, `api/conform`, `api/project/update`, `api/transcribe`) carry no
+call deadline; their failure runs the 3 s probe and the PROBE decides, never
+the call. With the verdict already down, a long route probes first and goes
+out with no deadline if the server answers. `api/pcm`, `api/locate`, the
+edit routes and the start-and-poll routes stay on the 8 s deadline, each
+read rather than assumed. `docs/OFFLINE-PLAN.md` §2 has the table.
+
+**Tests.** `tests/test_offline_page.js` +15 (121 -> 136).
+
 
 ## Carryover — unchanged from before the 2026-08-11 hunt
 

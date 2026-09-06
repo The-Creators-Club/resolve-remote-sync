@@ -15313,6 +15313,135 @@ paragraph updated.
 golden regenerated.
 
 
+## Timeline Cards, 2026-09-06 night (CR-206, CR-207, CR-208, CR-209)
+
+Found on Alex's laptop, which holds an OFFLINE COPY of the project-mode
+cut list "Civil Defence Canvas E2 V3" (taken at rev 231, 13:34) while the
+server was at rev 507 and climbing. The dashboard container was recreated
+at 22:04 to put CR-204/CR-205 live, which is what first tripped CR-206.
+
+### CR-206 - "the lane and order keep jumping around": one slow poll switched the page to a 276-revision-old offline copy, and back 20 s later - FIXED in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Report** (2026-09-06 22:05, Alex, laptop): "the lane and order keep
+jumping around", then a screenshot of the offline panel flashing "1 edit
+waiting to sync - trim (1 cut) - that cut is not in this copy - the cut
+list on the server moved on while you were away (rev 507, your copy was
+taken at rev 231)".
+
+**Cause** (page/15-offline.js, page/08-places.js). With a copy on the
+device every `window.fetch` goes through the seam. An ORDINARY route
+(`api/state` included; CR-203's exemption covers only the long routes)
+ran against the 8 s call deadline, and ONE timeout or refused connection
+was the verdict: `oflSeen(false)` and, in the same breath, the state poll
+answered from the copy (`oflStateAnswer`), a snapshot from download time
+that nothing ever refreshed except [ REFRESH ] and an emptied queue.
+`poll()` had no monotonicity guard and nothing read `offline:true`, so the
+copy's order was rendered in the list and the lane. The verdict flips back
+on its own (a 20 s reprobe, `visibilitychange`, any media route that
+succeeds), the next poll adopts the live rev, the order jumps back, and
+the replay runs: `oflSync` cleared the conflict panel at its start and
+painted the refusal at its end, which is the flashing. Edits made in a
+"down" window went to the queue against base_rev 231 instead of the
+server, which is how a trim came to name a cut the copy never had. Period
+about 20 s; over the tailnet any slow poll restarts it. The service
+worker was ruled out (it never touches `api/*`), so was a disk-fingerprint
+reload on the server (version only moves forward) and the lane's own
+ordering (it reads the same CARDS array as the list).
+
+**Fix.** Four rules, each tested: (A) a failed ordinary call PROBES first
+(3 s) and only a failed probe is the verdict - CR-194's "one stall, not
+one per call" holds because once down, later calls answer from the copy
+with no wait; (B) the copy TRACKS the live state: every full `api/state`
+document the page receives becomes OFLSTATE/OFLSEQ/OFLMETA.rev, persisted
+on a 2 s trailing write, so a real outage shows the last state seen and a
+queued edit is against the current rev; (C) `poll()` refuses an
+`offline:true` answer below the live sequence it holds; (D) `oflSync`
+paints the conflict panel once. Left as the owner's call: `OFLMETA.when`
+still says when the copy was DOWNLOADED; transcripts, word timing and
+media still move only at download / [ REFRESH ] / an emptied queue.
+`docs/OFFLINE-PLAN.md` §2 has the rules.
+
+**On the night:** the answer to "I want the latest version, which is most
+likely my local version" was the server: 207 revisions since the copy,
+all made that day through the live page; the copy had one queued trim
+the server lacked. [ DROP MINE ] then [ DOWNLOAD AGAIN ].
+
+**Tests.** `tests/test_offline_page.js` (A, B, D), `tests/test_page_patch.js`
++9 (`offlineStale`, and that `poll()` calls it); golden refreshed.
+
+### CR-207 - live or offline copy was not obvious - BUILT in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Ask** (2026-09-06, Alex): "When it's offline and online it should
+display so it's obvious." The only sign was "server reachable" in muted
+text inside the offline panel.
+
+**Built.** One fixed element at the top of the page, both layouts, driven
+by `OFLNET.up` alone (no second probe or timer): with no copy on the
+device, nothing; copy + reachable, a small muted `live` chip; copy + down,
+a filled warn chip `OFFLINE COPY` (`- N edits waiting` when the queue is
+non-empty) and a 3 px warn bar across the top so it reads even with the
+eye on the lane. A click opens the offline panel. Each flip says one line
+through the toast ("server unreachable: editing the offline copy, edits
+will sync when it is back" / "server back: live cut list, syncing N
+edits"); the first measurement is not a flip. Not in the topbar because
+`body.mobile #head` is `display:none` and a child of a hidden parent
+cannot be shown back. Class toggles only (CR-202's frame budget).
+
+**Tests.** `tests/test_offline_page.js` +13.
+
+### CR-208 - A and S left the playhead ahead of or behind the cut point in the lane - FIXED in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Report** (2026-09-06, Alex, laptop, 25 fps project-mode cut list): "a +
+s are not jumping to cut point in the lane, they're leaving the playhead
+ahead and behind the cut point."
+
+**Cause** (page/06-trim.js `unitSpans`). The lane's edit points were built
+with the gaps COLLAPSED (its comment said so), which stopped being true on
+2026-08-29 when `laneModel` gave a gap its own lane time so the head could
+sit in one. `stepEdit` compared a gap-inclusive playhead against
+gap-exclusive edit points and seeked to a gap-exclusive frame on a
+gap-inclusive clock: every boundary after a gap was short by the
+accumulated gaps, and A and S were asymmetric because a head reading as
+past a boundary stepped to a different point than one reading as before
+it. A project-mode cut list leads with the lane, so this is exactly
+Alex's case. Frame/seconds rounding, the audio element and the remote
+poll were each ruled out. Measured: 50 frames off after one 50-frame gap.
+
+**Fix.** The lane branch of `unitSpans` accumulates `gap_before` then
+`dur` per member, `laneModel`'s own accumulation including its
+"under one frame is not a gap" guard. The Resolve-frames branch is
+untouched.
+
+**Tests.** `tests/test_lane_page.js` +15 (a three-cut fixture with a gap:
+A/S from mid-cut, on the boundary and inside the gap, S-then-A symmetry,
+and the lane-clock round trip at 25 fps and 29.97); 12 of 15 fail on the
+old code.
+
+### CR-209 - the semantic search returned a fixed five passages - BUILT in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Ask** (2026-09-06, Alex): "the semantic search should let you select
+how many results you want."
+
+**Built.** A 5 / 10 / 20 / 50 select beside the query box, remembered per
+device (`localStorage cards_tslimit`); the request carries `limit`, the
+route clamps it to 1..100 and refuses nothing (junk falls back to the
+default five, which is unchanged and what an older page gets). The result
+header says the count shown, and "N of M" only when the model offered
+rows that were dropped as unverifiable: the model ranks the corpus itself
+and hands back at most `limit` rows, there is no candidate pool to slice,
+so "10 of 37" would be invented. A bigger count is nearly free: the
+expensive half is the first turn over every transcript, already paid. The
+search bar wraps so the four controls fit a 390 px phone. `docs/LAYOUT.md`.
+
+**Tests.** `tests/test_transcript_search.py` +12, `tests/test_handler.py`
++5, `tests/test_transcript_search_page.js` +8; golden refreshed.
+
+**Shipped.** Cards 0db6007 (CR-206..CR-209) went live on the NAS at 22:54
+the same night, image-mode recreate on the 0.7.38 digest; the gate ran
+once, 58/59 with perf_e2e red at exactly its 20 ms threshold under a
+parallel builder's load and green alone afterwards.
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

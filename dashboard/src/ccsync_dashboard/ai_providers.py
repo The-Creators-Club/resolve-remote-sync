@@ -416,6 +416,10 @@ def cli_path(conn: sqlite3.Connection, name: str, settings: Any = None) -> str:
     test, a probe with nothing to install into) still gets 1 and 3.
     """
     provider = spec(name)
+    # An EMPTY typed path is "the admin did not type one", never "a path that
+    # is not a file": the live container's `ai_claude_code_path` is `''` (a
+    # row written by the Settings page's save, checked CR-195 2026-09-06), and
+    # treating it as a typed path would hide the wizard's own install.
     configured = get_setting(conn, provider.path_setting, "").strip()
     if configured:
         return configured if Path(configured).is_file() else ""
@@ -671,7 +675,10 @@ def unprobed_cli_state(conn: sqlite3.Connection, name: str, settings: Any,
     2. THE WIZARD'S SNAPSHOT (`cli_tools.setup_snapshot`): two small file
        reads saying it installed this tool and drove its sign-in. A typed path
        counts as installed too -- `cli_path` is a stat, and the admin who
-       typed it is telling us about their host.
+       typed it is telling us about their host. Since CR-195 (2026-09-06) the
+       sign-in half of that snapshot survives a restart: `signin_status` falls
+       back to the CLI's own credential file, so this branch no longer needs
+       the process that did the signing to still be alive.
 
     Only when neither says anything is the honest answer still ST_UNKNOWN.
     """
@@ -690,12 +697,18 @@ def unprobed_cli_state(conn: sqlite3.Connection, name: str, settings: Any,
     if wizard is not None:
         installed = bool(wizard["install"]["installed"]) or bool(
             cli_path(conn, name, settings))
-        signed_in = (wizard["signin"].get("state") == "signed_in"
+        signin = wizard.get("signin") or {}
+        signed_in = (signin.get("state") == "signed_in"
                      or bool(wizard.get("signed_in")))
         if installed and signed_in:
             out["status"] = ST_AVAILABLE
             out["available"] = True
-            out["detail"] = "signed in (wizard); not re-probed"
+            # Where the answer came from, because the two are different kinds
+            # of evidence (CR-195): a session this process ran, or the
+            # credential file the CLI left behind before the last restart.
+            out["detail"] = ("signed in (credential on disk); not re-probed"
+                             if signin.get("strategy") == "on_disk"
+                             else "signed in (wizard); not re-probed")
             out["path"] = out["path"] or wizard["install"].get("installed_path", "")
             out["version"] = out["version"] or wizard["install"].get(
                 "installed_version", "")

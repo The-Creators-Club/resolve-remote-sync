@@ -713,6 +713,93 @@ def test_timeline_cards_status_is_ok_on_a_wizard_signed_in_cli(env, monkeypatch)
     assert (out["ok"], out["why"]) == (True, "")
 
 
+# --------------------------------- and it survives a restart of the container
+# CR-195 (2026-09-06). CR-121 above is faked at `setup_snapshot`, so it could
+# not see that the snapshot's sign-in half was two module GLOBALS: after a
+# deploy, an OTA or a crash the wizard's install was still on disk and the
+# sign-in was forgotten, the row went back to ST_UNKNOWN, and the phone's
+# /cards edit view said "claude not available on this server" again until an
+# admin opened Settings -> AI providers and clicked TEST. Nothing below fakes
+# `setup_snapshot`: this is the real state a restarted container wakes up in.
+
+def wizard_installed_on_disk(settings, *, signed_in=True,
+                             name="claude_code", version="2.1.234"):
+    """What the SET UP wizard leaves behind: the binary, the pointer that
+    makes it live, `state.json`, and the credential the CLI wrote itself."""
+    from ccsync_dashboard import cli_tools
+
+    # The sign-in globals are module state shared by the whole pytest run;
+    # a restarted container has neither (that is the bug).
+    cli_tools._signin = None
+    cli_tools._signin_last.clear()
+    root = cli_tools.tool_root(settings, name)
+    rel = cli_tools.spec(name).rel_binary
+    binary = root / version / rel
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/true\n", encoding="utf-8")
+    # `_finish_install` is the wizard's own last step: it writes state.json
+    # and flips the pointer, so the shape here cannot drift from the shape
+    # `install_status` reads.
+    cli_tools._finish_install(settings, name, version=version, rel=rel,
+                              sha="a" * 64, size=12,
+                              url=f"https://x/{version}/claude",
+                              checksum_source="publisher_manifest")
+    if signed_in:
+        cred = (cli_tools.home_dir(settings, name)
+                / cli_tools.spec(name).credential_file)
+        cred.parent.mkdir(parents=True, exist_ok=True)
+        cred.write_text('{"claudeAiOauth": {"accessToken": "SECRET-TOKEN"}}',
+                        encoding="utf-8")
+    return binary
+
+
+def test_a_restarted_container_still_knows_the_cli_is_signed_in(env, monkeypatch):
+    """The live shape, end to end, with nothing faked but the subprocess ban:
+    installed by the wizard, signed in before the last restart, no API key
+    anywhere, no probe has ever run in this process."""
+    _client, conn, settings = env
+    enable_cli(conn)
+    no_subprocess(monkeypatch)
+    monkeypatch.setattr(ai_providers.shutil, "which", lambda binary: None)
+    binary = wizard_installed_on_disk(settings)
+    # The live container's own value, set by the Settings page's save: an
+    # EMPTY typed path is "the admin did not type one", so the wizard's
+    # install is what answers.
+    conn.execute(
+        "INSERT INTO site_settings (key, value, updated_at, updated_by) "
+        "VALUES ('ai_claude_code_path','','now','alex') "
+        "ON CONFLICT(key) DO UPDATE SET value=''")
+    conn.commit()
+    assert ai_providers.cli_path(conn, "claude_code", settings) == str(binary)
+
+    row = {r["name"]: r for r in
+           ai_providers.provider_states(conn, settings, probe=False)}["claude_code"]
+    assert row["status"] == ai_providers.ST_AVAILABLE
+    assert row["available"] is True
+    assert "credential on disk" in row["detail"]
+    assert "not re-probed" in row["detail"]
+    assert ai_providers.resolved(conn, settings, probe=False).name == "claude_code"
+
+    from ccsync_dashboard import cards_ai
+
+    out = cards_ai.status(settings)
+    assert (out["ok"], out["why"]) == (True, "")
+
+
+def test_a_restarted_container_with_no_credential_is_still_unknown(env, monkeypatch):
+    """The other half: installed but never signed in stays "test it", so the
+    fix cannot turn a missing sign-in into a call that fails at the model."""
+    _client, conn, settings = env
+    enable_cli(conn)
+    no_subprocess(monkeypatch)
+    monkeypatch.setattr(ai_providers.shutil, "which", lambda binary: None)
+    wizard_installed_on_disk(settings, signed_in=False)
+    row = {r["name"]: r for r in
+           ai_providers.provider_states(conn, settings, probe=False)}["claude_code"]
+    assert row["status"] == ai_providers.ST_UNKNOWN
+    assert row["available"] is False
+
+
 def test_timeline_cards_status_says_not_checked_rather_than_unavailable(env, monkeypatch):
     from ccsync_dashboard import cards_ai
 

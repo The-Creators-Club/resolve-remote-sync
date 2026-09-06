@@ -14817,6 +14817,214 @@ versioned by the page bundle's hash, so a checkout refresh is a new shell
 cache name and installed apps update themselves on the next load.
 
 
+## The Claude chain forgets a sign-in when the container restarts (CR-195, 2026-09-06)
+
+### CR-195 - "claude not available on this server" comes BACK after every container restart, until an admin clicks TEST - FIXED in repo 2026-09-06 (dashboard 0.7.38)
+
+**Seen live.** 2026-09-06, Alex on the phone at `/cards`' edit view: *"getting
+no Claude error again"*. This is CR-121 (dashboard 0.7.28, 2026-09-03) coming
+back, and it had come back on every deploy, every OTA and every crash since -
+nobody connected the two because clicking TEST on Settings -> AI providers
+made it go away, and a fix that "works until you restart" looks exactly like a
+fix that works.
+
+**Measured on the live container**, before anything was changed:
+
+- `/data/tools/claude-code/state.json`: Claude Code 2.1.234, installed
+  2026-08-18 by the SET UP wizard, checksum verified.
+- `/data/tools/claude-code/home/.claude/.credentials.json`: 509 bytes, mtime
+  2026-09-05 16:29, a `claudeAiOauth` object with an access and a refresh
+  token. The CLI wrote it. It IS the sign-in.
+- `site_settings`: `features.ai_cli_providers = 1`, and
+  `ai_claude_code_path = ''` (an empty string, saved 2026-08-31 by alex).
+- `ai_providers.provider_states(conn, s, probe=False)` answered claude_code
+  `status=unknown, available=False`, so `cards_ai.status()` said "Claude Code
+  has not been checked on this server yet ...".
+
+**Cause.** `cli_tools.signin_status()` answers from `_signin` (the live
+session) and `_signin_last` (the last one's outcome), and both are module-level
+IN-MEMORY dicts; `ai_providers._probe_cache` is in memory too. Its docstring
+has promised "the live session, else the last one's outcome, else **the
+installed truth**" since 2026-08-18 and the third leg was never written. So
+CR-121's `unprobed_cli_state`, which reads `cli_tools.setup_snapshot`'s
+`signin.state == "signed_in"`, only ever worked inside the process that had
+done the sign-in or a probe. A restart forgets all of it, the install on disk
+is not enough on its own (installed and signed out is a real state), and the
+row goes back to `ST_UNKNOWN` - which is `available = False` by the time
+`resolve_provider` sees it, which is "no provider has a working credential",
+which is a dimmed button on a phone. CR-121's own tests could not see this:
+they fake `setup_snapshot`, which is precisely the function whose answer is
+process state.
+
+The Cards page was hiding the second half of it. `status()`' `why` - the
+sentence that names Settings -> AI providers and its TEST button - was only in
+a hover tooltip, so a phone, which has no hover, only ever saw the generic
+"claude not available on this server". Fixed in the MulticamPipeline repo the
+same day, same CR.
+
+**Fixed.** `cli_tools.ToolSpec` gains `credential_file`: the path, relative to
+the tool's `HOME`, that the CLI itself writes when it is signed in - Claude
+Code's OAuth store at `.claude/.credentials.json`, and Codex's `auth.json` in
+CODEX_HOME, which is `$HOME/.codex` because `cli_env` sets HOME and not
+CODEX_HOME. `signin_status()` consults it as the third leg, and returns
+`state=signed_in, strategy=on_disk` with a detail naming the relative path and
+the file's mtime.
+
+Two things about that leg are the fix, not decoration:
+
+1. **EXISTENCE AND SIZE ONLY.** The file is a live OAuth credential. Nothing
+   opens it, parses it, logs it or puts a byte of it in an answer; an OSError
+   is "cannot tell", which falls back to the idle reading. A zero-byte file
+   (what a killed write leaves) and a directory in its place are both "not
+   signed in".
+2. **PRECEDENCE IS UNCHANGED.** The disk is consulted only where the answer
+   would otherwise be idle. A `_signin_last` that says a sign-in FAILED still
+   wins, and so does a SIGN OUT whose `auth logout` could not run (the binary
+   is gone) and which therefore left the file behind - a stale credential must
+   never overrule the login that just failed.
+
+`unprobed_cli_state`'s detail now says which evidence answered: "signed in
+(credential on disk); not re-probed", against the existing "signed in
+(wizard); not re-probed" for a live or remembered session. `ai_providers.cli_path`
+was checked against the live `ai_claude_code_path = ''` and was already right
+(an empty typed path falls through to the wizard's install rather than reading
+as a typed path that is not a file); it carries a comment saying so now.
+
+**Files.** `dashboard/src/ccsync_dashboard/cli_tools.py`
+(`ToolSpec.credential_file`, `_credential_on_disk`, `signin_status`),
+`dashboard/src/ccsync_dashboard/ai_providers.py` (`unprobed_cli_state`'s
+detail, the `cli_path` comment).
+
+**Tests.** `dashboard/tests/test_cli_tools.py`: the file answers after a
+restart with the whole status shape, no file is idle, an empty file is idle, a
+directory is idle, a failed `_signin_last` and a sign-out both beat the file,
+Codex has its own path and one tool's credential says nothing about the
+other's, `signin_status(None, ...)` still answers, and the credential is never
+opened or read (`builtins.open` and `Path.read_text` are booby-trapped over
+that path, and the answer is checked for the token strings).
+`dashboard/tests/test_ai_providers.py`: the end-to-end shape with NOTHING
+faked but the subprocess ban - a real `_finish_install` tree, a real
+credential file, the feature flag on, `ai_claude_code_path = ''`, no API key
+and a cold probe cache -> `cli_path` finds the wizard's binary,
+`provider_states(probe=False)` is `ST_AVAILABLE`, `resolved()` is
+`claude_code` and `cards_ai.status()` is `ok True, why ""`; plus the other
+half, installed with no credential, which stays `ST_UNKNOWN`.
+
+**Operator note.** Until dashboard 0.7.38 is deployed, the workaround is the
+one that was accidentally discovered: Settings -> AI providers -> TEST beside
+Claude Code, after every container restart. It costs one probe and it lasts
+until the next restart.
+
+
+## Timeline Cards, 2026-09-06 (CR-196, CR-197, CR-198)
+
+Seventeen owner-requested items landed in the **MulticamPipeline checkout** on
+2026-09-06, three of which were defects and are written up below. Like CR-192
+to CR-194 they are another repo's code, carrying no version of ours, so they
+reach the page only after the NAS cards checkout is refreshed and the container
+restarted (`docs/CARDS_DEPLOY.md`). On top of 8cac87f in that repo; NOT
+deployed.
+
+**The other fourteen items** are features, not defects, and are listed here
+only so a reader knows what else moved in that checkout on the same day:
+
+- the Claude pill prints the server's reason instead of one generic line
+  (the page half of CR-195, which a phone could not reach in a hover tooltip);
+- an EN / 中 toggle in the edit view's bar;
+- 2x and ✂ buttons under the gear;
+- the current row grows to show all of its text, capped at 60% of the view;
+- a compact name / duration line on the row's bottom edge, so tight density
+  now fits three lines;
+- the head is carried exactly between the edit view and the lane;
+- the edit view's cut is carried into cards / lane / transcript on a switch;
+- undo on every tab, dimmed when there is nothing to undo;
+- lane hold-trim through a trim pad, with the scrub pad moved to the top right;
+- Q and W as buttons in the lane bar, beside the keys CR-193 fixed;
+- the dial starts frame-slow and ramps late, with its speed in the label;
+- a trim drag is a constant 5 s across the row for every cut, long or short;
+- the head stays on its source moment through a trim;
+- scrub audio and a live word pill during a trim drag, a 1.5 s audition on
+  release, and a loupe strip (plus or minus 2 s, 4x finer drag) with its own
+  button.
+
+### CR-196 - split on the cards page on a phone did nothing and said nothing - FIXED in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Seen live.** 2026-09-06, Alex, on the phone: *"it also seems like split
+doesn't work in the cards page on mobile also"*. Tapping ✂ on a cut inside a
+stack: nothing happened, and nothing said why.
+
+**Cause.** The split path itself works under real touch points - the ✂ chip is
+a 35x52 target, the trim sheet opens, a tap on a word moves the blade, and
+"split here" stages the op or posts `api/split`. What was broken was every way
+that path REFUSES, and on a phone a refusal that is not seen is
+indistinguishable from a dead button:
+
+1. `msg()` writes into `#err` at the top of the page, which on a phone is
+   scrolled off and, in the edit view, `display:none` outright. Every refusal
+   went there.
+2. Three of the refusals named keys a phone has not got - W, Z, Enter - so
+   even when one was seen it asked for hardware that is not on the device.
+3. The sheet's `.tsplit` button carried `disabled` in exactly the state the
+   sheet opens in (the blade at the edge of the cut), so the FIRST tap, the one
+   an owner makes to find out what the button does, was silent by design.
+
+**Fixed.** Every refusal on that path goes through `say()` (the toast) and
+names something a finger can reach rather than a key. `.tsplit` and `.tdel`
+take a class `off` instead of the `disabled` attribute, so the element still
+receives the tap and can answer with the reason. `msg()` mirrors its bad and
+warn levels into the toast whenever the edit view is up, since `#err` is
+hidden there.
+
+**Tests.** Six phone-harness checks in `tests/test_edit_view.js`: the toast
+carries each refusal, the off buttons are tappable and answer, and no refusal
+on the path names a key.
+
+### CR-197 - the lane strip stayed on screen with the bar saying "transcript", and the transcript's insert sheet appeared over it - FIXED in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Seen live.** 2026-09-06, Alex, landscape phone screenshot: the lane strip
+under a bottom bar reading "transcript", with the insert sheet (preview /
+insert at the end / place on top / copy) sitting on top of it. *"this insert
+overlay should never appear anywhere except the transcript page"*.
+
+**Cause.** Two halves of one shape. `navView()` tested `body.split` before
+`LANE`, and the lane never clears `split`: a double-tap on a clip, or a tap on
+a clip belonging to another interview (`docToCut` -> `openDoc`), sets `split`
+from INSIDE the lane view. On a phone `body.mobile.lane #main{display:none}`
+hides the panel, so what remained on screen was the strip while the bar named
+the transcript. The insert sheet was keyed on the selection ALONE, with no
+test for which view was up, so it showed anywhere a selection existed.
+
+**Fixed.** `selSheetView()` guards `selSheet()` so the sheet can exist only
+while the transcript is the view actually on screen, and `navPaint()` drops it
+when it is not. `navView()` prefers the lane over `split` on a phone. Desktop
+is deliberately unchanged: there the lane is a strip beside a real panel, and
+both being up at once is the layout, not a bug.
+
+**Tests.** Seven checks: the sheet is refused from the lane and from the cards
+view, a view switch drops an open one, the split-from-inside-the-lane paths
+(double-tap and `docToCut`) leave the lane as the view on a phone, and the
+desktop case still shows both.
+
+### CR-198 - after any row rebuild in the edit view, no row carried the current marker - FIXED in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Found while building** the growing current row (item 4 of the day), which is
+what made it visible.
+
+**Cause.** `edvDraw` adds `.cur` only when the row index has CHANGED
+(`i!==EDCUR`), and `edvBuild`'s innerHTML rebuild threw the marked element away
+without resetting `EDCUR`. So after any rebuild the page believed the marker
+was already on the right row and never re-added it. Invisible for as long as
+every row was one height - the only thing lost was a highlight nobody had
+looked for - and fatal the moment the current row grows, because then the row
+that grows is the row that carries the class.
+
+**Fixed.** `edvBuild` resets `EDCUR` after the rebuild, so the next `edvDraw`
+treats the index as changed and re-marks.
+
+**Tests.** Covered by the row-growth checks in `tests/test_edit_view.js`: after
+a rebuild exactly one row carries `.cur` and it is the current one.
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

@@ -22,10 +22,12 @@ No test here opens a socket, runs a CLI or spawns a pty: `_fetch_bytes`,
 """
 from __future__ import annotations
 
+import builtins
 import hashlib
 import io
 import json
 import os
+import pathlib
 import tarfile
 import threading
 import time
@@ -782,6 +784,149 @@ def test_auth_status_that_will_not_parse_reads_as_signed_out(settings, monkeypat
     monkeypatch.setattr(cli_tools.subprocess, "run", lambda argv, **kw: Proc())
     # Never "signed in" by accident: an unreadable answer is signed OUT.
     assert cli_tools.auth_status(settings, cli_tools.CLAUDE_CODE)["logged_in"] is False
+
+
+# ------------------------------------- a sign-in survives a container restart
+# CR-195 (2026-09-06). `_signin` and `_signin_last` are module globals, so
+# every deploy, OTA or crash forgot that the wizard had signed the CLI in, and
+# `/cards` went back to "claude not available on this server" until an admin
+# clicked TEST. The third leg `signin_status`' docstring has promised since
+# 2026-08-18 is the CLI's OWN credential file, which outlives the process.
+
+CREDENTIAL_BYTES = ('{"claudeAiOauth": {"accessToken": "SECRET-ACCESS-TOKEN", '
+                    '"refreshToken": "SECRET-REFRESH-TOKEN"}}')
+
+
+def write_credential(settings, name=cli_tools.CLAUDE_CODE, text=CREDENTIAL_BYTES):
+    path = cli_tools.home_dir(settings, name) / cli_tools.spec(name).credential_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_the_clis_own_credential_file_answers_after_a_restart(settings):
+    name = cli_tools.CLAUDE_CODE
+    # A cold process: no live session, no remembered outcome. This IS the
+    # container that has just come back up.
+    assert cli_tools.signin_status(settings, name)["state"] == "idle"
+    write_credential(settings)
+    answer = cli_tools.signin_status(settings, name)
+    assert answer["state"] == "signed_in"
+    assert answer["strategy"] == "on_disk"
+    assert ".claude/.credentials.json" in answer["detail"]
+    # The whole shape the page and setup_snapshot read, not a partial dict.
+    for key in ("url", "user_code", "account", "tool", "mode", "expires_in"):
+        assert key in answer
+    assert answer["tool"] == name
+
+
+def test_no_credential_file_is_still_idle(settings):
+    # The directory exists (the wizard made a HOME) but nothing signed in.
+    cli_tools.home_dir(settings, cli_tools.CLAUDE_CODE).mkdir(parents=True)
+    assert cli_tools.signin_status(settings, cli_tools.CLAUDE_CODE)["state"] == "idle"
+
+
+def test_an_empty_credential_file_is_not_a_sign_in(settings):
+    # A zero-byte file is what a killed write leaves behind. It is not a
+    # credential, and reporting it as one would put the /cards page back to
+    # failing at the call instead of at the button.
+    write_credential(settings, text="")
+    assert cli_tools.signin_status(settings, cli_tools.CLAUDE_CODE)["state"] == "idle"
+
+
+def test_a_directory_where_the_credential_should_be_is_not_a_sign_in(settings):
+    name = cli_tools.CLAUDE_CODE
+    (cli_tools.home_dir(settings, name)
+     / cli_tools.spec(name).credential_file).mkdir(parents=True)
+    assert cli_tools.signin_status(settings, name)["state"] == "idle"
+
+
+def test_a_failed_sign_in_still_beats_the_file_on_disk(settings):
+    """Precedence, not convenience: a stale credential left by an expired or
+    revoked login must not overrule the re-login that just failed."""
+    name = cli_tools.CLAUDE_CODE
+    write_credential(settings)
+    cli_tools._signin_last[name] = {
+        "state": "failed", "url": "", "user_code": "", "strategy": "login",
+        "detail": "the CLI refused the code", "account": {}, "tool": name,
+        "mode": "subscription", "expires_in": 0}
+    answer = cli_tools.signin_status(settings, name)
+    assert answer["state"] == "failed"
+    assert answer["strategy"] == "login"
+
+
+def test_a_sign_out_beats_the_file_on_disk(settings):
+    """SIGN OUT records an idle outcome even when `auth logout` could not run
+    (the binary is gone), and the file it could not delete must not read as a
+    sign-in on the next poll."""
+    name = cli_tools.CLAUDE_CODE
+    write_credential(settings)
+    monkey = {"state": "idle", "url": "", "user_code": "", "strategy": "",
+              "detail": "could not run the CLI's logout (FileNotFoundError)",
+              "account": {}, "tool": name, "mode": "", "expires_in": 0}
+    cli_tools._signin_last[name] = monkey
+    assert cli_tools.signin_status(settings, name)["state"] == "idle"
+
+
+def test_the_credential_is_never_read_only_stat_ed(settings, monkeypatch):
+    """It IS the credential. Existence and size, nothing else: no open, no
+    parse, and not one byte of it in a value an admin or an API sees."""
+    name = cli_tools.CLAUDE_CODE
+    path = write_credential(settings)
+
+    real_open = builtins.open
+
+    def refuse(file, *a, **kw):
+        if str(file) == str(path):
+            raise AssertionError("the credential file must never be opened")
+        return real_open(file, *a, **kw)
+
+    monkeypatch.setattr(builtins, "open", refuse)
+    monkeypatch.setattr(pathlib.Path, "read_text", _no_read_text(path))
+    answer = cli_tools.signin_status(settings, name)
+    assert answer["state"] == "signed_in"
+    blob = json.dumps(answer)
+    assert "SECRET-ACCESS-TOKEN" not in blob
+    assert "SECRET-REFRESH-TOKEN" not in blob
+    assert "claudeAiOauth" not in blob
+
+
+def _no_read_text(path):
+    real = pathlib.Path.read_text
+
+    def guard(self, *a, **kw):
+        if str(self) == str(path):
+            raise AssertionError("the credential file must never be read")
+        return real(self, *a, **kw)
+
+    return guard
+
+
+def test_codex_has_its_own_credential_path(settings):
+    """`auth.json` in CODEX_HOME, which is `$HOME/.codex` because `cli_env`
+    sets HOME and not CODEX_HOME."""
+    assert cli_tools.spec(cli_tools.CODEX).credential_file == ".codex/auth.json"
+    write_credential(settings, cli_tools.CODEX)
+    assert cli_tools.signin_status(settings, cli_tools.CODEX)["state"] == "signed_in"
+    # And one tool's credential says nothing about the other's.
+    assert cli_tools.signin_status(settings, cli_tools.CLAUDE_CODE)["state"] == "idle"
+
+
+def test_a_settings_less_caller_is_still_answered(settings):
+    # `signin_status(None, ...)` has one caller shape (an older test, a probe
+    # with nothing to install into) and must not raise looking for a HOME.
+    assert cli_tools.signin_status(None, cli_tools.CLAUDE_CODE)["state"] == "idle"
+
+
+def test_the_wizard_snapshot_carries_the_on_disk_sign_in(env):
+    """`setup_snapshot` is what `ai_providers.unprobed_cli_state` reads, so
+    this is the seam CR-121's fix was standing on."""
+    _client, conn, settings = env
+    enable_cli(conn)
+    write_credential(settings)
+    snap = cli_tools.setup_snapshot(conn, settings, cli_tools.CLAUDE_CODE)
+    assert snap["signed_in"] is True
+    assert snap["signin"]["strategy"] == "on_disk"
 
 
 # ------------------------------------------------------- the one env helper

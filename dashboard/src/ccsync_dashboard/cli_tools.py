@@ -84,6 +84,7 @@ as a terminal inside the container -- hence both strategies, login first, and
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import logging
@@ -91,6 +92,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -147,6 +149,19 @@ class ToolSpec:
     # What `HOME=<ours>` makes the CLI write, used to tell "this wizard signed
     # it in" from "an empty directory".
     home_marker: str
+    # The file, relative to that HOME, that the CLI ITSELF writes when it is
+    # signed in (CR-195, 2026-09-06). It is what survives a container restart:
+    # the sign-in session and its outcome are module globals, so before this
+    # a `docker restart` forgot that the wizard had ever signed anything in.
+    # Existence and size are all that is ever read -- these files ARE the
+    # credential (see `_credential_on_disk`).
+    #   Claude Code: its OAuth store, written by `claude` under
+    #   `$HOME/.claude/.credentials.json` (measured on the live container
+    #   2026-09-06: 509 bytes, a `claudeAiOauth` object with an access and a
+    #   refresh token).
+    #   Codex: `auth.json` in CODEX_HOME, which is `$HOME/.codex` unless the
+    #   env var says otherwise -- and `cli_env` sets HOME, not CODEX_HOME.
+    credential_file: str
 
 
 TOOLS: dict[str, ToolSpec] = {
@@ -154,11 +169,13 @@ TOOLS: dict[str, ToolSpec] = {
         name=CLAUDE_CODE, label="Claude Code", dir_name="claude-code",
         binary="claude", rel_binary="claude",
         publisher="Anthropic (downloads.claude.ai)", home_marker=".claude",
+        credential_file=".claude/.credentials.json",
     ),
     CODEX: ToolSpec(
         name=CODEX, label="Codex", dir_name="codex",
         binary="codex", rel_binary="bin/codex",
         publisher="OpenAI (github.com/openai/codex releases)", home_marker=".codex",
+        credential_file=".codex/auth.json",
     ),
 }
 
@@ -1355,9 +1372,54 @@ _signin: SignInSession | None = None
 _signin_last: dict[str, dict] = {}
 
 
+def _credential_on_disk(settings: Any, name: str) -> dict | None:
+    """The CLI's own credential file under our HOME, as a `signin_status`
+    answer -- or None if it is not there.
+
+    CR-195 (2026-09-06), the third leg this docstring promised since
+    2026-08-18 and nothing ever wrote. `_signin` and `_signin_last` are
+    module globals, so every container restart (a deploy, an OTA, a crash)
+    forgot that the wizard had signed the CLI in, CR-121's `unprobed_cli_state`
+    fell back to ST_UNKNOWN, and the /cards page said "claude not available on
+    this server" until an admin clicked TEST. The file the CLI itself wrote is
+    the one piece of that truth that survives the process.
+
+    EXISTENCE AND SIZE ONLY. The file IS the credential (an OAuth access and
+    refresh token); nothing here opens it, parses it, logs it or puts a byte
+    of it in a value an admin or an API sees. An OSError is "cannot tell",
+    which falls back to the idle answer.
+    """
+    if settings is None:
+        return None
+    rel = spec(name).credential_file
+    if not rel:
+        return None
+    path = home_dir(settings, name) / rel
+    try:
+        st = path.stat()
+        if not stat.S_ISREG(st.st_mode) or st.st_size <= 0:
+            return None
+        written = dt.datetime.fromtimestamp(st.st_mtime, dt.timezone.utc)
+    except (OSError, ValueError, OverflowError):
+        return None
+    return {"state": "signed_in", "strategy": "on_disk",
+            "detail": (f"signed in earlier - the CLI's own credential is on "
+                       f"disk ({rel}, written "
+                       f"{written.strftime('%Y-%m-%d %H:%M UTC')})"),
+            "url": "", "user_code": "", "account": {}, "tool": name,
+            "mode": "", "expires_in": 0}
+
+
 def signin_status(settings: Any, name: str) -> dict:
     """The live session for this tool, else the last one's outcome, else the
-    installed truth. Cheap: no subprocess."""
+    installed truth. Cheap: no subprocess.
+
+    The order is precedence, not convenience (CR-195): a `_signin_last` that
+    says a sign-in FAILED, or a SIGN OUT whose `auth logout` could not run,
+    still beats a file on disk -- a stale credential after a failed re-login
+    must not read as signed in. The disk is consulted only where the answer
+    would otherwise be the idle one, which is exactly the post-restart case.
+    """
     spec(name)
     with _signin_lock:
         session = _signin
@@ -1366,6 +1428,9 @@ def signin_status(settings: Any, name: str) -> dict:
     last = dict(_signin_last.get(name) or {})
     if last:
         return last
+    on_disk = _credential_on_disk(settings, name)
+    if on_disk is not None:
+        return on_disk
     return {"state": "idle", "url": "", "user_code": "", "strategy": "",
             "detail": "", "account": {}, "tool": name, "mode": "", "expires_in": 0}
 

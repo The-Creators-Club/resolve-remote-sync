@@ -15313,7 +15313,7 @@ paragraph updated.
 golden regenerated.
 
 
-## Timeline Cards, 2026-09-06 night (CR-206, CR-207, CR-208, CR-209)
+## Timeline Cards, 2026-09-06 night (CR-206, CR-207, CR-208, CR-209, CR-210)
 
 Found on Alex's laptop, which holds an OFFLINE COPY of the project-mode
 cut list "Civil Defence Canvas E2 V3" (taken at rev 231, 13:34) while the
@@ -15440,6 +15440,47 @@ search bar wraps so the four controls fit a 390 px phone. `docs/LAYOUT.md`.
 the same night, image-mode recreate on the 0.7.38 digest; the gate ran
 once, 58/59 with perf_e2e red at exactly its 20 ms threshold under a
 parallel builder's load and green alone afterwards.
+
+### CR-210 - "remotely, trimming and moving is instant, but splitting has a significant delay" - FIXED in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Report** (2026-09-06 22:55, Alex, laptop over the tailnet, 208-card
+project-mode cut list).
+
+**Cause** (page/03-lane.js `laneBlade`). The lane's scissors, the F key
+and the phone edit view's scissors all reach `laneBlade`, and it was the
+one edit that went straight to `sendEdit('api/split')` with no
+`shadowOp` prediction, no ghost and no saving mark the lane draws. Every
+other gesture (drag reorder, edge drags, Q/W, delete, and the
+trim-panel's own split) is drawn before the server answers and
+reconciled through `renamed`. So a blade was one full round trip of
+visible nothing, 300-700 ms on the tailnet, while a trim's identical
+round trip hid behind its prediction. The server was measured and is not
+the cause: a split's `_run_apply` is 7.8 ms p50 against a trim's 7.5 ms
+(same shape, same route, words re-cut from tokens already in memory, no
+database call), and a split's delta is 12.7 KB against a trim's 588 KB.
+A second suspicion, that the poll delta left the server ungzipped, was
+WRONG: `_send` gzips every JSON body over 2 KB when the client accepts
+it (measured 127 KB -> 5.6 KB), the `None` beside the delta only means
+"no pre-made gzip".
+
+**Fix.** `laneBlade` predicts the split exactly as the trim panel does
+(`shadowOp({k:'split',uid,off})`, `off` already in timeline frames) and
+posts, reading `uid`/`sec` BEFORE the prediction; `paintList` already
+ends in `laneDraw(true)`, so no second raster (CR-202). A refusal drops
+the prediction through `sendEdit`'s existing fail path; the selection
+lands on the first half. Two server-side CPU costs noted and left:
+`_answer_edit` recompresses the whole answer instead of reusing the
+state's gzip, and a delta is compressed fresh per request.
+
+**Shipped.** Cards 1872015 live on the NAS 23:23 the same night (gate
+59/59 alone); reload the page to get it.
+
+**Tests.** `tests/test_lane_page.js` +10 (`laneBlade` run against fakes:
+shadow-then-send, op shape, both refusals, busy, staging), `tests/test_handler.py`
++4 (the delta is gzipped when accepted, plain when not, identical after
+decoding), `tests/test_page_latency.js` section 7 (the prediction is on
+screen 60 ms in with the POST held 400 ms; reconciled after), one check in
+`tests/test_edit_view.js`; golden refreshed.
 
 
 ## Carryover — unchanged from before the 2026-08-11 hunt

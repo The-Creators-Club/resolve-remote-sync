@@ -15313,7 +15313,7 @@ paragraph updated.
 golden regenerated.
 
 
-## Timeline Cards, 2026-09-06 night (CR-206, CR-207, CR-208, CR-209, CR-210)
+## Timeline Cards, 2026-09-06 night (CR-206, CR-207, CR-208, CR-209, CR-210, CR-211)
 
 Found on Alex's laptop, which holds an OFFLINE COPY of the project-mode
 cut list "Civil Defence Canvas E2 V3" (taken at rev 231, 13:34) while the
@@ -15481,6 +15481,63 @@ shadow-then-send, op shape, both refusals, busy, staging), `tests/test_handler.p
 decoding), `tests/test_page_latency.js` section 7 (the prediction is on
 screen 60 ms in with the POST held 400 ms; reconciled after), one check in
 `tests/test_edit_view.js`; golden refreshed.
+
+### CR-211 - unsynced offline edits lived only in the browser's own storage - BUILT in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Ask** (2026-09-06, Alex): "local copies should save to a directory
+automatically so that if the browser gets closed or whatever all the
+work doesn't get lost" - and, asked what works on a phone, "1 + 2 yes,
+downloads on laptop is fine also, it's just to protect against unlikely
+disaster scenarios."
+
+**What is at risk.** Live edits are on the server as revisions; the copy
+is a download of the server. The only thing unique to a device is the
+OFFLINE QUEUE plus the copy state it was applied to, in IndexedDB with
+`navigator.storage.persist()`, which survives a browser close but not
+cleared site data, an uninstalled browser, storage eviction or a dead
+phone.
+
+**Built** (page/15-offline.js). (1) An automatic snapshot into the
+browser's Downloads: `<project> offline <rev>+<N edits> <date>
+.cards-offline.json`, holding the copy's cards and order (no words or
+media, `en_para` dropped, tens of kB), the queue verbatim with ids and
+base_rev so a restore is idempotent, and a readable prose block whose
+first lines say nothing loads it into Resolve - deliberately NOT a
+`.cut.md`, because the page has only clip stems, and a file that looks
+like a cut list and refuses to load is worse than none. Written 5 s after
+an offline edit, at most one a minute (the timer re-arms so a burst's
+last edit is always written), and once when the verdict flips to down
+with a non-empty queue; never with an empty queue. Android Chrome asks
+once for multiple downloads and is then silent; iOS Safari asks per file,
+so there the automatic one is a toggle, default off. (2) [ SAVE A COPY ]
+in the offline panel: the share sheet where files can be shared, else a
+download; works with an empty queue as a plain export. (3) [ RESTORE
+FROM FILE ]: refuses another cut list's file, merges the queue without
+duplicates under the replay's own sent/rev rule, keeps the newer state by
+rev, toasts "restored 3 edits, 1 already here". The disaster road is:
+download the cut list again, then restore. The chip says "saved 23:41".
+Not verified on a device: the two prompts above and the share sheet
+inside the tap. `docs/OFFLINE-PLAN.md` §6a.
+
+**The first build killed the page in Chrome and node could not see it.**
+The filename sanitiser's regex class carried two RAW control bytes (0x00
+and 0x1f, an escape that lost its backslash): a valid range for node, so
+`node --check`, the assembled-page parse and 223 unit checks were green,
+but the HTML parser rewrites a NUL as U+FFFD and Chrome then compiled
+"range out of order" at load. The page is ONE script, so every top-level
+binding died with it and 18 browser suites timed out on "CARDS is not
+defined". Fixed as ` -` escapes; the offline suite's first
+check now scans `15-offline.js` and `sw.js` for any control character
+other than tab, CR and LF. Lesson: the gate's browser suites are the
+only thing that runs the page as a browser does; never ship a page slice
+on the node suites alone.
+
+**Shipped.** Cards 719df59 live on the NAS 2026-09-07 00:46 (gate
+59/59 after the fix); reload the page. Still unverified on a device: the
+Android one-time prompt, the iOS per-file prompt, the share sheet.
+
+**Tests.** `tests/test_offline_page.js` 136 -> 225 checks; golden
+refreshed.
 
 
 ## Carryover — unchanged from before the 2026-08-11 hunt

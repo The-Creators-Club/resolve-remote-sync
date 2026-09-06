@@ -15229,6 +15229,90 @@ read rather than assumed. `docs/OFFLINE-PLAN.md` §2 has the table.
 **Tests.** `tests/test_offline_page.js` +15 (121 -> 136).
 
 
+## Timeline Cards, 2026-09-07 (CR-204, CR-205)
+
+### CR-204 - a transcript selection sometimes inserted the WHOLE PARAGRAPH instead of the highlighted words - FIXED in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Report** (2026-09-07, Alex): "sometimes when you select text in the
+transcript and insert it will just insert the entire paragraph instead of
+the selection."
+
+**Cause.** `match_selection` looked the selected words up in the clip's
+word timing by taking the FIRST exact occurrence in the whole interview
+(`TokenStream.locate`, `ftext.find` from offset 0). The page also sends the
+`^ref`s of the paragraph(s) the highlight covered, and the 2026-08-31
+montage guard checks the hit against that paragraph's own span: a hit more
+than 2 s outside it, or no hit at all (fuzzy below 0.75 - a selection
+straddling the EN and ZH lines, odd punctuation, a very short stretch),
+was replaced by the whole paragraph, silently. So any selection whose
+words had also been said earlier in the interview, and any selection the
+matcher could not place, became the paragraph. The offline copy
+(`15-offline.js` `oflInsertSpan`) used every word row of the ref'd blocks,
+i.e. the whole paragraph, ALWAYS.
+
+**Fixed.** The highlighted paragraph is searched FIRST: `TokenStream.locate
+/ find` take `within=(lo, hi)` (exact search bounded to the span, fuzzy
+grid restricted to the span's own windows, refine clamped; `within=None`
+is byte-for-byte the old sweep), and `match_selection` unions the ref'd
+blocks' text offsets (`REF_SPAN_SLACK` = 8 chars) and asks inside that
+span before the global lookup. Order: exact within span -> fuzzy within
+span -> the old global find -> the EN-of-a-ZH-interview fallback -> the
+block span as the last resort. When the answer IS the paragraph the desc
+carries `whole_block: True` and `whole_block_sec`, `conf` is capped at
+0.5, `api/insert` puts both on the reply, and the page warns: "could not
+find those exact words in the clip's timing - inserted the whole
+paragraph (N s)". Offline, `oflInsertSpan` narrows to the rows covering
+the selection (exact only - no zh fold on the page) and the queued reply
+carries the same flag. Selecting the EN line of a ZH interview stays
+paragraph-granular by design (the EN is not word-timed) and now warns.
+
+**Tests.** New `tests/test_selection_span.py` (21 checks): the
+repeated-phrase case is placed inside the highlighted block and is the
+words, not the paragraph (the fixture's first occurrence is at 3600.0 s,
+the block at 3612.5-3620.4 s; the pre-fix code returned the paragraph); an
+unplaceable selection falls back with the flag; a unique selection is
+unchanged with and without refs; `locate` bounded vs unbounded. Gate
+59/59, 0 red (`run_all.py`, 2026-09-06 18:11).
+
+### CR-205 - gaps could not be dragged, and a clip could not be dropped after a gap - BUILT in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Ask** (2026-09-07, Alex): "you should be able to drag gaps around, and
+drag clips in front of or behind gaps."
+
+**Cause.** A gap is `gap_before` on the cut that follows it, so the
+strip's drop slot ("before the clip whose middle is right of the
+pointer", `laneInsertAt`) knew nothing about gaps: a drop anywhere in a
+gap before cut i landed before cut i, which is always BEFORE the gap. A
+press in a gap's body only ever selected it; only the right edge dragged
+(resize).
+
+**Built.** A press in a gap's body that travels lifts it (drawn at .45
+alpha, an insertion line at the landing boundary, hint "the 1.0 s gap -
+drop it before cut 12"); the landing slot is the clips' own rule; its own
+boundary is no edit; past the last cut is refused ("a gap at the end of
+the timeline holds nothing - drop it before a cut"); the landing gap is
+the carried frames plus whatever the target already had. `laneDropAt(x)`
+resolves a clip drop inside a gap: LEFT half = before the gap (the old
+slot), RIGHT half = the same slot plus the gap moving onto the dragged
+block's first cut, added to that cut's own `gap_before` (a clip that came
+with a gap keeps it). ONE revision, one undo: `api/gap {uid, frames, from}`
+and `api/reorder {..., gap: {uid, frames, from}}` (`project_engine
+._gap_transfer`; refused with the gap route's words on any engine that is
+not a cut list, so nothing new reaches the Resolve/library engines). The
+draft plan carries one `{k:'gap', uid, frames, from}` op, absolute in both
+halves so a replay stays idempotent; `stores.PlanStore` had been stripping
+unknown keys, so `from` is kept there now (a staged move round-tripping
+through `api/plan` would otherwise have left the gap on BOTH cuts). The
+offline seam applies both. Phone: tap selects, a 350 ms hold picks the gap
+up, drag and lift drops; the right-edge resize stays mouse-only (GOTCHAS
+§10) and the phone edit view still only renders gap rows. README gap
+paragraph updated.
+
+**Tests.** `test_lane_gap.js` 24 -> 41, `test_lane_page.js` 161 -> 166,
+`test_project_edit.js` 70 -> 78, `test_project_engine.py` 145 -> 151;
+golden regenerated.
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

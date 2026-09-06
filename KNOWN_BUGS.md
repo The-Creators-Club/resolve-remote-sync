@@ -15025,6 +15025,152 @@ treats the index as changed and re-marks.
 a rebuild exactly one row carries `.cur` and it is the current one.
 
 
+## Timeline Cards, 2026-09-06 evening (CR-199, CR-200, CR-201, CR-202)
+
+A second batch in the **MulticamPipeline checkout** the same day, from the
+owner at his desk: three defects fixed, one investigated and left for a
+decision, one behaviour reversed. Another repo's code again, so it reaches
+the page only after the NAS cards checkout is refreshed and the container
+restarted (`docs/CARDS_DEPLOY.md`). On top of 314fddc in that repo; NOT
+committed, NOT deployed.
+
+**Reversed, not a defect:** a single click on a lane clip no longer brings the
+transcript to that cut's paragraph (the 2026-08-29 decision); it only selects
+the card. A double click still lands the transcript there, now also for a cut
+of the already-open interview and for a cut without a block reference
+(2026-09-06, Alex: "clicking once on a clip in the lane should not move the
+transcript view to that paragraph, it should only be double click").
+`tests/test_doc_panel.js` asserts both directions.
+
+**Hygiene:** `12-cats.js` carried a literal NUL byte in a string, so git
+treated the whole slice as binary and every diff of it was invisible in
+review. Replaced with the `\u0000` escape (same runtime string); the file is
+a text diff again from the next commit on.
+
+### CR-199 - the transcript pane's find box and switch-transcript control vanished as soon as the transcript scrolled - FIXED in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Report** (2026-09-06, Alex, desktop): "the search and switch transcript
+function should float and not stick to the top of the transcript, right now
+you have to scroll all the way up to access it".
+
+**Cause.** It was already sticky. `#viewer` is the scroller on the desktop
+and `#dochead` pinned to it, but it shared `top:0` with the file / browser /
+staged tab strip `#vtabs`, which is opaque and above it: `#dochead`'s CSS
+rule opened with `z-index:6` and closed with a stray `z-index:3`, the last
+one winning. The moment the pane scrolled the head slid under the tabs and
+only reappeared at scrollTop 0, below them in flow. The phone had the same
+overlap.
+
+**Fixed.** One `--vtabh` on the viewer; the tab strip takes that height; the
+head pins at `top:var(--vtabh)` with its z-index 6 restored (load-bearing:
+the switch-transcript dropdown paints inside this stacking context and must
+beat the tabs); the player bar below it moves down by the same amount. CSS
+only. Measured on a 2560 px desktop viewport scrolled 3000 px: head top went
+from 58 (under the tabs) to 92 (fully visible), dropdown opens on top; phone
+layout measured the same way.
+
+### CR-200 - Enter then Space through the find hits replayed the previous hit and skipped the next; Chinese hits started seconds before the word - FIXED in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Report** (2026-09-06, Alex): "In Chinese, the accuracy of playing the
+selected result is often very low, starting way before the actual result
+word. Also sometimes when you press enter and space it repeats the audio for
+the previous result, then you press enter again and it skips to a third
+result, and you miss hearing the result in the middle entirely."
+
+**Cause, three parts.** (1) `nextMatch` asked the SERVER to locate the hit a
+second time (`api/locate` with a 24 + hit + 12 character context) and cued
+the player only in that answer's callback, while a click on a word had always
+cued from the word timing the page already holds (`WORDS`). (2) `spaceKey`
+during an in-flight cue tested `player.classList.contains('on')`, which is
+still true from the previous hit, so Space played the previous cue; the late
+answer then paused and re-seeked the running audio, and a still-later answer
+could overwrite a newer hit's cue because nothing said which hit an answer
+belonged to. Measured in the owner's rhythm (Enter, Space, Enter): every hit
+was cued by the previous hit's answer, median 5.3 s off, worst 21 s. (3) The
+server's `locate` narrowed to the focus word only `if off > 0`, so a hit on
+the first word of a line was never narrowed and played from the start of the
+whole matched stretch (0.4 s early on the fixture, a whole sentence early on
+an interview whose tokens are subtitle cues).
+
+**Fixed.** Hits are cued from the page's own words, synchronously, no round
+trip; only a line with no word timing falls back to `locate`. Every hit takes
+a sequence number and an answer for an older one is dropped; Space pressed
+while a cue is in flight arms playback of THIS hit when it lands. `off >= 0`
+on the server. After: 23 of 23 Chinese hits cue at exactly the hit word, 0
+round trips; the race no longer reproduces with `api/locate` held back 700 ms.
+
+**Tests.** New `tests/test_find_cue.js` (13 checks, in the `text` group and
+`run_all.py`); `tests/test_zh_fold.py` (f) for the server narrowing.
+
+### CR-201 - a card dropped on the staged shelf disappeared, and never landed where it was dropped - FIXED in the MulticamPipeline repo 2026-09-06 (cards checkout)
+
+**Report** (2026-09-06, Alex): "when you add a card to staged it just
+disappears and doesn't appear where you dragged it to".
+
+**Cause.** Two faults, measured over CDP. The shelf BODY drop sent `api/stage`
+with no category, so with a category selected on the shelf (remembered per
+browser) the card was filed under the plain `## staged` and filtered out of
+the view: it was never lost, only filed where the editor was not looking.
+And `api/stage` carried no position at all, and the dragover for a list card
+over the shelf drew no insertion line: a card dropped on the top half of the
+first staged card landed LAST. (The chip drop already did both right, which is
+why dropping on a category name worked.)
+
+**Fixed.** A body drop stages into the category being viewed; the dragover
+draws the same insertion line the in-shelf reorder draws and the drop sends
+`before` / `after`; the project engine honours the slot (only within
+`## staged`, never into a legacy `## Alternates` row); the offline replay
+inserts at the same slot; the shelf scrolls the landed card into view; and
+the drop ends the drag explicitly instead of relying on the document-level
+fallback that happened to catch it.
+
+**Tests.** `tests/test_project_edit.js` +3 blocks (nine checks, six red
+without the fix); `test_project_engine.py`, `test_handler.py`,
+`test_offline.py`, `test_offline_page.js` green.
+
+### CR-202 - the lane at medium-high zoom: responsiveness and frame rate drop - OPEN; take three (2026-09-06) cleared the JS draw path, the CJK text and GPU raster halves are being measured next
+
+**Report** (2026-09-06, Alex, after three earlier rounds): "on high zoom
+levels, even after ALL the rounds of fixes, the lane in timeline cards is
+still poorly performant and laggy", "everywhere, laptop and computer, at
+certain high zoom levels performance drops sharply".
+
+**What was measured** (MulticamPipeline `docs/LANE-ZOOM-PERF-INVESTIGATION.md`,
+"take three"): the 433-cut fixture at 3440 and 1920 px, LZ 1 to 400 in 1.25x
+steps, real input streams, headed and headless, GPU on, with a 2x CPU
+throttle as the laptop stand-in, synthetic peaks and word timing installed so
+the real hot paths ran. `laneDraw` is 0.3 to 1.4 ms a frame and gets CHEAPER
+with zoom; the main thread is 96 to 99 % idle in every phase; zero long tasks
+in 4 s of playback, trim, extend, scrub at LZ 400 in all five runs. There is
+no draw-cost knee. The quadratic `wrapText` is real but costs 1 to 2.3 ms once
+per zoom notch, never per frame. Every earlier round measured at LZ 10 on a
+1600 px headless window; the owner's saved places are LZ 42 to 205.
+
+**What does change with zoom.** (1) Nothing re-centres the strip during
+playback: `laneShow` is called at play start and on jumps only, never from
+`laneTick` or the poll, so at LZ 400 the head leaves a 4.8 s window on the
+laptop (8.6 s on the rig) and the strip sits still - a sharp threshold that
+arrives sooner on the narrower screen. (2) In Resolve-timeline mode the red
+playhead is placed only by the poll (600 ms on any page not on loopback,
+i.e. every NAS-served page) with no interpolation: 30 px a step at LZ 50, 240
+px at LZ 400; hidden in project mode by `laneLead()`, which is why no fixture
+ever showed it. (3) The per-notch rewrap of every visible clip.
+
+**Owner's ruling, the same evening:** "at high zoom the playhead running
+off the screen is not a problem. It's very clear that there are distinct
+performance issues at medium-high zoom, responsiveness and frame rate drop
+significantly." So (1) is not the complaint and take three measured the
+wrong thing. Two blind spots it left, being measured now: the fixture's cards
+are LATIN and the owner's project is Mandarin (canvas text in `system-ui` has
+no CJK glyphs, so every measure and draw goes through per-glyph font
+fallback, and `wrapText` wraps CJK per character - a 300-char card is 300
+`measureText` calls of growing prefixes per wrap - with the most text on
+screen at exactly the medium zoom named); and GPU raster / compositor time,
+which `performance.now()` around JS never sees. The still-useful proposals:
+a linear `wrapText`, a CJK-capable lane font, card elements cached instead of
+`querySelector` per frame, and an opt-in frame meter in the lane hint line so
+the laptop can be read directly.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

@@ -112,7 +112,7 @@ one really is a dataset.**
 | | Naming | When | Kept |
 |---|---|---|---|
 | hourly | `ccsync-%Y%m%d-%H%M` | every hour, on the hour | 24 hours |
-| daily | `ccsync-daily-%Y%m%d` | 03:10 | 30 days |
+| daily | `ccsync-daily-%Y%m%d-%H%M` | 03:10 | 30 days |
 | pre-op | `ccsync-pre-<label>-<ts>` | before every privileged recursive op (§3) | until the pool prunes them by hand |
 
 24 hourly + 30 daily is a **floor, not an archive**: it buys back the last day

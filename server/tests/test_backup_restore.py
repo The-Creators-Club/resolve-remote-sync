@@ -721,3 +721,12 @@ def test_every_spec_names_its_content_tables():
     for which, spec in publish_db.SPECS.items():
         assert spec["tables"], which
         assert "ingest_queue" not in spec["tables"]
+
+
+def test_every_schema_carries_hour_and_minute():
+    """CR-227 (2026-09-08): TrueNAS refuses a snapshot task whose naming
+    schema has no %H / %M (422 "%H must be present"), so a daily schema of
+    `ccsync-daily-%Y%m%d` created the hourly task and silently no daily on
+    the first --apply. Every schema this script writes must carry both."""
+    for schema in (setup_snapshots.HOURLY_SCHEMA, setup_snapshots.DAILY_SCHEMA):
+        assert "%H" in schema and "%M" in schema, schema

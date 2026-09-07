@@ -57,7 +57,12 @@ from common import (
 # scanning `zfs list -t snapshot` can tell ours from the box's own tasks, and
 # from the replication package's GMT+NN- ones on DSM.
 HOURLY_SCHEMA = "ccsync-%Y%m%d-%H%M"
-DAILY_SCHEMA = "ccsync-daily-%Y%m%d"
+# The daily one carries -%H%M too, although it runs once a day: TrueNAS
+# refuses a schema without %H and %M (422 "%H must be present in snapshot
+# naming schema"), so the first --apply on the fleet made the hourly task
+# and silently no daily (CR-227, 2026-09-08). Its own daily tasks spell it
+# the same way (auto-daily-%Y%m%d-%H%M).
+DAILY_SCHEMA = "ccsync-daily-%Y%m%d-%H%M"
 
 # The policy. Cadence and retention live HERE, not in a backend: what a
 # platform knows is how to install a schedule, not how often a video studio

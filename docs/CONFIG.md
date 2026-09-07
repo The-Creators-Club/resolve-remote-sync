@@ -60,7 +60,7 @@ it stops and names it; that is the enforcement.
 | Key | Default | Notes |
 |---|---|---|
 | `root` | — | **R**. Where the dashboard's host tree lives. Everything under `<root>/app` is **replaced as root on every deploy**, so the backend refuses a root that does not match its expected shape |
-| `dataset` | *(unset → the deploy asks the NAS)* | TrueNAS only, same shape as `[tree] dataset`. The dataset `root` is **inside** — usually the pool itself (`tank`), because the app root is normally a plain folder and a task on `tank` does cover files living directly in it. Reaches the container as `DASH_UPDATE_SNAPSHOT_DATASET` (2026-09-03) |
+| `dataset` | *(unset → the deploy asks the NAS)* | TrueNAS only, same shape as `[tree] dataset`. The dataset `root` is **inside**. Until 2026-09-08 that was the pool itself (`tank`) on this fleet, because the app root was a plain folder in it -- and `setup_snapshots.py` refuses to schedule on a pool, so the dashboard's data had NO snapshot task and the protection panel said so (CR-227). The app root must be its own dataset (`tank/apps/ccsync-dashboard`; the migration recipe is in KNOWN_BUGS CR-227). Reaches the container as `DASH_UPDATE_SNAPSHOT_DATASET` (2026-09-03) |
 
 ### `[net]`
 

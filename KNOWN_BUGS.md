@@ -16072,6 +16072,51 @@ build. **LIVE 2026-09-07:** cards-web on the NAS from d527338 at 20:05
 walk stamped at connect, which only the new engine reports. The conform
 of a no-timeline project has not yet been exercised end to end.
 
+## Backups, 2026-09-08 (CR-227)
+
+### CR-227 - the dashboard's own data had no snapshot behind it: the apps root was a plain folder in the pool, the script refuses a pool, and its daily schema was one TrueNAS rejects - FIXED 2026-09-08, LIVE
+
+**Seen** (Alex, 2026-09-08, home page): `[ ERROR ] snapshot_apps: tank` -
+"no enabled snapshot task covers this dataset, so the fleet's projects,
+editors, ticks and search indexes have no point-in-time behind them",
+first seen four days earlier.
+
+**Why, three layers.** (1) `/mnt/tank/apps` was a plain directory in the
+pool's root dataset, so the deploy's df lookup told the container
+`DASH_UPDATE_SNAPSHOT_DATASET=tank` and no task covered `tank` (the
+pre-recreate snapshots the deploy took were `tank@...` for the same
+reason). (2) `backends/truenas.py` REFUSES to schedule on a pool (server-6,
+rightly: a recursive hourly task there snapshots everything), so
+`setup_snapshots.py --apply` could never have fixed it, and `docs/CONFIG.md`
+said the pool was the normal answer. (3) Once a dataset existed, the daily
+task was refused by TrueNAS with 422 `%H must be present in snapshot naming
+schema`: `DAILY_SCHEMA` was `ccsync-daily-%Y%m%d`. The hourly task went in
+and the daily silently did not.
+
+**Done on the NAS** (00:40-00:47, dashboard down 00:40-00:42 and again for
+the recreate): `zfs snapshot tank@pre-apps-dataset-20260908`; app stopped;
+`mv /mnt/tank/apps /mnt/tank/apps.pre-dataset-20260908`; `zfs create
+tank/apps` + `tank/apps/ccsync-dashboard`; `rsync -aHAX --numeric-ids` back;
+verified 23135 entries / 12 859 515 355 bytes equal; app started. Then the
+two tasks (hourly keep 24, daily keep 30, recursive) on
+`tank/apps/ccsync-dashboard` only - NOT the whole `--apply`, which would
+have added a second hourly+daily series to `tank/TheCreatorsPool` beside
+the NAS's own `auto-*` tasks. Then the image-mode recreate (live digest,
+`DASH_RELEASE_PUBKEYS` from `release_key.py pubkey --quiet` - without
+`--quiet` the variable gets the helper's whole three-line text) so the
+container reads `DASH_UPDATE_SNAPSHOT_DATASET=tank/apps/ccsync-dashboard`;
+the deploy's own pre-recreate snapshot then landed on the app dataset.
+Protection panel: PROTECTED, 2 tasks cover it. **Owed:** delete
+`/mnt/tank/apps.pre-dataset-20260908` (9 GB) once a day of snapshots has
+run; the sibling folders `cloudflared`, `timeline-cards`, `vault-viewer`
+moved with it into `tank/apps` (nothing mounts them; the two standalone
+containers mount `/mnt/tank/web`).
+
+**Fixed in the repo:** `DAILY_SCHEMA = "ccsync-daily-%Y%m%d-%H%M"` (the
+NAS's own daily tasks spell it that way), `docs/BACKUP_RESTORE.md`'s table,
+`docs/CONFIG.md`'s `[apps] dataset` row, and
+`test_every_schema_carries_hour_and_minute` in `test_backup_restore.py`.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

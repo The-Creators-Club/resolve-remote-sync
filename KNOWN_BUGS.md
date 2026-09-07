@@ -15539,6 +15539,76 @@ Android one-time prompt, the iOS per-file prompt, the share sheet.
 **Tests.** `tests/test_offline_page.js` 136 -> 225 checks; golden
 refreshed.
 
+## Timeline Cards, 2026-09-07 afternoon (CR-212, CR-213)
+
+Both off Alex's phone, in the edit tab, on the Civil Defence E2 cut list.
+
+### CR-212 - the edit tab's English line, in 中 mode: an English cut's words twice, a Chinese cut's WHOLE paragraph - FIXED in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Report** (2026-09-07, Alex, phone, screenshot): "on English cards in
+mobile edit in 中 mode you get doubled up English text, and for Chinese
+cards you get the entire paragraph in English underneath, not just the
+card itself, this is wrong." The screenshot: cut 129 of 222 (林飛帆, 17.8 s)
+with its own sentence on top and, dimmed under it, a paragraph that runs
+on past the cut into cuts 130 and 131.
+
+**Cause** (page/09-edit.js `edvRowHtml`, 2026-09-04). The dimmed line
+under a row's words read `c.en_para` whenever the cut had no exact
+translation. `en_para` is the engine's WHOLE overlapping paragraph(s),
+handed over as context for the translation job (`_slice_en`: "snippet is
+what the card displays, full is the human-approved paragraph context");
+`c.en` is the time-sliced snippet, and `en_kind` says which it is (exact /
+gt / para). The card view has always read `en` through that rule
+(`cardTextHtml`); the edit row invented its own. And it never asked
+whether the words were already English: Brian's and Amanda's cuts carry
+their own timed English as `text` and the paragraph as `en`, so the row
+drew the same sentence twice. `laneTextOf` had the no-CJK test since
+2026-08-28; the edit row did not.
+
+**Fix.** `edvEnLine(c)`, one rule: nothing in EN mode or with no `en`;
+nothing when the cut's own words have no CJK in them; the exact
+translation; `≈ ` + the machine line; else `¶ ` + the snippet. Never
+`en_para`.
+
+**Tests.** `tests/test_edit_view.js` 4c: an audit over every cut row in
+中 mode (English cuts have no `.eden`; a Chinese cut's line is exactly
+its snippet with the kind's mark, never `en_para`), and a check that the
+fixture exercised both shapes (21 English rows, 23 exact). The fixture has
+no gt or para rows; the branch is the card view's and is exercised there.
+
+### CR-213 - "you should be able to move cards in the edit tab by double tapping them" - BUILT in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Report** (2026-09-07, Alex, phone). The edit tab could trim, split and
+undo, and not move a cut; the cards tab has had tap-tap-to-pick-up since
+the phone got a list.
+
+**Built** (page/09-edit.js, 07-conform.js, cards.css). A tap twice on a
+cut row picks it up (`edvArm`: the same `blockOf` as the cards' `armMove`,
+`disarmMove()` first so one thing is carried across the views, a 15 ms
+buzz, the row outlined and dimmed, a message that says where to tap).
+While one is carried, two fingers still browse, every other cut shows a
+dashed line at its middle, and a tap on a cut drops BEFORE it (top half)
+or AFTER it (bottom half); a gap row drops before the cut it precedes; a
+tap on the carried cut puts it back; Esc lets go of it; leaving the tab
+lets go of it. The drop is the cards tab's own `cardDrop`, so a move
+staged here is byte for byte the move the cards tab stages (queue mode)
+or posts (`api/reorder`, immediate mode). The ? sheet lists it.
+
+**The cost, stated.** The single tap's play toggle now waits out the
+double-tap window (`EDDBL_MS` = 300 ms, Android's own) before it fires.
+Without that, the first tap of the pair snapped the view back to the head
+(`edvPlayToggle` zeroes `EDBROW`) and the second tap landed on whatever
+row had scrolled under the finger. The hold-to-trim is unaffected: it
+arms on the way down. If 300 ms on play/pause reads as lag, the number is
+one constant.
+
+**Tests.** `tests/test_edit_view.js` 4d, in a draft: the double tap arms
+without playing, a rebuild of the rows keeps the mark, a tap on the armed
+row disarms without staging, a tap on another cut's bottom half stages
+`{k:'move', block:[A], before:<the cut after B>}`, its top half stages
+`before: B`, and a lone tap still plays once the window has passed. Suite
+161 checks; golden refreshed.
+
 
 ## Carryover — unchanged from before the 2026-08-11 hunt
 

@@ -15539,7 +15539,7 @@ Android one-time prompt, the iOS per-file prompt, the share sheet.
 **Tests.** `tests/test_offline_page.js` 136 -> 225 checks; golden
 refreshed.
 
-## Timeline Cards, 2026-09-07 afternoon (CR-212, CR-213)
+## Timeline Cards, 2026-09-07 morning (CR-212, CR-213)
 
 Both off Alex's phone, in the edit tab, on the Civil Defence E2 cut list.
 
@@ -15608,6 +15608,105 @@ row disarms without staging, a tap on another cut's bottom half stages
 `{k:'move', block:[A], before:<the cut after B>}`, its top half stages
 `before: B`, and a lone tap still plays once the window has passed. Suite
 161 checks; golden refreshed.
+
+## Timeline Cards, 2026-09-07 late morning (CR-214, CR-215, CR-216, CR-217)
+
+Four asks off Alex's phone in one sitting, an hour after CR-212/CR-213
+went live. All four in the Cards repo; nothing touches the dashboard.
+
+### CR-214 - "edit tab needs to be able to delete clips too" - BUILT in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Built** (page/09-edit.js `edvDeleteBtn`, 05-keys.js `armDelPaint`,
+cards.html, cards.css). A ⌫ button at the top of the edit view's thumb
+stack, above undo - the one destructive control, farthest from where the
+thumb rests. It is `deleteKey`, the same door the card's ⌫ and the lane
+bar's go through: the cursor goes onto the cut first, the first tap arms
+it for 3 s, the second stages (a draft) or posts `api/delete` with
+`shadowOp` dropping it at once (immediate mode). The cut is the one
+PICKED UP (CR-213) if one is carried, else the one under the head; the
+carried cut is let go of on the second tap, when it stops existing here.
+`armDelPaint` knows `edvdel` as it knows `ldel` (the square shows the bare
+count, there is no room for the glyph too), and the row wears the cards'
+red `armed` edge through `edvRowHtml`, so a poll's rebuild cannot take the
+countdown away mid-count - the 2026-08-29 phone-delete lesson, applied
+before it recurred.
+
+**Tests.** `tests/test_edit_view.js` 4e: the button's place, one tap arms
+(count on the button, red row, nothing staged), the second stages
+`{k:'delete', uids:[the head's cut]}`, and with a cut picked up ⌫ twice
+deletes THAT cut and clears the pick-up.
+
+### CR-215 - "in lane mode if you hold down play pause button it should 2x playback" - BUILT in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Built** (page/03-lane.js, the `lplay` block). The Space-hold skim has
+existed since 2026-08-29 and the button's own title promised "hold it for
+2×"; the button now IS the key: a press starts the hold `spaceDown`
+starts (owner decided on the way down - the lane, always), a release
+inside `SPHOLD_MS` is the tap it always was, a longer one is the 2× skim,
+and the release puts the STICKY rate (`LRATEB`) back and parks the head
+if it was not playing, exactly as `spaceUp` does for the key. `code` is a
+name no keyup can match. `onclick` is gone - the pointerup is the click,
+and a click on top of it toggled play twice. A `pointercancel` ends a skim
+but is never a tap. CSS: `touch-action:none` and no callout on the button,
+so a long press neither scrolls nor selects.
+
+**Tests.** `tests/test_edit_view.js` 4f, as pointer events on the button:
+a hold plays at 2×, the release parks at 1× with the trailing click
+ignored, a tap still toggles once, a hold while playing is 2× for the hold
+and keeps playing after.
+
+### CR-216 - "you should be able to hear audio as you're trimming and scrubbing in lane" - FIXED in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Cause** (page/03-lane.js). Two silent paths. The rate scrub (the ◐ pad,
+and the ruler hold) was heard only when it BEGAN while playing: 120 ms
+snips of the `<audio>` element every 200 ms, forward only (`scrubSnip`,
+2026-08-28). A scrub from a parked head - every scrub on a phone - was
+silent. And an edge drag (`laneDragTo` in head/tail mode: the mouse, the
+strip's touch drag and the trim pad all come through it) never made a
+sound at all; only the edit view's hold-trim did (2026-09-06).
+
+**Fix.** Both are the grain player now. `scrubTick` calls
+`laneScrubAudio(LPOS)` on every tick the head moves, playing or not - 70 ms
+pitch-kept grains out of the `api/pcm` window, either direction, any
+speed, the sound the ruler drag, F8 and the edit view's dial already made;
+the snips and `LSNIP`/`LSNIPEL` are gone. `laneDragTo` plays a grain of
+the EDGE's own source second every frame `k` changes, through
+`laneScrubGrain` with `edvEdgeSec(LDRAG)` (the same `{s, mode, k}` shape
+the edit view's hold uses). `scrubStop` and `laneUp` call
+`laneScrubStop()` so the "still: silent" mark does not carry into the next
+gesture.
+
+**Tests.** `tests/test_edit_view.js` 4g: with `laneScrubGrain` counted, a
+rate scrub from a parked head produces grains every tick, and eight steps
+of an in-point drag produce grains with `k > 0`.
+
+### CR-217 - "let's try moving the scroller on the edit tab on mobile to the right" - BUILT in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Built** (page/09-edit.js `EDDIAL_RIGHT`, cards.css `body.dialr`). One
+flag. While the view is open `body.dialr` mirrors the dial (right edge,
+border on its left, gradient reversed), the list (left edge), the row's
+number (left) and padding, the marker (right), and the dial's precision
+axis flips with it - further from the edge is finer, whichever edge that
+is. The ? sheet and the opening message say which edge.
+
+**The thumb stack did not cross.** The first build put it on the LEFT so
+the two would never share an edge; the screenshot showed it sitting on the
+first words of every row in the lower half of the screen, where on the
+right it had only ever covered ragged line ends. It stays on the right,
+inset by the dial's width (`right: calc(var(--tap) + var(--s3))`), and
+the dial's pointer capture keeps a scrub that drifts left from landing on
+⌫. `edvBuild` now sets the density class through `classList`, not
+`className`, because `arming` (CR-213) and now `dialr` ride on that
+element and a rebuild used to wipe them.
+
+**"let's try":** if it is not right, `EDDIAL_RIGHT=false` puts everything
+back; the tests read the flag.
+
+**Tests.** `tests/test_edit_view.js` reads the dial's own rect for every
+dial touch (`DX`), checks the edge from the flag and that the list takes
+the other edge with the stack beside the dial and never over it; the three
+leftward trim drags start at x=260, clear of the inset stack. Suite 173
+checks (was 161); golden refreshed.
 
 
 ## Carryover — unchanged from before the 2026-08-11 hunt

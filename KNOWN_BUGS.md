@@ -16063,8 +16063,14 @@ Resolve's, not the database's. Tests: new
 goldens `engine_methods.txt` and `page.html` refreshed.
 
 **Deploy:** Cards checkout refresh + container restart (the NAS page);
-the agent half is whichever machine runs `reorder_web.py --agent`, from a
-pulled checkout.
+the agent half is the COMPANION's cards role (`timeline_cards_role`, on
+since 2026-08-31), which imports the engine from the checkout named by
+`jobs_mulcam_pipeline` at start, so it needs a companion RESTART, not a
+build. **LIVE 2026-09-07:** cards-web on the NAS from d527338 at 20:05
+(container restarted with it); Creator_1's companion 0.9.70 restarted
+23:02 and the server's agent tail then carried `resolve: ok` with a pool
+walk stamped at connect, which only the new engine reports. The conform
+of a no-timeline project has not yet been exercised end to end.
 
 ## Carryover — unchanged from before the 2026-08-11 hunt
 

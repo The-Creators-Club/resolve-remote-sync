@@ -16023,6 +16023,49 @@ each hit's own time, across clips).
 
 **Deploy:** Cards checkout refresh + container restart.
 
+## Timeline Cards, 2026-09-07 late (CR-226)
+
+### CR-226 - a conform through the agent needed a POPULATED timeline open in Resolve, because the only clip names the server ever learned came from the timeline sweep - BUILT in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Seen** (Alex, 2026-09-07, after E2 V3 was conformed by hand from the
+base rig): "why does the agent even need an open timeline to conform? It
+should be able to just conform even into a project with no timelines in
+it at all, as long as the multicams are there." The conform of
+`Civil Defence Canvas E2 V3.cut.md` was refused with "these clip(s) are
+not in the media pool" for all seven multicams until E1 Ruskin was opened
+and swept; then `creator-1 names 7 of this file's clips` and it built.
+
+**Why.** The server plans the conform and refuses by name before it
+queues the job; its only source of media-pool names is what the agent
+pushes, and the agent filled its name table only from the timeline sweep
+(`sweep` raised "no timeline is open" and learned nothing). The agent's
+own bin scan before `_apply_conform` never ran because the server never
+got that far. `route_for` also read "no timeline" as "the agent cannot
+conform".
+
+**Built** (`resolve_engine.py`, `library_engine.py`, `agent.py`,
+`project_agent.py`, `project_conform.py`, `config.py`, `page/01-state.js`,
+docs): the agent walks the media pool from the root folder, names only,
+on connect, on every no-timeline tick (`POOL_SCAN_S` = 120 s throttle),
+under a normal sweep on the same cadence, and right before it places
+anything; a sweep with no timeline is `no_timeline`, not a failure, and
+the agent still pushes its names with zero cards; the server learns a
+NEW NAME as well as a new fact; the agent reports three states
+(`ok` / `no_timeline` / `gone`) and only `gone` blocks the conform, with
+honest copy on the page ("Resolve open, no timeline (conform is
+available)" vs "Resolve is not reachable"); a refusal names the pool and
+when it was walked; `POST /api/conform {"name", "folder"}` builds into a
+named bin and restores the editor's current bin after (unknown bin:
+refused in a sentence; no default). `pipeline.py conform-project
+--folder` refuses: that command is the library route and a bin is
+Resolve's, not the database's. Tests: new
+`tests/test_conform_no_timeline.py` (33), `test_project_agent.py` 52,
+goldens `engine_methods.txt` and `page.html` refreshed.
+
+**Deploy:** Cards checkout refresh + container restart (the NAS page);
+the agent half is whichever machine runs `reorder_web.py --agent`, from a
+pulled checkout.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

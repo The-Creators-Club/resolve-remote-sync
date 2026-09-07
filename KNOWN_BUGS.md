@@ -15947,6 +15947,82 @@ prompt (turn 0, the cached one) is untouched on purpose. Tests:
 **Deploy:** Cards checkout refresh + container restart, after CR-222's
 dashboard.
 
+## Timeline Cards, 2026-09-07 night (CR-224, CR-225)
+
+### CR-224 - audio from the transcript preview window was slower than the lane and often failed over the laptop's link: the preview reloaded its one shared element on every click, asked the server before every paragraph, and fell back to the full WAV - BUILT in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Seen** (Alex, 2026-09-07): "playing back audio from transcripts in the
+transcript preview window remotely over laptop is slower and often fails,
+when playback in the lane is really good and mostly flawless."
+
+**Why.** The server route, Range handling and the service worker's
+cache-first rule are identical for both; every difference was in the
+page. The lane keeps up to eight warm elements per clip, `preload=auto`,
+a URL with `lite=1` and the format pinned once per session, and no
+network before play. The transcript window had ONE shared `<audio
+id=aud preload=metadata>`; `openDoc` (fourteen call sites) paused it and
+re-assigned `src` even for the same interview (the `aud.paused` check
+was always true after that pause), which discards the buffer and
+re-fetches metadata; nothing was assigned until `api/audio_info`
+answered, and in that window the element still held the previous
+interview at `readyState>=1`, so the "go" branches seeked the wrong
+file; the not-ready and `.catch` branches fell back to `audio?mp=` with
+no `lite=1`, the full reference WAV (~38x the 40 kbps Opus copy) through
+one WSGI worker; the offline seam reported ready only for `ogg`; a
+paragraph tap POSTed `api/locate` first, through the offline seam's 8 s
+deadline, with no offline answer and no `fail`, so on a slow link the
+tap did nothing in silence; no `fmt` pin, so a copy landing mid-session
+swapped bytes under a live element (EOF at once, handler.py 2026-08-28);
+an 8 s `LITET` re-arm re-assigned `src` on a timer; `onerror` hid the
+player and `play()` rejections were swallowed; the search and staged
+players re-pointed the same element at a `fmt=src` URL.
+
+**Built** (`page/01-state.js`, `15-offline.js`, `cards.html`,
+`12-cats.js`, one-line edits in `03-lane.js`, `sw.js`, CSS): same
+interview never touches `src`; a real doc change clears the element
+synchronously (`audClear`) and sets a pinned `lite=1&fmt=` URL in the
+same turn (`previewURL`, pin from `api/doc`'s `audio` kind, `LWAVS` for
+other clips, no second `api/wavs`); `api/audio_info` only upgrades the
+URL on a genuine file change (`liteWatch`); no unpinned or non-lite URL
+can be built; the offline seam is ready for any kind it holds bytes for;
+a paragraph plays off the page's own `WORDS` with zero round trips
+(`selSpanSecs`, keyboard and mouse-drag selections), `api/locate` only
+as the fallback with a `fail` shown in the player, and answered offline
+from the cached doc (`oflLocate`); `preload=auto`; a `#perr` line names
+the clip and the MediaError code, and `play()` rejections are named as
+the lane names them; span playback (corpus results, staged) has its own
+element `SPAN` so the transcript keeps its buffer. Tests:
+`test_doc_panel.js` 33 -> 49, `test_offline_page.js` +6, golden
+regenerated.
+
+**Owed:** the laptop's DevTools view was never captured; if it still
+fails there, the `#perr` line now says why.
+
+### CR-225 - the transcript find box's Enter, space, Enter, space sometimes left the audio stuck on the previous hit - BUILT in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Seen** (Alex, 2026-09-07): "transcript verbatim search enter > space
+enter > space, sometimes the audio gets stuck and doesn't update to the
+next result".
+
+**Why.** The seek was written at `readyState 0`: `aud.currentTime = X`
+before the file is in is only the default start position and is lost
+outright when `src` is assigned again afterwards, which CR-224's 8 s
+poll and any doc change did underneath a cued hit. And a refused or
+timed-out `api/locate` armed nothing and said nothing, so the spacebar
+played the element from where it was parked.
+
+**Built** (`01-state.js`): every seek+play on the transcript element
+goes through `audGo` -> `AUDWANT` with a token (`AUDSEQ`); a held
+instruction is re-applied on `loadedmetadata`, an older one discarded,
+`audPlay` arms the pending instruction instead of playing from the
+parked position, a scrub or media error cancels it, and `nextMatch`'s
+failure writes into `#perr`. `playRange`, `setDocHead` and `corpusPlay`
+no longer share the single-slot `aud.onloadedmetadata`.
+`tests/test_find_cue.js` 13 -> 20 (Enter, space, Enter, space lands on
+each hit's own time, across clips).
+
+**Deploy:** Cards checkout refresh + container restart.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

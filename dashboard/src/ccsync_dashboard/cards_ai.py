@@ -68,6 +68,18 @@ FIVE DECISIONS, each of which is a whole class of bug or a policy:
    is recorded beside it, so a session opened under 5m is never re-stamped
    into a second breakpoint half way through. `session_cache_ttl` on
    `status()` is what the page says out loud.
+
+7. **The breakpoints are decided at SEND time, and there are up to three.**
+   2026-09-07, warm transcript search 139 s: only turn 0 was under a
+   breakpoint. Prompt caching is prefix-based, so an episode sent as four
+   corpus parts (68k, 89k, 97k, 67k chars, one per opening turn) had 79% of
+   its corpus and every earlier answer re-processed uncached on every warm
+   turn. `_for_send` therefore stamps the FIRST corpus part, the LAST corpus
+   part and this turn's own message on a COPY of the stored history -- at
+   most three of the API's four breakpoints, and none of them persisted.
+   Storage keeps decision 6's shape byte for byte (the stamp on turn 0 and
+   nowhere else) because sessions opened by an older container are still
+   open in the field.
 """
 
 from __future__ import annotations
@@ -79,6 +91,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -225,6 +238,7 @@ class Runner:
                 f"for Claude. Set an ANTHROPIC_API_KEY (Settings -> AI "
                 f"providers), or pin Claude.")
         text = ""
+        usage: dict[str, int] = {}
         if json_out:
             prompt = prompt + JSON_REPLY_NOTE.format(path=json_out)
         convo = None
@@ -246,8 +260,12 @@ class Runner:
                 _user_message(prompt, first=turns == 0, ttl=ttl))
         try:
             if choice.name == ai_providers.ANTHROPIC_API:
-                text = self._sdk(prompt, model, timeout,
-                                 messages=None if convo is None else convo["messages"])
+                # `_for_send`, never `convo["messages"]`: two of the three
+                # breakpoints belong to THIS request only (decision 7).
+                text, usage = self._sdk(
+                    prompt, model, timeout,
+                    messages=(None if convo is None
+                              else _for_send(convo["messages"], ttl)))
             else:
                 text = self._cli(prompt, timeout, session=session)
         except ClaudeError as e:
@@ -263,7 +281,8 @@ class Runner:
             convo["turns"] = int(convo.get("turns") or 0) + 1
             self._save_convo(convo)
         out: dict[str, Any] = {"ok": True, "text": text, "data": None,
-                               "provider": choice.name, "error": ""}
+                               "provider": choice.name, "error": "",
+                               "usage": usage}
         if json_out:
             try:
                 out["data"] = self._land_json(text, json_out)
@@ -352,7 +371,12 @@ class Runner:
             conn.close()
 
     def _sdk(self, prompt: str, model: str, timeout: float,
-             messages: list[dict[str, Any]] | None = None) -> str:
+             messages: list[dict[str, Any]] | None = None
+             ) -> tuple[str, dict[str, int]]:
+        """(the reply, the token counts). The counts are the only way to tell
+        a cache HIT from a cache write from outside the bill (2026-09-07: a
+        warm transcript search took 139 s and `response.usage` was dropped on
+        the floor, so nothing in the log could say why)."""
         key = self._key()
         if not key:
             raise ClaudeError("no ANTHROPIC_API_KEY is set for this site "
@@ -363,6 +387,7 @@ class Runner:
             raise ClaudeError(f"the `anthropic` SDK is not installed in this "
                               f"container ({e})") from None
         client = anthropic.Anthropic(api_key=key)
+        started = time.monotonic()
         try:
             response = client.with_options(timeout=float(timeout)).messages.create(
                 model=model or "",
@@ -379,7 +404,13 @@ class Runner:
             )
         except Exception as e:  # noqa: BLE001 - classified by its message
             raise ClaudeError(_sdk_detail(e, model)) from None
-        return _text_of(response)
+        usage = _usage_of(response)
+        log.info("Timeline Cards AI: model=%s %.1fs in=%d cache_read=%d "
+                 "cache_write=%d out=%d", model or "(unset)",
+                 time.monotonic() - started, usage["input_tokens"],
+                 usage["cache_read_input_tokens"],
+                 usage["cache_creation_input_tokens"], usage["output_tokens"])
+        return _text_of(response), usage
 
     def _cli(self, prompt: str, timeout: float, session: Any = None) -> str:
         path = self._cli_path()
@@ -556,24 +587,103 @@ def _says_no_such_session(detail: str) -> bool:
 
 def _user_message(prompt: str, first: bool,
                   ttl: str = CACHE_TTL_DEFAULT) -> dict[str, Any]:
-    """This turn's user message. Turn 0 is the only one that is worth caching.
+    """This turn's user message, as it is STORED.
 
-    A cache breakpoint is billed per write, so it goes on the corpus and
-    nowhere else; every later turn is a sentence. `ttl` is how long that one
-    write lives -- an hour for a session opened since 2026-09-04.
+    Every turn carrying the marker is stored in the two-block form, because
+    the split is what lets `_for_send` find the corpus parts again on a later
+    turn (2026-09-07, warm transcript search 139 s: only turn 0 was under a
+    breakpoint, and a corpus arriving as four parts over four turns had three
+    of them invisible to this module afterwards). The persisted
+    `cache_control` still goes on turn 0 and nowhere else, so a conversation
+    written here is byte for byte what a container running decision 6 alone
+    would read back -- the other two stamps belong to a single request.
     """
-    if not first:
-        return {"role": "user", "content": prompt}
     corpus, instruction = split_prompt(prompt)
     if not corpus:
+        if not first:
+            return {"role": "user", "content": prompt}
         return {"role": "user", "content": [{"type": "text", "text": prompt}]}
-    blocks: list[dict[str, Any]] = [
-        {"type": "text", "text": corpus,
-         "cache_control": _cache_control(ttl)},
-    ]
+    block: dict[str, Any] = {"type": "text", "text": corpus}
+    if first:
+        block["cache_control"] = _cache_control(ttl)
+    blocks: list[dict[str, Any]] = [block]
     if instruction:
         blocks.append({"type": "text", "text": instruction})
     return {"role": "user", "content": blocks}
+
+
+def _is_corpus_message(message: Any) -> bool:
+    """Was this stored message built from a prompt carrying the marker?
+
+    The shape IS the record: a list content whose first block is a text block.
+    Nothing else in this store is stored that way, and a message read back
+    from an older session file (turn 0, with or without the marker) still
+    answers yes -- which is exactly the one it must stamp.
+    """
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    first = content[0]
+    return isinstance(first, dict) and first.get("type") == "text"
+
+
+def _for_send(messages: list[Any], ttl: str) -> list[Any]:
+    """The history as this request sends it: up to three breakpoints, on a copy.
+
+    2026-09-07, warm transcript search 139 s: only turn 0 was under a
+    breakpoint. Caching is prefix-based up to a breakpoint, so an episode sent
+    as four corpus parts left parts 2-4 (79% of it) and every earlier answer
+    re-processed at full price on every warm turn. The three stamps are the
+    FIRST corpus part (the prefix that never changes), the LAST corpus part
+    (which moves forward one part per opening turn, so each open turn is a
+    read of the prefix plus a write of the delta) and this turn's own message
+    (so the NEXT turn reads everything said so far). The API allows four.
+
+    A copy, never the stored blocks: the stored history is decision 6's shape,
+    and re-persisting stamps b and c would leave breakpoints scattered through
+    a conversation as it grows.
+    """
+    out = [dict(m) if isinstance(m, dict) else m for m in messages]
+    if not out:
+        return out
+    stamp = _cache_control(ttl)
+    corpus = [i for i, m in enumerate(out) if _is_corpus_message(m)]
+    marks = {len(out) - 1}
+    if corpus:
+        marks.add(corpus[0])
+        marks.add(corpus[-1])
+    for i in sorted(marks):
+        message = out[i]
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, list) and content and isinstance(content[0], dict):
+            blocks = [dict(b) if isinstance(b, dict) else b for b in content]
+            blocks[0] = dict(blocks[0])
+            blocks[0]["cache_control"] = stamp
+            message["content"] = blocks
+        elif isinstance(content, str):
+            message["content"] = [{"type": "text", "text": content,
+                                   "cache_control": stamp}]
+    return out
+
+
+def _usage_of(response: Any) -> dict[str, int]:
+    """The four counts, zeroed when the SDK or a stub reports none. A missing
+    `usage` must read as "nothing measured", never as an exception on the way
+    back from a call that already succeeded."""
+    usage = getattr(response, "usage", None)
+    names = ("input_tokens", "output_tokens", "cache_read_input_tokens",
+             "cache_creation_input_tokens")
+    out: dict[str, int] = {}
+    for name in names:
+        try:
+            out[name] = int(getattr(usage, name, 0) or 0)
+        except (TypeError, ValueError):
+            out[name] = 0
+    return out
 
 
 def split_prompt(prompt: str) -> tuple[str, str]:

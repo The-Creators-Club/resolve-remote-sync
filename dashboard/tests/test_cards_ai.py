@@ -22,6 +22,10 @@ The properties defended, each of them money or a montage:
   * THE HISTORY IS BOUNDED, AND THE CORPUS SURVIVES THE BOUND. A page left
     open for a week must not send a megabyte of history, and must not drop the
     one message every later turn depends on.
+  * A MULTI-PART CORPUS IS CACHED TO ITS END (decision 7, 2026-09-07). Caching
+    is prefix-based, so a breakpoint on turn 0 alone left an episode's parts
+    2-N uncached for ever; the request carries up to three, and the STORED
+    conversation still carries exactly one.
 """
 from __future__ import annotations
 
@@ -35,6 +39,21 @@ from ccsync_dashboard import ai_providers, cards_ai
 
 CORPUS = "### pangolins [c1] FF5 -- the burrow (61.0s, speakers: A)\n0.0 3.2 hello"
 MARKED = CORPUS + "\n\n" + cards_ai.INSTRUCTIONS_MARKER + "\n\ndescribe the montage"
+
+HOUR = {"type": "ephemeral", "ttl": "1h"}
+
+# What the API reports back. The numbers are not the assertion (the shape and
+# the log line are), but they are the four fields the 2026-09-07 warm-search
+# investigation had no way to read.
+FAKE_USAGE = types.SimpleNamespace(input_tokens=4120, output_tokens=310,
+                                   cache_read_input_tokens=98000,
+                                   cache_creation_input_tokens=7100)
+
+
+def part(n):
+    """Corpus part `n` as the transcript search sends it: one marked prompt
+    per turn, each its own user message (four of them on the live episode)."""
+    return f"{CORPUS} part {n}\n\n{cards_ai.INSTRUCTIONS_MARKER}\n\nnoted, part {n}"
 
 
 class FakeSettings:
@@ -63,7 +82,7 @@ class FakeMessages:
         self._calls.append(copy.deepcopy(kwargs))
         text = self._replies.pop(0) if self._replies else "an answer"
         block = types.SimpleNamespace(text=text)
-        return types.SimpleNamespace(content=[block])
+        return types.SimpleNamespace(content=[block], usage=FAKE_USAGE)
 
 
 class FakeClient:
@@ -179,19 +198,29 @@ def test_turn_one_sends_the_history(sdk):
     assert out["ok"] is True
     messages = calls[1]["messages"]
     assert len(messages) == 3
-    assert messages[0]["content"][0]["cache_control"] == {"type": "ephemeral",
-                                                          "ttl": "1h"}
+    assert messages[0]["content"][0]["cache_control"] == HOUR
     assert messages[1] == {"role": "assistant", "content": "an answer"}
-    assert messages[2] == {"role": "user", "content": "more of the pangolins"}
+    assert messages[2] == {"role": "user", "content": [
+        {"type": "text", "text": "more of the pangolins",
+         "cache_control": HOUR}]}
 
 
-def test_a_later_turn_is_not_a_second_cache_breakpoint(sdk):
+def test_a_later_turn_is_stamped_for_this_request_only(sdk):
+    """Was `test_a_later_turn_is_not_a_second_cache_breakpoint`, inverted on
+    2026-09-07 (warm transcript search 139 s: only turn 0 was under a
+    breakpoint). This turn's message IS stamped on the way out, so the NEXT
+    turn reads the whole conversation from cache instead of re-processing
+    every earlier answer; the STORE still holds the plain string, so the
+    breakpoint does not accumulate down the history."""
     runner, calls = sdk
     runner.run(MARKED, session=FakeSession())
     runner.run("more of the pangolins", session=FakeSession(turns=1))
 
-    later = calls[1]["messages"][2]
-    assert isinstance(later["content"], str)
+    sent = calls[1]["messages"][2]["content"]
+    assert sent == [{"type": "text", "text": "more of the pangolins",
+                     "cache_control": HOUR}]
+    stored = json.loads(store_file(runner).read_text(encoding="utf-8"))
+    assert stored["messages"][2]["content"] == "more of the pangolins"
 
 
 def test_an_unknown_id_is_session_lost_and_no_call(sdk):
@@ -262,11 +291,16 @@ def test_split_prompt_takes_the_last_marker():
     "an indented  ---INSTRUCTIONS---  marker does not count",
 ])
 def test_prompts_without_a_usable_marker_are_one_block(sdk, prompt):
+    """One BLOCK is the property; the stamp on it arrived 2026-09-07 with
+    decision 7, because this message is also the final message of the
+    request and every request stamps that."""
     runner, calls = sdk
     runner.run(prompt, session=FakeSession())
 
     content = calls[0]["messages"][0]["content"]
-    assert content == [{"type": "text", "text": prompt}]
+    assert content == [{"type": "text", "text": prompt, "cache_control": HOUR}]
+    stored = json.loads(store_file(runner).read_text(encoding="utf-8"))
+    assert stored["messages"][0]["content"] == [{"type": "text", "text": prompt}]
 
 
 def test_a_marker_with_trailing_spaces_still_splits(sdk):
@@ -474,3 +508,183 @@ def test_a_refused_status_still_names_the_ttl(tmp_path, monkeypatch, no_db):
     out = cards_ai.Runner(FakeSettings(tmp_path)).status()
     assert out["ok"] is False
     assert out["session_cache_ttl"] in ("1h", "5m")
+
+
+# -- three breakpoints at SEND time (decision 7, 2026-09-07) ------------------
+# Measured on the live NAS: the stored conversation for one episode is four
+# corpus parts (68k, 89k, 97k, 67k chars) and a breakpoint on turn 0 alone, so
+# 79% of the corpus and every earlier answer were re-processed uncached on
+# every warm turn. A warm person search took 139 s.
+
+def stamped(content):
+    """The indexes of the blocks of one sent message carrying a breakpoint."""
+    if isinstance(content, str):
+        return []
+    return [i for i, b in enumerate(content) if "cache_control" in b]
+
+
+def marks_of(messages):
+    """(message index, block index) of every breakpoint in one request."""
+    return [(i, b) for i, m in enumerate(messages)
+            for b in stamped(m["content"])]
+
+
+def test_a_multi_part_corpus_is_stamped_first_last_and_now(sdk):
+    runner, calls = sdk
+    runner.run(part(1), session=FakeSession())
+    runner.run(part(2), session=FakeSession(turns=1))
+    runner.run(part(3), session=FakeSession(turns=2))
+    out = runner.run("who mentions the burrow?", session=FakeSession(turns=3))
+
+    assert out["ok"] is True
+    messages = calls[3]["messages"]
+    # user, assistant, user, assistant, user, assistant, user
+    assert len(messages) == 7
+    # Part 1's corpus block, part 3's corpus block, and this turn's query.
+    assert marks_of(messages) == [(0, 0), (4, 0), (6, 0)]
+    assert all(m["cache_control"] == HOUR
+               for i, b in marks_of(messages)
+               for m in [messages[i]["content"][b]])
+    assert messages[4]["content"][0]["text"] == f"{CORPUS} part 3"
+    assert messages[6]["content"] == [
+        {"type": "text", "text": "who mentions the burrow?",
+         "cache_control": HOUR}]
+
+
+def test_each_opening_turn_moves_the_last_breakpoint_forward(sdk):
+    """Corpus parts arrive one per turn, so at open turn k the last part IS
+    part k: a read of the prefix already cached plus a write of the delta."""
+    runner, calls = sdk
+    runner.run(part(1), session=FakeSession())
+    runner.run(part(2), session=FakeSession(turns=1))
+    runner.run(part(3), session=FakeSession(turns=2))
+
+    assert marks_of(calls[0]["messages"]) == [(0, 0)]
+    assert marks_of(calls[1]["messages"]) == [(0, 0), (2, 0)]
+    assert marks_of(calls[2]["messages"]) == [(0, 0), (4, 0)]
+
+
+def test_the_store_keeps_one_stamp_and_the_two_block_shape(sdk):
+    """Compatibility with sessions already open in the field (decision 6): the
+    persisted breakpoint is turn 0's and nothing else. Every corpus part is
+    stored SPLIT, which is what lets a later request find the parts again."""
+    runner, _calls = sdk
+    runner.run(part(1), session=FakeSession())
+    runner.run(part(2), session=FakeSession(turns=1))
+    runner.run(part(3), session=FakeSession(turns=2))
+    runner.run("who mentions the burrow?", session=FakeSession(turns=3))
+
+    stored = json.loads(store_file(runner).read_text(encoding="utf-8"))
+    messages = stored["messages"]
+    assert marks_of(messages) == [(0, 0)]
+    assert messages[0]["content"][0]["cache_control"] == HOUR
+    for i, n in ((0, 1), (2, 2), (4, 3)):
+        assert messages[i]["content"] == [
+            {"type": "text", "text": f"{CORPUS} part {n}",
+             **({"cache_control": HOUR} if i == 0 else {})},
+            {"type": "text", "text": f"noted, part {n}"},
+        ]
+    assert messages[6]["content"] == "who mentions the burrow?"
+
+
+def test_a_one_part_corpus_is_two_breakpoints(sdk):
+    """First == last, so the corpus takes ONE stamp, not two on the same
+    block; the query takes the other."""
+    runner, calls = sdk
+    runner.run(MARKED, session=FakeSession())
+    runner.run("who mentions the burrow?", session=FakeSession(turns=1))
+
+    messages = calls[1]["messages"]
+    assert marks_of(messages) == [(0, 0), (2, 0)]
+
+
+def test_turn_zero_is_a_single_breakpoint(sdk):
+    """First corpus part, last corpus part and the final message are all the
+    same message on the opening turn."""
+    runner, calls = sdk
+    runner.run(MARKED, session=FakeSession())
+
+    assert marks_of(calls[0]["messages"]) == [(0, 0)]
+
+
+def test_a_five_minute_session_stamps_all_three_at_five_minutes(sdk):
+    """The convo's OWN ttl drives every send-time stamp, not today's."""
+    runner, calls = sdk
+    runner.run(part(1), session=FakeSession())
+    path = store_file(runner)
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    stored["cache_ttl"] = "5m"
+    stored["messages"][0]["content"][0]["cache_control"] = {"type": "ephemeral"}
+    path.write_text(json.dumps(stored), encoding="utf-8")
+
+    runner.run(part(2), session=FakeSession(turns=1))
+
+    messages = calls[1]["messages"]
+    assert marks_of(messages) == [(0, 0), (2, 0)]
+    assert all(messages[i]["content"][b]["cache_control"] == {"type": "ephemeral"}
+               for i, b in marks_of(messages))
+
+
+def test_the_send_stamps_never_reach_the_next_request(sdk):
+    """Stamps b and c are for ONE request. If `_for_send` mutated the stored
+    blocks, every turn would leave a breakpoint behind and the fourth would be
+    over the API's limit of four."""
+    runner, calls = sdk
+    runner.run(part(1), session=FakeSession())
+    for turn in range(1, 8):
+        runner.run(f"turn {turn}", session=FakeSession(turns=turn))
+
+    for call in calls:
+        assert len(marks_of(call["messages"])) <= 3
+    stored = json.loads(store_file(runner).read_text(encoding="utf-8"))
+    assert marks_of(stored["messages"]) == [(0, 0)]
+
+
+def test_a_session_free_call_still_carries_no_breakpoint(sdk):
+    """Translate, search and summaries without a session are one plain string.
+    `_for_send` is only reached with a conversation."""
+    runner, calls = sdk
+    runner.run(MARKED, model="claude-haiku-4-5-20251001")
+    assert calls[0]["messages"] == [{"role": "user", "content": MARKED}]
+
+
+# -- what the call cost (2026-09-07) -----------------------------------------
+# `_sdk` threw `response.usage` away, so the 139 s warm search could not be
+# told from a cold one anywhere but the bill.
+
+def test_the_usage_is_logged_and_returned(sdk, caplog):
+    runner, _calls = sdk
+    with caplog.at_level("INFO", logger="ccsync.dashboard.cards"):
+        out = runner.run(MARKED, model="claude-sonnet-5", session=FakeSession())
+
+    assert out["usage"] == {"input_tokens": 4120, "output_tokens": 310,
+                            "cache_read_input_tokens": 98000,
+                            "cache_creation_input_tokens": 7100}
+    lines = [r.getMessage() for r in caplog.records
+             if r.getMessage().startswith("Timeline Cards AI:")]
+    assert len(lines) == 1
+    assert "model=claude-sonnet-5" in lines[0]
+    assert "in=4120 cache_read=98000 cache_write=7100 out=310" in lines[0]
+
+
+def test_a_response_without_usage_reads_as_zeros(sdk, monkeypatch):
+    """A stub, an older SDK or a streamed shape must not raise on the way back
+    from a call that already succeeded."""
+    assert cards_ai._usage_of(types.SimpleNamespace()) == {
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+
+
+def test_the_cli_path_reports_no_usage(sdk, monkeypatch):
+    """Only the SDK path can count tokens; the CLI answers with text alone."""
+    runner, _calls = sdk
+    choice = ai_providers.ProviderChoice(name=ai_providers.CLAUDE_CODE,
+                                         label="Claude Code", reason="")
+    monkeypatch.setattr(cards_ai.Runner, "_choice",
+                        lambda self, probe=True: (choice, ""))
+    monkeypatch.setattr(cards_ai.Runner, "_cli",
+                        lambda self, prompt, timeout, session=None: "an answer")
+
+    out = runner.run("translate this")
+    assert out["ok"] is True
+    assert out["usage"] == {}

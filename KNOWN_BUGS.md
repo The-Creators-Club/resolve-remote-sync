@@ -15885,6 +15885,68 @@ person is not remembered by the `all` conversation.
 **Deploy:** Cards checkout refresh + container restart.
 
 
+## Timeline Cards, 2026-09-07 evening (CR-222, CR-223)
+
+Both found by reading the server after Alex's "it seems suspiciously slow
+even when warm" (2026-09-07 17:10 TST). One live search since the CR-221
+deploy: a person search for Aha Chu, answered from the warm `all`
+conversation, 139 s.
+
+### CR-222 - the dashboard's Claude runner cached only the FIRST corpus part, so a "warm" transcript search re-read 79% of the episode every turn - BUILT 2026-09-07 (dashboard, `cards_ai.py`)
+
+**Seen:** the stored conversation for Civil Defence on the NAS
+(`<data>/cards_sessions/3ca5489c....json`) is four corpus parts (68k, 89k,
+97k, 67k chars, one user turn each) then the query turns; only turn 0's
+corpus block carried `cache_control`. Prompt caching is prefix-based up to
+a breakpoint, so parts 2-4 and every earlier answer were sent at full
+price on every turn. The runner also dropped `response.usage`, so no log
+line could have said so.
+
+**Built** (`cards_ai.py`, decision 7 in its docstring): breakpoints are
+decided at SEND time on a copy of the stored history - the first corpus
+part, the LAST corpus part (moves forward one part per opening turn, so
+each open is a read of the prefix plus a write of the delta) and this
+turn's own message, at most three of the API's four. Storage keeps the
+old shape byte for byte (the stamp on turn 0 only), so sessions opened by
+an older container still read back. Every turn carrying the
+`---INSTRUCTIONS---` marker is now stored two-block so the parts can be
+found again. `_sdk` logs one line per call, `Timeline Cards AI: model=..
+in= cache_read= cache_write= out=`, and `run()` returns `usage`.
+`dashboard/tests/test_cards_ai.py` 30 -> 43.
+
+**Deploy:** dashboard (image build or OTA). Sessions already open keep
+working; their next turn is the first fully cached one.
+
+### CR-223 - the search answer carried the model's copy of every passage plus two paragraphs of context either side, and a person search was answered by the whole-episode conversation whenever that was warm - BUILT in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Seen:** each answer was ~8k chars of JSON, mostly `quote`, on a turn
+that took 139 s; the page already showed the corpus paragraph
+(`r.text`) and used the quote only as a fallback. Alex: "remove the
+context above and below paragraphs, unnecessary, we just need the result
+itself. Also could we get it to not write out the whole paragraph with
+the model, just fetch the embed tag and then the script surfaces that
+paragraph." And the person search never opened its own conversation: CR-
+221's pick rule sent it to the warm `all` conversation (322k chars for a
+97k transcript) on a "costs nothing" premise that CR-222 shows was false,
+and no person sidecar had ever been written on the NAS.
+
+**Built** (`config.py`, `transcript_search.py`, `page/14-search.js`,
+`cards.css`, `docs/LAYOUT.md`): the query prompt asks for `interviewee`,
+`clip`, `ref`, `why` and a `summary`, never the passage text; `_results`
+surfaces the paragraph from the corpus by ref (an older answer's `quote`
+is ignored), and `before` / `after` / `CONTEXT_BLOCKS` are gone. The page
+renders one card per hit, the paragraph itself, long press to open the
+transcript there. `_pick` uses the scope's OWN conversation, warm or
+cold, always: per query that is half the cached read of the `all`
+conversation, and one cold open of that person's transcript per hour is
+the price. The session line reports the scope's own warmth. The opening
+prompt (turn 0, the cached one) is untouched on purpose. Tests:
+`tests/test_transcript_search.py` 114, `test_transcript_search_page.js`
+43, golden page regenerated.
+
+**Deploy:** Cards checkout refresh + container restart, after CR-222's
+dashboard.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

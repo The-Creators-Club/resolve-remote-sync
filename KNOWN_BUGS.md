@@ -15709,6 +15709,182 @@ leftward trim drags start at x=260, clear of the inset stack. Suite 173
 checks (was 161); golden refreshed.
 
 
+## Timeline Cards, 2026-09-07 midday (CR-218)
+
+### CR-218 - Amanda Hsiao's cards showed English translated BACK from Chinese: her whisper sidecar was made with the language forced to zh - FIXED in the vault 2026-09-07 (data, no code)
+
+**Seen** (Alex, laptop, Civil Defence): "amanda hsiao who spoke english,
+it's showing me a translation BACK from chinese in english mode".
+
+**Cause.** The 2026-09-04 interview transcription (cards-whisper-first)
+ran in two per-language batches after the forced-zh lesson, and the split
+was made BY NAME: Chung Chieh, Aha Chu and Amanda Hsiao went into
+`cd_facts_zh.json` with `--lang zh`. Amanda spoke English. Whisper
+large-v3 with a forced language does not refuse - it "translated" her
+English into Mandarin on the fly (`是的,我的名字是Amanda Hsiao,我是歐洲群眾的
+中華實習總統的總統。` for "My name is Amanda Hsiao, I am a director in the
+China practice of Eurasia Group"), the sidecar said `language: zh,
+language_prob: 1`, OpenCC ran over it, and every card cut from her clip
+carried that Mandarin as its text with a machine English line on top. Her
+`_Transcript.md` (from Resolve's own English srt) was right the whole
+time, which is why the transcript pane read fine and the CARDS did not;
+and because the sidecar's tokens were Chinese, `api/doc` could align NONE
+of them to her English blocks (`words: 0` against Enoch's 944), so a word
+click in her transcript had nothing to seek to and a selection insert had
+no timing to place against.
+
+**Fixed.** Re-ran `pipeline.py resolve-multicam-whisper --from-facts
+<Amanda only> --model large-v3 --lang en --overwrite` on the base rig
+(169 s, 285 cues, 3605 words, `language: en`), backups of the bad
+`_words.json` / `.whisper.srt` in the session scratchpad, then `docker
+restart` of the dashboard container - the engine caches tokens per uid,
+so a rewritten sidecar is invisible until then (the same restart rule as
+a Cards redeploy). Verified through the live API: her doc now aligns 1277
+words, all 25 of her cards `ts_src: whisper` with English text. The other
+two in the zh batch really are Mandarin speakers (checked their Resolve
+srts), and the four in the en batch were already right.
+
+**Rule.** The language split is decided by LISTENING (or by the Resolve
+srt's script), never by whether the name is written in Chinese. A forced
+language is a promise whisper keeps even when it is wrong, and
+`language_prob: 1` on a forced run means nothing. When a set is mixed and
+nobody has listened, run with no `--lang` and let detection decide per
+clip, then check `language` in each sidecar before trusting the cards.
+
+
+## Timeline Cards, 2026-09-07 afternoon (CR-219, CR-220, CR-221)
+
+Two follow-ups to CR-218, both in the MulticamPipeline repo, from Alex's
+ruling: "we should just enable language detection in whisper to avoid this
+problem. Also sometimes you get multiple languages across an interview so
+it should be able to cope with that."
+
+### CR-219 - whisper picks the language ONCE, from the first 30 s, and a forced language is kept even where it is wrong - BUILT in the MulticamPipeline repo 2026-09-07 (transcripts/)
+
+**Why the forced batches existed.** `--lang` already defaulted to
+autodetect, but faster-whisper's autodetect listens to the first 30 s of
+speech and applies that language to the whole file. Interviews here open
+with the crew talking in the other language ("OK, roleA", "do you want to
+do English or Chinese?"), so autodetect was wrong often enough that the
+operator forced per-language batches by hand - and split them by NAME,
+which is CR-218.
+
+**What was measured before building.** faster-whisper 1.2.1's
+`multilingual=True` (re-detect every 30 s window while transcribing) was
+tried first: on a spliced 60 s English + 90 s Mandarin + 60 s English
+file it transcribed the whole Mandarin middle as an ENGLISH TRANSLATION -
+a window straddling the switch goes to one language and the rest of that
+window is translated or dropped, and `condition_on_previous_text` delays
+the switch by a further window. Detecting on the voice-activity chunks
+instead was right on every chunk of that file (en 0.93-0.99 / zh
+0.82-0.99, 15 chunks in 2.2 s on the base rig's GPU).
+
+**Built** (`whisper_worker.py` `detect_runs` / `transcribe_runs`, used by
+`resolve_multicam_whisper.whisper_srt` and the montage worker's main
+loop whenever no language is forced and `--batched` is off):
+1. decode the file once; Silero VAD chunks (`min_silence 500 ms`,
+   `max_speech 20 s` so a switch inside a long stretch is still caught);
+2. `model.detect_language` on EVERY chunk (a chunk under 1 s or under
+   0.6 probability is undecided and inherits its neighbour);
+3. consecutive chunks of one language form a RUN, gaps under 3 s merge
+   into one range; a run under 3 s of speech in a language neither
+   neighbour speaks is an ISLAND and is absorbed (the crew's "Thank
+   you." and "Cut." inside a Mandarin interview, and two one-second
+   chunks whisper guessed as Japanese and Portuguese at 0.72, which
+   became "ルークを" and "Sui!" before the rule existed);
+4. ONE `transcribe(audio, language=L, clip_timestamps=[...ranges...],
+   vad_filter=False)` per language present - timestamps stay absolute;
+5. segments merged by time, each carrying `lang`; OpenCC (s2twp+tai)
+   applied per segment to Mandarin text only, never over English.
+The sidecar records `languages` (seconds per language), `language_runs`
+(t0, t1, lang, prob, absorbed), `detection` (`chunks` / `window` /
+`forced`) and `lang` on every segment; `language` is the majority by
+spoken seconds. Detection failing falls back to the old single call
+(`multilingual=True`, `detection: window`) with one warning; `--lang`
+still forces one language for the whole file (`detection: forced`), and
+its help text now says that is how CR-218 happened.
+
+**Verified live on copies, never the vault files:** the spliced file ->
+3 runs at the true boundaries, Traditional Chinese in the middle, English
+untouched; Amanda's 33 min -> one English run p=0.95; Chung Chieh's 45 min
+-> one Mandarin run, five interjections absorbed. Cost: 273 s vs 197 s
+for the 45-min file, 202 vs 195 for the 33-min one. Tests:
+`tests/test_whisper_language.py` (68 checks, fake model, no
+faster-whisper import) and `tests/test_whisper_corpus.py` (139).
+
+**Still open:** the montage worker's chunks path has no subprocess test
+(the fake `faster_whisper` fixture is a single module with no
+`decode_audio` / `vad`; that suite exercises and asserts the fallback);
+`--batched` stays on the per-window path. The seven Civil Defence
+sidecars in the vault were NOT re-transcribed - they are right as they
+are (five forced en, two forced zh, Amanda redone en under CR-218).
+
+### CR-220 - a cut's words in the FILE are re-sliced only when its span moves, so a replaced transcript left the old words under every untouched cut - BUILT in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Seen** after CR-218's restart: the state's cards read English (they are
+sliced from the tokens at build time) but `Civil Defence Canvas E2
+V3.cut.md` kept the Chinese blockquotes under Amanda's untouched cuts
+and rewrote them on every save, because `Cut.text` came from the file at
+load and `_refresh` runs only from trim / split / extend. Obsidian shows
+the file, so the editor saw Chinese under an English interview.
+
+**Built** (`project_engine.py` `_reslice_all`): `load()` and `reload()`
+re-derive every cut's words and `^ref` from the tokens once the clips are
+resolved, alternates included - in memory only; the next save (which is
+generative anyway) writes them. Nothing is written at load, because a
+write there would bump `rev` and fight an editor with the file open in
+Obsidian. When any cut changed it prints `[project] N cut(s) re-sliced
+from the transcript at load (the file had older words)`. A clip with no
+tokens keeps the file's words; `==highlights==` are refitted. Measured
+0.33 s for 435 cuts against a 20,000-token stream, paid at every load and
+reload. Tests: `tests/test_project_engine.py` section (l), 161 checks.
+
+**Deploy:** Cards checkout refresh + container restart
+(`docs/CARDS_DEPLOY.md`); the first load prints the count for the Civil
+Defence file and the next edit rewrites Amanda's blockquotes.
+
+
+### CR-221 - a cold transcript search scoped to ONE person read every transcript in the episode - BUILT in the MulticamPipeline repo 2026-09-07 (cards checkout)
+
+**Seen** (Alex, 2026-09-07): "if the search is cold, and you are only
+searching one transcript and not them all, it should only read that one
+relevant transcript to give you the answer. Waste of context and tokens to
+have it read the whole lot."
+
+**Why it did.** The 2026-09-04 design kept ONE Claude conversation per
+episode root and put the whole corpus in on turn 0 whatever the scope,
+because a conversation whose cached block changes with the scope re-reads
+the corpus every time the drop-down moves. The scope was only a sentence
+in the query turn, so a cold person search paid for every transcript.
+
+**Built** (`transcript_search.py`, `handler.py`, `page/14-search.js`):
+one conversation per (root, SCOPE). `all` keeps today's sidecar and id
+(`transcript-search.claude-session.json`, live sessions survive);
+`person:<name>` gets `transcript-search.person-<slug>.claude-session.json`
+holding only that person's transcript(s); `clips` likewise. Choosing the
+conversation for a query: the scope's own if warm; else the `all`
+conversation if warm (it covers everything, and the scope stays a
+sentence there, as before); else the scope's own, opened cold on its
+transcripts alone. An `all` question never goes to a narrower
+conversation. `GET /api/search/scopes?scope=` and `POST /api/search/reset
+{scope}` are per scope (defaults keep an old page working); the session
+line says which conversation answers and prorates the "about a minute"
+by the scope's characters ("cold: the first search reads Amanda Hsiao's
+transcript, about 20 s"; "warm (every transcript is in)" when the all
+conversation answers a person query). Nothing new writes to the vault
+beyond the extra sidecars; no prompt names a vault path (the existing
+test still pins it). Tests: `tests/test_transcript_search.py` 111
+checks, `tests/test_transcript_search_page.js` 43.
+
+**Known limits:** two interviewees whose names slug alike would share a
+sidecar (each search then finds it cold and re-opens; the corpus hashes
+differ, and `_results` drops out-of-scope passages, so slower, never
+wrong). Running context is per conversation now: what was asked of one
+person is not remembered by the `all` conversation.
+
+**Deploy:** Cards checkout refresh + container restart.
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

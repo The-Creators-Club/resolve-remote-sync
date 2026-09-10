@@ -16254,6 +16254,42 @@ subtract offset-naive and offset-aware datetimes" - the session code
 compares against an aware now. `db.utcnow_iso()` is the shape to write;
 mint the row with it, never with a bare isoformat.
 
+### CR-231 - a root switch showed the previous episode's cuts, canvases and interviewees - FIXED 2026-09-10 (Cards f6e4e0d, LIVE)
+
+**Seen** (Alex, 2026-09-10, three screenshots): after switching the
+Timeline Cards root to Reproductive Rights the drawer still listed the
+Civil Defence cut lists and canvases, the browser tab said six Civil
+Defence interviewees were "in the cut - no whisper" under the new root
+("why does it think the pangolin transcripts are in reproductive rights"),
+and a new cut list made from a Reproductive Rights canvas was created and
+opened on the server but the page never moved until a hard reload.
+
+**Cause:** `POST /api/root` only QUEUED the switch and answered ok; the
+page's CR-101 fix (2026-09-02) made the drawer ask for the lists at once,
+which is exactly the moment the engine still pointed at the old episode,
+and nothing asked again. On top of that `_apply_root` kept the cut-list
+scan and the transcript walk caches for five seconds, and a project
+open/new polled for a delta against the file just left.
+
+**Fixed:** the route waits for the loop to land the switch (or lands it
+itself when nothing pumps), `_apply_root` drops both caches, the page asks
+for the new root's lists only once the state names that root, and a
+project open/new asks for the whole state. `test_open_panel.js` had never
+been registered in `run_all.py`; it is now. Deployed 2026-09-10 16:01 with
+dashboard 0.7.41.
+
+### CR-229 addendum, 2026-09-10 evening (Cards, built, see the ledger line for its deploy)
+
+Owner asks the same day, all built: the chat now PROPOSES first (one or
+several suggestions with a preview) and applies only the one the editor
+clicks, a follow-up message refines the set (`POST /api/chat/apply`); the
+transcript panel has a close control and a header toggle; the overview
+and lane buttons are icon-only; the lane can be dragged to dock at the top
+(remembered per device); every panel can pop out into its own browser
+window for another screen, sharing selection and playhead over a
+BroadcastChannel (`page/17-windows.js`). The multi-window path is proven in
+a fake-DOM test only; two real windows on two screens have not been opened.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

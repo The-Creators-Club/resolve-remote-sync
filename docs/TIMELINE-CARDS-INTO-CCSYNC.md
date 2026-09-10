@@ -1572,6 +1572,29 @@ comes back as `{"ok": false, "error": "this API does not know the model
 claude-sonnet-5: ..."}` -- with the name in it, because the alternative is a
 bare `NotFoundError` in a worker thread.
 
+### The fourth feature: the edit chat (2026-09-10)
+
+The owner asked on 2026-09-10 for "a claude fable instance input box inside
+the UI that you can talk with to update and change edits in natural
+language", so the three features above are four: the cards page's "ask claude"
+panel posts a sentence to `api/chat`, and
+`multicam_pipeline/cards/chat_edit.py` sends a digest of the open cut list
+plus that sentence through this same seam as one conversation per cut file
+(`session=`, as transcript search does), validates every operation the model
+returns against the live cut list, and applies them through the engine's one
+mutation door. Design: the other repo's `docs/CHAT-EDIT.md`; ledger CR-229.
+
+Its model is `CHAT_MODEL = os.environ.get("CARDS_CHAT_MODEL") or
+"claude-fable-5-1"` -- the first caller here to pick a model on purpose, and
+picking one is what exposed CR-228: `cards_ai.Runner._cli` dropped the
+caller's `model` entirely, so on the Claude-Code-CLI provider (this studio's
+own: no API key, the OAuth CLI under `<data>/tools/claude-code`) all four
+features ran on whatever that CLI defaults to, while the SDK path honoured the
+name. Fixed in dashboard 0.7.40 by appending `--model <model>` after the flags
+when the caller gives one; an empty model still means the CLI's default, for
+the three callers that never passed one. Deploy that dashboard BEFORE the
+Cards checkout that asks for Fable.
+
 ### The JSON contract, and the one thing that changes
 
 **THE MODEL NEVER GETS FILE TOOLS.** `_run_claude_json`'s prompt asks for an

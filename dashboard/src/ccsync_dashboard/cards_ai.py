@@ -267,7 +267,7 @@ class Runner:
                     messages=(None if convo is None
                               else _for_send(convo["messages"], ttl)))
             else:
-                text = self._cli(prompt, timeout, session=session)
+                text = self._cli(prompt, timeout, session=session, model=model)
         except ClaudeError as e:
             return _fail(str(e), provider=choice.name)
         except Exception as e:  # noqa: BLE001 - never a traceback across the seam
@@ -412,7 +412,26 @@ class Runner:
                  usage["cache_creation_input_tokens"], usage["output_tokens"])
         return _text_of(response), usage
 
-    def _cli(self, prompt: str, timeout: float, session: Any = None) -> str:
+    def _cli(self, prompt: str, timeout: float, session: Any = None,
+             model: str = "") -> str:
+        """The CLI path, which until 2026-09-10 threw the caller's `model` away.
+
+        Found while wiring Timeline Cards' "ask claude" edit chat, which asks
+        for `claude-fable-5-1`: this argv was `-p --output-format text` and
+        nothing else, so on the studio's Claude-Code-CLI provider (no API key,
+        the OAuth CLI under `<data>/tools/claude-code`) EVERY Timeline Cards
+        feature ran on whatever model that CLI defaults to, while the SDK path
+        honoured the name. The standalone `library_engine._run_claude` in the
+        other repo has always passed `--model <model>`, so the two doors
+        disagreed and only the deployed one was wrong. It went unnoticed
+        because translate, search and summaries are all fine on the default.
+
+        An empty `model` still means "the CLI's own default", deliberately: a
+        caller from before this change passes nothing, and inventing a name
+        for it here would move three shipped features onto a model nobody
+        picked. The flag goes after the flags and BEFORE the session args so a
+        hand-set `YTDL_CLAUDE_CODE_ARGS` still reads as one block.
+        """
         path = self._cli_path()
         if not path:
             raise ClaudeError("Claude Code is the site's provider but this "
@@ -423,7 +442,9 @@ class Runner:
         # (§12.2) and never our transcript re-sent as text. Our store is
         # still what answers "has this id ever existed", because the CLI's
         # lives in a HOME this container may not even have.
-        argv = [path] + _cli_args() + _cli_session_args(session)
+        argv = ([path] + _cli_args()
+                + (["--model", model] if model else [])
+                + _cli_session_args(session))
         try:
             proc = subprocess.run(  # noqa: S603 - argv, never a shell
                 argv, input=prompt, capture_output=True, text=True,

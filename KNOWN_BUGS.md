@@ -16117,6 +16117,96 @@ NAS's own daily tasks spell it that way), `docs/BACKUP_RESTORE.md`'s table,
 `docs/CONFIG.md`'s `[apps] dataset` row, and
 `test_every_schema_carries_hour_and_minute` in `test_backup_restore.py`.
 
+## Timeline Cards, 2026-09-10 (CR-228, CR-229)
+
+Both come out of wiring the "ask claude" edit chat the owner asked for on
+2026-09-10 ("update timeline cards so that there's a claude fable instance
+input box inside the UI that you can talk with to update and change edits in
+natural language"). The contract for the feature is the other repo's
+`docs/CHAT-EDIT.md`.
+
+### CR-228 - the dashboard's Claude runner threw the caller's model away on the CLI path, so on the studio's own provider every Timeline Cards feature ran on the CLI's default model - FIXED 2026-09-10 (dashboard 0.7.40, `cards_ai.py`)
+
+**Seen:** `Runner._cli` built `argv = [path] + _cli_args() +
+_cli_session_args(session)` and `run()` never passed it a model at all;
+`_cli_args()` is `-p --output-format text` (or `YTDL_CLAUDE_CODE_ARGS`).
+So a caller asking for `claude-haiku-4-5-20251001`, `claude-sonnet-5` or
+the chat's `claude-fable-5-1` got whatever model the signed-in Claude Code
+CLI defaults to. The SDK path has always honoured `model` (it is a field
+of the request), and the standalone `library_engine._run_claude` in the
+MulticamPipeline repo has always passed `["-p", "--model", model, ...]`,
+so the two doors disagreed - and the deployed one was the wrong one: this
+studio has no ANTHROPIC_API_KEY, it runs the OAuth CLI under
+`<data>/tools/claude-code`.
+
+**Why it went unnoticed for six weeks:** the three features that existed
+(the `->EN` translations, transcript search, the overview summaries) are
+all perfectly good on the CLI's default model, so nothing ever looked
+wrong; and the API path, which was correct, is the one every test and
+every dev checkout exercises. A model name only becomes load-bearing when
+a caller picks a specific one on purpose, which the chat is the first to
+do.
+
+**Fixed** (`cards_ai.py`): `_cli(self, prompt, timeout, session=None,
+model="")` appends `["--model", model]` after the flags and before the
+session args, and `run()` passes `model` through on the CLI branch. An
+empty `model` still means "the CLI's own default", deliberately: a caller
+from before this change passes nothing, and inventing a name here would
+move three shipped features onto a model nobody picked. The position is
+pinned as well as the presence - `--session-id` / `--resume` take the id
+after them, so a flag wedged between the two would hand the CLI the wrong
+value. `dashboard/tests/test_cards_ai.py` 43 -> 48.
+
+**Deploy:** dashboard 0.7.40 (image build or OTA), and BEFORE the Cards
+checkout that asks for Fable - on an older dashboard the chat runs on the
+CLI's default model and answers perfectly plausibly, which is the worst
+kind of wrong.
+
+### CR-229 - Timeline Cards has no way to edit a cut list in words - BUILT 2026-09-10 (both repos), NOT DEPLOYED
+
+**Asked for** (Alex, 2026-09-10): a Claude input box inside the Timeline
+Cards UI that an editor talks to in natural language to change the edit.
+
+**Built:** a chat panel ("ask claude") on the cards page and a server side
+that turns a sentence into validated engine operations. The design is the
+other repo's `docs/CHAT-EDIT.md`; in one line, the page posts to
+`api/chat`, the server sends a compact digest of the open cut list plus
+the sentence to Claude through the mounted runner as ONE conversation per
+cut file, validates every operation the model returns against the live cut
+list before anything is applied, and applies them through the engine's one
+mutation door so each turn is undoable as a single gesture. The model
+never gets file tools (cards_ai decision 2) and no vault path is ever in a
+prompt.
+
+**Two repos.** MulticamPipeline (`multicam_pipeline/cards/chat_edit.py`,
+the `/api/chat*` routes, `page/16-chat.js`, `cards.css`) is the feature;
+this repo is CR-228 plus this ledger entry, because the mounted runner is
+what talks to Claude here.
+
+**Model:** `claude-fable-5-1`, the owner's pick, with `CARDS_CHAT_MODEL` as
+the environment knob so the studio can drop to `claude-opus-5` without a
+redeploy.
+
+**Phase 2, the same day** (Alex: "run phase 2, adding from the corpus would
+be very useful and massive"): the conversation now opens with the
+episode's whole interview corpus (the transcript search's own `Corpus`,
+one part per message, cached for the hour) and a fourteenth op, `insert`,
+names a transcript block by its `^ref` plus optional first and last words;
+the server resolves it to a clip span through `match_selection` exactly
+as a pasted Obsidian embed is, so a card of guessed seconds cannot happen.
+Every message also carries the page's situation (playhead, selection,
+visible range, shelf, transcript pane) as a CONTEXT block, with
+`@playhead` / `@selected` handles and `at_playhead` placement, so "insert
+that bit at the playhead" lands where the editor is looking. The series'
+house style (no questions in the edit, withhold for tension, fragments as
+cards, cliffhangers) is a titled block in the opening rules,
+overridable per episode by `Script Docs\chat-style.md`; the server itself
+refuses to insert an interviewer's question block.
+
+**Deploy order:** dashboard 0.7.40 first, so the Claude Code CLI provider
+actually honours the model this asks for (CR-228); then the Cards checkout
+re-ship and container restart per `docs/CARDS_DEPLOY.md`.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

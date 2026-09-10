@@ -682,9 +682,102 @@ def test_the_cli_path_reports_no_usage(sdk, monkeypatch):
                                          label="Claude Code", reason="")
     monkeypatch.setattr(cards_ai.Runner, "_choice",
                         lambda self, probe=True: (choice, ""))
-    monkeypatch.setattr(cards_ai.Runner, "_cli",
-                        lambda self, prompt, timeout, session=None: "an answer")
+    monkeypatch.setattr(
+        cards_ai.Runner, "_cli",
+        # `model=` since 2026-09-10: `run()` passes it on this path too.
+        lambda self, prompt, timeout, session=None, model="": "an answer")
 
     out = runner.run("translate this")
     assert out["ok"] is True
     assert out["usage"] == {}
+
+
+# -- the CLI argv (2026-09-10) ------------------------------------------------
+# The chat asks for `claude-fable-5-1`, and until this date `_cli` built its
+# argv out of the flags and the session alone: on the studio's Claude Code
+# provider every Timeline Cards feature silently ran on the CLI's default
+# model. These pin the flag's presence, its POSITION and its absence.
+
+class FakeProc:
+    def __init__(self, stdout="an answer"):
+        self.returncode = 0
+        self.stdout = stdout
+        self.stderr = ""
+
+
+@pytest.fixture
+def cli(tmp_path, monkeypatch):
+    """A Runner whose provider is Claude Code and whose subprocess is a
+    recorder. Returns `(runner, argvs)`."""
+    argvs: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        argvs.append(list(argv))
+        return FakeProc()
+
+    choice = ai_providers.ProviderChoice(name=ai_providers.CLAUDE_CODE,
+                                         label="Claude Code", reason="")
+    monkeypatch.setattr(cards_ai.Runner, "_choice",
+                        lambda self, probe=True: (choice, ""))
+    monkeypatch.setattr(cards_ai.Runner, "_cli_path",
+                        lambda self: "/data/tools/claude-code/bin/claude")
+    monkeypatch.setattr(cards_ai.cli_tools, "cli_env",
+                        lambda settings, name: {"HOME": "/data/tools/x/home"})
+    monkeypatch.setattr(cards_ai.subprocess, "run", fake_run)
+    monkeypatch.delenv("YTDL_CLAUDE_CODE_ARGS", raising=False)
+    return cards_ai.Runner(FakeSettings(tmp_path)), argvs
+
+
+def test_the_cli_is_told_which_model(cli):
+    runner, argvs = cli
+    out = runner.run("stage the pangolin cards", model="claude-fable-5-1")
+    assert out["ok"] is True
+    assert argvs[0] == ["/data/tools/claude-code/bin/claude", "-p",
+                        "--output-format", "text",
+                        "--model", "claude-fable-5-1"]
+
+
+def test_the_model_follows_the_flags_and_precedes_the_session(cli):
+    """Position, not just presence: `--session-id` takes the id after it, so a
+    `--model` wedged between the two would hand the CLI the wrong value."""
+    runner, argvs = cli
+    runner.run(MARKED, model="claude-fable-5-1", session=FakeSession())
+    argv = argvs[0]
+    assert argv[argv.index("--output-format") + 1] == "text"
+    assert argv[argv.index("--model") + 1] == "claude-fable-5-1"
+    assert argv.index("--model") < argv.index("--session-id")
+    assert argv[argv.index("--session-id") + 1] == "1a2b-3c4d"
+
+
+def test_a_warm_session_keeps_the_model_before_resume(cli):
+    runner, argvs = cli
+    # Turn 0 first: a `turns > 0` id this store has never seen is
+    # `session_lost` and never reaches an argv at all (decision 5).
+    session = FakeSession()
+    runner.run(MARKED, model="claude-opus-5", session=session)
+    session.turns = 4
+    runner.run("and again", model="claude-opus-5", session=session)
+    argv = argvs[-1]
+    assert argv.index("--model") < argv.index("--resume")
+    assert argv[-2:] == ["--resume", "1a2b-3c4d"]
+
+
+def test_no_model_is_the_clis_own_default(cli):
+    """Translate, search and summaries called this door for a year without a
+    model on the CLI path. An empty name must stay "whatever the CLI is signed
+    in to run", never a name this module invents."""
+    runner, argvs = cli
+    runner.run("summarise this section")
+    assert "--model" not in argvs[0]
+    assert argvs[0] == ["/data/tools/claude-code/bin/claude", "-p",
+                        "--output-format", "text"]
+
+
+def test_the_sdk_path_is_unchanged_by_the_model_flag(sdk):
+    """The API door already honoured `model`, and nothing about 2026-09-10
+    touched it: the model is a field of the request, not an argv."""
+    runner, calls = sdk
+    runner.run("stage the pangolin cards", model="claude-fable-5-1")
+    assert calls[0]["model"] == "claude-fable-5-1"
+    assert calls[0]["messages"] == [{"role": "user",
+                                     "content": "stage the pangolin cards"}]

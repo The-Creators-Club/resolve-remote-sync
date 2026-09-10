@@ -40,6 +40,7 @@ line above is machine-checkable and nothing was checking it.
 | [`YTDL_LOCAL_DOWNLOAD.md`](YTDL_LOCAL_DOWNLOAD.md) | The YouTube downloader's fleet job model and the local-download path |
 | [`YTDL_RESILIENCE_PLAN.md`](YTDL_RESILIENCE_PLAN.md) | After CR-80: why cookies and pinned player clients keep breaking YouTube downloads, and the fix. WP1-WP7 BUILT in repo 2026-08-26 (CR-83, dashboard 0.7.11 / companion 0.9.52, unshipped); WP8 deliberately not built |
 | [`CLIENT_FOLDERS.md`](CLIENT_FOLDERS.md) | Curated b-roll folders with a link a prospective licensee can open: how to use them, what the client sees, and publishing the one path prefix with Tailscale Funnel |
+| [`CLIENT_DELIVERY.md`](CLIENT_DELIVERY.md) | Runbook for handing a client terabytes of footage to download once, without joining the tailnet: stage in Backblaze B2 near the client (TrueNAS Cloud Sync task, scoped read-only key, what to tell them), the shared-Tailscale-node direct route, and why not Funnel, Syncthing, MASV or a port-forward |
 | [`DOCKER.md`](DOCKER.md) | The two ways the dashboard container gets its code and its dependencies |
 | [`CARDS_DEPLOY.md`](CARDS_DEPLOY.md) | Refreshing Timeline Cards on the NAS: the one code mount that is another repo's checkout, why a copy without a restart changes nothing, and the rollback |
 | [`RELEASE_PATHWAYS.md`](RELEASE_PATHWAYS.md) | **Read before starting a release.** Which of the two publish pathways applies right now: Alex's terminal, or CI plus `publish_latest.py` |

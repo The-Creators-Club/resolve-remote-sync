@@ -839,6 +839,13 @@ def _who(entry: Mapping[str, Any]) -> str:
     return f"{entry.get('editor_username')}/{entry.get('machine')}"
 
 
+def _norm_name(text: Any) -> str:
+    """A project name as it is COMPARED (CR-232): whitespace collapsed and
+    case folded. Never a name anything opens - the bytes on disk are the
+    truth there (CR-90)."""
+    return " ".join(str(text or "").split()).casefold()
+
+
 def _lane_words(entry: Mapping[str, Any]) -> str:
     lanes = [l for l in (entry.get("lanes") or []) if isinstance(l, Mapping)]
     if not lanes:
@@ -853,15 +860,25 @@ Finding = dict            # {"subject", "diagnosis", "fix", "detail"}
 
 
 def _f(subject: str, diagnosis: str, fix: str, detail: str = "",
-       *, repeat: bool = True) -> Finding:
+       *, repeat: bool = True, title: str = "") -> Finding:
     """One finding. `repeat=False` (DDIAG-3, 2026-09-04) says "still true,
     still worth showing, but do not mail it again while it stays true" - the
     warn repeat rule on a finding an error kind produced. It is NOT the same
     as dropping the finding: a subject that leaves the scan is declared
     RECOVERED, and "this has cleared, no action is needed" about a computer
-    that has been dead for a fortnight is a worse lie than the daily mail."""
-    return {"subject": subject, "diagnosis": diagnosis, "fix": fix,
-            "detail": detail, "repeat": repeat}
+    that has been dead for a fortnight is a worse lie than the daily mail.
+
+    `title` (CR-232, 2026-09-10) overrides the KIND's title for this one
+    finding, for a fact that belongs in the headline and cannot go in the
+    subject because the subject is the ledger's identity: "footage is
+    outside the tree in 'Ruskin Pangolins' - ruskin/DESKTOP-LQQ41TC". Left
+    empty every other kind reads its own registry title exactly as before.
+    """
+    finding: Finding = {"subject": subject, "diagnosis": diagnosis, "fix": fix,
+                        "detail": detail, "repeat": repeat}
+    if title:
+        finding["title"] = title
+    return finding
 
 
 @dataclass(frozen=True)
@@ -945,6 +962,55 @@ class Ctx:
         # that read it, and side-effect free by contract (no probe, no
         # database, no subprocess).
         self.ytdl: dict[str, Any] | None = _ytdl_health(self.mounts)
+        # CR-232 (2026-09-10): which Resolve project each computer last said
+        # was OPEN, and everything needed to decide whether that project is
+        # one this fleet syncs at all. Four fleet-wide reads on the Ctx rule
+        # (no per-machine query), and every one of them is a picture the
+        # dashboard already keeps:
+        #   * machine_state.resolve_project - the name the companion reports
+        #     on every heavy tick (reporter.get_resolve_project). NULL when
+        #     Resolve is closed or the name is one of the ignored ones.
+        #   * project_roots - the name -> slug mapping an editor or an admin
+        #     has already made for it.
+        #   * projects - the folders the collector found under the tree's
+        #     Projects, by slug and by label ("year/series/project").
+        #   * the machine's own ticks, for the sentence's "ticked" evidence.
+        self.open_projects: dict[str, str] = {}
+        for row in _rows(
+                conn,
+                "SELECT editor_username, machine, resolve_project "
+                "FROM machine_state WHERE resolve_project IS NOT NULL"):
+            name = str(row["resolve_project"] or "").strip()
+            if name:
+                self.open_projects[
+                    f"{row['editor_username']}/{row['machine']}"] = name
+        self.project_roots: dict[str, str] = {
+            _norm_name(row["resolve_project"]): str(row["project_slug"] or "")
+            for row in _rows(
+                conn, "SELECT resolve_project, project_slug FROM project_roots")
+            if str(row["project_slug"] or "")
+        }
+        self.tree_labels: dict[str, str] = {}
+        self.tree_identity: dict[str, str] = {}
+        for row in _rows(
+                conn, "SELECT slug, label FROM projects WHERE active=1"):
+            slug = str(row["slug"] or "")
+            label = str(row["label"] or "")
+            if not slug:
+                continue
+            self.tree_labels[slug] = label
+            segments = [s for s in label.replace("\\", "/").split("/") if s]
+            for identity in (slug, slug.replace("-", " "), label,
+                             segments[-1] if segments else ""):
+                if identity:
+                    self.tree_identity.setdefault(_norm_name(identity), slug)
+        try:
+            self.plan_slugs: dict[tuple[str, str], set[str]] = db.plan_slugs_map(
+                conn, [(e.get("editor_username") or "", e.get("machine") or "")
+                       for e in self.editors])
+        except sqlite3.Error:
+            log.debug("alerts: could not read the fleet's ticks", exc_info=True)
+            self.plan_slugs = {}
         # Machines a more specific kind has already named, so the catch-all
         # ("red for an hour and we cannot say why") does not repeat them.
         self.named: set[str] = set()
@@ -1644,24 +1710,97 @@ def _check_notices(ctx: Ctx) -> list[Finding]:
         f"notice kind={r['kind']}") for r in rows]
 
 
+def _synced_project(ctx: Ctx, name: str) -> str | None:
+    """Which tree project the open Resolve project IS, or None (CR-232).
+
+    Every branch is a way this dashboard ALREADY answers that question, in
+    descending order of how much a human had to do with the answer:
+
+      1. `project_roots` - the name -> slug mapping an editor or an admin
+         made by hand at /project-setup, or that the sticky auto-map wrote.
+      2. the identity of a ticked project on this computer, and then of any
+         project folder the collector found under the tree's Projects: the
+         slug, the slug with its hyphens as spaces, the whole label
+         ("year/series/project") or its last segment.
+      3. `db.match_project_label_confident` over the tree's labels, which is
+         the same function the report route trusts to write a PERMANENT
+         mapping - so it is good enough to decide that the footage in this
+         project was meant to go up.
+
+    None is "no project in this tree looks like this one", which is the
+    answer for an editor's own project on their own disk.
+    """
+    key = _norm_name(name)
+    if not key:
+        return None
+    slug = ctx.project_roots.get(key)
+    if slug:
+        return slug
+    slug = ctx.tree_identity.get(key)
+    if slug:
+        return slug
+    return db.match_project_label_confident(name, ctx.tree_labels.values())
+
+
 def _check_out_of_tree(ctx: Ctx) -> list[Finding]:
+    """Clips the OPEN Resolve project references from outside the tree.
+
+    CR-232 (2026-09-10), on the first of these mails the owner read: "this
+    warning should say which project. the project might be an editor's
+    personal project which they don't want to sync."
+
+    Both halves of that. The finding NAMES the project in its title and in
+    its sentence, and the SUBJECT stays the `editor/machine` key: the alert
+    ledger and the notices table are keyed `(kind, subject)`, so a project
+    name in there would open a fresh row (and a fresh mail) every time an
+    editor switched project, and lose the recovery message for the old one.
+
+    And a project this dashboard cannot tie to the tree raises NOTHING. The
+    whole diagnosis is "this footage will never upload", which is only a
+    loss for footage that was meant to go up; on a personal project it is
+    the editor's own business. There is no `info` severity to demote it to
+    (severity is the KIND's, and it decides the repeat rule), so the honest
+    shape is silence: the counts are still on the fleet page and in the
+    machine's WHY sentence, where an admin who wants them is looking.
+
+    A computer that has NOT said which project is open (Resolve closed since
+    the scan, or an ignored project name) keeps the warning without a name:
+    "could not check" must never render as "nothing to worry about".
+    """
     out = []
     for e in ctx.editors:
         g = ctx.guard(e)
         count = g.get("resolve_out_of_tree")
         if not count:
             continue
-        who = ctx.name(_who(e))
+        who = _who(e)
+        project = ctx.open_projects.get(who, "")
+        slug = _synced_project(ctx, project) if project else None
+        if project and not slug:
+            continue
+        who = ctx.name(who)
+        ticked = slug in (ctx.plan_slugs.get(
+            (e.get("editor_username") or "", e.get("machine") or "")) or set())
+        opening = (f"The project '{project}' open on {who} uses" if project
+                   else f"The project open on {who} uses")
+        title = (f"footage is outside the tree in '{project}'" if project
+                 else "footage is outside the tree")
+        unnamed = ("" if project else
+                   " That computer has not said which project it is, so this "
+                   "is the last scan it managed.")
         out.append(_f(
             who,
-            f"The project open on {who} uses {count} clip(s) that are not in "
-            f"the sync tree. Those clips will never upload and nobody else on "
-            f"the fleet will ever see them, and the timeline will open with "
-            f"red media on any other computer.",
+            f"{opening} {count} clip(s) that are not in the sync tree. Those "
+            f"clips will never upload and nobody else on the fleet will ever "
+            f"see them, and the timeline will open with red media on any "
+            f"other computer.{unnamed}",
             "Ask that editor to copy those clips into the project's own folder "
             "on the sync drive and relink them in Resolve.",
+            f"project={project or 'unknown'} slug={slug or '-'} "
+            f"ticked={'yes' if ticked else 'no'} "
             f"bad prefix={g.get('resolve_bad_prefix')} missing={g.get('resolve_missing')} "
-            f"scanned {_age_words(g.get('resolve_last_scan_at'), ctx.now)}"))
+            f"scanned {_age_words(g.get('resolve_last_scan_at'), ctx.now)}",
+            title=title))
     return out
 
 
@@ -2840,15 +2979,20 @@ def open_counts(findings: list[dict[str, Any]]) -> dict[str, int]:
 
 # ------------------------------------------------------------- the composers
 
-def compose_alert(kind: str, subject: str, detail: str) -> tuple[str, str]:
+def compose_alert(kind: str, subject: str, detail: str,
+                  title: str = "") -> tuple[str, str]:
     """(mail subject, plain text) for one alert.
 
     PURE, and the reason `send` takes a subject and a text rather than a
     template: what an alert IS and how it is delivered are separate decisions,
     and only the first is worth a test. `detail` is the whole body a check
     composed (diagnosis, then fix, then the technical line).
+
+    `title` is a per-finding override (CR-232, 2026-09-10) and is passed here
+    as well as into the digest so the one-POST-per-finding sink says the same
+    thing the one-mail-per-cycle sink does.
     """
-    title = KIND_BY_NAME[kind].title if kind in KIND_BY_NAME else kind
+    title = title or (KIND_BY_NAME[kind].title if kind in KIND_BY_NAME else kind)
     line = f"CC Sync: {title} - {subject}" if subject else f"CC Sync: {title}"
     body = [line, ""]
     if detail:
@@ -3571,7 +3715,9 @@ def deliver(
             # what "we told somebody" means, and dedup reads any row.
             undelivered += 1
             continue
-        mail_subject, text = compose_alert(kind, subject, _finding_body(finding))
+        mail_subject, text = compose_alert(
+            kind, subject, _finding_body(finding),
+            str(finding.get("title") or ""))
         result = _send_committed(conn, settings, mail_subject, text, kind=kind,
                                  dedup_subject=subject, now=now, dedup=dedup)
         if result["deduped"]:

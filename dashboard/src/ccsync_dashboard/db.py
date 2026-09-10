@@ -5089,6 +5089,44 @@ def plan_summary_map(
     return out
 
 
+def plan_slugs_map(
+    conn: sqlite3.Connection, keys: Iterable[tuple[str, str]]
+) -> dict[tuple[str, str], set[str]]:
+    """(editor, machine) -> the slugs that computer is ticked for (CR-232).
+
+    plan_summary_map's shape and plan_summary_map's reasoning: two queries
+    for the whole fleet rather than selections_for_machine per row, carrying
+    the ONE inheritance rule with it (a machine with rows of its own never
+    also inherits the unassigned bucket). Both sync modes are in it: an
+    upload-only tick is still a project this fleet syncs, which is the only
+    question the caller asks.
+
+    A WIRED machine is NOT dropped here the way selections_for_machine drops
+    it (CR-28). The callers of this map ask "is this project one of ours",
+    not "what should come down", and a base rig's legacy rows are still
+    evidence of that.
+    """
+    own: dict[tuple[str, str], set[str]] = {}
+    for r in conn.execute(
+        "SELECT editor_username, machine, project_slug FROM selections "
+        "WHERE machine <> ?", (ANY_MACHINE,),
+    ):
+        own.setdefault((r["editor_username"], r["machine"]), set()).add(
+            str(r["project_slug"]))
+    bucket: dict[str, set[str]] = {}
+    for r in conn.execute(
+        "SELECT editor_username, project_slug FROM selections WHERE machine = ?",
+        (ANY_MACHINE,),
+    ):
+        bucket.setdefault(r["editor_username"], set()).add(str(r["project_slug"]))
+    out: dict[tuple[str, str], set[str]] = {}
+    for editor, machine in keys:
+        slugs = own.get((editor, machine))
+        out[(editor, machine)] = set(
+            slugs if slugs is not None else bucket.get(editor, set()))
+    return out
+
+
 def request_diagnostics(
     conn: sqlite3.Connection, editor: str, machine: str,
     requested_by: str, now: str,

@@ -1586,3 +1586,131 @@ def test_the_page_groups_the_rows_that_shared_a_message(env, monkeypatch):
     page = client.get("/admin/alerts")
     assert page.status_code == 200
     assert "one message, 2 finding(s)" in page.text
+
+
+# ------------------------------- out_of_tree names its project (CR-232)
+#
+# The owner, 2026-09-10, on the mail that reached him ("CC Sync: 2 new
+# problem(s)" -> "TO LOOK AT: footage is outside the tree -
+# ruskin/DESKTOP-LQQ41TC"): "this warning should say which project. the
+# project might be an editor's personal project which they don't want to
+# sync."
+
+OUT_OF_TREE_GUARD = {
+    "resolve_health": {"out_of_tree": 40, "bad_prefix": 0, "missing": 0,
+                       "last_scan_at": NOW},
+}
+
+
+def _report_out_of_tree(client, project):
+    body = payload(OUT_OF_TREE_GUARD)
+    if project is not None:
+        body["resolve_project"] = project
+    return client.post("/api/v1/report", json=body, headers=report_headers())
+
+
+def _tree_project(conn, slug, label, *, ticked=False):
+    dbmod.upsert_project(conn, slug, label, f"/mnt/tank/Projects/{label}", NOW)
+    if ticked:
+        dbmod.add_selection(conn, "jsmith", slug, "owen", NOW, machine="EDIT-PC")
+    conn.commit()
+
+
+def _out_of_tree(findings):
+    return [f for f in findings if f["kind"] == "out_of_tree"]
+
+
+def test_out_of_tree_names_the_project_a_computer_is_ticked_for(env):
+    client, conn, settings = env
+    _tree_project(conn, "2026-pangolins", "2026/Ruskin/Ruskin Pangolins",
+                  ticked=True)
+    assert _report_out_of_tree(client, "Ruskin Pangolins").status_code == 200
+
+    found = _out_of_tree(alerts.scan(conn, settings, NOW))
+    assert len(found) == 1
+    finding = found[0]
+    # The SUBJECT is still the machine key: notices and alert_log are keyed
+    # (kind, subject), so a project name in there would open a new row every
+    # time an editor switched project.
+    assert finding["subject"] == "jsmith/EDIT-PC"
+    assert finding["title"] == "footage is outside the tree in 'Ruskin Pangolins'"
+    assert "'Ruskin Pangolins'" in finding["diagnosis"]
+    assert "40 clip(s)" in finding["diagnosis"]
+    assert "slug=2026-pangolins" in finding["detail"]
+    assert "ticked=yes" in finding["detail"]
+    # ...and the headline a reader gets carries both.
+    subject, text = alerts.compose_alert(
+        finding["kind"], finding["subject"], finding["diagnosis"],
+        finding["title"])
+    assert subject == ("CC Sync: footage is outside the tree in "
+                       "'Ruskin Pangolins' - jsmith/EDIT-PC")
+    assert "'Ruskin Pangolins'" in text
+
+
+def test_out_of_tree_says_nothing_about_a_project_that_is_not_in_the_tree(env):
+    """An editor's own project on their own disk. "the project might be an
+    editor's personal project which they don't want to sync." """
+    client, conn, settings = env
+    _tree_project(conn, "2026-pangolins", "2026/Ruskin/Ruskin Pangolins",
+                  ticked=True)
+    assert _report_out_of_tree(client, "Wedding Video For Mum").status_code == 200
+
+    findings = alerts.scan(conn, settings, NOW)
+    assert _out_of_tree(findings) == []
+    # ...and it is not quietly re-raised as the catch-all either.
+    assert "TO LOOK AT" not in "".join(str(f) for f in findings)
+
+
+def test_out_of_tree_still_fires_for_a_tree_project_nobody_ticked(env):
+    """"or at least a project folder that exists under the tree's Projects":
+    footage outside the tree in a project the fleet HAS is still a loss, and
+    the sentence says nobody has ticked it."""
+    client, conn, settings = env
+    _tree_project(conn, "2026-pangolins", "2026/Ruskin/Ruskin Pangolins")
+    assert _report_out_of_tree(client, "Ruskin Pangolins").status_code == 200
+
+    found = _out_of_tree(alerts.scan(conn, settings, NOW))
+    assert len(found) == 1
+    assert "ticked=no" in found[0]["detail"]
+    assert "'Ruskin Pangolins'" in found[0]["diagnosis"]
+
+
+def test_out_of_tree_matches_a_hand_made_project_root_mapping(env):
+    """`project_roots` is the mapping an editor made at /project-setup; a
+    Resolve name that shares no word with the folder is still that project."""
+    client, conn, settings = env
+    _tree_project(conn, "2026-pangolins", "2026/Ruskin/Ruskin Pangolins")
+    dbmod.admin_set_project_root(conn, "Big Cats Cut", "2026-pangolins", "owen", NOW)
+    conn.commit()
+    assert _report_out_of_tree(client, "Big Cats Cut").status_code == 200
+
+    found = _out_of_tree(alerts.scan(conn, settings, NOW))
+    assert len(found) == 1
+    assert found[0]["title"] == "footage is outside the tree in 'Big Cats Cut'"
+
+
+def test_out_of_tree_keeps_the_warning_when_no_project_was_reported(env):
+    """Resolve closed since the scan, or an ignored project name: "could not
+    check" must never render as "nothing to worry about"."""
+    client, conn, settings = env
+    _tree_project(conn, "2026-pangolins", "2026/Ruskin/Ruskin Pangolins",
+                  ticked=True)
+    assert _report_out_of_tree(client, None).status_code == 200
+
+    found = _out_of_tree(alerts.scan(conn, settings, NOW))
+    assert len(found) == 1
+    assert found[0]["title"] == "footage is outside the tree"
+    assert "has not said which project" in found[0]["diagnosis"]
+    assert "project=unknown" in found[0]["detail"]
+
+
+def test_out_of_tree_says_nothing_when_no_clips_are_outside_the_tree(env):
+    client, conn, settings = env
+    _tree_project(conn, "2026-pangolins", "2026/Ruskin/Ruskin Pangolins",
+                  ticked=True)
+    body = payload({"resolve_health": {"out_of_tree": 0, "last_scan_at": NOW}})
+    body["resolve_project"] = "Ruskin Pangolins"
+    assert client.post("/api/v1/report", json=body,
+                       headers=report_headers()).status_code == 200
+
+    assert _out_of_tree(alerts.scan(conn, settings, NOW)) == []

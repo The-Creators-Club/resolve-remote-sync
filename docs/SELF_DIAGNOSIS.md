@@ -202,6 +202,7 @@ Per machine (from the fleet view's `guard` section):
 | `upgrade_failed` | error | 8 or more failed attempts at one build (REL-8's cap) |
 | `upgrade_reverted` | warn | the machine rolled a build back (APP-5) |
 | `out_of_tree`, `stray_projects`, `moved_project_dir`, `ingest_staging` | warn | the v38 ingest columns; silent until a companion sends them |
+| | | `out_of_tree` NAMES the open Resolve project (CR-232, 2026-09-10) from `machine_state.resolve_project`, in a per-finding `title` override as well as the sentence, and is SILENT for a project it cannot tie to the tree: an editor's own project on their own disk is not a fault. `_synced_project` decides that the three ways the dashboard already does (a `project_roots` mapping, the identity of a ticked or active project folder, `match_project_label_confident`); a computer that did not say which project is open keeps the unnamed warning |
 | `versions_behind` | warn | 3 or more PUBLISHED, non-retracted builds newer than the one running (counts fixes missed, not version arithmetic) |
 | `retracted_running` | error | running a build that has been recalled |
 | `red_unexplained` | error | red for 1 h and no kind above named it (fix: `[ ASK WHY ]`) |

@@ -16290,6 +16290,81 @@ window for another screen, sharing selection and playhead over a
 BroadcastChannel (`page/17-windows.js`). The multi-window path is proven in
 a fake-DOM test only; two real windows on two screens have not been opened.
 
+## Dashboard alerts, 2026-09-10 (CR-232)
+
+### CR-232 - the "footage is outside the tree" alert never said WHICH project, and fired for an editor's personal project that was never meant to sync - FIXED 2026-09-10 (dashboard 0.7.42, `alerts.py`)
+
+**Seen** (Alex, 2026-09-10, from the SMTP sink): "CC Sync: 2 new
+problem(s)", and inside it
+
+    TO LOOK AT: footage is outside the tree - ruskin/DESKTOP-LQQ41TC
+
+    The project open on ruskin/DESKTOP-LQQ41TC uses 40 clip(s) that are not
+    in the sync tree. Those clips will never upload [...]
+    What to do: Ask that editor to copy those clips into the project's own
+    folder on the sync drive and relink them in Resolve.
+    Detail: bad prefix=0 missing=0 scanned 2 minutes ago
+
+His words: "this warning should say which project. the project might be an
+editor's personal project which they don't want to sync." Both halves are
+real: there is nothing in that mail an owner can carry to the editor
+(forty clips in WHICH of the projects on that computer), and the one
+action it names is wrong advice for a wedding video the editor is cutting
+for their mother on their own disk.
+
+**Cause:** `_check_out_of_tree` read three counters off the machine's guard
+row (`resolve_out_of_tree`, `resolve_bad_prefix`, `resolve_missing`) and
+nothing else. The project name was already on the dashboard and had been
+for a year - `machine_state.resolve_project`, written by every heavy report
+from `reporter.get_resolve_project`, which is what `project_roots`, the
+sticky auto-map and the NEW PROJECT prompt are all keyed on - and this check
+simply never read it. `ResolveHealthIn.open_project` is accepted from the
+guard section too and stored nowhere, so the top-level column is the field
+to trust. Nothing anywhere asked whether the open project was one this
+fleet syncs at all: the counters latch on the last scan, so ANY project
+open in Resolve on a machine with a sync plan produced a THINGS TO LOOK AT
+line about footage nobody had asked to be uploaded.
+
+**Fixed:**
+
+* The finding NAMES the project, in its sentence and in its headline:
+  `footage is outside the tree in 'Ruskin Pangolins' -
+  ruskin/DESKTOP-LQQ41TC`. The headline needed a per-finding title
+  override (`_f(..., title=...)`, honoured by `scan`, `_digest_item` and now
+  `compose_alert`, so the webhook sink says what the mail says), because
+  the SUBJECT has to stay the `editor/machine` key: `alert_log` and
+  `notices` are keyed `(kind, subject)`, and a project name in there would
+  open a fresh row, and send a fresh mail, every time an editor switched
+  project - and lose the recovery message for the one before.
+* **A project this dashboard cannot tie to the tree raises nothing.**
+  `_synced_project` answers "which tree project is this" the three ways the
+  dashboard already answers it: a `project_roots` mapping an editor or an
+  admin made, the identity of a ticked project or of any active project
+  folder under the tree's Projects (slug, slug with hyphens as spaces, the
+  whole `year/series/project` label or its last segment), then
+  `db.match_project_label_confident` over those labels - the same function
+  the report route trusts to write a PERMANENT mapping. No match is
+  silence. There is no `info` severity to demote it to (severity is the
+  KIND's and it decides the repeat rule), and the counts are still on the
+  fleet grid and in the machine's WHY sentence for an admin who wants them.
+* A computer that has NOT said which project is open (Resolve closed since
+  the scan, or a name in `ignored_resolve_projects`) keeps the unnamed
+  warning and says so in the sentence: "could not check" must never render
+  as "nothing to worry about".
+* The detail line carries the evidence - `project=<name> slug=<slug>
+  ticked=yes|no` - from `db.plan_slugs_map`, a new fleet-wide read in
+  plan_summary_map's shape (two queries, the same unassigned-bucket
+  inheritance rule) so the check keeps `Ctx`'s no-per-machine-query rule.
+  `ticked=no` on a real tree project is deliberate and still alerts: the
+  footage is still a loss, and the sentence's evidence says nobody has
+  ticked it.
+
+Tests: six in `dashboard/tests/test_alerts.py` (the body and headline name
+the project; a project absent from the tree and the plan produces no
+finding; a tree project nobody ticked still does; a hand-made
+`project_roots` mapping counts; an unreported project keeps the unnamed
+warning; zero clips still says nothing).
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

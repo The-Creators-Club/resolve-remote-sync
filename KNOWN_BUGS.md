@@ -16117,7 +16117,7 @@ NAS's own daily tasks spell it that way), `docs/BACKUP_RESTORE.md`'s table,
 `docs/CONFIG.md`'s `[apps] dataset` row, and
 `test_every_schema_carries_hour_and_minute` in `test_backup_restore.py`.
 
-## Timeline Cards, 2026-09-10 (CR-228, CR-229)
+## Timeline Cards, 2026-09-10 (CR-228, CR-229, CR-230)
 
 Both come out of wiring the "ask claude" edit chat the owner asked for on
 2026-09-10 ("update timeline cards so that there's a claude fable instance
@@ -16206,6 +16206,53 @@ refuses to insert an interviewer's question block.
 **Deploy order:** dashboard 0.7.40 first, so the Claude Code CLI provider
 actually honours the model this asks for (CR-228); then the Cards checkout
 re-ship and container restart per `docs/CARDS_DEPLOY.md`.
+
+### CR-230 - a session id consumed by a failed first turn was fatal for ever: the runner never read "already in use" as a lost session - FIXED 2026-09-10 (dashboard 0.7.41, `cards_ai.py`)
+
+**Seen:** the first live turn of the CR-229 edit chat, minutes after the
+chat went up. Turn 0 opened a conversation under a fresh `--session-id` and
+failed for an unrelated reason (the CLI on this container is older than
+`--model`, i.e. the 400 CR-228 had just introduced a caller for). The CLI
+had nonetheless CONSUMED the id, so the next turn came back
+`Claude Code exited 1: Error: Session ID 1b01ec70-... is already in use.`
+and every turn after it said the same thing. Nothing recovered: the chat,
+the transcript search and the montage builder all treat `session_lost` as
+"open a new conversation and re-send the corpus", and this error was not
+one - it arrived as a plain error string, so the caller kept re-sending the
+same dead id.
+
+**Cause:** `_says_no_such_session` matched only the warm-turn wordings
+("no conversation found", "not found", "does not exist", "no such
+session"). "Already in use" is the turn-0 TWIN of those: both mean this id
+is no good, open a new conversation. The standalone door in the other repo
+has read the two as one verdict since it was written -
+`claude._LOST_MARKS` in MulticamPipeline and "The detection rule" in its
+`docs/CLAUDE-SESSIONS.md` - so the mounted runner was the only place a
+lost session was fatal.
+
+**Fixed** (`cards_ai.py`): `_says_no_such_session` returns True for
+"already in use" too, case-insensitively and still only when the text
+mentions a session - the narrowness matters, because `session_lost` makes
+the caller re-send a whole corpus and a timeout or a signed-out CLI read as
+one would do that on every turn for ever. `dashboard/tests/test_cards_ai.py`
+48 -> 50: an "already in use" stderr on a turn-0 run answers
+`{"ok": False, "error": "session_lost"}`, and an unrelated exit 1 still
+arrives with its own words.
+
+**The Cards side shipped its own guard the same day**, deliberately belt
+and braces: a cold turn that fails now mints a fresh id rather than
+re-offering the one it just burned, so neither half depends on the other
+having been deployed.
+
+**Deploy:** dashboard 0.7.41 (image build or OTA).
+
+**Unrelated observation from the same hour, an operator recipe hazard and
+not a product bug:** a hand-minted `auth_sessions` row (the
+admin-session-without-a-password recipe) written with a naive
+`datetime.now().isoformat()` makes EVERY admin route 500 with "can't
+subtract offset-naive and offset-aware datetimes" - the session code
+compares against an aware now. `db.utcnow_iso()` is the shape to write;
+mint the row with it, never with a bare isoformat.
 
 ## Carryover — unchanged from before the 2026-08-11 hunt
 

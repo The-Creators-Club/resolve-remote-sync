@@ -360,8 +360,11 @@ def test_the_cli_id_is_stable_across_an_hour_of_calls():
 
 def test_only_an_unknown_session_reads_as_session_lost():
     assert cards_ai._says_no_such_session("No conversation found with session ID abc")
+    assert cards_ai._says_no_such_session(
+        "Error: Session ID 1b01ec70-0f0e-4b7a-9d1e-2c1f3a4b5c6d is already in use.")
     assert not cards_ai._says_no_such_session("Invalid API key")
     assert not cards_ai._says_no_such_session("command not found")
+    assert not cards_ai._says_no_such_session("port 8899 is already in use")
 
 
 # -- status(): unknown is not "no" (CR-121, 2026-09-03) -----------------------
@@ -781,3 +784,41 @@ def test_the_sdk_path_is_unchanged_by_the_model_flag(sdk):
     assert calls[0]["model"] == "claude-fable-5-1"
     assert calls[0]["messages"] == [{"role": "user",
                                      "content": "stage the pangolin cards"}]
+
+
+# -- a consumed id is a lost session (CR-230, 2026-09-10) ---------------------
+# The live shape: turn 0 under a fresh `--session-id` failed for an unrelated
+# reason (a CLI too old for `--model`) and the id was consumed anyway, so every
+# later turn came back "Session ID ... is already in use" and the chat, the
+# transcript search and the montage never re-opened.
+
+def fails_with(monkeypatch, stderr, code=1):
+    def fake_run(argv, **kwargs):
+        return types.SimpleNamespace(returncode=code, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(cards_ai.subprocess, "run", fake_run)
+
+
+def test_an_id_already_in_use_is_session_lost(cli, monkeypatch):
+    runner, _ = cli
+    fails_with(monkeypatch, "Error: Session ID 1b01ec70-0f0e-4b7a-9d1e-2c1f "
+                            "is already in use.")
+
+    out = runner.run(MARKED, session=FakeSession())
+
+    assert out["ok"] is False
+    assert out["error"] == cards_ai.SESSION_LOST
+
+
+def test_an_unrelated_cli_failure_keeps_its_own_words(cli, monkeypatch):
+    """The narrowness is the point: `session_lost` makes the caller re-send a
+    whole corpus, so anything that is not "that id is no good" must arrive as
+    itself."""
+    runner, _ = cli
+    fails_with(monkeypatch, "error: unknown option '--model'")
+
+    out = runner.run(MARKED, session=FakeSession())
+
+    assert out["ok"] is False
+    assert out["error"] != cards_ai.SESSION_LOST
+    assert "--model" in out["error"]

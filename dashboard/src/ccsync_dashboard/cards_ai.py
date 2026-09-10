@@ -594,7 +594,17 @@ def _cli_session_args(session: Any) -> list[str]:
 
 
 def _says_no_such_session(detail: str) -> bool:
-    """Is this CLI failure "I have never heard of that session"?
+    """Is this CLI failure "that id is no good, open a new conversation"?
+
+    "Session ID ... is already in use" counts (2026-09-10, CR-230). It is the
+    turn-0 twin of "no conversation found": a first turn that fails for an
+    unrelated reason (that day: a CLI too old for `--model`) has still CONSUMED
+    the id, so every later turn under it dies on the in-use error and the chat
+    can never re-open. The standalone door in the other repo has read both as
+    one verdict since it was written -- `claude._LOST_MARKS` in
+    MulticamPipeline, "The detection rule" in its docs/CLAUDE-SESSIONS.md --
+    and this runner has to say the same thing or the CLI path is the only
+    place a lost session is fatal.
 
     Narrow on purpose: `session_lost` makes the caller re-send a corpus, and
     a timeout or a signed-out CLI misread as one would do that on every turn
@@ -603,7 +613,8 @@ def _says_no_such_session(detail: str) -> bool:
     low = (detail or "").lower()
     return ("session" in low
             and ("no conversation found" in low or "not found" in low
-                 or "does not exist" in low or "no such session" in low))
+                 or "does not exist" in low or "no such session" in low
+                 or "already in use" in low))
 
 
 def _user_message(prompt: str, first: bool,

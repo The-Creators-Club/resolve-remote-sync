@@ -651,6 +651,12 @@ def _fleet_view(conn: sqlite3.Connection, scope: auth.Scope) -> dict:
             conn, str(entry.get("editor_username") or ""),
             str(entry.get("machine") or ""))
         entry["resolve_detail"] = detail or None
+        # The count shown beside a COLLAPSED [ DETAILS ] (fleet-grid declutter
+        # 2026-09-11), so folding a row's diagnostics away can never hide a
+        # real problem in silence. Computed HERE and not in build_editors_view
+        # because two of the notes come from the Resolve detail attached one
+        # line above, which only the page reads.
+        entry["notes"] = health.detail_notes(entry)
     return fleet
 
 
@@ -2012,6 +2018,12 @@ async def partial_admin_protection_ack(
         db.audit(conn, admin, "protection.ack", str(form.get("key") or ""),
                  {"date": entry["date"]})
         conn.commit()
+        # The line above the button re-reads the store NOW (2026-09-11):
+        # without this the panel said MISSING for up to fifteen minutes
+        # under a row that said "last recorded today by alex".
+        protection.refresh_line(conn, request.app.state.settings,
+                                str(form.get("key") or ""), db.utcnow_iso())
+        conn.commit()
         notice = f"recorded {entry['date']}."
     except ValueError as exc:
         conn.rollback()
@@ -2873,7 +2885,15 @@ async def partial_admin_archive_project(request: Request,
         elif db.unarchive_project(conn, slug):
             db.audit(conn, admin, "project.unarchive", slug, {})
         conn.commit()
-    return RedirectResponse("/admin/assignments", status_code=303)
+    # Back to the plan that was on screen (2026-09-11): the page is filtered
+    # by person and computer now, and a redirect to the bare address would
+    # answer [ ARCHIVE ] by emptying the grid the admin was reading.
+    back = "/admin/assignments"
+    editor = form.get("editor", "").strip()
+    machine = form.get("machine", "")
+    if editor:
+        back += f"?editor={quote(editor, safe='')}&machine={quote(machine, safe='')}"
+    return RedirectResponse(back, status_code=303)
 
 
 @router.post("/partials/admin/users/suspend")
@@ -3511,6 +3531,96 @@ def _feed_next_check_seconds(last_checked_at: str | None, interval: float) -> in
     return max(0, int(interval - elapsed))
 
 
+# --------------------------------------- Settings -> Packages: the grouping
+# The owner's reading of the page, 2026-09-11: "it should be sorted into
+# categories, so companion > windows / mac / linux | dashboard | onboard".
+# Every list on that panel -- what this dashboard serves, what the vendor
+# offers, what is held here for a rollback -- is grouped by the same two keys
+# in the same order, so the eye lands in the same place in all three.
+#
+# A group with nothing in it is NOT rendered: there is no such thing as a
+# linux companion build, and a heading over an empty space reads as a thing
+# that has gone missing rather than one that never existed.
+PACKAGE_KIND_ORDER = ("companion", "dashboard", "onboard")
+PACKAGE_PLATFORM_ORDER = ("windows", "macos", "linux")
+
+
+def _ordered(values: list[str], order: tuple[str, ...]) -> list[str]:
+    """`order` first, then anything else alphabetically. A kind or platform
+    this build has never heard of still gets a heading -- the page is read by
+    an admin whose vendor may ship something this dashboard predates."""
+    known = [v for v in order if v in values]
+    return known + sorted(v for v in values if v not in order)
+
+
+def _kind_platform_groups(rows: list[dict]) -> list[dict]:
+    """[{kind, platforms: [{platform, rows}]}], in PACKAGE_KIND_ORDER and
+    PACKAGE_PLATFORM_ORDER. Row order inside a platform is the caller's:
+    db.fetch_companion_packages already answers newest first."""
+    by_kind: dict[str, dict[str, list[dict]]] = {}
+    for row in rows:
+        kind = str(row.get("kind") or "").strip().lower()
+        platform = str(row.get("platform") or "").strip().lower()
+        by_kind.setdefault(kind, {}).setdefault(platform, []).append(row)
+    groups = []
+    for kind in _ordered(list(by_kind), PACKAGE_KIND_ORDER):
+        platforms = by_kind[kind]
+        groups.append({
+            "kind": kind,
+            "platforms": [{"platform": p, "rows": platforms[p]}
+                          for p in _ordered(list(platforms), PACKAGE_PLATFORM_ORDER)],
+        })
+    return groups
+
+
+def _vendor_rows(app_state, packages: dict) -> list[dict]:
+    """What the vendor's channel carries, each record told apart by what THIS
+    dashboard has already done with it (owner, 2026-09-11: "what is the
+    difference between published packages which aren't current, and available
+    from the vendor?").
+
+    release_feed.build_feed_view's `available` is deliberately only the
+    records with no row here, so a version the vendor offers and this server
+    already serves used to vanish from the section entirely -- which is what
+    made the two lists look like two unrelated ledgers. Same source records
+    (release_feed.verified_records, so the [ PUBLISH ] buttons still name only
+    what a check really verified), classified rather than filtered.
+    """
+    try:
+        records = release_feed.package_records(release_feed.verified_records(app_state))
+    except Exception:  # noqa: BLE001
+        # Best-effort like every other optional block on this page: a feed
+        # cache this build cannot read must not take the Packages page down.
+        log.exception("could not read the verified feed records for the vendor section")
+        return []
+    held = {(p["kind"], p["platform"], p["version"]): p
+            for p in packages.get("packages") or []}
+    rows: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for record in records:
+        kind = str(record.get("kind") or "").strip().lower()
+        platform = str(record.get("platform") or "").strip().lower()
+        version = str(record.get("version") or "").strip()
+        if not (kind and platform and version) or (kind, platform, version) in seen:
+            continue
+        seen.add((kind, platform, version))
+        mine = held.get((kind, platform, version))
+        rows.append({
+            "kind": kind, "platform": platform, "version": version,
+            "size_bytes": record.get("size_bytes") or 0,
+            "notes": record.get("notes") or "",
+            "published_at": record.get("published_at") or "",
+            "git_dirty": bool(record.get("git_dirty")),
+            "git_sha": str(record.get("git_sha") or ""),
+            # "available" is exactly build_feed_view's `available`: no row
+            # here at all. The other two are the answer to the owner's
+            # question, said on the row itself.
+            "state": ("current" if mine and mine.get("is_current")
+                      else "held" if mine else "available"),
+        })
+    return rows
+
+
 def _packages_and_feed(conn, request: Request, error: str | None = None,
                        refused: list | None = None,
                        current_refused: str = "") -> dict:
@@ -3524,8 +3634,18 @@ def _packages_and_feed(conn, request: Request, error: str | None = None,
     # max(POLLER_MIN_INTERVAL, settings.release_feed_interval)).
     interval = max(release_feed.POLLER_MIN_INTERVAL,
                    float(getattr(settings, "release_feed_interval", 0) or 86400.0))
+    packages = build_packages_view(conn, settings)
+    rows = packages["packages"]
     return {
-        "packages": build_packages_view(conn, settings),
+        "packages": packages,
+        # The three lists the panel renders, grouped once here rather than
+        # three times in Jinja (owner, 2026-09-11). A row is in exactly one
+        # of the first two: what the fleet is handed, and what is kept here
+        # behind it for a rollback or a staged canary.
+        "served_groups": _kind_platform_groups([p for p in rows if p["is_current"]]),
+        "held_groups": _kind_platform_groups([p for p in rows if not p["is_current"]]),
+        "held_count": len([p for p in rows if not p["is_current"]]),
+        "vendor_groups": _kind_platform_groups(_vendor_rows(request.app.state, packages)),
         "feed": feed,
         "nas_kind": getattr(settings, "nas_kind", ""),
         "feed_interval_seconds": interval,

@@ -1,6 +1,13 @@
 <div class="admin-packages-box">
-  <div class="side-head">[ PUBLISHED PACKAGES ]
-    <span class="muted">companion: what the fleet self-upgrades to. onboard: the full installer served by [ INSTALLER ]. CURRENT is per kind and platform.</span></div>
+  {# The panel's three lists, 2026-09-11 (owner): CURRENTLY SERVED first,
+     then what the vendor offers, then the versions kept here behind them.
+     It used to open with one flat table called PUBLISHED PACKAGES that mixed
+     the build the fleet is handed with the rollback material and the staged
+     canaries, in publish order, nine columns wide -- so the first thing on
+     the page was not the answer to "what is my fleet running". The grouping
+     (kind, then platform) comes from ui._kind_platform_groups, and all three
+     lists use the same one and the same four column roles, so a version
+     lines up with a version wherever the eye goes. #}
 
   {% if error %}
     {# DUI-6: `error-banner` is what static/htmx_errors.js moves next to the button
@@ -41,132 +48,208 @@
     {% endif %}
   {% endif %}
 
-  {% if packages.packages %}
-    {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row is one published build,
-       nine columns of it, and the chips inside VERSION are the reason this
-       table is stacked rather than scrolled sideways: they are the answer. #}
-    {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
-       600 px, but between 600 and 900 it is still a grid, and a grid that
-       is wider than the window has to scroll inside itself rather than take
-       the page with it (round 2 of the sweep, 2026-08-30). #}
-    <div class="scroll-x">
-    <table class="editors stack">
-      <thead><tr><th>KIND</th><th>VERSION</th><th>PLATFORM</th><th>SIZE</th><th>SHA256</th><th>PUBLISHED</th><th>BY</th><th></th><th></th></tr></thead>
-      <tbody>
-      {% for p in packages.packages %}
-        <tr class="editor-row">
-          <td class="mono-sm muted" data-label="KIND">{{ p.kind }}</td>
-          <td class="mono-sm" data-label="VERSION">{{ p.version }}
-            {# REL-13 (resilience sweep 2026-08-28): "+dirty" used to die at the
-               publish boundary, so the fleet's 0.9.55 could correspond to no
-               commit in the repo, permanently and invisibly. #}
-            {% if p.git_dirty %}<span class="chip amber" title="built from uncommitted code">(+dirty, {{ p.git_sha or "no commit" }})</span>
-            {% elif p.git_sha %}<span class="muted mono-sm" title="the commit this build came from">{{ p.git_sha }}</span>{% endif %}
-            {% if p.is_current %}<span class="chip green">[ CURRENT ]</span>{% endif %}
-            {% if p.kind == "companion" and not p.is_current and not p.retracted %}<span class="chip">[ STAGED ]</span>{% endif %}
-            {% if p.arch %}<span class="chip" title="the CPU this binary was built for">{{ p.arch }}</span>{% endif %}
-            {% if p.retracted %}<span class="chip red" title="{{ p.retracted_reason }}">[ RECALLED ]</span>{% endif %}
-            {% if p.ordering_blocked %}<span class="chip red" title="needs dashboard {{ p.requires_dashboard }}, this dashboard is {{ packages.dashboard_version }}">[ UPDATE THE DASHBOARD FIRST ]</span>{% endif %}
-            {% if not p.file_exists %}<span class="chip red" title="row exists but the file is gone from the packages dir">[ FILE MISSING ]</span>{% endif %}
-            {# COMMERCIAL_READINESS.md item 4, 2026-08-17: a row published before
-               release signing exists carries no signature, and every companion
-               that verifies will refuse it -- so the fleet silently stops
-               upgrading. Say it here, where MAKE CURRENT is clicked. #}
-            {% if not p.signature %}<span class="chip red" title="published without a release signature: companions that verify will REFUSE this build; republish through tools\ship.cmd">[ UNSIGNED ]</span>{% endif %}
-            {% if p.signature and not p.signed_binary %}<span class="chip amber" title="the record is signed, but the binary itself carries no Authenticode/Developer ID signature: fresh installs meet SmartScreen/Gatekeeper">[ NO CODE SIG ]</span>{% endif %}
-          </td>
-          <td class="mono-sm muted" data-label="PLATFORM">{{ p.platform }}</td>
-          <td class="mono-sm" data-label="SIZE">{{ p.size_bytes | human_bytes }}</td>
-          <td class="mono-sm muted" data-label="SHA256" title="{{ p.sha256 }}">{{ p.sha256[:12] }}…</td>
-          <td class="muted" data-label="PUBLISHED">{{ p.published_at | ago }}</td>
-          <td class="muted" data-label="BY">{{ p.published_by }}</td>
-          <td data-label="MAKE CURRENT">
-            {# REL-1: a build is STAGED first and reaches the fleet only after
-               one machine has actually run it. The canary line is the evidence
-               the click is made on; the override needs the version typed. #}
-            {% if p.soak and not p.is_current and not p.retracted %}
-              <div class="muted mono-sm" style="margin-bottom:0.2rem">
-                canary: {{ p.soak.machines }} computer{{ "s" if p.soak.machines != 1 }} on {{ p.version }}
-                for {{ p.soak.minutes }} min, {{ p.soak.crashes }} crashes
-                {#- CR-191 (2026-09-04): the crash counter is a LIFETIME count of
-                    files on that computer's disk, and reading it as this build's
-                    is what refused 0.9.70 over 16 markers written weeks ago by
-                    0.9.66 and older. The gate counts the ones written since this
-                    build started running there; say which these are. #}
-                {%- if p.soak.crashes and not p.soak.crashes_on_version and not p.soak.crashes_unknown %} (none since {{ p.version }} started there)
-                {%- elif p.soak.crashes_on_version %} ({{ p.soak.crashes_on_version }} computer{{ "s" if p.soak.crashes_on_version != 1 }} crashed since {{ p.version }} started there){% endif %}
-                {%- if p.soak.reverted %}, {{ p.soak.reverted }} rolled back{% endif %}
-                (soak {{ p.soak.soak_minutes }} min)
-              </div>
-              <form class="inline-form" hx-post="/partials/admin/packages/push-one"
-                    hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this">
-                <input type="hidden" name="platform" value="{{ p.platform }}">
-                <input type="hidden" name="version" value="{{ p.version }}">
-                <select name="target">
-                  <option value="">pick a computer…</option>
-                  {% for m in packages.machines_by_platform.get(p.platform, []) %}
-                    <option value="{{ m.editor_username }}/{{ m.machine }}">{{ m.editor_username }}/{{ m.machine }} ({{ m.companion_version or "?" }})</option>
-                  {% endfor %}
-                </select>
-                {# REL-12 (2026-09-03): the form carries hx-indicator, so the
-                   button dims and swaps its label while the request is in
-                   flight. Without it a second click was the natural response
-                   to a button that looks dead for its whole duration. #}
-                <button class="btn tap" type="submit"
-                        title="ask one computer to take this build on its next report"><span class="idle-label">[ PUSH TO ONE COMPUTER ]</span><span class="busy-label">[ ASKING THAT COMPUTER... ]</span></button>
-              </form>
-            {% endif %}
-            {% if not p.is_current and not p.retracted %}
-            <form class="inline-form" hx-post="/partials/admin/packages/current"
-                  hx-target="closest .admin-packages-box" hx-swap="outerHTML">
-              <input type="hidden" name="kind" value="{{ p.kind }}">
-              <input type="hidden" name="platform" value="{{ p.platform }}">
-              <input type="hidden" name="version" value="{{ p.version }}">
-              <button class="btn tap" type="submit">[ MAKE CURRENT ]</button>
-            </form>
-            {# The typed override, for the soak gate and (UX-9, 2026-08-28)
-               for an UNSIGNED build: one mechanism, not two. Making an
-               unsigned build current stops every companion upgrading,
-               silently, because they verify the record signature. #}
-            {% if (p.soak and not p.soak.ok) or not p.signature %}
-            <form class="inline-form" hx-post="/partials/admin/packages/current"
-                  hx-target="closest .admin-packages-box" hx-swap="outerHTML"
-                  {% if not p.signature %}
-                  hx-confirm="This build has no release signature. Companions verify signatures, so making it current stops EVERY computer in the fleet from updating, silently. Republish it through tools\ship.cmd instead. Make it current anyway?"
-                  {% endif %}>
-              <input type="hidden" name="kind" value="{{ p.kind }}">
-              <input type="hidden" name="platform" value="{{ p.platform }}">
-              <input type="hidden" name="version" value="{{ p.version }}">
-              <input type="hidden" name="force" value="1">
-              <input type="text" name="confirm" placeholder="type {{ p.version }}" size="12">
-              <button class="btn tap" type="submit"
-                      title="{% if not p.signature %}hand this UNSIGNED build to the whole fleet, which stops every computer updating{% else %}hand this build to the whole fleet without waiting for the soak{% endif %}">[ MAKE CURRENT ANYWAY ]</button>
-            </form>
-            {% endif %}
-            {% endif %}
-          </td>
-          <td data-label="DELETE">
-            {% if not p.is_current %}
-            {# C-5 (UX.md, 2026-08-28): the bytes a rollback needs, deleted on
-               one click to "tidy up". They go to packages/.trash for 30 days
-               now, but the click is still worth spelling out. #}
-            <form class="inline-form" hx-post="/partials/admin/packages/delete"
-                  hx-target="closest .admin-packages-box" hx-swap="outerHTML"
-                  hx-confirm="Delete {{ p.kind }} {{ p.version }} for {{ p.platform }}? These are the bytes a rollback to that version needs. Once it is gone you cannot put the fleet back on it without rebuilding and republishing.">
-              <input type="hidden" name="kind" value="{{ p.kind }}">
-              <input type="hidden" name="platform" value="{{ p.platform }}">
-              <input type="hidden" name="version" value="{{ p.version }}">
-              <button class="btn" type="submit">[ DELETE ]</button>
-            </form>
-            {% endif %}
-          </td>
-        </tr>
+{# ------------------------------------------------------------- macros #}
+{# The chips a published row carries. They are the answer on this page, which
+   is why they live in the VERSION cell rather than in columns of their own
+   (that was nine columns and a row that wrapped four times). #}
+{% macro package_chips(p) %}
+  {# REL-13 (resilience sweep 2026-08-28): "+dirty" used to die at the
+     publish boundary, so the fleet's 0.9.55 could correspond to no commit
+     in the repo, permanently and invisibly. #}
+  {% if p.git_dirty %}<span class="chip amber" title="built from uncommitted code">(+dirty, {{ p.git_sha or "no commit" }})</span>
+  {% elif p.git_sha %}<span class="muted mono-sm" title="the commit this build came from">{{ p.git_sha }}</span>{% endif %}
+  {% if p.is_current %}<span class="chip green">[ CURRENT ]</span>{% endif %}
+  {% if p.kind == "companion" and not p.is_current and not p.retracted %}<span class="chip">[ STAGED ]</span>{% endif %}
+  {% if p.arch %}<span class="chip" title="the CPU this binary was built for">{{ p.arch }}</span>{% endif %}
+  {% if p.retracted %}<span class="chip red" title="{{ p.retracted_reason }}">[ RECALLED ]</span>{% endif %}
+  {% if p.ordering_blocked %}<span class="chip red" title="needs dashboard {{ p.requires_dashboard }}, this dashboard is {{ packages.dashboard_version }}">[ UPDATE THE DASHBOARD FIRST ]</span>{% endif %}
+  {% if not p.file_exists %}<span class="chip red" title="row exists but the file is gone from the packages dir">[ FILE MISSING ]</span>{% endif %}
+  {# COMMERCIAL_READINESS.md item 4, 2026-08-17: a row published before
+     release signing exists carries no signature, and every companion
+     that verifies will refuse it -- so the fleet silently stops
+     upgrading. Say it here, where MAKE CURRENT is clicked. #}
+  {% if not p.signature %}<span class="chip red" title="published without a release signature: companions that verify will REFUSE this build; republish through tools\ship.cmd">[ UNSIGNED ]</span>{% endif %}
+  {% if p.signature and not p.signed_binary %}<span class="chip amber" title="the record is signed, but the binary itself carries no Authenticode/Developer ID signature: fresh installs meet SmartScreen/Gatekeeper">[ NO CODE SIG ]</span>{% endif %}
+{% endmacro %}
+
+{# One published build, one line: version and its chips, when it was
+   published, how big it is, and its actions at the right. #}
+{% macro package_row(p) %}
+  <tr class="editor-row pkg-row">
+    <td class="mono-sm" data-label="VERSION">{{ p.version }}{{ package_chips(p) }}</td>
+    <td class="muted" data-label="PUBLISHED">{{ p.published_at | ago }}{% if p.published_by %} by {{ p.published_by }}{% endif %}</td>
+    <td class="mono-sm muted" data-label="SIZE" title="sha256 {{ p.sha256 }}">{{ p.size_bytes | human_bytes }} · {{ p.sha256[:12] }}…</td>
+    <td class="pkg-actions" data-label="">
+      {% if p.is_current %}
+        {% if p.machines_running_known %}
+          <span class="muted mono-sm">{{ p.machines_running }} computer{{ "s" if p.machines_running != 1 }} on it</span>
+        {% endif %}
+      {% else %}
+        {# REL-1: a build is STAGED first and reaches the fleet only after
+           one machine has actually run it. The canary line is the evidence
+           the click is made on; the override needs the version typed. #}
+        {% if p.soak and not p.retracted %}
+          <span class="muted mono-sm">canary: {{ p.soak.machines }} computer{{ "s" if p.soak.machines != 1 }} on {{ p.version }}
+            for {{ p.soak.minutes }} min, {{ p.soak.crashes }} crashes
+            {#- CR-191 (2026-09-04): the crash counter is a LIFETIME count of
+                files on that computer's disk, and reading it as this build's
+                is what refused 0.9.70 over 16 markers written weeks ago by
+                0.9.66 and older. The gate counts the ones written since this
+                build started running there; say which these are. #}
+            {%- if p.soak.crashes and not p.soak.crashes_on_version and not p.soak.crashes_unknown %} (none since {{ p.version }} started there)
+            {%- elif p.soak.crashes_on_version %} ({{ p.soak.crashes_on_version }} computer{{ "s" if p.soak.crashes_on_version != 1 }} crashed since {{ p.version }} started there){% endif %}
+            {%- if p.soak.reverted %}, {{ p.soak.reverted }} rolled back{% endif %}
+            (soak {{ p.soak.soak_minutes }} min)</span>
+          <form class="inline-form" hx-post="/partials/admin/packages/push-one"
+                hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this">
+            <input type="hidden" name="platform" value="{{ p.platform }}">
+            <input type="hidden" name="version" value="{{ p.version }}">
+            <select name="target">
+              <option value="">pick a computer…</option>
+              {% for m in packages.machines_by_platform.get(p.platform, []) %}
+                <option value="{{ m.editor_username }}/{{ m.machine }}">{{ m.editor_username }}/{{ m.machine }} ({{ m.companion_version or "?" }})</option>
+              {% endfor %}
+            </select>
+            {# REL-12 (2026-09-03): the form carries hx-indicator, so the
+               button dims and swaps its label while the request is in
+               flight. Without it a second click was the natural response
+               to a button that looks dead for its whole duration. #}
+            <button class="btn tap" type="submit"
+                    title="ask one computer to take this build on its next report"><span class="idle-label">[ PUSH TO ONE COMPUTER ]</span><span class="busy-label">[ ASKING THAT COMPUTER... ]</span></button>
+          </form>
+        {% endif %}
+        {% if not p.retracted %}
+        <form class="inline-form" hx-post="/partials/admin/packages/current"
+              hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+          <input type="hidden" name="kind" value="{{ p.kind }}">
+          <input type="hidden" name="platform" value="{{ p.platform }}">
+          <input type="hidden" name="version" value="{{ p.version }}">
+          <button class="btn tap" type="submit">[ MAKE CURRENT ]</button>
+        </form>
+        {# The typed override, for the soak gate and (UX-9, 2026-08-28)
+           for an UNSIGNED build: one mechanism, not two. Making an
+           unsigned build current stops every companion upgrading,
+           silently, because they verify the record signature. #}
+        {% if (p.soak and not p.soak.ok) or not p.signature %}
+        <form class="inline-form" hx-post="/partials/admin/packages/current"
+              hx-target="closest .admin-packages-box" hx-swap="outerHTML"
+              {% if not p.signature %}
+              hx-confirm="This build has no release signature. Companions verify signatures, so making it current stops EVERY computer in the fleet from updating, silently. Republish it through tools\ship.cmd instead. Make it current anyway?"
+              {% endif %}>
+          <input type="hidden" name="kind" value="{{ p.kind }}">
+          <input type="hidden" name="platform" value="{{ p.platform }}">
+          <input type="hidden" name="version" value="{{ p.version }}">
+          <input type="hidden" name="force" value="1">
+          <input type="text" name="confirm" placeholder="type {{ p.version }}" size="12">
+          <button class="btn tap" type="submit"
+                  title="{% if not p.signature %}hand this UNSIGNED build to the whole fleet, which stops every computer updating{% else %}hand this build to the whole fleet without waiting for the soak{% endif %}">[ MAKE CURRENT ANYWAY ]</button>
+        </form>
+        {% endif %}
+        {% endif %}
+        {# C-5 (UX.md, 2026-08-28): the bytes a rollback needs, deleted on
+           one click to "tidy up". They go to packages/.trash for 30 days
+           now, but the click is still worth spelling out. The sentence is
+           in the confirm, not in the row: it took three lines on the page
+           and was read by nobody (owner, 2026-09-11). #}
+        <form class="inline-form" hx-post="/partials/admin/packages/delete"
+              hx-target="closest .admin-packages-box" hx-swap="outerHTML"
+              hx-confirm="Delete {{ p.kind }} {{ p.version }} for {{ p.platform }}? These are the bytes a rollback to that version needs. Once it is gone you cannot put the fleet back on it without rebuilding and republishing.">
+          <input type="hidden" name="kind" value="{{ p.kind }}">
+          <input type="hidden" name="platform" value="{{ p.platform }}">
+          <input type="hidden" name="version" value="{{ p.version }}">
+          <button class="btn" type="submit">[ DELETE ]</button>
+        </form>
+      {% endif %}
+    </td>
+  </tr>
+{% endmacro %}
+
+{# One build the vendor offers, told apart by what this server already did
+   with it (ui._vendor_rows). #}
+{% macro vendor_row(p) %}
+  <tr class="editor-row pkg-row">
+    <td class="mono-sm" data-label="VERSION">{{ p.version }}
+      {% if p.git_dirty %}<span class="chip amber" title="built from uncommitted code">(+dirty, {{ p.git_sha or "no commit" }})</span>{% endif %}
+      {% if p.state == "current" %}<span class="chip green">[ CURRENT HERE ]</span>
+      {% elif p.state == "held" %}<span class="chip">[ STAGED, NOT CURRENT ]</span>{% endif %}
+    </td>
+    <td class="muted" data-label="PUBLISHED">{{ p.published_at | ago if p.published_at else "" }}{% if p.notes %} · {{ p.notes }}{% endif %}</td>
+    <td class="mono-sm muted" data-label="SIZE">{{ p.size_bytes | human_bytes }}</td>
+    <td class="pkg-actions" data-label="">
+      {% if p.state == "current" %}
+        <span class="muted mono-sm">this server already hands this build to its fleet</span>
+      {% elif p.state == "held" %}
+        {# Already downloaded here, waiting for a human: the action is the
+           same MAKE CURRENT the section below it carries, offered where the
+           admin is looking rather than only there. #}
+        <form class="inline-form" hx-post="/partials/admin/packages/current"
+              hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+          <input type="hidden" name="kind" value="{{ p.kind }}">
+          <input type="hidden" name="platform" value="{{ p.platform }}">
+          <input type="hidden" name="version" value="{{ p.version }}">
+          <button class="btn tap" type="submit">[ MAKE CURRENT ]</button>
+        </form>
+      {% else %}
+        <form class="inline-form" hx-post="/partials/admin/feed/publish"
+              hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this">
+          <input type="hidden" name="kind" value="{{ p.kind }}">
+          <input type="hidden" name="platform" value="{{ p.platform }}">
+          <input type="hidden" name="version" value="{{ p.version }}">
+          {# DUI-4 (2026-09-04): a publish DOWNLOADS the artefact from
+             the vendor feed, tens of megabytes over the internet. The
+             button said nothing for the whole of it. #}
+          <button class="btn tap" type="submit"><span class="idle-label">[ PUBLISH ]</span><span class="busy-label">[ DOWNLOADING THE BUILD... ]</span></button>
+        </form>
+        <form class="inline-form" hx-post="/partials/admin/feed/publish"
+              hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this">
+          <input type="hidden" name="kind" value="{{ p.kind }}">
+          <input type="hidden" name="platform" value="{{ p.platform }}">
+          <input type="hidden" name="version" value="{{ p.version }}">
+          <input type="hidden" name="make_current" value="1">
+          {# DUI-4 (2026-09-04): same download as [ PUBLISH ] beside it. #}
+          <button class="btn tap" type="submit"><span class="idle-label">[ PUBLISH + MAKE CURRENT ]</span><span class="busy-label">[ DOWNLOADING THE BUILD... ]</span></button>
+        </form>
+      {% endif %}
+    </td>
+  </tr>
+{% endmacro %}
+
+{# One table per section, the kind and the platform as spanning rows inside
+   it: separate tables per group would put every group on column widths of
+   its own, which is the misalignment the owner was reading. #}
+{# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row is one build, and the
+   chips inside VERSION are the reason this table is stacked rather than
+   scrolled sideways: they are the answer. .scroll-x: between 600 and 900 px
+   it is still a grid, and a grid wider than the window has to scroll inside
+   itself rather than take the page with it. #}
+{% macro group_table(groups, row_macro) %}
+  <div class="scroll-x">
+  <table class="editors stack pkg-table">
+    <colgroup><col class="pkg-col-version"><col class="pkg-col-when"><col class="pkg-col-size"><col class="pkg-col-actions"></colgroup>
+    <thead><tr><th>VERSION</th><th>PUBLISHED</th><th>SIZE</th><th></th></tr></thead>
+    <tbody>
+    {% for group in groups %}
+      <tr class="pkg-kind-row"><td colspan="4">{{ group.kind }}</td></tr>
+      {% for sub in group.platforms %}
+        <tr class="pkg-platform-row"><td colspan="4">{{ sub.platform }}</td></tr>
+        {% for p in sub.rows %}{{ row_macro(p) }}{% endfor %}
       {% endfor %}
-      </tbody>
-    </table>
-    </div>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+{% endmacro %}
+
+{# ------------------------------------------------- 1. currently served #}
+  <div class="side-head" style="margin-top:1.2rem">[ CURRENTLY SERVED ]
+    <span class="muted">what this server hands out right now, one build per kind and platform.
+      companion: what the fleet self-upgrades to. onboard: the full installer served by [ INSTALLER ].</span></div>
+
+  {% if served_groups %}
+    {{ group_table(served_groups, package_row) }}
   {% else %}
-    <div class="muted">nothing published yet</div>
+    <div class="muted">nothing is being served yet: publish a build below, or from your wired
+      computer with <span class="mono-sm publish-cmd">tools\ship.cmd</span></div>
   {% endif %}
 
   {# REL-3 (resilience sweep 2026-08-28): a build the vendor has RECALLED. It
@@ -236,6 +319,150 @@
     {% endfor %}
   {% endif %}
 
+{# ------------------------------------------- 2. available from the vendor #}
+  {# The vendor release feed (ZERO_TOUCH_PLAN.md WP E, 2026-08-17): "we
+     publish once, every dashboard pulls". `feed` comes from
+     ui._packages_and_feed on every route that re-renders this partial, so
+     this section is always as fresh as the tables above it. #}
+  <div class="side-head" style="margin-top:1.6rem">[ AVAILABLE FROM THE VENDOR ]
+    <span class="muted">what your supplier publishes. Nothing here reaches your fleet until it is
+      published onto this server and made current.</span></div>
+  {% if not feed.configured %}
+    <div class="muted">
+      not configured, so this server is not being offered new builds. Ask whoever installed
+      this server to point it at your supplier's release channel: it is a container setting,
+      not something this page can change.
+    </div>
+  {% else %}
+    {# REL-11 (2026-09-03): "last checked 19 hours ago" with no cadence beside
+       it tells an admin who has just been told a fix is out nothing about
+       whether waiting five minutes would help. The default interval is a DAY.
+       Both figures come from ui._packages_and_feed, which reads the same
+       settings value the poller sleeps on. #}
+    <div class="muted">
+      feed: <span class="mono-sm">{{ feed.feed_url }}</span>
+      · last checked {{ feed.last_checked_at | ago if feed.last_checked_at else "never" }}
+      {% if feed_interval_seconds %}· checks every
+        {%- if feed_interval_seconds >= 3600 %} {{ (feed_interval_seconds / 3600) | round | int }} h{% else %} {{ feed_interval_seconds | eta }}{% endif %}{% endif %}
+      {% if feed_next_check_seconds is not none %}·
+        {{ "next retry in about" if feed.last_error else "next in about" }}
+        {{ feed_next_check_seconds | eta }}{% endif %}
+      {% if feed.last_error %}<span class="chip red" title="{{ feed.last_error }}">[ LAST CHECK FAILED ]</span>{% endif %}
+    </div>
+    <form class="inline-form" hx-post="/partials/admin/feed/check"
+          hx-target="closest .admin-packages-box" hx-swap="outerHTML" style="margin:0.4rem 0" hx-indicator="this" hx-disabled-elt="this">
+      {# DUI-4 (2026-09-04): a check fetches the vendor's channel over the
+         internet, so it is not instant. #}
+      <button class="btn tap" type="submit"><span class="idle-label">[ CHECK NOW ]</span><span class="busy-label">[ CHECKING THE FEED... ]</span></button>
+    </form>
+
+    {# What the check REFUSED (2026-09-04). A build this dashboard will not
+       accept -- an unsigned record, one below the downgrade floor, one whose
+       min_version is above itself -- used to leave the page looking exactly
+       like a feed with nothing new in it, and the evidence was one log line
+       in a container nobody opens. #}
+    {% if feed_refused %}
+      <div class="muted" style="margin-top:0.4rem">
+        <span class="chip red">[ REFUSED ]</span>
+        this dashboard would not take
+        {% for r in feed_refused %}<span class="mono-sm">{{ r }}</span>{{ ", " if not loop.last }}{% endfor %}
+        from the feed. Nothing was published. Ask whoever publishes these
+        builds: it is the release record that is being refused, not the
+        download.
+      </div>
+    {% endif %}
+
+    <div class="muted" style="margin-top:0.4rem">
+      policy:
+      <form class="inline-form" hx-post="/partials/admin/feed/policy"
+            hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+        {# C-3 (UX.md, 2026-08-28): one arrow key used to arm unattended
+             fleet-wide upgrades. static/confirms.js owns the change handler
+             now, and puts the select back when the admin cancels. #}
+          <select name="policy" data-previous="{{ feed.policy }}">
+          <option value="manual" {% if feed.policy == "manual" %}selected{% endif %}>manual - Check now / Publish only</option>
+          <option value="stage" {% if feed.policy == "stage" %}selected{% endif %}>stage - auto-publish, not current</option>
+          <option value="current" {% if feed.policy == "current" %}selected{% endif %}>current - auto-publish + make current</option>
+        </select>
+      </form>
+    </div>
+
+    {% if vendor_groups %}
+      {{ group_table(vendor_groups, vendor_row) }}
+    {% elif feed.available %}
+      {# The classified list is built from the same verified records the
+         [ PUBLISH ] route reads, so this branch means those records could not
+         be read while `available` could. Offer the versions rather than
+         nothing: a build the vendor has and this page hides is the failure
+         this section exists to prevent. #}
+      <div class="muted" style="margin-top:0.4rem">
+        {% for p in feed.available %}<span class="mono-sm">{{ p.kind }} {{ p.version }} {{ p.platform }}</span>{{ ", " if not loop.last }}{% endfor %}
+        are offered by the vendor. Run [ CHECK NOW ] to publish them.
+      </div>
+    {% else %}
+      <div class="muted">nothing new: the fleet's packages already cover everything the vendor feed offers</div>
+    {% endif %}
+
+    {# Same version, different bytes (release-pipeline-6, 2026-08-21). Every
+       other surface in this product - drift tooling, the tables above, a
+       companion's report - speaks only in version numbers, so a version that
+       stands for two different binaries is invisible unless it is said out
+       loud here. #}
+    {% for c in feed.sha_conflicts or [] %}
+      <div class="muted" style="margin-top:0.6rem">
+        <span class="chip red">[ SAME VERSION, DIFFERENT BYTES ]</span>
+        <span class="mono-sm">{{ c.kind }} {{ c.version }} {{ c.platform }}</span>:
+        published here as <span class="mono-sm">{{ c.published_sha256[:12] }}</span>,
+        the vendor feed now offers <span class="mono-sm">{{ c.feed_sha256[:12] }}</span>.
+        Nothing was replaced. Ask the vendor to publish it under a new version number.
+      </div>
+    {% endfor %}
+
+    {% for r in feed.retracted or [] %}
+      <div class="muted" style="margin-top:0.6rem">
+        <span class="chip red">[ RECALLED BY THE VENDOR ]</span>
+        <span class="mono-sm">{{ r.kind }} {{ r.version }} {{ r.platform }}</span>
+        {%- if r.reason %}: {{ r.reason }}{% endif %}.
+        It is not offered here under any policy.
+      </div>
+    {% endfor %}
+
+    {% if feed.image.tag %}
+      {% if nas_kind == "synology" %}
+        {% set nas_hint = "Container Manager → Project ccsync → Build" %}
+      {% elif nas_kind == "truenas" %}
+        {% set nas_hint = "Apps → ccsync → Update" %}
+      {% else %}
+        {% set nas_hint = "your NAS's app/container manager's Update action" %}
+      {% endif %}
+      <div class="muted" style="margin-top:0.6rem">
+        image <span class="mono-sm">{{ feed.image.tag }}</span> available
+        (running <span class="mono-sm">{{ feed.image.current_running_version }}</span>)
+        - update in your NAS UI: <span class="mono-sm">{{ nas_hint }}</span>
+      </div>
+    {% endif %}
+  {% endif %}
+
+{# ------------------------------------- 3. other versions held on this server #}
+  {# Collapsed by default (owner, 2026-09-11): these are real and they are
+     kept on purpose, but they are not the answer to "what is my fleet
+     running" and they were the top of the page. #}
+  <details class="pkg-other" style="margin-top:1.6rem">
+    <summary class="side-head tap">[ OTHER VERSIONS HELD ON THIS SERVER ]
+      <span class="muted">{{ held_count }} build{{ "s" if held_count != 1 }}</span></summary>
+    <div class="muted" style="margin-top:0.4rem">
+      Kept so you can put the fleet back on one of them: republishing an older
+      build is how a rollback works here, and a build pulled from the vendor
+      feed waits here as a staged canary until somebody makes it current.
+    </div>
+    {% if held_groups %}
+      {{ group_table(held_groups, package_row) }}
+    {% else %}
+      <div class="muted">nothing held: every published build is the current one for its platform</div>
+    {% endif %}
+  </details>
+
+{# ------------------------------------------------ 4. out-of-date computers #}
   <div class="side-head" style="margin-top:1.2rem">[ OUT-OF-DATE COMPUTERS ]</div>
   {% if packages.outdated_machines %}
     {# .stack: a row is one machine (MOBILE_PLAN.md §3.2, 2026-08-30). #}
@@ -312,154 +539,4 @@
     soak-gated flip. See docs/RELEASE.md. Each computer's tray then offers the
     update.
   </div>
-
-  {# The vendor release feed (ZERO_TOUCH_PLAN.md WP E, 2026-08-17): "we
-     publish once, every dashboard pulls". `feed` comes from
-     ui._packages_and_feed on every route that re-renders this partial, so
-     this section is always as fresh as the packages table above it. #}
-  <div class="side-head" style="margin-top:1.6rem">[ AVAILABLE FROM THE VENDOR ]</div>
-  {% if not feed.configured %}
-    <div class="muted">
-      not configured, so this server is not being offered new builds. Ask whoever installed
-      this server to point it at your supplier's release channel: it is a container setting,
-      not something this page can change.
-    </div>
-  {% else %}
-    {# REL-11 (2026-09-03): "last checked 19 hours ago" with no cadence beside
-       it tells an admin who has just been told a fix is out nothing about
-       whether waiting five minutes would help. The default interval is a DAY.
-       Both figures come from ui._packages_and_feed, which reads the same
-       settings value the poller sleeps on. #}
-    <div class="muted">
-      feed: <span class="mono-sm">{{ feed.feed_url }}</span>
-      · last checked {{ feed.last_checked_at | ago if feed.last_checked_at else "never" }}
-      {% if feed_interval_seconds %}· checks every
-        {%- if feed_interval_seconds >= 3600 %} {{ (feed_interval_seconds / 3600) | round | int }} h{% else %} {{ feed_interval_seconds | eta }}{% endif %}{% endif %}
-      {% if feed_next_check_seconds is not none %}·
-        {{ "next retry in about" if feed.last_error else "next in about" }}
-        {{ feed_next_check_seconds | eta }}{% endif %}
-      {% if feed.last_error %}<span class="chip red" title="{{ feed.last_error }}">[ LAST CHECK FAILED ]</span>{% endif %}
-    </div>
-    <form class="inline-form" hx-post="/partials/admin/feed/check"
-          hx-target="closest .admin-packages-box" hx-swap="outerHTML" style="margin:0.4rem 0" hx-indicator="this" hx-disabled-elt="this">
-      {# DUI-4 (2026-09-04): a check fetches the vendor's channel over the
-         internet, so it is not instant. #}
-      <button class="btn tap" type="submit"><span class="idle-label">[ CHECK NOW ]</span><span class="busy-label">[ CHECKING THE FEED... ]</span></button>
-    </form>
-
-    {# What the check REFUSED (2026-09-04). A build this dashboard will not
-       accept -- an unsigned record, one below the downgrade floor, one whose
-       min_version is above itself -- used to leave the page looking exactly
-       like a feed with nothing new in it, and the evidence was one log line
-       in a container nobody opens. #}
-    {% if feed_refused %}
-      <div class="muted" style="margin-top:0.4rem">
-        <span class="chip red">[ REFUSED ]</span>
-        this dashboard would not take
-        {% for r in feed_refused %}<span class="mono-sm">{{ r }}</span>{{ ", " if not loop.last }}{% endfor %}
-        from the feed. Nothing was published. Ask whoever publishes these
-        builds: it is the release record that is being refused, not the
-        download.
-      </div>
-    {% endif %}
-
-    <div class="muted" style="margin-top:0.4rem">
-      policy:
-      <form class="inline-form" hx-post="/partials/admin/feed/policy"
-            hx-target="closest .admin-packages-box" hx-swap="outerHTML">
-        {# C-3 (UX.md, 2026-08-28): one arrow key used to arm unattended
-             fleet-wide upgrades. static/confirms.js owns the change handler
-             now, and puts the select back when the admin cancels. #}
-          <select name="policy" data-previous="{{ feed.policy }}">
-          <option value="manual" {% if feed.policy == "manual" %}selected{% endif %}>manual - Check now / Publish only</option>
-          <option value="stage" {% if feed.policy == "stage" %}selected{% endif %}>stage - auto-publish, not current</option>
-          <option value="current" {% if feed.policy == "current" %}selected{% endif %}>current - auto-publish + make current</option>
-        </select>
-      </form>
-    </div>
-
-    {% if feed.available %}
-      {# .stack: a row is one build the vendor offers (MOBILE_PLAN.md §3.2). #}
-      <div class="scroll-x">
-      <table class="editors stack" style="margin-top:0.6rem">
-        <thead><tr><th>KIND</th><th>VERSION</th><th>PLATFORM</th><th>SIZE</th><th>NOTES</th><th></th><th></th></tr></thead>
-        <tbody>
-        {% for p in feed.available %}
-          <tr class="editor-row">
-            <td class="mono-sm muted" data-label="KIND">{{ p.kind }}</td>
-            <td class="mono-sm" data-label="VERSION">{{ p.version }}</td>
-            <td class="mono-sm muted" data-label="PLATFORM">{{ p.platform }}</td>
-            <td class="mono-sm" data-label="SIZE">{{ p.size_bytes | human_bytes }}</td>
-            <td class="muted" data-label="NOTES">{{ p.notes }}</td>
-            <td data-label="PUBLISH">
-              <form class="inline-form" hx-post="/partials/admin/feed/publish"
-                    hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this">
-                <input type="hidden" name="kind" value="{{ p.kind }}">
-                <input type="hidden" name="platform" value="{{ p.platform }}">
-                <input type="hidden" name="version" value="{{ p.version }}">
-                {# DUI-4 (2026-09-04): a publish DOWNLOADS the artefact from
-                   the vendor feed, tens of megabytes over the internet. The
-                   button said nothing for the whole of it. #}
-                <button class="btn tap" type="submit"><span class="idle-label">[ PUBLISH ]</span><span class="busy-label">[ DOWNLOADING THE BUILD... ]</span></button>
-              </form>
-            </td>
-            <td data-label="PUBLISH + MAKE CURRENT">
-              <form class="inline-form" hx-post="/partials/admin/feed/publish"
-                    hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this">
-                <input type="hidden" name="kind" value="{{ p.kind }}">
-                <input type="hidden" name="platform" value="{{ p.platform }}">
-                <input type="hidden" name="version" value="{{ p.version }}">
-                <input type="hidden" name="make_current" value="1">
-                {# DUI-4 (2026-09-04): same download as [ PUBLISH ] beside it. #}
-                <button class="btn tap" type="submit"><span class="idle-label">[ PUBLISH + MAKE CURRENT ]</span><span class="busy-label">[ DOWNLOADING THE BUILD... ]</span></button>
-              </form>
-            </td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      </div>
-    {% else %}
-      <div class="muted">nothing new: the fleet's packages already cover everything the vendor feed offers</div>
-    {% endif %}
-
-    {# Same version, different bytes (release-pipeline-6, 2026-08-21). Every
-       other surface in this product - drift tooling, the table above, a
-       companion's report - speaks only in version numbers, so a version that
-       stands for two different binaries is invisible unless it is said out
-       loud here. #}
-    {% for c in feed.sha_conflicts or [] %}
-      <div class="muted" style="margin-top:0.6rem">
-        <span class="chip red">[ SAME VERSION, DIFFERENT BYTES ]</span>
-        <span class="mono-sm">{{ c.kind }} {{ c.version }} {{ c.platform }}</span>:
-        published here as <span class="mono-sm">{{ c.published_sha256[:12] }}</span>,
-        the vendor feed now offers <span class="mono-sm">{{ c.feed_sha256[:12] }}</span>.
-        Nothing was replaced. Ask the vendor to publish it under a new version number.
-      </div>
-    {% endfor %}
-
-    {% for r in feed.retracted or [] %}
-      <div class="muted" style="margin-top:0.6rem">
-        <span class="chip red">[ RECALLED BY THE VENDOR ]</span>
-        <span class="mono-sm">{{ r.kind }} {{ r.version }} {{ r.platform }}</span>
-        {%- if r.reason %}: {{ r.reason }}{% endif %}.
-        It is not offered here under any policy.
-      </div>
-    {% endfor %}
-
-    {% if feed.image.tag %}
-      {% if nas_kind == "synology" %}
-        {% set nas_hint = "Container Manager → Project ccsync → Build" %}
-      {% elif nas_kind == "truenas" %}
-        {% set nas_hint = "Apps → ccsync → Update" %}
-      {% else %}
-        {% set nas_hint = "your NAS's app/container manager's Update action" %}
-      {% endif %}
-      <div class="muted" style="margin-top:0.6rem">
-        image <span class="mono-sm">{{ feed.image.tag }}</span> available
-        (running <span class="mono-sm">{{ feed.image.current_running_version }}</span>)
-        - update in your NAS UI: <span class="mono-sm">{{ nas_hint }}</span>
-      </div>
-    {% endif %}
-  {% endif %}
 </div>

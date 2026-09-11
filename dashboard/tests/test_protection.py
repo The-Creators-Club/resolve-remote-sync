@@ -255,6 +255,38 @@ def test_the_key_backup_is_missing_until_an_admin_records_it(conn):
     assert "2026-08-20" in row["detail"]
 
 
+def test_an_acknowledgement_refreshes_its_own_line_and_notice_at_once(conn):
+    """2026-09-11: the owner clicked [ I HAVE BACKED IT UP ] and the line
+    stayed [ MISSING ] until the next 15-minute pass, under a row saying
+    "last recorded today". The ack route now re-runs that one line: its
+    stored verdict flips, its notice closes, and no other line's stored
+    verdict is touched."""
+    settings = _settings(release_pubkeys=("k",))
+    protection.run_cycle(conn, settings, NOW, tasks_fn=lambda: None)
+    before = {r["key"]: r for r in protection.stored_results(conn)["lines"]}
+    assert before["release_key_backup"]["state"] == protection.BROKEN
+    assert any(r["subject"].startswith("release_key_backup")
+               for r in dbmod.open_notices(conn))
+
+    protection.set_ack(conn, protection.ACK_KEY_BACKUP, "2026-08-20", "owen", now=NOW)
+    result = protection.refresh_line(conn, settings, protection.ACK_KEY_BACKUP, NOW)
+    assert result is not None and result["state"] == protection.OK
+
+    after = {r["key"]: r for r in protection.stored_results(conn)["lines"]}
+    assert after["release_key_backup"]["state"] == protection.OK
+    page = {r["key"]: r for r in protection.page_view(conn)["lines"]}
+    assert page["release_key_backup"]["state"] == protection.OK
+    for key, row in before.items():
+        if key != "release_key_backup":
+            assert after[key]["state"] == row["state"], key
+    assert not any(r["subject"].startswith("release_key_backup")
+                   for r in dbmod.open_notices(conn))
+    # A different line's open notice is untouched by this line's refresh.
+    assert any(r["subject"].startswith("restore_drill")
+               for r in dbmod.open_notices(conn))
+    assert protection.refresh_line(conn, settings, "no-such-line", NOW) is None
+
+
 def test_a_site_with_no_signing_key_has_nothing_to_have_backed_up(conn):
     row = _line(protection.evaluate(_ctx(conn)), "release_key_backup")
     assert row["state"] == protection.NOT_CHECKED

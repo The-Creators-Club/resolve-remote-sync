@@ -201,14 +201,17 @@ def test_packages_has_its_own_page_and_the_users_page_no_longer_carries_it(clien
     about editor accounts are a page of their own now."""
     packages = as_user(client, "owen").get("/admin/packages")
     assert packages.status_code == 200
-    assert "[ PUBLISHED PACKAGES ]" in packages.text
+    # [ PUBLISHED PACKAGES ] was one flat table; since 2026-09-11 the panel
+    # leads with what the fleet is actually handed.
+    assert "[ CURRENTLY SERVED ]" in packages.text
     assert "[ AVAILABLE FROM THE VENDOR ]" in packages.text
+    assert "[ OTHER VERSIONS HELD ON THIS SERVER ]" in packages.text
     # The dashboard's own update panel loads itself on this page.
     assert 'hx-get="/partials/admin/dashboard-update"' in packages.text
 
     users = client.get("/admin/users")
     assert users.status_code == 200
-    assert "[ PUBLISHED PACKAGES ]" not in users.text
+    assert "[ CURRENTLY SERVED ]" not in users.text
     assert "/partials/admin/packages" not in users.text
     assert "/partials/admin/dashboard-update" not in users.text
     # Nothing may point at the old anchor either.

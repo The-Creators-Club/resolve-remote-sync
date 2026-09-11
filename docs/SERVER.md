@@ -862,7 +862,7 @@ updates silently). Publish flow, from the base rig:
    dashboard admin password and PUTs the exe to
    `/api/v1/admin/packages/windows/<version>`.
 3. Without `-MakeCurrent`, the build is staged: flip `[ MAKE CURRENT ]` in
-   the `[ PUBLISHED PACKAGES ]` box on `/admin/packages` (Settings >
+   `[ OTHER VERSIONS HELD ON THIS SERVER ]` on `/admin/packages` (Settings >
    `[ PACKAGES ]`) when ready. The same publish run also uploads
    `onboard.exe` as the `kind=onboard` package (versioned by
    `$InstallerVersion`), which `/download` (the menu's `[ INSTALLER ]`
@@ -883,7 +883,8 @@ side effect of publishing a new one -- the safer default, since rollback is
 only as deep as the builds still on disk. To get the old "current + 2 newest
 per platform" behaviour back, add `?prune=1` to the publish URL for that one
 publish. Deleting a build stays a deliberate act (`[ DELETE ]` in
-`[ PUBLISHED PACKAGES ]`); the current version can never be deleted.
+`[ OTHER VERSIONS HELD ON THIS SERVER ]`); the current version can never be
+deleted.
 
 **Nothing is offered to a companion that doesn't report its platform.**
 An unknown platform used to be treated as `windows`, which meant a Mac could

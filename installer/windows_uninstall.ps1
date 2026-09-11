@@ -173,10 +173,31 @@ function Get-BinDirLeftovers {
     )
     if (-not $BinDir -or -not (Test-Path -LiteralPath $BinDir)) { return @() }
     try {
+        # BOTH SIDES THROUGH ONE SPELLING before they are compared. The two
+        # paths arrive from different places -- the bin dir from the
+        # uninstall entry's recorded argument, SelfPath from $PSCommandPath --
+        # and Windows hands either of them out in 8.3 short form on a profile
+        # that has one (C:\Users\RUNNER~1\... on a hosted CI runner), while
+        # the FullName Get-ChildItem reports is always the long one. A
+        # short-form bin dir therefore matched none of the expected names and
+        # the running uninstaller and its own drive library were reported as
+        # leftovers on a perfectly clean uninstall -- a warning on every run
+        # is a warning editors learn to ignore, which is the exact failure
+        # this function's DESCRIPTION says it exists to avoid (2026-09-11,
+        # CI run 34583384353).
+        $normalise = {
+            param([string]$p)
+            if (-not $p) { return "" }
+            try { return (Get-Item -LiteralPath $p -Force -ErrorAction Stop).FullName }
+            catch {
+                try { return [System.IO.Path]::GetFullPath($p) } catch { return $p }
+            }
+        }
+        $root = & $normalise $BinDir
         $expected = @(
-            $SelfPath,
-            (Join-Path $BinDir "windows_uninstall.ps1"),
-            (Join-Path $BinDir "drive_mapping.ps1")
+            (& $normalise $SelfPath),
+            (Join-Path $root "windows_uninstall.ps1"),
+            (Join-Path $root "drive_mapping.ps1")
         ) | Where-Object { $_ }
         return @(Get-ChildItem -LiteralPath $BinDir -Recurse -File -Force -ErrorAction SilentlyContinue |
             Where-Object { $expected -notcontains $_.FullName } |

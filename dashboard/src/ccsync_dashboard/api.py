@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from . import VERSION, auth, db, health, links, local_users, package_store, release_trust
 from . import jobs as jobs_mod
+from . import locate as locate_mod
 from .nas import EDITORS_GROUP, NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
 from .nas import factory as nas_factory
 from .syncthing_client import SyncthingClient, SyncthingError
@@ -1096,6 +1097,13 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         # already took it, which are the ones a recall is about.
         entry["companion_retracted_reason"] = retracted_versions.get(
             (platform, entry["companion_version"] or ""))
+        # Fleet-grid declutter (2026-09-11): ONE headline per row and the
+        # three lanes in one fixed order. Both are composed here, after the
+        # version comparison, because "out of date" is one of the things the
+        # headline can be and it is not known until this point. The template
+        # renders what it is given and ranks nothing.
+        entry["lane_strip"] = health.lane_strip(entry["lanes"])
+        entry["headline"] = health.fleet_headline(entry)
         result.append(entry)
     result.sort(key=lambda e: (e["editor_username"], e["machine"]))
     # Fleet-level rollups for the banner (item 9). Computed here rather than
@@ -10699,3 +10707,44 @@ def api_job_result(
              "done" if payload.ok else state, editor, machine,
              "" if payload.ok else f": {payload.error[:200]}")
     return {"ok": True, "state": state}
+
+
+# -- where a file went (docs/HAND_MOVES_ON_THE_SERVER.md phase 2) ----------
+class LocateFileIn(BaseModel):
+    """One file an editor's machine is about to give up on.
+
+    A BASENAME and a SIZE, never a path: the caller is asking "is this file
+    anywhere on the server", and the path it had is precisely the thing that
+    stopped being true. `size` is exact by design -- a re-encode is not a
+    move, and the collector's own detection uses the same rule.
+    """
+    name: str = Field(min_length=1, max_length=512)
+    size: int = Field(ge=0)
+
+
+class LocateIn(BaseModel):
+    files: list[LocateFileIn] = Field(default_factory=list)
+
+
+@router.post("/files/locate")
+def api_locate_files(
+    payload: LocateIn, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """Where else on the NAS do these files live?
+
+    The fleet credential, exactly as the claim door: this reads the whole
+    tree's inventory across every active project, which is more than any one
+    editor's pages show them, and the answer drives a rename on their disk.
+
+    413 on an oversized batch rather than a silent truncation: a caller that
+    asked about 4000 files and was answered about 2000 would read the missing
+    half as "not on the server", which is the one wrong conclusion this route
+    exists to prevent.
+    """
+    _require_fleet_caller(request, conn)
+    if len(payload.files) > locate_mod.MAX_LOCATE_FILES:
+        raise HTTPException(
+            status_code=413,
+            detail=(f"ask about at most {locate_mod.MAX_LOCATE_FILES} files at a "
+                    f"time - this asked about {len(payload.files)}."))
+    return locate_mod.locate(conn, [(f.name, f.size) for f in payload.files])

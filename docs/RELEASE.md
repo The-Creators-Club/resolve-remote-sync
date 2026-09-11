@@ -574,7 +574,7 @@ is the **zipped onboarding wizard** from `tools/build_onboard_macos.sh
 still ships inside the editor package and inside the wizard bundle). So
 between the Windows ship and the next Mac build session:
 
-- the dashboard's `[ PUBLISHED PACKAGES ]` box shows the current `macos`
+- the dashboard's `[ CURRENTLY SERVED ]` box shows the current `macos`
   `companion` (and possibly the `macos` installer) at an older version than
   the current `windows` ones;
 - Mac editors keep running the build they have and are **not** offered an
@@ -1346,7 +1346,7 @@ thing if you prefer it):
 | Component | Input | Extras |
 |---|---|---|
 | `companion` | `pyproject.toml` | `tray`, `dev` |
-| `dashboard` | `pyproject.toml` | `broll`, `music`, `ytdl`, `ytdl_unblock`, `synology`, `oidc`, `dev` |
+| `dashboard` | `pyproject.toml` | `broll`, `music`, `ytdl`, `ytdl_unblock`, `synology`, `oidc`, `cards`, `dev` |
 | `dashboard/deploy` | `requirements.txt` | — (the base container set) |
 | `dashboard/deploy` (unblock) | `requirements-unblock.txt` | — (the GPLv3 YouTube-unblock plugin, installed only when `[features] youtube_unblock` is on — see the file's own header and `docs/CI.md`) |
 | `server` | `requirements.txt` | — |
@@ -1356,7 +1356,14 @@ thing if you prefer it):
 | `broll/indexer` | `pyproject.toml` | `dev` |
 | `music/indexer` | `pyproject.toml` | `dev` |
 
-Two of these have caveats worth knowing before you regenerate them:
+`zhconv` is deliberately absent from `cards` and from the container
+(2026-09-11): it is GPLv2+ and every customer's container installs this set
+whether or not that site ever switches `/cards` on, so it was dropped rather
+than allowlisted — Timeline Cards imports it inside a `try` and folds
+Simplified/Traditional with its own map (`multicam_pipeline/zh_fold.py`,
+written for exactly this container) when it is missing.
+
+Three of these have caveats worth knowing before you regenerate them:
 
 - **`dashboard/deploy/requirements.lock` is the one the fleet runs.** Changing
   it changes what every customer's container installs on its next boot, and
@@ -1371,6 +1378,16 @@ Two of these have caveats worth knowing before you regenerate them:
   `ytdl_unblock` extra in step — `dashboard/tests/test_hardening.py`'s
   `test_deploy_unblock_requirements_match_pyproject_ytdl_unblock_group`
   checks both directions.
+- **`dashboard`'s own lock must carry EVERY extra the container installs,
+  `cards` included.** It is not the lock the fleet runs — it is the one CI
+  builds `dashboard/.venv` from, and that venv is where
+  `tools/check_licenses.py` READS the licences of the packages
+  `dashboard/deploy/requirements.lock` conveys (the container's venv has no
+  local twin; see that script's `dashboard-container` target). An extra left
+  off this command is four packages the strict gate reports `UNSCANNED`, which
+  is a CI failure that says "install this target's lock" and looks nothing
+  like the copyleft verdict it is hiding: `cards` was missing from 2026-08-31
+  to 2026-09-11 and hid psycopg2-binary's LGPL and zhconv's GPLv2+ behind it.
 - **`music/indexer` pulls `torch` and, on Linux, the whole `nvidia-*` set.**
   That is the CPU/default-PyPI wheel set and it is correct for the base rig;
   the CUDA-index build belongs to the GPU image (item 14), not here. It is

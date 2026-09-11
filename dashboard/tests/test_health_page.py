@@ -26,7 +26,24 @@ def env(tmp_path):
                         admin_users=frozenset({"owen"}))
     app = create_app(settings)
     with TestClient(app) as c:
+        # The real Collector thread starts on lifespan entry and runs
+        # `protection`, `invariants` and `alerts` (all SYNCTHING_FREE_KINDS) on
+        # its own connection, so "nothing on a fresh server has been checked"
+        # was a race with it: a pass that got in first stores real verdicts --
+        # BROKEN for the restore drill nobody has recorded, for the alerts sink
+        # nobody configured, for DASH_RELEASE_PUBKEYS -- and the NOT CHECKED
+        # rows these tests are about arrive as error rows instead. This rig won
+        # that race about two runs in five and CI's Linux runner lost it
+        # (2026-09-11, CI run 34583384353). Stop it, then reset to the baseline
+        # the tests describe: a second stop() cannot close the gap between
+        # thread start and here. Same pattern, same reason, as test_alerts.py
+        # and test_invariants.py.
+        c.app.state.collector.stop()
         conn = dbmod.connect(settings.db_path)
+        conn.execute("DELETE FROM invariant_results")
+        conn.execute("DELETE FROM notices")
+        dbmod.meta_delete(conn, protection.RESULTS_META)
+        conn.commit()
         try:
             yield c, conn
         finally:

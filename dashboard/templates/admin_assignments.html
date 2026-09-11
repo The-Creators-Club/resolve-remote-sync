@@ -8,9 +8,11 @@
     {% include "partials/settings_nav.html" %}
     <div class="detail-head"><h1>[ SYNC PLANS ]</h1></div>
     <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 62ch;">
-      Tick a project onto one computer, or pull it back. One column per
-      computer: a person with a desktop and a laptop gets a column each, and
-      the two sync different things. Every cell here is the same write the
+      Choose a person, then one of their computers: a plan belongs to a
+      computer, not to a person, so this page shows one at a time. Tick a
+      project onto that computer, or pull it back. A person with a desktop
+      and a laptop has a plan for each, and the two sync different things -
+      pick EVERY COMPUTER to see them side by side. Every cell here is the same write the
       checkboxes on SYNC STATUS make: there is one list, not two. The small
       <span class="mono-sm">up</span> box beside a tick makes it
       <a href="{{ term_href('Upload only') }}">UPLOAD ONLY</a>: that computer
@@ -19,6 +21,56 @@
       not want the rest of the project coming down. What the words on this
       page mean: <a href="{{ GLOSSARY_HREF }}">the glossary</a>.
     </p>
+    {# ONE PERSON, ONE COMPUTER at a time (owner, 2026-09-11): "rebuild this
+       so it's filtered by default, by user and then by computer, instead of
+       showing all users at once, because if there are many many users in a
+       company, this would be very unwieldy". The grid below is unchanged -
+       same cells, same writes, same column tools - it is just asked for.
+       A plain GET form, so the choice is in the URL and a reload, a bookmark
+       and a link all land on the same view. Changing the person and pressing
+       [ SHOW ] re-renders the computer picker for them; a computer that is
+       not theirs is treated as not chosen (assignments._picker). #}
+    <form class="assign-pick" method="get" action="/admin/assignments">
+      <label for="assign-editor">PERSON</label>
+      <select id="assign-editor" name="editor">
+        <option value="">choose a person…</option>
+        {% for e in picker.editors %}
+        <option value="{{ e }}" {% if e == picker.editor %}selected{% endif %}>{{ e }}</option>
+        {% endfor %}
+      </select>
+      {% if picker.editor %}
+      <label for="assign-machine">COMPUTER</label>
+      <select id="assign-machine" name="machine">
+        {# value="-" and not "", because "" is the UNASSIGNED BUCKET
+           (db.ANY_MACHINE) and can be a real option below. A hostname cannot
+           be "-", so assignments._picker reads it as "not chosen". #}
+        <option value="-" {% if picker.machine is none %}selected{% endif %}>choose a computer…</option>
+        {% if picker.machines | length > 1 %}
+        <option value="{{ machine_all }}" {% if picker.machine == machine_all %}selected{% endif %}>every computer</option>
+        {% endif %}
+        {% for m in picker.machines %}
+        <option value="{{ m.value }}" {% if picker.machine is not none and picker.machine == m.value %}selected{% endif %}>{{ m.label }}</option>
+        {% endfor %}
+      </select>
+      {% endif %}
+      <button class="btn tap" type="submit">[ SHOW ]</button>
+      <span class="muted mono-sm">{{ picker.editors | length }} {{ "person" if picker.editors | length == 1 else "people" }},
+        {{ picker.machine_count }} computer{{ "s" if picker.machine_count != 1 }},
+        {{ assignments.projects | length }} project{{ "s" if assignments.projects | length != 1 }}</span>
+    </form>
+    {% if not picker.editors %}
+      <div class="muted">no known editors yet: one appears here once they
+        sign in, tick a project of their own, or their companion reports.</div>
+    {% elif not picker.show_grid %}
+      <div class="muted">choose a person{% if picker.editor %} and one of their computers{% endif %},
+        then [ SHOW ]. Nothing is listed until then: a company with many
+        editors has a grid too wide to read, and a plan belongs to one
+        computer anyway.</div>
+    {% elif not assignments.columns %}
+      <div class="muted">this person has no computer to show a plan for yet.</div>
+    {% elif not assignments.projects %}
+      <div class="muted">no active projects yet.</div>
+    {% else %}
     <div class="assign-toolbar">
       <input class="assign-filter" type="search" id="assign-filter"
              placeholder="filter projects…" aria-label="filter projects">
@@ -26,12 +78,6 @@
         {{ assignments.projects | length }} project{{ "s" if assignments.projects | length != 1 }} &times; {{ assignments.columns | length }} computer{{ "s" if assignments.columns | length != 1 }}
       </span>
     </div>
-    {% if not assignments.columns %}
-      <div class="muted">no known editors yet: one appears here once they
-        sign in, tick a project of their own, or their companion reports.</div>
-    {% elif not assignments.projects %}
-      <div class="muted">no active projects yet.</div>
-    {% else %}
     {# .scroll-x (MOBILE_PLAN.md §3.2, 2026-08-30) on the wrapper that already
        scrolls: one column per computer is the whole point of this grid, so it
        is the one admin surface that scrolls sideways instead of stacking. The
@@ -121,6 +167,9 @@
                 <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
                 <input type="hidden" name="slug" value="{{ p.slug }}">
                 <input type="hidden" name="archived" value="1">
+                {# Which plan was on screen, so the redirect comes back to it. #}
+                <input type="hidden" name="editor" value="{{ picker.editor }}">
+                <input type="hidden" name="machine" value="{{ picker.machine if picker.machine is not none else '' }}">
                 <button class="btn tap" type="submit"
                         title="take this project off every tick list, the queue and this grid. The folder, its files and the ticks themselves are kept, and UNARCHIVE brings it all back.">[ ARCHIVE ]</button>
               </form>
@@ -208,6 +257,8 @@
           <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
           <input type="hidden" name="slug" value="{{ a.slug }}">
           <input type="hidden" name="archived" value="0">
+          <input type="hidden" name="editor" value="{{ picker.editor }}">
+          <input type="hidden" name="machine" value="{{ picker.machine if picker.machine is not none else '' }}">
           <button class="btn tap" type="submit"
                   title="put this project back on every tick list and the queue. The ticks it had are still there, so it starts syncing again on the next cycle.">[ UNARCHIVE ]</button>
         </form>

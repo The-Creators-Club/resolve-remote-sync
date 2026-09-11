@@ -47,6 +47,14 @@ def as_user(client, user):
     return client
 
 
+def grid(client, editor="editor1", machine="*") -> str:
+    """The page WITH its two pickers answered (owner, 2026-09-11). The grid
+    renders for one person and one computer now; `machine="*"` is the "every
+    computer of this person" view, which is the shape these tests were
+    written against."""
+    return client.get(f"/admin/assignments?editor={editor}&machine={machine}").text
+
+
 def matrix_checkbox(body: str, slug: str, editor: str) -> str:
     for tag in re.findall(r"<input[^>]*>", body, re.S):
         if ("matrix-check" in tag and f'data-slug="{slug}"' in tag
@@ -80,17 +88,19 @@ def test_grid_renders_projects_editors_and_existing_ticks(env):
     conn.commit()
     as_user(client, "owen")
 
-    body = client.get("/admin/assignments").text
+    body = grid(client, "editor1")
     assert "2026/FF5/Elections" in body
     assert "2026/Base Drone" in body
-    assert "editor1" in body and "jsmith" in body
+    # Both people are in the PICKER; only the chosen one has columns.
+    assert '<option value="editor1"' in body and '<option value="jsmith"' in body
+    assert 'data-editor="jsmith"' not in body
 
     ticked = matrix_checkbox(body, FF5, "editor1")
     assert ticked and "checked" in ticked
     unticked = matrix_checkbox(body, DRONE, "editor1")
     assert unticked and "checked" not in unticked
-    # jsmith never ticked anything -- their column starts empty
-    assert "checked" not in matrix_checkbox(body, FF5, "jsmith")
+    # jsmith never ticked anything -- their own view starts empty
+    assert "checked" not in matrix_checkbox(grid(client, "jsmith"), FF5, "jsmith")
 
     # real checkbox markup, not a div stand-in (style.css restyles the
     # element, it does not replace it)
@@ -105,6 +115,7 @@ def test_admin_never_gets_a_self_column_by_accident(env):
     as_user(client, "owen")
     body = client.get("/admin/assignments").text
     assert 'data-editor="owen"' not in body
+    assert '<option value="owen"' not in body
 
 
 # ------------------------------------------------- cell writes == ?as= flow
@@ -143,7 +154,7 @@ def test_grid_reflects_a_tick_made_through_the_as_switcher(env):
     client.post(f"/partials/selection/editor1/{FF5}/toggle?as=editor1")
     assert [s["slug"] for s in dbmod.fetch_selections(conn, "editor1")] == [FF5]
 
-    body = client.get("/admin/assignments").text
+    body = grid(client, "editor1")
     assert "checked" in matrix_checkbox(body, FF5, "editor1")
 
 
@@ -203,7 +214,7 @@ def test_the_grid_carries_the_two_figures_the_preflight_needs(env):
                                       "disk_root_total_bytes": 500 * gb})
     conn.commit()
     as_user(client, "owen")
-    body = client.get("/admin/assignments").text
+    body = grid(client, "editor1", "LESO-MBP")
     cell = matrix_checkbox(body, FF5, "editor1")
     assert f'data-proxy-bytes="{620 * gb}"' in cell
     assert f'data-free-bytes="{180 * gb}"' in cell
@@ -216,7 +227,7 @@ def test_a_project_the_collector_never_walked_renders_no_figure(env):
     as 0 GB would be worse than no preflight at all."""
     client, conn = env
     as_user(client, "owen")
-    cell = matrix_checkbox(client.get("/admin/assignments").text, DRONE, "editor1")
+    cell = matrix_checkbox(grid(client, "editor1"), DRONE, "editor1")
     assert cell and "data-proxy-bytes" not in cell
 
 
@@ -247,7 +258,7 @@ def test_wired_column_ticked_stays_enabled_and_untick_succeeds(env):
     conn.commit()
     as_user(client, "owen")
 
-    body = client.get("/admin/assignments").text
+    body = grid(client, "editor1")
     ticked = matrix_checkbox(body, FF5, "editor1")
     assert "checked" in ticked, ticked
     assert "disabled" not in ticked, ticked           # stays enabled -- CR-28 follow-up
@@ -276,7 +287,7 @@ def test_wired_column_unticked_stays_disabled(env):
     conn.commit()
     as_user(client, "owen")
 
-    body = client.get("/admin/assignments").text
+    body = grid(client, "editor1")
     tags = re.findall(r"<input[^>]*>", body, re.S)
     unticked = next(t for t in tags if "matrix-check" in t
                     and f'data-slug="{DRONE}"' in t and 'data-editor="editor1"' in t
@@ -304,7 +315,7 @@ def test_a_remote_column_of_the_same_mixed_account_is_unaffected(env):
     conn.commit()
     as_user(client, "owen")
 
-    body = client.get("/admin/assignments").text
+    body = grid(client, "editor1")
     # matrix_checkbox() returns the FIRST match; editor1 now has two columns
     # for FF5 (BASE-RIG unticked+disabled, LAPTOP ticked+enabled) -- so pull
     # every FF5/editor1 checkbox out and check both shapes are present.
@@ -318,3 +329,141 @@ def test_a_remote_column_of_the_same_mixed_account_is_unaffected(env):
         by_machine[m.group(1)] = t
     assert "disabled" in by_machine["BASE-RIG"] and "checked" not in by_machine["BASE-RIG"]
     assert "disabled" not in by_machine["LAPTOP"] and "checked" in by_machine["LAPTOP"]
+
+
+# ------------------------------------------------- the pickers (2026-09-11)
+#
+# Owner: "rebuild this so it's filtered by default, by user and then by
+# computer, instead of showing all users at once, because if there are many
+# many users in a company, this would be very unwieldy". The grid, its cells
+# and every write behind them are unchanged; what changed is that the page
+# asks who and which computer first, in the URL.
+
+
+def test_the_page_opens_with_the_pickers_and_no_grid(env):
+    client, _conn = env
+    as_user(client, "owen")
+    body = client.get("/admin/assignments").text
+    assert 'class="assign-pick"' in body
+    assert '<option value="editor1"' in body and '<option value="jsmith"' in body
+    # No grid, no cells, and no computer picker until a person is chosen.
+    assert 'id="assign-grid"' not in body
+    assert "matrix-check" not in body
+    assert 'id="assign-machine"' not in body
+
+
+def test_choosing_a_person_offers_their_computers_and_still_no_grid(env):
+    client, conn = env
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_machine(conn, "editor1", "EDIT-1", now)
+    dbmod.upsert_machine(conn, "editor1", "LAPTOP", now)
+    conn.commit()
+    as_user(client, "owen")
+
+    body = client.get("/admin/assignments?editor=editor1").text
+    assert 'id="assign-machine"' in body
+    assert '<option value="EDIT-1"' in body and '<option value="LAPTOP"' in body
+    assert '<option value="*"' in body            # this person, every computer
+    assert 'id="assign-grid"' not in body
+
+    # ...and the computer's own view is one column, named in the URL.
+    body = client.get("/admin/assignments?editor=editor1&machine=LAPTOP").text
+    assert 'id="assign-grid"' in body
+    machines = set(re.findall(r'matrix-check[^>]*?data-machine="([^"]*)"', body, re.S))
+    assert machines == {"LAPTOP"}
+
+
+def test_a_computer_that_is_not_that_persons_is_not_a_chosen_computer(env):
+    """What the form posts when the PERSON was changed and the stale machine
+    rode along. The answer is their computer picker, never an empty grid for
+    a computer they do not own."""
+    client, conn = env
+    now = dbmod.utcnow_iso()
+    # TWO computers for editor1, so the stale value cannot simply resolve to
+    # the only one they have (which is a preselect, not a guess).
+    dbmod.upsert_machine(conn, "editor1", "EDIT-1", now)
+    dbmod.upsert_machine(conn, "editor1", "EDIT-2", now)
+    dbmod.upsert_machine(conn, "jsmith", "JS-PC", now)
+    conn.commit()
+    as_user(client, "owen")
+    body = client.get("/admin/assignments?editor=editor1&machine=JS-PC").text
+    assert 'id="assign-grid"' not in body
+    assert '<option value="EDIT-1"' in body
+
+
+def test_one_editor_and_one_computer_are_preselected(env):
+    """An admin with a single person must not find this page emptier than it
+    was for the sake of a company with two hundred."""
+    client, conn = env
+    conn.execute("DELETE FROM known_editors WHERE editor_username='jsmith'")
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_machine(conn, "editor1", "EDIT-1", now)
+    conn.commit()
+    as_user(client, "owen")
+
+    body = client.get("/admin/assignments").text
+    assert 'id="assign-grid"' in body             # both answers were obvious
+    machines = set(re.findall(r'matrix-check[^>]*?data-machine="([^"]*)"', body, re.S))
+    assert machines == {"EDIT-1"}
+
+    # A second computer for the same person: the person is still obvious, the
+    # computer is not, so nothing is preselected.
+    dbmod.upsert_machine(conn, "editor1", "LAPTOP", now)
+    conn.commit()
+    assert 'id="assign-grid"' not in client.get("/admin/assignments").text
+
+
+def test_an_editor_with_no_computer_yet_gets_the_unassigned_bucket(env):
+    """The bucket is `machine=''` here exactly as it is everywhere else
+    (db.ANY_MACHINE), and it is that person's only column until their
+    companion reports."""
+    client, _conn = env
+    as_user(client, "owen")
+    body = client.get("/admin/assignments?editor=editor1&machine=").text
+    assert 'id="assign-grid"' in body
+    machines = set(re.findall(r'matrix-check[^>]*?data-machine="([^"]*)"', body, re.S))
+    assert machines == {""}
+    assert "no computer yet" in body
+
+
+def test_every_computer_is_the_person_wide_view(env):
+    client, conn = env
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_machine(conn, "editor1", "EDIT-1", now)
+    dbmod.upsert_machine(conn, "editor1", "LAPTOP", now)
+    dbmod.upsert_machine(conn, "jsmith", "JS-PC", now)
+    conn.commit()
+    as_user(client, "owen")
+    body = client.get("/admin/assignments?editor=editor1&machine=*").text
+    machines = set(re.findall(r'matrix-check[^>]*?data-machine="([^"]*)"', body, re.S))
+    assert machines == {"EDIT-1", "LAPTOP"}
+    assert 'data-editor="jsmith"' not in body
+
+
+def test_the_fleet_size_is_still_said_in_one_line(env):
+    """What the whole-fleet grid told an admin at a glance and a per-person
+    view cannot: how many people and computers there are at all."""
+    client, conn = env
+    dbmod.upsert_machine(conn, "editor1", "EDIT-1", dbmod.utcnow_iso())
+    conn.commit()
+    as_user(client, "owen")
+    body = client.get("/admin/assignments").text
+    assert "2 people" in body
+    assert "1 computer," in body
+
+
+def test_archiving_a_project_comes_back_to_the_same_plan(env):
+    """[ ARCHIVE ] redirects, and the page is filtered now: the redirect has
+    to carry the person and the computer or the click answers by emptying the
+    grid that was being read."""
+    client, conn = env
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_machine(conn, "editor1", "EDIT-1", now)
+    conn.commit()
+    as_user(client, "owen")
+    resp = client.post("/partials/admin/projects/archive",
+                       data={"slug": DRONE, "archived": "1",
+                             "editor": "editor1", "machine": "EDIT-1"},
+                       follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/admin/assignments?editor=editor1&machine=EDIT-1"

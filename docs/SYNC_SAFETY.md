@@ -381,7 +381,27 @@ before anything else: **was a folder MOVED on the NAS?** Since CR-44 the
 breaker asks that question itself (it re-lists the scope and matches trashed
 files on basename + exact size before tripping), so a move should no longer
 reach you as an alarm — but a move to a *different project*, outside the
-scope being synced, still looks like a deletion and still trips.
+scope being synced, still looked like a deletion and still tripped.
+
+**Since companion 0.9.73 that probe is TREE-WIDE** (`docs/HAND_MOVES_ON_THE_SERVER.md`
+phase 2): before a pass gives its trashed files up for deleted, lane B asks
+the dashboard `POST /api/v1/files/locate` with their `[basename, size]` pairs,
+answered from `nas_media` across EVERY project it has walked - one read of
+a table the collector already maintains, no NAS I/O, at most 15 minutes
+stale. A file found anywhere is a
+relocation, not a deletion. Where exactly ONE place comes back AND this
+machine syncs that project, the local copy is renamed into the new relative
+path rather than left in `.ccsync-trash`, so the editor's proxies follow the
+folder somebody dragged in Explorer instead of being downloaded again; where
+the destination is not synced here it stays in the trash, quietly, and still
+does not count. Two candidates, no candidate, a call that fails or times out
+(10 s), and a dashboard that has never walked the tree all keep 0.9.72's
+behaviour exactly - every failure here falls back to "treat them all as
+deletions", and the `min(relocated, deleted)` clamp is untouched. Nothing in
+this path deletes or overwrites: it renames, and what it cannot place stays
+recoverable. One log line per pass names the tally (moved / trashed as a
+duplicate / trashed because the destination is not synced here / deleted).
+A machine below 0.9.73 behaves exactly as this paragraph's first half.
 
 **Halting the fleet.** Dashboard → USERS → FLEET SYNC HALT, with a reason.
 Every companion stops within one report interval and shows the reason. Release

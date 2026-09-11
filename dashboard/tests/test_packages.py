@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -1492,3 +1493,123 @@ def test_health_carries_the_rollout_counts_for_the_ship_and_no_names(env):
     assert "RUSKIN-PC" not in str(body["rollout"])
     # ...and an unauthenticated caller still gets ok+version and nothing else.
     assert "rollout" not in client.get("/api/v1/health").json()
+
+
+# ------------------------------------- the layout of /admin/packages itself
+# Owner, 2026-09-11: "it should be sorted into categories, so companion >
+# windows / mac / linux | dashboard | onboard ... surely the top should just
+# be 'currently served'". The grouping is ui._kind_platform_groups and the
+# three sections are admin_packages.html; this test is the order, which is the
+# whole point of the change and the thing a later edit would quietly lose.
+SECTIONS = ("[ CURRENTLY SERVED ]", "[ AVAILABLE FROM THE VENDOR ]",
+            "[ OTHER VERSIONS HELD ON THIS SERVER ]")
+
+
+def _headings(block: str) -> list[tuple[str, str]]:
+    """The kind and platform heading rows of a section, in document order."""
+    return re.findall(r'pkg-(kind|platform)-row"><td colspan="4">([a-z0-9]+)', block)
+
+
+def _publish_onboard(client, platform, version, body, make_current=0):
+    sha = hashlib.sha256(body).hexdigest()
+    suffix = signed_query("onboard", platform, version, body, sha=sha)
+    return client.put(
+        f"/api/v1/admin/packages/{platform}/{version}"
+        f"?kind=onboard&sha256={sha}&make_current={make_current}{suffix}",
+        content=body, headers={"Content-Type": "application/octet-stream"},
+    )
+
+
+def test_the_packages_page_is_grouped_by_kind_then_platform_in_a_fixed_order(env):
+    client, _conn, _settings = env
+    as_user(client, "owen")
+    publish_platform(client, "windows", "0.1.0", body=b"win1")
+    publish_platform(client, "windows", "0.2.0", body=b"win2", make_current=1)
+    publish_platform(client, "macos", "0.2.0", body=b"mac2", make_current=1)
+    assert _publish_onboard(client, "windows", "1.0.40", b"onb", make_current=1).status_code == 200
+
+    text = as_user(client, "owen").get("/admin/packages").text
+    at = [text.index(s) for s in SECTIONS]
+    assert at == sorted(at), "the sections must read served, vendor, held"
+
+    served = text[at[0]:at[1]]
+    held = text[at[2]:]
+    # companion before onboard, windows before macos, and nothing invents a
+    # linux companion heading over an empty space.
+    assert _headings(served) == [("kind", "companion"), ("platform", "windows"),
+                                 ("platform", "macos"),
+                                 ("kind", "onboard"), ("platform", "windows")]
+    assert ("platform", "linux") not in _headings(served)
+
+    # The current build is at the top and is NOT also in the rollback drawer;
+    # the version kept behind it is only in the drawer.
+    assert "0.2.0" in served and "0.1.0" not in served
+    assert "0.1.0" in held and "0.2.0" not in held
+    assert "[ CURRENT ]" in served
+
+
+def test_the_rollback_drawer_says_why_those_versions_are_kept(env):
+    """Collapsed, and it explains itself: an admin who opens it is reading
+    the answer to "why is 0.1.0 still here" (owner, 2026-09-11)."""
+    client, _conn, _settings = env
+    as_user(client, "owen")
+    publish_platform(client, "windows", "0.1.0", body=b"win1")
+    publish_platform(client, "windows", "0.2.0", body=b"win2", make_current=1)
+
+    text = as_user(client, "owen").get("/admin/packages").text
+    assert "<details" in text[:text.index("[ OTHER VERSIONS HELD ON THIS SERVER ]")]
+    drawer = text[text.index("[ OTHER VERSIONS HELD ON THIS SERVER ]"):]
+    assert "republishing an older" in drawer
+    assert "staged canary" in drawer
+    # One delete button, and the warning is in the confirm rather than on the
+    # row (owner: "delete takes three lines").
+    assert drawer.count("[ DELETE ]") == 1
+    assert "hx-confirm=\"Delete companion 0.1.0" in drawer
+
+
+def test_the_vendor_section_marks_what_this_server_already_holds(env, tmp_path):
+    """The owner's question, answered on the row: "what is the difference
+    between published packages which aren't current, and available from the
+    vendor?". build_feed_view's `available` drops every record this server
+    already has a row for, so a version the vendor offers and this dashboard
+    already serves used to be absent from the section entirely - which is
+    what made the two lists read as two unrelated ledgers. ui._vendor_rows
+    classifies the same verified records instead of filtering them."""
+    settings = Settings(
+        db_path=str(tmp_path / "vendor.db"),
+        report_token="sekrit",
+        session_secret=SECRET,
+        admin_users=frozenset({"owen"}),
+        packages_dir=str(tmp_path / "vpkgs"),
+        release_pubkeys=(TEST_PUBKEY,),
+        release_soak_minutes=0,
+        release_feed_url="https://example.invalid/channel.json",
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        as_user(client, "owen")
+        publish_platform(client, "windows", "0.2.0", body=b"win2", make_current=1)
+        publish_platform(client, "windows", "0.3.0", body=b"win3")     # staged here
+        # What a check would have left in the process-local cache.
+        client.app.state.feed_cache = {"channel": {}, "checked_at": None, "valid_records": [
+            {"kind": "companion", "platform": "windows", "version": "0.2.0",
+             "size_bytes": 4, "published_at": PUBLISHED_AT},
+            {"kind": "companion", "platform": "windows", "version": "0.3.0",
+             "size_bytes": 4, "published_at": PUBLISHED_AT},
+            {"kind": "companion", "platform": "macos", "version": "0.4.0",
+             "size_bytes": 4, "published_at": PUBLISHED_AT},
+        ]}
+        text = client.get("/admin/packages").text
+
+    vendor = text[text.index("[ AVAILABLE FROM THE VENDOR ]"):
+                  text.index("[ OTHER VERSIONS HELD ON THIS SERVER ]")]
+    assert _headings(vendor) == [("kind", "companion"),
+                                 ("platform", "windows"), ("platform", "macos")]
+    assert "[ CURRENT HERE ]" in vendor                 # 0.2.0
+    assert "[ STAGED, NOT CURRENT ]" in vendor          # 0.3.0
+    # Only the one this server has never taken is offered for download.
+    assert vendor.count("[ PUBLISH ]") == 1
+    assert vendor.count("[ PUBLISH + MAKE CURRENT ]") == 1
+    # The staged row, and only it: a build already downloaded here needs a
+    # decision, not a second download.
+    assert vendor.count("[ MAKE CURRENT ]") == 1

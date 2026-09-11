@@ -103,10 +103,10 @@ On the project page, an admin has `MOVE: <path> to <project> / <folder>
 
 ## 4. What it does not do
 
-- It does not detect a move made in Explorer on the NAS. Move through the
-  dashboard, or the old behaviour applies. (Automatic detection between two
-  inventory walks is possible and was deliberately left out: a rename plus a
-  copy, or two cards with an `A001.MOV` of the same size, would be misread.)
+- It did not detect a move made in Explorer on the NAS. Since 2026-09-11 the
+  collector detects the unambiguous ones and feeds them into everything below
+  as `source='detected'` rows: see §8. Everything it cannot PROVE was a move
+  still behaves as this section describes.
 - It does not move a file across two projects on a machine that has only
   the destination ticked and not the source: there is nothing there to
   move, and lane B / lane C will deliver the file at its new place normally.
@@ -116,8 +116,7 @@ On the project page, an admin has `MOVE: <path> to <project> / <folder>
   that companion: a pre-v36 dashboard drops the unknown `state` field, reads
   a `retrying` answer as `ok=false`, stamps `applied_at` and never resends
   the command - the old one-shot latch, relocated to the server.
-- It does not detect a move made in Explorer on the NAS (see above). Nor
-  does it delete anything, ever, on either end.
+- It does not delete anything, ever, on either end.
 
 ## 5. Tests
 
@@ -199,3 +198,61 @@ deferral, pending relinks, the report), `companion/tests/test_watcher.py`
   shape the dashboard already understands as "still working on it, do not
   retire this" - with `attempts` left at 0, because waiting for a drive is
   not an attempt and must not spend the retry budget a real failure needs.
+
+## 8. Detected moves (2026-09-11, schema v53)
+
+Phase 1 of `docs/HAND_MOVES_ON_THE_SERVER.md`, which is the design and the
+reasoning; this is what was built. The button is still the only thing that
+MOVES anything on the server. What is new is that a move somebody made by
+hand, in Explorer, is recognised afterwards and handed to the machinery
+above, so the fleet follows it instead of re-uploading the old path and
+trashing its local copies on the next lane B pass (CR-267a: the Gold Card
+Meetup shoot cost a two-day trail of warnings and a parked lane).
+
+- **Where.** The collector's inventory cycle (`collector.py`,
+  `interval_inventory` = 900 s), after each project's `nas_media` rows have
+  been replaced. A move is the diff between two walks: a `(basename, size,
+  mtime_ns)` that VANISHED from one path and APPEARED at exactly one other,
+  in that project or any other project the same pass walked (the cross-
+  project case is today's, and it is a vanish in one walk and an arrival in
+  another, so the match happens once the whole pass is in). The basename is
+  compared through `db.media_rel_key` like every other path comparison here
+  (CR-90).
+- **Every rule is a refusal.** Two destinations, or two sources, is an
+  ambiguity and nothing is recorded. A file that only vanished is a
+  DELETION and this code does nothing with it. A file nothing could stat
+  keys on nothing. Nothing in the path touches the filesystem: the rename
+  already happened, and the collector only says so.
+- **What is written.** `db.record_file_move` with `source='detected'` (v53;
+  `'admin'` is the button, and the DEFAULT, so every row that predates the
+  column reads correctly), in the state a finished server rename lands in,
+  with the target machines `db.file_move_target_machines` computes - the
+  same rule as the button: every computer with the source project ticked in
+  either mode, plus any computer whose manifest says it holds the file.
+- **One row per folder.** A folder whose every recorded file moved to the
+  matching path under one new folder, with NOTHING left behind at the old
+  path, is one `is_dir` row. Anything less is per file. A `Proxy` folder
+  left behind is exactly the "something stayed" case, which is why today's
+  incident is recorded as its originals and the leftovers stay a
+  proxy_pairs finding. Proxies that moved WITH their original ride on its
+  row (`proxies_moved`), never their own: a proxy is never moved alone,
+  here or at the button.
+- **Bounds.** At most 500 moves per pass (`DETECTED_MOVE_LIMIT`; more than
+  that is a restore or a remount, and the excess is logged, not recorded).
+  An identical move already recorded in the last day is not recorded again.
+  A project whose walk was refused by the collapse brake is not diffed at
+  all - its old rows are still the ones on file. The whole detection is
+  wrapped: the inventory walk is what tells every editor whether their
+  footage is on the server, and a convenience on top of it may never take
+  it down.
+- **What the owner sees.** One log line per move, and a `notices` row of
+  kind `file_move_detected` (severity info, subject = the destination
+  path) naming where it came from, how many files moved and how many
+  computers are following, with "Nothing to do; the computers follow on
+  their own."
+- **Known bound.** A project that loses ALL of its originals to one move
+  trips the inventory collapse brake (DASH-5), which keeps the previous
+  file list, so that move is not detected. That is the safe direction: the
+  brake exists because an unmounted dataset looks exactly like an emptied
+  project.
+- **Tests.** `dashboard/tests/test_hand_moves_detected.py`.

@@ -188,7 +188,9 @@ def test_the_assignments_grid_greys_the_wired_column_not_the_account(env):
     _two_machines(conn)
     as_user(client)
 
-    page = client.get("/admin/assignments")
+    # Both of jsmith's computers at once: the "every computer" view of the
+    # per-person page (2026-09-11), which is the comparison this test is about.
+    page = client.get("/admin/assignments?editor=jsmith&machine=*")
     assert page.status_code == 200
     # The wired computer's cell is disabled and says which computer it means;
     # the same person's laptop column is still clickable.

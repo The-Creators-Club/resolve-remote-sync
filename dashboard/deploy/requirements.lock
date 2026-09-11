@@ -1200,9 +1200,6 @@ yt-dlp==2026.8.19 \
     --hash=sha256:1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf \
     --hash=sha256:9e213e48cea35c66b378e4447903f118f6392a5fa380a2b6d7070ec86f4e0af1
     # via -r requirements.txt
-zhconv==1.4.3 \
-    --hash=sha256:ad42d9057ca0605f8e41d62b67ca797f879f58193ee6840562c51459b2698c45
-    # via -r requirements.txt
 zstandard==0.25.0 \
     --hash=sha256:011d388c76b11a0c165374ce660ce2c8efa8e5d87f34996aa80f9c0816698b64 \
     --hash=sha256:01582723b3ccd6939ab7b3a78622c573799d5d8737b534b86d0e06ac18dbde4a \

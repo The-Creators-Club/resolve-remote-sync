@@ -142,9 +142,22 @@ PyJWT>=2.8
 psycopg2-binary>=2.9
 zstandard>=0.21
 # ...round two (same day): the rest of the cards engine's needs -- the
-# lane's waveform peaks and the transcript search's Simplified/Traditional
-# folding and pinyin matching. All three degrade in SILENCE when absent
-# (MulticamPipeline requirements.txt tells the story, psycopg2 above sprang
-# the same trap an hour earlier).
-zhconv>=1.4.3
+# lane's waveform peaks and the transcript search's pinyin matching. They
+# degrade in SILENCE when absent (MulticamPipeline requirements.txt tells the
+# story, psycopg2 above sprang the same trap an hour earlier).
+#
+# `zhconv` WAS HERE and was removed on 2026-09-11, deliberately: it is
+# GPLv2+, and this file is installed in EVERY customer's container whether or
+# not that site ever sets DASH_CARDS_ENABLED -- a conveyed copyleft
+# dependency with no dynamic-linking story behind it, which is the case
+# tools/license_allowlist.toml's header says the answer to is "replace it or
+# stop shipping it". Nothing here needed it: Timeline Cards' `cards/text.py`
+# imports zhconv inside a try and falls back to its own Simplified/
+# Traditional map, `multicam_pipeline/zh_fold.py`, whose header names this
+# exact container ("No new dependency. opencc and zhconv are not in the
+# dashboard") and whose tests cover the container's case with neither
+# installed. The licence gate could not see the verdict until the day it was
+# removed, because dashboard/requirements.lock was missing the `cards` extra
+# and reported it UNSCANNED instead (docs/RELEASE.md, "Refreshing the
+# lockfiles"). Do not put it back.
 pypinyin>=0.53

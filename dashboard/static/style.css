@@ -425,6 +425,41 @@ details.proj-group > summary .mono-sm { margin-left: auto; }
    half that names the cause would undo the whole finding. */
 .why-line { font-size: 12px; white-space: normal; padding: 0.1rem 0 0.3rem; }
 .why-line.red { color: var(--red); }
+/* Fleet-grid declutter (2026-09-11). The headline carries one of three
+   levels, and two of them are "nothing to chase here": a machine syncing
+   normally and a machine with nothing ticked, which is a state and not an
+   error (owner, 2026-09-11). Muted is the DEFAULT weight of the line, so a
+   row that is not muted is the one the eye lands on. */
+.why-line.amber { color: var(--amber); }
+.why-line.muted { color: var(--muted); }
+/* The three lanes, one fixed order, one line. min-width keeps upload, proxy
+   download and folder sync in the same three places on every row: the
+   alternative is a lane that moves with the length of the state word beside
+   it, which is what made the reader re-read each row. */
+.lane-strip { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem; }
+.lane-strip .chip.lane { min-width: 8.5rem; margin-right: 0; }
+/* A healthy lane is drawn quiet: a row of green boxes stops the eye exactly
+   as well as a red one does, and only one of them should be able to. */
+.chip.lane.quiet { color: var(--muted); border-color: #2a2a31; }
+.lane-detail { margin-left: 0.2rem; }
+/* Everything that is not the headline or a lane. Collapsed by default; the
+   note count beside the summary is what stops a fold hiding a real problem. */
+details.row-details { margin-top: 0.3rem; }
+details.row-details > summary { font-size: 11px; }
+.row-detail-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.6rem;
+  margin: 0.3rem 0 0.2rem 0.9rem;
+  font-size: 12px;
+}
+.row-detail-list dt { color: var(--muted); font-size: 11px; letter-spacing: 0.04em; }
+.row-detail-list dd { margin: 0; }
+.row-detail-list dd > * { margin-right: 0.25rem; }
+/* The buttons, in a column of their own: mixed into the chip lines they were
+   12 px words between two chips, which is the shape MOBILE_PLAN.md's .tap
+   rule exists to end. */
+td.row-actions { text-align: right; white-space: nowrap; vertical-align: top; }
 .diag-bundle { margin: 0.4rem 0; }
 .diag-bundle summary { cursor: pointer; }
 .diag-text {
@@ -455,6 +490,52 @@ table.editors th {
 }
 table.editors td { padding: 0.45rem 0.8rem 0.45rem 0; vertical-align: baseline; }
 tr.editor-row { border-bottom: 1px dotted #2a2a31; }
+
+/* ---------------- Settings -> Packages ----------------
+   One set of column roles for all three lists on that page (owner,
+   2026-09-11: "nothing is aligned properly"). The widths are declared on the
+   colgroup rather than left to the content, because the three tables are
+   three separate elements and content-sized columns put a version under a
+   size in the section below it. `table-layout: fixed` is what makes the
+   colgroup binding; the actions column is last and takes the slack. */
+table.pkg-table { table-layout: fixed; }
+table.pkg-table col.pkg-col-version { width: 30%; }
+table.pkg-table col.pkg-col-when { width: 20%; }
+table.pkg-table col.pkg-col-size { width: 16%; }
+table.pkg-table col.pkg-col-actions { width: 34%; }
+/* A version and its chips wrap inside their column instead of widening it:
+   .mono-sm is nowrap, which would push the actions off the panel. */
+table.pkg-table td { white-space: normal; overflow-wrap: anywhere; }
+/* The actions are one line, at the right, wrapping only when they must. */
+td.pkg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: 0.2rem 0.6rem;
+  text-align: right;
+}
+td.pkg-actions select, td.pkg-actions input[type="text"] { max-width: 11rem; }
+/* The two spanning heading rows. The kind is the category the owner asked
+   for; the platform under it is indented so the pair reads as one heading,
+   not as two rows of data. */
+tr.pkg-kind-row > td {
+  color: var(--red);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding-top: 0.8rem;
+  border-bottom: 1px dotted var(--red-dim);
+}
+tr.pkg-platform-row > td {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding-left: 0.9rem;
+}
+/* The third section is a <details>, and its summary is a .side-head: keep
+   the rule under the label rather than under the whole open block. */
+details.pkg-other > summary { cursor: pointer; }
 
 /* ---------------- chips & buttons ---------------- */
 .chip {
@@ -946,6 +1027,23 @@ details.bin[open] > summary { color: var(--red-hot); }
 .clip-list .clip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---------------- admin: assignment matrix (2026-08-17) ---------------- */
+/* The two pickers that decide what this page shows (owner, 2026-09-11).
+   A plain GET form on one line, wrapping to as many as it needs: the choice
+   lives in the URL, so there is no JS behind it to break. */
+.assign-pick {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.8rem;
+  margin-bottom: 0.8rem;
+}
+.assign-pick label {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+.assign-pick select { max-width: 16rem; }
+
 .assign-toolbar {
   display: flex;
   align-items: baseline;
@@ -1210,6 +1308,13 @@ table.assign-grid td.assign-cell { text-align: center; white-space: nowrap; }
     width: 100%;
     justify-content: flex-start;
   }
+  /* The fleet grid's actions column (2026-09-11): right-aligned is a DESKTOP
+     rule, where it is a column of its own at the end of the row. Stacked, it
+     is a card's last block and it reads from the left like everything above
+     it. The lane chips drop their desktop min-width for the same reason: a
+     phone is 320 px and three 8.5 rem chips are a horizontal scroll. */
+  td.row-actions { text-align: left; white-space: normal; }
+  .lane-strip .chip.lane { min-width: 0; }
 
   /* 16px is not a size choice, it is the threshold: Android and iOS zoom the
      whole page into any field smaller than this the moment it is focused, and

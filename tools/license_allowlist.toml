@@ -49,6 +49,35 @@ one thing DSM has no API for (writing ~/.ssh/authorized_keys). Obligations \
 still owed and tracked in docs/legal/THIRD_PARTY_NOTICES.md: the notice, the \
 licence text, and a written offer for the source of the version we install."""
 
+# psycopg2-binary arrived in dashboard/deploy/requirements.lock on 2026-08-31
+# for the mounted Timeline Cards page's project-library route, and the gate
+# could not see its licence until 2026-09-11: dashboard/requirements.lock was
+# compiled without pyproject.toml's `cards` extra, so no venv CI scans had the
+# package and --strict reported it UNSCANNED rather than LGPL. The lock now
+# carries the extra, which is what makes this entry necessary -- the gate
+# working, a release late.
+#
+# The posture is paramiko's above, line for line: an ordinary pip-installed
+# importable package in the container's /venv (or an image layer built from
+# the same lock), nothing statically linked, replaceable by the customer's own
+# build without touching our code. psycopg2 additionally carries its own
+# LINKING EXCEPTION (its metadata says "LGPL with exceptions"), which is more
+# permissive than plain LGPL, not less.
+[allow.psycopg2-binary]
+license = "GNU Library or Lesser General Public License (LGPL)"
+targets = ["dashboard-container"]
+reason = """\
+LGPL with psycopg2's own linking exception, shipped exactly the way paramiko \
+above is and for the same reasons: pip-installed as an ordinary importable \
+package into the container's /venv (or an image layer built from the same \
+requirements.lock), nothing statically linked, and the customer can replace \
+the installed copy with their own build without touching our code. It is \
+imported only by the mounted Timeline Cards page's project-library route, \
+which reads Resolve's PostgreSQL directly, and only on a site that sets \
+DASH_CARDS_ENABLED. Obligations still owed and tracked in \
+docs/legal/THIRD_PARTY_NOTICES.md: the notice, the licence text, and a \
+written offer for the source of the version we install."""
+
 # bgutil-ytdlp-pot-provider is GPLv3, and unlike paramiko above this is a
 # CUSTOMER-ENABLED OPTIONAL FEATURE, not something every deployment carries
 # (2026-08-17, docs/COMMERCIAL_READINESS.md items 2/3, CI run 32041222871).

@@ -43,7 +43,7 @@ from .base import (
     LaneAdapter,
     LaneStatus,
 )
-from . import lane_guard
+from . import lane_guard, server_locate
 
 log = logging.getLogger("ccsync.sync.rclone")
 
@@ -2360,6 +2360,8 @@ class RcloneLane(LaneAdapter):
         disk_floor: Optional["lane_guard.DiskFloorLatch"] = None,
         remote_list_fn: Optional[Callable[[list[str], float], Optional[str]]] = None,
         extra_excludes_fn: Optional[Callable[[Optional[str]], list[str]]] = None,
+        locator: Optional["server_locate.ServerLocator"] = None,
+        project_rel_fn: Optional[Callable[[str], Optional[str]]] = None,
     ) -> None:
         assert direction in (DIRECTION_UP, DIRECTION_DOWN)
         self.direction = direction
@@ -2402,6 +2404,21 @@ class RcloneLane(LaneAdapter):
         # Lane B only -- keeps a proxy that is still being written on the NAS
         # out of the run entirely (see LANE_B_MIN_AGE_SECONDS).
         self.min_age_seconds = lane_b_min_age_seconds(cfg)
+        # Lane B only: the dashboard's tree-wide "where did this file go?"
+        # (docs/HAND_MOVES_ON_THE_SERVER.md phase 2, 0.9.73) and the map from
+        # a project slug to where THIS machine keeps that project. Both
+        # optional: without them lane B behaves exactly as 0.9.72 did, which
+        # is what every machine in the fleet does until it is upgraded.
+        self.locator = locator
+        self.project_rel_fn = project_rel_fn
+        # Filled once per pass by _relocate_trashed, read by
+        # _count_relocations: the files the SERVER says are still on the NAS
+        # somewhere, keyed (NFC basename, size), and how many of them this
+        # pass carried out of the trash to their new home. The breaker's
+        # probe cannot re-derive the second number, because those files are
+        # no longer in the trash for it to walk.
+        self._server_relocated_keys: set[tuple[str, int]] = set()
+        self._moved_out_of_trash = 0
         # Last orphan-.partial scan (P8/P15/C-7): REPORTED, never deleted.
         self._orphans: Optional[dict] = None
         # subpath -> marker slug, for the project_slug on each transfer row.
@@ -3588,6 +3605,12 @@ class RcloneLane(LaneAdapter):
         # tidied 12 proxies is a pass that found something to do.
         self._last_run_moved = max(0, int(result.transferred or 0)) + max(
             0, int(result.deleted or 0))
+        # BEFORE the accounting, because it changes what the accounting is
+        # counting: a file the server says moved is a relocation, and one
+        # this machine can follow is carried to its new folder rather than
+        # left in the trash to be downloaded again (phase 2 of
+        # docs/HAND_MOVES_ON_THE_SERVER.md).
+        self._relocate_trashed(subpath)
         # Ahead of every return below, including the stop-mid-transfer one: a
         # pass that was killed halfway still moved whatever it moved, and a
         # breaker that only counts tidy passes is a breaker that a flapping
@@ -3941,6 +3964,153 @@ class RcloneLane(LaneAdapter):
             return out
         return out
 
+    # -- the server says it was moved (HAND_MOVES_ON_THE_SERVER.md §4a/§4b) --
+    def _relocate_trashed(self, subpath: Optional[str]) -> None:
+        """Ask the dashboard where this pass's trashed files went, and follow.
+
+        Runs once per pass, after rclone has moved the vanished files into
+        `.ccsync-trash` and before the breaker accounts for them. It never
+        deletes and never overwrites: every outcome here is a rename, and a
+        file it cannot place stays in the trash, recoverable for 14 days.
+
+        Four outcomes per file, and three of them are today's behaviour:
+
+          * ONE place on the server and this machine syncs that project ->
+            the local copy is renamed into the new relative path. This is the
+            whole point: the editor's proxies follow the folder somebody
+            dragged in Explorer, instead of being trashed and re-downloaded.
+          * ONE place and this machine does NOT sync it (§4b: Ruskin syncs
+            Creator Profiles, the folder went to FF5 Talent Gap) -> it stays
+            in the trash. There is no home for it on this disk, and the
+            server has told us it was not deleted, so it must not cost the
+            breaker either.
+          * SEVERAL places -> nothing moves. Ambiguity is a refusal, not a
+            guess (design section 6): the same name and size at two paths is
+            as likely a copy as a move, and a wrong rename is the one way
+            this feature could lose an editor a file.
+          * NONE, or no usable answer at all -> exactly what 0.9.72 does.
+
+        Never raises: this is decoration on a pass that has already run.
+        """
+        self._server_relocated_keys = set()
+        self._moved_out_of_trash = 0
+        if self.direction != DIRECTION_DOWN or self.locator is None:
+            return
+        backup_dir = self._last_backup_dir
+        if not backup_dir:
+            return
+        try:
+            trashed = self._trashed_this_pass()
+            if not trashed:
+                return
+            answer = self.locator.locate([(name, size) for name, size, _rel in trashed])
+            if answer is None or not answer.usable:
+                return
+            base = Path(backup_dir)
+            moved = duplicate = not_synced = ambiguous = 0
+            for name, size, rel in trashed:
+                places = answer.places(name, size)
+                if not places:
+                    continue
+                self._server_relocated_keys.add((nfc_key(name), int(size)))
+                if len(places) != 1:
+                    ambiguous += 1
+                    continue
+                dest = self._local_destination(places[0])
+                if dest is None:
+                    not_synced += 1
+                    continue
+                outcome = self._move_out_of_trash(
+                    base / Path(*rel.split("/")), dest, int(size))
+                if outcome == "moved":
+                    moved += 1
+                    self._moved_out_of_trash += 1
+                else:
+                    duplicate += 1
+            deleted = len(trashed) - len(
+                [1 for name, size, _rel in trashed
+                 if (nfc_key(name), int(size)) in self._server_relocated_keys])
+            log.info(
+                "lane B: the server was asked about %d trashed file(s) (inventory "
+                "as of %s): moved %d, trashed-as-duplicate %d, "
+                "trashed-not-synced-here %d, found in more than one place %d, "
+                "deleted %d",
+                len(trashed), answer.as_of or "unknown", moved, duplicate,
+                not_synced, ambiguous, deleted,
+            )
+        except Exception:
+            log.exception("%s: following the server's moves failed -- this pass's "
+                          "trashed files keep the old behaviour", self.name)
+
+    def _local_destination(self, place: dict) -> Optional[Path]:
+        """Where a file the server found at `place` belongs on THIS disk, or
+        None when this machine does not sync that project.
+
+        The path is built from the local project directory this machine
+        already syncs plus the server's own spelling of the relative path --
+        never from a string the server chose alone. Anything that escapes
+        local_root (a `..`, a rooted component, a drive letter) is refused:
+        the answer arrives over the network and drives a rename, so it is
+        treated as input, not as instruction.
+        """
+        if self.project_rel_fn is None:
+            return None
+        slug = str(place.get("project_slug") or "").strip()
+        rel = str(place.get("rel_path") or "").replace("\\", "/").strip("/")
+        if not slug or not rel:
+            return None
+        try:
+            project_rel = self.project_rel_fn(slug)
+        except Exception:
+            log.debug("lane B: could not resolve the local path of %r", slug,
+                      exc_info=True)
+            return None
+        if not project_rel:
+            return None
+        parts = [p for p in rel.split("/") if p]
+        if any(p in ("..", ".") for p in parts) or not parts:
+            log.warning("lane B: refusing a destination path from the server (%r)", rel)
+            return None
+        root = Path(self.local_root)
+        dest = root / Path(*str(project_rel).replace("\\", "/").strip("/").split("/"))
+        dest = dest / Path(*parts)
+        try:
+            dest.resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            log.warning("lane B: refusing a destination outside the tree (%r)", rel)
+            return None
+        return dest
+
+    def _move_out_of_trash(self, src: Path, dest: Path, size: int) -> str:
+        """Rename one recovered file into its new home. -> "moved" | "kept".
+
+        "kept" means it stays in `.ccsync-trash`, which is where lane B would
+        have left it anyway: something is already at the destination (the
+        local copy is then a duplicate, and lane B will re-check it next pass
+        like any other file), or the rename failed. NOTHING here overwrites
+        and nothing here deletes -- os.rename, never os.replace, so a
+        destination that appeared between the check and the rename is a
+        refusal rather than a file lost.
+        """
+        try:
+            if dest.exists():
+                try:
+                    same = dest.stat().st_size == size
+                except OSError:
+                    same = False
+                if not same:
+                    log.warning(
+                        "lane B: %s is already at the destination with a different "
+                        "size -- the copy stays in %s", dest.name, TRASH_DIR_NAME)
+                return "kept"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(str(src), str(dest))
+            return "moved"
+        except OSError as exc:
+            log.warning("lane B: could not move %s to its new folder (%s) -- it "
+                        "stays in %s", src.name, exc, TRASH_DIR_NAME)
+            return "kept"
+
     def _count_relocations(self, subpath: Optional[str]) -> int:
         """How many of this pass's trashed files are still on the NAS, under
         a different path (KNOWN_BUGS CR-44, 2026-08-20).
@@ -3972,9 +4142,15 @@ class RcloneLane(LaneAdapter):
         Returns 0 on any failure: see LaneBBreaker._count_relocations for why
         that is the safe direction.
         """
+        # The files this pass already CARRIED to their new home on the
+        # server's word (_relocate_trashed, 0.9.73). They are not in the
+        # trash any more, so the walk below cannot see them -- but rclone
+        # counted them as deletions, and they are the least deleted files of
+        # the lot.
+        relocated = self._moved_out_of_trash
         trashed = self._trashed_this_pass()
         if not trashed:
-            return 0
+            return relocated
         remote_paths: set[str] = set()
         remote_files = list_remote_files(
             self.rclone_path, self.remote, self.remote_root, subpath,
@@ -3983,8 +4159,13 @@ class RcloneLane(LaneAdapter):
         if not remote_files:
             # None = the listing failed, {} = the remote really is empty.
             # Neither is evidence of a move, and the empty case is the one
-            # the breaker exists for.
-            return 0
+            # the breaker exists for. The SERVER's answer still counts: it
+            # came from the dashboard's inventory of the whole tree, which is
+            # a different question from "is the scope empty", and it is the
+            # tree-wide half CR-44 never had.
+            return relocated + sum(
+                1 for name, size, _rel in trashed
+                if (nfc_key(name), int(size)) in self._server_relocated_keys)
         # SYNC-3 (resilience sweep 2026-08-28): both sides fold to NFC before
         # the comparison. The trashed paths came off the LOCAL disk (NFD on a
         # Mac), the remote ones off the NAS (NFC), so before this every path
@@ -3994,11 +4175,15 @@ class RcloneLane(LaneAdapter):
         remote_by_name: dict[str, set[int]] = {}
         for name, sizes in remote_files.items():
             remote_by_name.setdefault(nfc_key(name), set()).update(sizes)
-        relocated = 0
         for name, size, rel in trashed:
             if rel and nfc_key(rel) in remote_keys:
                 relocated += 1
             elif size in remote_by_name.get(nfc_key(name), ()):
+                relocated += 1
+            elif (nfc_key(name), int(size)) in self._server_relocated_keys:
+                # Found by the dashboard somewhere else in the tree: the
+                # cross-project move the scope listing above cannot see, and
+                # the shape that has actually parked lanes in the field.
                 relocated += 1
         return relocated
 

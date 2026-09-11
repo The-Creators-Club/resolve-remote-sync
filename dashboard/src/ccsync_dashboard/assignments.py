@@ -49,7 +49,28 @@ def _editor_presence(conn: sqlite3.Connection) -> dict[str, str]:
     return {name: health.worst(statuses) for name, statuses in by_editor.items()}
 
 
-def _assignments_view(conn: sqlite3.Connection) -> dict[str, Any]:
+# The "every computer of this person" value of the machine picker (owner,
+# 2026-09-11). It is the view a request with NO ?machine= already means
+# everywhere else in the product (db.selections_for_machine, the tick API), so
+# it needs a spelling of its own only HERE, where "not chosen yet" and "all of
+# them" are two different states of the same URL. `*` and not `all`, because a
+# hostname cannot contain it and a computer really could be called ALL.
+MACHINE_ALL = "*"
+
+
+def _assignments_view(conn: sqlite3.Connection, editor: str | None = None,
+                      machine: str | None = None) -> dict[str, Any]:
+    """The grid. `editor`/`machine` narrow the COLUMNS only (owner,
+    2026-09-11: "if there are many many users in a company, this would be
+    very unwieldy"); every cell, tick, mode control and write path is
+    unchanged, and None on both keeps the whole-fleet shape the JSON-free
+    callers (and this module's own tests) have always got.
+
+    An editor of "" is how the page asks for NO columns: the picker has not
+    been answered yet, and a known editor's username is never empty."""
+    # Held before the loops below, which bind `editor` and `machine` of their
+    # own and would otherwise leave the filter reading the LAST column built.
+    want_editor, want_machine = editor, machine
     try:
         archived = db.fetch_archived_projects(conn)
         archived_unreadable = False
@@ -84,6 +105,10 @@ def _assignments_view(conn: sqlite3.Connection) -> dict[str, Any]:
                             # -- a new machine starts empty by design, and
                             # this is the one click that fills it.
                             "siblings": [m for m in machines if m != machine]})
+    if want_editor is not None:
+        columns = [c for c in columns if c["editor"] == want_editor]
+    if want_machine is not None:
+        columns = [c for c in columns if c["machine"] == want_machine]
     ticked_cells = {
         (slug, e, m) for slug, pairs in machine_ticks.items() for e, m in pairs
     }
@@ -143,11 +168,79 @@ def _assignments_view(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _machine_options(conn: sqlite3.Connection, editor: str) -> list[dict[str, str]]:
+    """The computer picker's options for one person, in the order the rest of
+    the product names them: the registry (oldest first), then the unassigned
+    bucket when it is a real place for this person - either they have no
+    computer at all yet, or they carry bucket rows a companion has not
+    adopted. Never a bucket option invented beside two real computers: a tick
+    written there is the legacy shape db.selections_for_machine only honours
+    for a machine with no plan of its own."""
+    options = [{"value": m, "label": m} for m in db.machines_of(conn, editor)]
+    if not options:
+        return [{"value": db.ANY_MACHINE, "label": "no computer yet"}]
+    if db.selections_for_machine(conn, editor, db.ANY_MACHINE):
+        options.append({"value": db.ANY_MACHINE,
+                        "label": "no computer yet (ticks no computer has claimed)"})
+    return options
+
+
+def _picker(conn: sqlite3.Connection, editors: list[str],
+            editor: str | None, machine: str | None) -> dict[str, Any]:
+    """Who and which computer the page is showing, and what the two pickers
+    offer. Both come from the URL so a reload, a bookmark and a link land on
+    the same view.
+
+    A machine that is not one of that person's is NOT chosen: it is what the
+    browser posts when the editor was changed in the same form, and the
+    honest answer is the computer picker for the new person rather than an
+    empty grid for a computer they do not own."""
+    chosen_editor = (editor or "").strip()
+    if chosen_editor not in editors:
+        # ONE editor is preselected (owner, 2026-09-11): an admin with a
+        # single person must not find this page emptier than it used to be
+        # for the sake of a company that has two hundred.
+        chosen_editor = editors[0] if len(editors) == 1 and editor is None else ""
+    options = _machine_options(conn, chosen_editor) if chosen_editor else []
+    values = {o["value"] for o in options}
+    chosen_machine: str | None = machine
+    if chosen_machine is not None and chosen_machine != MACHINE_ALL             and chosen_machine not in values:
+        chosen_machine = None
+    if chosen_machine is None and chosen_editor and len(options) == 1:
+        chosen_machine = options[0]["value"]
+    return {
+        "editors": editors,
+        "editor": chosen_editor,
+        "machines": options,
+        "machine": chosen_machine,
+        # The grid renders only when both questions have been answered.
+        "show_grid": bool(chosen_editor) and chosen_machine is not None,
+    }
+
+
 @router.get("/admin/assignments")
-def page_admin_assignments(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+def page_admin_assignments(request: Request,
+                           editor: str | None = None,
+                           machine: str | None = None,
+                           conn: sqlite3.Connection = Depends(get_conn)):
     _require_admin_page(request)
+    editors = sorted(db.known_editor_usernames(conn))
+    picker = _picker(conn, editors, editor, machine)
+    # The whole-fleet size, in one line rather than in two hundred columns:
+    # what the old grid told an admin at a glance that the per-person view
+    # cannot (owner, 2026-09-11).
+    picker["machine_count"] = len(db.fetch_machines(conn))
+    # No selection means no columns, not every column: an empty username
+    # matches none of them. The projects, the archived list and the counts
+    # below are the whole-fleet half of the page and are built either way.
+    column_editor = picker["editor"] if picker["show_grid"] else ""
+    column_machine = (None if picker["machine"] == MACHINE_ALL
+                      else picker["machine"] if picker["show_grid"] else None)
     return _render(request, "admin_assignments.html", {
         **_sidebar_context(request, conn, None),
-        "assignments": _assignments_view(conn),
+        "assignments": _assignments_view(conn, editor=column_editor,
+                                         machine=column_machine),
+        "picker": picker,
+        "machine_all": MACHINE_ALL,
         "nav_current": "assignments",
     })

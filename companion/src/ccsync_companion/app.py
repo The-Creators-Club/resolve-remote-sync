@@ -72,7 +72,7 @@ from .paths import OUT_OF_TREE, classify_path
 from .project_setup import ProjectSetupPrompter
 from .reporter import DashboardReporter
 from .selection import SelectionClient
-from .sync import lane_guard
+from .sync import lane_guard, server_locate
 from .sync.base import STATE_ERROR, LaneAdapter, LaneStatus
 from .sync.rclone_lane import DIRECTION_DOWN, DIRECTION_UP, VIDEO_EXTS, RcloneLane
 from .sync.sequencer import PROJECTS_PREFIX, STATE_NO_SELECTION, Sequencer
@@ -2319,6 +2319,20 @@ class CompanionApp:
             # the tray line, the report field and the lane's own preflight
             # cannot disagree about whether proxy download is parked.
             disk_floor=self.disk_floor,
+            # "Where did this file go?", asked of the dashboard's inventory
+            # of the WHOLE tree rather than of the project being synced
+            # (docs/HAND_MOVES_ON_THE_SERVER.md phase 2, 0.9.73). A hand move
+            # between two projects is the shape CR-44's scope listing cannot
+            # see, and it is the one that has parked lanes in the field.
+            locator=server_locate.ServerLocator(
+                cfg, identity_token_fn=lambda: self.identity.token),
+            # Slug -> where THIS machine keeps that project, from the
+            # selection the sequencer already holds (either sync mode: an
+            # upload-only project is still a folder on this disk). None for
+            # anything not synced here, which is §4b's "trash it locally,
+            # quietly" case. Deferred, because the sequencer is built after
+            # the lanes.
+            project_rel_fn=self._project_rel_for_slug if self._managed else None,
         )
         lane_c = SyncthingLane(
             base_url=cfg.get("syncthing_url", "http://127.0.0.1:8384"),
@@ -3984,6 +3998,25 @@ class CompanionApp:
         if self.sequencer is None:
             return None
         return set(self.sequencer.rel_to_slug.keys())
+
+    def _project_rel_for_slug(self, slug: str) -> Optional[str]:
+        """Where this machine keeps `slug`, local_root-relative, or None.
+
+        Lane B's answer to "the server says this file moved into project X --
+        do I sync X?" (docs/HAND_MOVES_ON_THE_SERVER.md phase 2). None is the
+        ordinary answer and it is §4b's case: no home for the file on this
+        disk, so the local copy stays in .ccsync-trash rather than being
+        planted somewhere nothing syncs.
+
+        Reads the SELECTION, both modes: an upload-only project is still a
+        folder on this disk, and a file that moved into one belongs in it.
+        """
+        if self.sequencer is None or not slug:
+            return None
+        for rel, known in self.sequencer.rel_to_slug.items():
+            if known == slug:
+                return f"{PROJECTS_PREFIX}{rel}"
+        return None
 
     # -- media pool BIN tree (dashboard reporting) -----------------------------------------------
     @staticmethod

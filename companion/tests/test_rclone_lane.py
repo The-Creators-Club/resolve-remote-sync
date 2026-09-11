@@ -2053,3 +2053,235 @@ def test_a_stand_down_with_no_reason_at_all_still_says_something(tmp_path):
     assert status.detail.startswith("STOPPED (safety): Proxy download stopped "
                                     "itself as a safety measure.")
     assert status.detail.endswith(lane_guard._BREAKER_TAIL)
+
+
+# -- the server says it MOVED (docs/HAND_MOVES_ON_THE_SERVER.md phase 2) -----
+#
+# The half CR-44's scope listing cannot do: a folder dragged in Explorer from
+# one project to ANOTHER leaves the scope lane B is syncing, so the re-listing
+# probe sees a deletion and the breaker parks the lane. The dashboard's
+# inventory covers the whole tree, so it can answer where the files went -- and
+# where this machine syncs the destination, lane B carries its copies there
+# instead of leaving them in .ccsync-trash to be downloaded all over again.
+
+from ccsync_companion.sync import server_locate                    # noqa: E402
+
+
+def _locator(answer, *, status=200, raises=None):
+    """A ServerLocator wired to a canned dashboard answer, so the real client
+    (headers, parsing, the walked flag) is exercised rather than stubbed --
+    the same shape this file stubs `rclone_available` with."""
+    def request(method, url, body, headers, timeout):
+        assert method == "POST" and url.endswith("/api/v1/files/locate")
+        assert headers["X-CCSync-Token"] == "tok"
+        if raises is not None:
+            raise raises
+        return status, answer
+    return server_locate.ServerLocator(
+        {"dashboard_url": "http://dash.example", "dashboard_token": "tok"},
+        identity_token_fn=lambda: "identity",
+        request_fn=request)
+
+
+def _lane_with_trash(tmp_path, trashed, *, locator=None, projects=None,
+                     remote_lines=()):
+    """Lane B with `trashed` [(rel, size)] already in this pass's backup dir.
+
+    The backup dir sits under local_root exactly as `_backup_dir` builds it:
+    the move out of it is a rename on one volume, which is what makes it safe.
+    """
+    lane = _make_lane(tmp_path, DIRECTION_DOWN)
+    backup = Path(lane.local_root) / ".ccsync-trash" / "20260911-190000"
+    for rel, size in trashed:
+        target = backup.joinpath(*rel.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"x" * size)
+    lane._last_backup_dir = str(backup)
+    lane._remote_list_fn = lambda cmd, timeout: "\n".join(remote_lines)
+    lane.locator = locator
+    lane.project_rel_fn = (projects or {}).get
+    return lane
+
+
+def _answer(files, walked=True, as_of="2026-09-11T19:00:00Z"):
+    return {"walked": walked, "as_of": as_of, "files": files}
+
+
+def _found(name, size, places):
+    return {"name": name, "size": size,
+            "found": [{"project_slug": s, "rel_path": r} for s, r in places]}
+
+
+def test_a_file_the_server_found_in_another_project_is_not_a_deletion(tmp_path):
+    """The probe's tree-wide half. The scope listing is empty -- the files DID
+    leave the project being synced -- and the breaker must still not count
+    them, because they are on the NAS under FF5."""
+    lane = _lane_with_trash(
+        tmp_path, [("Proxy/gold.mp4", 7)],
+        locator=_locator(_answer([
+            _found("gold.mp4", 7, [("ff5-talent-gap", "Interviewees/Proxy/gold.mp4")])])),
+    )
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    assert lane._count_relocations("Projects/2026/CCT/Season 1") == 1
+
+
+@pytest.mark.parametrize("kind", ["transport", "http", "never walked"])
+def test_a_dashboard_that_cannot_answer_contributes_nothing(tmp_path, kind):
+    """Every failure falls back to "treat them all as deletions" -- this is
+    the path that decides NOT to stop a lane that is removing files."""
+    locator = {
+        "transport": lambda: _locator(None, raises=OSError("connection refused")),
+        "http": lambda: _locator(None, status=503),
+        "never walked": lambda: _locator(_answer(
+            [_found("gold.mp4", 7, [("ff5", "a/gold.mp4")])], walked=False)),
+    }[kind]()
+    lane = _lane_with_trash(tmp_path, [("Proxy/gold.mp4", 7)], locator=locator)
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    assert lane._count_relocations("Projects/2026/CCT/Season 1") == 0
+
+
+def test_no_locator_at_all_is_exactly_the_old_behaviour(tmp_path):
+    lane = _lane_with_trash(tmp_path, [("Proxy/gold.mp4", 7)])
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    assert lane._count_relocations("Projects/2026/CCT/Season 1") == 0
+    assert lane._moved_out_of_trash == 0
+
+
+def test_the_breaker_clamps_the_probe_to_what_the_pass_deleted(tmp_path):
+    """A probe claiming more relocations than the pass had deletions must not
+    be able to talk the breaker out of a real trip (lane_guard's clamp, still
+    in force now that the count comes partly from the server)."""
+    lane = _make_lane(tmp_path, DIRECTION_DOWN)
+    assert lane.breaker.note_pass("Projects/X", 80, 0,
+                                  relocation_probe=lambda: 5000) is None
+    assert lane.breaker.note_pass("Projects/X", 80, 0,
+                                  relocation_probe=lambda: 20) is not None
+
+
+def test_a_synced_destination_moves_the_file_instead_of_trashing_it(tmp_path):
+    """The point of the whole phase: the editor's proxy follows the folder
+    somebody dragged, and lane B does not download it again."""
+    lane = _lane_with_trash(
+        tmp_path, [("Proxy/gold.mp4", 7)],
+        locator=_locator(_answer([
+            _found("gold.mp4", 7, [("ff5", "Interviewees/Proxy/gold.mp4")])])),
+        projects={"ff5": "Projects/2026/FF5/Talent Gap"},
+    )
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    dest = (Path(lane.local_root) / "Projects/2026/FF5/Talent Gap"
+            / "Interviewees/Proxy/gold.mp4")
+    assert dest.is_file() and dest.stat().st_size == 7
+    assert not (Path(lane._last_backup_dir) / "Proxy" / "gold.mp4").exists()
+    # It counts as a relocation even though it is no longer in the trash for
+    # the probe's walk to find.
+    assert lane._moved_out_of_trash == 1
+    assert lane._count_relocations("Projects/2026/CCT/Season 1") == 1
+
+
+def test_a_destination_this_machine_does_not_sync_stays_in_the_trash(tmp_path):
+    """Section 4b: Ruskin syncs Creator Profiles, the folder went to FF5. His
+    copy has no home on this disk, so it stays recoverable in the trash -- and
+    it still must not count against the breaker."""
+    lane = _lane_with_trash(
+        tmp_path, [("Proxy/gold.mp4", 7)],
+        locator=_locator(_answer([
+            _found("gold.mp4", 7, [("ff5", "Interviewees/Proxy/gold.mp4")])])),
+        projects={"cct": "Projects/2026/CCT/Season 1"},
+    )
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    assert (Path(lane._last_backup_dir) / "Proxy" / "gold.mp4").is_file()
+    assert lane._moved_out_of_trash == 0
+    assert lane._count_relocations("Projects/2026/CCT/Season 1") == 1
+
+
+def test_a_copy_already_at_the_destination_leaves_the_local_one_in_the_trash(tmp_path):
+    """Same size at the new path: this machine already has it there (lane B
+    downloaded it before the move was noticed), so the trashed one is a
+    duplicate. Nothing is overwritten and nothing is deleted."""
+    lane = _lane_with_trash(
+        tmp_path, [("Proxy/gold.mp4", 7)],
+        locator=_locator(_answer([
+            _found("gold.mp4", 7, [("ff5", "Interviewees/Proxy/gold.mp4")])])),
+        projects={"ff5": "Projects/2026/FF5/Talent Gap"},
+    )
+    dest = (Path(lane.local_root) / "Projects/2026/FF5/Talent Gap"
+            / "Interviewees/Proxy/gold.mp4")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"y" * 7)
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    assert dest.read_bytes() == b"y" * 7        # never overwritten
+    assert (Path(lane._last_backup_dir) / "Proxy" / "gold.mp4").is_file()
+    assert lane._moved_out_of_trash == 0
+
+
+def test_two_candidates_move_nothing(tmp_path):
+    """Ambiguity is a refusal, not a guess (design section 6). A copy made
+    twice and then deleted at the source looks exactly like this."""
+    lane = _lane_with_trash(
+        tmp_path, [("Proxy/gold.mp4", 7)],
+        locator=_locator(_answer([
+            _found("gold.mp4", 7, [("ff5", "A/gold.mp4"), ("cct", "B/gold.mp4")])])),
+        projects={"ff5": "Projects/2026/FF5/Talent Gap",
+                  "cct": "Projects/2026/CCT/Season 1"},
+    )
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    assert (Path(lane._last_backup_dir) / "Proxy" / "gold.mp4").is_file()
+    assert lane._moved_out_of_trash == 0
+    # ...but two places on the NAS is still not a deletion.
+    assert lane._count_relocations("Projects/2026/CCT/Season 1") == 1
+
+
+def test_a_file_the_server_has_never_heard_of_is_still_a_deletion(tmp_path):
+    lane = _lane_with_trash(
+        tmp_path, [("Proxy/gold.mp4", 7)],
+        locator=_locator(_answer([_found("gold.mp4", 7, [])])),
+        projects={"ff5": "Projects/2026/FF5/Talent Gap"},
+    )
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    assert (Path(lane._last_backup_dir) / "Proxy" / "gold.mp4").is_file()
+    assert lane._count_relocations("Projects/2026/CCT/Season 1") == 0
+
+
+def test_a_destination_that_escapes_the_tree_is_refused(tmp_path):
+    """The answer arrives over the network and drives a rename, so it is
+    input, not instruction."""
+    lane = _lane_with_trash(
+        tmp_path, [("Proxy/gold.mp4", 7)],
+        locator=_locator(_answer([
+            _found("gold.mp4", 7, [("ff5", "../../../elsewhere/gold.mp4")])])),
+        projects={"ff5": "Projects/2026/FF5/Talent Gap"},
+    )
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    assert (Path(lane._last_backup_dir) / "Proxy" / "gold.mp4").is_file()
+    assert not (tmp_path / "elsewhere" / "gold.mp4").exists()
+
+
+def test_a_mac_spelling_still_matches_the_answer_from_the_server(tmp_path):
+    """CR-90 on this wire too: the trashed name came off a Mac's disk (NFD),
+    the dashboard inventory is NFC."""
+    nfc_name = Path(_NFC_REL).name
+    lane = _lane_with_trash(
+        tmp_path, [(_NFD_REL, 5)],
+        locator=_locator(_answer([
+            _found(nfc_name, 5, [("ff5", "B-roll/" + nfc_name)])])),
+    )
+    lane._relocate_trashed("Projects/2026/FF5/Alpha")
+    assert lane._count_relocations("Projects/2026/FF5/Alpha") == 1
+
+
+def test_one_call_per_pass_however_many_files(tmp_path):
+    """A locate per trashed file would be 100 round trips on the pass that
+    matters most."""
+    calls = []
+
+    def request(method, url, body, headers, timeout):
+        calls.append(len(body["files"]))
+        return 200, _answer([_found(f["name"], f["size"], []) for f in body["files"]])
+
+    locator = server_locate.ServerLocator(
+        {"dashboard_url": "http://d", "dashboard_token": "tok"},
+        request_fn=request)
+    lane = _lane_with_trash(
+        tmp_path, [(f"Proxy/clip{i}.mp4", i + 1) for i in range(12)], locator=locator)
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    assert calls == [12]

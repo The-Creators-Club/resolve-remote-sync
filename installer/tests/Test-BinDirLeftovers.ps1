@@ -96,7 +96,14 @@ function Check {
     if ("$Expected" -eq "$Actual") { Ok $Label } else { Bad "$Label`: got '$Actual' want '$Expected'" }
 }
 
-$BinDir = Join-Path $env:TEMP "ccsync-test-leftovers"
+# $env:TEMP is 8.3 SHORT form on any profile that has one -- a hosted Windows
+# runner's is C:\Users\RUNNER~1\AppData\Local\Temp -- while every FullName
+# Get-ChildItem reports is the long one. Expectations built from the raw
+# variable compared a short path against a long answer and failed seven cases
+# on CI while passing here (2026-09-11, CI run 34583384353). One spelling, for
+# every path this file builds.
+$TempRoot = (Get-Item -LiteralPath $env:TEMP -Force).FullName
+$BinDir = Join-Path $TempRoot "ccsync-test-leftovers"
 $SelfPath = Join-Path $BinDir "windows_uninstall.ps1"
 
 try {
@@ -253,7 +260,7 @@ function Get-ScriptStatement {
 $reportBlock = Get-ScriptStatement -Ast $uAst -TypeName "IfStatementAst" `
     -Match @("Get-BinDirLeftovers", "Remove-Item -LiteralPath \`$BinDir -Recurse")
 if ($reportBlock) {
-    $Sandbox = Join-Path $env:TEMP "ccsync-test-leftovers-report"
+    $Sandbox = Join-Path $TempRoot "ccsync-test-leftovers-report"
     try {
         if (Test-Path -LiteralPath $Sandbox) { Remove-Item -LiteralPath $Sandbox -Recurse -Force }
         New-Item -ItemType Directory -Path $Sandbox -Force | Out-Null

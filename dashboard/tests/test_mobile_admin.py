@@ -226,8 +226,11 @@ STACKED = {
                               "EDITOR", "COMPUTER", "PLATFORM", "LAST REPORT"),  # UX-16
     "/partials/admin/sessions": ("USERNAME", "SIGNED IN", "LAST SEEN", "FROM"),
     "/partials/admin/report-tokens": ("EDITOR", "LABEL", "CREATED", "LAST USED"),
-    "/partials/admin/packages": ("KIND", "VERSION", "PLATFORM", "SIZE", "SHA256",
-                                 "PUBLISHED", "BY"),
+    # KIND and PLATFORM are HEADINGS on this panel since 2026-09-11, not
+    # columns: the page groups companion/onboard and windows/macos rather
+    # than repeating both on every row. What is left is the row itself, plus
+    # the out-of-date computers table below it.
+    "/partials/admin/packages": ("VERSION", "PUBLISHED", "SIZE"),
     "/partials/admin/audit": ("WHEN", "WHO", "ACTION", "SUBJECT", "DETAIL"),
 }
 
@@ -239,7 +242,9 @@ def test_the_record_tables_stack_with_a_label_on_every_cell(client, url):
     instead of off the side of it. A cell with no `data-label` renders bare,
     which is why the labels are pinned per table rather than counted."""
     body = client.get(url).text
-    assert 'class="editors stack"' in body, url
+    # A prefix, not the whole attribute: the packages panel's tables carry a
+    # third class (.pkg-table) for their shared column roles.
+    assert 'class="editors stack' in body, url
     for label in STACKED[url]:
         assert f'data-label="{label}"' in body, (url, label)
 
@@ -353,7 +358,9 @@ def test_the_assignments_matrix_scrolls_sideways_inside_itself(client):
     what the page is for, and stacking it would lose the comparison. `.scroll-x`
     keeps the scrolling inside the element, and the project name stays pinned
     to the left edge while it moves."""
-    body = client.get("/admin/assignments").text
+    # With its two pickers answered (2026-09-11): the grid is per person and
+    # per computer now, and the sideways scroll is what that grid still does.
+    body = client.get("/admin/assignments?editor=jsmith&machine=EDIT-PC").text
     assert 'class="assign-scroll scroll-x"' in body
     assert 'class="assign-project"' in body          # the sticky column, per row
     assert 'class="assign-project-head"' in body

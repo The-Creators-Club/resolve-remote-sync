@@ -407,6 +407,53 @@ Response:
   separate keys because one editor can be running one of each, and a cancel
   must reach the orchestrator it was meant for.
 
+### `POST /api/v1/files/locate`
+
+Where else on the NAS does a file with this name and this size live?
+**Fleet credential** (the token AND a signed `X-CCSync-Identity`), exactly
+as the jobs claim: no session on the far end, and the answer covers every
+active project, which is more than any one editor's pages show them.
+
+```json
+{"files": [{"name": "A002_C048.mp4", "size": 734003200}, ...]}
+```
+
+```json
+{"walked": true,
+ "as_of": "2026-09-11T18:45:02Z",
+ "files": [{"name": "A002_C048.mp4", "size": 734003200,
+            "found": [{"project_slug": "2026-ff5-talent-gap",
+                       "rel_path": "Interviewees/Proxy/A002_C048.mp4"}]}]}
+```
+
+* `name` is a **basename** (a path is reduced to one: the path is precisely
+  what stopped being true), compared NFC through `db.media_rel_key` (CR-90);
+  `rel_path` comes back in the server's own spelling, because it is what the
+  caller renames to.
+* `found` is EVERY place that name and size sits, in no order, and `[]` when
+  there is none. Ambiguity is reported, never resolved here: the companion
+  refuses to move a file with more than one candidate
+  (`docs/HAND_MOVES_ON_THE_SERVER.md` section 6).
+* `walked: false` means this dashboard has never completed an inventory walk,
+  so "not found" means **not known**, and the caller must change nothing on
+  it. `as_of` is the newest `refreshed_at` in `nas_media`, i.e. how stale the
+  server's picture is (at most `interval_inventory`, 15 minutes).
+* `size` is exact. A re-encode is not a move.
+* At most **2000** files per call; more is a **413** with a sentence, never a
+  silent truncation - a caller answered about half its list would read the
+  other half as deleted.
+* It is answered from `nas_media` alone. No NAS filesystem call happens, and
+  nothing is written.
+
+Who calls it: a companion's lane B pass, once, before it gives the files it
+just moved into `.ccsync-trash` up for deleted (companion 0.9.73,
+`sync/server_locate.py`). A file found elsewhere is a relocation rather than a
+deletion for the breaker's count (CR-44, now tree-wide), and where this
+machine syncs the destination project the local copy is renamed into it
+instead of being trashed and downloaded again.
+
+---
+
 ---
 
 ## 3. Fleet reads

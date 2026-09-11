@@ -163,7 +163,13 @@ _CSRF_EXEMPT_EXACT = {"/login", "/api/v1/login", "/api/v1/logout", "/api/v1/repo
                       # Same reasoning as /api/v1/report beside it: a companion
                       # is not a browser and holds no session cookie to forge
                       # (v33, SYS-7).
-                      "/api/v1/diagnostics"}
+                      "/api/v1/diagnostics",
+                      # ...and the locate call a lane B pass makes before it
+                      # gives a file up for deleted (HAND_MOVES_ON_THE_SERVER
+                      # phase 2). A POST because the question is a list, not
+                      # because it writes anything: it reads nas_media and
+                      # changes nothing here.
+                      "/api/v1/files/locate"}
 _CSRF_EXEMPT_PREFIXES = ("/api/v1/selection/", "/api/v1/admin/packages/",
                          "/broll/", "/music/", "/ytdl/")
 # The fleet job claim/heartbeat/result (phase 0, 2026-08-29). Bearer-token
@@ -1186,6 +1192,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # ...and the machine with Resolve open serving the Timeline Cards
             # page (TIMELINE-CARDS-INTO-CCSYNC.md phase 2)
             or (_cards_fleet_re.match(path) is not None and _companion_token_ok(request))
+            # ...and a lane B pass asking where the files it is about to
+            # trash have gone (HAND_MOVES_ON_THE_SERVER.md phase 2). Same
+            # posture as the fleet routes above: no session on the far end,
+            # and api.api_locate_files runs the full fleet gate (token AND a
+            # signed identity) itself. Exact, never a prefix.
+            or (path == "/api/v1/files/locate" and _companion_token_ok(request))
             # the setup wizard's own API (ZERO_TOUCH_PLAN.md WP D). Open at
             # THIS layer only -- every route under it re-checks via
             # setup_routes.require_setup_access, which is the actual gate

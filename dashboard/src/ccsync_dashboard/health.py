@@ -6,6 +6,7 @@ amber means work in flight, green means fully synced and quiet.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable, Mapping
 
 from .db import age_seconds
@@ -374,7 +375,96 @@ WHY_ORDER: tuple[str, ...] = (
 # as a fault is, and leaving it out is what makes an admin chase an
 # upload-only machine. The caller colours by membership here, never by the
 # mere presence of a sentence.
-WHY_INFORMATIONAL = frozenset({"upload_only"})
+# `no_selection` joined them on 2026-09-11 (fleet-grid declutter, owner's
+# words: "Alex laptop just happens to have no synced projects, not an error").
+# A computer nobody has ticked a project for is a computer with nothing to do,
+# which is a state, not a fault: red there sends an admin chasing a machine
+# that is working exactly as planned, and it is the single commonest sentence
+# on the grid.
+WHY_INFORMATIONAL = frozenset({"upload_only", "no_selection"})
+
+# The reasons whose whole answer is this dashboard's own (the plan lives
+# HERE), so a companion's `blocked_detail` can only ever restate it. See
+# _detail_clause: the triple-nested "Nothing to sync: no project is ticked for
+# this computer (No projects are ticked for this computer (Nothing to sync
+# yet: ...))" the owner read on the grid was this sentence, the companion's
+# sentence and the sequencer's sentence, each wrapped in the next.
+WHY_DETAIL_IS_ECHO = frozenset({"no_selection"})
+
+# Words that carry no meaning when deciding whether two sentences say the same
+# thing. Deliberately small: this comparison exists to catch a restatement,
+# and every word dropped is a way for two DIFFERENT sentences to look alike.
+_ECHO_NOISE = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "has", "have",
+    "had", "yet", "now", "already", "this", "that", "it", "its", "there",
+    "on", "in", "of", "for",
+})
+
+
+def _echo_words(text: Any) -> tuple[str, ...]:
+    """`text` as comparable content words: lowercased, de-pluralised, noise out."""
+    words = []
+    for word in re.findall(r"[a-z0-9]+", str(text or "").lower()):
+        if word in _ECHO_NOISE:
+            continue
+        if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+            word = word[:-1]
+        words.append(word)
+    return tuple(words)
+
+
+def _says_the_same(one: Any, other: Any) -> bool:
+    """True when these two texts say the same thing in different words.
+
+    SYMMETRIC on purpose: the repetition the grid showed came in both
+    directions, a short sentence wrapped around a longer restatement of
+    itself AND the reverse. Either way the second copy adds nothing.
+    """
+    first, second = set(_echo_words(one)), set(_echo_words(other))
+    if not first or not second:
+        return True
+    return first <= second or second <= first
+
+
+def _unnest(detail: str) -> str:
+    """A detail with any parenthetical that merely restates it removed.
+
+    The companion composes "<its own sentence> (<the sequencer's sentence>)",
+    and the sequencer's sentence has said the same thing since SYNC-116. What
+    an admin read was one fact three times. The head is kept rather than the
+    parenthetical: it is the shorter of the two and it is the product's own
+    words. A parenthetical that ADDS something (a path, an errno, a count)
+    fails the test and stays.
+    """
+    text = detail.strip()
+    while text.endswith(")"):
+        open_at = text.rfind("(")
+        if open_at <= 0:
+            break
+        head, inner = text[:open_at].strip(), text[open_at + 1:-1].strip()
+        if not head or not _says_the_same(head, inner):
+            break
+        text = head
+    return text
+
+
+def _detail_clause(code: str, sentence: str, detail: str) -> str:
+    """The " (<detail>)" to append to `sentence`, or "" for none.
+
+    The companion's detail is APPENDED, never substituted: the sentence is the
+    product's words and the detail is the machine's (a path, an errno, a
+    folder name). A detail that only says the sentence again in other words is
+    dropped whole, and a detail long enough to be a paragraph is a diagnostics
+    bundle's job, not a grid line.
+    """
+    cleaned = _unnest(detail)
+    if not cleaned or len(cleaned) > 120:
+        return ""
+    if code in WHY_DETAIL_IS_ECHO:
+        return ""
+    if cleaned.lower() in sentence.lower() or _says_the_same(_clause(sentence), cleaned):
+        return ""
+    return f" ({cleaned})"
 
 # One minute is already twice lane B's `--min-age 60s`, and a clock that far
 # out makes the pass exclude every file on the NAS and exit 0 (SYS-4).
@@ -492,7 +582,11 @@ def _why_sentence(code: str, row: Mapping[str, Any]) -> str:
         return ("Not downloading proxies: proxy download stopped itself and needs a "
                 "person to check the server")
     if code == "no_selection":
-        return "Nothing to sync: no project is ticked for this computer"
+        # Not "Nothing to sync:" any more (fleet-grid declutter 2026-09-11):
+        # that lead-in is the vocabulary of the fault sentences around it, and
+        # this one is not a fault. Short, because it is the commonest line on
+        # the grid and it is muted now.
+        return "Nothing ticked for this computer"
     if code == "folders_unfiltered":
         count = _why_get(row, "folders_unfiltered")
         if count:
@@ -554,12 +648,11 @@ def _why_first(
         code = reported if reported in WHY_ORDER else "blocked"
         sentence = _why_sentence(code, row)
         detail = str(_why_get(row, "blocked_detail") or "").strip()
-        # The companion's detail is APPENDED, never substituted: the sentence
-        # is the product's words and the detail is the machine's (a path, an
-        # errno, a folder name). A detail long enough to be a paragraph is a
-        # diagnostics bundle's job, not a grid line.
-        if detail and len(detail) <= 120 and detail.lower() not in sentence.lower():
-            sentence = f"{sentence} ({detail})"
+        # ONE headline, once (fleet-grid declutter 2026-09-11). The substring
+        # test this used to be could not see a restatement in other words, so
+        # three layers of the same fact rode onto the grid nested in each
+        # other's brackets. _detail_clause is the whole rule.
+        sentence = f"{sentence}{_detail_clause(code, sentence, detail)}"
         return code, sentence
 
     if _why_get(row, "verified") is False:
@@ -721,3 +814,196 @@ def why_causes(
         return []
     second = _second_cause(row, first[0])
     return [first] if second is None else [first, second]
+
+
+# ------------------------------------------- fleet-grid declutter 2026-09-11
+#
+# The owner's words about the COMPANIONS section: "this whole section is also
+# very visually cluttered, clean it up". A row was a red sentence, a line of
+# lane chips, a Resolve line, a second line of a dozen chips with buttons
+# mixed into it, an expander and a version. Everything was on screen at once,
+# so nothing was.
+#
+# One row, ONE headline: the single most important thing about that computer
+# right now. Three fixed lane chips under it, so the eye finds the same lane
+# in the same place on every row. Everything else behind [ DETAILS ].
+
+HEADLINE_MUTED = "muted"
+
+# The lane strip, in this order on every row, always all three. A lane a
+# machine has not reported is rendered as "not reported", never dropped: a
+# missing chip would shift the two beside it and undo the whole point of a
+# fixed position.
+LANE_STRIP: tuple[tuple[str, str], ...] = (
+    ("lane_a_video_up", "upload"),
+    ("lane_b_proxy_down", "proxy download"),
+    ("lane_c_syncthing", "folder sync"),
+)
+
+
+def lane_strip(lanes: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The three lanes in their fixed order, whatever the machine reported.
+
+    `chip` is the colour the row should draw, and it is GREEN for a healthy
+    lane -- the template renders green as muted, because a row of green boxes
+    is the same wall of colour as a row of red ones and only one of them
+    should be able to stop the eye.
+    """
+    by_lane: dict[str, Mapping[str, Any]] = {}
+    for lane in lanes or []:
+        if isinstance(lane, Mapping):
+            by_lane[str(lane.get("lane") or "")] = lane
+    strip = []
+    for key, label in LANE_STRIP:
+        lane = by_lane.get(key)
+        if lane is None:
+            strip.append({"lane": key, "label": label, "state": "not reported",
+                          "chip": GREEN, "reported": False,
+                          "chip_reason": None, "last_error": None})
+            continue
+        strip.append({
+            "lane": key,
+            "label": label,
+            "state": str(lane.get("state") or "?"),
+            "chip": str(lane.get("chip") or GREEN),
+            "reported": True,
+            "chip_reason": lane.get("chip_reason"),
+            "last_error": lane.get("last_error"),
+        })
+    return strip
+
+
+def _lane_fault(lanes: Iterable[Mapping[str, Any]]) -> tuple[str, str] | None:
+    """(lane words, reason) for the first lane this machine cannot run, or None."""
+    for lane in lanes or []:
+        if not isinstance(lane, Mapping):
+            continue
+        if str(lane.get("chip") or "") != RED:
+            continue
+        reason = str(lane.get("chip_reason") or lane.get("last_error") or "").strip()
+        return _lane_words(lane.get("lane") or lane.get("label")), reason
+    return None
+
+
+def fleet_headline(row: Mapping[str, Any]) -> dict[str, Any]:
+    """{reason, text, level} -- the ONE line this machine's row leads with.
+
+    PURE, and built from the row build_editors_view already composed: `why`
+    (health.why_not_syncing), `companion_outdated` and the lane chips. The
+    priority is the owner's: a stop somebody or something applied, then an old
+    build, then a lane that is failing, then nothing ticked, then all good.
+
+    `level` is red / amber / muted, NOT a lane colour: a healthy row and a row
+    with nothing to do are both muted, because the reader is scanning for the
+    one row that is not.
+    """
+    why = row.get("why") if isinstance(row.get("why"), Mapping) else None
+    reason = str((why or {}).get("reason") or "")
+    sentence = str((why or {}).get("sentence") or "").strip()
+    informational = bool((why or {}).get("informational"))
+
+    # A fault the product can name beats everything: it is the reason the
+    # admin opened the page.
+    if sentence and not informational:
+        return {"reason": reason or "blocked", "text": sentence, "level": RED}
+
+    if row.get("companion_outdated"):
+        current = str(row.get("current_companion_version") or "").strip()
+        running = str(row.get("companion_version") or "").strip() or "an unknown build"
+        return {
+            "reason": "out_of_date", "level": AMBER,
+            "text": (f"Out of date: running {running}, current is {current}"
+                     if current else f"Out of date: running {running}"),
+        }
+
+    fault = _lane_fault(row.get("lanes") or [])
+    if fault is not None:
+        lane, detail = fault
+        text = f"{lane.capitalize()} has stopped"
+        if detail:
+            text = f"{text}: {detail}"
+        return {"reason": "lane_error", "text": text, "level": RED}
+
+    # Nothing ticked, upload-only, clips outside the tree: true, worth saying,
+    # not a problem (2026-09-11, the owner on his own laptop: "just happens to
+    # have no synced projects, not an error").
+    if sentence:
+        return {"reason": reason or "informational", "text": sentence,
+                "level": HEADLINE_MUTED}
+
+    busy = any(str((l or {}).get("state") or "") == "syncing"
+               for l in (row.get("lanes") or []) if isinstance(l, Mapping))
+    return {"reason": "syncing" if busy else "idle",
+            "text": "Syncing" if busy else "Idle, nothing owed",
+            "level": HEADLINE_MUTED}
+
+
+def detail_notes(row: Mapping[str, Any]) -> list[str]:
+    """The things behind [ DETAILS ] that are actually WRONG, in words.
+
+    The count of these is the one thing shown beside the collapsed expander,
+    so that folding a row's diagnostics away can never hide a real problem
+    silently. Only states a person would act on: a capability (a GPU, a
+    whisper model) and a live job are facts about the machine, not notes.
+    """
+    guard = row.get("guard") if isinstance(row.get("guard"), Mapping) else {}
+    notes: list[str] = []
+
+    crashes = guard.get("crash_count")
+    if crashes:
+        notes.append(f"{crashes} crash{'' if crashes == 1 else 'es'}")
+    if guard.get("disk_percent") is not None and guard.get("disk_status") != GREEN:
+        notes.append("the drive is filling up")
+    out_of_tree = guard.get("resolve_out_of_tree")
+    if out_of_tree:
+        notes.append(f"{out_of_tree} clip{'' if out_of_tree == 1 else 's'} "
+                     "outside the tree")
+    stray = guard.get("stray_projects_count")
+    if stray:
+        notes.append(f"{stray} stray project folder{'' if stray == 1 else 's'}")
+    if guard.get("moved_project_dirs_count"):
+        notes.append("a project folder has moved")
+    conflicts = guard.get("sync_conflicts")
+    if conflicts:
+        notes.append(f"{conflicts} sync conflict{'' if conflicts == 1 else 's'}")
+    if guard.get("folders_unfiltered"):
+        notes.append("a shared folder has no filter yet")
+    if guard.get("upgrade_attempts"):
+        notes.append("an update keeps failing")
+    if guard.get("report_refused_at"):
+        notes.append("this computer is being refused")
+
+    proxy = row.get("proxy") if isinstance(row.get("proxy"), Mapping) else {}
+    need = proxy.get("missing")
+    if need:
+        notes.append(f"{need} clip{'' if need == 1 else 's'} need proxies")
+
+    capabilities = (row.get("capabilities")
+                    if isinstance(row.get("capabilities"), Mapping) else {})
+    cards = capabilities.get("cards_agent")
+    if isinstance(cards, Mapping):
+        state = str(cards.get("state") or "")
+        if state in ("refused", "stopped", "credential_refused", "unreachable"):
+            notes.append("the cards role is not running")
+
+    youtube = (row.get("youtube_import")
+               if isinstance(row.get("youtube_import"), Mapping) else {})
+    yt_state = str(youtube.get("state") or "")
+    pending = youtube.get("pending")
+    if pending:
+        notes.append(f"{pending} YouTube clip{'' if pending == 1 else 's'} "
+                     "waiting for Resolve")
+    elif youtube.get("reason") and yt_state and yt_state not in ("ok", "idle"):
+        notes.append("the YouTube import gave up")
+
+    resolve = (row.get("resolve_detail")
+               if isinstance(row.get("resolve_detail"), Mapping) else {})
+    missing = resolve.get("missing_clips") or []
+    if missing:
+        # UX-10 (usability sweep 2026-09-03): "(s)" is not a word, and the
+        # count is known here.
+        notes.append(f"{len(missing)} clip{'' if len(missing) == 1 else 's'} "
+                     "Resolve cannot find")
+    if resolve.get("wedged_seconds"):
+        notes.append("Resolve is wedged on a call")
+    return notes

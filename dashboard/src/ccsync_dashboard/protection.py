@@ -915,6 +915,80 @@ def run_cycle(conn: sqlite3.Connection, settings: Any, now: str,
     return {"results": results, "note": _note(counts), "counts": counts}
 
 
+def refresh_line(conn: sqlite3.Connection, settings: Any, key: str,
+                 now: str) -> dict[str, Any] | None:
+    """Re-run ONE line now and put its verdict in the stored picture.
+
+    2026-09-11: the owner clicked [ I HAVE BACKED IT UP ], the row under the
+    button said "last recorded 2026-09-11 by alex", and the line above it
+    stayed [ MISSING ] "no backup has been recorded" - because page_view
+    shows the last PASS (every 15 min, `interval_invariants`), and the
+    click only wrote the ack. A panel that contradicts the button it just
+    took is the "swallowed acknowledgement" the ack route's docstring
+    promises never to produce. So the ack route calls this: the one line is
+    evaluated again against the store as it now is, its entry in the stored
+    results is replaced (never the other lines': their NAS-backed answers
+    come from the collector's context, which this request does not have),
+    and its own MISSING / UNVERIFIABLE notices are filed or closed exactly
+    as a pass would. Returns the new result, or None for an unknown key.
+    Never raises: the click was recorded before this ran, and the next pass
+    reaches the same answer on its own."""
+    line = BY_KEY.get(key)
+    if line is None:
+        return None
+    try:
+        ctx = Ctx(conn, settings, now)
+        try:
+            outcome = line.check(ctx)
+        except Exception as exc:                                     # noqa: BLE001
+            log.exception("protection line %s could not run", line.key)
+            outcome = Outcome(CHECK_FAILED, f"{type(exc).__name__}: {str(exc)[:200]}")
+        result = {
+            "key": line.key, "title": line.title, "what": line.what,
+            "consequence": line.consequence, "fix": line.fix,
+            "severity": line.severity, "state": outcome.state,
+            "label": STATE_LABELS.get(outcome.state, outcome.state.upper()),
+            "detail": outcome.detail,
+            "subjects": [{"subject": s, "detail": d} for s, d in outcome.subjects],
+        }
+        stored = stored_results(conn)
+        lines = [r for r in (stored.get("lines") or [])
+                 if isinstance(r, dict) and r.get("key") != line.key]
+        lines.append(result)
+        order = {l.key: i for i, l in enumerate(LINES)}
+        lines.sort(key=lambda r: order.get(str(r.get("key")), len(LINES)))
+        db.meta_set_json(conn, RESULTS_META,
+                         {"checked_at": stored.get("checked_at") or now, "lines": lines})
+        # Its notices, the way run_cycle files and closes them: the keep-lists
+        # are every OTHER line's open subjects plus this line's new ones.
+        missing = [f"{r['key']}: {s['subject']}" for r in lines
+                   if r.get("state") == BROKEN for s in (r.get("subjects") or [])]
+        unverifiable = [r["key"] for r in lines
+                        if r.get("state") in (NOT_CHECKED, CHECK_FAILED)]
+        if result["state"] == BROKEN:
+            for subject in result["subjects"]:
+                db.notice(
+                    conn, NOTICE_MISSING, line.severity,
+                    f"{line.key}: {subject['subject']}",
+                    body=(f"{line.consequence} This server checks that "
+                          f"{line.title}, and it cannot see that it is: "
+                          f"{subject['detail']}."),
+                    fix=line.fix, now=now)
+        elif result["state"] in (NOT_CHECKED, CHECK_FAILED):
+            db.notice(
+                conn, NOTICE_UNVERIFIABLE, "warn", line.key,
+                body=(f"This server cannot confirm that {line.title}. "
+                      f"{line.consequence} Treat it as unchecked, not as "
+                      f"fine: {result['detail']}"),
+                fix=line.fix, now=now)
+        db.clear_notices_of_kind(conn, NOTICE_MISSING, missing, now=now)
+        db.clear_notices_of_kind(conn, NOTICE_UNVERIFIABLE, unverifiable, now=now)
+        return result
+    except sqlite3.Error:
+        log.exception("protection: could not refresh %s after an acknowledgement", key)
+        return None
+
+
 def _counts(results: list[dict[str, Any]]) -> dict[str, int]:
     counts = {state: 0 for state in (OK, BROKEN, NOT_CHECKED, CHECK_FAILED)}
     for result in results:

@@ -253,9 +253,13 @@ def test_every_reason_the_companion_can_report_gets_one_sentence():
         assert "\u2014" not in sentence
         # A sentence that is only the code back again explains nothing.
         assert sentence != reason
+        # "Nothing ticked" joined the lead-ins on 2026-09-11 (fleet-grid
+        # declutter): a computer nobody has ticked a project for is not
+        # failing at anything, so it does not wear the vocabulary of the
+        # faults around it.
         assert sentence.startswith(("Not syncing:", "Not downloading proxies:",
                                     "Not syncing safely:", "Nothing to sync:",
-                                    "Nothing to download:"))
+                                    "Nothing to download:", "Nothing ticked"))
 
 
 def test_the_order_is_the_contracts_order():
@@ -384,9 +388,13 @@ def test_upload_only_is_informational_not_a_fault():
         _row(plan={"count": 2, "full": 1, "upload_only": 1}), NOW) is None
 
 
-def test_only_upload_only_is_informational():
+def test_only_the_two_states_that_are_not_faults_are_informational():
+    """`no_selection` joined `upload_only` on 2026-09-11, the owner on his own
+    laptop: "just happens to have no synced projects, not an error". Every
+    OTHER reason in the contract is a fault and must stay red."""
+    assert health.WHY_INFORMATIONAL == frozenset({"upload_only", "no_selection"})
     for reason in health.WHY_ORDER:
-        if reason == "upload_only":
+        if reason in ("upload_only", "no_selection"):
             continue
         assert reason not in health.WHY_INFORMATIONAL, reason
 

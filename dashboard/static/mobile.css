@@ -283,6 +283,10 @@
      file is M1's: a more specific selector, same effect. */
   .assign-scroll { max-height: 70vh; }
   .assign-toolbar { flex-wrap: wrap; }
+  /* The person/computer pickers (2026-09-11): full-width selects, one per
+     line, because a 16px select and a label side by side is wider than a
+     phone and this is the control the page now opens with. */
+  .assign-pick select { width: 100%; max-width: none; }
   .assign-filter { min-width: 0; width: 100%; }
   .assign-scroll table.assign-grid td.assign-project,
   .assign-scroll table.assign-grid th.assign-project-head { max-width: 9rem; }

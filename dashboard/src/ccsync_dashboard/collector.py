@@ -14,7 +14,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from pathlib import Path
 
@@ -1647,7 +1647,7 @@ class Collector:
                       "not empty; skipping the walk so no inventory is wiped", projects_dir)
             return "skipped: the Projects tree looks unmounted (0 entries)"
         active = conn.execute(
-            "SELECT id, label, path FROM projects WHERE active=1 ORDER BY id"
+            "SELECT id, slug, label, path FROM projects WHERE active=1 ORDER BY id"
         ).fetchall()
         if not active:
             return
@@ -1683,15 +1683,25 @@ class Collector:
                 errors.append((pid, "project dir has no .stfolder marker and no media "
                                     "files - it looks unmounted, not empty"))
                 continue
-            walked.append((pid, rel, rows, sig, n_dirs))
+            walked.append((pid, str(row["slug"]), rel, rows, sig, n_dirs))
 
         # -- phase 2: one short write burst ---------------------------------
         for pid, message in errors:
             db.record_inventory_error(conn, pid, message, now)
         refused = 0
-        for pid, rel, rows, sig, n_dirs in walked:
+        # What each project's file list looked like BEFORE this pass replaced
+        # it, kept only for the projects whose replacement went through: a
+        # project whose inventory was refused (the collapse brake) still holds
+        # its old rows, so the same vanishes would be "detected" again on every
+        # cycle from a walk nobody believed.
+        diffs: list[InventoryWalk] = []
+        for pid, slug, rel, rows, sig, n_dirs in walked:
+            previous = db.nas_media_rows(conn, pid)
             if db.replace_nas_media(conn, pid, rows, sig, n_dirs, now):
                 log.info("inventory: %s -> %d media file(s)", rel, len(rows))
+                diffs.append(InventoryWalk(
+                    slug=slug, project_rel=rel, old=previous,
+                    new=[(r[0], r[1], r[3], r[4]) for r in rows]))
             else:
                 refused += 1
                 log.error("inventory: %s walked to %d media file(s) from a non-empty "
@@ -1701,7 +1711,72 @@ class Collector:
             notes.append(f"{len(errors)} project dir(s) unreadable")
         if refused:
             notes.append(f"kept {refused} project inventory(ies): the walk collapsed")
+        # LAST, and wrapped. The inventory walk is what tells every editor
+        # whether their footage is on the server; recognising a hand move is a
+        # convenience on top of it, and a convenience may never take the walk
+        # down with it.
+        try:
+            detected = self._record_detected_moves(conn, diffs, now)
+        except Exception:                                            # noqa: BLE001
+            log.exception("inventory: hand-move detection failed; the walk stands")
+        else:
+            if detected:
+                notes.append(f"{detected} move(s) detected on the server")
         return "; ".join(notes) or None
+
+    def _record_detected_moves(self, conn, walks: list[InventoryWalk], now: str) -> int:
+        """Write a `file_moves` row for every move this pass can prove, with
+        the same target machines the project page's button computes.
+
+        The row is written in the state a COMPLETED server rename lands in,
+        because the rename has already happened: an admin did it in Explorer
+        minutes ago. Everything after this point is the machinery
+        docs/FILE_MOVES.md describes, unchanged."""
+        # Evidence that this check ran, findings or none: without it the WHAT
+        # THE SERVER CHECKS panel reads a fleet that has never had a hand move
+        # as a kind nobody wrote (db.mark_notice_checked).
+        db.mark_notice_checked(conn, "file_move_detected", now)
+        if not walks:
+            return 0
+        moves = detect_moves(walks)
+        if len(moves) > DETECTED_MOVE_LIMIT:
+            log.warning("inventory: %d moves detected in one pass, recording the first "
+                        "%d. A pass this size is a restore or a remount, not an "
+                        "afternoon of filing: check the server before the rest are "
+                        "picked up on later cycles", len(moves), DETECTED_MOVE_LIMIT)
+            moves = moves[:DETECTED_MOVE_LIMIT]
+        recorded = 0
+        for move in moves:
+            if db.file_move_recorded(conn, from_slug=move.from_slug,
+                                     from_rel=move.from_rel, to_slug=move.to_slug,
+                                     to_rel=move.to_rel, now=now,
+                                     within_days=DETECTED_MOVE_REPEAT_DAYS):
+                continue
+            targets = db.file_move_target_machines(conn, move.from_slug, move.from_rel)
+            db.record_file_move(
+                conn, from_slug=move.from_slug,
+                from_project_rel=move.from_project_rel, from_rel=move.from_rel,
+                to_slug=move.to_slug, to_project_rel=move.to_project_rel,
+                to_rel=move.to_rel, is_dir=move.is_dir,
+                proxies_moved=move.proxies_moved, requested_by=DETECTED_MOVE_ACTOR,
+                now=now, targets=targets, state=db.FILE_MOVE_DONE,
+                source=db.FILE_MOVE_SOURCE_DETECTED)
+            recorded += 1
+            log.info("inventory: a move was made on the server by hand: %s/%s -> %s/%s "
+                     "(%d file(s)); %d machine(s) to follow",
+                     move.from_project_rel, move.from_rel,
+                     move.to_project_rel, move.to_rel, move.n_files, len(targets))
+            db.notice(
+                conn, "file_move_detected", "info",
+                f"{move.to_project_rel}/{move.to_rel}",
+                body=(f"{move.n_files} file(s) were moved on the server, by hand, from "
+                      f"{move.from_project_rel}/{move.from_rel}. "
+                      f"{len(targets)} computer(s) are following: each moves its own "
+                      f"copy and relinks Resolve, so nothing re-uploads the old path."),
+                fix=("Nothing to do; the computers follow on their own. If this was "
+                     "not a move, open the project page's MOVES history."),
+                now=now)
+        return recorded
 
     @staticmethod
     def _project_rel(row, prefix: str) -> str:
@@ -2100,6 +2175,291 @@ class Collector:
         result = alerts.run_cycle(conn, self.settings, self.now_fn(),
                                   watchdog_restarts=max(0, restarts))
         return result.get("note")
+
+
+# ---------------------------------------------------------------- hand moves
+# docs/HAND_MOVES_ON_THE_SERVER.md phase 1, 2026-09-11. A move somebody makes
+# in Explorer on the NAS used to cost the fleet a two-day trail of warnings and
+# a parked lane B on every machine that held the files (CR-267a, the Gold Card
+# Meetup shoot). The dashboard already walks every project's files into
+# nas_media every 15 minutes, and a move is a plain diff between two of those
+# walks: a (basename, size, mtime_ns) that VANISHED from one path and APPEARED
+# at exactly one other. Nothing else on the NAS makes that shape -- a re-encode
+# changes size and mtime, a copy leaves the source in place, a delete has no
+# destination -- so the match needs no hashing and never touches the disk.
+#
+# What is found is written as the `file_moves` row the project page's button
+# writes, with `source='detected'` and the state a finished server rename lands
+# in (the rename HAS happened; this code only recognised it). From there the
+# fleet follows it exactly as if the button had been pressed.
+#
+# The rules here are section 6's, and every one of them is a refusal:
+#   * ambiguity is not a guess. A key that appeared at two paths, or vanished
+#     from two, is left alone and stays a deletion for lane B and the breaker.
+#   * a file that only vanished is a DELETION and this code does nothing with
+#     it, ever.
+#   * nothing here touches the filesystem, on the NAS or anywhere else.
+
+# What one pass may record. A pass that finds more than this has not seen 500
+# moves; it has seen a dataset remount, a restore or a re-encode of a whole
+# archive, and the right answer to that is a log line and a human.
+DETECTED_MOVE_LIMIT = 500
+
+# How long a move already recorded suppresses an identical one. Long enough to
+# cover a walk that raced the move it was watching (the window is one cycle,
+# 15 minutes), short enough that a file genuinely sent the same way twice in a
+# week is still followed the second time.
+DETECTED_MOVE_REPEAT_DAYS = 1
+
+# The actor on the audit row and the project page. Nobody typed this move, and
+# a name that pretended otherwise would be worse than none.
+DETECTED_MOVE_ACTOR = "detected on the server"
+
+
+class InventoryWalk(NamedTuple):
+    """One project's file list before and after a single inventory walk.
+
+    `old` is what nas_media held (rel_path already NFC, `db.media_rel_key`);
+    `new` is what the walk just found, in the bytes the disk spells them in.
+    Both are [(rel_path, kind, size, mtime_ns)]."""
+    slug: str
+    project_rel: str
+    old: list[tuple[str, str, int | None, int | None]]
+    new: list[tuple[str, str, int | None, int | None]]
+
+
+class DetectedMove(NamedTuple):
+    from_slug: str
+    from_project_rel: str
+    from_rel: str
+    to_slug: str
+    to_project_rel: str
+    to_rel: str
+    is_dir: bool
+    n_files: int
+    proxies_moved: int
+
+
+class _Pair(NamedTuple):
+    """One matched file: it left (from_i, from_rel) and arrived at (to_i,
+    to_rel). `to_raw` is the destination in the bytes the NAS holds, because
+    that is the path a companion will rename to; everything compared is the
+    NFC spelling beside it (CR-90)."""
+    from_i: int
+    from_rel: str
+    to_i: int
+    to_rel: str
+    to_raw: str
+
+
+def _move_key(rel_norm: str, size, mtime) -> tuple[str, int, int] | None:
+    """(basename, size, mtime_ns), or None when the file cannot be keyed.
+
+    A walk that could not stat a file stores NULLs, and two NULLs match every
+    other unstattable file in the tree: that is not evidence of anything."""
+    if size is None or mtime is None:
+        return None
+    return (rel_norm.rsplit("/", 1)[-1], int(size), int(mtime))
+
+
+def _dirname(rel: str) -> str:
+    return rel.rsplit("/", 1)[0] if "/" in rel else ""
+
+
+def _stem(rel: str) -> str:
+    base = rel.rsplit("/", 1)[-1]
+    return (base.rsplit(".", 1)[0] if "." in base else base).lower()
+
+
+def _in_proxy_dir(rel: str) -> bool:
+    parts = rel.split("/")
+    return len(parts) >= 2 and parts[-2].lower() == "proxy"
+
+
+def _matched_pairs(
+    walks: list[InventoryWalk],
+) -> tuple[list[_Pair], list[dict[str, str]], list[dict[str, str]]]:
+    """Every file that vanished from one path and appeared at exactly one
+    other, across the whole pass.
+
+    The cross-project half is why this looks at all the walks at once: a move
+    between two projects is a vanish in one walk and an appearance in another
+    (today's case moved a shoot from Creator Profiles to FF5 Talent Gap), and
+    matching per project would see only half of it."""
+    old_maps: list[dict[str, str]] = []
+    new_maps: list[dict[str, str]] = []
+    vanished: dict[tuple[str, int, int], list[tuple[int, str]]] = {}
+    appeared: dict[tuple[str, int, int], list[tuple[int, str]]] = {}
+    for i, walk in enumerate(walks):
+        old_map: dict[str, str] = {}
+        new_map: dict[str, str] = {}
+        old_keys: dict[tuple[str, int, int], set[str]] = {}
+        new_keys: dict[tuple[str, int, int], set[str]] = {}
+        for rel, _kind, size, mtime in walk.old:
+            norm = db.media_rel_key(rel)
+            old_map[norm] = rel
+            key = _move_key(norm, size, mtime)
+            if key:
+                old_keys.setdefault(key, set()).add(norm)
+        for rel, _kind, size, mtime in walk.new:
+            norm = db.media_rel_key(rel)
+            new_map[norm] = rel
+            key = _move_key(norm, size, mtime)
+            if key:
+                new_keys.setdefault(key, set()).add(norm)
+        old_maps.append(old_map)
+        new_maps.append(new_map)
+        for key, paths in old_keys.items():
+            for norm in paths - new_keys.get(key, set()):
+                vanished.setdefault(key, []).append((i, norm))
+        for key, paths in new_keys.items():
+            for norm in paths - old_keys.get(key, set()):
+                appeared.setdefault(key, []).append((i, norm))
+    pairs: list[_Pair] = []
+    for key, sources in vanished.items():
+        destinations = appeared.get(key) or []
+        if len(sources) != 1 or len(destinations) != 1:
+            # Either nothing arrived (a deletion, which is not ours to act on)
+            # or the same file is at two places (a copy made twice, then the
+            # original removed). Both stay exactly as they are today.
+            continue
+        (from_i, from_rel), (to_i, to_rel) = sources[0], destinations[0]
+        pairs.append(_Pair(from_i, from_rel, to_i, to_rel, new_maps[to_i][to_rel]))
+    pairs.sort(key=lambda p: (p.from_i, p.from_rel))
+    return pairs, old_maps, new_maps
+
+
+def _folder_move(
+    pairs: list[_Pair], idx: int, by_source: dict[tuple[int, str], int],
+    old_maps: list[dict[str, str]], new_maps: list[dict[str, str]],
+) -> tuple[str, str, int, set[int]] | None:
+    """The outermost folder this file's move belongs to, or None.
+
+    A folder that moved is recorded as ONE row, the way the button records it,
+    because that is what the companion applies in one rename and what the
+    project page shows as one event. The bar is deliberately high: EVERY file
+    the last walk saw under the old folder has to have moved to the matching
+    path under the new one, and nothing may be left behind at the old path.
+    That last clause is today's leftover `Proxy` folder (67 byte-identical
+    files that stayed at the old path): with files still there, this was not
+    one rename, so the originals that did move are recorded one by one and the
+    leftovers stay a proxy_pairs finding. Returns
+    (from_folder, to_folder_raw, member count, member indices)."""
+    pair = pairs[idx]
+    from_parts = pair.from_rel.split("/")
+    to_parts = pair.to_rel.split("/")
+    raw_parts = pair.to_raw.split("/")
+    shared = 0
+    while (shared < min(len(from_parts), len(to_parts))
+           and from_parts[-1 - shared] == to_parts[-1 - shared]):
+        shared += 1
+    for depth in range(shared, 1, -1):
+        from_folder = "/".join(from_parts[:len(from_parts) - (depth - 1)])
+        to_folder = "/".join(to_parts[:len(to_parts) - (depth - 1)])
+        to_folder_raw = "/".join(raw_parts[:len(raw_parts) - (depth - 1)])
+        if from_folder.rsplit("/", 1)[-1].lower() == "proxy" \
+                or to_folder.rsplit("/", 1)[-1].lower() == "proxy":
+            # A proxy travels with its original and is never moved on its own:
+            # the button refuses a `Proxy` folder as either end, and a detected
+            # move may not do what the button would have refused.
+            continue
+        members = _folder_members(pairs, pair, from_folder, to_folder,
+                                  by_source, old_maps, new_maps)
+        if members:
+            return from_folder, to_folder_raw, len(members), members
+    return None
+
+
+def _folder_members(
+    pairs: list[_Pair], pair: _Pair, from_folder: str, to_folder: str,
+    by_source: dict[tuple[int, str], int],
+    old_maps: list[dict[str, str]], new_maps: list[dict[str, str]],
+) -> set[int] | None:
+    prefix = from_folder + "/"
+    under = [rel for rel in old_maps[pair.from_i]
+             if rel == from_folder or rel.startswith(prefix)]
+    if not under:
+        return None
+    members: set[int] = set()
+    for rel in under:
+        found = by_source.get((pair.from_i, rel))
+        if found is None:
+            return None                       # something under it did not move
+        other = pairs[found]
+        tail = rel[len(from_folder):]
+        if other.to_i != pair.to_i or other.to_rel != to_folder + tail:
+            return None                       # it moved somewhere else
+        members.add(found)
+    if any(rel == from_folder or rel.startswith(prefix) for rel in new_maps[pair.from_i]):
+        return None                           # files stayed behind: not one rename
+    return members
+
+
+def detect_moves(walks: list[InventoryWalk]) -> list[DetectedMove]:
+    """The moves one inventory pass can prove, folders batched into one row
+    each and proxies carried on their original's row."""
+    pairs, old_maps, new_maps = _matched_pairs(walks)
+    by_source = {(p.from_i, p.from_rel): i for i, p in enumerate(pairs)}
+    consumed: set[int] = set()
+    moves: list[DetectedMove] = []
+    for idx, pair in enumerate(pairs):
+        if idx in consumed:
+            continue
+        folder = _folder_move(pairs, idx, by_source, old_maps, new_maps)
+        if folder is None:
+            continue
+        from_folder, to_folder_raw, n_files, members = folder
+        consumed |= members
+        moves.append(DetectedMove(
+            from_slug=walks[pair.from_i].slug,
+            from_project_rel=walks[pair.from_i].project_rel, from_rel=from_folder,
+            to_slug=walks[pair.to_i].slug,
+            to_project_rel=walks[pair.to_i].project_rel, to_rel=to_folder_raw,
+            is_dir=True, n_files=n_files, proxies_moved=0))
+    for idx, pair in enumerate(pairs):
+        if idx in consumed or _in_proxy_dir(pair.from_rel):
+            continue
+        proxies = _proxy_siblings(pairs, idx, consumed)
+        consumed |= proxies
+        consumed.add(idx)
+        moves.append(DetectedMove(
+            from_slug=walks[pair.from_i].slug,
+            from_project_rel=walks[pair.from_i].project_rel, from_rel=pair.from_rel,
+            to_slug=walks[pair.to_i].slug,
+            to_project_rel=walks[pair.to_i].project_rel, to_rel=pair.to_raw,
+            is_dir=False, n_files=1 + len(proxies), proxies_moved=len(proxies)))
+    # Whatever is left is a proxy whose original did not move (or moved
+    # somewhere this pass could not prove). It is not a move anyone is told
+    # about: proxy_pairs is what reports a proxy separated from its original.
+    return sorted(moves, key=lambda m: (m.from_slug, m.from_rel))
+
+
+def _proxy_siblings(pairs: list[_Pair], idx: int, consumed: set[int]) -> set[int]:
+    """The `Proxy/<stem>.*` files that moved with this original.
+
+    They are part of ITS move, not moves of their own: the companion moves a
+    file's proxies with it (api._move_proxy_siblings does the same on the
+    server), and a separate row would tell every machine to move a file that
+    has already gone."""
+    pair = pairs[idx]
+    from_dir, to_dir = _dirname(pair.from_rel), _dirname(pair.to_rel)
+    stem = _stem(pair.from_rel)
+    found: set[int] = set()
+    for other_idx, other in enumerate(pairs):
+        if other_idx == idx or other_idx in consumed:
+            continue
+        if other.from_i != pair.from_i or other.to_i != pair.to_i:
+            continue
+        if not _in_proxy_dir(other.from_rel) or not _in_proxy_dir(other.to_rel):
+            continue
+        if _dirname(_dirname(other.from_rel)) != from_dir:
+            continue
+        if _dirname(_dirname(other.to_rel)) != to_dir:
+            continue
+        if _stem(other.from_rel) != stem:
+            continue
+        found.add(other_idx)
+    return found
 
 
 def main(argv: list[str] | None = None) -> int:

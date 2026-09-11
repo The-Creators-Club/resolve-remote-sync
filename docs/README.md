@@ -46,6 +46,7 @@ line above is machine-checkable and nothing was checking it.
 | [`CARDS_DEPLOY.md`](CARDS_DEPLOY.md) | Refreshing Timeline Cards on the NAS: the one code mount that is another repo's checkout, why a copy without a restart changes nothing, and the rollback |
 | [`RELEASE_PATHWAYS.md`](RELEASE_PATHWAYS.md) | **Read before starting a release.** Which of the two publish pathways applies right now: Alex's terminal, or CI plus `publish_latest.py` |
 | [`FILE_MOVES.md`](FILE_MOVES.md) | Moving a file on the server without it coming straight back: the project page's move button, the two-phase command, and why nothing in that path deletes |
+| [`HAND_MOVES_ON_THE_SERVER.md`](HAND_MOVES_ON_THE_SERVER.md) | A folder moved by hand on the NAS becomes a recorded move every machine follows: the server diffs its own inventory walks, lane B asks the server where a vanished file went before it trashes anything, and why the breaker still has the last word |
 | [`UPLOAD_ONLY_TICK.md`](UPLOAD_ONLY_TICK.md) | The upload-only tick: originals up, nothing down, and why it is "no share" rather than a send-only folder |
 | [`MOBILE.md`](MOBILE.md) | The dashboard on a phone: installing it from the browser, what works offline, and what the admin sets up |
 | [`ANDROID.md`](ANDROID.md) | The Android APK half of the phone story, and the one symptom it exists for (the app showing a URL bar) |

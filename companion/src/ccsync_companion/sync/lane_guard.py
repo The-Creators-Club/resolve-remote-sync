@@ -745,7 +745,13 @@ class LaneBBreaker(_PersistedLatch):
         otherwise trip or when it trashed at least half the per-pass cap
         (see `eager` below), because it costs a recursive listing of the
         scope: on the ~99% of passes that are nowhere near a limit it must
-        not be spent at all. A move is the common benign shape -- an editor drags a
+        not be spent at all. Since 0.9.73 the probe also carries the
+        dashboard's tree-wide answer (`POST /api/v1/files/locate`,
+        docs/HAND_MOVES_ON_THE_SERVER.md phase 2), which is what finally
+        covers the move that goes to ANOTHER project -- outside the scope,
+        and the shape that has actually parked lanes in the field. That half
+        is free here: the lane asked once per pass, before this, and hands
+        over what it already knows. A move is the common benign shape -- an editor drags a
         folder in Explorer and every proxy under it "disappears" from the
         server at once -- and it was tripping the breaker on exactly the
         event the breaker has nothing to say about."""

@@ -23967,7 +23967,69 @@ else would ever have looked at those rows again. Signed fields are never
 touched. The live rows are corrected by the first feed check after 0.7.45
 boots.
 
-### CR-267d - the Packages page layout (owner's ask, built by an Opus builder; see `docs/bug-hunt-2026-09-11b/ledger/packages-page-layout.md`)
+### CR-267d - the Packages page layout - BUILT (`ledger/packages-page-layout.md`)
+
+Owner: "sorted into categories, so companion > windows / mac / linux |
+dashboard | onboard > windows > mac > linux ... the top should just be
+'currently served' and then underneath it 'available from the vendor'".
+Three sections in that order, the third (`OTHER VERSIONS HELD ON THIS
+SERVER`, the rollback and staged rows) collapsed; headings per kind then
+platform; one-line rows sharing one colgroup; delete is one button with the
+warning in `hx-confirm`. The vendor section CLASSIFIES rather than filters:
+a version this server already serves is marked, not hidden. The answer to
+"what is the difference": published-but-not-current are builds whose bytes
+are already on this server, kept so a rollback is one click or staged from
+the vendor awaiting make-current; available-from-the-vendor are builds the
+supplier has published that this server has not downloaded at all.
+
+### CR-267e - the Assignments page shows every user at once - BUILT (`ledger/assignments-page-filter.md`)
+
+Owner: "filtered by default, by user and then by computer ... if there are
+many many users in a company, this would be very unwieldy". No grid until
+`?editor=` and `?machine=` are both answered (`*` = this person, every
+computer; `''` = the unassigned bucket); a one-editor site preselects, and
+their single computer preselects too. Found on the way: `_assignments_view`'s
+column loops re-bound `editor` and `machine`, so a filter by those names
+read the LAST column built. Fixed.
+
+### CR-267f - the fleet COMPANIONS grid: one headline, three fixed lane chips, everything else behind DETAILS; and "nothing ticked" is not an error - BUILT (`ledger/fleet-grid-declutter.md`)
+
+Owner: "this whole section is also very visually cluttered, clean it up",
+and "having no projects synced should not be an error". The Razer row's
+headline was the same sentence nested three times, from three authors:
+`sequencer._describe_no_selection` returns a whole sentence since SYNC-116,
+`app.py` still wraps it as a fragment in brackets, and `health._why_first`
+appended the companion's `blocked_detail` guarded only by a substring test.
+Fixed at the dashboard layer (`health._detail_clause` un-nests and drops a
+restatement; `no_selection` never takes a detail), because that is the
+layer every fielded companion reports into; the two companion layers are
+owed and noted in the ledger. `health.fleet_headline` ranks named fault >
+out of date > lane error > nothing ticked > syncing / idle; `health.lane_strip`
+renders the three lanes muted when healthy; `direct:N` is a muted detail;
+the rest sits in a collapsed `[ DETAILS ]` with a note count.
+
+### CR-267g - [ I HAVE BACKED IT UP ] recorded the date and the line above it stayed [ MISSING ] - FIXED (protection.py, ui.py)
+
+The panel renders the last protection PASS (every 15 min) while the row
+under the button reads the store live, so the owner's click looked
+swallowed for up to a quarter of an hour. `protection.refresh_line`
+re-evaluates the one acknowledged line, replaces its stored verdict, and
+files or closes its own notices exactly as a pass would; the ack route
+calls it after `set_ack`.
+
+### CR-267h - a vendor publish took an hour for 200 MB - FIXED (tools/publish_feed.py, tools/publish_latest.py, release-macos.yml)
+
+Owner: "why is the upload that slow? It should be direct surely". It was
+direct, and three times wasteful: `publish_feed.github_upload` passed the
+whole local mirror (89 files, 3.0 GB) to `gh release upload --clobber`, and
+`publish_latest` runs it once per package, so 12 GB went up to republish
+two; the macOS artifact was `dist/**` (413 MB, the wizard's whole unpacked
+.app beside its zip); and each run's artifact was downloaded twice, once for
+the companion and once for the onboard package. Now: assets already on the
+release at the same name and size are skipped (channel pair and the package
+just signed always go), the macOS artifact is its four deliverables, and a
+run is downloaded once per publish.
+
 
 ### Not defects, for the record
 
@@ -23990,6 +24052,55 @@ boots.
   the release workflows went green on 3c7cf8e; the vendor feed still says
   0.9.70. The dry run publishes companion 0.9.72 and onboard 1.0.43 for
   both platforms.
+
+### CR-267i - the CI workflow has been red on every run since at least 2026-09-07 while the local gate was green - FIXED (`ledger/ci-reds-2026-09-11.md`)
+
+Three environment-specific reds. (1) `test_health_page::test_not_checked_is_its_own_band_and_never_ok`
+raced the real collector thread's first pass, which stores verdicts the
+page then reads; green locally 3 runs in 5, never on the Linux runner. The
+fixture now stops the collector and resets the stored picture, the shape
+test_alerts / test_invariants already use. (2) The licence gate:
+`dashboard/requirements.lock` had never been compiled with the `cards`
+extra, so the four Cards packages were UNSCANNED under `--strict`; scanned,
+`psycopg2-binary` (LGPL with exceptions) is allowlisted like paramiko and
+**`zhconv` (GPLv2+) is dropped from the container** - `cards/text.py`
+imports it optionally and `zh_fold.py` is the container's own map, so
+nothing was lost. (3) `Test-BinDirLeftovers.ps1`: the runner's `$env:TEMP`
+is an 8.3 path and `windows_uninstall.ps1`'s leftover check compared it as
+a string against long `FullName`s; both sides normalise now.
+
+## Hand moves on the server (CR-268, 2026-09-11 evening)
+
+Owner, after the third breaker trip of the day: "this happening every time
+I move something on the server is a major issue, can we come up with a
+better solution to this problem." Design in `docs/HAND_MOVES_ON_THE_SERVER.md`;
+approved and built the same evening, phases 1 and 2 of 3.
+
+### CR-268a - the server notices its own moves - BUILT (collector.py, db.py v53; `ledger/hand-moves-phase-1.md`)
+
+The inventory walk diffs each project's previous and new `nas_media` rows
+on (NFC basename, size, mtime_ns); a key that vanished from one path and
+appeared at exactly one other, in this or any other project walked in the
+same pass, is recorded as a `file_moves` row with the new `source =
+'detected'` column and the same target machines the MOVE button computes,
+plus a `file_move_detected` notice. Ambiguity refuses; a pure deletion is
+ignored; a `Proxy/` folder left behind is not a move; a repeat within a day
+is recorded once; at most 500 per pass; the walk never fails because of it.
+
+### CR-268b - lane B asks the server before it trashes - BUILT (locate.py, api.py, app.py; companion 0.9.73: server_locate.py, rclone_lane.py; `ledger/hand-moves-phase-2.md`)
+
+`POST /api/v1/files/locate` on the fleet credential answers, per
+(basename, size), every path on the server holding it. CR-44's relocation
+probe adds that answer to its two rules (a file found anywhere is a
+relocation, never a deletion), and lane B moves a trashed copy out of
+`.ccsync-trash` into the destination when this machine syncs that project;
+otherwise it stays in the trash and still does not count. Every failure of
+the call is 0, which is today's behaviour. Owed: phase 3 (the breaker
+message naming the destination with [ IT WAS A MOVE, CARRY ON ], proxy_pairs
+using locate with [ DELETE THE LEFTOVER ], detected rows in MOVES history),
+the button folding onto `db.file_move_target_machines`, and a basename
+column or index on `nas_media` so locate is one query rather than a size
+prefilter plus a Python match.
 
 ## Carryover — unchanged from before the 2026-08-11 hunt
 

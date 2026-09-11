@@ -68,7 +68,7 @@ files, installer = **4**).
    `docker restart` of the dashboard container triggers a check 10 s
    after boot when you need it now.
 6. **Verify**: `.\tools\check_deploy_drift.ps1`, or the dashboard's
-   `[ PUBLISHED PACKAGES ]` box.
+   `[ CURRENTLY SERVED ]` box.
 
 **The trap that costs a build cycle:** the *latest green run* is whatever CI
 last built — if the version bump landed **after** that run, publishing now

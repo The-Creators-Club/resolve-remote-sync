@@ -1755,6 +1755,22 @@ SCHEMA_V52 = """
 ALTER TABLE machines ADD COLUMN update_requested_from TEXT;
 """
 
+# v53: WHO ASKED FOR A MOVE (docs/HAND_MOVES_ON_THE_SERVER.md phase 1,
+# 2026-09-11). Every `file_moves` row until now was an admin at the project
+# page's [ MOVE ON THE SERVER AND ON EVERY MACHINE ]. The collector now also
+# RECOGNISES a move somebody made by hand in Explorer on the NAS, between two
+# inventory walks, and writes the same row so the fleet follows it instead of
+# re-uploading the old path (lane A never deletes) and trashing the local copy
+# on the next lane B pass (CR-267a, the Gold Card Meetup move that parked a
+# lane and cost three trips). The two are the same record and drive the same
+# machinery, but they are not the same EVENT: a detected row is a rename the
+# server already made and nobody typed, so the project page's MOVES history,
+# the audit trail and any future refusal have to be able to tell them apart.
+# The DEFAULT is 'admin' because every row that predates this column was one.
+SCHEMA_V53 = """
+ALTER TABLE file_moves ADD COLUMN source TEXT NOT NULL DEFAULT 'admin';
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1886,6 +1902,10 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # 52: the pushed update's direction (dash-api-3, 2026-09-11). One
     # nullable column, and gapless like every one before it.
     (52, SCHEMA_V52),
+    # 53: where a file move came from (hand-move detection, phase 1,
+    # 2026-09-11). One column with a default that reads every existing row
+    # correctly, and gapless like every one before it.
+    (53, SCHEMA_V53),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -3179,6 +3199,12 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
     "inventory_refused": {"severity": "error", "what":
         "the server's file count collapsed, so the last good one is being kept",
         "href": _slug_href},
+    # The subject is the DESTINATION PATH, not a slug, so the button goes to
+    # the fleet page: deriving a slug from a project's folder path here would
+    # be a guess, and a 404 is worse than one more click (DDIAG-8's rule).
+    "file_move_detected": {"severity": "info", "what":
+        "files moved by hand on the server, which the computers are now following",
+        "href": "/fleet"},
     "enforce_refusal": {"severity": "error", "what":
         "too many share removals in one pass, so none were applied",
         "href": _slug_href},
@@ -3370,6 +3396,20 @@ def _mark_notice_checked(conn: sqlite3.Connection, kind: str, now: str) -> None:
         meta_set_json(conn, NOTICE_CHECKS_META, seen)
     except sqlite3.Error:
         pass
+
+
+def mark_notice_checked(conn: sqlite3.Connection, kind: str, now: str | None = None) -> None:
+    """Evidence for an EVENT-shaped kind, whose pass usually finds nothing.
+
+    The three writers above stamp this for free, which covers every kind whose
+    pass re-asserts or clears it each cycle. `file_move_detected` is not one of
+    those: a detected hand move is a thing that HAPPENED, its notice is an FYI
+    a person dismisses, and `clear_notices_of_kind` (the usual way to stamp a
+    clean pass) would close it 15 minutes later before anybody read it. Without
+    this, the WHAT THE SERVER CHECKS panel would show the kind [ NOT CHECKED ]
+    on every fleet that has never had a hand move, which is the false negative
+    the registry exists to prevent."""
+    _mark_notice_checked(conn, kind, now or utcnow_iso())
 
 
 def notice_check_times(conn: sqlite3.Connection) -> dict[str, str]:
@@ -5419,6 +5459,74 @@ FILE_MOVE_UNDONE = "undone"        # a later move put it back (UX-11)
 # The states a MACHINE can be in beyond applied/not (v36, RES-1).
 FILE_MOVE_TARGET_RETRYING = "retrying"
 FILE_MOVE_TARGET_BLOCKED = "blocked"
+# Who asked for the move (v53, docs/HAND_MOVES_ON_THE_SERVER.md). 'admin' is
+# the project page's button; 'detected' is a move somebody made by hand on the
+# NAS that the inventory walk recognised afterwards.
+FILE_MOVE_SOURCE_ADMIN = "admin"
+FILE_MOVE_SOURCE_DETECTED = "detected"
+
+
+def file_move_target_machines(
+    conn: sqlite3.Connection, from_slug: str, from_rel: str,
+) -> list[tuple[str, str]]:
+    """The computers that have to follow a move of `from_rel` out of
+    `from_slug`: every computer syncing the source project in either mode,
+    plus any computer whose manifest says it holds the file even though its
+    plan no longer does (an editor who unticked the project still has the
+    copy, and lane A never deletes).
+
+    `for_enforce=True` (dash-db-1, 2026-09-11): this decides what a COMPUTER
+    is told to do with its OWN copy, not what an admin is shown. A wired
+    machine's tree root IS the NAS share, so the rename that already happened
+    there is the only one there is, and telling it to move its copy is the
+    same file moved twice. A wired machine that really does hold the file is
+    still picked up below, off its manifest.
+
+    The manifest query, and only it, is asked in NFC (bug-hunt-2026-09-03
+    dash-api-6 / CR-90): `editor_media.rel_path` is written through
+    `media_rel_key`, while the path being moved carries whatever bytes the
+    disk holds, so an NFD spelling off a Mac matched nothing here and the
+    machines holding the file outside their plan were never told."""
+    targets: set[tuple[str, str]] = set()
+    for editor, machine in fetch_machine_selections(
+            conn, for_enforce=True).get(from_slug, []):
+        if machine:
+            targets.add((editor, machine))
+    media_key = media_rel_key(from_rel)
+    for row in conn.execute(
+        """SELECT DISTINCT editor_username, machine FROM editor_media
+            WHERE project_slug=? AND (rel_path=? OR rel_path LIKE ?)""",
+        (from_slug, media_key, media_key + "/%"),
+    ):
+        targets.add((row["editor_username"], row["machine"]))
+    return sorted(targets)
+
+
+def file_move_recorded(
+    conn: sqlite3.Connection, *, from_slug: str, from_rel: str,
+    to_slug: str, to_rel: str, now: str | None = None,
+    within_days: int | None = None,
+) -> bool:
+    """Is this exact move already on the books?
+
+    Hand-move detection's idempotence (phase 1, 2026-09-11). An inventory
+    walk that raced a long Explorer move can see the same relocation in two
+    consecutive passes (the first walk catching the destination half-written,
+    the collapse brake keeping a project's old inventory, a project walked
+    again before its partner), and a second row would mean a second command
+    to every machine for a move it has already applied.
+
+    `within_days` bounds how far back that counts, and the caller passes a
+    short one on purpose: the same file really can make the same journey
+    twice (moved out, put back, moved out again), and a lifetime-wide match
+    would silently drop the second one."""
+    sql = ("SELECT 1 FROM file_moves WHERE from_slug=? AND from_rel=? "
+           "AND to_slug=? AND to_rel=?")
+    args: list[Any] = [from_slug, from_rel, to_slug, to_rel]
+    if within_days:
+        sql += " AND requested_at >= ?"
+        args.append(_file_move_cutoff(now or utcnow_iso(), int(within_days)))
+    return conn.execute(sql + " LIMIT 1", args).fetchone() is not None
 
 
 def record_file_move(
@@ -5426,6 +5534,7 @@ def record_file_move(
     to_slug: str, to_project_rel: str, to_rel: str, is_dir: bool, proxies_moved: int,
     requested_by: str, now: str, targets: list[tuple[str, str]],
     state: str = FILE_MOVE_DONE, undo_of: int | None = None,
+    source: str = FILE_MOVE_SOURCE_ADMIN,
 ) -> int:
     """The record of a move and the list of computers that have to follow.
 
@@ -5434,15 +5543,22 @@ def record_file_move(
     `complete_file_move`. A row that exists while the rename is in flight is
     what makes the crash window recoverable at all -- before this, a rename
     that succeeded and then died left the file moved and nothing anywhere
-    saying so. Returns the id."""
+    saying so. Returns the id.
+
+    `source` defaults to 'admin' (v53) so the button and the undo, which are
+    what every existing caller is, keep writing exactly the row they wrote
+    before this column existed. The collector's hand-move detection passes
+    'detected': the same record, driving the same machinery, for a rename the
+    server had already made by the time anybody knew about it."""
     cur = conn.execute(
         """INSERT INTO file_moves
              (from_slug, from_project_rel, from_rel, to_slug, to_project_rel, to_rel,
-              is_dir, proxies_moved, requested_by, requested_at, state, undo_of)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+              is_dir, proxies_moved, requested_by, requested_at, state, undo_of, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (from_slug, from_project_rel, from_rel, to_slug, to_project_rel, to_rel,
          int(bool(is_dir)), int(proxies_moved), requested_by, now, state,
-         int(undo_of) if undo_of else None),
+         int(undo_of) if undo_of else None,
+         str(source or FILE_MOVE_SOURCE_ADMIN)),
     )
     move_id = int(cur.lastrowid)
     for editor, machine in sorted(set(targets)):
@@ -5460,6 +5576,7 @@ def record_file_move(
     audit(conn, requested_by, "file.move", from_slug,
           {"move_id": move_id, "from": f"{from_project_rel}/{from_rel}",
            "to": f"{to_project_rel}/{to_rel}", "is_dir": bool(is_dir),
+           "source": str(source or FILE_MOVE_SOURCE_ADMIN),
            "machines": len({(e, m) for e, m in targets if e and m})}, now=now)
     return move_id
 
@@ -8257,6 +8374,22 @@ def media_rel_key(rel_path: str) -> str:
     there the bytes on disk are the truth (`file_moves` keeps its own).
     """
     return unicodedata.normalize("NFC", str(rel_path or ""))
+
+
+def nas_media_rows(
+    conn: sqlite3.Connection, project_id: int,
+) -> list[tuple[str, str, int | None, int | None]]:
+    """[(rel_path, kind, size, mtime_ns)] as the LAST walk left it.
+
+    Read by hand-move detection immediately before `replace_nas_media`
+    overwrites it: a move made in Explorer on the NAS is visible only as the
+    difference between these rows and the ones about to replace them
+    (docs/HAND_MOVES_ON_THE_SERVER.md §3). rel_path is NFC here, like every
+    row this table has ever held (`media_rel_key`, CR-90)."""
+    return [(str(r["rel_path"]), str(r["kind"]), r["size"], r["mtime_ns"])
+            for r in conn.execute(
+                "SELECT rel_path, kind, size, mtime_ns FROM nas_media WHERE project_id=?",
+                (project_id,))]
 
 
 def replace_nas_media(

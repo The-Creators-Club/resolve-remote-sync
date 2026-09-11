@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
 from . import (
+    VERSION,
     ai_providers, api, assignments, auth, broll, cards, cards_exec, cards_tunnel,
     cli_tools, crash_report,
     dashboard_update, db, internal_sftp, jobs, local_users, mount_status, music,
@@ -638,6 +639,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         conn = db.connect(settings.db_path)
         db.migrate(conn)
+        # A "report fields" record an OLDER build wrote is this build's to
+        # re-earn (2026-09-11): the field it named is very likely the one
+        # this deploy declared, and nothing else ever cleared the record.
+        if db.forget_ignored_report_sections_of_older_build(conn, VERSION):
+            log.info("forgot the ignored-report-sections record an older "
+                     "dashboard build wrote; this build re-records anything "
+                     "still undeclared on the next report")
         # Additive, idempotent DDL owned by the auth layer rather than a
         # numbered migration step (see sessions.SCHEMA): it carries no data any
         # other module reads, and a numbered step would have to be co-ordinated

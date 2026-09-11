@@ -500,6 +500,44 @@ def test_publish_inserts_the_same_shape_a_put_would(env, monkeypatch):
     assert view2["available"] == []
 
 
+def test_a_feed_git_dirty_of_zero_is_clean_and_a_stamped_row_is_repaired(env, monkeypatch):
+    """publish_feed.py writes git_dirty as the STRING "0"/"1"; bool("0") is
+    True, so every clean CI build was stamped +dirty (owner, 2026-09-11).
+    The reader now parses the string, and the next feed check corrects the
+    rows the old reading already stamped."""
+    client, conn, settings = env
+    record, body = make_record()
+    record["git_dirty"] = "0"
+    record["git_sha"] = "3c7cf8e"
+    channel, sig = make_channel([record])
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(), record["url"]: body,
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    r = client.post("/api/v1/admin/feed/publish",
+                    json={"kind": "companion", "platform": "windows", "version": "0.9.0",
+                          "make_current": True})
+    assert r.status_code == 200
+    row = dbmod.get_package(conn, "windows", "0.9.0")
+    assert bool(row["git_dirty"]) is False
+    assert row["git_sha"] == "3c7cf8e"
+
+    # The rows the old reading stamped: put one back the way 0.7.44 left it,
+    # and the next check repairs it without touching the signed fields.
+    conn.execute("UPDATE companion_packages SET git_dirty=1 WHERE id=?", (row["id"],))
+    conn.commit()
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    row2 = dbmod.get_package(conn, "windows", "0.9.0")
+    assert bool(row2["git_dirty"]) is False
+    assert row2["signature"] == record["signature"]
+
+    # And "1" still means dirty.
+    assert release_feed._feed_flag("1") is True
+    assert release_feed._feed_flag("true") is True
+    assert release_feed._feed_flag(False) is False
+    assert release_feed._feed_flag(None) is False
+
+
 def test_publish_without_check_first_is_404(env):
     client, conn, settings = env
     r = client.post("/api/v1/admin/feed/publish",

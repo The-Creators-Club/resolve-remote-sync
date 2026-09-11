@@ -719,6 +719,53 @@ def _safe_filename(name: str) -> str:
     return name
 
 
+def _feed_flag(value: Any) -> bool:
+    """A yes/no the feed may spell as a bool, a number or a STRING.
+
+    publish_feed.py has always written `git_dirty` as the string "0" or "1"
+    (its --git-dirty flag is a choice of "", "0", "1"), and this reader did
+    `bool(record.get("git_dirty"))`: bool("0") is True, so every clean CI
+    build the studio pulled from the vendor feed was stamped +dirty on the
+    Packages page (owner, 2026-09-11: "Why are they all stamped dirty").
+    A provenance chip that is always on says nothing, which is worse than
+    no chip: the day a real dirty build is published nobody will notice."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on", "dirty")
+    return bool(value)
+
+
+def repair_provenance(conn, valid_records: list[dict[str, Any]]) -> list[str]:
+    """Re-read the two ADVISORY git fields of every already-published package
+    from the verified feed, and correct the stored row where they differ.
+
+    Exists for the rows the bool("0") reading above stamped dirty before
+    2026-09-11: the feed view hides a version that is already published, so
+    nothing else would ever look at those rows again. Only the advisory pair
+    moves (the signed fields are verified by store_verified_package and are
+    never touched here), and only where the sha matches, so a vendor copy
+    that differs from ours cannot rewrite our row's story. Returns the keys
+    it corrected, for the log."""
+    fixed: list[str] = []
+    for record in package_records(valid_records):
+        kind, platform, version = _record_key(record)
+        if not (kind and platform and version):
+            continue
+        existing = db.get_package(conn, platform, version, kind)
+        if existing is None or sha_conflict(existing, record):
+            continue
+        dirty = _feed_flag(record.get("git_dirty"))
+        sha = str(record.get("git_sha") or "")
+        if bool(existing["git_dirty"]) == dirty and (not sha or existing["git_sha"] == sha):
+            continue
+        db.update_package_provenance(conn, int(existing["id"]),
+                                     git_sha=sha or str(existing["git_sha"] or ""),
+                                     git_dirty=dirty)
+        fixed.append(f"{kind}/{platform} {version}")
+    if fixed:
+        conn.commit()
+    return fixed
+
+
 def check_now(conn, settings, app_state) -> dict[str, Any]:
     """Fetch + verify the channel, refresh the cache and `feed_state`, and
     apply the configured policy to anything newly available. Never raises --
@@ -743,6 +790,14 @@ def check_now(conn, settings, app_state) -> dict[str, Any]:
     cache = _cache(app_state)
     cache["channel"] = channel
     cache["valid_records"] = valid_records
+    try:
+        repaired = repair_provenance(conn, valid_records)
+    except Exception as exc:  # noqa: BLE001 - advisory fields must never fail a check
+        log.warning("could not repair package provenance from the feed: %s", exc)
+        repaired = []
+    if repaired:
+        log.info("corrected the git provenance of %d published package(s) from the "
+                 "vendor feed: %s", len(repaired), ", ".join(repaired))
     cache["checked_at"] = now
     # dash-release-jobs-4 (2026-09-11b): the channel verified, so this is not
     # a feed OUTAGE -- but a record this dashboard refuses to offer has to
@@ -1233,7 +1288,7 @@ def publish_from_feed(
         sha256=sha, size_bytes=size,
         min_version=str(record.get("min_version") or "0.0.0"),
         published_at=str(record.get("published_at") or ""),
-        signed_binary=bool(record.get("signed_binary")),
+        signed_binary=_feed_flag(record.get("signed_binary")),
         signature=str(record.get("signature") or ""),
         pubkey_id=str(record.get("pubkey_id") or ""),
         # The two SIGNED extras and the two ADVISORY provenance fields
@@ -1244,7 +1299,7 @@ def publish_from_feed(
         requires_dashboard=str(record.get("requires_dashboard") or ""),
         arch=str(record.get("arch") or ""),
         git_sha=str(record.get("git_sha") or ""),
-        git_dirty=bool(record.get("git_dirty")),
+        git_dirty=_feed_flag(record.get("git_dirty")),
         # APP-16 (2026-09-04): the feed has carried `notes` on every record
         # since publish_feed.py's first version and nothing here read it.
         # Unsigned, display only, bounded by db.package_notes -- a feed host

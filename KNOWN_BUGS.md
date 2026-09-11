@@ -23913,6 +23913,84 @@ so f1eeb42 alone cannot show the shape):
 - `MAX_FOUND_SUBJECTS = 2000` (CR-266c). Past that an invariant's pass carries no `found` set and behaves exactly as it did before this change: the carry keeps its notices open, and the stale ones among them need a pass that is not truncated to clear.
 - The nas_media side of the live symptom is NOT touched. If the collector's `nas_media` rows for a hand-moved folder are what the check is still seeing, the notices are honest and the row pruning is the fix; this change is about the case where the subject has gone from the scan, which is what the panel showed. Worth one look at the live server after the deploy: the twenty should clear on the first pass of `proxy_pairs` that finds its whole set.
 
+## Live dashboard pass, 2026-09-11 evening (CR-267)
+
+The owner walked the PROBLEMS THE SERVER FOUND panel with me after the
+Timeline Cards cut UI went live. What each card turned out to be, and what
+changed in the repo (dashboard 0.7.45, unshipped):
+
+### CR-267a - proxy_pairs raised one notice per orphaned proxy; the owner wants one per folder - FIXED (invariants.py)
+
+The two `proxy_pairs` warnings on the panel were the visible two of FIFTY-SIX
+orphaned proxies in one folder: CR-266c's claim that "nothing is wrong on the
+NAS" was wrong, the hand move of 2026-09-09 had left the whole
+`Creator Profiles/Season 1/.../Gold Card Meetup/Proxy` folder behind (67
+files, 6.7 GB, every one byte-identical to a copy beside the originals at the
+new path). As 56 subjects they filled the twenty-subject cap and rotated
+through it, so the operator saw two at a time and nothing said fifty-four
+more existed. Owner's rule: "the dash should only post one warning per folder
+of broken proxy pairs, not one warning per proxy". The subject is now the
+Proxy folder (`<slug>/<dir>/Proxy`), the detail names the first five clips
+and counts the rest, and the outcome's detail counts orphans and folders.
+Deleted the leftover folder on the NAS by hand (both notices clear on the
+next collector pass). Tests in test_invariants.py rewritten to the folder
+subject, plus one for the 56-in-one-folder shape.
+
+### CR-267b - "report fields: sync_guard.skipped_exists.subpath" on every 0.9.70 companion, and a banner nothing could ever clear - FIXED (api.py, db.py, app.py)
+
+Every 0.9.70 companion has sent `subpath` inside `skipped_exists` since the
+size-mismatch scan was scoped to a project; the dashboard's `SkippedExistsIn`
+never declared it, and 0.7.44's nested-key audit (comp-app-2) started
+reporting every machine as "ahead of the dashboard" for it two hours after
+going live. Declared now. The second half: `db.clear_ignored_report_sections`
+had NO CALLER, so the record (which accumulates on purpose) would have
+outlived the build that declared the field and the alert would have re-raised
+the banner for ever. The record now carries the dashboard version that wrote
+it, and a boot on a DIFFERENT version drops it
+(`forget_ignored_report_sections_of_older_build`): a new build is the one
+event that makes the list wrong, and anything still undeclared is written
+back by the first report that carries it. A record with no version at all
+(what 0.7.44 wrote) is dropped too, which is exactly the live case.
+
+### CR-267c - every package on the Packages page stamped +dirty - FIXED (release_feed.py, db.py)
+
+Owner: "Why are they all stamped dirty also". `publish_feed.py` has always
+written `git_dirty` as the STRING "0" or "1" (its flag is a choice of "",
+"0", "1"); `release_feed.py` read it with `bool(record.get("git_dirty"))`,
+and bool("0") is True. Every clean CI build the studio pulled from the vendor
+feed was stamped dirty, so the one chip that exists to catch a build nobody
+can reproduce was on for all of them. `_feed_flag` parses the string (and
+`signed_binary` goes through it too), and `repair_provenance` runs on every
+feed check to correct the advisory git pair of already-published rows whose
+sha matches the feed's - the feed view hides a published version, so nothing
+else would ever have looked at those rows again. Signed fields are never
+touched. The live rows are corrected by the first feed check after 0.7.45
+boots.
+
+### CR-267d - the Packages page layout (owner's ask, built by an Opus builder; see `docs/bug-hunt-2026-09-11b/ledger/packages-page-layout.md`)
+
+### Not defects, for the record
+
+- `fleet_current_with_vendor: macos 0.9.70`: the soak rule is refusing on
+  purpose ("no computer has reported 0.9.70 yet"), and the only Mac in the
+  fleet has been silent since 2026-09-03 on 0.9.65 with its push queued. It
+  clears when that Mac comes back and takes the push, or by the override.
+- `restore_drill`: run from the API on 2026-09-11 11:10Z (one 37 MB file out
+  of `auto-weekly-20260906-0010`, byte for byte).
+- `/api/v1/admin/ai-providers/claude_code/install (TypeError)`: CR-266a's
+  fix is live in 0.7.44; the notice was the record of the 2026-09-10 failure
+  and was dismissed.
+- `release_key_backup`: an owner action (`tools/release_key.py backup`),
+  not a code change.
+- The YouTube queue "stuck": four open jobs, every one parked at
+  `terms_review` or `ready_for_review`, which are the two phases that wait
+  for the person who created them (two of alex's since 2026-08-30, two of
+  ruskin's from today). Nothing claimed, nothing erroring.
+- 0.9.72 "not being offered": `tools/publish_latest.py` was never run after
+  the release workflows went green on 3c7cf8e; the vendor feed still says
+  0.9.70. The dry run publishes companion 0.9.72 and onboard 1.0.43 for
+  both platforms.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

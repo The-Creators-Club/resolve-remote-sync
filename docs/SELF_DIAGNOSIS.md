@@ -729,7 +729,7 @@ Numbered as SYS-9 numbers them.
 | 7 | `companion_floor` | every computer runs a build new enough for its plan (0.9.3 pushes, 0.9.43 RESUME, 0.9.54 upload-only) | checked |
 | 8 | `versioning_agrees` | `.stversions` retention agrees between NAS-side and editor-side (R5) | **NOT CHECKED, by design** |
 | 9 | `snapshot_schedule` | the customer's data is on a snapshot schedule (SYS-14's standing red line) | checked when the NAS can be asked |
-| 10 | `proxy_pairs` | every `Proxy/<stem>.*` on the server has its original beside it, a camera proxy suffix (Sony `S03`) allowed for | checked, `warn` |
+| 10 | `proxy_pairs` | every `Proxy/<stem>.*` on the server has its original beside it, a camera proxy suffix (Sony `S03`) allowed for; ONE subject per Proxy folder (owner's rule 2026-09-11), the detail naming the first five clips and counting the rest | checked, `warn` |
 | 11 | `fleet_current_with_vendor` | the newest companion build the VENDOR feed offers (`db.get_feed_offered`, written by every feed check) is published here and is current (SYS-2) | checked when a feed is configured and one check has recorded what it offers |
 | 12 | `dashboard_meets_requirements` | this dashboard's `VERSION` is at or above the `requires_dashboard` of every non-retracted record in the channel, through `package_store.blocks_on_dashboard_version` rather than a second comparison | checked once anything is published |
 | 13 | `mount_assets_open` | every mounted app's installable-app files (`PWA_MOUNT_ASSETS`: the dashboard's manifest and `sw.js`, Timeline Cards' manifest and icon) are in `app._OPEN_EXACT`, so the outer gate does not 303 them (CR-100) | checked always, from the gate's own set and never by fetching |

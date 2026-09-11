@@ -7221,6 +7221,13 @@ class SkippedExistsIn(_BoundedSectionIn):
     count: int | None = Field(default=None, ge=0)
     samples: list[str] | None = Field(default=None, max_length=64)
     checked_at: str | None = Field(default=None, max_length=64)
+    # The project prefix the scan was scoped to ("Projects/<rel>"), or null
+    # for the whole tree. rclone_lane._refresh_size_mismatches has sent it
+    # since 0.9.5x; nothing here reads it yet, but declared so comp-app-2's
+    # nested-key audit (0.7.44) stops reporting every 0.9.70 companion as
+    # "ahead of the dashboard" for a field the dashboard simply never
+    # modelled (2026-09-11, the day 0.7.44 went live).
+    subpath: str | None = Field(default=None, max_length=1024)
 
 
 class RemovalOverrideIn(_BoundedSectionIn):
@@ -9080,7 +9087,8 @@ def api_report(
             )
         try:
             db.record_ignored_report_sections(
-                conn, received_at, f"{editor}/{machine}", ignored_sections)
+                conn, received_at, f"{editor}/{machine}", ignored_sections,
+                dashboard_version=VERSION)
         except Exception as e:  # noqa: BLE001 - a banner must never 500 a report
             log.warning("could not record the ignored report sections (%s: %s)",
                         type(e).__name__, e)

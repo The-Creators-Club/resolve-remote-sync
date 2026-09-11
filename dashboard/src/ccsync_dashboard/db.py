@@ -3730,6 +3730,7 @@ MAX_IGNORED_SECTION_MACHINES = 10
 
 def record_ignored_report_sections(
     conn: sqlite3.Connection, now: str, machine: str, keys: Iterable[str],
+    dashboard_version: str = "",
 ) -> dict[str, Any] | None:
     """Fold "this machine sent sections we do not read" into the meta record.
 
@@ -3763,7 +3764,8 @@ def record_ignored_report_sections(
         keep = sorted(sections.items(), key=lambda kv: kv[1].get("last_seen") or "",
                       reverse=True)[:MAX_IGNORED_SECTIONS]
         sections = dict(keep)
-    record = {"at": now, "sections": sections}
+    record = {"at": now, "sections": sections,
+              "dashboard_version": dashboard_version}
     meta_set_json(conn, META_IGNORED_REPORT_SECTIONS, record)
     return record
 
@@ -3781,6 +3783,29 @@ def clear_ignored_report_sections(conn: sqlite3.Connection) -> None:
     """For the deploy that declares the field: the banner has to be able to
     go away without waiting for a retention pass."""
     meta_delete(conn, META_IGNORED_REPORT_SECTIONS)
+
+
+def forget_ignored_report_sections_of_older_build(
+    conn: sqlite3.Connection, dashboard_version: str) -> bool:
+    """At boot: drop the record when a DIFFERENT dashboard build wrote it.
+
+    2026-09-11: `clear_ignored_report_sections` had no caller, so the "report
+    fields" banner an older build raised outlived the deploy that declared
+    the field - the record accumulates on purpose (a section one machine
+    named must survive the next machine's clean report) and nothing ever
+    started it over. A new build is the one event that can make the list
+    wrong, so a new build starts it empty: anything still undeclared is
+    written back by the first report that carries it, minutes later. A
+    record with no version at all was written before this field existed,
+    and is exactly the record 0.7.44 left behind. Returns True when it
+    dropped something."""
+    record = meta_get_json(conn, META_IGNORED_REPORT_SECTIONS)
+    if not isinstance(record, dict) or not record.get("sections"):
+        return False
+    if str(record.get("dashboard_version") or "") == str(dashboard_version):
+        return False
+    meta_delete(conn, META_IGNORED_REPORT_SECTIONS)
+    return True
 
 
 def collector_alarms(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -3940,6 +3965,15 @@ def fetch_companion_packages(
         "ORDER BY kind, published_at DESC",
         (platform,),
     ).fetchall()
+
+
+def update_package_provenance(conn: sqlite3.Connection, package_id: int, *,
+                              git_sha: str, git_dirty: bool) -> None:
+    """The two advisory provenance columns only (release_feed.repair_provenance,
+    2026-09-11). Never the signed fields: those are what a companion trusts."""
+    conn.execute(
+        "UPDATE companion_packages SET git_sha=?, git_dirty=? WHERE id=?",
+        (str(git_sha or ""), 1 if git_dirty else 0, int(package_id)))
 
 
 def get_package(

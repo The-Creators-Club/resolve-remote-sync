@@ -370,7 +370,32 @@ def test_a_proxy_with_no_original_beside_it_is_broken(conn):
     ], "sig", 2, NOW)
     outcome = invariants._check_proxy_pairs(_ctx(conn))
     assert outcome.state == dbmod.INVARIANT_BROKEN
-    assert outcome.subjects[0][0] == "ff5/Day1/Proxy/GONE.mp4"
+    assert outcome.subjects[0][0] == "ff5/Day1/Proxy"
+    assert "GONE.mp4" in outcome.subjects[0][1]
+    assert "A001.mp4" not in outcome.subjects[0][1]
+
+
+def test_a_moved_shoot_is_one_finding_per_proxy_folder(conn):
+    """Owner's rule 2026-09-11: one warning per folder of broken pairs, not
+    one per proxy. The Gold Card Meetup move left 56 orphans in one folder
+    and the dashboard showed two of them at a time."""
+    project_id = dbmod.upsert_project(conn, "ff5", "FF5", "/data/Projects/FF5", NOW)
+    rows = [(f"Old/Gold Card Meetup/Proxy/fx3_{i:04d}.mp4", "proxy", "mp4", 2, 1)
+            for i in range(56)]
+    rows += [("Day2/B001.mov", "original", "mov", 10, 1),
+             ("Day2/Proxy/B001.mp4", "proxy", "mp4", 2, 1),
+             ("Day2/Proxy/LOST.mp4", "proxy", "mp4", 2, 1)]
+    dbmod.replace_nas_media(conn, project_id, rows, "sig", 59, NOW)
+    outcome = invariants._check_proxy_pairs(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_BROKEN
+    assert [s[0] for s in outcome.subjects] == ["ff5/Day2/Proxy",
+                                                "ff5/Old/Gold Card Meetup/Proxy"]
+    assert not outcome.truncated
+    gold = outcome.subjects[1][1]
+    assert gold.startswith("56 proxy file(s)")
+    assert "fx3_0004.mp4 and 51 more" in gold
+    assert "fx3_0005" not in gold
+    assert "57 of 58 proxy file(s), in 2 Proxy folder(s)" in outcome.detail
 
 
 def test_every_proxy_paired_is_ok(conn):
@@ -406,7 +431,8 @@ def test_a_sony_camera_proxy_with_no_original_is_still_broken(conn):
     ], "sig", 3, NOW)
     outcome = invariants._check_proxy_pairs(_ctx(conn))
     assert outcome.state == dbmod.INVARIANT_BROKEN
-    assert outcome.subjects[0][0] == "ff5/Day1/Proxy/fx3_20260830_1415S03.MP4"
+    assert outcome.subjects[0][0] == "ff5/Day1/Proxy"
+    assert "fx3_20260830_1415S03.MP4" in outcome.subjects[0][1]
 
 
 def test_an_ordinary_stem_mismatch_is_still_broken(conn):
@@ -418,7 +444,8 @@ def test_an_ordinary_stem_mismatch_is_still_broken(conn):
     ], "sig", 2, NOW)
     outcome = invariants._check_proxy_pairs(_ctx(conn))
     assert outcome.state == dbmod.INVARIANT_BROKEN
-    assert outcome.subjects[0][0] == "ff5/Day1/Proxy/A001_v2.mp4"
+    assert outcome.subjects[0][0] == "ff5/Day1/Proxy"
+    assert "A001_v2.mp4" in outcome.subjects[0][1]
 
 
 def test_the_camera_proxy_suffix_matches_case_insensitively(conn):
@@ -455,7 +482,9 @@ def test_an_appledouble_sidecar_in_proxy_is_not_a_finding(conn):
     ], "sig2", 2, NOW)
     outcome = invariants._check_proxy_pairs(_ctx(conn))
     assert outcome.state == dbmod.INVARIANT_BROKEN
-    assert [s[0] for s in outcome.subjects] == ["ff5/Interviewees/Proxy/GONE.mp4"]
+    assert [s[0] for s in outcome.subjects] == ["ff5/Interviewees/Proxy"]
+    assert "GONE.mp4" in outcome.subjects[0][1]
+    assert "._A001" not in outcome.subjects[0][1]
 
 
 def test_an_appledouble_original_cannot_pair_a_proxy(conn):
@@ -469,7 +498,8 @@ def test_an_appledouble_original_cannot_pair_a_proxy(conn):
     ], "sig", 2, NOW)
     outcome = invariants._check_proxy_pairs(_ctx(conn))
     assert outcome.state == dbmod.INVARIANT_BROKEN
-    assert [s[0] for s in outcome.subjects] == ["ff5/Day1/Proxy/A001.mp4"]
+    assert [s[0] for s in outcome.subjects] == ["ff5/Day1/Proxy"]
+    assert "1 proxy file(s)" in outcome.subjects[0][1]
 
 
 def test_project_markers_are_not_checked_without_a_tree(conn):

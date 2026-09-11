@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from ccsync_dashboard import api as apimod
 from ccsync_dashboard import auth
+from ccsync_dashboard import VERSION
 from ccsync_dashboard import db as dbmod
 from ccsync_dashboard import health
 from ccsync_dashboard.app import create_app
@@ -88,6 +89,42 @@ def test_an_undeclared_sync_guard_sub_key_is_recorded_under_its_namespace(app_en
                 headers=report_headers())
     record = dbmod.ignored_report_sections(conn)
     assert sorted(record["sections"]) == ["sync_guard.tray_missing"]
+
+
+def test_skipped_exists_subpath_is_a_declared_key(app_env):
+    """2026-09-11, the day 0.7.44 went live: every 0.9.70 companion has sent
+    `sync_guard.skipped_exists.subpath` since the scan was scoped to a
+    project, and the nested-key audit (comp-app-2) reported all of them as
+    "ahead of the dashboard" for a key the model had simply never declared.
+    """
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(sync_guard={
+        "skipped_exists": {"count": 2, "samples": ["a.mp4", "b.mp4"],
+                           "checked_at": NOW, "subpath": "Projects/2026/FF5/One"},
+    }), headers=report_headers())
+    assert dbmod.ignored_report_sections(conn) is None
+
+
+def test_a_record_an_older_build_wrote_is_forgotten_at_boot(app_env):
+    """2026-09-11: nothing called clear_ignored_report_sections, so the banner
+    0.7.44 raised about `sync_guard.skipped_exists.subpath` would have
+    outlived the build that declared it. A different build's record (or one
+    with no version, which is what 0.7.44 wrote) is dropped; this build's own
+    is kept."""
+    client, conn = app_env
+    client.post("/api/v1/report",
+                json=payload(sync_guard={"tray_missing": True}),
+                headers=report_headers())
+    record = dbmod.ignored_report_sections(conn)
+    assert record["dashboard_version"] == VERSION
+    assert dbmod.forget_ignored_report_sections_of_older_build(conn, VERSION) is False
+    assert dbmod.ignored_report_sections(conn) is not None
+
+    record.pop("dashboard_version")
+    dbmod.meta_set_json(conn, dbmod.META_IGNORED_REPORT_SECTIONS, record)
+    assert dbmod.forget_ignored_report_sections_of_older_build(conn, VERSION) is True
+    assert dbmod.ignored_report_sections(conn) is None
+    assert dbmod.forget_ignored_report_sections_of_older_build(conn, VERSION) is False
 
 
 def test_a_declared_section_is_never_reported_as_ignored(app_env):

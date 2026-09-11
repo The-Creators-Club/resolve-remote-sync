@@ -663,6 +663,11 @@ def _check_snapshot_schedule(ctx: Ctx) -> Outcome:
     return ok(f"{len(enabled)} enabled snapshot task(s) on this NAS")
 
 
+# How many orphaned clips a proxy_pairs subject names before it counts the
+# rest: enough to recognise the shoot, short enough for a notice card.
+PROXY_NAMES_SHOWN = 5
+
+
 def _proxy_stem_candidates(stem: str) -> list[str]:
     """The stems an original for this proxy could carry: the stem itself,
     then the same stem with a camera proxy suffix taken off (see
@@ -720,12 +725,22 @@ def _check_proxy_pairs(ctx: Ctx) -> Outcome:
 
     Files the OS wrote (`._*`, `.DS_Store`) are skipped on both sides - see
     `_is_sidecar_junk`.
+
+    ONE SUBJECT PER PROXY FOLDER, not per proxy (owner's rule, 2026-09-11).
+    The failure this detects is a folder somebody moved, and a moved shoot is
+    one thing to fix however many clips it held: the Gold Card Meetup move of
+    2026-09-09 left 56 orphaned proxies in one folder, which as 56 subjects
+    filled the twenty-subject cap, rotated through it pass after pass, and
+    showed the operator two of them at a time with no hint that the other
+    fifty-four existed. The folder is the subject; the detail names the first
+    few clips and counts the rest.
     """
     projects = list(ctx.conn.execute(
         "SELECT id, slug FROM projects WHERE active=1 ORDER BY slug"))
     if not projects:
         return not_checked("no active project to look at")
     bad: list[tuple[str, str]] = []
+    orphans = 0
     checked = 0
     walked = 0
     for project in projects:
@@ -748,6 +763,7 @@ def _check_proxy_pairs(ctx: Ctx) -> Outcome:
                 proxies.append(rel)
             else:
                 originals.add(("/".join(parts[:-1]), stem))
+        by_folder: dict[str, list[str]] = {}
         for rel in proxies:
             parts = rel.split("/")
             if len(parts) < 2 or parts[-2].lower() != PROXY_DIR:
@@ -760,10 +776,18 @@ def _check_proxy_pairs(ctx: Ctx) -> Outcome:
             parent = "/".join(parts[:-2])
             if not any((parent, candidate) in originals
                        for candidate in _proxy_stem_candidates(stem)):
-                bad.append((f"{project['slug']}/{rel}",
-                            "this proxy has no original beside it on the server"))
+                by_folder.setdefault("/".join(parts[:-1]), []).append(parts[-1])
+        for folder, names in sorted(by_folder.items()):
+            orphans += len(names)
+            shown = ", ".join(names[:PROXY_NAMES_SHOWN])
+            if len(names) > PROXY_NAMES_SHOWN:
+                shown += f" and {len(names) - PROXY_NAMES_SHOWN} more"
+            bad.append((f"{project['slug']}/{folder}",
+                        f"{len(names)} proxy file(s) in this folder have no "
+                        f"original beside them on the server: {shown}"))
     if bad:
-        return broken(bad, f"{len(bad)} of {checked} proxy file(s) have no original")
+        return broken(bad, f"{orphans} of {checked} proxy file(s), in "
+                           f"{len(bad)} Proxy folder(s), have no original")
     if not walked:
         return not_checked("the server has not walked any project's files yet")
     return ok(f"{checked} proxy file(s) across {walked} project(s), each with its original")
@@ -1101,8 +1125,8 @@ INVARIANTS: tuple[Invariant, ...] = (
         "Proxies left behind by a half-finished reorganisation are downloaded by "
         "every editor for clips that no longer exist, and the project looks fuller "
         "than it is.",
-        "On the server, look at the folder named below: either put the original "
-        "footage back beside it or delete the leftover Proxy folder.",
+        "On the server, look at the Proxy folder named below: either put the "
+        "original footage back beside it or delete the leftover Proxy folder.",
         _check_proxy_pairs, severity="warn"),
     # 11 to 15 (SYS-17, 2026-09-04). The first ten look at state that has
     # gone wrong INSIDE one deployment. These five look at the relationship

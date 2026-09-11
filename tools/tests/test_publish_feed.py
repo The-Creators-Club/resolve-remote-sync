@@ -224,11 +224,14 @@ class FakeGh:
     `rc_by_verb` (default 0). `on_call` fires before the answer, which is how
     the sign-before-upload ordering is observed."""
 
-    def __init__(self, *, release_exists=True, rc_by_verb=None, on_call=None):
+    def __init__(self, *, release_exists=True, rc_by_verb=None, on_call=None, assets=None):
         self.calls: list[list[str]] = []
         self.release_exists = release_exists
         self.rc_by_verb = dict(rc_by_verb or {})
         self.on_call = on_call
+        # {asset name: size} the fake release already holds, answered to
+        # `release view --json assets` (2026-09-11, upload only what changed).
+        self.assets = dict(assets or {})
 
     def __call__(self, argv):
         self.calls.append(list(argv))
@@ -236,7 +239,11 @@ class FakeGh:
             self.on_call(list(argv))
         verb = " ".join(argv[1:3])
         if verb == "release view":
-            return (0, "", "") if self.release_exists else (1, "", "release not found")
+            if not self.release_exists:
+                return 1, "", "release not found"
+            if "--json" in argv:
+                return 0, "".join(f"{n}\t{sz}\n" for n, sz in self.assets.items()), ""
+            return 0, "", ""
         rc = self.rc_by_verb.get(verb, 0)
         return rc, "", ("gh says no" if rc else "")
 
@@ -327,6 +334,44 @@ def test_upload_argv_has_clobber_the_channel_the_sig_and_every_artifact(key, art
     channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
     for record in channel["packages"]:
         assert record["url"].rsplit("/", 1)[-1] == record["filename"]
+
+
+def test_assets_the_release_already_holds_are_not_re_uploaded(key, artifact, tmp_path, capsys):
+    """2026-09-11: every run pushed the whole 3 GB mirror with --clobber,
+    four times per release. Now an asset already on the release at the same
+    name and size is skipped; the channel pair and the package this run
+    signed are always pushed; a gh that cannot list assets means upload all."""
+    feed_dir = tmp_path / "feed"
+    assert _build(feed_dir, artifact) == pf.EXIT_OK
+    win_size = (feed_dir / "windows" / "ccsync-companion-0.8.0.exe").stat().st_size
+    mac = tmp_path / "ccsync-companion"
+    mac.write_bytes(b"\xcf\xfa\xed\xfe" + b"y" * 5000)
+    gh = FakeGh(assets={"ccsync-companion-0.8.0.exe": win_size,
+                        pf.CHANNEL_FILENAME: 1, pf.SIG_FILENAME: 1})
+    rc = pf.main(["--artifact", str(mac), "--platform", "macos", "--version", "0.8.0",
+                  "--feed-dir", str(feed_dir), "--github-repo", GH_REPO, "--github-upload"],
+                 runner=gh)
+    assert rc == pf.EXIT_OK
+    argv = gh.upload_argv()
+    assert [Path(a).name for a in argv[4:-3]] == [
+        pf.CHANNEL_FILENAME, pf.SIG_FILENAME, "ccsync-companion-0.8.0"]
+    assert "1 asset(s) already on the release" in capsys.readouterr().out
+
+    # Same name, DIFFERENT size: stale on the release, so it goes up again.
+    gh2 = FakeGh(assets={"ccsync-companion-0.8.0.exe": win_size + 1})
+    rc = pf.main(["--artifact", str(mac), "--platform", "macos", "--version", "0.8.0",
+                  "--feed-dir", str(feed_dir), "--github-repo", GH_REPO, "--github-upload",
+                  "--allow-replace"], runner=gh2)
+    assert rc == pf.EXIT_OK
+    assert "ccsync-companion-0.8.0.exe" in [Path(a).name for a in gh2.upload_argv()[4:-3]]
+
+    # The package this run signed is pushed even when the size matches.
+    gh3 = FakeGh(assets={"ccsync-companion-0.8.0": mac.stat().st_size})
+    rc = pf.main(["--artifact", str(mac), "--platform", "macos", "--version", "0.8.0",
+                  "--feed-dir", str(feed_dir), "--github-repo", GH_REPO, "--github-upload",
+                  "--allow-replace"], runner=gh3)
+    assert rc == pf.EXIT_OK
+    assert "ccsync-companion-0.8.0" in [Path(a).name for a in gh3.upload_argv()[4:-3]]
 
 
 def test_release_is_created_when_absent_and_the_run_still_succeeds(key, artifact, tmp_path):

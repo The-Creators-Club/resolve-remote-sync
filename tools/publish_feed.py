@@ -743,12 +743,48 @@ def retract_record(channel: dict[str, Any], kind: str, platform: str,
     return len(channel["packages"]) != before
 
 
+def published_assets(*, repo: str, tag: str, runner: Runner) -> dict[str, int] | None:
+    """{asset name: size} of what the release already holds, or None when gh
+    could not say (then the caller uploads everything, as it always did)."""
+    rc, stdout, _stderr = runner([
+        "gh", "release", "view", tag, "-R", repo, "--json", "assets",
+        "--jq", r'.assets[] | "\(.name)\t\(.size)"',
+    ])
+    if rc != 0:
+        return None
+    held: dict[str, int] = {}
+    for line in (stdout or "").splitlines():
+        name, _sep, size = line.rpartition("\t")
+        if name and size.strip().isdigit():
+            held[name] = int(size)
+    return held
+
+
 def github_upload(feed_dir: Path, channel: dict[str, Any], *, repo: str, tag: str,
-                  base_url: str, runner: Runner, out) -> None:
+                  base_url: str, runner: Runner, out,
+                  fresh_key: tuple[str, str, str] | None = None) -> None:
     """Sign-then-upload, idempotently. Re-running a ship re-uploads the same
     asset names with --clobber on purpose: the feed is republished every
-    release and the tag is stable."""
+    release and the tag is stable.
+
+    ONLY WHAT CHANGED, since 2026-09-11. Until then every run pushed the
+    whole local mirror (89 files, 3.0 GB) with --clobber, and publish_latest
+    runs this four times per release: twelve gigabytes up the studio's line
+    to republish two hundred megabytes, an hour per release (owner: "why is
+    the upload that slow? It should be direct surely"). Now the release's
+    own asset list is read first and a file the release already holds at the
+    same name AND size is skipped. Always uploaded regardless: channel.json
+    and its signature (they change every run), and the package this run
+    signed (`fresh_key`, so a rebuild that happens to match an old size can
+    never be left stale). A `gh` that cannot list the assets means "upload
+    everything", which is the old behaviour and always correct."""
     files = github_asset_plan(feed_dir, channel, base_url=base_url)
+    fresh: set[str] = {CHANNEL_FILENAME, SIG_FILENAME}
+    if fresh_key is not None:
+        for record in channel.get("packages", []):
+            key = (str(record.get("kind")), str(record.get("platform")), str(record.get("version")))
+            if key == tuple(str(x) for x in fresh_key):
+                fresh.add(str(record.get("filename") or ""))
     for record in channel.get("packages", []):
         local = feed_dir / str(record.get("platform") or "") / str(record.get("filename") or "")
         if not local.is_file():
@@ -760,7 +796,8 @@ def github_upload(feed_dir: Path, channel: dict[str, Any], *, repo: str, tag: st
     # does is DOWNLOAD the published channel to merge into -- and that needs
     # the same credential (release-pipeline-1).
     rc, _stdout, _stderr = runner(["gh", "release", "view", tag, "-R", repo])
-    if rc != 0:
+    created = rc != 0
+    if created:
         print(f"[publish-feed] release {tag} not found in {repo} -- creating it", file=out)
         rc, stdout, stderr = runner([
             "gh", "release", "create", tag, "-R", repo,
@@ -778,6 +815,16 @@ def github_upload(feed_dir: Path, channel: dict[str, Any], *, repo: str, tag: st
                 + (f"\n{(stderr or stdout).strip()}" if (stderr or stdout).strip() else ""),
                 EXIT_UPLOAD_FAILED)
 
+    # A release created a moment ago holds nothing; asking would only add a
+    # `gh` call to a path the tests pin verb for verb.
+    held = {} if created else published_assets(repo=repo, tag=tag, runner=runner)
+    if held is not None:
+        skipped = [p for p in files
+                   if p.name not in fresh and held.get(p.name) == p.stat().st_size]
+        if skipped:
+            files = [p for p in files if p not in skipped]
+            print(f"[publish-feed] {len(skipped)} asset(s) already on the release at the "
+                  f"same name and size, not re-uploaded", file=out)
     argv = ["gh", "release", "upload", tag] + [str(p) for p in files] + ["--clobber", "-R", repo]
     rc, stdout, stderr = runner(argv)
     if rc != 0:
@@ -1303,6 +1350,7 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
             raise upload_refusal
         if args.github_upload:
             github_upload(feed_dir, channel, repo=args.github_repo, tag=args.github_tag,
+                          fresh_key=(args.kind, args.platform, args.version),
                           base_url=args.base_url, runner=runner, out=out)
             return EXIT_OK
 

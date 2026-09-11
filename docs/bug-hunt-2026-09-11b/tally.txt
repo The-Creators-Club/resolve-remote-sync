@@ -90,9 +90,32 @@ music-3                   medium  CONFIRMED a retried batch is undispatchable af
 music-4                   medium  PLAUSIBLE the positive readiness cache keeps the write gate open for 5 s after the library mount disappears
 music-5                   low     CONFIRMED `_snapshot_token` can raise out of the first line of `rescore_library`
 music-6                   low     PLAUSIBLE `editor:` stamps are rejected for any editor name with a space, silently downgrading to a token mismatch 403
-regression-1              medium  CONFIRMED the CR-241 fix for dash-collector-alerts-1 silences the catch-all "this computer is not syncing and we cannot say why" a
-regression-2              low     CONFIRMED the broll-2 fix hardens the migration but the door it was written to protect still falls over on a non-sqlite error
-regression-3              low     CONFIRMED CR-242b/CR-242c cite the wrong finding ids, and dash-release-jobs-5 has no ledger entry at all
+regression-1              medium  CONFIRMED res-fleet-2: the per-cycle mount probe cannot see the failure it was written for
+regression-2              medium  CONFIRMED dash-collector-alerts-1: the new quiet path names the machine, which silences the catch-all "not syncing and we cannot s
+regression-3              medium  CONFIRMED dash-api-2: a cancelled job the holder fails as retryable becomes an immortal invisible `queued` row
+regression-4              medium  CONFIRMED comp-sync-7: the new stale-subpath gate is on the shared lane object, so CONSOLIDATE's proxy pull is silently dropped
+regression-5              medium  CONFIRMED comp-sync-11: the twin the fix's own comment names, `CompanionApp._relink_moved`, was never converted to `cmp_key`
+regression-6              medium  CONFIRMED comp-sync-12: the new case-only rename skips the proxy siblings every other move takes with it
+regression-7              medium  CONFIRMED comp-ui-1: a recoverable Explorer-restart re-add failure now kills the tray refresh and pulse loops for the life of the 
+regression-8              medium  CONFIRMED comp-resolve-4: the cards watchdog still never recovers a role that lost ONE of its two loops
+regression-9              medium  CONFIRMED comp-broll-music-2: a staged-but-never-run drop is now immortal - no sweep, no button, unbounded staging disk
+regression-10             medium  CONFIRMED music-5: `ORDER BY id DESC` now samples the rows least likely to be on disk, so a live drop refuses itself from item ~51
+regression-11             medium  CONFIRMED comp-ytdl-jobs-3: the dashboard half was never built, so the finding's central symptom stands
+regression-12             low     CONFIRMED res-companion-3 is claimed fixed and there is no fix anywhere in the tree
+regression-13             low     CONFIRMED CR-242b/CR-242c cite the wrong finding ids, and dash-release-jobs-5 is unledgered while dash-release-jobs-3's real fix i
+regression-14             low     CONFIRMED broll-2: the `try/except` that protects the public share door catches `sqlite3.Error` only
+regression-15             low     CONFIRMED comp-sync-7: the abandoned-lane-B latch is set outside the lock that its only clearer takes
+regression-16             low     CONFIRMED comp-ui-1: the Explorer-restart re-add inherited the new backoff and blocks the pump for ~15.5 s, against its own commen
+regression-17             low     CONFIRMED res-companion-1: the new `applying` intent row is `relink_pending=True` before the file has moved
+regression-18             low     CONFIRMED comp-sync-20: the new "retrying" answer does not stop the 7-day expiry it was written to stop
+regression-19             low     CONFIRMED comp-ui-4: the "(s)" ban was extended to two files and app.py still ships four editor-visible plurals
+regression-20             low     CONFIRMED comp-sync-15: the second trash-summary producer still hands out the DEFAULT retention
+regression-21             low     PLAUSIBLE comp-ui-2: the "second source that does not need a filesystem" is itself a file, written with a silent swallow
+regression-22             low     CONFIRMED dash-db-3: the cap bounds the rows but not the work the same marker buys
+regression-23             low     PLAUSIBLE dash-mounts-ui-5: the stale-while-revalidate write is not held alive, so the stale asset can survive anyway
+regression-24             low     PLAUSIBLE dash-release-jobs-5: a `stop()` whose join times out, plus `start()`, leaves two pollers and the orphan is uncancellable
+regression-25             low     PLAUSIBLE res-fleet-4: the per-slot attempt ceiling loses the weekly report for an outage longer than about twenty minutes
+regression-26             low     PLAUSIBLE ytdl-web-5: the new claim refusal reaches the page as "this computer declined the job (HTTP 503)"
 res-companion-1           high    CONFIRMED the crash-resume for an interrupted file move is unreachable, and the crash now ends as a PERMANENT failed move instead 
 res-companion-2           medium  CONFIRMED the new "lane B abandoned" latch can be set on a thread that has just finished, and then nothing ever clears it: proxy d
 res-companion-3           low     CONFIRMED an in-flight deletion credit that is never reconciled makes the NEXT lane B pass's deletions invisible to the breaker

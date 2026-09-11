@@ -881,7 +881,15 @@ LANE_WATCHDOG_MAX_RESTARTS_PER_HOUR = 6
 # Wait between attempts on ONE thread: base x 2^(restarts already in the last
 # hour), capped. The first restart is still immediate.
 LANE_WATCHDOG_BACKOFF_SECONDS = 60.0
-LANE_WATCHDOG_BACKOFF_MAX_SECONDS = 30.0 * 60.0
+# comp-app-3 (2026-09-11b): the cap and the ceiling are ONE policy, and at 30
+# minutes they contradicted each other. 60 * 2**len(recent) put the sixth
+# restart at t=3720s, by which time the first had aged out of the hour, so
+# `len(recent)` never reached the ceiling: the branch that says "this needs a
+# human" was dead code and a permanently dead thread was restarted 97 times a
+# day. The cap must leave room for MAX_RESTARTS_PER_HOUR attempts INSIDE the
+# window they are counted over (0, 120, 360, 840, 1440, 2040 -- six inside the
+# hour, the seventh refused).
+LANE_WATCHDOG_BACKOFF_MAX_SECONDS = 10.0 * 60.0
 # A clock that steps BACKWARDS used to erase the crash-loop evidence the
 # record exists to survive (`0 < now - t` dropped every event stamped in what
 # is now the future). Tolerated symmetrically instead.
@@ -944,6 +952,9 @@ class LaneWatchdog:
         # (never make a safety latch in-memory-only).
         self._events: dict[str, list[float]] = {}
         self._last_error: dict[str, Optional[str]] = {}
+        # comp-app-5: name -> the kind of hold-off last written to the log, so
+        # the same refusal is not a WARNING once a minute for a day.
+        self._held_logged: dict[str, str] = {}
         self._load_record()
 
     # -- lifecycle ---------------------------------------------------------
@@ -991,9 +1002,23 @@ class LaneWatchdog:
             if held:
                 # comp-app-7: the thread is still down and still needs
                 # restarting; what is refused is trying again THIS tick.
-                log.warning("thread watchdog: NOT restarting the %s -- %s (%s)",
-                            target.name, held, reason)
+                #
+                # comp-app-5 (2026-09-11b): once per CHANGE of answer, not
+                # once per tick. The per-tick JSON write went with comp-app-7
+                # and the per-tick WARNING stayed, so a thread down for a day
+                # still wrote 1,350 lines into a 5 MB rotating log and still
+                # took the day's other evidence with it. The transition into
+                # the ceiling is the line that matters and it is kept.
+                kind = "ceiling" if "ceiling" in held else "backoff"
+                if self._held_logged.get(target.name) != kind:
+                    self._held_logged[target.name] = kind
+                    log.warning("thread watchdog: NOT restarting the %s -- %s (%s)",
+                                target.name, held, reason)
+                else:
+                    log.debug("thread watchdog: still NOT restarting the %s -- %s (%s)",
+                              target.name, held, reason)
                 continue
+            self._held_logged.pop(target.name, None)
             log.error("thread watchdog: restarting the %s -- %s", target.name, reason)
             if self._restart(target):
                 restarted.append(target.name)
@@ -1012,7 +1037,15 @@ class LaneWatchdog:
             now = float(self._now())
             with self._lock:
                 events = list(self._events.get(name, []))
-            recent = [t for t in events if 0 <= now - t <= _WATCHDOG_HOUR_SECONDS]
+            # comp-app-4 (2026-09-11b): the same skew tolerance _load_record
+            # was given, because THIS is the policy that reads those events.
+            # `0 <= now - t` discarded every one of them after a clock step
+            # backwards (an NTP correction, a VM resume, a dual-boot RTC), so
+            # for the length of the step the dead thread was restarted every
+            # tick with no backoff and no ceiling -- the exact spin the
+            # persisted record exists to prevent.
+            recent = [t for t in events
+                      if -_WATCHDOG_CLOCK_SKEW_SECONDS <= now - t <= _WATCHDOG_HOUR_SECONDS]
             if len(recent) >= LANE_WATCHDOG_MAX_RESTARTS_PER_HOUR:
                 return (f"{len(recent)} restarts in the last hour is the ceiling; "
                         f"this needs a human, not another restart")
@@ -1020,7 +1053,9 @@ class LaneWatchdog:
                 return ""
             wait = min(LANE_WATCHDOG_BACKOFF_SECONDS * (2 ** len(recent)),
                        LANE_WATCHDOG_BACKOFF_MAX_SECONDS)
-            since = now - max(recent)
+            # An event stamped in the future is "just now" for the wait, never
+            # a negative age that reads as older than the wait (comp-app-4).
+            since = max(0.0, now - max(recent))
             if since < wait:
                 return (f"restarted {since:.0f}s ago and the wait after "
                         f"{len(recent)} attempt(s) is {wait:.0f}s")
@@ -1227,10 +1262,93 @@ class LaneWatchdog:
             self._last_error[name] = error if isinstance(error, str) else None
 
 
+# comp-app-2 / res-companion-5 (2026-09-11b): module-level, and built on
+# demand, because `_apply_file_moves` and `_queue_file_move_answer` are called
+# UNBOUND on objects that never ran CompanionApp.__init__ (the file-move
+# suite's stub is how the redelivery path is tested at all). A new instance
+# attribute in the constructor would be an AttributeError swallowed by that
+# function's never-raise handler, i.e. silently no file moves applied.
+def _file_move_drive_state(app: Any) -> dict[int, float]:
+    """Move id -> when this machine last said "waiting for the sync drive"."""
+    state = getattr(app, "_file_move_drive_answered_at", None)
+    if state is None:
+        state = {}
+        app._file_move_drive_answered_at = state
+    return state
+
+
+def _file_move_answers_lock(app: Any) -> threading.Lock:
+    """The lock the reporter thread and the watcher thread share over the
+    queued file-move answers."""
+    lock = getattr(app, "_file_move_answers_lock", None)
+    if lock is None:
+        lock = threading.Lock()
+        app._file_move_answers_lock = lock
+    return lock
+
+
+def _moved_destination_is_there(entry: dict[str, Any]) -> bool:
+    """Is the move this ledger row describes actually ON DISK here?
+    (comp-sync-b-2, 2026-09-11b, owed here by comp-sync.)
+
+    Defence in depth for the crash window: an `applying` intent row is
+    written before the rename and carries `relink_pending`, so a companion
+    killed in between left a row that reads like a completed move. Its two
+    readers - the pending-relink sweep and the RELINK IT dialog - would then
+    repoint this project's clips at a path that does not exist - Media Offline with no file behind it, which is
+    strictly worse than the offline clip they are fixing, and the fixer's
+    answer to an in-tree missing clip is to copy it back to the path the
+    admin just cleared. The ledger half is fixed in file_moves.py; this
+    asks the disk, which is the only thing that actually knows. A path we
+    cannot test (a permission error, a drive that is out) is NOT a
+    refusal: the walk below is read-only except through replace_clip, and
+    never relinking would be its own permanent fault."""
+    new_local = str(entry.get("new_local") or "")
+    if not new_local:
+        return False
+    try:
+        if os.path.exists(new_local):
+            return True
+    except OSError:
+        return True
+    log.info("file move #%s: not relinking yet - nothing is at %s on this "
+             "machine", entry.get("id"), new_local)
+    return False
+
+
+def _file_move_drive_answer_due(app: Any, move_id: int) -> bool:
+    """Is "waiting for the sync drive" worth saying again for this move?
+    (comp-app-2, 2026-09-11b.)
+
+    The answer's job is to stop the dashboard's 7 day expiry retiring a move
+    the machine is still talking about; saying it twice a minute for a
+    fortnight does that no better and buries the dashboard's log. Never
+    raises: a clock that cannot be read answers yes, which is what this
+    always did.
+    """
+    try:
+        now = float(time.time())
+        state = _file_move_drive_state(app)
+        last = state.get(int(move_id))
+        every = float(getattr(app, "FILE_MOVE_DRIVE_ANSWER_SECONDS", 1800.0))
+        if last is not None and 0.0 <= now - float(last) < every:
+            return False
+        state[int(move_id)] = now
+        return True
+    except Exception:  # noqa: BLE001
+        return True
+
+
 class CompanionApp:
     """Owns the timeline watcher, all three sync lanes, and (optionally) the
     tray icon. Every public method is safe to call from any thread (the
     tray runs its callbacks on its own thread)."""
+
+    # comp-app-2 (2026-09-11b): how often ONE unfinished file move may repeat
+    # "waiting for the sync drive" to the dashboard. Well inside the 7 day
+    # expiry the answer exists to hold off, and short enough that a lost
+    # report costs half an hour rather than the move.
+    FILE_MOVE_DRIVE_ANSWER_SECONDS = 30.0 * 60.0
 
     def __init__(self, cfg: dict[str, Any], exists_fn: Callable[[str], bool] = os.path.exists) -> None:
         self.config = cfg
@@ -2115,6 +2233,19 @@ class CompanionApp:
         # or refused (docs/FILE_MOVES.md). Before the lanes: lane A reads it.
         self.file_moves = file_moves_mod.FileMoveLedger(Path(state_dir))
         self._file_move_answers: list[dict[str, Any]] = []
+        # res-companion-5: the reporter thread drains this list while the
+        # watcher thread and the report-reply path queue into it.
+        self._file_move_answers_lock = threading.Lock()
+        # comp-app-2: move id -> when this machine last said "waiting for the
+        # sync drive" about it, so an outage is not one WARNING per move per
+        # report on the dashboard for as long as the drive is in the bag.
+        self._file_move_drive_answered_at: dict[int, float] = {}
+        # comp-app-8: said once per process, like every other startup
+        # advisory the editor would otherwise read on every tick.
+        self._machine_id_warned = False
+        # comp-resolve-b-2: when the rate limiter's hold-off was last written
+        # to the log, so the watcher's 900 s re-offer does not repeat it.
+        self._canon_relink_held_logged_at: Optional[float] = None
         # SYS-15b (2026-08-29): what this machine has already answered about
         # an admin's Resolve undo. Beside the file-move ledger, on disk, for
         # the same reason: a command redelivered after a restart is answered
@@ -2966,12 +3097,21 @@ class CompanionApp:
             with self._canon_relink_lock:
                 self._canon_relink_busy = False
                 waiting = len(self._canon_relink_pending)
-            log.info(
-                "non-canonical relink: holding %d clip(s) -- this project was "
-                "auto-relinked less than %.0f minutes ago and the unprompted path "
-                "is rate-limited. Tray > Settings > SCAN WHOLE PROJECT runs it now",
-                waiting, resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS / 60.0,
-            )
+            # comp-resolve-b-2 (2026-09-11b, owed here): once per cooldown
+            # window, not once per refusal. RES-19's watcher re-offers the
+            # same clips every 900 s for the life of the process, so this line
+            # repeated all afternoon about a queue that had not changed.
+            now = time.monotonic()
+            last = self._canon_relink_held_logged_at
+            if last is None or (now - last) >= resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS:
+                self._canon_relink_held_logged_at = now
+                log.info(
+                    "non-canonical relink: holding %s -- this project was "
+                    "auto-relinked less than %.0f minutes ago and the unprompted path "
+                    "is rate-limited. Tray > Settings > SCAN WHOLE PROJECT runs it now",
+                    ui_copy.count(waiting, "clip"),
+                    resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS / 60.0,
+                )
             return
         try:
             threading.Thread(
@@ -3069,7 +3209,8 @@ class CompanionApp:
                 )
         if fixed:
             self._notify_tray(
-                f"Re-addressed {fixed} clip(s) to {self.config.get('canonical_prefix')} "
+                f"Re-addressed {ui_copy.count(fixed, 'clip')} to "
+                f"{self.config.get('canonical_prefix')} "
                 "so they stay online for every editor.",
                 site_mod.notify_title(),
             )
@@ -3415,7 +3556,7 @@ class CompanionApp:
             # tree" is not true of a machine that has been told to look past
             # a folder, and this is the one screen where the editor asked.
             folders = self.ignore_tracker.folder_count()
-            extra = (f" ({folders} folder(s) are set to be left alone - "
+            extra = (f" ({ui_copy.count(folders, 'folder')} are set to be left alone - "
                      f"Settings shows them)" if folders else "")
             log.info("whole-project scan: all media is in the tree%s", extra)
             self._notify_tray(
@@ -3736,13 +3877,18 @@ class CompanionApp:
             # A rehearsal that says "finished" is the wrong sentence twice
             # over: nothing was copied and nothing was uploaded.
             self._notify_tray(
-                f"Rehearsal finished: {rehearsed} file(s) were checked and "
+                f"Rehearsal finished: {ui_copy.count(rehearsed, 'file')} were checked and "
                 "nothing was copied in or uploaded.",
                 site_mod.notify_title("consolidate"))
             return
+        # comp-app-7 (2026-09-11b): the conditional governed the WHOLE
+        # f-string, so the count appeared only where the editor had skipped
+        # something - the uncommon case. The common one, a clean 40 clip
+        # consolidate, said "Copy & upload finished." with no number to
+        # compare against the 40 they expected, while the rehearsal and
+        # failure branches both print one.
         self._notify_tray(
-            f"Copy & upload finished ({copied} "
-            f"copied in{skipped_part})." if skipped else "Copy & upload finished.",
+            f"Copy & upload finished ({copied} copied in{skipped_part}).",
             site_mod.notify_title("consolidate"))
 
     def _subpath_is_contained(self, subpath: str) -> bool:
@@ -4215,7 +4361,8 @@ class CompanionApp:
             )
         first = items[0].get("clip_name") or os.path.basename(
             items[0].get("file_path", "")) or "a clip"
-        more = f" and {len(items) - 1} other clip(s)" if len(items) > 1 else ""
+        more = (f" and {ui_copy.count(len(items) - 1, 'other clip', 'other clips')}"
+                if len(items) > 1 else "")
         self._notify_tray(
             f"“{first}”{more} point at paths that only exist on another "
             "editor's computer, so they can never sync or come online here. "
@@ -4810,7 +4957,8 @@ class CompanionApp:
         """
         lanes: list[str] = []
         try:
-            lanes = [str(getattr(lane, "name", "") or "") for lane in self.lanes]
+            lanes = [str(getattr(lane, "name", "") or "")
+                     for lane in self._runnable_lanes()]
         except Exception:
             log.exception("sync_now: could not list the lanes")
         refusal = self._lanes_refusal()
@@ -4860,9 +5008,16 @@ class CompanionApp:
             return None
         try:
             root = str(self.config.get("local_root", "") or "")
+            # regression-20 (2026-09-11b): the SITE's retention, not the
+            # module default. comp-sync-15 passed it to the lane's producer
+            # and left this one, which is in the pinned app contract: the
+            # next consumer would render "copies are kept 14 days" about a
+            # folder pruned at 3, which is the wrong-deadline defect SYNC-112
+            # and comp-sync-15 both exist to stop.
+            retention = self._configured_trash_max_age_days()
             summarise = getattr(lane_guard, "trash_summary", None)
             if summarise is not None:
-                summary = dict(summarise(root) or {})
+                summary = dict(summarise(root, max_age_days=retention) or {})
                 if not summary:
                     return None
                 summary.setdefault("path", path)
@@ -4878,11 +5033,22 @@ class CompanionApp:
                 "bytes": total,
                 "oldest": (datetime.fromtimestamp(oldest, timezone.utc).isoformat()
                            if oldest else None),
-                "retention_days": lane_guard.DEFAULT_TRASH_MAX_AGE_DAYS,
+                "retention_days": retention,
             }
         except Exception:
             log.exception("trash_summary() failed")
             return None
+
+    def _configured_trash_max_age_days(self) -> int:
+        """`trash_max_age_days` as this site set it (regression-20). The
+        module default when it is absent or unreadable: a wrong number is
+        worse than the shipped one, but neither may raise out of a summary."""
+        default = int(lane_guard.DEFAULT_TRASH_MAX_AGE_DAYS)
+        try:
+            value = self.config.get("trash_max_age_days", default)
+            return int(value) if value is not None else default
+        except (TypeError, ValueError):
+            return default
 
     # -- the sentence that names the broken setting (APP-5) ----------------
     def config_problem_detail(self) -> Optional[str]:
@@ -5929,9 +6095,7 @@ class CompanionApp:
             except Exception:
                 log.exception("failed to start lane A watchdog")
         else:
-            for lane in self.lanes:
-                if lane is self._lane_b and not self._lane_b_enabled:
-                    continue
+            for lane in self._runnable_lanes():   # comp-app-6: the one predicate
                 try:
                     lane.start()
                 except Exception:
@@ -6721,7 +6885,7 @@ class CompanionApp:
         disk with a dot-folder no editor has any UI to see, and then blamed
         the editor for it. Only FINISHED batches -- the running one is never
         touched."""
-        removed, freed = 0, 0
+        removed, freed, held_unrun = 0, 0, 0
         for ingestor in self._ingestors():
             try:
                 one = ingestor.prune_staging(max_age_days=0)
@@ -6730,7 +6894,20 @@ class CompanionApp:
                 continue
             removed += int(one.get("removed") or 0)
             freed += int(one.get("bytes") or 0)
+            held_unrun += int(one.get("held_unrun") or 0)
         if not removed:
+            # comp-broll-music-2 (2026-09-11b, owed here): a drop that was
+            # staged and never run has no `ended_at`, so it is deliberately
+            # not "finished" and this button cannot touch it - and the space
+            # refusal that sends the editor here names this button. Saying
+            # "there is nothing to clear" about the bytes they can see filling
+            # the disk is the sentence that made them press it twice.
+            if held_unrun:
+                return (
+                    f"The staging on this computer is {ui_copy.count(held_unrun, 'drop')} "
+                    "that were never indexed, so there is nothing FINISHED to "
+                    "clear. Those clear themselves once they are past the "
+                    "staging retention window, or as soon as the drop is run.")
             return "There is no finished staging to clear on this computer."
         return (f"Cleared {ui_copy.count(removed, 'finished staging folder')}, "
                 f"{freed / 1e9:.1f} GB.")
@@ -7514,13 +7691,28 @@ class CompanionApp:
             if not isinstance(raw_moves, list) or not raw_moves:
                 return
             local_root = str(self.config.get("local_root", "")).strip()
+            if local_root and not self._root_absent:
+                # comp-app-2: the drive is here, so the next outage is a new
+                # one and says so at once.
+                _file_move_drive_state(self).clear()
             for raw in raw_moves[:file_moves_mod.LEDGER_MAX_ENTRIES]:
                 move = file_moves_mod.parse_command(raw)
                 if move is None:
                     log.warning("file moves: ignoring a malformed command (%r)", raw)
                     continue
                 done = self.file_moves.entry(move["id"])
-                if done is not None and not self.file_moves.retry_due(done):
+                # res-companion-1 (2026-09-11b): an `applying` row is not an
+                # outcome, it is a move this machine was interrupted in the
+                # middle of - which is the whole point of writing it. The
+                # gate below treated it as "already answered" and replied
+                # ok=False with state=None, i.e. "a failure is an answer": the
+                # dashboard stamped applied_at, retired the command, and
+                # apply_move's resume arm was never reached again. The row
+                # then sat in recent_excludes' unresolved set for ever, so
+                # lane A was muzzled on that path permanently.
+                resuming = (done is not None
+                            and done.get("state") == file_moves_mod.STATE_APPLYING)
+                if done is not None and not resuming and not self.file_moves.retry_due(done):
                     # RES-1 (2026-08-28): a failure is no longer final. An
                     # entry still in `retryable` re-answers as "retrying" --
                     # which the dashboard records WITHOUT retiring the
@@ -7552,11 +7744,23 @@ class CompanionApp:
                     # understood. `attempts` stays 0: waiting for a drive is
                     # not an attempt, and it must not spend the retry budget
                     # that a real failure needs.
-                    log.info("file moves: #%s waits for the sync drive", move["id"])
-                    self._queue_file_move_answer(
-                        move["id"], False,
-                        f"waiting for the sync drive ({site_mod.drive_phrase()})",
-                        state="retrying", attempts=0)
+                    #
+                    # comp-app-2 (2026-09-11b): but not on EVERY report. The
+                    # dashboard logs a WARNING for each retrying answer it
+                    # records (the UPDATE matches while applied_at IS NULL, so
+                    # it can never become a no-op), which is three moves x two
+                    # reports a minute x a fortnight away = tens of thousands
+                    # of identical lines in the log an admin opens to find out
+                    # why something ELSE went wrong. Once per move per
+                    # FILE_MOVE_DRIVE_ANSWER_SECONDS says the same thing and
+                    # still survives a lost report, which "once per outage"
+                    # would not.
+                    if _file_move_drive_answer_due(self, int(move["id"])):
+                        log.info("file moves: #%s waits for the sync drive", move["id"])
+                        self._queue_file_move_answer(
+                            move["id"], False,
+                            f"waiting for the sync drive ({site_mod.drive_phrase()})",
+                            state="retrying", attempts=0)
                     continue
                 # res-companion-1 (2026-09-11): the ledger goes IN, so
                 # apply_move can record `applying` before it touches the disk
@@ -7635,10 +7839,19 @@ class CompanionApp:
         except Exception:
             log.exception("could not apply the dashboard's file moves")
 
+
     def _queue_file_move_answer(self, move_id: int, ok: bool, detail: str,
                                 state: str | None = None, attempts: int = 0,
                                 relink_pending: bool = False) -> None:
-        self._file_move_answers = [a for a in self._file_move_answers if a["id"] != move_id]
+        # res-companion-5 (2026-09-11b): the reporter thread swaps this list
+        # out while the watcher thread and the report-reply path both queue
+        # into it. A swap landing between the filter-assign and the append
+        # either lost the answer being queued or assigned answers that had
+        # just been reported back into the list, which re-publishes a verdict
+        # the dashboard has already acted on.
+        with _file_move_answers_lock(self):
+            self._file_move_answers = [a for a in self._file_move_answers
+                                       if a["id"] != move_id]
         answer: dict[str, Any] = {"id": int(move_id), "ok": bool(ok),
                                   "detail": str(detail or "")[:512]}
         # RES-1 / RES-10: the extra fields a dashboard below the same sweep
@@ -7655,8 +7868,9 @@ class CompanionApp:
 
     def _file_move_results(self) -> list[dict[str, Any]]:
         """Drained by the reporter: the answers queued since the last report."""
-        answers, self._file_move_answers = self._file_move_answers, []
-        return answers
+        with _file_move_answers_lock(self):
+            answers, self._file_move_answers = self._file_move_answers, []
+        return list(answers)
 
     # -- the admin-side Resolve undo (SYS-15b, 2026-08-29) -----------------
 
@@ -7767,6 +7981,8 @@ class CompanionApp:
         raises (watcher thread)."""
         try:
             for entry in self.file_moves.pending_relinks():
+                if not _moved_destination_is_there(entry):
+                    continue
                 matched, text = self._relink_moved_result(
                     entry.get("old_local", ""), entry.get("new_local", ""),
                     bool(entry.get("is_dir")))
@@ -7799,6 +8015,12 @@ class CompanionApp:
         ).start()
 
     def _show_moved_clip_dialog(self, entry: dict[str, Any], name: str) -> None:
+        if not _moved_destination_is_there(entry):
+            self._notify_tray(
+                "That clip has not finished moving on this computer yet. "
+                "CCSync will offer to repoint Resolve once it has.",
+                site_mod.notify_title("this clip moved"))
+            return
         if not self._popup_active_lock.acquire(blocking=False):
             log.info("moved-clip dialog: another CCSync window is open -- the tray "
                      "notification carried the message instead")
@@ -7829,56 +8051,29 @@ class CompanionApp:
             self._popup_active_lock.release()
 
     def _relink_moved(self, old_local: str, new_local: str, is_dir: bool) -> str:
-        """Repoint every media pool clip under `old_local` to `new_local`,
-        through replace_clip (save point + undo journal, like every other
-        Resolve mutation). Returns a short outcome for the report, "" when
-        there was nothing to do. Never raises: a Resolve that is closed or
-        busy is reported, not treated as a failed move -- the file HAS moved,
-        and the fixer popup will meet the offline clip like any other."""
-        try:
-            from . import canon, resolve_bridge
+        """Repoint every media pool clip under `old_local` to `new_local`.
+        Returns a short outcome for the report, "" when there was nothing to
+        do. Never raises: a Resolve that is closed or busy is reported, not
+        treated as a failed move -- the file HAS moved, and the fixer popup
+        will meet the offline clip like any other.
 
-            result = resolve_bridge.get_media_pool_items()
-            if not result.get("ok"):
-                return f"Resolve not relinked ({result.get('message') or 'not open'})"
-            local_root = str(self.config.get("local_root", ""))
-            prefix = str(self.config.get("canonical_prefix", ""))
-            old_n = os.path.normcase(os.path.normpath(old_local))
-            relinked = failed = 0
-            for item in result.get("items") or []:
-                file_path = str(item.get("file_path") or "")
-                local = canon.canonical_to_local(file_path, local_root, prefix) or file_path
-                local_n = os.path.normcase(os.path.normpath(local))
-                if is_dir:
-                    if not (local_n == old_n or local_n.startswith(old_n.rstrip("\\/") + os.sep)):
-                        continue
-                    target = os.path.join(new_local, os.path.relpath(local, old_local)) \
-                        if local_n != old_n else new_local
-                elif local_n == old_n:
-                    target = new_local
-                else:
-                    continue
-                clip = resolve_bridge.resolve_media_pool_item(item)
-                if clip is None:
-                    failed += 1
-                    continue
-                canonical = canon.local_to_canonical(target, local_root, prefix)
-                outcome = resolve_bridge.replace_clip(clip, canonical, source="file_move")
-                if outcome.get("ok"):
-                    relinked += 1
-                else:
-                    failed += 1
-                    log.warning("file move: could not relink %s -> %s: %s",
-                                file_path, canonical, outcome.get("message"))
-            if not relinked and not failed:
-                return ""
-            text = f"{relinked} Resolve clip(s) relinked"
-            if failed:
-                text += f", {failed} could not be"
-            return text
-        except Exception:
-            log.exception("file move: Resolve relink failed")
-            return "Resolve relink failed (see the log)"
+        regression-5 (2026-09-11b): the WALK now lives in
+        file_moves.relink_moved, which is where comp-sync-11 put the folded
+        comparison (`cmp_key`: NFC plus case). This twin kept a private
+        `os.path.normcase(os.path.normpath(...))` copy of the rule, so the
+        fix landed on sync/repath.py's project-rename path and not on the
+        FILE MOVE feature -- the apply path, the pending-relink sweep and the
+        RELINK IT dialog all come through here. A Mac answers NFD and the
+        ledger's old path is the dashboard's NFC, so a clip whose name
+        carries a diacritic matched nothing, the pending relink never retired,
+        and RELINK IT said "Nothing in this project pointed at the old
+        location" about a clip sitting offline in front of the editor."""
+        _matched, text = file_moves_mod.relink_moved(
+            old_local, new_local,
+            str(self.config.get("local_root", "")),
+            str(self.config.get("canonical_prefix", "")),
+            is_dir)
+        return text
 
     def _apply_fleet_halt(self, resp: Any) -> None:
         """Adopt the dashboard's fleet halt flag from a report reply.
@@ -8565,12 +8760,32 @@ class CompanionApp:
                         "reason": "CCSync could not start a sync pass. "
                                   f"{ui_copy.OPEN_LOG}."}
             return verdict
-        for lane in self.lanes:
+        for lane in self._runnable_lanes():
             try:
                 lane.run_once()
             except Exception:
                 log.exception("sync_now: lane %s failed", getattr(lane, "name", lane))
         return verdict
+
+    def _runnable_lanes(self) -> list[Any]:
+        """The lanes this machine may actually run (comp-app-6, 2026-09-11b).
+
+        `_start_lanes` has always skipped lane B where `lane_b_enabled=false`
+        (a machine that reads the proxies straight off the share) and writes
+        "disabled: direct NAS access" on its status line. "Sync now" iterated
+        `self.lanes` unfiltered, and `rclone_lane.run_once` has no enable
+        check of its own -- its early returns are the root, the stop event
+        (never set on a lane that was never started), the breaker and the disk
+        floor -- so the click ran a full proxy pull DOWN onto that machine and
+        named lane B in the toast. One predicate, so the third caller cannot
+        miss it either."""
+        lane_b = getattr(self, "_lane_b", None)
+        out: list[Any] = []
+        for lane in self.lanes:
+            if lane is not None and lane is lane_b and not self._lane_b_enabled:
+                continue
+            out.append(lane)
+        return out
 
     def is_paused(self) -> bool:
         return self._paused
@@ -8791,6 +9006,7 @@ class CompanionApp:
             ("keep-awake", self._start_keep_awake),
             ("LUT/stills link", self._start_lut_link),
             ("root guard", self._start_root_guard),
+            ("computer id check", self._warn_if_machine_id_is_unreadable),
             ("b-roll server", self._start_broll_server),
             ("yt-dlp manager", self._start_ytdlp_manager),
             # LAST: it supervises the threads everything above it started
@@ -8801,6 +9017,36 @@ class CompanionApp:
                 starter()
             except Exception:
                 log.exception("failed to start the %s", name)
+
+    def _warn_if_machine_id_is_unreadable(self) -> None:
+        """Say it once when this computer cannot read its own id file
+        (comp-app-8, 2026-09-11b).
+
+        comp-app-5 stopped the companion minting a SECOND id over an
+        unreadable one, which was right: the dashboard reads a new id as
+        another computer and the old one is unrecoverable afterwards. But
+        nothing said so. `machine_id()` answered "" for every report, the
+        reporter cached that for the life of the process, and the machine
+        went on reporting under its hostname - so the fault stayed invisible
+        until someone renamed that computer and found its sync plan gone.
+        Once per process, and never a refusal: everything else about this
+        machine still works."""
+        try:
+            if self._machine_id_warned or not machine_mod.machine_id_unreadable():
+                return
+            self._machine_id_warned = True
+            path = machine_mod.machine_path()
+            log.warning("this computer cannot read its id file (%s): it reports no "
+                        "machine id until the file is repaired", path)
+            self._notify_tray(
+                f"CCSync cannot read this computer's id file ({path.name}). "
+                "Syncing is not affected, but this computer cannot be "
+                "recognised again if it is renamed. Send your log to your "
+                "admin: the file is repairable and CCSync will not overwrite "
+                "it on its own.",
+                site_mod.notify_title("this computer's id"))
+        except Exception:
+            log.exception("could not check this computer's id file")
 
     def _start_watcher_thread(self) -> None:
         """Start (or replace) the timeline watcher's thread.
@@ -9625,7 +9871,7 @@ class CompanionApp:
         try:
             confirmed = popup.confirm_dialog(
                 "Share these LUTs with the team?",
-                f"{len(strays)} LUT(s) on this computer ({total_mb:.1f} MB) are not in the shared "
+                f"{ui_copy.count(len(strays), 'LUT')} on this computer ({total_mb:.1f} MB) are not in the shared "
                 f"library.\n\nCopying them to {library} puts them on every editor's computer. "
                 f"Your own copies stay where they are.\n\n{preview}",
                 ok_label="SHARE",
@@ -9638,7 +9884,7 @@ class CompanionApp:
         finally:
             self._popup_active_lock.release()
         errors = result.get("errors") or []
-        message = f"Shared {result.get('copied', 0)} LUT(s) with the team."
+        message = f"Shared {ui_copy.count(result.get('copied', 0), 'LUT')} with the team."
         if errors:
             message += f" {len(errors)} could not be copied -- see the log."
             for err in errors:

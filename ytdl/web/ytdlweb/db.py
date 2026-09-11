@@ -1893,6 +1893,17 @@ def job_dict(row):
     # the SPA labels every view of a job with them, under the rule mode is.
     d['term_scope'] = term_scope_of(row)
     d['date_from'], d['date_to'] = date_range_of(row)
+    # A BOOL, through the same tolerant reader the claim gate uses
+    # (regression-26, 2026-09-11b). The SPA re-reads the editor's "download on
+    # this computer" switch at DISPATCH time, so an editor who ticks it after
+    # the search was submitted hands their companion a job that
+    # claim_download's `COALESCE(created_local,1)=1` can only refuse - and the
+    # page painted the resulting 503 as a bare HTTP code, which reads as a
+    # broken tray. The page can only skip a hand-off it knows is hopeless if
+    # the row says what the job was CREATED with. Absent on a database
+    # migration 013 has not reached, and read as True there, which is what the
+    # claim gate reads it as.
+    d['created_local'] = created_widening_of(row)[1]
     return d
 
 

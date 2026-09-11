@@ -207,11 +207,33 @@ def retry_failed(uid: str, x_ccsync_user: str = Header(default=None),
     and the next claim resumes it. Nothing is dispatched from this route - the
     page tells its OWN companion to pick the batch up, because only the
     editor's machine holds the staged audio.
+
+    A batch a machine is STILL HOLDING is refused (music-1, 2026-09-11b; the
+    music half of broll-5). The reset nulls `lease_expires_at` and puts the
+    batch back to `queued`, which underneath a live leaseholder is possession
+    taken away without telling it: `claim` only refuses a second machine while
+    the lease is live, so two of an editor's computers can index the same
+    tracks into the same library until the first one's next per-item POST is
+    410'd. The button is only ever drawn for a finished batch, but the route
+    is the contract, not the button. A lease nobody renewed has already been
+    expired by the list/claim paths, so the orphaned-batch case this exists
+    for is unaffected.
     """
     user = require_user(x_ccsync_user)
     admin = is_admin(x_ccsync_admin)
     conn = con()
+    # Opportunistic, as everywhere else in this app (there is no timer): the
+    # guard below must not refuse a batch whose machine stopped talking hours
+    # ago just because nobody has listed the panel since.
+    ingest_batches.expire_stale_leases(conn)
     batch = _visible_or_404(conn, uid, user, admin)
+    if ingest_batches.lease_live(batch):
+        raise HTTPException(409, {
+            'detail': f'{batch["machine"] or "another computer"} is still '
+                      'working on this batch. Stop it first, then try the '
+                      'failed tracks again.',
+            'batch_uid': uid, 'reason': 'held', 'machine': batch['machine'],
+            'state': batch['state']})
     return ingest_batches.retry_failed(conn, batch)
 
 

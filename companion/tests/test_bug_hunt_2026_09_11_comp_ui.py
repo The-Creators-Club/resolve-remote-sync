@@ -146,8 +146,10 @@ def test_start_tray_wires_the_failure_hook_on_windows(monkeypatch):
     """comp-ui-1: the hook is useless if start_tray does not attach it."""
     calls: list[str] = []
     monkeypatch.setattr(tray.ui_dispatch, "uses_main_thread", lambda: False)
+    # comp-ui-1 (2026-09-11b): the hook now carries `fatal` -- whether the
+    # pump is gone for good or Explorer can still hand the icon back.
     monkeypatch.setattr(tray, "_report_windows_icon_failure",
-                        lambda app, icon, detail: calls.append(detail))
+                        lambda app, icon, detail, fatal=True: calls.append(detail))
     icon = _StubIcon()
     monkeypatch.setattr(tray.tray_backend, "Icon", lambda *a, **k: icon)
     monkeypatch.setattr(tray, "_tray_snapshot", lambda app: {"color": "green"})
@@ -512,7 +514,12 @@ def test_a_latch_that_cannot_persist_gets_a_line():
     assert line is not None
     assert "cannot save its safety state" in line
     assert "lane_b_breaker.json" in line
-    assert "Restarting" in line
+    # comp-ui-4 (2026-09-11b): it used to end "Restarting CCSync would clear
+    # it", in the place every other BLOCKING advisory puts the remedy -- and
+    # a restart is what drops the latch. It now says what a restart costs and
+    # names an action the editor can take.
+    assert "Restarting CCSync would clear it" not in line
+    assert "COPY DIAGNOSTICS FOR YOUR ADMIN" in line
     # Absent when the disk is fine, which is how the happy path is spelled.
     assert tray._persist_failed_line({}) is None
     assert tray._persist_failed_line({"halt": {"active": True}}) is None
@@ -525,18 +532,22 @@ def test_all_three_latches_are_read_and_the_line_names_them_once():
         "halt": {"persist_failed": True, "persist_error": "e3"},
     }
     line = tray._persist_failed_line(guard)
-    assert line.count("Restarting") == 1
+    assert line.count("restarting CCSync") == 1  # comp-ui-4 (2026-09-11b)
     for key in ("halt", "disk_floor"):
         assert tray._persist_failed_line({key: {"persist_failed": True,
                                                 "persist_error": "e"}}) is not None
 
 
-def test_the_persist_failure_moves_the_menu_fingerprint():
-    """Without this the line never appears until something unrelated moves
-    the menu, and lingers after the write starts working - UI-3's shape."""
+def test_the_persist_failure_does_not_move_the_menu_fingerprint():
+    """comp-ui-6 (2026-09-11b): this test asserted the opposite, on a comment
+    that said the line was a MENU line. It is not: `_persist_failed_line`'s
+    only caller in the repo is settings_window._lane_advisories, and every
+    advisory line left the tray menu. The entry bought nothing and cost a
+    full _build_menu (and its HMENU teardown) on every flap. See
+    test_bug_hunt_2026_09_11b_comp_ui.py."""
     for key in ("lane_b_breaker", "disk_floor", "halt"):
         assert (tray._guard_fingerprint({})
-                != tray._guard_fingerprint({key: {"persist_failed": True}}))
+                == tray._guard_fingerprint({key: {"persist_failed": True}}))
 
 
 def test_the_persist_line_is_one_of_the_settings_advisories():
@@ -576,12 +587,15 @@ def test_a_renamed_project_folder_gets_a_line():
         {"repath_events": [{**_REPATHS[0], "relinked": True}]}) is None
 
 
-def test_both_sections_move_the_menu_fingerprint():
-    """A count and the ids, never the sentences: the sentences carry paths
-    and would rebuild the menu on every machine that has one."""
+def test_neither_section_moves_the_menu_fingerprint():
+    """comp-ui-6 (2026-09-11b): both lines are Settings-only too, and
+    Settings re-renders on its own 2 s timer. Nothing about them belongs in
+    the TRAY MENU's fingerprint -- least of all the sentences, which carry
+    absolute paths and would rebuild the menu on every machine that has
+    one."""
     base = tray._guard_fingerprint({})
-    assert base != tray._guard_fingerprint({"shared_folder_problems": _SHARED})
-    assert base != tray._guard_fingerprint({"repath_events": _REPATHS})
+    assert base == tray._guard_fingerprint({"shared_folder_problems": _SHARED})
+    assert base == tray._guard_fingerprint({"repath_events": _REPATHS})
     flat = str(tray._guard_fingerprint({"shared_folder_problems": _SHARED}))
     assert "not reachable on this computer" not in flat
 

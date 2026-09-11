@@ -414,6 +414,16 @@ class Settings:
     # fetch time, same as the no-redirect rule the companion's own upgrade
     # client already enforces against the dashboard itself).
     release_feed_url: str = ""
+    # The detached signature's URL, when it is not derivable from the feed's.
+    # dash-release-jobs-5/-6 (2026-09-11b, hand-off wave): `_signature_url`
+    # can put `.sig` on the PATH of a CDN-token URL, but a PRE-SIGNED URL
+    # (SigV4) cannot be transformed at all -- the signature covers the object
+    # key, so any derived URL answers 403 and the site quietly stops receiving
+    # builds. This is the escape hatch: set both URLs explicitly and nothing
+    # is derived. Empty (the default) keeps the derivation, so no existing
+    # deployment changes. Must be https for the same reason the feed URL must
+    # be; release_feed.py refuses anything else at fetch time.
+    release_feed_sig_url: str = ""
     # manual   = "Check now" / "Publish" are the only ways a feed build ever
     #            reaches this dashboard's packages -- the default, because an
     #            unattended write to the upgrade channel is not something a
@@ -665,6 +675,15 @@ class Settings:
         # posture ("manual") rather than being coerced upward -- a typo must
         # never turn into unattended auto-current (ZERO_TOUCH_PLAN.md WP E,
         # 2026-08-17).
+        # A signature URL with no feed URL is a half-configured pair: the feed
+        # is disabled, so the override is read by nothing. Say so at boot
+        # rather than leaving an operator to wonder why their explicit
+        # signature URL is never fetched (CR-257d's shape, 2026-09-11b).
+        if self.release_feed_sig_url and not self.release_feed_url:
+            log.warning(
+                "DASH_RELEASE_FEED_SIG_URL is set but DASH_RELEASE_FEED_URL is not -- "
+                "the vendor feed is disabled, so the signature URL is ignored",
+            )
         if self.release_feed_policy not in ("manual", "stage", "current"):
             log.warning(
                 "DASH_RELEASE_FEED_POLICY=%r is not one of manual/stage/current -- "
@@ -855,6 +874,7 @@ class Settings:
                 ) if _looks_like_ed25519_pubkey(k)
             ),
             release_feed_url=env.get("DASH_RELEASE_FEED_URL", "").strip(),
+            release_feed_sig_url=env.get("DASH_RELEASE_FEED_SIG_URL", "").strip(),
             release_feed_policy=(env.get("DASH_RELEASE_FEED_POLICY", "").strip().lower() or "manual"),
             release_feed_interval=num("DASH_RELEASE_FEED_INTERVAL", 86400.0),
             release_soak_minutes=int(num("DASH_RELEASE_SOAK_MINUTES", 30.0)),

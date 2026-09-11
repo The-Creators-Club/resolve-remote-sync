@@ -1034,8 +1034,17 @@ def write_item_result(conn, batch, item, body):
         log.error('music ingest: track %s written but not scored (%s: %s); it is '
                   'searchable by similarity and has no tags until the next '
                   'result or a base-rig --retag', track_id, type(exc).__name__, exc)
+        # music-5 (2026-09-11b): the marker read is itself a read of the
+        # database that just failed. Unguarded, a locked or malformed
+        # `music.db` raised a SECOND time from inside this handler and turned
+        # a track that WAS written into an HTTP 500 - which the companion's
+        # `_result_retry_wait` reads as terminal for that track.
+        try:
+            stale = rescore.scores_stale(conn)
+        except Exception:                                       # noqa: BLE001
+            stale = None
         scores = {'error': f'{type(exc).__name__}: {exc}',
-                  'scores_stale': rescore.scores_stale(conn)}
+                  'scores_stale': stale}
     return {'ok': True, 'state': 'indexed', 'track_id': track_id,
             'rel_path': dest_name, 'scores': scores, **counts}
 

@@ -35,6 +35,7 @@ import re
 import shutil
 import threading
 import time
+import unicodedata
 import urllib.request
 from datetime import date
 from pathlib import Path
@@ -1457,6 +1458,12 @@ def free_bytes_at(path, now=None):
             return hit[1]
     free, probe = _answering_path(path)
     if probe is None:
+        # The MISS is cached too (ytdl-web-b-5, 2026-09-11b), which is what the
+        # pre-ytdl-web-6 version did: the case this cache was written for is a
+        # mount that has gone away, and returning before the write meant every
+        # press paid all eight probes against it instead of one a minute.
+        with _free_lock:
+            _free_cache[key] = (now, None)
         return None
     with _free_lock:
         _free_cache[key] = (now, free)
@@ -1507,10 +1514,18 @@ def _refuse_if_full(rows, job, outdir):
     # The cheap guard is whether the destination's own project folder is
     # there; with the tree mounted it is, and with the tree gone the number
     # above belongs to a filesystem these clips were never going to touch.
-    _refuse_if_the_tree_is_gone(job)
     # The refusal's own instruction is the one action a 60 s cache invalidated
     # (ytdl-web-2, 2026-09-11): the next press must re-stat.
+    #
+    # BEFORE the tree guard, which RAISES (ytdl-web-b-1, 2026-09-11b). Ordered
+    # the other way round, the overlay figure measured while the bind mount was
+    # gone survived the tree_missing refusal and stayed cached for the rest of
+    # the TTL, keyed on the whole tree: the admin remounts ten seconds later
+    # and the next press is told "there is only 2.0 GB free ... free some
+    # space" about a share with 900 GB on it, by ytdl-web-1's own fix. A
+    # refusal of EITHER shape is the moment a fresh stat is worth its cost.
     _forget_free_at(outdir)
+    _refuse_if_the_tree_is_gone(job)
     where = f'{job["project_label"]}/{db.YOUTUBE_DIR}'
     if job['term_dir']:
         where = f'{where}/{job["term_dir"]}'
@@ -1522,6 +1537,35 @@ def _refuse_if_full(rows, job, outdir):
                    f'Free some space and press DOWNLOAD again.'),
         'phase': job['phase'], 'reason': 'disk_full',
         'free_bytes': int(free), 'estimate_bytes': int(estimate)})
+
+
+def _named_under_the_root(label):
+    """Is there a folder under PROJECTS_ROOT whose name IS `label` once both
+    spellings are normalised? (ytdl-web-b-6, 2026-09-11b, CR-90.)
+
+    Segment by segment, because the label is a relative path and each level has
+    its own accent to fold. Reached only on the way to a refusal that has
+    already been decided, so the listing cost is paid once per refused press
+    and never on a download that is going ahead. Every failure answers False:
+    this is a second opinion on "the share is gone", not a new way to decide it.
+    """
+    try:
+        root = Path(config.PROJECTS_ROOT)
+        parts = [p for p in str(label).replace('\\', '/').split('/') if p]
+        if not parts:
+            return False
+        here = root
+        for part in parts:
+            want = unicodedata.normalize('NFC', part)
+            match = next((e for e in here.iterdir()
+                          if unicodedata.normalize('NFC', e.name) == want
+                          and e.is_dir()), None)
+            if match is None:
+                return False
+            here = match
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _refuse_if_the_tree_is_gone(job):
@@ -1538,6 +1582,16 @@ def _refuse_if_the_tree_is_gone(job):
     except config.PathTraversalError:
         return None
     if project_dir.is_dir():
+        return None
+    if _named_under_the_root(job['project_label']):
+        # A path a Mac reported is not `==` a path anything else reported
+        # (CR-90, CLAUDE.md): a label that reached this database from a Mac is
+        # NFD, the NAS writes NFC, and is_dir() answers False for a folder that
+        # is there. The wrong sentence is the whole thing this guard exists to
+        # prevent, so a folder that matches under a normaliser counts as the
+        # tree being present (ytdl-web-b-6, 2026-09-11b). Safe HERE and nowhere
+        # else in the download path: this compares, it never opens, renames or
+        # deletes - there the bytes on disk are the truth.
         return None
     raise HTTPException(409, {
         'detail': (f'the footage tree is not there: nothing at '

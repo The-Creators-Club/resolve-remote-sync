@@ -518,6 +518,17 @@ def upgrade_report(record: Any, starts_this_version: Any = 1,
         "refused_version": str(refused.get("version") or "") or None,
         "refused_reason": str(refused.get("reason") or "") or None,
         "refused_at": str(refused.get("at") or "") or None,
+        # res-companion-4 (2026-09-11b): the state writes this process has
+        # swallowed. A machine that cannot write ~/.ccsync/state has a
+        # crash-loop counter that reads "first start" for ever, so APP-5's
+        # revert can never fire -- and until now that fact was a WARNING in
+        # the log of the machine with the full disk and nowhere else, which
+        # is the one place nobody is looking. Zero is the normal answer and
+        # is always sent, like the counters above: absent would be
+        # indistinguishable from a companion too old to count.
+        # `lane_guard._PersistedLatch._persist_report`'s `persist_failed` is
+        # the same move on the same afternoon.
+        "state_write_failures": write_failures(),
     }
 
 
@@ -1497,7 +1508,13 @@ class UpgradeManager:
         Self-clearing on version: a machine that is now RUNNING the build it
         refused (an admin installed it by hand, or a later offer was taken)
         has nothing left to report, and a `[ REFUSING 0.9.65 ]` chip beside a
-        machine already on 0.9.65 would be the alarm that cries wolf."""
+        machine already on 0.9.65 would be the alarm that cries wolf.
+
+        SAME only, never OLDER -- and the second way out is
+        `note_report_response` on a reply with no offer (comp-ytdl-jobs-1,
+        2026-09-11b), not an age bound. Both are pinned by
+        tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py; the compare had no
+        test at all until then (comp-ytdl-jobs-5)."""
         record = self.last_refusal
         if not isinstance(record, dict) or not record:
             return None
@@ -1531,6 +1548,7 @@ class UpgradeManager:
             info = parse_upgrade(resp)
         except Exception:
             info = None
+        offered = info is not None
         if info is not None:
             # An offer that will not be installed is not an offer. Dropping it
             # here (rather than at the click) keeps the tray honest and keeps
@@ -1540,6 +1558,24 @@ class UpgradeManager:
             if not accepted:
                 self._log_refusal(info.get("version"), reason)
                 info = None
+        if (not offered and isinstance(resp, dict)
+                and not resp.get("upgrade")):
+            # comp-ytdl-jobs-1 (2026-09-11b): THE OTHER WAY OUT of a standing
+            # refusal, and until now the only one was `_accept_offer`
+            # succeeding on a later offer -- which a machine already running
+            # the current build is never given (api._upgrade_info returns
+            # nothing when running == current). So an admin who published
+            # 0.9.65 as a rollback, watched the fleet refuse it and then put
+            # the newer build back left `[ REFUSING 0.9.65 ]` and the
+            # `upgrade_refused` alert lit on every machine until each tray was
+            # restarted, with the alert's own action text ("publish a build
+            # that computer will accept") describing the move that had just
+            # failed to clear it. A reply that carries no offer at all is the
+            # dashboard saying there is nothing to take, so there is nothing
+            # being refused: a still-current refused build is re-offered and
+            # re-refused on the very next report, so nothing true is lost. An
+            # `upgrade` key we could not parse is NOT this case, and keeps it.
+            self._clear_refusal()
         newly: Optional[dict[str, Any]] = None
         if info is not None:
             # APP-16: the wording helpers are called with a VERSION and

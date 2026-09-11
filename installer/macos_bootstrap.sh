@@ -53,7 +53,7 @@
 #     Finish page without scraping the human-facing summary.
 set -u
 
-INSTALLER_VERSION="1.0.42"
+INSTALLER_VERSION="1.0.43"
 
 # ----------------------------------------------------------------------
 # PINNED DOWNLOADS (2026-08-17, docs/COMMERCIAL_READINESS.md item 13)
@@ -1901,6 +1901,11 @@ ensure_dir "$LAUNCH_AGENTS_DIR"
 # either name. Unload first, THEN delete: launchd keeps running a job whose
 # plist has been deleted until it is booted out, and there would be nothing
 # left to boot it out with.
+# Set to 1 by retire_legacy_agent when it actually deleted something, so the
+# COMPANION_MISSING warning block can say that this Mac now has NO companion
+# autostart at all (install-onboard-4, 2026-09-11b).
+LEGACY_AGENT_RETIRED=0
+
 retire_legacy_agent() {
     legacy_plist="$1"
     legacy_label="$2"
@@ -1913,6 +1918,7 @@ retire_legacy_agent() {
     launchctl bootout "gui/$(id -u)" "$legacy_plist" >/dev/null 2>&1 || true
     launchctl unload "$legacy_plist" >/dev/null 2>&1 || true
     rm -f "$legacy_plist"
+    LEGACY_AGENT_RETIRED=1
     step "retired the legacy LaunchAgent $legacy_label (renamed to com.ccsync.*, 2026-08-17)"
 }
 retire_legacy_agent "$SYNCTHING_PLIST_LEGACY" "com.creatorsclub.ccsync.syncthing"
@@ -2449,7 +2455,9 @@ fi
 # pre-2026-08-17 one running an old companion - the very process that holds
 # 8899 against the new one when a later run succeeds. Same placement as the
 # Syncthing one.
+LEGACY_AGENT_RETIRED=0
 retire_legacy_agent "$COMPANION_PLIST_LEGACY" "$COMPANION_LABEL_LEGACY"
+COMPANION_LEGACY_AGENT_RETIRED="$LEGACY_AGENT_RETIRED"
 
 if [ "$COMPANION_MISSING" = 1 ]; then
     # INST-6: this used to be one skippable WARNING line in the middle of an
@@ -2475,6 +2483,19 @@ if [ "$COMPANION_MISSING" = 1 ]; then
     warn "its own until the companion is installed. Re-run this script with"
     warn "DASHBOARD_TOKEN set, or with --companion-file pointing at the macOS"
     warn "build the admin sent you."
+    # install-onboard-4 (2026-09-11b): the retirement above is unconditional
+    # since install-onboard-6, so it now runs on THIS path too - and this path
+    # then removes our own plist as well. A Mac whose legacy agent was starting
+    # a working companion ends the run with no autostart at all, and the block
+    # explaining that the app is not installed never said the thing that was
+    # working a minute ago had been removed.
+    if [ "${COMPANION_LEGACY_AGENT_RETIRED:-0}" = 1 ]; then
+        warn ""
+        warn "The old autostart entry this Mac was provisioned with before"
+        warn "2026-08-17 was removed by this run,"
+        warn "so this Mac will not start the sync app at logon at all until an"
+        warn "install succeeds - not even the older copy it used to start."
+    fi
     warn "**********************************************************************"
     echo ""
     # An agent pointing at a binary that is not there just spams launchd

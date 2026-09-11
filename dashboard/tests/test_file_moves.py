@@ -481,3 +481,74 @@ def test_a_machine_holding_an_nfd_spelling_is_still_told(env):
         "path": f"B-roll/{nfd}", "to_slug": A_SLUG, "to_path": "Interviewees/Pangolin"})
     assert r.status_code == 200, r.text
     assert r.json()["machines"] == [{"editor": "leso", "machine": "LESO-LAPTOP"}]
+
+
+def test_a_crash_mid_move_is_answered_applying_and_keeps_the_command(env):
+    """wire-1 / res-companion-1 (fix pass 2026-09-11b).
+
+    The companion's ledger holds an `applying` INTENT row when the tray is
+    killed between the rename and the record. That state had no spelling on
+    this wire: the redelivered command came back `ok=false` with no `state`,
+    which means "answered, stop asking", so a crash became a PERMANENT failed
+    move and the resume (proxy siblings, the Resolve relink) never ran.
+    """
+    client, conn, projects = env
+    report(client, "leso", "LESO-PC")
+    as_user(client, "owen")
+    client.put(f"/api/v1/selection/leso/{D_SLUG}?machine=LESO-PC")
+    move_id = client.post(f"/api/v1/projects/{D_SLUG}/move", json={
+        "path": "B-roll/A001_0512.braw", "to_slug": A_SLUG}).json()["move_id"]
+    client.cookies.delete(auth.COOKIE_NAME)
+
+    reply = report(client, "leso", "LESO-PC",
+                   file_moves_applied=[{"id": move_id, "ok": False,
+                                        "state": "applying",
+                                        "detail": "applying it on this machine"}])
+    assert [m["id"] for m in reply["commands"]["file_moves"]] == [move_id]
+    (rec,) = dbmod.file_moves_for_project(conn, D_SLUG)
+    assert rec["targets"][0]["applied_at"] is None
+    # ...and the machine can still finish it on the next pass.
+    report(client, "leso", "LESO-PC",
+           file_moves_applied=[{"id": move_id, "ok": True, "detail": "moved"}])
+    (rec,) = dbmod.file_moves_for_project(conn, D_SLUG)
+    assert rec["targets"][0]["applied_at"] is not None
+
+
+def test_a_machine_retrying_the_same_move_logs_once(env, caplog):
+    """comp-app-2 (2026-09-11b, hand-off wave): a `retrying` answer does not
+    retire the command, so the same move is re-sent and re-answered on every
+    report - a WARNING every 30 s, per move, per machine, for as long as the
+    drive is out. The change is logged; the repeat is not.
+    """
+    import logging
+
+    client, conn, projects = env
+    report(client, "leso", "LESO-PC")
+    as_user(client, "owen")
+    client.put(f"/api/v1/selection/leso/{D_SLUG}?machine=LESO-PC")
+    move_id = client.post(f"/api/v1/projects/{D_SLUG}/move", json={
+        "path": "B-roll/A001_0512.braw", "to_slug": A_SLUG}).json()["move_id"]
+    client.cookies.delete(auth.COOKIE_NAME)
+    answer = {"id": move_id, "ok": False, "state": "retrying",
+              "attempts": 1, "detail": "the drive is not connected"}
+
+    def lines():
+        return [r for r in caplog.records
+                if f"file move #{move_id}" in r.getMessage()]
+
+    with caplog.at_level(logging.INFO, logger="ccsync.dashboard.api"):
+        report(client, "leso", "LESO-PC", file_moves_applied=[dict(answer)])
+        assert len(lines()) == 1, "the first answer is the news"
+        for attempt in range(2, 8):
+            report(client, "leso", "LESO-PC",
+                   file_moves_applied=[dict(answer, attempts=attempt)])
+        assert len(lines()) == 1, [r.getMessage() for r in lines()]
+        # A CHANGE of state or detail is news again, both times.
+        report(client, "leso", "LESO-PC",
+               file_moves_applied=[dict(answer, detail="Resolve has it open")])
+        assert len(lines()) == 2
+        report(client, "leso", "LESO-PC",
+               file_moves_applied=[{"id": move_id, "ok": True, "detail": "moved"}])
+        assert len(lines()) == 3, [r.getMessage() for r in lines()]
+    (rec,) = dbmod.file_moves_for_project(conn, D_SLUG)
+    assert rec["targets"][0]["applied_at"] is not None

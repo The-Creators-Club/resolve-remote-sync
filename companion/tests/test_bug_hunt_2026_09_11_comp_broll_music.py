@@ -179,8 +179,17 @@ def test_clear_finished_staging_leaves_a_drop_that_has_not_run(tmp_path):
     assert sid in ing._staging, "and the upload slots still exist"
 
 
-def test_the_retention_sweep_leaves_an_old_drop_that_has_not_run(tmp_path):
-    """The same loss on a slower clock: staged eight days ago, never run."""
+def test_the_retention_sweep_leaves_a_drop_still_being_written_into(tmp_path):
+    """The same loss on a slower clock: an `at` in the past while the bytes
+    are still arriving.
+
+    Retitled by comp-broll-music-2 (2026-09-11b): holding an unrun drop back
+    from the RETENTION sweep as well as from the button made those bytes
+    permanent, because `ended_at` is written only for a batch that was
+    claimed and this is the only rmtree in the ingest stack. What the sweep
+    keeps now is a drop a byte landed in recently, which is what this staging
+    directory is - the files were written a moment ago.
+    """
     ing = make_ingestor(tmp_path)
     sid, directory = _staged_not_run(ing)
     ing._staging[sid]["at"] = "2020-01-01T00:00:00Z"

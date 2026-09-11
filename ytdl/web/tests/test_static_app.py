@@ -1704,7 +1704,7 @@ const dispatchedBy = h => loopback(h).slice(h._loopbackAtBoot || 0)
 // script the companion's two routes; `mode` is what the server then says about
 // the job (a function of the poll number, for the reclaim case).
 function dispatchPage(opts) {
-  const {flag, cap, dl, lock, mode, quality} = opts || {};
+  const {flag, cap, dl, lock, mode, quality, createdLocal} = opts || {};
   let started = false, downloadPolls = 0;
   // Marked at the END of boot, not at the start of submit(): some scenarios
   // below drive app.dispatchLocal() directly and never submit at all, and
@@ -1743,7 +1743,10 @@ function dispatchPage(opts) {
     }
     if (url.startsWith('api/jobs/90/manifest')) {
       return {json: MANIFEST({job: JOB({id: 90, phase: 'ready_for_review',
-                                        quality}),
+                                        quality,
+                                        ...(createdLocal === undefined
+                                            ? {}
+                                            : {created_local: createdLocal})}),
                               videos: [VIDEO('AAAAAAAAAA9', {selected: 1,
                                                              dl_state: 'pending'})]})};
     }
@@ -1900,6 +1903,27 @@ scenarios['an_out_of_scope_job_is_never_handed_over'] = async () => {
           submitted: [inScope, outOfScope, undeclared]
             .map(p => p.calls.filter(c => c.url === 'api/jobs/90/download').length),
           spoken: [outOfScope.get('toast').hidden, outOfScope.get('toast').textContent]};
+};
+
+// regression-26 (2026-09-11b): the switch is read at DISPATCH time, so an
+// editor who ticks "this computer" after the search was submitted holds a job
+// created with local:false -- one the claim CAS has refused outright since
+// ytdl-web-5. The hand-off is skipped on the job's own answer rather than made
+// and painted as "this computer declined the job (HTTP 503)", which reads as a
+// broken tray. A server that does not send the field dispatches as before.
+scenarios['a_job_created_on_the_server_is_not_offered_here'] = async () => {
+  const run = over => dispatchPage(Object.assign(
+    {flag: true, mode: 'server', cap: CAPABLE, dl: ACCEPTED}, over)).then(submit);
+  const server = await run({createdLocal: false});
+  const local = await run({createdLocal: true});
+  const older = await run({});                  // no field at all
+  return {server: dispatchedBy(server).map(c => c.url),
+          local: dispatchedBy(local).map(c => c.url),
+          older: dispatchedBy(older).map(c => c.url),
+          // the server was given the selection either way
+          submitted: [server, local, older]
+            .map(p => p.calls.filter(c => c.url === 'api/jobs/90/download').length),
+          spoken: [server.get('toast').hidden, server.get('toast').textContent]};
 };
 
 // §9: the badge is derived from the poll payload every tick and remembered
@@ -3540,6 +3564,23 @@ def test_a_job_this_machine_cannot_name_correctly_is_not_dispatched(spa):
     assert 'only downloads' in said, said
 
 
+def test_a_job_created_on_the_server_is_never_handed_to_this_computer(spa):
+    """regression-26 (2026-09-11b): ytdl-web-5 made `created_local=0` a hard
+    refusal at the claim CAS, and the page went on dispatching those jobs and
+    painting the companion's 503 as a bare HTTP code. The page now reads the
+    job's own answer, so the probe is never even made, and the editor is told
+    in a sentence why their clips are landing on the NAS."""
+    r = spa['a_job_created_on_the_server_is_not_offered_here']
+    assert r['server'] == [], r['server']
+    assert r['local'] == [CAPABILITIES, LOCAL_DOWNLOAD], r['local']
+    assert r['older'] == [CAPABILITIES, LOCAL_DOWNLOAD], r['older']
+    assert r['submitted'] == [1, 1, 1], 'the server lost a selection'
+    hidden, said = r['spoken']
+    assert hidden is False, 'the skip was silent'
+    assert 'HTTP' not in said, said
+    assert 'unticked' in said, said
+
+
 def test_the_badge_flips_on_its_own_when_the_server_reclaims(spa):
     """§3/§9: the lease expires (laptop closed, tray upgraded), the server takes
     the job back, and the header says so within a poll -- because the badge is
@@ -4253,7 +4294,9 @@ def test_the_dispatch_respects_a_companions_declared_scope():
     body = _dispatch()
     assert 'Array.isArray(cap.scope_qualities)' in body, body
     assert 'cap.scope_qualities.includes(quality)' in body, body
-    assert 'async function dispatchLocal(jobId, quality)' in _js()
+    # `createdLocal` joined the signature 2026-09-11b (regression-26): the
+    # job's own answer, beside the switch and the declared scope.
+    assert 'async function dispatchLocal(jobId, quality, createdLocal)' in _js()
 
 
 def test_the_dispatch_happens_only_after_the_server_accepts_the_selection():

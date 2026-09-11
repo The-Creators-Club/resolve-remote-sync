@@ -30,6 +30,7 @@ and transcoding under the editor's hands.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import sqlite3
 from typing import Any, Mapping
@@ -521,6 +522,88 @@ def machine_facts(
     }
 
 
+# The tools the companion's sidecar manager installs, and which a media job
+# asks for by name. regression-11 (2026-09-11b): `deno` is in the list the
+# companion reports and no job requires it, which is fine - the intersection
+# is what decides whether the sidecar's verdict explains THIS refusal.
+SIDECAR_TOOLS = ("ffmpeg", "ffprobe", "deno")
+
+
+def sidecar_notes(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
+    """Each machine's stored `sync_guard.ytdlp.sidecar` block, by (editor,
+    machine). {} for a companion that has never sent one.
+
+    regression-11 (2026-09-11b): comp-ytdl-jobs-3 (2026-09-11) landed the
+    companion half of "say WHY this computer has no ffmpeg" - the cause, the
+    consecutive-failure count, the tray line - and on the dashboard the value
+    was validated, stored in `meta` and read by NOBODY. So a Mac whose
+    sidecar install fails on an SSL CA problem reports `ffmpeg: false`, the
+    admin queues a proxy job, `why` answers `no_capable_machine`, and the page
+    whose whole purpose is "unschedulable, and why" says the computer cannot
+    do this kind of work - which reads as "nobody set it up" for a machine
+    that is trying to set itself up and failing for a nameable reason.
+
+    ONE query for the whole fleet, on the Ctx rule alerts.py states: this runs
+    once per `explain` call, not once per machine. Unparseable rows are
+    skipped rather than raised: this feeds an explanation, and a bad meta row
+    must never be able to 500 the page that says why nothing is running.
+    """
+    from .api import YTDLP_META_PREFIX
+
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    try:
+        rows = conn.execute("SELECT key, value FROM meta WHERE key LIKE ?",
+                            (f"{YTDLP_META_PREFIX}%",)).fetchall()
+    except sqlite3.Error:
+        log.debug("jobs: could not read the stored sidecar verdicts", exc_info=True)
+        return out
+    for row in rows:
+        name = str(row["key"])[len(YTDLP_META_PREFIX):]
+        editor, _, machine = name.partition("/")
+        try:
+            block = json.loads(row["value"])
+        except (ValueError, TypeError):
+            continue
+        sidecar = (block or {}).get("sidecar") if isinstance(block, Mapping) else None
+        if isinstance(sidecar, Mapping) and sidecar:
+            out[(editor, machine)] = dict(sidecar)
+    return out
+
+
+def sidecar_cause(note: Mapping[str, Any] | None,
+                  requires: Mapping[str, Any] | None,
+                  capabilities: Mapping[str, Any] | None) -> str:
+    """The sentence that says WHY a required tool is missing, or "".
+
+    Three conditions, and all three matter (regression-11, 2026-09-11b):
+    the machine's sidecar check must have FAILED (`ok is False` or
+    `action == "failed"` - an absent verdict is never "it is fine", and a
+    verdict that succeeded explains nothing), this job must require one of
+    the tools that check covers, and that tool must actually be missing from
+    the capabilities. Without the third, a machine refused for `mount` or
+    `gpu_vram_gb` would be explained by an unrelated sidecar failure.
+    """
+    note = dict(note or {})
+    if not note:
+        return ""
+    failed_ok = note.get("ok") is False or str(note.get("action") or "") == "failed"
+    if not failed_ok:
+        return ""
+    caps = dict(capabilities or {})
+    failed = [str(t).lower() for t in (note.get("failed") or [])] or list(SIDECAR_TOOLS)
+    wanted = [key for key in dict(requires or {})
+              if key in SIDECAR_TOOLS and key in failed and not caps.get(key)]
+    if not wanted:
+        return ""
+    cause = str(note.get("cause") or note.get("message") or "").strip()
+    misses = int(note.get("consecutive_failures") or 0)
+    tools = ", ".join(wanted)
+    words = f"the {tools} install on this computer is failing"
+    if misses > 1:
+        words += f" ({misses} tries)"
+    return f"{words}: {cause}" if cause else words
+
+
 def fleet_facts(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
     """policy()'s answer for EVERY machine, in five queries.
 
@@ -899,6 +982,9 @@ def explain(conn: sqlite3.Connection, job_id: int,
             "summary": _terminal_summary(job),
         }
     fleet = fleet_facts(conn)
+    # regression-11 (2026-09-11b): one fleet-wide read, so a capability
+    # refusal can say why the tool is missing rather than only that it is.
+    notes = sidecar_notes(conn)
     able = ranked_machines(job, fleet, now)
     order = {key: rank for rank, (key, _score) in enumerate(able, start=1)}
     scores = dict(able)
@@ -911,8 +997,16 @@ def explain(conn: sqlite3.Connection, job_id: int,
             continue
         ok, why = db.job_requirements_met(job.get("requires"), facts["capabilities"])
         if not ok:
+            cause = sidecar_cause(notes.get((editor, machine)),
+                                  job.get("requires"), facts["capabilities"])
             lines.append({"editor": editor, "machine": machine, "ok": False,
-                          "reason": REFUSE_CAPABILITY, "why": why})
+                          "reason": REFUSE_CAPABILITY,
+                          "why": f"{why} - {cause}" if cause else why,
+                          # The cause on its own key as well as inside the
+                          # sentence: the fleet grid and Settings -> JOBS
+                          # render it beside cap_ffmpeg, and neither should
+                          # have to parse a sentence apart to do it.
+                          "sidecar_cause": cause})
             continue
         reason, sentence = policy_refusal(facts, kind, now, job)
         if reason:
@@ -1102,5 +1196,17 @@ def _blocked_summary(lines: list[dict[str, Any]],
         REFUSE_NOT_TARGET: "are not the computer this job was sent to",
         REFUSE_LOCAL_WORK: "are busy with their own media work",
     }.get(reason, reason)
-    return (f"no computer can take this job right now: {count} of "
-            f"{len(lines)} {words}")
+    summary = (f"no computer can take this job right now: {count} of "
+               f"{len(lines)} {words}")
+    if reason == REFUSE_CAPABILITY:
+        # regression-11 (2026-09-11b): "cannot do this kind of work" is the
+        # sentence that reads as "nobody ever set that machine up". When the
+        # companion has TOLD us why - a sidecar install failing on an SSL CA
+        # problem, a GitHub it cannot reach - the summary says so, because
+        # this line is what an admin reads before the per-machine list.
+        named = [line for line in lines if line.get("sidecar_cause")]
+        if named:
+            first = named[0]
+            summary += (f". On {first['editor']}/{first['machine']}, "
+                        f"{first['sidecar_cause']}")
+    return summary

@@ -1062,17 +1062,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         r"^/broll/api/fleet/ingest/batches/[0-9a-f]{32}/"
         r"(claim|heartbeat|release|items/[0-9a-f]{32}/(status|result|uploaded))$"
     )
-    # BROLL-8 (usability sweep 2026-09-04): the DISCOVERY route, GET only.
-    # A companion cannot claim a batch whose uid it does not know, and until
-    # this landed the only way to learn one was a report reply -- so the
-    # route was added and then 303'd into a login page by this gate, which is
-    # the SYS-3 shape wearing a middleware. Exact, with an optional trailing
-    # slash and nothing else: `/broll/api/fleet/` at large stays closed, the
-    # method is pinned here because a collection path that accepted a POST
-    # would be a second door onto batch creation, and the route itself
-    # verifies the fleet credential and 403s an `?editor=` that is not the
-    # token's own.
-    _broll_fleet_list_re = re.compile(r"^/broll/api/fleet/ingest/batches/?$")
+    # BROLL-8's DISCOVERY route (GET /broll/api/fleet/ingest/batches) had a
+    # carve-out of its own here from 2026-09-04. The route was deleted on
+    # 2026-09-11 (broll-3: nothing ever called it) and the carve-out outlived
+    # it by one afternoon (security-2 / broll-4, 2026-09-11b). It is gone
+    # because a carve-out that names a COLLECTION path with no route behind it
+    # is a session-gate bypass waiting for whoever adds the next route there,
+    # and nothing in that diff would say so. If discovery comes back, the
+    # route and this line land in the SAME commit.
 
     # The MUSIC ingest fleet routes (docs/MUSIC_INGEST_PLAN.md step 2,
     # 2026-08-18). Identical posture and identical shape to the b-roll block
@@ -1172,10 +1169,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # the companion indexing a claimed b-roll ingest batch -- same
             # fleet-token posture again (docs/BROLL_INGEST_PLAN.md §4.2)
             or (_broll_fleet_re.match(path) is not None and _companion_token_ok(request))
-            # ...and the batch list a companion discovers work from (BROLL-8)
-            or (request.method == "GET"
-                and _broll_fleet_list_re.match(path) is not None
-                and _companion_token_ok(request))
             # and the same for a claimed MUSIC ingest batch
             # (docs/MUSIC_INGEST_PLAN.md step 2)
             or (_music_fleet_re.match(path) is not None and _companion_token_ok(request))

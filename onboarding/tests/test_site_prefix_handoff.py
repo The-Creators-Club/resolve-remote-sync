@@ -42,7 +42,7 @@ class _FakeResult:
 class TestEnsureConfigResolvesThePrefixLikeEverySibling:
     @pytest.fixture(autouse=True)
     def _cached_q_site(self, monkeypatch):
-        monkeypatch.setattr(site_mod, "cached_site", lambda: dict(Q_CACHE))
+        monkeypatch.setattr(site_mod, "cached_site", lambda **kw: dict(Q_CACHE))
 
     def _write(self, tmp_path, site, role="editor"):
         path = tmp_path / "config.toml"
@@ -67,7 +67,7 @@ class TestEnsureConfigResolvesThePrefixLikeEverySibling:
         assert 'canonical_prefix = "R:\\\\"' in text
 
     def test_the_default_survives_when_nothing_knows(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(site_mod, "cached_site", lambda: {})
+        monkeypatch.setattr(site_mod, "cached_site", lambda **kw: {})
         text = self._write(tmp_path, {})
         assert 'canonical_prefix = "P:\\\\"' in text
 
@@ -93,7 +93,7 @@ class TestSiteCanonicalPrefix:
             assert steps.site_canonical_prefix({"canonical_prefix": prefix}) == "P:\\"
 
     def test_it_agrees_with_site_drive_letter(self, monkeypatch):
-        monkeypatch.setattr(site_mod, "cached_site", lambda: dict(Q_CACHE))
+        monkeypatch.setattr(site_mod, "cached_site", lambda **kw: dict(Q_CACHE))
         assert steps.site_canonical_prefix() == f"{steps.site_drive_letter()}:\\"
 
 
@@ -139,7 +139,7 @@ class TestTheBootstrapIsToldTheLetterTheWizardUsed:
         case the flags exist for, and reading the passed dict alone passed
         nothing in exactly it while ensure_config wrote the CACHED prefix into
         config.toml."""
-        monkeypatch.setattr(site_mod, "cached_site", lambda: dict(Q_CACHE))
+        monkeypatch.setattr(site_mod, "cached_site", lambda **kw: dict(Q_CACHE))
         cmd = _run_bootstrap(tmp_path, "win32", None, "windows_bootstrap.ps1")["cmd"]
         assert cmd[cmd.index("-CanonicalPrefix") + 1] == "Q:\\"
         assert cmd[cmd.index("-TreeName") + 1] == "Creators_Club"
@@ -148,7 +148,7 @@ class TestTheBootstrapIsToldTheLetterTheWizardUsed:
             self, tmp_path, monkeypatch):
         """The 404 case: the scripts' own fetch-then-fall-back must decide.
         Passing OUR fallback would beat their fetch and defeat the point."""
-        monkeypatch.setattr(site_mod, "cached_site", lambda: {})
+        monkeypatch.setattr(site_mod, "cached_site", lambda **kw: {})
         captured = _run_bootstrap(tmp_path, "win32", None, "windows_bootstrap.ps1")
         assert "-CanonicalPrefix" not in captured["cmd"]
         assert "-TreeName" not in captured["cmd"]
@@ -185,7 +185,7 @@ class TestEveryManifestKeyRunBootstrapHoldsCanBePassedOn:
         # re-fetches harmlessly, site_manifest_value for the two that must
         # survive a failed fetch (install-onboard-2).
         keys = set(re.findall(r'site\.get\("([a-z_]+)"', body))
-        keys |= set(re.findall(r'site_manifest_value\(site, "([a-z_]+)"\)', body))
+        keys |= set(re.findall(r'site_manifest_value\(site, "([a-z_]+)"', body))
         assert keys == set(self.HANDOFF), (
             "a manifest key run_bootstrap reads with no way to hand it to the "
             "bootstrap is install-onboard-2 again")
@@ -210,7 +210,8 @@ class TestEveryManifestKeyRunBootstrapHoldsCanBePassedOn:
         which is the same bug pointing the other way)."""
         body = self._run_bootstrap_source()
         assert "site_canonical_prefix(" not in body
-        monkeypatch.setattr(site_mod, "cached_site", lambda: {"remote_root": "/mnt/pool"})
+        monkeypatch.setattr(site_mod, "cached_site",
+                            lambda **kw: {"remote_root": "/mnt/pool"})
         assert steps.site_manifest_value(None, "canonical_prefix") == ""
         assert steps.site_manifest_value({"canonical_prefix": "R:\\"},
                                          "canonical_prefix") == "R:\\"

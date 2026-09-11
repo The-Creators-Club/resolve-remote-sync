@@ -121,7 +121,13 @@
            sentence, in a class that is nowrap. #}
         <td colspan="7" class="mono-sm muted job-why" data-label="">
           {% for m in job.machines %}
-            {{ "yes" if m.ok else "no " }} {{ m.editor }}/{{ m.machine }}: {{ m.why }}<br>
+            {{ "yes" if m.ok else "no " }} {{ m.editor }}/{{ m.machine }}: {{ m.why }}{% if m.sidecar_cause %}
+            {# regression-11 (2026-09-11b): the tool is missing BECAUSE its
+               installer failed, and the difference between that and "this
+               computer was never set up" is the difference between fixing it
+               and re-imaging it. The cause is already in the sentence; the
+               chip is what makes the line scannable in a list of eight. #}
+            <span class="chip amber" title="{{ m.sidecar_cause }}">[ SIDECAR FAILED ]</span>{% endif %}<br>
           {% endfor %}
         </td>
       </tr>

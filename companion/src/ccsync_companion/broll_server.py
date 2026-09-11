@@ -2267,8 +2267,20 @@ def start(ccsync_cfg: dict[str, Any],
             HOST, port, exc,
         )
         return None
-    except Exception:
-        log.warning("broll: server failed to start -- continuing without it", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - the tray outlives this feature
+        # comp-broll-music-6 (2026-09-11b): the same latch as the OSError
+        # branch above, for the same reason. comp-app-6 latched only that one,
+        # so a failure that is not a bind error (a bad `mounts` table, a
+        # resolver that raises) logged a full traceback on every attempt of
+        # the backoff loop - the exact flooding the latch was added to stop -
+        # and left `_LAST_BIND_ERROR` holding an older fault's message for
+        # anyone who reads it.
+        text = f"{type(exc).__name__}: {exc}"
+        repeat = text == _LAST_BIND_ERROR
+        _LAST_BIND_ERROR = text
+        log.log(logging.DEBUG if repeat else logging.WARNING,
+                "broll: server failed to start (%s) -- continuing without it",
+                text, exc_info=not repeat)
         return None
 
     try:

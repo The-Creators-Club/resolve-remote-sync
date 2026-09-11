@@ -136,6 +136,13 @@
     </form>
 
     {% if recovery_preview %}
+      {# COUNTS ONLY WHEN THERE ARE COUNTS (dash-collector-alerts' hand-off,
+         2026-09-11b). A folder this server cannot walk in one go withholds
+         them, and the zeros it returns instead rendered as "0 file(s) missing
+         from the server now, 0 that are there but different, 0 the same" -
+         which reads as "nothing is missing" to the person deciding whether to
+         restore. The refusal's own sentence is in `note`. #}
+      {% if not recovery_preview.counts_unavailable %}
       <div class="mono-sm" style="margin-top:0.6rem">
         {{ recovery_preview.label }} in {{ recovery_preview.snapshot }}:
         {{ recovery_preview.missing_count }} file(s) missing from the server now,
@@ -144,6 +151,12 @@
         {% if recovery_preview.truncated %}(This project is too large to list in
         full: the counts above stopped early.){% endif %}
       </div>
+      {% else %}
+      <div class="mono-sm" style="margin-top:0.6rem">
+        {{ recovery_preview.label }} in {{ recovery_preview.snapshot }}:
+        <span class="chip amber">[ CANNOT SAY ]</span>
+      </div>
+      {% endif %}
       <div class="muted" style="margin-top:0.25rem;max-width:78ch">{{ recovery_preview.note }}</div>
       {% for row in recovery_preview.missing %}
         <div class="mono-sm">+ {{ row.rel }}</div>

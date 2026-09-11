@@ -642,8 +642,16 @@ def perform_fix_all(
         outcome = dict(outcome)
         outcome["file_path"] = path
         results.append(outcome)
-        if outcome.get("ok"):
+        if outcome.get("ok") and not outcome.get("dry_run"):
             batch_done += file_total
+        # comp-resolve-b-1 (2026-09-11b): comp-resolve-2 taught
+        # run_consolidation, count_copied and app.py's toast that
+        # `fixer_dry_run` answers {"ok": True, "dry_run": True} and copies
+        # nothing; this loop, the one behind the FIX ALL button every editor
+        # presses, was missed. A rehearsal over 800 GB credited every byte,
+        # so the bar filled in a second or two and RateEstimator's speed and
+        # ETA read off nonsense -- on the one run whose entire purpose
+        # (RES-15) is a screen an admin can trust.
         # else: nothing was copied that still exists. fixer.fix_clip deletes
         # both artifacts of an aborted or failed attempt before returning, so
         # counting file_total here credited the batch with bytes that are no
@@ -670,13 +678,22 @@ def perform_fix_all(
                          path, len(results), total)
                 break
 
-    fixed = sum(1 for r in results if r.get("ok"))
+    # comp-resolve-b-1 (2026-09-11b): `ok` alone is not "copied" -- the
+    # rehearsal arm is ok and copied nothing. Spelled here rather than
+    # imported from consolidate.count_copied: consolidate imports popup, and
+    # the reverse import would close the cycle.
+    fixed = sum(1 for r in results if r.get("ok") and not r.get("dry_run"))
+    rehearsed = sum(1 for r in results if r.get("ok") and r.get("dry_run"))
     skipped = sum(1 for r in results if r.get("aborted"))
     publish(index=len(results), total=total, name="", file_bytes_done=0,
             file_bytes_total=0, batch_bytes_done=batch_done,
             batch_bytes_total=batch_total, stopped=stopped,
             # ADDED keys, never replacing the ones above (existing readers).
-            fixed=fixed, skipped=skipped, failed=len(results) - fixed - skipped,
+            fixed=fixed, skipped=skipped,
+            failed=len(results) - fixed - rehearsed - skipped,
+            # Its own count, as run_consolidation publishes: a reader never
+            # has to re-derive "was anything actually copied" from `ok`.
+            rehearsal=rehearsed,
             cancelled=cancelled)
     return results
 

@@ -185,6 +185,51 @@ function Get-BinDirLeftovers {
     catch { return @() }
 }
 
+function Get-UninstallClosingAdvice {
+    <#
+      .SYNOPSIS
+        The closing paragraph, as Kind/Text lines the caller prints
+        (install-onboard-2, 2026-09-11b).
+      .DESCRIPTION
+        The "this uninstaller is still on disk ... delete that file, and the
+        folder it is in, whenever you like" notice used to be unconditional,
+        four lines under "run this uninstaller again from Apps & features".
+        Following the second line deletes the only retry path the first one
+        just named, and "the folder it is in" is the bin dir that still holds
+        the program files. The leftovers case is not rare: PowerShell 5.1's
+        Remove-Item -Recurse deletes NOTHING AT ALL when one child is locked,
+        so a partial failure leaves the whole directory.
+
+        A function, not four Write-Host lines in the body, so the advice can
+        be asserted without running an uninstall.
+    #>
+    param(
+        [int]$LeftoverCount,
+        [string]$BinDir,
+        [string]$SelfPath,
+        [switch]$DryRun
+    )
+    $lines = @()
+    if ($LeftoverCount -gt 0) {
+        $lines += [pscustomobject]@{ Kind = "warn"; Text = "CCSync uninstall NOT complete: $LeftoverCount program file(s) are still in $BinDir. Sign out and back in, then run this uninstaller again from Apps & features." }
+    }
+    else {
+        $lines += [pscustomobject]@{ Kind = "step"; Text = "CCSync uninstall complete$(if ($DryRun) { ' (dry run -- nothing changed)' })." }
+    }
+    $lines += [pscustomobject]@{ Kind = "step"; Text = "Tailscale / rclone / Syncthing installed as system packages were left alone; remove them from Apps & features if wanted." }
+    # This script is installed INTO $BinDir by windows_bootstrap.ps1 (OPS-17),
+    # and Windows will not always let a running script delete itself.
+    if ($SelfPath -and $BinDir -and $SelfPath.StartsWith($BinDir, [StringComparison]::OrdinalIgnoreCase)) {
+        if ($LeftoverCount -gt 0) {
+            $lines += [pscustomobject]@{ Kind = "step"; Text = "LEAVE this uninstaller where it is at $SelfPath - it is what Apps & features runs when you retry, and the folder it is in still holds the program files listed above." }
+        }
+        else {
+            $lines += [pscustomobject]@{ Kind = "step"; Text = "this uninstaller is still on disk at $SelfPath (it was running). Delete that file, and the folder it is in, whenever you like." }
+        }
+    }
+    return $lines
+}
+
 Write-Step "mode: $(if ($Full) { 'FULL (also removes your sign-in + Syncthing identity)' } else { 'keep sign-in + settings' })"
 Write-Step "your synced media is never touched by this script -- only the CCSync app itself."
 if ($DryRun) { Write-Step "DRY RUN -- nothing will be changed" }
@@ -609,19 +654,13 @@ Write-Host ""
 Write-Host "=================================================================="
 # install-onboard-3 (2026-09-11): the closing line said "complete" over a run
 # that had left the whole app on disk. It is only complete when the binaries
-# are gone.
-if ($binLeftovers.Count -gt 0) {
-    Write-Warn2 "CCSync uninstall NOT complete: $($binLeftovers.Count) program file(s) are still in $BinDir. Sign out and back in, then run this uninstaller again from Apps & features."
-}
-else {
-    Write-Step "CCSync uninstall complete$(if ($DryRun) { ' (dry run -- nothing changed)' })."
-}
-Write-Step "Tailscale / rclone / Syncthing installed as system packages were left alone; remove them from Apps & features if wanted."
-# This script is installed INTO $BinDir by windows_bootstrap.ps1 (OPS-17), and
-# Windows will not always let a running script delete itself. Say so rather
-# than leave a file nobody expects.
-if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath) -and
-    $PSCommandPath.StartsWith($BinDir, [StringComparison]::OrdinalIgnoreCase)) {
-    Write-Step "this uninstaller is still on disk at $PSCommandPath (it was running). Delete that file, and the folder it is in, whenever you like."
+# are gone. The whole paragraph is one function since install-onboard-2
+# (2026-09-11b), because the retry advice and the "delete it whenever you
+# like" notice contradicted each other on the leftovers path.
+$selfOnDisk = ""
+if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $selfOnDisk = $PSCommandPath }
+foreach ($line in (Get-UninstallClosingAdvice -LeftoverCount $binLeftovers.Count `
+                     -BinDir $BinDir -SelfPath $selfOnDisk -DryRun:$DryRun)) {
+    if ($line.Kind -eq "warn") { Write-Warn2 $line.Text } else { Write-Step $line.Text }
 }
 Write-Host "=================================================================="

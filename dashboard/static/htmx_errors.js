@@ -227,8 +227,15 @@
     var root = detail.target;
     var path = writePath(detail.requestConfig && detail.requestConfig.elt);
     if (!path && pathFor && detail.xhr && pathFor.has(detail.xhr)) {
+      // NOT DELETED HERE (dash-mounts-ui-b-6, 2026-09-11). htmx fires
+      // afterSwap once per settled element, and an out-of-band swap puts its
+      // elements in that same list with the same xhr. Consuming the entry on
+      // the first element left the OOB fragment - which is where a write
+      // route's error strip arrives - with no path at all, so the banner
+      // stayed above the viewport: DUI-6 again for that shape of response.
+      // The map is weak and keyed on the xhr, so the entry dies with the
+      // request whether we delete it or not.
       path = pathFor.get(detail.xhr);
-      pathFor.delete(detail.xhr);
     }
     if (!root || !root.querySelector || !path) return;
     var banner = root.querySelector(".error-banner");

@@ -219,11 +219,34 @@ def test_the_fleet_router_carries_no_route_without_a_caller():
 
 def test_the_fleet_docstrings_do_not_claim_the_gate_needs_widening():
     """broll-4: the NOTE said the dashboard's login_gate carve-out still had
-    to be widened for a companion to reach the route. It was widened in the
-    same commit, and a wrong fact about a security gate is what gets a correct
-    gate "fixed"."""
+    to be widened for a companion to reach the route, and a wrong fact about a
+    security gate is what gets a correct gate "fixed".
+
+    Corrected 2026-09-11b: the original wording of this docstring claimed the
+    gate "was widened in the same commit", which was a second wrong fact about
+    the same gate - the route the carve-out was for was DELETED that commit
+    (broll-3) and `_broll_fleet_list_re` was left behind. What this file must
+    say is the rule, which is what the assertions below now check.
+
+    Hand-off wave, same day: the third wrong fact was the CORRECTION's own
+    tense. The note said the gate "still admits" the unauthenticated GET
+    "onto a 404 today", written while dash-core was deleting the regex in the
+    same pass (security-2, CR-257h). A file that describes a gate as open
+    when it is shut is how the next reader re-opens it "to match the
+    comment", which is the exact failure mode broll-4 is about. The note is
+    history now and says which change closed it.
+    """
     assert "needs that regex widened" not in FLEET_PY
     assert "before a companion behind the dashboard can reach it" not in FLEET_PY
+    assert "_broll_fleet_list_re" in FLEET_PY and "broll-4" in FLEET_PY, (
+        "the file that owns the path shape records why the gate's carve-out "
+        "for it is gone, so the next GET at that path does not inherit it")
+    assert "onto a 404 today" not in FLEET_PY, (
+        "the carve-out is deleted (security-2): nothing here may describe it "
+        "as a gate that is still open")
+    assert "security-2" in FLEET_PY, (
+        "name the change that deleted the dashboard half, so the next reader "
+        "can check the gate instead of trusting this paragraph's tense")
 
 
 # --- broll-5: a retry does not take a live lease away --------------------------

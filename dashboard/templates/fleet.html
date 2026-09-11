@@ -62,7 +62,11 @@
     </section>
 
     {% if queue %}
-      <div hx-get="/partials/queue{{ ('?as=' ~ queue.editor) if session_user and queue.editor != session_user else '' }}"
+      {# The poll carries the COMPUTER the panel is about as well as the ?as=
+         (dash-api-4's hand-off, 2026-09-11b). Without it the ten-second
+         refresh re-asks for the person's view and the panel silently becomes
+         about the other machine ten seconds after it was opened. #}
+      <div hx-get="/partials/queue?as={{ queue.editor if session_user and queue.editor != session_user else '' }}&machine={{ queue_machine | default('', true) | urlencode }}"
            hx-trigger="every 10s [document.visibilityState === 'visible']" hx-swap="innerHTML">
         {% include "partials/queue_section.html" %}
       </div>

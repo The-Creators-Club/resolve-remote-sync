@@ -257,6 +257,30 @@ def is_restricted(fetched: Any) -> bool:
     return any(line.startswith("!") for line in stripped)
 
 
+_NO_REDIRECT_OPENER: Any = None
+
+
+def _opener() -> Any:
+    """An opener that refuses redirects (security-4, 2026-09-11b).
+
+    `urllib.request.urlopen` follows 3xx AND re-sends the request headers to
+    the new location, and the header here is `X-API-Key` -- lane C's full
+    Syncthing admin credential. The shipped base_url is loopback, so the peer
+    is normally benign; a site that points a companion at a Syncthing GUI on
+    another host, or anything that can answer on that port first, got the key
+    posted wherever it liked for the cost of one 302. Every other outbound
+    caller in this product already installs this opener (upgrade.py,
+    release_feed.py, dashboard_update.py, alerts.py, cards_tunnel.py); these
+    two Syncthing helpers were the last that did not. Built lazily so the
+    import graph of this module stays what it was."""
+    global _NO_REDIRECT_OPENER
+    if _NO_REDIRECT_OPENER is None:
+        from ..upgrade import build_no_redirect_opener
+
+        _NO_REDIRECT_OPENER = build_no_redirect_opener()
+    return _NO_REDIRECT_OPENER
+
+
 def http_request(
     method: str, url: str, api_key: str, body: Optional[dict] = None, timeout: float = 5.0
 ) -> Any:
@@ -266,7 +290,7 @@ def http_request(
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _opener().open(req, timeout=timeout) as resp:
         resp_data = resp.read()
     return json.loads(resp_data.decode("utf-8")) if resp_data else {}
 

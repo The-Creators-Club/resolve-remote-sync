@@ -96,9 +96,11 @@ transcodes doing it. So:
 "Mounted" is a CALL, not an environment variable: `mount_music` runs
 `musicweb.config.set_login_gated(True)`. A host that merely has a variable set is not a
 process with the middleware wrapped around it, and the difference is the whole security
-property. (`MUSIC_LOGIN_GATED=1` exists as an escape hatch for a deployment that puts its
-own authenticating proxy in front — use it knowing exactly what is doing the
-authenticating.)
+property. The `MUSIC_LOGIN_GATED=1` escape hatch is **gone** (security-3, 2026-09-11):
+the same flag is what makes `fleet_auth` believe an inbound `X-CCSync-Fleet-Auth` stamp,
+so a host with the variable set and a proxy that did not strip that header stopped
+requiring `DASH_REPORT_TOKEN` on `/api/fleet/ingest/*`. A deployment with its own
+authenticating proxy in front sets `MUSIC_INGEST_TOKEN` and has the proxy send it.
 
 One request is also **bounded**: `config.MAX_INGEST_FILES` (64) and
 `MAX_INGEST_TOTAL_BYTES` / `MAX_INGEST_FILE_BYTES` (512 MB), refused with a 413 before a

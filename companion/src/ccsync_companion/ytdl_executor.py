@@ -993,6 +993,28 @@ def _this_machine_id() -> str:
         return ""
 
 
+def _header_safe(value: str) -> str:
+    """`value` if it can go in an HTTP header, else "" (ytdl-web-3 hand-off).
+
+    A minted id is uuid4 hex, but machine.json is a plain file an editor can
+    replace by hand, and `http.client` RAISES on a header value carrying a
+    newline or a non-latin-1 character. A claim that dies in the transport is
+    strictly worse than one the server answers per editor, so an id that
+    cannot be a header simply is not sent: the body field and the query
+    parameter still carry it.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        text.encode("ascii")
+    except UnicodeEncodeError:
+        return ""
+    if any(ch in text for ch in "\r\n\x00") or not text.isprintable():
+        return ""
+    return text
+
+
 class FleetClient:
     """routes_fleet, from the other end. Token-authed, browser-free.
 
@@ -1029,11 +1051,24 @@ class FleetClient:
         # editor's job. The server now verifies the signature before it
         # believes the name; this is the same token reporter.py and
         # selection.py already send on every call they make.
-        return {
+        headers = {
             "Content-Type": "application/json",
             "X-CCSync-Token": self.deps.token,
             "X-CCSync-Identity": self.deps.identity_token(),
         }
+        # ytdl-web-3 (2026-09-11b hand-off): the THIRD door into
+        # routes_fleet._machine_of, and the only one that does not depend on
+        # the call's shape. The body field and the query parameter each ride
+        # exactly one kind of call, so a route that grows a second POST, or a
+        # body a proxy rewrites, loses the id and the lease silently goes back
+        # to answering per EDITOR - which is the stale-laptop bug ytdl-web-3
+        # was raised for. Optional both ways: an older server sees an unknown
+        # header, and _machine_of prefers the body/query spelling when it has
+        # one, so the two can never disagree.
+        machine = _header_safe(_this_machine_id())
+        if machine:
+            headers["X-CCSync-Machine"] = machine
+        return headers
 
     def _call(self, method: str, suffix: str, body: Optional[dict] = None):
         """One fleet call, retrying a TRANSPORT failure inside the lease.

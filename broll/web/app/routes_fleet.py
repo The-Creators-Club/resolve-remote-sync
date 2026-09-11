@@ -71,6 +71,20 @@ log = logging.getLogger("broll.fleet")
 # by a claim the PAGE dispatches. The affordance for a batch whose machine was
 # wiped is the panel's [ take over on this computer ] button, which is on
 # every queued batch in the editor's own scope.
+#
+# broll-4 (2026-09-11b): a carve-out outlives its route silently. The route
+# went and `_broll_fleet_list_re` stayed, so the gate still admitted an
+# unauthenticated GET to `/broll/api/fleet/ingest/batches` - onto a 404 then,
+# and onto whatever collection GET landed there next, session-gated by
+# inheritance in its author's head and not at all in fact. A carve-out is
+# deleted in the same change as the route it was written for.
+#
+# The dashboard half is DONE (security-2, same pass): `_broll_fleet_list_re`
+# and its GET clause are gone from `login_gate`, so today there is no
+# carve-out for any GET under this prefix and a GET route added here would be
+# behind the session gate like everything else. Only `_broll_fleet_re` (the
+# POST carve-out the routes below need) remains. This paragraph is history,
+# not a description of the gate as it stands.
 router = APIRouter(prefix="/api/fleet/ingest")
 
 

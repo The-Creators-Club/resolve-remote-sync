@@ -471,7 +471,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: companion/requirements.lock
+          cache-dependency-path: |
+            companion/requirements.lock
+            onboarding/requirements.lock
 
       - name: companion -- install
         run: |
@@ -542,6 +544,23 @@ jobs:
       - name: licence gate (companion, darwin)
         if: ${{ !cancelled() }}
         run: companion/.venv/bin/python tools/check_licenses.py --strict --only companion --platform darwin
+
+      # install-onboard-1 (hand-off wave, 2026-09-11b): the onboarding suite is
+      # the ONLY suite whose subject is macOS-only behaviour (the firmlink
+      # guard, the Mac bootstrap's argv, the launchd labels) and until this
+      # step it was the only suite that never ran on a Mac: the Windows job's
+      # os.path is ntpath, whose ismount never reads a mount table, so the
+      # tests that matter most here SKIPPED everywhere. One of them says so in
+      # its own skip reason (onboarding/tests/test_bug_hunt_2026_09_11_install_onboard.py).
+      - name: onboarding -- install
+        if: ${{ !cancelled() }}
+        run: |
+          python -m venv onboarding/.venv
+          onboarding/.venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r onboarding/requirements.lock
+      - name: onboarding -- pytest
+        if: ${{ !cancelled() }}
+        working-directory: onboarding
+        run: .venv/bin/python -m pytest tests -q --junitxml=../junit-onboarding-macos.xml
 
       # Inspection only: prints every step, builds nothing, publishes nothing,
       # and needs neither the dashboard nor an admin account.

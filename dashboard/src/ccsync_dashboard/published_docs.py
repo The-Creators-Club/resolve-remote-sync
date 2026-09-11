@@ -65,7 +65,16 @@ ROOT_DOCS: tuple[str, ...] = ()
 # a deploy that cannot find them says so (install_dashboard_app.SHIPPED_DOCS);
 # everything else on the list is best effort, because a missing document is
 # not a reason to refuse to ship a dashboard.
-REQUIRED_DOCS: tuple[str, ...] = ("HOW_IT_WORKS.md",)
+#
+# dash-mounts-ui-b-4 (2026-09-11b): EDITOR_SETUP.md joined them, as a
+# DECISION rather than a drift. The image names it in a `COPY`, and a COPY
+# that names a missing file fails the build - so the image already treated it
+# as required while the bundler and the bind-mode deploy treated it as best
+# effort, and a rename on a branch would have failed the image build with a
+# bare "COPY failed" and nothing about the doc policy. Required is the half
+# that can be said clearly: the bundler now refuses by name, in the same
+# sentence it refuses a missing guide with.
+REQUIRED_DOCS: tuple[str, ...] = ("HOW_IT_WORKS.md", "EDITOR_SETUP.md")
 REQUIRED_TREES: tuple[str, ...] = ("legal",)
 
 SUFFIX = ".md"

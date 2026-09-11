@@ -76,7 +76,7 @@ MAX_ITEMS = 500
 SETTING_PUBLIC_BASE = "public_base_url"
 
 _SCHEMA = """
-CREATE TABLE client_folders (
+CREATE TABLE IF NOT EXISTS client_folders (
     id          INTEGER PRIMARY KEY,
     token       TEXT NOT NULL UNIQUE,
     title       TEXT NOT NULL,
@@ -98,7 +98,7 @@ CREATE TABLE client_folders (
     last_viewed_at TEXT
 );
 
-CREATE TABLE client_folder_items (
+CREATE TABLE IF NOT EXISTS client_folder_items (
     id          INTEGER PRIMARY KEY,
     folder_id   INTEGER NOT NULL REFERENCES client_folders(id) ON DELETE CASCADE,
     video_id    INTEGER NOT NULL,
@@ -122,14 +122,13 @@ CREATE TABLE client_folder_items (
     added_at    TEXT NOT NULL,
     UNIQUE (folder_id, video_id)
 );
-CREATE INDEX idx_client_folder_items_folder ON client_folder_items(folder_id, ord);
+CREATE INDEX IF NOT EXISTS idx_client_folder_items_folder ON client_folder_items(folder_id, ord);
 
-CREATE TABLE client_share_settings (
+CREATE TABLE IF NOT EXISTS client_share_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
-PRAGMA user_version = 2;
 """
 
 
@@ -157,8 +156,28 @@ def ensure_schema(db_path: Path | None = None) -> None:
         conn.execute("PRAGMA journal_mode = WAL")
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version == 0:
-            conn.executescript(_SCHEMA)
-            version = SCHEMA_VERSION
+            # broll-3 (2026-09-11b): the CREATE half had the shape broll-2 was
+            # written to kill. `executescript` COMMITS any open transaction
+            # before it runs and then runs in autocommit, so each CREATE was
+            # durable the instant it executed while `PRAGMA user_version = 2`
+            # was the script's last statement: a container killed inside the
+            # first request that creates the ledger left tables at version 0,
+            # and every later entry re-ran the script and raised
+            # `table client_folders already exists` - for ever, on every
+            # client-folder route and every public /broll/share/<token>/ link.
+            # So the same treatment the v1 -> v2 step got: one IMMEDIATE lock
+            # around the whole create, the version stamped INSIDE it (a
+            # `PRAGMA user_version` write goes through the pager and rolls
+            # back with the DDL), and IF NOT EXISTS so a file left behind by
+            # the old code still finishes rather than raising for ever.
+            conn.execute("BEGIN IMMEDIATE")
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version == 0:
+                for statement in _schema_statements(_SCHEMA):
+                    conn.execute(statement)
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                version = SCHEMA_VERSION
+            conn.commit()
         if version == 1:
             # v2 (broll-1, 2026-09-03): the content hash as a third identity.
             #
@@ -181,9 +200,17 @@ def ensure_schema(db_path: Path | None = None) -> None:
                 if not _has_column(conn, "client_folder_items", "hash"):
                     conn.execute("ALTER TABLE client_folder_items "
                                  "ADD COLUMN hash TEXT NOT NULL DEFAULT ''")
-                _backfill_hashes(conn)
-                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-                version = SCHEMA_VERSION
+                # broll-6 (2026-09-11b): stamping the version on a backfill
+                # that FAILED (an unreadable broll.db - mid-publish_db.py
+                # rename is the realistic one - or a full disk) retired the
+                # step for ever, and those items kept `hash = ''`: the third
+                # identity, the one that survives an /api/ingest/moved
+                # rename, silently absent for every folder curated before v2.
+                # Leaving the file at version 1 costs one re-entry per open
+                # until it works, and the step is idempotent by design.
+                if _backfill_hashes(conn):
+                    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                    version = SCHEMA_VERSION
             conn.commit()
         if version > SCHEMA_VERSION:
             raise RuntimeError(
@@ -195,6 +222,23 @@ def ensure_schema(db_path: Path | None = None) -> None:
         conn.close()
 
 
+def _schema_statements(script: str) -> list[str]:
+    """`_SCHEMA` split into statements, so the create can run inside a
+    transaction (broll-3, 2026-09-11b): `executescript` cannot, because it
+    commits first. sqlite3.complete_statement does the splitting, so a `;`
+    inside a comment or a string literal is not a statement boundary."""
+    out: list[str] = []
+    buffer = ""
+    for line in script.splitlines(True):
+        buffer += line
+        if buffer.strip() and sqlite3.complete_statement(buffer):
+            out.append(buffer)
+            buffer = ""
+    if buffer.strip():
+        out.append(buffer)
+    return out
+
+
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     """broll-2 (2026-09-11): what a re-runnable migration asks, instead of
     trusting `user_version` to tell it what the file already has."""
@@ -202,9 +246,16 @@ def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
                for r in conn.execute(f"PRAGMA table_info({table})").fetchall())
 
 
-def _backfill_hashes(conn: sqlite3.Connection) -> None:
+def _backfill_hashes(conn: sqlite3.Connection) -> bool:
     """Fill the new `hash` column for items whose clip the index still files
     under the same (share, rel_path). Best effort by design.
+
+    Answers whether the step RAN TO THE END: false means the caller must not
+    stamp the schema version, because a step that never happened and is never
+    retried is a permanent silent data loss (broll-6, 2026-09-11b). A missing
+    index file is not a failure - there is nothing to read hashes out of, and
+    waiting for one would hold every deployment that has no broll.db yet at
+    version 1 for ever.
 
     The two databases are deliberately separate (publish_db.py must never be
     able to take a customer's client links with it), so this reaches across
@@ -226,12 +277,12 @@ def _backfill_hashes(conn: sqlite3.Connection) -> None:
     """
     index_path = config.get_db_path()
     if not index_path.exists():
-        return
+        return True
     wanted = conn.execute(
         "SELECT id, share, rel_path FROM client_folder_items WHERE hash = ''"
     ).fetchall()
     if not wanted:
-        return
+        return True
     try:
         index = sqlite3.connect(index_path)
         try:
@@ -246,8 +297,34 @@ def _backfill_hashes(conn: sqlite3.Connection) -> None:
                         (found[0], item_id))
         finally:
             index.close()
-    except sqlite3.Error:
-        return
+    except (sqlite3.Error, OSError):
+        log.exception("client_shares.db: the hash backfill did not finish")
+        return False
+    return True
+
+
+def ensure_schema_best_effort(db_path: Path | None = None) -> bool:
+    """`ensure_schema`, logged and swallowed. Answers whether it worked.
+
+    The ONE way anything other than a test should call it (broll-5,
+    2026-09-11b). The request path has had this guard since broll-2; both BOOT
+    paths called it bare, so a ledger that was locked or on a read-only mount
+    for the seconds the container started either stopped the standalone app
+    from booting at all or marked the WHOLE /broll mount DEGRADED - nav link
+    hidden, home page saying "every /broll request will fail until the data
+    root is writable" - about an app that was in fact serving every request
+    fine, because of that same broll-2 guard. Client folders are one feature
+    of this app; they do not get to take the archive's search page down.
+
+    The deliberately fatal "newer user_version" RuntimeError is NOT caught
+    here either, for the reason get_shares_db gives.
+    """
+    try:
+        ensure_schema(db_path)
+    except (sqlite3.Error, OSError):
+        log.exception("client_shares.db: ensure_schema failed, carrying on")
+        return False
+    return True
 
 
 def open_connection(db_path: Path | None = None) -> sqlite3.Connection:
@@ -270,11 +347,15 @@ def get_shares_db() -> Iterator[sqlite3.Connection]:
     the migration did not. The routes answer on their own merits after this.
     The "newer user_version" RuntimeError is deliberately fatal and is NOT
     caught: an older app half-reading a newer file is the worse outcome.
+
+    regression-14 (2026-09-11b): OSError too. `ensure_schema` opens with a
+    `mkdir` on the data root and then `sqlite3.connect`, and a dataset that is
+    unmounted or remounted read-only raises `PermissionError` /
+    `FileNotFoundError` / "Read-only file system" out of both - none of them a
+    `sqlite3.Error`, so the door this handler exists to hold open was still
+    500ing on the one failure most likely to reach it.
     """
-    try:
-        ensure_schema()
-    except sqlite3.Error:
-        log.exception("client_shares.db: ensure_schema failed, opening anyway")
+    ensure_schema_best_effort()
     conn = open_connection()
     try:
         yield conn

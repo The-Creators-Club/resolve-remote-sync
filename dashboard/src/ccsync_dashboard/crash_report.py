@@ -67,6 +67,17 @@ _REDACTIONS = (
      r"\1=<redacted>"),
     (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@]+:[^\s/@]+@"), r"\1<redacted>@"),
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+"), "Bearer <redacted>"),
+    # CR-266b (2026-09-11b): the key shapes that turn up BARE in an exception
+    # message, with no `key=` in front of them to be recognised by the first
+    # pattern - "Invalid API key: sk-ant-api03-...", a `cce1.` fleet token in
+    # a 403 from our own API, a GitHub token in a release-lookup error. This
+    # redactor is now also what `notices.error_detail` runs an exception
+    # message through before writing it into a notice the home page renders,
+    # so a shape that gets past here reaches a page and a database backup.
+    (re.compile(r"(?i)\bsk-(?:ant-|proj-|or-)?[A-Za-z0-9_\-]{12,}"),
+     "sk-<redacted>"),
+    (re.compile(r"\bcce1\.[A-Za-z0-9._\-]{8,}"), "cce1.<redacted>"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{8,}"), "gh_<redacted>"),
 )
 
 

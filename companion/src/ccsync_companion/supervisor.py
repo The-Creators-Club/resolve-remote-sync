@@ -85,6 +85,13 @@ HISTORY_MAX_ENTRIES = 20
 # NEXT supervisor in the chain, through the companion, so the ceiling does not
 # depend on a file that may not be writable. Comma-separated epoch seconds.
 PRIOR_FLAG = "--prior"
+# res-companion-3 (2026-09-11b): upgrade._OLD_SUFFIX, spelled here rather
+# than imported. This module deliberately imports nothing from the companion
+# package (see the docstring): it runs in a process whose whole job is to
+# outlive one that could not start, and an import of upgrade.py would drag
+# config, logging and the release keys in with it. The two spellings must
+# stay in step; both are covered by the regression test.
+_UPGRADE_OLD_SUFFIX = ".old"
 # The supervisor's own log, beside the crash reports. Small and self-capping.
 LOG_FILENAME = "supervisor.log"
 LOG_MAX_BYTES = 256_000
@@ -214,23 +221,95 @@ def merge_history(*sources: Optional[list[float]]) -> list[float]:
     HIGHER count is the safe one here: a ceiling that under-counts relaunches
     a build that cannot stay up, and a ceiling that over-counts leaves a
     machine to its logon autostart, which is the failure a human notices.
+
+    comp-ui-3 (2026-09-11b): the stamps are QUANTISED to milliseconds before
+    the union, because the two sources spell the same relaunch differently -
+    the file keeps `time.time()`'s full precision and `supervisor_argv`
+    formats `%.3f`. They were two different floats, so every hop through the
+    chain contributed a second entry per relaunch: `decide` reached
+    MAX_RELAUNCHES after two relaunches, refused the third with "already
+    relaunched 4 times", and the editor-facing "relaunch N of 3" in the
+    unclean-exit report was off by the same factor. Milliseconds is finer
+    than anything here measures, so the quantisation loses nothing.
     """
     seen: set[float] = set()
     for source in sources:
         for item in source or []:
             try:
-                seen.add(float(item))
+                seen.add(round(float(item), 3))
             except (TypeError, ValueError):
                 continue
     return sorted(seen)[-HISTORY_MAX_ENTRIES:]
 
 
-def write_relaunch_note(crash_dir: Path, note: dict[str, Any]) -> None:
+def write_relaunch_note(crash_dir: Path, note: dict[str, Any]) -> bool:
+    """-> whether it was written.
+
+    regression-21 (2026-09-11b): `merge_history`'s docstring calls the argv
+    copy "a source that does not need a filesystem at all", but the count
+    only reaches the relaunched COMPANION through this file (crash_report
+    reads it and passes it to the supervisor it spawns for itself). This
+    used to return None, swallow every failure with a bare `pass` and write
+    in place. So a `relaunched.json` that cannot be written -- an AV lock, or
+    it exists as a directory -- while `<state>/supervisor.json` is also
+    unwritable left `decide` an empty history for ever: a build that cannot
+    stay up relaunched every ten seconds with nothing anywhere saying the
+    ceiling had been lost. tmp+replace as everywhere else in the package, so
+    a kill mid-write cannot leave half a note behind either.
+    """
+    path = crash_dir / RELAUNCH_NOTE_FILENAME
+    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         crash_dir.mkdir(parents=True, exist_ok=True)
-        (crash_dir / RELAUNCH_NOTE_FILENAME).write_text(json.dumps(note), encoding="utf-8")
-    except Exception:  # noqa: BLE001
-        pass
+        tmp.write_text(json.dumps(note), encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except Exception:  # noqa: BLE001 - the caller logs; a note is not a reason to stop
+        try:
+            tmp.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
+def restore_interrupted_upgrade(exe: Path, log: Callable[[str], None]) -> bool:
+    """Put `<exe>.old` back when the companion exe is MISSING. -> did it.
+
+    res-companion-3 / regression-12 (2026-09-11b): a self-upgrade is two
+    os.replace calls (`upgrade.py`: exe -> exe.old, then the download -> exe).
+    Killed between them - a power cut, a reboot, an AV quarantine of the new
+    binary - the machine is left with no `ccsync-companion.exe` at all. Every
+    in-companion recovery lives inside a companion that cannot start, the Run
+    key points at a name that is not there, and the supervisor, the one awake
+    process outside it, used to log "the companion exe is no longer on disk:
+    nothing to relaunch" and exit. The machine then synced nothing until a
+    human renamed the file.
+
+    Tightly guarded on purpose. It fills a HOLE and never overwrites: an
+    `.old` beside a companion that IS on disk is the ordinary post-upgrade
+    state (`upgrade.cleanup_old_exe` deletes it on the next start), and
+    renaming over that would silently downgrade the machine. Loud in the
+    supervisor log either way, because `installer/windows_upgrade.ps1` swaps
+    the same two paths and a human may be mid-install.
+    """
+    old = Path(str(exe) + _UPGRADE_OLD_SUFFIX)
+    try:
+        if exe.exists():
+            return False
+        if not old.is_file() or old.stat().st_size <= 0:
+            return False
+    except OSError as exc:
+        log(f"could not tell whether {exe} needs restoring: {exc!r}")
+        return False
+    try:
+        os.replace(old, exe)
+    except Exception as exc:  # noqa: BLE001
+        log(f"an interrupted self-upgrade left no {exe.name} and {old.name} "
+            f"could not be renamed back: {exc!r}. This machine needs a human.")
+        return False
+    log(f"an interrupted self-upgrade left no {exe.name}: renamed {old.name} "
+        "back to it (the previous build) so there is something to relaunch")
+    return True
 
 
 def read_relaunch_note(crash_dir: Path, remove: bool = True) -> Optional[dict[str, Any]]:
@@ -468,6 +547,12 @@ def main(argv: list[str], *,
         log(f"could not wait on pid {pid}: {exc!r}; standing down")
         return 0
     marker = read_marker(crash_dir)
+    if marker is not None and not exe.is_file():
+        # res-companion-3 (2026-09-11b): only with a marker in hand, i.e.
+        # only for a companion that died without starting a shutdown. A
+        # missing exe with no marker is a deliberate uninstall, and decide()
+        # is the one that reads the marker's pid.
+        restore_interrupted_upgrade(exe, log)
     # comp-ui-2 / res-companion-4: the file is one source, the count carried
     # in on argv the other. Whichever is higher wins, so the ceiling holds
     # even where <state>/supervisor.json cannot be read or written.
@@ -516,7 +601,13 @@ def main(argv: list[str], *,
             "-- the 'three relaunches an hour' ceiling now rests entirely on the "
             "count carried to the relaunched companion. A state directory that "
             "cannot be written needs a human.")
-    write_relaunch_note(crash_dir, note)
+    if not write_relaunch_note(crash_dir, note):
+        # regression-21 (2026-09-11b): the same loud line write_history's
+        # failure gets. This file is how the count reaches the relaunched
+        # companion, and with both writers failing the ceiling is gone.
+        log(f"WARNING: could not write {crash_dir / RELAUNCH_NOTE_FILENAME} "
+            "-- the relaunched companion will not know how many times this "
+            "build has been relaunched, and cannot pass the count on.")
     try:
         child = run([str(exe)], exe.parent, child_env())
     except Exception as exc:  # noqa: BLE001

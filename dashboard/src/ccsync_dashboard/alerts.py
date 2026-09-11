@@ -161,6 +161,18 @@ PINNED_STALE_SECONDS = 3600
 # a computer that has reported since and is still behind is not busy taking
 # the update, it is not taking it.
 ROLLOUT_STALLED_SECONDS = 48 * 3600
+# comp-ytdl-jobs-1 (hand-off wave, 2026-09-11b). How old a stored refusal may
+# be before it is a LEFTOVER rather than a refusal. The companion re-stamps
+# `refused_at` on every offer it turns down and reports every heavy tick, so
+# a live refusal is at most minutes old; a day is generous enough that a
+# dashboard restart, a long enforce cycle or a laptop that slept through the
+# afternoon cannot age out a real one.
+UPGRADE_REFUSED_STALE_SECONDS = 24 * 3600
+# regression-11 (hand-off wave, 2026-09-11b). How many consecutive failed
+# sidecar installs make a finding. One is a flaky network on a daily check and
+# heals itself; two in a row is a machine that will not get its media tools
+# without somebody looking at the reason.
+MEDIA_SIDECAR_MIN_FAILURES = 2
 # REL-13: how far one platform's channel may fall behind another's before it
 # is a finding. macOS bundles cannot be cross-built from Windows, so "the Mac
 # half is owed" has been true across many ships and was recorded only as a
@@ -698,14 +710,52 @@ def previous_weekly_slot(now: dt.datetime, zone) -> dt.datetime:
     return slot.astimezone(dt.timezone.utc)
 
 
-# How many times one scheduled message (the weekly report, the daily
-# heartbeat) may be ATTEMPTED inside its own slot. res-fleet-4: the schedules
-# now retire on a SUCCESSFUL send, so a sink that is refusing would otherwise
-# be tried once per collector cycle for the rest of the week, each attempt
-# blocking that thread for an SMTP timeout. Three is enough to ride out the
-# outages that lose a slot (DNS not up at boot, a relay blip) and small
-# enough that a dead sink costs three timeouts, not a thousand.
+# How many attempts inside one slot the schedules used to allow (res-fleet-4:
+# they retire on a SUCCESSFUL send, so a refusing sink would otherwise be
+# tried once per collector cycle for the rest of the week, each attempt
+# blocking that thread for an SMTP timeout). Superseded by the backoff below,
+# which bounds the same cost without spending the whole slot in twenty
+# minutes; kept as the number of attempts after which the wait is at its
+# longest, and because it is what the res-fleet-4 test is written against.
 MAX_SEND_ATTEMPTS_PER_SLOT = 3
+
+# regression-25 (2026-09-11b). A ceiling counted per SLOT spends itself in
+# about twenty minutes at `interval_alerts = 600`, so a relay down from 07:55
+# to 08:40 on a Monday did not DELAY the week's report, it deleted it - the
+# outcome res-fleet-4 was raised to stop. The ceiling is therefore a BACKOFF
+# instead: the wait after the n-th failed attempt in this slot, so a sink that
+# comes back gets the message late rather than never, and a sink that is dead
+# costs about five SMTP timeouts a day, not one per cycle.
+SEND_BACKOFF_SECONDS = (600.0, 3600.0, 21600.0)
+
+
+def _last_attempt_at(conn: sqlite3.Connection, kind: str) -> str:
+    """When this kind was last ATTEMPTED, ok or not. '' if never."""
+    rows = _rows(conn, "SELECT at FROM alert_log WHERE kind=? "
+                       "ORDER BY id DESC LIMIT 1", (str(kind),))
+    return str(rows[0]["at"] or "") if rows else ""
+
+
+def _retry_due(conn: sqlite3.Connection, kind: str, since_iso: str,
+               now: str) -> bool:
+    """Whether a scheduled message owed since `since_iso` may be tried now.
+
+    regression-25 (2026-09-11b). True on the first attempt of a slot; after
+    that, only once the backoff for the number of attempts already made has
+    elapsed since the last one. A clock that cannot be read is a retry: the
+    failure direction of a schedule is to send.
+    """
+    attempts = _attempts_since(conn, kind, since_iso)
+    if attempts <= 0:
+        return True
+    wait = SEND_BACKOFF_SECONDS[min(attempts, len(SEND_BACKOFF_SECONDS)) - 1]
+    last = _last_attempt_at(conn, kind)
+    if not last:
+        return True
+    try:
+        return db.age_seconds(last, now) >= wait
+    except (ValueError, TypeError):
+        return True
 
 
 def _attempts_since(conn: sqlite3.Connection, kind: str, since_iso: str) -> int:
@@ -762,7 +812,7 @@ def weekly_due(conn: sqlite3.Connection, now: str) -> bool:
     # unaffected. Bounded by `_attempts_since`: a sink that is down costs one
     # send per cycle for a few cycles, never one per cycle until Tuesday.
     last = db.last_alert_at(conn, KIND_WEEKLY, ok_only=True)
-    if _attempts_since(conn, KIND_WEEKLY, slot.isoformat()) >= MAX_SEND_ATTEMPTS_PER_SLOT:
+    if not _retry_due(conn, KIND_WEEKLY, slot.isoformat(), now):
         return False
     if not last:
         return True
@@ -802,9 +852,8 @@ def heartbeat_due(conn: sqlite3.Connection, now: str) -> bool:
     # reason. A dead man's switch that retires the day on one refused send is
     # a dead man's switch that a ten-minute outage turns off.
     day_start = dt.datetime.combine(today, dt.time(0, 0), tzinfo=zone)
-    if _attempts_since(conn, KIND_HEARTBEAT,
-                       day_start.astimezone(dt.timezone.utc).isoformat()
-                       ) >= MAX_SEND_ATTEMPTS_PER_SLOT:
+    if not _retry_due(conn, KIND_HEARTBEAT,
+                      day_start.astimezone(dt.timezone.utc).isoformat(), now):
         return False
     last = db.last_alert_at(conn, KIND_HEARTBEAT, ok_only=True)
     if not last:
@@ -1042,6 +1091,10 @@ class Ctx:
         # that read it, and side-effect free by contract (no probe, no
         # database, no subprocess).
         self.ytdl: dict[str, Any] | None = _ytdl_health(self.mounts)
+        # res-fleet-3 (hand-off wave, 2026-09-11b): which code this container
+        # actually booted, against the version `current.json` says was
+        # applied. Gathered here on the Ctx rule; `{}` is "could not ask".
+        self.code: dict[str, Any] = _code_state(settings)
         # CR-232 (2026-09-10): which Resolve project each computer last said
         # was OPEN, and everything needed to decide whether that project is
         # one this fleet syncs at all. Four fleet-wide reads on the Ctx rule
@@ -1167,6 +1220,45 @@ def _ytdl_health(mounts: Mapping[str, tuple[str, str]]) -> dict[str, Any] | None
     except Exception:                                               # noqa: BLE001
         log.debug("alerts: could not read the ytdl health snapshot", exc_info=True)
         return None
+
+
+def _code_state(settings: Any) -> dict[str, Any]:
+    """Which code is answering, and which code `current.json` says applied.
+
+    res-fleet-3 (hand-off wave, 2026-09-11b). `dashboard_update.status()` is
+    the published answer to this question and it takes the app object, because
+    it also builds the update lists off the verified feed records on
+    `app.state`. THERE IS NO APP HERE (the `_ytdl_health` rule), and none is
+    needed: the two facts this check wants are `running_source`, which reads
+    only `sys.path`, and the `current.json` file itself. One small read per
+    scan, no feed, no network.
+
+    An empty dict is "could not ask", and the check below reports nothing on
+    it: a dashboard that cannot read its own current.json must not raise an
+    alarm about what that file says.
+    """
+    try:
+        from . import dashboard_update
+
+        current = dashboard_update._read_json(
+            dashboard_update.current_json_path(settings))
+        if not isinstance(current, Mapping):
+            current = {}
+        return {
+            "source": str(dashboard_update.running_source(settings) or ""),
+            "running": str(getattr(dashboard_update, "VERSION", "") or ""),
+            "applied": str(current.get("version") or ""),
+            "applied_at": str(current.get("applied_at") or ""),
+            "reverted_reason": str(current.get("reverted_reason") or ""),
+            # select_code_root writes these two when it refuses a tree and
+            # cannot revert it (dash-mounts-ui, 2026-09-11b). Absent on a
+            # deployment whose boot predates them, which is silence, not OK.
+            "revert_refused_reason": str(current.get("revert_refused_reason") or ""),
+            "revert_refused_from": str(current.get("revert_refused_from") or ""),
+        }
+    except Exception:                                               # noqa: BLE001
+        log.debug("alerts: could not read which code is running", exc_info=True)
+        return {}
 
 
 def _sqlite_ro(path: Any) -> sqlite3.Connection | None:
@@ -1622,40 +1714,71 @@ def _check_collector_kinds(ctx: Ctx) -> list[Finding]:
     return out
 
 
-def _collector_started_recently(ctx: Ctx) -> bool | None:
-    """Whether ANY collector kind has STARTED a run inside the stale window.
+def _stale_after_seconds(ctx: Ctx) -> float:
+    """The age at which "nothing has started" means STOPPED, for THIS site.
 
-    dash-collector-alerts-3 (2026-09-11). `db.fetch_collector_status`'s
-    `collector_stale` is only ever computed inside `if reachable and
-    finished_at`, and `reachable` is the `ok` of the newest non-Syncthing-free
-    run: a collector whose last act was a FAILED cycle, and a Syncthing-less
-    deployment which never runs such a kind at all, can therefore never be
-    stale, so the one question the flag exists to answer stops being asked in
-    exactly the two states worth asking it in. Liveness is the START of a
-    cycle, regardless of what the cycle then made of itself, and regardless of
-    kind - anything starting proves the thread is turning.
+    dash-collector-alerts-1 (2026-09-11b). `db.COLLECTOR_STALE_SECONDS` is
+    180 s, which is only meaningful where a kind runs at least that often.
+    A deployment with no `syncthing_url` runs `db.SYNCTHING_FREE_KINDS` alone
+    (`collector.py`'s kind gate) - prune 3600 s, invariants 900 s, alerts
+    600 s - so the newest START there is ALWAYS older than three minutes and
+    the stored flag is permanently True: a vendor or zero-touch dashboard
+    that has not been pointed at Syncthing yet reported its own perfectly
+    healthy collector as stopped, on the home page and by mail, every day.
+    Two cadences of the quickest kind that actually runs, never less than the
+    constant.
 
-    None means the ledger could not be read or holds no run at all, which is
-    "cannot tell" and never "stopped": a fresh container has no rows.
+    THE OBSERVED CADENCE IS NOT ASKED HERE, and that is deliberate (hand-off
+    wave, 2026-09-11b). The hand-off asked this function to compare against
+    `db.collector_stale_bound` as well - "the other way the false positive
+    fires" - and by the time it was read, dash-db had already made
+    `fetch_collector_status` measure the stored flag against exactly that
+    bound, with the same 180 s floor. Re-running it here would be
+    dash-collector-alerts-8 in its purest form: a second query, of the same
+    rows, against the same threshold, that can never change the verdict the
+    first one reached. What is left below is the half `collector_stale_bound`
+    cannot reach, because it is not in the data at all: a container whose
+    poll_runs hold no REPEAT of any kind yet (one cycle each since boot),
+    where the observed bound falls back to the floor and only the CONFIGURED
+    intervals say what this site can meet.
     """
-    rows = _rows(ctx.conn, "SELECT MAX(started_at) AS at FROM poll_runs")
-    started = str(rows[0]["at"] or "") if rows else ""
-    if not started:
-        return None
-    try:
-        return db.age_seconds(started, ctx.now) < db.COLLECTOR_STALE_SECONDS
-    except (ValueError, TypeError):
-        return None
+    if getattr(ctx.settings, "syncthing_url", ""):
+        return db.COLLECTOR_STALE_SECONDS
+    cadences = []
+    for kind in db.SYNCTHING_FREE_KINDS:
+        try:
+            value = float(getattr(ctx.settings, f"interval_{kind}", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            cadences.append(value)
+    if not cadences:
+        return db.COLLECTOR_STALE_SECONDS
+    return max(db.COLLECTOR_STALE_SECONDS, 2 * min(cadences))
 
 
 def _check_collector_stale(ctx: Ctx) -> list[Finding]:
     if not ctx.collector.get("collector_stale"):
-        # dash-collector-alerts-3: the stored flag is one of two ways in. It
-        # answers False for a collector whose last cycle failed, so the START
-        # of the last cycle is asked as well, and only a positive "nothing has
-        # started for three minutes" raises the finding.
-        if _collector_started_recently(ctx) is not False:
-            return []
+        return []
+    # dash-collector-alerts-8 (2026-09-11b): the second door here used to be
+    # `_collector_started_recently`, which re-ran `db.fetch_collector_status`'s
+    # own `MAX(started_at)` query against the same constant and so could never
+    # change the verdict - both halves of dash-collector-alerts-3 were fixed,
+    # in two places. What is left is the opposite question: the stored flag is
+    # computed against a fixed 180 s, and on a Syncthing-less site that is
+    # shorter than any cadence it runs, so the flag is asked again against a
+    # threshold this deployment can actually meet.
+    threshold = _stale_after_seconds(ctx)
+    if threshold > db.COLLECTOR_STALE_SECONDS:
+        rows = _rows(ctx.conn, "SELECT MAX(started_at) AS at FROM poll_runs")
+        started = str(rows[0]["at"] or "") if rows else ""
+        if started:
+            try:
+                if db.age_seconds(started, ctx.now) < threshold:
+                    return []
+            except (ValueError, TypeError):
+                # Cannot tell is never "it is fine": the stored flag stands.
+                pass
     return [_f(
         "the server",
         "The server's background collector has not completed a cycle "
@@ -1936,7 +2059,16 @@ def _check_out_of_tree(ctx: Ctx) -> list[Finding]:
             # raised, the finding stays in the scan and goes QUIET - no mail,
             # no recovery, the row left open for the next scan that can see
             # the tree project again.
-            if ctx.name(who) not in ctx.open_alert_subjects("out_of_tree"):
+            # dash-collector-alerts-2 / regression-2 (2026-09-11b): ask the
+            # question WITHOUT naming. `ctx.name` is not a getter, it adds the
+            # subject to `ctx.named`, and `_check_red_unexplained` - the last
+            # kind in the registry, the backstop whose whole job is "RED and
+            # no other check said why" - skips any subject that is in there.
+            # Naming inside the test silenced the backstop for exactly the
+            # machines this check has decided to say nothing about, so a
+            # machine that was both RED for hours and on a personal project
+            # was reported by nobody.
+            if who not in ctx.open_alert_subjects("out_of_tree"):
                 continue
             quiet = True
         who = ctx.name(who)
@@ -2444,6 +2576,21 @@ def _check_upgrade_refused(ctx: Ctx) -> list[Finding]:
     renders identically to one that has simply not reported yet. It is
     strictly worse than a merely outdated computer, because no button on the
     page can fix it.
+
+    Hand-off wave (2026-09-11b), comp-ytdl-jobs-1's other side: the companion
+    re-stamps `refused_at` every time it turns an offer down, so a machine
+    that is really refusing what this dashboard is really offering is
+    re-stamped within a tick or two. An OLD stamp therefore means the opposite
+    - nothing is being offered and refused any more - and on companions
+    0.9.65..0.9.71 the standing refusal only ever cleared by taking a later
+    offer, which a machine already running the current build is never given.
+    That left `[ REFUSING 0.9.65 ]` and this alert lit for the life of the
+    tray process after an admin had already put the newer build back, with the
+    alert's own action text describing the move that had just failed to clear
+    it. 0.9.72 clears it from a reply with no offer; the fleet will hold older
+    builds for months, so the row also ages out here. A machine that is merely
+    switched off ages out too, which is right: `machine_silent` owns that, and
+    an alarm about an offer nobody is making is noise.
     """
     out = []
     for r in _rows(ctx.conn,
@@ -2451,6 +2598,9 @@ def _check_upgrade_refused(ctx: Ctx) -> list[Finding]:
                    "upgrade_refused_reason, upgrade_refused_at FROM machine_state "
                    "WHERE upgrade_refused_version IS NOT NULL "
                    "AND upgrade_refused_version != '' LIMIT 40"):
+        refused_age = _age(r["upgrade_refused_at"], ctx.now)
+        if refused_age is not None and refused_age >= UPGRADE_REFUSED_STALE_SECONDS:
+            continue
         who = ctx.name(f"{r['editor_username']}/{r['machine']}")
         reason = str(r["upgrade_refused_reason"] or "it did not say why")
         out.append(_f(
@@ -2467,6 +2617,54 @@ def _check_upgrade_refused(ctx: Ctx) -> list[Finding]:
             f"refused={r['upgrade_refused_version']} "
             f"at={r['upgrade_refused_at']}"))
     return out
+
+
+def _check_code_not_applied(ctx: Ctx) -> list[Finding]:
+    """This container is running the IMAGE while `current.json` names a tree.
+
+    res-fleet-3 (hand-off wave, 2026-09-11b), the other half of
+    dash-mounts-ui-8. That fix moved the boot counter below `check_tree` so an
+    environment-shaped refusal ("DASH_RELEASE_PUBKEYS is not set") stops
+    counting against a good bundle - correct, and it also means a PERMANENT
+    refusal never accumulates to the two boots that produced a revert with a
+    sentence on the Packages page. So a container whose applied tree no longer
+    matches the image's runtime id boots the image every restart, for ever,
+    while the page still says 0.7.43 is current. The only evidence was a
+    stderr line in the container log: no notice, no alert, no invariant read
+    either `running_source` or `reverted_reason`. The studio believes it
+    shipped a build the fleet is not running, including - when the image
+    predates it - without the fixes it was shipped for.
+
+    Only `source == "image"` counts. A developer's checkout is a checkout and
+    says nothing about a deployment; a `volume` source is the applied tree
+    answering, which is the healthy case. A version that MATCHES what is
+    running is also silence: the image caught up, which is how an image update
+    is supposed to retire a bundle.
+    """
+    code = ctx.code
+    if not code or code.get("source") != "image":
+        return []
+    applied = str(code.get("applied") or "")
+    running = str(code.get("running") or "")
+    if not applied or (running and applied == running):
+        return []
+    refused = str(code.get("revert_refused_reason") or "")
+    why = (f" The last boot refused that tree and could not undo it: {refused}."
+           if refused else
+           " The container log from the last boot says which check refused it.")
+    return [_f(
+        "this server",
+        f"This dashboard is running the version built into the container "
+        f"({running or 'unknown'}), not the {applied} update that was applied "
+        f"to it. Every restart will do the same until somebody looks at it, "
+        f"and the Packages page still names {applied} as the current one, so "
+        f"the fixes in that build are not live however many times this server "
+        f"is restarted.{why}",
+        "Settings, PACKAGES: apply the update again, and if it refuses, send "
+        "us the container log from the NAS. Updating the container image to "
+        "one that already carries this version also clears it.",
+        f"source=image running={running} applied={applied} "
+        f"refused={refused[:120]}")]
 
 
 def _check_rollout_stalled(ctx: Ctx) -> list[Finding]:
@@ -2646,6 +2844,63 @@ def _check_ytdlp_failed(ctx: Ctx) -> list[Finding]:
             "antivirus or its network is blocking the download tool.",
             f"version={record.get('version')} "
             f"checked={record.get('checked_at')}"))
+    return out
+
+
+def _check_media_sidecar_failed(ctx: Ctx) -> list[Finding]:
+    """That computer has no ffmpeg/ffprobe/deno, and this is WHY.
+
+    regression-11 / comp-ytdl-jobs-3 (hand-off wave, 2026-09-11b). The
+    companion half of comp-ytdl-jobs-3 landed a whole cause -- which tool, and
+    what stopped it -- into `sync_guard.ytdlp.sidecar`, `api._store_ytdlp_state`
+    swallowed it into the `ytdlp:` meta blob, and NOTHING on this server read
+    it. A Mac editor whose sidecar ffmpeg install fails on an SSL CA problem
+    reports `capabilities.ffmpeg = false`; the admin queues a `proxy-480p`
+    job, `why` answers `no_capable_machine`, and the whole fleet picture says
+    only that the machine is not capable -- which reads as "nobody set that
+    computer up". The cause existed in exactly one place: that editor's own
+    tray, i.e. the audience it already had.
+
+    `consecutive_failures >= 2` and not the first failure: the installer
+    retries, and a single miss on a flaky network heals itself on the next
+    daily check. An ABSENT sidecar block is a companion below 0.9.71 and says
+    nothing, which must never read as "it is fine" -- silence here, and
+    `cap_ffmpeg` on the jobs page is the surface that already answers for
+    those.
+    """
+    out = []
+    for e in ctx.editors:
+        record = ctx.ytdlp.get(_who(e)) or {}
+        sidecar = record.get("sidecar")
+        if not isinstance(sidecar, Mapping):
+            continue
+        if str(sidecar.get("action") or "") != "failed":
+            continue
+        try:
+            failures = int(sidecar.get("consecutive_failures") or 0)
+        except (TypeError, ValueError):
+            failures = 0
+        if failures < MEDIA_SIDECAR_MIN_FAILURES:
+            continue
+        who = ctx.name(_who(e))
+        tools = ", ".join(str(t) for t in (sidecar.get("failed") or []) if t)
+        cause = str(sidecar.get("cause") or "").strip() or str(
+            sidecar.get("message") or "").strip() or "it did not say why"
+        out.append(_f(
+            who,
+            f"{who} could not install the media tools it needs "
+            f"({tools or 'ffmpeg, ffprobe, deno'}), {failures} check(s) in a "
+            f"row. The reason it gave: {cause}. Without them that computer "
+            f"makes no proxies, converts no downloads, and is offered none of "
+            f"the fleet's media work - which on every other page reads as a "
+            f"computer nobody has set up yet.",
+            "Settings, JOBS shows which computers can do media work. Ask that "
+            "editor to quit CC Sync from the tray and start it again while "
+            "they are online. If it fails again with the same reason, that "
+            "computer's antivirus, proxy or certificate store is blocking the "
+            "download.",
+            f"failed={tools} consecutive={failures} "
+            f"checked={sidecar.get('checked_at')}"))
     return out
 
 
@@ -3033,6 +3288,12 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
               "computers refusing the offer outright", _check_upgrade_refused),
     AlertKind("rollout_stalled", SEV_WARN, "a new build is not being taken",
               "adoption of the current build", _check_rollout_stalled),
+    # res-fleet-3 (hand-off wave, 2026-09-11b): the OTHER end of the release
+    # pipeline. Every kind above this one asks whether a build reached the
+    # fleet; this one asks whether it reached THIS SERVER.
+    AlertKind("code_not_applied", SEV_ERROR,
+              "this server is not running the update that was applied to it",
+              "which code this container booted", _check_code_not_applied),
     AlertKind("platform_channel_stale", SEV_WARN, "one platform's build is behind",
               "the two platforms' channels against each other",
               _check_platform_channel_stale),
@@ -3042,6 +3303,13 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
     AlertKind("ytdlp_failed", SEV_ERROR,
               "a computer has no working YouTube downloader",
               "computers with no usable yt-dlp", _check_ytdlp_failed),
+    # regression-11 / comp-ytdl-jobs-3 (hand-off wave, 2026-09-11b): the
+    # ffmpeg/ffprobe/deno sidecar beside it, whose cause the companion has
+    # been reporting to a dashboard that did not read it.
+    AlertKind("media_sidecar_failed", SEV_WARN,
+              "a computer could not install its media tools",
+              "each computer's ffmpeg/ffprobe/deno sidecar",
+              _check_media_sidecar_failed),
     AlertKind("loopback_down", SEV_WARN,
               "Send to Resolve cannot work on a computer",
               "the 8899 loopback on each computer", _check_loopback_down),

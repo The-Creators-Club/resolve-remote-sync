@@ -179,6 +179,14 @@
       </table>
     </div>
     {% endif %}
+    {% if assignments.archived_unreadable %}
+    {# dash-db-5's hand-off (2026-09-11b): the archived list is read on its own
+       now, so a table this database cannot answer for leaves the list EMPTY -
+       and an empty list here says "nothing is archived", which is the one
+       thing it does not know. The rest of the page is unaffected, which is
+       why the read was separated in the first place. #}
+    <div class="banner" style="margin-top:1.2rem">▲ The archived list could not be read right now, so it is not shown. Nothing was archived or restored by this, and the projects above are unaffected.</div>
+    {% endif %}
     {% if assignments.archived_projects %}
     {# The reverse side of DCORE-5. An archived project is not gone and this
        is where an owner sees that: the ticks are still counted, and one

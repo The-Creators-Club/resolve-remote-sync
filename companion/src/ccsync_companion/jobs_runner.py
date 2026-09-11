@@ -179,6 +179,18 @@ IDLE_BACKOFF_MAX_SECONDS = 120.0
 # nobody asked for, and the dashboard's own word for it is the same string
 # (db.JOB_CANCELLED_ERROR).
 CANCELLED_ERROR = "cancelled"
+# comp-ytdl-jobs-6 (2026-09-11b): how many local stops are remembered. The
+# merged cancel list the report reply builds is capped at the same number, so
+# an unbounded set of stale local ids could crowd an admin's cancel out of it.
+LOCAL_CANCEL_MAX = 16
+# wire-5 / dash-api-4 (2026-09-11b): the dashboard refusing THIS MACHINE'S
+# fleet credential, as opposed to refusing this job. dash-api-6's account bar
+# sits on `_require_fleet_caller`, which gates claim, heartbeat and result
+# alike, so a suspended editor's machine gets 403 on every one of them.
+CREDENTIAL_REFUSED_STATUSES = (401, 403)
+# The sentence the tray and Settings show for it. No em dash (owner's rule).
+CREDENTIAL_REFUSED_NOTE = ("This computer's fleet work is not being accepted "
+                           "right now: ask the studio to check this account.")
 # THE EARLY HEARTBEAT (§10, 2026-08-30). A whisper pass is minutes long and
 # the 30 s beat is sized against the lease, not against a progress bar -- so a
 # beat also goes out as soon as the fraction has really moved (1 %) and the
@@ -272,7 +284,16 @@ class JobRunner:
         # completion on a machine whose owner had asked for it back. Pruned in
         # _post_result, so a number the dashboard reuses later is not cancelled
         # by a stop somebody asked for last week.
-        self._local_cancel: set[int] = set()
+        # comp-ytdl-jobs-6 (2026-09-11b): BOUNDED, newest first. An id only
+        # leaves this set in `_post_result`, and a job that ends without one
+        # (the process killed between the kill and the post, stop() racing
+        # _execute) left its id here for the life of the tray. Sixteen of
+        # those filled every slot of the merged `_cancel` list below and an
+        # admin's cancel for the job actually running was truncated away, so
+        # the fleet's [ CANCEL ] did nothing on that machine and said nothing
+        # either. A list, not a set, because "which stop is the oldest" is the
+        # question a bound has to answer.
+        self._local_cancel: list[int] = []
         # THE IDS AN ADMIN SUBMITTED WITH `--now` (§10). An offer this machine
         # may claim even with somebody at the keyboard -- and only those ids,
         # which is why `_claim_ids` exists: a forced claim must not be able to
@@ -294,6 +315,10 @@ class JobRunner:
         # capabilities are already in hand, because status() must stay zero-I/O
         # (it is called from the tray's refresh thread).
         self._gate_note = ""
+        # The HTTP status of the last fleet call this machine's credential was
+        # refused with, or None (wire-5, 2026-09-11b). Cleared by the next
+        # call that gets through.
+        self._credential_refused: Optional[int] = None
         # Written at every result and read at construction, so "what has this
         # machine run" outlives a restart (CMEDIA-2). Derived from the log path
         # rather than passed in: app.py builds this runner and nothing else
@@ -341,8 +366,16 @@ class JobRunner:
             # comp-ytdl-jobs-2: MERGE, never replace. The admin's list is the
             # dashboard's to own; the local stop is this machine's, and only
             # a posted result retires it.
+            #
+            # comp-ytdl-jobs-6 (2026-09-11b): THE ADMIN'S LIST GOES FIRST, and
+            # the local stops follow newest first. The merged list is capped
+            # at sixteen, so whichever end is written last is the end that
+            # gets truncated: with the local ids in front, a set of stale
+            # local stops (ids that ended without a posted result) could push
+            # the fleet's cancel for the job actually running off the end,
+            # and the dashboard's [ CANCEL ] then did nothing here, silently.
             merged = list(dict.fromkeys(
-                sorted(self._local_cancel) + stops))
+                stops + list(reversed(self._local_cancel))))
             self._cancel = merged[:16]
             self._forced = urgent[:16]
         if ids or urgent:
@@ -424,11 +457,34 @@ class JobRunner:
             volunteer = (self._volunteer_until_iso
                          if self._volunteering_locked() else None)
             state, note = self._state, self._gate_note
+            refused = self._credential_refused
             recent = [dict(item) for item in self._recent]
         taking, sentence = GATE_SENTENCES.get(
             state, (False, "This computer is not taking fleet work."))
         if note:
             sentence = f"{sentence} {note}"
+        if refused:
+            # wire-5: the one thing a person at this machine can act on when
+            # the fleet work stops - and the gate itself cannot see it, since
+            # the refusal happens at the door and not at the verdict.
+            #
+            # CLOSING THE GATE IS HALF THE FIX (2026-09-11b hand-off). The
+            # note alone reached nobody in the commonest case: this runner
+            # sits at STATE_NOTHING_OFFERED, whose verdict is "taking work",
+            # and Settings -> JOBS prints "Taking fleet work" and drops the
+            # reason when `taking_work` is true. A door answering 401/403 to
+            # claim, heartbeat and result alike is not a machine that is
+            # taking work, so the verdict says so and the sentence survives.
+            # A state that was ALREADY closed keeps its own words (somebody at
+            # the keyboard is still why nothing is running) and gains the
+            # note; an open one is replaced by it, because "ready for fleet
+            # work" beside "not being accepted" is two answers to one
+            # question.
+            if taking:
+                sentence = CREDENTIAL_REFUSED_NOTE
+            else:
+                sentence = f"{sentence} {CREDENTIAL_REFUSED_NOTE}"
+            taking = False
         if state == STATE_USER_ACTIVE:
             sentence = (f"{sentence} It waits for "
                         f"{_minutes(self.idle_seconds)} of quiet.")
@@ -436,6 +492,7 @@ class JobRunner:
                 "queue": dict(self._queue),
                 "volunteer_until": volunteer, "forced": list(self._forced),
                 "gate": {"taking_work": bool(taking), "reason": sentence},
+                "credential_refused": refused,
                 "current": current,
                 "recent": recent,
                 "job": {"id": job["id"], "kind": job["kind"]} if job else None}
@@ -466,9 +523,26 @@ class JobRunner:
                 self._cancel.append(job_id)
                 del self._cancel[:-16]
             # comp-ytdl-jobs-2: and in the list a report reply cannot wipe.
-            self._local_cancel.add(job_id)
+            self._note_local_cancel(job_id)
         log.warning("jobs: the person at this machine stopped job #%s", job_id)
         return True
+
+    def _note_local_cancel(self, job_id: int) -> None:
+        """Remember a stop the person at this machine asked for, newest last
+        and never more than LOCAL_CANCEL_MAX of them (comp-ytdl-jobs-6).
+
+        The bound is what makes the merge above safe: an id that never gets a
+        posted result would otherwise sit here for the life of the process,
+        and sixteen of them are a fleet cancel that quietly does nothing. The
+        oldest local stop is the one worth losing - the job it named has been
+        over for hours.
+
+        Called with `_lock` held."""
+        job_id = int(job_id)
+        if job_id in self._local_cancel:
+            self._local_cancel.remove(job_id)
+        self._local_cancel.append(job_id)
+        del self._local_cancel[:-LOCAL_CANCEL_MAX]
 
     def wait_seconds(self) -> float:
         """How long to sleep before the next tick -- THE BACKOFF (phase 4).
@@ -724,9 +798,17 @@ class JobRunner:
             # only ever narrow what comes back, never widen it.
             body["ids"] = list(ids)
         status, parsed = self._call("/claim", body)
+        if status in CREDENTIAL_REFUSED_STATUSES:
+            # wire-5: the same door, and the claim is where a suspended
+            # machine notices next after the job it was running ended.
+            log.error("jobs: the dashboard refused this machine's claim "
+                      "(HTTP %s)", status)
+            self._note_credential_refused(status)
+            return None
         if status != 200 or not isinstance(parsed, dict):
             log.debug("jobs: claim answered HTTP %s", status)
             return None
+        self._note_credential_accepted()
         return parsed.get("job") or None
 
     def _heartbeat(self, job_id: int, progress: Optional[float] = None) -> bool:
@@ -761,10 +843,44 @@ class JobRunner:
                      "carrying on", job_id)
             log.debug("jobs: heartbeat transport failure", exc_info=True)
             return True
+        if status == 200:
+            self._note_credential_accepted()
         if status == 410:
             log.warning("jobs: job #%s is no longer ours -- stopping", job_id)
             return False
+        if status in CREDENTIAL_REFUSED_STATUSES:
+            # wire-5 / dash-api-4 (2026-09-11b): AN ACCOUNT BAR IS NOT A BLIP.
+            # dash-api-6 put the suspended-account gate on the fleet caller,
+            # which gates heartbeat and result as well as claim -- and 410 was
+            # the only status this runner stopped for, so a machine whose owner
+            # was suspended mid-transcode ran the job to the end, wrote its
+            # output into the shared vault (SMB, which no gate reaches), and
+            # then had its result refused while the expired lease had already
+            # sent the same job to a second machine. The lease cannot be
+            # renewed through a door that is answering 403, so carrying on is
+            # burning this editor's CPU on work nobody will accept.
+            log.error("jobs: the dashboard refused this machine's fleet "
+                      "credential (HTTP %s) for job #%s -- stopping",
+                      status, job_id)
+            self._note_credential_refused(status)
+            return False
         return True
+
+    def _note_credential_refused(self, status: Any) -> None:
+        """Remember that the dashboard is refusing this machine's fleet calls
+        (wire-5), so the gate sentence can say so.
+
+        Sticky within the process and cleared by the next call that gets
+        through: the editor otherwise sees a machine that simply stops taking
+        work, with the reason in a log they never open. `reporter`'s APP-1
+        credential notice is the same move for the report credential."""
+        with self._lock:
+            self._credential_refused = int(status or 0) or None
+
+    def _note_credential_accepted(self) -> None:
+        """A fleet call got through: whatever was refusing it has stopped."""
+        with self._lock:
+            self._credential_refused = None
 
     def _post_result(self, job_id: int, ok: bool, error: str = "",
                      result: Optional[dict] = None, retryable: bool = True) -> None:
@@ -772,16 +888,34 @@ class JobRunner:
         # answer. Held until here rather than dropped at the kill, because the
         # id has to survive every report reply in between.
         with self._lock:
-            self._local_cancel.discard(int(job_id))
+            if int(job_id) in self._local_cancel:
+                self._local_cancel.remove(int(job_id))
         # RECORDED BEFORE IT IS SENT (CMEDIA-2): a result the dashboard never
         # received is exactly the case where the editor's own machine is the
         # only place that can say what happened.
         self._note_finished(job_id, ok, error)
         try:
-            self._call(f"/{int(job_id)}/result",
-                       {"machine": self.machine, "ok": bool(ok),
-                        "retryable": bool(retryable), "error": str(error or "")[:2000],
-                        "result": result or {}})
+            status, _parsed = self._call(
+                f"/{int(job_id)}/result",
+                {"machine": self.machine, "ok": bool(ok),
+                 "retryable": bool(retryable), "error": str(error or "")[:2000],
+                 "result": result or {}})
+            if status in CREDENTIAL_REFUSED_STATUSES:
+                # wire-5 (2026-09-11b): every non-200 used to be swallowed
+                # whole, so the one status that means "this machine's work is
+                # not wanted" looked exactly like a dashboard restarting. The
+                # job is already done and the row will be re-dispatched; what
+                # is worth saying is that it will keep happening until
+                # somebody un-suspends this account.
+                log.error("jobs: the result of job #%s was refused (HTTP %s) "
+                          "-- this machine's fleet credential is not being "
+                          "accepted", job_id, status)
+                self._note_credential_refused(status)
+            elif status == 200:
+                self._note_credential_accepted()
+            elif status >= 400:
+                log.warning("jobs: the result of job #%s answered HTTP %s",
+                            job_id, status)
         except Exception:
             # The lease expires on its own, so a lost result costs one retry
             # rather than a stuck job. Never fatal to the loop.

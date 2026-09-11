@@ -900,7 +900,13 @@ def test_upgrade_report_is_always_a_full_shape(tmp_path):
         # REL-3 (2026-09-04): null, never absent, on the same reasoning as
         # the counters above.
         "refused_version": None, "refused_reason": None, "refused_at": None,
+        # res-companion-4 (2026-09-11b): the swallowed state writes. A count
+        # rather than a flag, and always sent -- it is compared loosely here
+        # because _WRITE_FAILURES is a process-wide counter that the write
+        # tests above have already moved.
+        "state_write_failures": empty["state_write_failures"],
     }
+    assert isinstance(empty["state_write_failures"], int)
     path = tmp_path / "upgrade_attempts.json"
     upgrade_mod.note_upgrade_attempt(path, "9.9.9", upgrade_mod.ERROR_EXEC, now=0.0)
     report = upgrade_mod.upgrade_report(upgrade_mod.read_attempts(path), 2)

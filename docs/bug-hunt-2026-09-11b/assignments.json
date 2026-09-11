@@ -1,0 +1,1129 @@
+{
+ "comp-sync": [
+  {
+   "id": "comp-sync-b-1",
+   "sev": "high",
+   "title": "the new abandoned-lane-B latch can be set after the thread has already cleared it, and then nothing ever clears it: proxy download is off for the rest of the process",
+   "also": [],
+   "aliases": [
+    "res-companion-2",
+    "regression-15"
+   ]
+  },
+  {
+   "id": "comp-sync-b-2",
+   "sev": "medium",
+   "title": "res-companion-1's `applying` intent row is written with `relink_pending=True`, and `pending_relinks()` / `moved_to()` filter on neither `ok` nor `state`: Resolve can be repointed at a file that was never moved",
+   "also": [
+    "comp-app"
+   ],
+   "aliases": [
+    "regression-17"
+   ]
+  },
+  {
+   "id": "comp-sync-b-3",
+   "sev": "medium",
+   "title": "a lane B pass that returns without reaching `_account_pass` leaves `_in_flight_credited` set, and the NEXT pass's deletions never reach the breaker's account",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "regression-4",
+   "sev": "medium",
+   "title": "comp-sync-7: the new stale-subpath gate is on the shared lane object, so CONSOLIDATE's proxy pull is silently dropped",
+   "also": [
+    "comp-app"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "regression-6",
+   "sev": "medium",
+   "title": "comp-sync-12: the new case-only rename skips the proxy siblings every other move takes with it",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-sync-b-4",
+   "sev": "low",
+   "title": "a failed case-only rename can leave the editor's media file under a `.ccsync-move-<pid>-` name that lane A then uploads to the NAS",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-sync-b-5",
+   "sev": "low",
+   "title": "a fleet halt stops the borrowed folders from being accepted but not the shared asset libraries",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "res-companion-3",
+   "sev": "low",
+   "title": "an in-flight deletion credit that is never reconciled makes the NEXT lane B pass's deletions invisible to the breaker",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "security-4",
+   "sev": "low",
+   "title": "the companion's Syncthing helpers follow redirects while carrying `X-API-Key`",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "comp-app": [
+  {
+   "id": "res-companion-1",
+   "sev": "high",
+   "title": "the crash-resume for an interrupted file move is unreachable, and the crash now ends as a PERMANENT failed move instead of a retired one",
+   "also": [
+    "comp-sync",
+    "dash-db"
+   ],
+   "aliases": [
+    "wire-1"
+   ]
+  },
+  {
+   "id": "comp-app-2",
+   "sev": "medium",
+   "title": "the same answer floods the dashboard log once per move per report for as long as the drive is out",
+   "also": [
+    "dash-api"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "comp-app-3",
+   "sev": "medium",
+   "title": "the watchdog's hourly ceiling is unreachable: the constants make it dead code, and the two tests that assert it pass on the backoff instead",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-app-4",
+   "sev": "medium",
+   "title": "the clock-skew tolerance comp-app-7 added is missing from the one place the fix says reads those events",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-app-6",
+   "sev": "medium",
+   "title": "\"Sync now\" runs lane B on a machine where lane B is disabled by config, and names it in the toast",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "regression-5",
+   "sev": "medium",
+   "title": "comp-sync-11: the twin the fix's own comment names, `CompanionApp._relink_moved`, was never converted to `cmp_key`",
+   "also": [
+    "comp-sync"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "comp-app-5",
+   "sev": "low",
+   "title": "the hold-off writes a WARNING every tick, so the per-tick spam comp-app-7 removed comes straight back in the same log",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-app-7",
+   "sev": "low",
+   "title": "the consolidate success toast still hides the copied count on the path where nothing was skipped",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-app-8",
+   "sev": "low",
+   "title": "a corrupt machine.json is now permanent, silent and unrepairable",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "regression-19",
+   "sev": "low",
+   "title": "comp-ui-4: the \"(s)\" ban was extended to two files and app.py still ships four editor-visible plurals",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "regression-20",
+   "sev": "low",
+   "title": "comp-sync-15: the second trash-summary producer still hands out the DEFAULT retention",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "res-companion-5",
+   "sev": "low",
+   "title": "`_file_move_answers` is rebuilt from two threads with no lock, so an answer can be lost or an already-sent one resurrected",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "comp-ui": [
+  {
+   "id": "comp-ui-1",
+   "sev": "high",
+   "title": "a failed Explorer-restart re-add kills the tray refresh loops for ever",
+   "also": [],
+   "aliases": [
+    "regression-7"
+   ]
+  },
+  {
+   "id": "comp-resolve-b-1",
+   "sev": "medium",
+   "title": "comp-resolve-2's fix landed in consolidate only: FIX ALL still counts a rehearsal as bytes copied",
+   "also": [
+    "comp-resolve"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "comp-ui-2",
+   "sev": "medium",
+   "title": "the Explorer-restart re-add freezes the tray for 15.5 s, not the 2.5 s its own comment promises",
+   "also": [],
+   "aliases": [
+    "regression-16"
+   ]
+  },
+  {
+   "id": "comp-ui-3",
+   "sev": "medium",
+   "title": "every relaunch is counted twice, so the \"three relaunches an hour\" ceiling fires after two",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-ui-4",
+   "sev": "medium",
+   "title": "the \"cannot save its safety state\" line tells the editor to do the one thing that drops the latch",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-ui-5",
+   "sev": "low",
+   "title": "the Quit-while-copying confirmation is garbled when the batch total is not known",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-ui-6",
+   "sev": "low",
+   "title": "the three new Settings-only advisories are in the tray MENU fingerprint",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-ui-7",
+   "sev": "low",
+   "title": "show_settings can release a lock another window now holds",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "regression-12",
+   "sev": "low",
+   "title": "res-companion-3 is claimed fixed and there is no fix anywhere in the tree",
+   "also": [
+    "comp-ytdl-jobs"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "regression-21",
+   "sev": "low",
+   "title": "comp-ui-2: the \"second source that does not need a filesystem\" is itself a file, written with a silent swallow",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "comp-resolve": [
+  {
+   "id": "comp-resolve-b-2",
+   "sev": "medium",
+   "title": "clips held by the auto-relink rate limiter can wait for the life of the process, because only a FAILED relink re-arms the watcher",
+   "also": [
+    "comp-app"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "regression-8",
+   "sev": "medium",
+   "title": "comp-resolve-4: the cards watchdog still never recovers a role that lost ONE of its two loops",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-resolve-b-3",
+   "sev": "low",
+   "title": "`_elide` can return MORE characters than the cap it is given",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-resolve-b-4",
+   "sev": "low",
+   "title": "an UNKNOWN probe closes the launch window with the \"Resolve registered\" line",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-resolve-b-5",
+   "sev": "low",
+   "title": "the res-companion-2 regression test passes on a half-reverted fix (or-assertion)",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "comp-broll-music": [
+  {
+   "id": "comp-broll-music-2",
+   "sev": "medium",
+   "title": "a staged drop that was never run can now never be deleted, and CLEAR FINISHED STAGING still tells the editor to press it",
+   "also": [],
+   "aliases": [
+    "regression-9"
+   ]
+  },
+  {
+   "id": "comp-broll-music-3",
+   "sev": "low",
+   "title": "a clip whose original vanished still uploads its poster, sprite and proxy to the archive, with no row to own them",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-broll-music-4",
+   "sev": "low",
+   "title": "a music track waiting out a result retry publishes \"nothing to do\" and tears the model down every 15 s",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-broll-music-5",
+   "sev": "low",
+   "title": "the deferred CLAP analysis is never dropped when a batch is cancelled or its lease is lost",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-broll-music-6",
+   "sev": "low",
+   "title": "a non-OSError failure to start the loopback server is neither latched nor recorded",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "comp-ytdl-jobs": [
+  {
+   "id": "comp-ytdl-jobs-1",
+   "sev": "medium",
+   "title": "the refusal is now sticky FOR EVER: a rollback the admin abandons leaves every machine permanently alarmed, and nothing can clear it",
+   "also": [
+    "dash-api",
+    "dash-collector-alerts"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "comp-ytdl-jobs-2",
+   "sev": "medium",
+   "title": "the sidecar cause/counter never reaches the report on a YouTube-enabled machine's two commonest failures, so the new tray line can never appear there",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-ytdl-jobs-3",
+   "sev": "low",
+   "title": "the new `sync_guard.ytdlp.sidecar` block is stored by the dashboard and read by nobody, so the admin half of the finding is still open",
+   "also": [
+    "dash-api",
+    "dash-collector-alerts",
+    "dash-mounts-ui"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "comp-ytdl-jobs-4",
+   "sev": "low",
+   "title": "the new drain-liveness check fires on stderr too, and it runs BEFORE the real-failure check, so it can replace ffmpeg's own error with a generic one",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-ytdl-jobs-5",
+   "sev": "low",
+   "title": "the one fix in this territory with no regression test is the one that changed fleet-visible behaviour",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "comp-ytdl-jobs-6",
+   "sev": "low",
+   "title": "`_local_cancel` has no ceiling and is merged ahead of the admin's list, so 16 stale local stops would crowd out a fleet cancel",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "res-companion-4",
+   "sev": "low",
+   "title": "\"this machine cannot keep its crash-loop counter\" is a log line and an accessor nobody calls",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "dash-api": [
+  {
+   "id": "dash-api-1",
+   "sev": "high",
+   "title": "the rollback button is a sixth door into \"make current\", and it walks past the gate",
+   "also": [
+    "dash-db"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "wire-2",
+   "sev": "high",
+   "title": "`sync_guard.repath_events[].at` is a float on the companion and a string in the model: every report from a machine that has had a project renamed is 422'd",
+   "also": [
+    "comp-sync",
+    "comp-app"
+   ],
+   "aliases": [],
+   "note": "receiver tolerance: RepathEventIn.at float|str|None on the dashboard; comp-sync may ALSO stringify on the wire, but the dashboard change is the fix that lets 0.9.71 machines report"
+  },
+  {
+   "id": "dash-api-2",
+   "sev": "medium",
+   "title": "the new undeclared-key walker is blind to the five sync_guard sections where this afternoon's dropped fields actually lived",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-api-3",
+   "sev": "medium",
+   "title": "dash-api-4's per-machine queue fix is unreachable from any page that renders the thing it fixes",
+   "also": [
+    "dash-mounts-ui"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "dash-api-4",
+   "sev": "medium",
+   "title": "suspending an editor mid-job throws away the work their machine has already done",
+   "also": [
+    "comp-ytdl-jobs"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "regression-11",
+   "sev": "medium",
+   "title": "comp-ytdl-jobs-3: the dashboard half was never built, so the finding's central symptom stands",
+   "also": [
+    "dash-collector-alerts"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "security-1",
+   "sev": "medium",
+   "title": "the dash-api-6 \"suspended means the same everywhere\" gate stops at api.py; the three mounted fleet APIs and the package door never ask",
+   "also": [
+    "broll",
+    "music",
+    "ytdl-web"
+   ],
+   "aliases": [],
+   "note": "make the suspended-account predicate importable and record the three mount halves (broll/music/ytdl fleet gates) as OWED; the mounts builders will wire it"
+  },
+  {
+   "id": "wire-3",
+   "sev": "medium",
+   "title": "the same section sends seven keys and declares four, and `_nested_extra_keys` now turns that into a daily warning and a SYS-3 banner line",
+   "also": [
+    "comp-sync"
+   ],
+   "aliases": [],
+   "note": "declare the seven repath keys the companion sends (or make the walker ignore this section)"
+  },
+  {
+   "id": "wire-5",
+   "sev": "medium",
+   "title": "dash-api-6's new 403 has no answer in the companion's fleet-jobs error model: a suspended editor's machine keeps running the job and writing into the vault",
+   "also": [
+    "comp-ytdl-jobs"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "dash-api-5",
+   "sev": "low",
+   "title": "`rollout` and `rollout_platforms` on the same /health answer disagree about a machine with no platform, and the ship gate cannot clear it",
+   "also": [
+    "dash-db",
+    "server-tools"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "dash-api-6",
+   "sev": "low",
+   "title": "`resolve_health_detail` carries unbounded undeclared keys out of the validator, against its own comment",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-api-7",
+   "sev": "low",
+   "title": "the rollback re-points `current` for the whole platform, not just the machines being rolled back",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "tests-3",
+   "sev": "low",
+   "title": "dashboard/tests/test_selection_api.py assertion shape (see tests.md)",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "dash-collector-alerts": [
+  {
+   "id": "dash-collector-alerts-2",
+   "sev": "medium",
+   "title": "the out-of-tree silence now also silences the catch-all \"red and we cannot say why\"",
+   "also": [],
+   "aliases": [
+    "regression-2"
+   ]
+  },
+  {
+   "id": "dash-collector-alerts-3",
+   "sev": "medium",
+   "title": "the truncated-invariant keep-list only survives one pass",
+   "also": [
+    "dash-db"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "dash-collector-alerts-4",
+   "sev": "medium",
+   "title": "mount_status restores a stale boot verdict over a newer one the ytdl gate wrote",
+   "also": [
+    "dash-mounts-ui"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "dash-collector-alerts-5",
+   "sev": "low",
+   "title": "`recheck()` holds the mount registry lock across a filesystem probe",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-collector-alerts-6",
+   "sev": "low",
+   "title": "the vendor default (no sink) now writes three failed heartbeat rows a day instead of one",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-collector-alerts-7",
+   "sev": "low",
+   "title": "the restore refuses on a truncated walk but the preview it is chosen from still shows the wrong list",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-collector-alerts-8",
+   "sev": "low",
+   "title": "`_collector_started_recently` is dead code: both sides of the same wire were fixed",
+   "also": [
+    "dash-db"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "regression-25",
+   "sev": "low",
+   "title": "res-fleet-4: the per-slot attempt ceiling loses the weekly report for an outage longer than about twenty minutes",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "dash-core": [
+  {
+   "id": "dash-core-1",
+   "sev": "medium",
+   "title": "a `warn` on the EULA task is sticky, so the licence is never accepted once it arrives",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-core-2",
+   "sev": "medium",
+   "title": "the dash-core-6 \"other direction\" regression test asserts a constant and can never fail",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-core-3",
+   "sev": "low",
+   "title": "the login backoff raises OverflowError once a key passes ~1024 recorded failures",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-core-4",
+   "sev": "low",
+   "title": "APP_UID without APP_GID is written to internal.env but ignored by the reader",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-core-5",
+   "sev": "low",
+   "title": "the /help index re-walks and re-opens the whole docs tree on every admin render",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-mounts-ui-b-4",
+   "sev": "low",
+   "title": "the image build now hard-fails on a document published_docs.py calls best effort",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "music-6",
+   "sev": "low",
+   "title": "`editor:` stamps are rejected for any editor name with a space, silently downgrading to a token mismatch 403",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "security-2",
+   "sev": "low",
+   "title": "the login-gate carve-out for `GET /broll/api/fleet/ingest/batches` outlived the route it was written for",
+   "also": [
+    "broll"
+   ],
+   "aliases": []
+  }
+ ],
+ "dash-db": [
+  {
+   "id": "comp-app-1",
+   "sev": "high",
+   "title": "comp-sync-20's \"retrying while the drive is out\" does not stop the 7 day expiry it was written to stop",
+   "also": [
+    "comp-app"
+   ],
+   "aliases": [
+    "regression-18"
+   ],
+   "note": "the dashboard half: exclude state=retrying rows from expire_delivered_file_moves; the companion half already landed"
+  },
+  {
+   "id": "dash-collector-alerts-1",
+   "sev": "high",
+   "title": "a Syncthing-less deployment now reports its own healthy collector as STOPPED, for ever",
+   "also": [
+    "dash-collector-alerts"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "dash-db-1",
+   "sev": "high",
+   "title": "the per-machine [ UPDATE NOW ] push still cannot deliver a rollback: dash-api-3 landed on the fleet route only",
+   "also": [
+    "dash-api",
+    "dash-mounts-ui"
+   ],
+   "aliases": [
+    "res-fleet-1"
+   ]
+  },
+  {
+   "id": "dash-db-2",
+   "sev": "medium",
+   "title": "a cancelled job re-queued by an older companion becomes a permanently unclaimable `queued` row that still counts in the queue depth",
+   "also": [],
+   "aliases": [
+    "regression-3"
+   ]
+  },
+  {
+   "id": "dash-db-3",
+   "sev": "medium",
+   "title": "dash-db-3's cap bounds the ROWS but not the WORK: `resolve_marker_includes` is still quadratic in a tampered marker",
+   "also": [
+    "dash-collector-alerts"
+   ],
+   "aliases": [
+    "regression-22"
+   ]
+  },
+  {
+   "id": "dash-db-4",
+   "sev": "low",
+   "title": "the enforce cycle, the reader `for_enforce` is named for, does not pass it",
+   "also": [
+    "dash-collector-alerts"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "dash-db-5",
+   "sev": "low",
+   "title": "dash-db-2's raise reaches two display-only admin pages, which now 500 on a transient lock",
+   "also": [
+    "dash-api"
+   ],
+   "aliases": []
+  }
+ ],
+ "dash-mounts-ui": [
+  {
+   "id": "res-fleet-2",
+   "sev": "high",
+   "title": "the AUTOMATIC crash-loop revert has no schema check, and reverting past a migration is an unrecoverable dashboard",
+   "also": [
+    "dash-db",
+    "dash-core"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "dash-mounts-ui-b-1",
+   "sev": "medium",
+   "title": "the res-fleet-2 runtime mount probe watches the bind MOUNTPOINT, which never goes away",
+   "also": [
+    "dash-collector-alerts"
+   ],
+   "aliases": [
+    "regression-1"
+   ]
+  },
+  {
+   "id": "dash-mounts-ui-b-2",
+   "sev": "medium",
+   "title": "a permanently unbootable code tree is now never reverted, because only a tree that PASSES check_tree is counted",
+   "also": [],
+   "aliases": [
+    "res-fleet-3"
+   ]
+  },
+  {
+   "id": "dash-mounts-ui-b-3",
+   "sev": "medium",
+   "title": "the new stale-while-revalidate does not hold the service worker alive, so the revalidation it was added for can be killed",
+   "also": [],
+   "aliases": [
+    "regression-23"
+   ]
+  },
+  {
+   "id": "dash-mounts-ui-b-5",
+   "sev": "low",
+   "title": "run.sh's new uid fallback blames APP_UID for a number it read off /data",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-mounts-ui-b-6",
+   "sev": "low",
+   "title": "the refusal banner's path is consumed by the FIRST swap of a response, so an out-of-band banner loses it",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "dash-release-jobs": [
+  {
+   "id": "dash-release-jobs-1",
+   "sev": "medium",
+   "title": "the FeedPoller restart fix revives the OLD thread as well as starting a new one",
+   "also": [],
+   "aliases": [
+    "regression-24"
+   ]
+  },
+  {
+   "id": "dash-release-jobs-2",
+   "sev": "medium",
+   "title": "the staged half of the SELECTED CARDS block is truncated silently, and its count lies",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-release-jobs-3",
+   "sev": "medium",
+   "title": "an older companion's Cards agent loses its machine name, so one editor's two machines become one string",
+   "also": [
+    "comp-resolve"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "wire-4",
+   "sev": "medium",
+   "title": "the cards tunnel stopped accepting the agent's `name`, so every companion below 0.9.71 now registers as the bare editor and two of one editor's machines collide",
+   "also": [
+    "comp-resolve"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "dash-release-jobs-4",
+   "sev": "low",
+   "title": "a feed record with a non-canonical kind/platform is now dropped with nothing at all to tell the admin",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-release-jobs-5",
+   "sev": "low",
+   "title": "`_signature_url` still cannot fetch the signature for the pre-signed URL its docstring is about",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-release-jobs-6",
+   "sev": "low",
+   "title": "two different fixes in the tree cite \"dash-release-jobs-3\", and the citations are off by one from -3 onward",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "dash-release-jobs-7",
+   "sev": "low",
+   "title": "`read_state` writes to disk, so a full or read-only data dir turns a status read into an exception on the boot and shutdown paths",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "regression-13",
+   "sev": "low",
+   "title": "CR-242b/CR-242c cite the wrong finding ids, and dash-release-jobs-5 is unledgered while dash-release-jobs-3's real fix is uncredited",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "res-fleet-4",
+   "sev": "low",
+   "title": "`FeedPoller.stop()` drops the thread handle before the join succeeds, and `start()` then clears the stop event under it",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "broll": [
+  {
+   "id": "comp-broll-music-1",
+   "sev": "high",
+   "title": "the b-roll RETRY FAILED button now claims the batch with no staging id, so every clip in it fails at once",
+   "also": [
+    "comp-broll-music"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "broll-1",
+   "sev": "medium",
+   "title": "the retry button's new 409 branch prints the one sentence that is almost always false",
+   "also": [
+    "comp-broll-music"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "broll-2",
+   "sev": "medium",
+   "title": "the new retry-failed 409 reaches the editor as \"[object Object]\"",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "broll-3",
+   "sev": "medium",
+   "title": "`client_shares.db` creation is still the crash-unsafe half of the migration broll-2 fixed, and the new try/except now hides it",
+   "also": [],
+   "aliases": [
+    "regression-14"
+   ]
+  },
+  {
+   "id": "broll-4",
+   "sev": "low",
+   "title": "the deleted discovery route left its login-gate carve-out behind, and today's test asserts the opposite",
+   "also": [
+    "dash-core"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "broll-5",
+   "sev": "low",
+   "title": "a ledger `ensure_schema` failure at BOOT degrades the whole /broll mount, which the same fix says must not happen",
+   "also": [
+    "dash-mounts-ui"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "broll-6",
+   "sev": "low",
+   "title": "a failed backfill still stamps the schema version, so those items lose the hash identity for ever",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "music": [
+  {
+   "id": "music-1",
+   "sev": "high",
+   "title": "retry-failed takes a LIVE batch away from the machine indexing it (the broll-5 guard was not ported)",
+   "also": [
+    "broll"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "music-2",
+   "sev": "medium",
+   "title": "the retry button is drawn on running batches and on other editors' batches",
+   "also": [
+    "broll"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "music-3",
+   "sev": "medium",
+   "title": "a retried batch is undispatchable after a page reload: music has no take-over path",
+   "also": [
+    "broll"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "music-4",
+   "sev": "medium",
+   "title": "the positive readiness cache keeps the write gate open for 5 s after the library mount disappears",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "regression-10",
+   "sev": "medium",
+   "title": "music-5: `ORDER BY id DESC` now samples the rows least likely to be on disk, so a live drop refuses itself from item ~51",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "music-5",
+   "sev": "low",
+   "title": "`_snapshot_token` can raise out of the first line of `rescore_library`",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "security-3",
+   "sev": "low",
+   "title": "musicweb believes `X-CCSync-Fleet-Auth` on an ENVIRONMENT VARIABLE, which its own comment says it does not",
+   "also": [
+    "dash-core"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "tests-4",
+   "sev": "low",
+   "title": "a regression test that skips itself when the thing it guards appears",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "ytdl-web": [
+  {
+   "id": "ytdl-web-b-1",
+   "sev": "medium",
+   "title": "ytdl-web-1's own guard leaves the stale number behind, so the press after the share comes back says \"free some space\"",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "ytdl-web-b-2",
+   "sev": "medium",
+   "title": "ytdl-web-4 removed the only free-space gate from exactly the jobs the NAS worker is the fallback executor for",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "regression-26",
+   "sev": "low",
+   "title": "ytdl-web-5: the new claim refusal reaches the page as \"this computer declined the job (HTTP 503)\"",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "ytdl-web-b-3",
+   "sev": "low",
+   "title": "the ' -- ' scan added for ytdl-web-7 does not cover the SPA, where most editor-facing copy is written",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "ytdl-web-b-4",
+   "sev": "low",
+   "title": "the worker still holds the claim door open for 4 s per job that claim_download can no longer grant",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "ytdl-web-b-5",
+   "sev": "low",
+   "title": "`free_bytes_at` no longer caches its negative answer, so a hung mount is re-stat'd on every press",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "ytdl-web-b-6",
+   "sev": "low",
+   "title": "`_refuse_if_the_tree_is_gone` compares a database label against on-disk bytes with no normaliser",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "server-tools": [
+  {
+   "id": "server-tools-b-1",
+   "sev": "medium",
+   "title": "the cards snapshot deploy ships a commit and never says the checkout is dirty",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "server-tools-b-2",
+   "sev": "medium",
+   "title": "`rollout_platforms` and `rollout_status` bucket a NULL platform differently, so the -EmitKindExtras gate refuses on a phantom platform",
+   "also": [
+    "dash-api",
+    "dash-db"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "server-tools-b-3",
+   "sev": "medium",
+   "title": "an explicit `--cards-src-dir` / `CARDS_SRC` deploy leaves a stale record, and the drift doctor reports it as OK",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "tests-2",
+   "sev": "medium",
+   "title": "the new installer regression test is not in the local gate",
+   "also": [
+    "install-onboard"
+   ],
+   "aliases": []
+  },
+  {
+   "id": "server-tools-b-4",
+   "sev": "low",
+   "title": "the drift doctor's new TIMELINE CARDS section runs on sites that have no Timeline Cards",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "server-tools-b-5",
+   "sev": "low",
+   "title": "`_stage_docs_tree` can still raise out of a function documented never to",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "server-tools-b-6",
+   "sev": "low",
+   "title": "`cards_repo_for`'s prefix fallback silently turns a subtree export into a whole-repo export",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "server-tools-b-7",
+   "sev": "low",
+   "title": "`ro,rslave` reaches TrueNAS's middleware, and nothing offline can say it is accepted",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "tests-5",
+   "sev": "low",
+   "title": "a large share of the new regression tests fail on the old code only because a new helper is missing",
+   "also": [],
+   "aliases": []
+  }
+ ],
+ "install-onboard": [
+  {
+   "id": "tests-1",
+   "sev": "high",
+   "title": "the install-onboard-1 regression test passes against the bug, on every runner it actually runs on",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "install-onboard-1",
+   "sev": "medium",
+   "title": "`site_manifest_value` lets a stale, unbounded, unidentified cache override a manifest this run actually fetched, and beat the bootstrap's own live fetch",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "install-onboard-2",
+   "sev": "low",
+   "title": "the closing advice on a failed uninstall contradicts itself: \"run this uninstaller again\" and then \"delete that file, and the folder it is in\"",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "install-onboard-3",
+   "sev": "low",
+   "title": "the macOS uninstaller still claims \"removed\" and \"complete\" over a removal that did not happen",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "install-onboard-4",
+   "sev": "low",
+   "title": "the hoisted legacy-agent retirement can leave a Mac with no companion autostart at all, and the big warning block does not say so",
+   "also": [],
+   "aliases": []
+  },
+  {
+   "id": "install-onboard-5",
+   "sev": "low",
+   "title": "`normalise_dashboard_url`'s new 8443 rule is a deployment-specific guess applied to every customer's hostname",
+   "also": [],
+   "aliases": []
+  }
+ ]
+}

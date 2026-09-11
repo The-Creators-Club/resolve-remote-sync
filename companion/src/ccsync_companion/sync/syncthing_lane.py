@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 from urllib.parse import urlencode
 
+from . import syncthing_admin as syncthing_admin_mod
 from .base import (
     STATE_ERROR,
     STATE_IDLE,
@@ -173,9 +174,12 @@ def read_api_key_from_config(path: Path) -> Optional[str]:
 
 
 def default_http_get(url: str, api_key: str, timeout: float) -> Any:
+    """One Syncthing REST read. NO REDIRECTS (security-4, 2026-09-11b): the
+    `X-API-Key` header would be re-sent to the redirect target, and it is
+    lane C's full admin credential. See syncthing_admin._opener."""
     headers = {"X-API-Key": api_key} if api_key else {}
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with syncthing_admin_mod._opener().open(req, timeout=timeout) as resp:
         data = resp.read()
     return json.loads(data.decode("utf-8")) if data else {}
 

@@ -274,10 +274,22 @@ def _write_sidecar_env_files(env: Mapping[str, str], secrets_dir: Path) -> None:
                                f"STGUIAPIKEY={syncthing_key}\n")
         if internal_token:
             lines = [f"CCSYNC_INTERNAL_TOKEN={internal_token}\n"]
-            if app_uid:
+            # dash-core-4 (2026-09-11b): the PAIR or neither. The dashboard's
+            # own reader (internal_sftp._uid_gid) takes both or falls back to
+            # os.getuid()/os.getgid(), so a compose file that set only APP_UID
+            # used to give the sftp sidecar one ownership and the dashboard's
+            # /internal/sftp/users answer another, with nothing in either log
+            # - and the symptom is a permission failure on an editor's lane
+            # days later. Writing half of it is worse than writing none: the
+            # sidecar would act on it.
+            if app_uid and app_gid:
                 lines.append(f"APP_UID={app_uid}\n")
-            if app_gid:
                 lines.append(f"APP_GID={app_gid}\n")
+            elif app_uid or app_gid:
+                log.warning(
+                    "APP_UID/APP_GID are half configured (uid=%r, gid=%r): neither "
+                    "is written to internal.env, so the sftp sidecar keeps the "
+                    "container's own ownership", app_uid, app_gid)
             # `internal.env`, which is the file compose.appliance.yaml's sftp
             # service actually env_files -- NOT `sftp.env`, which this
             # function wrote until 2026-08-21 and which nothing has ever read

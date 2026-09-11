@@ -72,7 +72,10 @@ def test_auth_matrix(env):
     # another editor: no
     as_user(client, "other")
     assert client.put("/api/v1/selection/jsmith/2025-ff4-nuclear").status_code == 403
-    assert client.get("/api/v1/selection/jsmith").status_code == 401 or True  # other cannot read either
+    # tests-3 (fix pass 2026-09-11b): the `or True` that used to end this
+    # line made the only assertion in the matrix about an editor READING
+    # another editor's sync plan unconditionally true.
+    assert client.get("/api/v1/selection/jsmith").status_code == 401
     # admin: yes
     as_user(client, "owen")
     assert client.put("/api/v1/selection/jsmith/2025-ff4-nuclear").status_code == 200

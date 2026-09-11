@@ -607,6 +607,37 @@ def test_status_reports_the_watchdog_counter(world):
     assert dashboard_update.status(settings, world["app"].state)["boot_attempts"] == 2
 
 
+def test_status_carries_a_refused_revert_out_of_current_json(world):
+    """res-fleet-3 (hand-off, 2026-09-11b): the boot selector records a revert
+    it refused, and `partials/admin_dashboard_update.html` renders it - but
+    status() rebuilds `current` with a FIXED key set, so the banner could
+    never have appeared and no notice could ever have read it."""
+    settings = world["settings"]
+    path = dashboard_update.current_json_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "version": NEW_VERSION, "previous": "0.7.42",
+        "revert_refused_reason": ("the previous tree's schema (v51) is older "
+                                  "than this database (v52)"),
+        "revert_refused_from": NEW_VERSION,
+    }), encoding="utf-8")
+    current = dashboard_update.status(settings, world["app"].state)["current"]
+    assert "v51" in current["revert_refused_reason"]
+    assert current["revert_refused_from"] == NEW_VERSION
+
+
+def test_status_says_an_empty_string_when_no_revert_was_refused(world):
+    """The key set is fixed: a pre-fix current.json (and the ordinary case)
+    must render as "" and never as a missing key."""
+    settings = world["settings"]
+    path = dashboard_update.current_json_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": NEW_VERSION}), encoding="utf-8")
+    current = dashboard_update.status(settings, world["app"].state)["current"]
+    assert current["revert_refused_reason"] == ""
+    assert current["revert_refused_from"] == ""
+
+
 # ------------------------------------------------------------------- health
 
 

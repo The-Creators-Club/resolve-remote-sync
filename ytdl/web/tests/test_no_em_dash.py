@@ -187,3 +187,41 @@ def test_the_scan_would_catch_a_regression() -> None:
     for form in FORMS:
         assert _hits(f'failed {form} see the server log', 'x')
     assert not _hits('failed: see the server log', 'x')
+
+
+# ...and the two surfaces that carry MORE editor copy than all six of them put
+# together (ytdl-web-b-3, 2026-09-11b): app.js writes every toast, banner,
+# status cell and hint on the page, and index.html every label. The Python arm
+# alone left the owner's rule enforced for HTTP `detail` strings only. Comments
+# are stripped the same way the em dash arm strips them, so a history note
+# above a line keeps its spelling.
+DOUBLE_HYPHEN = ' -- '
+
+
+def _double_hyphen_lines(text: str, source: str) -> list[str]:
+    out = []
+    for n, line in enumerate(text.splitlines(), start=1):
+        if DOUBLE_HYPHEN in line:
+            out.append(f'{source}:{n}: {line.strip()}')
+    return out
+
+
+@pytest.mark.parametrize('path', _html_files(), ids=lambda p: p.name)
+def test_page_markup_has_no_double_hyphen(path: Path) -> None:
+    text = _HTML_COMMENT.sub('', path.read_text(encoding='utf-8'))
+    hits = _double_hyphen_lines(text, path.name)
+    assert not hits, (
+        "' -- ' reads as an em dash in page copy (house style 2026-08-18, "
+        'ytdl-web-b-3 2026-09-11b): ' + '; '.join(hits)
+    )
+
+
+@pytest.mark.parametrize('path', _js_files(), ids=lambda p: p.name)
+def test_app_js_has_no_double_hyphen(path: Path) -> None:
+    text = path.read_text(encoding='utf-8')
+    text = _LINE_COMMENT.sub('', _BLOCK_COMMENT.sub('', text))
+    hits = _double_hyphen_lines(text, path.name)
+    assert not hits, (
+        "' -- ' reads as an em dash in JS that paints text (house style "
+        '2026-08-18, ytdl-web-b-3 2026-09-11b): ' + '; '.join(hits)
+    )

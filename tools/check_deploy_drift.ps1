@@ -95,6 +95,10 @@ function Write-Drift { param([string]$m) Write-Host "  DRIFT $m" -ForegroundColo
 function Write-Unknown { param([string]$m) Write-Host "  ?     $m" -ForegroundColor DarkGray }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+# The pure decision helpers this doctor shares with the ship gate live in
+# ship_gates.ps1 so the tools suite can dot-source and drive them
+# (Get-CardsDeployVerdict, 2026-09-11b). Functions only, no side effects.
+. (Join-Path $PSScriptRoot "ship_gates.ps1")
 $CompanionDir = Join-Path $RepoRoot "companion"
 $ExeBuilt = Join-Path $CompanionDir "dist\ccsync-companion.exe"
 $ManifestBuilt = Join-Path $CompanionDir "dist\ccsync-release.json"
@@ -726,53 +730,77 @@ if ($AdminUser -and $DashboardUrl) {
 # doctor is read-only and has no NAS shell, so the record is what it reads.
 # No record is "not checked", never OK: a check that cannot see is not a pass.
 
-Write-Head "TIMELINE CARDS (/cards, another repo's commit)"
-
 $CardsRecord = $env:CCSYNC_CARDS_RECORD
 if (-not $CardsRecord) { $CardsRecord = Join-Path $CcsyncHome "state\cards_deployed.json" }
+# server-tools-b-4 (2026-09-11b): does this site have Timeline Cards at all?
+# Every customer who did not buy it, and every base rig that has never run the
+# deploy, used to get a permanent "? NOT CHECKED, not OK" pointing at an
+# internal runbook for a feature they do not have.
+$CardsSiteSrc = Get-SiteScalar -Path $SitePath -Section "timeline_cards" -Key "src"
+$CardsSiteOn = Get-SiteScalar -Path $SitePath -Section "timeline_cards" -Key "enabled"
+$CardsSite = [bool]($CardsSiteSrc -or ($CardsSiteOn -and $CardsSiteOn -ne "false") -or $env:CCSYNC_CARDS_RECORD)
+
 $cardsInfo = $null
+$cardsUnreadable = ""
 if (Test-Path -LiteralPath $CardsRecord) {
     try { $cardsInfo = Get-Content -LiteralPath $CardsRecord -Raw -Encoding UTF8 | ConvertFrom-Json }
-    catch { Write-Unknown "unreadable cards deploy record at $CardsRecord ($($_.Exception.Message))" }
+    catch { $cardsUnreadable = "$($_.Exception.Message)" }
 }
-if (-not $cardsInfo) {
-    Write-Unknown "no cards deploy record at $CardsRecord -- this machine has not shipped /cards since 2026-09-11 (docs\CARDS_DEPLOY.md). NOT CHECKED, not OK."
-}
-else {
-    $cardsCommit = "$($cardsInfo.commit)".Trim()
-    $cardsRef = "$($cardsInfo.ref)".Trim()
-    $cardsRepo = "$($cardsInfo.repo)".Trim()
-    Write-Row "deployed commit" "$($cardsInfo.short)  ($cardsRef)"
-    if ("$($cardsInfo.subject)".Trim()) { Write-Row "  subject" "$($cardsInfo.subject)" }
-    if ("$($cardsInfo.exported)".Trim()) { Write-Row "  shipped" "$($cardsInfo.exported)" }
-    Write-Row "  from repo" $cardsRepo
-    if (-not $cardsRepo -or -not (Test-Path -LiteralPath $cardsRepo)) {
-        Write-Unknown "the Timeline Cards repo '$cardsRepo' is not on this machine -- cannot say whether it has moved on"
+if ($cardsInfo -or $CardsSite -or $cardsUnreadable) {
+    Write-Head "TIMELINE CARDS (/cards, another repo's commit)"
+    if ($cardsUnreadable) {
+        Write-Unknown "unreadable cards deploy record at $CardsRecord ($cardsUnreadable)"
     }
-    else {
-        if (-not $cardsRef) { $cardsRef = "main" }
-        # Called through & rather than `cmd /c` like the git describe above:
-        # cmd eats the caret in `main^{commit}` (it is cmd's own escape
-        # character) and git then resolves a ref called "main{commit}",
-        # which never exists -- the check silently became "cannot compare".
-        $cardsHead = ""
-        try { $cardsHead = "$(& git -C $cardsRepo rev-parse --verify "$cardsRef^{commit}" 2>$null)".Trim() }
-        catch { $cardsHead = "" }
-        if (-not $cardsHead) {
-            Write-Unknown "cannot read $cardsRef in $cardsRepo -- cannot compare"
+    $cardsHead = ""
+    $cardsAhead = ""
+    $cardsDirty = 0
+    if ($cardsInfo) {
+        $cardsRepo = "$($cardsInfo.repo)".Trim()
+        if ("$($cardsInfo.commit)".Trim()) {
+            Write-Row "deployed commit" "$($cardsInfo.short)  ($($cardsInfo.ref))"
+            if ("$($cardsInfo.subject)".Trim()) { Write-Row "  subject" "$($cardsInfo.subject)" }
+            Write-Row "  from repo" $cardsRepo
         }
-        elseif ($cardsHead -eq $cardsCommit) {
-            Write-Ok "/cards was shipped from $cardsRef at $($cardsInfo.short), which is still its head"
+        elseif ("$($cardsInfo.override)".Trim()) {
+            Write-Row "deployed directory" "$($cardsInfo.override)"
         }
-        else {
-            $ahead = ""
-            try { $ahead = "$(& git -C $cardsRepo rev-list --count "$cardsCommit..$cardsHead" 2>$null)".Trim() }
-            catch { $ahead = "" }
-            $count = ""
-            if ($ahead -and $ahead -ne "0") { $count = " ($ahead commits)" }
-            Write-Drift "$cardsRef in $cardsRepo is now $($cardsHead.Substring(0, [Math]::Min(12, $cardsHead.Length)))$count, ahead of the shipped $($cardsInfo.short)"
+        if ("$($cardsInfo.exported)".Trim()) { Write-Row "  shipped" "$($cardsInfo.exported)" }
+        if ($cardsRepo -and (Test-Path -LiteralPath $cardsRepo)) {
+            $cardsRef = "$($cardsInfo.ref)".Trim()
+            if (-not $cardsRef) { $cardsRef = "main" }
+            # Called through & rather than `cmd /c` like the git describe
+            # above: cmd eats the caret in `main^{commit}` (it is cmd's own
+            # escape character) and git then resolves a ref called
+            # "main{commit}", which never exists -- the check silently became
+            # "cannot compare".
+            try { $cardsHead = "$(& git -C $cardsRepo rev-parse --verify "$cardsRef^{commit}" 2>$null)".Trim() }
+            catch { $cardsHead = "" }
+            try { $cardsAhead = "$(& git -C $cardsRepo rev-list --count "$("$($cardsInfo.commit)".Trim())..$cardsHead" 2>$null)".Trim() }
+            catch { $cardsAhead = "" }
+            # server-tools-b-1: what is in that checkout and NOT in the deploy.
+            $cardsSubtree = "$($cardsInfo.subtree)".Trim()
+            try {
+                $statusArgs = @("-C", $cardsRepo, "status", "--porcelain")
+                if ($cardsSubtree) { $statusArgs += @("--", $cardsSubtree) }
+                $cardsDirty = @(& git @statusArgs 2>$null | Where-Object { "$_".Trim() }).Count
+            }
+            catch { $cardsDirty = 0 }
+        }
+        elseif ("$($cardsInfo.commit)".Trim()) {
+            Write-Unknown "the Timeline Cards repo '$cardsRepo' is not on this machine -- cannot say whether it has moved on"
+        }
+    }
+    $cardsVerdict = Get-CardsDeployVerdict -Record $cardsInfo -Head $cardsHead `
+        -Dirty $cardsDirty -SiteHasCards $CardsSite -RecordPath $CardsRecord `
+        -Ahead $cardsAhead
+    switch ($cardsVerdict.Kind) {
+        "ok"    { Write-Ok $cardsVerdict.Text }
+        "drift" {
+            Write-Drift $cardsVerdict.Text
             Write-Host "        => re-ship: dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py   (docs\CARDS_DEPLOY.md)" -ForegroundColor Yellow
         }
+        "skip"  { }
+        default { Write-Unknown $cardsVerdict.Text }
     }
 }
 

@@ -58,6 +58,11 @@ log = logging.getLogger("ccsync.dashboard.cards_exec")
 # their footage is syncing.
 POLL_SECONDS = 10.0
 
+# How long stop() waits for a tick to end before giving up on it and KEEPING
+# the handle (dash-release-jobs-1, 2026-09-11b). A constant so a test can
+# reach the overrun case without sitting out a real five seconds.
+STOP_JOIN_SECONDS = 5.0
+
 # The seam the Timeline Cards engine provides (§7f). Named here as a constant
 # because "is there an executor" is asked in three places and must be one
 # question.
@@ -142,7 +147,20 @@ class PinnedExecutor:
 
     # -- the loop --------------------------------------------------------
     def start(self) -> None:
-        if self._thread is not None or not self.available():
+        # dash-release-jobs-1 (2026-09-11b): a thread that outlived stop()'s
+        # join is still looping on `not self._stop.is_set()`, so clearing the
+        # event under it revives it -- here that is a SECOND ffmpeg worker on
+        # the same pinned queue, both claiming and both writing. Only a
+        # thread that really ended may be dropped.
+        thread = self._thread
+        if thread is not None:
+            if thread.is_alive():
+                log.warning("the pinned job executor is still running from a previous "
+                            "start (a tick that outlived stop()'s join) -- not starting "
+                            "a second one")
+                return
+            self._thread = None
+        if not self.available():
             return
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="ccsync-pinned",
@@ -150,10 +168,18 @@ class PinnedExecutor:
         self._thread.start()
 
     def stop(self) -> None:
+        # dash-release-jobs-1 (2026-09-11b): keep the handle when the join
+        # times out; `join(timeout)` cannot be asked whether it worked.
         self._stop.set()
-        thread, self._thread = self._thread, None
-        if thread is not None:
-            thread.join(timeout=5.0)
+        thread = self._thread
+        if thread is None:
+            return
+        thread.join(timeout=STOP_JOIN_SECONDS)
+        if thread.is_alive():
+            log.warning("the pinned job executor did not stop within 5s (it is inside a "
+                        "media job) -- keeping its handle so nothing starts a second one")
+            return
+        self._thread = None
 
     def _loop(self) -> None:
         """ONE CONNECTION FOR THE LIFE OF THE THREAD, the collector's shape

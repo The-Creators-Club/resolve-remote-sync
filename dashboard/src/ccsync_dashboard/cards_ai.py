@@ -864,6 +864,17 @@ def selection_block(selection: Any, staged: Any = None) -> str:
                      "the file but not in the cut:" % (len(shelf),))
         for n, row in enumerate(shelf[:MAX_SELECTION_ROWS], 1):
             lines.append(_selection_line(n, row))
+        # dash-release-jobs-2 (2026-09-11b): the staged half used to print the
+        # FULL count in its header and then render MAX_SELECTION_ROWS rows with
+        # nothing saying the rest existed. A model told there are 120 and shown
+        # 40 answers a question about 120 with an op naming 40, and the editor
+        # reads that as the whole selection. The selected half has carried this
+        # line since it was written; the two halves say the same thing now.
+        rest_shelf = shelf[MAX_SELECTION_ROWS:]
+        if rest_shelf:
+            lines.append("  ...and %d more, by id alone: %s"
+                         % (len(rest_shelf), " ".join("[%s]" % r["id"]
+                                                      for r in rest_shelf)))
     lines.append(SELECTION_END)
     return "\n".join(lines) + "\n"
 

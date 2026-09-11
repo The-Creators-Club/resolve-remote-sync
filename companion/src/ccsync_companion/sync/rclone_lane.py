@@ -111,6 +111,17 @@ IN_PROGRESS_EXCLUDE_RULES = ["- *.tmp", "- *.lock", "- *.partial"]
 # trailing `- **`.
 APPLEDOUBLE_EXCLUDE_RULE = "- ._*"
 
+# comp-sync-b-4 (2026-09-11b): file_moves._rename_case_only stages the file
+# under `.ccsync-move-<pid>-<original name>` between its two replaces, and a
+# Windows editor whose Resolve grabs a handle in that window (WinError 32 on
+# the replace AND on the restore) is left holding exactly that name. It keeps
+# the original extension, so it matched lane A's `+ *.mov` and the next pass
+# uploaded it to the NAS beside the real clip -- the duplicate-at-the-cleared-
+# path failure docs/FILE_MOVES.md exists to prevent, wearing a different
+# name. No leading `/`: the basename at any depth, like the two rules above.
+MOVE_STAGING_PREFIX = ".ccsync-move-"
+MOVE_STAGING_EXCLUDE_RULE = f"- {MOVE_STAGING_PREFIX}*"
+
 # YT-3 (resilience sweep 2026-08-28): the ytdl executors download AND convert
 # inside the tree, so a half-made file carries a real video extension while
 # `_ensure_edit_ready`'s libx264 pass runs (minutes to hours). Lane A is
@@ -593,6 +604,7 @@ def build_filter_rules_up(exclude_paths: Optional[Iterable[str]] = None) -> list
         rules.append(f"- /{escaped}/**")
     rules += ["- **/Proxy/**", "- /Proxy/**"]
     rules += YTDL_WORK_EXCLUDE_RULES
+    rules.append(MOVE_STAGING_EXCLUDE_RULE)
     rules += [f"+ *{ext}" for ext in VIDEO_EXTS]
     rules.append("- **")
     return rules
@@ -641,6 +653,7 @@ def build_filter_rules_down() -> list[str]:
         *IN_PROGRESS_EXCLUDE_RULES,
         "- *.part",
         "- *.ytdl",
+        MOVE_STAGING_EXCLUDE_RULE,
         "+ /Proxy/",
         "+ /Proxy/**",
         "+ **/Proxy/",
@@ -1736,6 +1749,11 @@ def path_matches_lane_a_filter(path: str) -> bool:
         return False
     parts = [seg for chunk in str(path).split("/") for seg in chunk.split("\\")]
     if parts and parts[-1].startswith("._"):
+        return False
+    # comp-sync-b-4: express is lane A's OTHER door, and a file-move staging
+    # name is a real video extension sitting perfectly still on disk, so it
+    # clears the size-stability and min-age gates easily.
+    if parts and parts[-1].startswith(MOVE_STAGING_PREFIX):
         return False
     if parts and any(rx.match(parts[-1]) for rx in YTDL_WORK_EXCLUDE_RES):
         return False
@@ -3329,17 +3347,23 @@ class RcloneLane(LaneAdapter):
             )
 
     def run_once(
-        self, subpath: Optional[str] = None, max_duration_seconds: Optional[float] = None
+        self, subpath: Optional[str] = None, max_duration_seconds: Optional[float] = None,
+        rotation_pass: bool = False,
     ) -> LaneStatus:
         """One synchronous pass. `max_duration_seconds` is a per-project time
         budget (the sequencer passes project_rotation_seconds) -- without it
         a single 200 GB ingest holds _run_lock, and therefore every other
-        project's lanes, for as long as it takes (AUDIT_2 L-4)."""
+        project's lanes, for as long as it takes (AUDIT_2 L-4).
+
+        `rotation_pass` says this call is one of the sequencer's rotation
+        turns, and is the only kind of call the stale-subpath gate below may
+        drop (regression-4, 2026-09-11b)."""
         with self._run_lock:
-            return self._run_once_locked(subpath, max_duration_seconds)
+            return self._run_once_locked(subpath, max_duration_seconds, rotation_pass)
 
     def _run_once_locked(
-        self, subpath: Optional[str] = None, max_duration_seconds: Optional[float] = None
+        self, subpath: Optional[str] = None, max_duration_seconds: Optional[float] = None,
+        rotation_pass: bool = False,
     ) -> LaneStatus:
         # Cleared here rather than only set at the end, so an early return
         # (breaker, stopped lane, missing root) reads as "this pass moved
@@ -3381,8 +3405,18 @@ class RcloneLane(LaneAdapter):
         # a project directory the next project's repath is moving. Optional
         # and duck-typed -- a lane with no such question to ask behaves
         # exactly as it did.
+        #
+        # regression-4 (2026-09-11b): ROTATION PASSES ONLY. The question is
+        # "has the rotation moved on since this pass was started", and it is
+        # nonsense asked of any other caller: CONSOLIDATE and FIX ALL call
+        # run_once on the SAME lane object the sequencer holds
+        # (app._consolidate_upload_phase), and _lane_b_subpath is sticky
+        # between turns, so an editor consolidating project X while the last
+        # turn was on Y had the consolidate's proxy pull dropped - after the
+        # progress UI had already said "Downloading proxies from the
+        # server...", with nothing but a log warning to show for it.
         current = self.subpath_still_current
-        if current is not None and subpath:
+        if current is not None and subpath and rotation_pass:
             try:
                 still = bool(current(subpath))
             except Exception:
@@ -3499,6 +3533,7 @@ class RcloneLane(LaneAdapter):
         # every early return below, or a crashed run would exclude its
         # subpath from express forever.
         self._set_periodic_scope(str(subpath or "").replace("\\", "/").strip("/"))
+        self._begin_breaker_pass()
         try:
             if self._legacy_run:
                 try:
@@ -4514,6 +4549,20 @@ class RcloneLane(LaneAdapter):
             # because this is the one place real movement is observed.
             self._status.progress_token = progress_token(
                 stats.get("bytes"), moved, subpath)
+
+    def _begin_breaker_pass(self) -> None:
+        """Tell the breaker a new run is starting (comp-sync-b-3,
+        2026-09-11b). Never raises, and duck-typed: a breaker from an older
+        build simply keeps the behaviour it had."""
+        if self.direction != DIRECTION_DOWN or self.breaker is None:
+            return
+        try:
+            begin = getattr(self.breaker, "begin_pass", None)
+            if begin is not None:
+                begin()
+        except Exception:
+            log.debug("%s: could not start the breaker's pass account",
+                      self.name, exc_info=True)
 
     def _credit_deletes_in_flight(self, tally: Optional[RcloneRunTally]) -> None:
         """Lane B only, and never raises: the accounting is a safety device,

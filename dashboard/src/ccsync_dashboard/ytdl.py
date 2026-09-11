@@ -219,6 +219,16 @@ class YtdlGate:
         if kind == api.AUTH_SHARED:
             return b"shared"
         if kind == api.AUTH_EDITOR and editor:
+            # security-1 (fix pass 2026-09-11b): suspension revokes no `cce1.`
+            # token (DCORE-4), so a suspended freelancer's laptop could go on
+            # claiming downloads into the shared tree through this door - the
+            # one door that WRITES video. The predicate is api's, shared with
+            # the other two mounts; withholding the stamp is the refusal,
+            # because the stamp is what the sub-app authorises a claim on.
+            barred = self._account_bar(editor)
+            if barred:
+                log.warning("ytdl fleet stamp withheld for %r: %s", editor, barred)
+                return None
             encoded = _header_value(f"editor:{editor}")
             if encoded is None:
                 # Same fail-closed rule as the identity header: a name that
@@ -228,6 +238,27 @@ class YtdlGate:
                 return None
             return encoded
         return None
+
+    def _account_bar(self, editor: str) -> str | None:
+        """Why this editor's machines may not be stamped, or None (security-1).
+
+        The same short-lived connection `_credential` opens, and the same
+        FAIL-OPEN rule `api.account_bar_reason` states about itself: a
+        database this gate cannot read must never turn the fleet away.
+        """
+        settings = self._settings
+        try:
+            conn = db.connect(settings.db_path)
+        except Exception:                                              # noqa: BLE001
+            return None
+        try:
+            return api.account_bar_reason(settings, conn, editor)
+        except Exception:                                              # noqa: BLE001
+            log.warning("could not read the account state for %r", editor,
+                        exc_info=True)
+            return None
+        finally:
+            conn.close()
 
     def _credential(self, token: str) -> tuple[str, str | None]:
         """(AUTH_*, editor) for a token, opening a connection only when the
@@ -696,8 +727,14 @@ def _init_ytdl_storage() -> None:
     # the mount.
     root = getattr(ytdl_config, "DATA_ROOT", "") or os.environ.get(
         "YTDL_DATA_ROOT", "./data")
-    # res-fleet-2 (2026-09-11): the root the collector re-probes every cycle.
-    mount_status.record_root("ytdl", str(root))
+    # res-fleet-2 (2026-09-11): the root the collector re-probes every cycle,
+    # and dash-mounts-ui-b-1's witness beside it (hand-off wave 2026-09-11b).
+    # The root is a bind-mount TARGET and a bind mount that goes away leaves
+    # its mount point behind, so the root answers True however the host is;
+    # ytdl creates no directory of its own inside it, so the witness is
+    # ytdl.db - a FILE, which is why `recheck` probes existence.
+    witness = getattr(ytdl_config, "DB_PATH", "") or (Path(root) / "ytdl.db")
+    mount_status.record_root("ytdl", str(root), witness=str(witness))
     Path(root).mkdir(parents=True, exist_ok=True)
 
     con = ytdl_db.connect()

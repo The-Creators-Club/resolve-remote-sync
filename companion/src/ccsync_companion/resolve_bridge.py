@@ -378,7 +378,15 @@ def connect():
             # diagnoses are read out of this line.
             _note_starting(None, ready=False)
             return None
-        _note_starting(None)
+        # comp-resolve-b-4 (2026-09-11b): READY and UNKNOWN both connect, and
+        # they are not the same event. UNKNOWN is the fail-open answer -- the
+        # TCP table could not be read, or 1144 is held by something that is
+        # not fuscript -- so logging it as "script server has its host now"
+        # put a claim the probe never made into the one line a CR-68
+        # diagnosis is read out of, and the next reader concludes scripting
+        # was healthy while the guard was blind.
+        _note_starting(None, ready=(True if phase == script_server.READY
+                                    else None))
         try:
             _ensure_env_and_syspath()
         except Exception:
@@ -413,19 +421,30 @@ _starting_lock = threading.Lock()
 _starting_since: Optional[float] = None
 
 
-def _note_starting(why: Optional[str], ready: bool = True) -> None:
+def _note_starting(why: Optional[str], ready: Optional[bool] = True) -> None:
     """A sentence OPENS the launch window; None closes it.
 
     Three outcomes, not two (comp-resolve-6, 2026-09-11): the window opens,
     the window ends with Resolve registered, and the window ends with Resolve
     gone. The third used to be logged as the second.
+
+    `ready` is TRI-STATE (comp-resolve-b-4, 2026-09-11b): None is the probe
+    that could not tell. Saying so is the whole value of this line -- a
+    blind guard and a healthy one read identically otherwise.
     """
     global _starting_since
     with _starting_lock:
         if why is None:
             if _starting_since is not None:
                 held = time.monotonic() - _starting_since
-                if ready:
+                if ready is None:
+                    log.info(
+                        "resolve: the script-server probe could not tell "
+                        "whether Resolve has registered after %.1fs -- "
+                        "connecting anyway, which is what the guard fails "
+                        "open to (CR-68)", held,
+                    )
+                elif ready:
                     log.info(
                         "resolve: script server has its host now -- connecting "
                         "(held off for %.1fs)", held,

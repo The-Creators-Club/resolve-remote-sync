@@ -98,6 +98,10 @@ def test_filter_rules_down_allows_proxy_dir_and_contents_then_excludes_rest():
         "- /.ccsync-trash/**",
         "- *.tmp", "- *.lock", "- *.partial",
         "- *.part", "- *.ytdl",
+        # comp-sync-b-4 (2026-09-11b): file_moves' case-only-rename staging
+        # name. It keeps the original's extension, so a proxy being renamed
+        # would otherwise match `+ **/Proxy/**` and come back down.
+        "- .ccsync-move-*",
         "+ /Proxy/", "+ /Proxy/**",
         "+ **/Proxy/", "+ **/Proxy/**",
         "- **",

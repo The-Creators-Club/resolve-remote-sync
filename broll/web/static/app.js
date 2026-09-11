@@ -177,7 +177,17 @@ async function fetchJson(url, opts) {
       toast("Session expired, signing in again…", "error");
       window.location.assign(`/login?next=${back}`);
     }
-    const detail = body && (body.detail || body.message);
+    // broll-2 (2026-09-11b): a route that raises HTTPException(409, {...})
+    // with a DICT detail (routes_batches' held-batch refusal is one) put an
+    // object into `new Error(...)`, and `Error.message` of an object is the
+    // string "[object Object]" - which is what the editor read in a red
+    // toast instead of the sentence telling them which computer to stop.
+    // Unwrapped once HERE so every caller gets a sentence; `err.body` still
+    // carries the whole object for the callers that read `reason`.
+    let detail = body && (body.detail || body.message);
+    if (detail && typeof detail === "object") {
+      detail = detail.detail || detail.message || "";
+    }
     const err = new Error(detail || `HTTP ${res.status}`);
     err.status = res.status;
     err.body = body;

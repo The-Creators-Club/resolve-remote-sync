@@ -1714,22 +1714,42 @@ async function ingestRetryFailedBatch(uid) {
     ingestLoadBatches();
     return;
   }
+  // comp-broll-music-1 (2026-09-11b): WITH THIS PAGE'S STAGING ID. The
+  // companion populates `local_path` in exactly one place, by matching the
+  // server's manifest against the items of `self._staging[staging_id]`, so a
+  // claim carrying `staging_id: null` builds every item with no source and
+  // `_crunch_item` fails all of them ("the source file is not on this
+  // computer any more") twice each, then releases the batch failed. Pressing
+  // the button again did it again, so a drop whose bytes were still in
+  // staging was unrecoverable without re-dropping the files. Guarded the way
+  // the music page guards its own: only this page's own staging id, only
+  // while it is still the batch this page staged.
+  const stagingId = (uid === ing.batchUid && ing.stagingId) ? ing.stagingId : null;
   try {
     await ingestLoopback("POST", "/broll/ingest/run", {
-      batch_uid: uid, staging_id: null, run_mode: ing.runMode,
+      batch_uid: uid, staging_id: stagingId, run_mode: ing.runMode,
       start_now: ing.runMode === "foreground",
     });
   } catch (e) {
-    if (e.status === 409) {
-      ingestSetNotice("The clips are queued again. Another of your computers " +
-                      "is still working on this batch, so it picks them up.");
-    } else {
-      ingestSetNotice(`The clips are queued again, but this computer did not ` +
-                      `pick them up: ${e.message}`);
-    }
+    // broll-1 (2026-09-11b): say what the companion said. The 409 here is
+    // almost always "this computer is already indexing another batch" -
+    // `run()` answers that one first, before any claim is attempted, and the
+    // retry-failed route above has already refused the case where ANOTHER of
+    // this editor's machines holds the batch - so the old "another of your
+    // computers picks them up" was both wrong and an instruction to wait for
+    // something that will never happen: nothing polls for queued batches.
+    // And the dispatch failed, so this page is not running the batch: saying
+    // it is leaves the live panel polling a run that does not exist.
+    ingestSetNotice(`The clips are queued again, but this computer did not ` +
+                    `pick them up: ${e.message}`);
+    toast(`${answer.retried} clip${answer.retried === 1 ? "" : "s"} queued again.`,
+          "warn");
+    ingestLoadBatches();
+    return;
   }
   ing.batchUid = uid;
   ing.running = true;
+  ingestSetNotice("");
   toast(`${answer.retried} clip${answer.retried === 1 ? "" : "s"} queued again.`,
         "success");
   ingestStartPolling();

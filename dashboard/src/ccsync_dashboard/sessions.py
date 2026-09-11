@@ -389,8 +389,18 @@ class SessionStore:
                 blocked_until = None
                 limit = LOGIN_FAILURE_LIMIT_IP if scope == SCOPE_IP else LOGIN_FAILURE_LIMIT
                 if failures >= limit:
+                    # dash-core-3 (2026-09-11b): clamp the EXPONENT, not just
+                    # the product. `2 ** n` is an unbounded Python int and the
+                    # multiply happens before min() sees it, so a key that
+                    # reached ~1024 failures (an attacker who retries once an
+                    # hour keeps the row fresh for ever, and the IP budget is
+                    # shared by everyone behind Tailscale Serve) raised
+                    # OverflowError - not an sqlite3.OperationalError, so _run
+                    # did not catch it and every further failed sign-in for
+                    # that key 500'd instead of being throttled. 2**16 minutes
+                    # is already far past the hour ceiling.
                     delay = min(
-                        LOGIN_BACKOFF_BASE_SECONDS * (2 ** (failures - limit)),
+                        LOGIN_BACKOFF_BASE_SECONDS * (2 ** min(failures - limit, 16)),
                         LOGIN_BACKOFF_MAX_SECONDS,
                     )
                     blocked_until = _shift(now, delay)

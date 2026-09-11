@@ -28,6 +28,7 @@ import io
 import logging
 import shutil
 import time
+import traceback
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -962,10 +963,42 @@ def check_settings(conn, settings, now: str | None = None) -> None:
 
 # -------------------------------------------------------------- 5xx faults
 
-# What a server error body may carry. Truncated hard, and the exception's own
-# message is NOT included: it is the one string that could hold a path, a
-# query or a credential fragment.
+# What a server error body may carry. Truncated hard.
+#
+# The exception's own message USED TO BE LEFT OUT, because it is the one
+# string that could hold a path, a query or a credential fragment. CR-266b
+# (2026-09-11b) reverses that, because the sentence the omission left behind -
+# "the full error is in the server log" - is not true of the deployment this
+# server actually runs: in image mode `/data` survives a recreate and the
+# container's log does not, so the one notice the live dashboard recorded on
+# 2026-09-10 ("/api/v1/admin/ai-providers/claude_code/install (TypeError)",
+# once) named a fault whose traceback no longer exists anywhere. A diagnosis
+# nobody can act on is a log line with better placement, which is the rule
+# this whole module was written against. The mitigation is the pair below:
+# every character goes through `crash_report.redact` first, and the whole
+# detail is bounded, because this text is rendered on the home page, quoted
+# into an error alert body and carried in every database backup.
 SERVER_ERROR_BODY_CHARS = 200
+
+# CR-266b: how much of the exception's own account of itself the body keeps.
+# About two panel lines' worth on the home page and about twenty lines of a
+# digest mail: enough for a type, a message and the three frames that say
+# which of our own lines raised, never enough to be a crash dump in a table
+# nothing prunes.
+SERVER_ERROR_DETAIL_CHARS = 1500
+
+# How much of that budget the exception's MESSAGE may take. Capped on its own
+# so the frames always survive: a `TypeError` whose message is a repr of the
+# whole request body would otherwise spend the lot and leave the one part of
+# the record that says which of our lines raised out of the notice.
+SERVER_ERROR_MESSAGE_CHARS = 700
+
+# How many of the INNERMOST traceback frames the body names. Three: the line
+# that raised, the line that called it and one more, which is what tells "our
+# own code did this" from "a library did this under our call" without
+# reprinting the whole stack of a request that came through Starlette,
+# FastAPI, a middleware chain and a router.
+SERVER_ERROR_FRAMES = 3
 
 
 # How many leading path segments a redacted subject keeps. TWO, and the
@@ -1000,6 +1033,63 @@ def redact_path(path: str, route: str = "") -> str:
     return kept[:120]
 
 
+def _frame_label(filename: str, lineno: Any, function: str) -> str:
+    """`ccsync_dashboard/cli_tools.py:412: install_tool`.
+
+    CR-266b. REPO-RELATIVE, not absolute: the frames are read by whoever has
+    the repo open, and an absolute path here would put the container's
+    directory layout on the home page (the same reason app.py's 500 body
+    carries nothing derived from the exception). Anything the trim cannot
+    recognise keeps its last two segments, which is bounded and still names a
+    file.
+    """
+    parts = [p for p in str(filename or "").replace("\\", "/").split("/") if p]
+    for anchor in ("ccsync_dashboard", "src", "site-packages"):
+        if anchor in parts:
+            parts = parts[parts.index(anchor):]
+            if anchor == "src":
+                parts = parts[1:]
+            break
+    else:
+        parts = parts[-2:]
+    where = "/".join(parts) or "?"
+    try:
+        line = int(lineno)
+    except (TypeError, ValueError):
+        line = 0
+    return f"{where}:{line}: {function or '?'}"
+
+
+def error_detail(exc: BaseException) -> str:
+    """What the exception says about itself, masked and bounded (CR-266b).
+
+    Three facts, in the order a reader needs them: the type, the message, and
+    the innermost `SERVER_ERROR_FRAMES` frames innermost-first. Every one of
+    them goes through `crash_report.redact`, which is the module that already
+    holds this server's "an exception message routinely quotes a URL or a
+    header" rule and is shared with the crash files an operator emails.
+
+    NEVER RAISES: a notice is a best-effort record of somebody else's
+    failure, and this function is called from the 500 handler. An exception
+    with no traceback (one constructed by hand, or a test's) is a type and a
+    message with no frames, which is honest rather than empty.
+    """
+    try:
+        message = crash_report.redact(str(exc) or "").strip()[
+            :SERVER_ERROR_MESSAGE_CHARS]
+        head = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+        frames = traceback.extract_tb(getattr(exc, "__traceback__", None))
+        labels = [_frame_label(f.filename, f.lineno, f.name)
+                  for f in list(frames)[-SERVER_ERROR_FRAMES:][::-1]]
+        where = crash_report.redact(" <- ".join(labels)) if labels else ""
+        detail = f"What went wrong: {head}"
+        if where:
+            detail = f"{detail} Where: {where}"
+        return detail[:SERVER_ERROR_DETAIL_CHARS]
+    except Exception:                                               # noqa: BLE001
+        return "What went wrong: the error could not be described."
+
+
 def record_server_error(
     conn, path: str, exc: BaseException, now: str | None = None,
     route: str = "",
@@ -1026,11 +1116,16 @@ def record_server_error(
             if token.isdigit():
                 seen = int(token) + 1
                 break
+    # CR-266b: the count stays the FIRST digit token of the body, because
+    # that is how the occurrence above is read back out of the previous row.
+    # The detail goes after the sentence, never before it.
     db.notice(
         conn, "server_error", "error", subject,
         body=(f"{seen} time(s) a request to {path} failed with an error "
-              f"({type(exc).__name__}). Whoever was using that page saw a failure."),
-        fix=("Open Settings, Diagnostics and send the detail to support. The full error "
-             "is in the server log with this same path."),
+              f"({type(exc).__name__}). Whoever was using that page saw a failure. "
+              f"{error_detail(exc)}"),
+        fix=("Open Settings, Diagnostics and send the detail to support. The error "
+             "above is from the most recent time it happened; a container recreate "
+             "loses the server log, so this notice is the copy that survives."),
         now=stamp)
     conn.commit()

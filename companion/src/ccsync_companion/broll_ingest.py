@@ -531,6 +531,32 @@ def _iso_epoch(value: str) -> float:
         return 0.0
 
 
+def _dir_newest_mtime(directory: Any, max_files: int = 200_000) -> float:
+    """The newest mtime under `directory`, 0.0 when there is nothing readable.
+
+    comp-broll-music-2 (2026-09-11b): a staged drop has no `ended_at` until a
+    batch that claimed it ends, so the only clock a never-run drop has is when
+    it was staged -- which is hours old while a 400-clip drop's PUTs are still
+    arriving. The bytes landing are the honest signal that it is still in use.
+    """
+    newest = 0.0
+    seen = 0
+    try:
+        for dirpath, _dirnames, filenames in os.walk(str(directory)):
+            for name in filenames:
+                seen += 1
+                if seen > max_files:
+                    return newest
+                try:
+                    newest = max(newest,
+                                 os.path.getmtime(os.path.join(dirpath, name)))
+                except OSError:
+                    continue
+    except OSError:
+        return newest
+    return newest
+
+
 def _accepts_child_sink(runner: Any) -> bool:
     """Whether this media runner takes MEDIA-2's `child_sink` keyword."""
     try:
@@ -1256,6 +1282,7 @@ class BrollIngestor:
         # Staged files stay for the retention window (plan §6), and this is
         # what starts that window (MEDIA-3).
         self._note_staging_ended(batch)
+        self._forget_batch_scratch(batch)
         with self._lock:
             self._batch = None
             self._current = {}
@@ -1713,6 +1740,32 @@ class BrollIngestor:
             return 503, {"ok": False, "message": why, "reason": "tier_unfit"}
         self._clear_warning()
 
+        items = [self._item_from_manifest(entry, staging)
+                 for entry in parsed.get("items") or []]
+        if not staging_id and items and not any(i.get("local_path") for i in items):
+            # comp-broll-music-1 (2026-09-11b): a claim that names no staging
+            # id builds every item with `local_path: ""`, and `_crunch_item`
+            # opens by failing an item with no source. For a genuine TAKE-OVER
+            # that is right (this machine really has none of the files); for a
+            # RETRY FAILED posted by the page that staged the drop it burns
+            # MAX_ITEM_ATTEMPTS on every clip and releases the batch failed
+            # with the bytes still sitting in staging, and pressing the button
+            # again repeats it exactly. So: if this machine is holding a
+            # staging entry for these very files, the dispatch lost the id and
+            # the claim is refused rather than spent. Not released -- the lease
+            # expires and the corrected request (or another machine) takes it,
+            # for the reason _fits gives above.
+            held = self._staging_holding(items)
+            if held:
+                self.log.warning(
+                    "refusing batch %s: it named no staging id, but %s on this "
+                    "computer holds the files it lists", batch_uid, held)
+                return 409, {"ok": False, "reason": "staging_id_missing",
+                             "staging_id": held, "message": (
+                                 f"this computer has those {self.kind.unit}s "
+                                 "staged, but the request did not say which "
+                                 "drop: reload the page and try again")}
+
         batch = {
             "uid": batch_uid,
             "staging_id": staging_id,
@@ -1723,8 +1776,7 @@ class BrollIngestor:
             "archive_remote_rel": self._remote_rel(parsed),
             "taxonomy": parsed.get("taxonomy") or [],
             "heartbeat_seconds": parsed.get("heartbeat_seconds") or HEARTBEAT_SECONDS,
-            "items": [self._item_from_manifest(entry, staging)
-                      for entry in parsed.get("items") or []],
+            "items": items,
             "claimed_at": _iso_now(),
         }
         with self._lock:
@@ -1757,6 +1809,27 @@ class BrollIngestor:
         """
         return (parsed.get("archive_remote_rel")
                 or broll_upload.ARCHIVE_REMOTE_REL)
+
+    def _staging_holding(self, items: list) -> str:
+        """The staging id on THIS machine that holds these manifest items, or "".
+
+        Matched the way `_item_from_manifest` matches (name + rel_dir), so the
+        answer is exactly "the drop whose local paths this claim should have
+        been given" (comp-broll-music-1, 2026-09-11b).
+        """
+        wanted = {(str(i.get("name") or ""), str(i.get("rel_dir") or ""))
+                  for i in items}
+        with self._lock:
+            entries = list((self._staging or {}).items())
+            for sid, entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                for candidate in (entry.get("items") or {}).values():
+                    key = (str(candidate.get("name") or ""),
+                           str(candidate.get("rel_dir") or ""))
+                    if key in wanted and str(candidate.get("path") or ""):
+                        return str(sid)
+        return ""
 
     def _item_from_manifest(self, entry: dict, staging: Optional[dict]) -> dict:
         """One manifest row plus whatever this machine knows about the file."""
@@ -2069,7 +2142,15 @@ class BrollIngestor:
         while not self._should_stop():
             item = self._next_item()
             if item is None:
-                return STATE_NOTHING_TO_DO
+                # comp-broll-music-4 (2026-09-11b): "nothing crunchable this
+                # instant" is not "nothing to do" when an item is waiting out
+                # music-2's result backoff (up to 300 s, i.e. twenty ticks).
+                # NOTHING_TO_DO here made `tick` stop the model server and
+                # publish "nothing to do" while this machine holds a lease on a
+                # live batch and its heartbeat renews it - an editor reading
+                # that on the page re-drops the album, and the 4-12 GB model is
+                # torn down and rebuilt across a mount blip.
+                return STATE_RUNNING if self._waiting_on_retry() else STATE_NOTHING_TO_DO
             started = self._clock()
             try:
                 self._crunch_item(item)
@@ -2089,6 +2170,20 @@ class BrollIngestor:
         with self._lock:
             self._current = {}
         return self._gate()
+
+    def _waiting_on_retry(self) -> bool:
+        """Is any item of the live batch inside a `result_retry_at` wait?
+
+        The one question that tells `_drain`'s empty answer apart from a batch
+        that is over (comp-broll-music-4, 2026-09-11b).
+        """
+        now = self._clock()
+        with self._lock:
+            for item in ((self._batch or {}).get("items") or []):
+                retry_at = item.get("result_retry_at")
+                if retry_at is not None and now < float(retry_at):
+                    return True
+        return False
 
     def _next_item(self) -> Optional[dict]:
         with self._lock:
@@ -2492,14 +2587,14 @@ class BrollIngestor:
         not one byte of the camera file.
         """
         plan = self._upload_plan(item)
-        queue = self._queue()
-        # comp-broll-music-1 (2026-09-11): declared only once the queue has
-        # actually TAKEN it. `item["uploads"]` is what `_pump_uploads` waits
-        # on, and a rel that was never handed over can neither land nor fail:
-        # the item sat in `uploading` for ever, the heartbeat kept renewing
-        # the lease, and every later drop on the machine got run()'s 409.
-        # The card being pulled between describe and upload is the live case.
-        declared: dict[str, str] = {}
+        # comp-broll-music-3 (2026-09-11b): stat the WHOLE plan before handing
+        # any of it over. `_upload_plan` is poster -> sprite -> proxy ->
+        # original and dicts keep insertion order, so the first three were
+        # already uploading by the time a missing original was noticed - and
+        # the item then fails with `uploads` cleared, so nothing ever posts
+        # `mark_uploaded` for them. Three files in an editor-visible archive
+        # folder with no `live` row to own them and no sweep that removes them.
+        present: dict[str, tuple[str, str]] = {}
         lost: list[str] = []
         for rel, (kind, local) in plan.items():
             if not local or not os.path.isfile(local):
@@ -2507,6 +2602,34 @@ class BrollIngestor:
                 self.log.warning("%s is not on this computer any more, so %s "
                                  "cannot be uploaded", local or "(no path)", rel)
                 continue
+            present[rel] = (kind, local)
+        if not present or any(plan[rel][0] == broll_upload.KIND_ORIGINAL
+                              for rel in lost):
+            # The original is the clip. A poster that went missing is a clip
+            # with no thumbnail; a missing original is nothing to archive, and
+            # an ending is the only answer that frees the batch.
+            item["uploads"] = {}
+            self._fail_item(item, "the files for this clip are not on this "
+                                  "computer any more, so it could not be "
+                                  "uploaded")
+            return
+        queue = self._queue()
+        # comp-broll-music-1 (2026-09-11): declared only once the queue has
+        # actually TAKEN it. `item["uploads"]` is what `_pump_uploads` waits
+        # on, and a rel that was never handed over can neither land nor fail:
+        # the item sat in `uploading` for ever, the heartbeat kept renewing
+        # the lease, and every later drop on the machine got run()'s 409.
+        # The card being pulled between describe and upload is the live case.
+        #
+        # The original goes FIRST (comp-broll-music-3): UploadQueue sorts by
+        # `UploadJob.order`, so insertion order decides nothing about what is
+        # sent first, and enqueuing the one artifact whose loss ends the item
+        # ahead of the rest means an enqueue that raises cannot leave the
+        # stills orphaned in the archive either.
+        order = sorted(present, key=lambda r: present[r][0] != broll_upload.KIND_ORIGINAL)
+        declared: dict[str, str] = {}
+        for rel in order:
+            kind, local = present[rel]
             try:
                 queue.enqueue(local, rel, kind, item_uid=item["uid"],
                               size_bytes=os.path.getsize(local))
@@ -2518,9 +2641,6 @@ class BrollIngestor:
         item["uploads"] = declared
         if not declared or any(plan[rel][0] == broll_upload.KIND_ORIGINAL
                                for rel in lost):
-            # The original is the clip. A poster that went missing is a clip
-            # with no thumbnail; a missing original is nothing to archive, and
-            # an ending is the only answer that frees the batch.
             item["uploads"] = {}
             self._fail_item(item, "the files for this clip are not on this "
                                   "computer any more, so it could not be "
@@ -2787,6 +2907,7 @@ class BrollIngestor:
         # MEDIA-3: the retention clock starts HERE, not when the drop was
         # staged.
         self._note_staging_ended(batch)
+        self._forget_batch_scratch(batch)
         with self._lock:
             self._batch = None
             self._current = {}
@@ -2806,6 +2927,7 @@ class BrollIngestor:
             self._current = {}
         self.log.info("batch %s is no longer ours (%s)", uid, why)
         self._note_staging_ended(batch)
+        self._forget_batch_scratch(batch)
         self._kill_child()
         self._stop_uploads()
         self._stop_model_server()
@@ -3008,15 +3130,29 @@ class BrollIngestor:
                         f"{floor / 1_000_000_000:.0f} GB floor")
         else:
             message += f", and {floor / 1_000_000_000:.0f} GB is the floor"
-        held = 0
+        report: dict[str, Any] = {}
         try:
-            held = int(self.staging_report().get("bytes") or 0)
+            report = self.staging_report()
         except Exception:
-            held = 0
-        if held:
-            message += (f". {held / 1_000_000_000:.1f} GB of that drive is "
+            report = {}
+        finished = int(report.get("finished_bytes") or 0)
+        unrun = int(report.get("unrun_bytes") or 0)
+        if finished:
+            message += (f". {finished / 1_000_000_000:.1f} GB of that drive is "
                         f"finished {self.kind.label} staging: open Settings from "
                         "the tray icon and use CLEAR FINISHED STAGING")
+        elif unrun:
+            # comp-broll-music-2 (2026-09-11b): CLEAR FINISHED STAGING cannot
+            # touch a drop that was never run, so naming it here sent the
+            # editor to a button that answers "there is nothing to clear".
+            days = self._retention_days()
+            message += (f". {unrun / 1_000_000_000:.1f} GB of that drive is "
+                        f"{self.kind.label} staging that was never indexed: "
+                        f"open the {self.kind.label} page and index or re-drop "
+                        "it")
+            if days > 0:
+                message += (f", and it is cleared automatically after "
+                            f"{days:.0f} days")
         else:
             message += ". Free some space and it will continue"
         return message
@@ -3037,6 +3173,17 @@ class BrollIngestor:
                 DEFAULT_STAGING_RETENTION_DAYS)))
         except Exception:
             return float(DEFAULT_STAGING_RETENTION_DAYS)
+
+    def _forget_batch_scratch(self, batch: Optional[dict]) -> None:
+        """Drop whatever this kind kept in memory for a batch that is over.
+
+        comp-broll-music-5 (2026-09-11b): music parks a mid-retry track's
+        embedding, peaks and windows in `_deferred_analysis`, popped only by a
+        `result` that lands or a refusal that is terminal. A cancel, a lost
+        lease and a gate that closed mid-wait all dropped the batch without
+        touching it, so ~25 kB per track stayed for the life of the tray
+        process. A no-op for b-roll, which keeps nothing off the item.
+        """
 
     def _note_staging_ended(self, batch: Optional[dict]) -> None:
         """Stamp the staging entry of a batch that is over.
@@ -3092,17 +3239,28 @@ class BrollIngestor:
         """`sync_guard.ingest_staging` for this kind: bytes, batches,
         oldest_at. Never raises; an unreadable directory counts as zero."""
         total, count = 0, 0
+        finished_bytes, unrun_bytes = 0, 0
         oldest: Optional[str] = None
         for _sid, entry in self._staging_entries():
             directory = str(entry.get("dir") or "")
             if not directory or not os.path.isdir(directory):
                 continue
             count += 1
-            total += _dir_bytes(directory)
+            size = _dir_bytes(directory)
+            total += size
+            # comp-broll-music-2 (2026-09-11b): FINISHED and HELD are different
+            # bytes and only the first has a button. `_space_refusal` used to
+            # blame the whole total on CLEAR FINISHED STAGING, which then
+            # answered "There is no finished staging to clear on this computer".
+            if entry.get("ended_at"):
+                finished_bytes += size
+            else:
+                unrun_bytes += size
             at = str(entry.get("ended_at") or entry.get("at") or "")
             if at and (oldest is None or at < oldest):
                 oldest = at
-        return {"bytes": total, "batches": count, "oldest_at": oldest}
+        return {"bytes": total, "batches": count, "oldest_at": oldest,
+                "finished_bytes": finished_bytes, "unrun_bytes": unrun_bytes}
 
     def prune_staging(self, max_age_days: Optional[float] = None) -> dict[str, Any]:
         """Delete finished staging older than the retention, and forget it.
@@ -3118,6 +3276,7 @@ class BrollIngestor:
         age_days = self._retention_days() if max_age_days is None else float(max_age_days)
         cutoff = time.time() - age_days * 86400.0
         removed, freed = 0, 0
+        held_unrun = 0
         gone: list[str] = []
         held_back: list[str] = []
         for sid, entry in self._staging_entries():
@@ -3131,20 +3290,35 @@ class BrollIngestor:
                 # button can say what it did not do.
                 held_back.extend(held)
                 continue
+            directory = str(entry.get("dir") or "")
             ended = str(entry.get("ended_at") or "")
             if not ended:
                 # comp-broll-music-2 (2026-09-11): NOT the `at` fallback this
-                # used to take. A drop with no `ended_at` has not been run, and
-                # `at` is always in the past, so at max_age_days=0 (the tray's
-                # CLEAR FINISHED STAGING) every staged-but-unrun drop was
-                # deleted mid-PUT and every remaining upload slot 404'd -- the
-                # one thing this function's own docstring promises never
-                # happens. FINISHED is the word on the button, and a drop with
-                # no ending is not finished at any retention value.
+                # used to take AT max_age_days=0. A drop with no `ended_at` has
+                # not been run, and `at` is always in the past, so the tray's
+                # CLEAR FINISHED STAGING deleted every staged-but-unrun drop
+                # mid-PUT and every remaining upload slot 404'd -- the one
+                # thing this function's own docstring promises never happens.
+                # FINISHED is the word on the button.
+                #
+                # comp-broll-music-2 (2026-09-11b): but the RETENTION sweep has
+                # to reach it, or those bytes are permanent - `ended_at` is
+                # written only for a batch that was claimed, this is the only
+                # rmtree in the ingest stack, and a drop the editor abandoned
+                # (closed the tab on 400 clips) otherwise sits in the archive
+                # for ever and then refuses the next drop. The clock for an
+                # unrun drop is the later of when it was staged and when a byte
+                # last landed in it, so a drop still being written into is
+                # never a candidate however old its `at` is.
+                if age_days <= 0:
+                    held_unrun += 1
+                    continue
+                last_seen = max(_iso_epoch(str(entry.get("at") or "")),
+                                _dir_newest_mtime(directory))
+                if last_seen > cutoff:
+                    continue
+            elif _iso_epoch(ended) > cutoff:
                 continue
-            if _iso_epoch(ended) > cutoff:
-                continue
-            directory = str(entry.get("dir") or "")
             if directory and os.path.isdir(directory):
                 size = _dir_bytes(directory)
                 try:
@@ -3168,7 +3342,8 @@ class BrollIngestor:
             self.log.info("kept %d staged file(s) the base rig still has to "
                           "finish: %s", len(held_back), ", ".join(held_back[:5]))
         return {"removed": removed, "bytes": freed,
-                "held": len(held_back), "held_names": held_back[:20]}
+                "held": len(held_back), "held_names": held_back[:20],
+                "held_unrun": held_unrun}
 
     def _path_refusal(self, path: str) -> str:
         """Why this machine may not index a picked path in place, or "".

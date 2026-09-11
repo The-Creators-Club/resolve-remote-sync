@@ -206,7 +206,17 @@ PORT = int(os.environ.get('MUSIC_PORT') or os.environ.get('PORT', '8790'))
 # `set_login_gated(True)` is called by the dashboard's mount (music.py). It is
 # NOT inferred from the environment: a host that merely has the variable set is
 # not the same as a process that actually has the middleware wrapped around it.
-_LOGIN_GATED = os.environ.get('MUSIC_LOGIN_GATED', '') == '1'
+#
+# security-3 (2026-09-11b): the line under that comment read
+# `MUSIC_LOGIN_GATED` anyway, and this flag is what makes `fleet_auth` believe
+# an inbound `X-CCSync-Fleet-Auth` stamp - the credential that SKIPS the
+# fleet-token comparison entirely. A standalone musicweb behind a proxy that
+# does not strip the header therefore stopped requiring DASH_REPORT_TOKEN on
+# /api/fleet/ingest/*. b-roll and ytdl have always had no environment hatch
+# here (`broll/web/app/fleet_auth.py:trust_gate_stamp`), and nothing in the
+# tree ever set the variable. The one thing lost with it is the standalone
+# "no ingest token needed" escape hatch: set MUSIC_INGEST_TOKEN instead.
+_LOGIN_GATED = False
 
 
 def set_login_gated(value=True):
@@ -433,10 +443,16 @@ _READY_SAMPLE = 50
 
 # music-5 (2026-09-11): how long a POSITIVE answer is trusted. The probe costs
 # up to _READY_SAMPLE stat()s over SMB/NFS and runs once per item of every drop
-# (allocate_name) as well as on every browser ingest; a mount that was there a
-# moment ago is not a fact that changes between two items of one batch. Only
-# "ready" is cached - a share that looks wrong is re-probed every time, so the
-# write path reopens the instant the mount is back.
+# (allocate_name) as well as on every browser ingest. Only "ready" is cached -
+# a share that looks wrong is re-probed every time, so the write path reopens
+# the instant the mount is back.
+#
+# music-4 (2026-09-11b): the cache covers the SAMPLE and nothing else. A NAS
+# reboot or an SMB session drop is precisely a fact that changes between two
+# items of one batch, and this gate is the only thing between an unmounted
+# bind mount and a write path that mints filenames and `tracks` rows for audio
+# that lands in the container's own filesystem. `root.is_dir()` is one stat,
+# not fifty, so it runs on every call.
 _READY_CACHE_SECONDS = 5.0
 _ready_cache = {}
 _ready_cache_lock = threading.Lock()
@@ -486,8 +502,6 @@ def share_root_ready(con=None, share=SHARE):
     root = share_root(share)
     if not isinstance(root, Path):
         return True, ''
-    if _ready_cached(str(root)):
-        return True, ''
     try:
         exists = root.is_dir()
     except OSError as exc:                                     # noqa: BLE001
@@ -503,6 +517,8 @@ def share_root_ready(con=None, share=SHARE):
                        f'{root}). Nothing is written until it is back.')
     if con is None:
         return True, ''
+    if _ready_cached(str(root)):
+        return True, ''
     try:
         # music-5 (2026-09-11): the NEWEST rows, not the oldest. `ORDER BY id`
         # sampled the fifty first cues ever indexed, which are the rows most
@@ -511,8 +527,22 @@ def share_root_ready(con=None, share=SHARE):
         # whose oldest fifty files are gone answered "not mounted" for ever, on
         # a share that was mounted and full, and closed the whole write path
         # with a message blaming the mount.
-        rows = con.execute('SELECT rel_path FROM tracks WHERE rel_path IS NOT NULL '
-                           'ORDER BY id DESC LIMIT ?', (_READY_SAMPLE,)).fetchall()
+        #
+        # regression-10 (2026-09-11b): BOTH ends, because the newest rows are
+        # the ones least likely to be on disk. A fleet `result` writes the
+        # `tracks` row BEFORE the companion uploads the audio, and `tracks`
+        # has no status column to exclude an unlanded row - so once a big drop
+        # has written fifty of them, a newest-fifty sample is entirely files
+        # that are not there yet and item 51 of that same drop refused itself
+        # with a message blaming the mount. One end going missing is a normal
+        # library; both ends is a share that is not mounted.
+        half = max(1, _READY_SAMPLE // 2)
+        rows = con.execute(
+            'SELECT rel_path FROM (SELECT rel_path FROM tracks '
+            'WHERE rel_path IS NOT NULL ORDER BY id DESC LIMIT ?) '
+            'UNION ALL SELECT rel_path FROM (SELECT rel_path FROM tracks '
+            'WHERE rel_path IS NOT NULL ORDER BY id ASC LIMIT ?)',
+            (half, half)).fetchall()
     except Exception:                                          # noqa: BLE001
         return True, ''
     if not rows:

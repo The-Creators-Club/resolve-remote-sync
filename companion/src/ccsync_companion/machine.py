@@ -134,6 +134,57 @@ def machine_id(path: Optional[Path] = None, create: bool = True) -> str:
     return minted
 
 
+def machine_id_unreadable(path: Optional[Path] = None) -> bool:
+    """Is there a machine.json here that cannot be read? (comp-app-8,
+    2026-09-11b.)
+
+    comp-app-5 was right to stop re-minting over an unreadable file and gave
+    the condition no exit: `machine_id()` answered "" for ever, the only
+    trace was one log line per process (reporter.py caches the empty answer
+    by design), and the machine kept its hostname key - so the loss was
+    invisible until somebody renamed that computer and found the plan gone.
+    An accessor is what lets the tray say it out loud. Never raises."""
+    try:
+        record, readable = read_record(path)
+    except Exception:  # noqa: BLE001
+        return False
+    if readable:
+        return False
+    return not str((record or {}).get("machine_id") or "").strip()
+
+
+def remint(path: Optional[Path] = None) -> str:
+    """Deliberately replace an UNREADABLE machine.json (comp-app-8).
+
+    The safe default (never re-mint) must not also be a dead end. This is the
+    repair, and it is never automatic: it is called from a place a human
+    pressed. The unreadable bytes are KEPT beside the new file
+    (`machine.json.unreadable-<epoch>`) because the id in them may still be
+    recoverable by hand, and a machine that CAN read its file is answered
+    with the id it already has - a live id is never replaced. Returns the id,
+    or "" when nothing could be written. Never raises."""
+    target = path or machine_path()
+    existing = machine_id(target, create=False)
+    if existing:
+        return existing
+    try:
+        if target.exists():
+            keep = target.with_name(f"{target.name}.unreadable-{int(_now_epoch())}")
+            target.replace(keep)
+            log.warning("kept the unreadable %s as %s", target.name, keep.name)
+    except Exception:  # noqa: BLE001
+        log.warning("could not set the unreadable %s aside -- not re-minting "
+                    "over it", target)
+        return ""
+    return machine_id(target)
+
+
+def _now_epoch() -> float:
+    from time import time
+
+    return time()
+
+
 def _now_iso() -> str:
     from datetime import datetime, timezone
 

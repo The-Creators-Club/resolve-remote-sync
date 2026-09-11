@@ -345,12 +345,18 @@ def _snapshot_token(con):
     try:
         row = con.execute('SELECT MAX(id) FROM tracks').fetchone()
         top = row[0] if row else None
+        # music-5 (2026-09-11b): INSIDE the try, beside the id. `scores_stale`
+        # is a second read of the same database and fails for the same reasons
+        # (a lock held by publish_db.py, a malformed file); left outside, the
+        # guard whose whole promise is "unreadable yields a harmless token"
+        # raised out of rescore_library's first statement instead.
+        marker = scores_stale(con)
     except Exception:                                           # noqa: BLE001
         # Unreadable is not evidence that nothing changed: a token that can
         # never compare equal leaves the marker standing, which costs one
         # extra rescore and loses nothing.
         return object()
-    return (scores_stale(con), top)
+    return (marker, top)
 
 
 def rescore_library(con, encoder=None):

@@ -1434,7 +1434,9 @@ async function retryFailed() {
     // work either way, and offering it to this editor's own machine sits on
     // top of that rather than in front of it (docs/YTDL_LOCAL_DOWNLOAD.md §2).
     dispatchLocal(jobId, state.manifest && state.manifest.job
-      ? state.manifest.job.quality : null);
+      ? state.manifest.job.quality : null,
+      state.manifest && state.manifest.job
+      ? state.manifest.job.created_local : undefined);
     state.pollStart = Date.now();
     await poll();
   } catch (e) {
@@ -2236,7 +2238,7 @@ async function runUrls() {
     //
     // Same contract as startDownload's: not awaited, the server has already
     // accepted the job, and a companion that cannot take it changes nothing.
-    dispatchLocal(r.job_id, payload.quality);
+    dispatchLocal(r.job_id, payload.quality, payload.local);
     detach();
     $('#progress').classList.remove('hidden');
     await attach(r.job_id);
@@ -2284,7 +2286,9 @@ async function startDownload() {
     // straight back (COMP-BROLL-10); the work order itself still comes from
     // the server (§8).
     dispatchLocal(jobId, state.manifest && state.manifest.job
-      ? state.manifest.job.quality : null);
+      ? state.manifest.job.quality : null,
+      state.manifest && state.manifest.job
+      ? state.manifest.job.created_local : undefined);
     $('#review').classList.add('hidden');
     state.pollStart = Date.now();
     await poll();
@@ -2512,7 +2516,7 @@ async function companionCapabilities() {
 // background fetch nobody ever sees fail. (companionCapabilities does retry a
 // probe that TIMED OUT -- see PROBE_RETRY_MS -- which is the opposite case: a
 // companion that is there and answering, just not within a second.)
-async function dispatchLocal(jobId, quality) {
+async function dispatchLocal(jobId, quality, createdLocal) {
   if (!jobId) return false;
   // The editor's switch is read HERE, at the moment of dispatch, rather than
   // remembered from page load: unticking it mid-session has to take effect on
@@ -2520,6 +2524,19 @@ async function dispatchLocal(jobId, quality) {
   // choice, so it says nothing -- noteLocalSkipped is for the times the page
   // TRIED and could not.
   if (!localWanted()) return false;
+  // ...and the JOB's own answer beside it (regression-26, 2026-09-11b). The
+  // switch is this second's preference; `created_local` is what the job was
+  // accepted with, and since ytdl-web-5 a job created on the server is one no
+  // machine can claim: the CAS refuses it, the companion answers 503 and the
+  // line below painted that as a bare HTTP code, which reads as a broken tray.
+  // An older server sends no field, so `undefined` dispatches exactly as
+  // before.
+  if (createdLocal === false) {
+    noteLocalSkipped('this search was submitted with "download on this '
+                     + 'computer" unticked, so the server is fetching it. Tick '
+                     + 'the box before the next search to have clips land here');
+    return false;
+  }
   const cap = await companionCapabilities();
   if (!cap) return false;
   // The rungs that companion actually runs (COMP-BROLL-10). The server refuses

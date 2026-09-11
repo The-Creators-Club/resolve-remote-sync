@@ -146,7 +146,15 @@ def _elide(text: str, limit: int) -> str:
     if limit <= 3 or len(text) <= limit:
         return text[:limit] if limit > 0 else ""
     head = max(1, limit // 3)
-    return text[:head].rstrip() + "..." + text[-(limit - head - 3):].lstrip()
+    # comp-resolve-b-3 (2026-09-11b): CLAMPED. At limit 4 the tail width is
+    # zero and `text[-0:]` is the whole string, so the helper whose contract
+    # is "cut this to limit" returned head + "..." + everything. Not reachable
+    # from today's one caller (its budget is 95), but the budget is two
+    # sentences in this file away from being smaller, and the cut exists to
+    # pre-empt the dashboard's own max_length=255 truncation.
+    tail = max(0, limit - head - 3)
+    return (text[:head].rstrip() + "..."
+            + (text[-tail:].lstrip() if tail else ""))
 
 
 class CardsRoleError(RuntimeError):
@@ -760,7 +768,17 @@ class TimelineCardsRole:
                 # most, a role whose loops had died. `health()` said stopped
                 # while the watchdog said running: the report was honest and
                 # the recovery was not.
-                if any(t.is_alive() for t in self._threads):
+                # regression-8 (2026-09-11b): ALL of them, and no recorded
+                # loop error. comp-resolve-4's `any()` recovers the
+                # both-dead case only, while `health()` goes STOPPED on the
+                # FIRST loop death (_note_loop_end) -- so a role with the
+                # push loop dead and the pull loop still long-polling showed
+                # STOPPED on the fleet grid for ever while the watchdog
+                # answered "running" every minute. The same asymmetry the
+                # comment above is about, one loop narrower.
+                if (self._threads
+                        and all(t.is_alive() for t in self._threads)
+                        and not self._loop_error):
                     return True
             if self._start_failures >= MAX_START_FAILURES:
                 if not self._ceiling_logged:

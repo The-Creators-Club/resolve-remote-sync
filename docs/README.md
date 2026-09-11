@@ -122,6 +122,7 @@ and are deliberately left as they were; do not copy commands out of them.
 | [`bug-hunt-2026-08-21.md`](bug-hunt-2026-08-21.md) | The 78-finding hunt plus the 53-issue design review. Fixed in the repo on 2026-08-21 and **unshipped**: `KNOWN_BUGS.md` CR-46 to CR-67 is what landed, what was deliberately deferred, and which seams were still open |
 | [`bug-hunt-2026-09-03.md`](bug-hunt-2026-09-03.md) | The 84-finding sixth fleet hunt (seventeen hunters, five verifiers), fixed the same day as CR-102 to CR-119 |
 | [`bug-hunt-2026-09-11.md`](bug-hunt-2026-09-11.md) | The seventh fleet hunt and resilience pass (nineteen hunters incl. two cross-cutting lenses, six verifiers): 131 distinct findings, 10 high, fixed the same day as CR-233 to CR-248 |
+| [`bug-hunt-2026-09-11b.md`](bug-hunt-2026-09-11b.md) | The eighth fleet hunt, run the same evening ON the seventh's fix pass (23 hunters incl. six lenses: wire, security, tests, regression): 136 distinct findings, 11 high, 27 of them a same-day fix that did not fix; fixed as CR-249 to CR-266 |
 | [`synology-spikes-2026-08-17.md`](synology-spikes-2026-08-17.md) | The eight day-1 spikes run against real Synology hardware |
 | [`macos-first-run-2026-08-04.md`](macos-first-run-2026-08-04.md) | The first macOS bring-up session |
 | [`macos-first-run-2026-08-05.md`](macos-first-run-2026-08-05.md) | The follow-up session |

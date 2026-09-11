@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from typing import Callable, TYPE_CHECKING
 
 from . import config as config_mod
+from . import machine as machine_mod
 from . import site as site_mod
 from . import tray as tray_mod
 from . import ui_copy
@@ -447,6 +448,71 @@ def action_repair_p_mapping(app: "CompanionApp") -> None:
         if ok:
             log.info("settings: media drive mapping repaired")
     tray_mod._spawn(app, "Repair drive mapping", _do)
+
+
+def machine_id_unreadable() -> bool:
+    """Is this computer's id file there and unreadable? (comp-app-8's owed
+    half, hand-off wave 2026-09-11b.)
+
+    Wrapped rather than called inline so the model builder cannot be given a
+    raising accessor by a future change: this runs on the window's 2 s
+    refresh timer, and one exception here costs the editor the whole
+    Settings window."""
+    try:
+        return bool(machine_mod.machine_id_unreadable())
+    except Exception:  # noqa: BLE001
+        log.exception("settings: could not check this computer's id file")
+        return False
+
+
+def action_repair_machine_id(app: "CompanionApp") -> None:
+    """[ GIVE THIS COMPUTER A NEW ID ] - the exit from comp-app-5's dead end.
+
+    comp-app-5 stopped the companion re-minting over a machine.json it could
+    not read, which was right (a second id reads as a second computer on the
+    dashboard and the first is gone for good), and left no way back: the
+    machine reported no id for ever and the loss only showed when somebody
+    renamed that computer. comp-app-8 added the accessor, the repair and the
+    one-per-process advisory; this is the place a HUMAN presses, deliberately
+    - never the toast, because the id in the unreadable bytes may still be
+    recoverable by hand and a one-click identity change is not a decision to
+    take from a notification. machine.remint() keeps those bytes beside the
+    new file and refuses a file it CAN read."""
+    def _do() -> None:
+        try:
+            from . import popup as popup_mod
+
+            ok = popup_mod.confirm_dialog(
+                site_mod.notify_title("this computer's id"),
+                "CCSync cannot read this computer's id file, so the server "
+                "cannot recognise this computer again if you rename it.\n\n"
+                "CCSync will save a new id and keep the unreadable file "
+                "beside it, so nothing in it is lost. Your syncing and your "
+                "sign-in are not affected.\n\n"
+                "If your admin is still looking at the old file, wait for "
+                "them before doing this.",
+                ok_label="GIVE IT A NEW ID")
+            if not ok:
+                return
+            minted = machine_mod.remint()
+        except Exception:
+            log.exception("settings: could not repair this computer's id file")
+            tray_mod._notify(app, "CCSync could not repair this computer's id "
+                                  f"file. {ui_copy.DIAGNOSTICS}.")
+            return
+        if minted:
+            log.info("settings: this computer's id file was repaired by hand")
+            tray_mod._notify(app, "This computer has a new id. It is reported "
+                                  "from the next check in.")
+        else:
+            # Two ways to get here and both are "nothing changed": the file
+            # became readable between the advisory and the click (remint
+            # answers the id it already has), or the new one could not be
+            # written. Neither is a failure the editor can act on beyond the
+            # log, and neither may render as "done".
+            tray_mod._notify(app, "CCSync did not change this computer's id. "
+                                  f"{ui_copy.DIAGNOSTICS}.")
+    tray_mod._spawn(app, "Repair this computer id", _do)
 
 
 def action_forget_ignored_folder(app: "CompanionApp", folder: str) -> None:
@@ -1192,6 +1258,18 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
             "starts.", style="warning",
         ))
     computer_items.append(Line(str(snap.get("identity_label", ""))))
+    if machine_id_unreadable():
+        # comp-app-8's owed half (hand-off wave, 2026-09-11b). The tray says
+        # it once per process and a balloon is gone in ten seconds; this is
+        # where the fact stays readable and where the repair is offered.
+        computer_items.append(Line(
+            "⚠ CCSync cannot read this computer's id file, so the server "
+            "cannot recognise this computer again if you rename it. Syncing "
+            "is not affected.", style="warning"))
+        computer_items.append(Button("GIVE THIS COMPUTER A NEW ID",
+                                     lambda: action_repair_machine_id(app)))
+        computer_items.append(Line(
+            "  the unreadable file is kept beside the new one", style="muted"))
     guard = snap.get("sync_guard") or {}
     if _credential_refused(guard):
         # APP-8: identity.valid() is local, so a revoked token still reads as
@@ -1548,8 +1626,18 @@ def show_settings(app: "CompanionApp") -> None:
     # exists, so a failure half way through widget construction destroys the
     # window instead of abandoning it. See _build_settings_window.
     closer: list = [None]
+    # comp-ui-7 (2026-09-11b): whether show_settings may still release the
+    # lock. `threading.Lock.locked()` has no owner, so the handler below used
+    # to ask "is it held?" and release whatever it found -- and by then
+    # _release_and_close had already released it, leaving the lock free for a
+    # second Settings click or the watcher's popup to take in the gap. The
+    # handler then released THEIR lock and a third tk.Tk root could be built
+    # beside the second: the CR-93 shape. Once _build_and_show has been
+    # entered, the lock's lifetime belongs to the window, never to us.
+    mine = [True]
 
     def _build_and_show() -> None:
+        mine[0] = False
         try:
             _build_settings_window(app, lock, closer)
         except Exception:
@@ -1570,7 +1658,7 @@ def show_settings(app: "CompanionApp") -> None:
         ui_dispatch.dispatch(_build_and_show)
     except Exception as exc:
         log.warning("settings window unavailable (%s)", exc)
-        if lock is not None and lock.locked():
+        if mine[0] and lock is not None and lock.locked():
             lock.release()
 
 

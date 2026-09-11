@@ -37,7 +37,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # take them with it). Mounted under the dashboard this lifespan never
     # runs -- ccsync_dashboard.broll._init_broll_storage does the same two
     # calls, and get_shares_db ensures it again on first use regardless.
-    client_folders.ensure_schema()
+    # broll-5 (2026-09-11b): best effort, like every other caller. A ledger
+    # that cannot be opened for the seconds this runs (locked by a concurrent
+    # write, or a data root that came back read-only) used to stop the app
+    # booting at all - the archive's search page, the ingest panel and the
+    # public share door with it, for a feature none of them need.
+    client_folders.ensure_schema_best_effort()
     yield
 
 

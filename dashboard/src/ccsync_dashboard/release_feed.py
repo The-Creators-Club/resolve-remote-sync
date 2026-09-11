@@ -57,7 +57,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from fastapi import APIRouter, Depends, HTTPException, Request as FastAPIRequest
@@ -106,6 +106,10 @@ _MAX_REDIRECTS = 5
 # floor under its cadence -- see FeedPoller._run.
 POLLER_FIRST_CHECK_DELAY = 10.0
 POLLER_MIN_INTERVAL = 60.0
+# How long stop() waits for a cycle to end before giving up on it and keeping
+# the handle (dash-release-jobs-1, 2026-09-11b). A constant so a test can
+# reach the overrun case without sitting out a real five seconds.
+POLLER_STOP_JOIN_SECONDS = 5.0
 
 
 class FeedError(Exception):
@@ -339,13 +343,23 @@ def fetch_artifact_to(url: str, part: Path, *, expected_sha256: str,
 def _signature_url(url: str) -> str:
     """The detached signature's URL: `.sig` on the PATH, query intact.
 
-    dash-release-jobs-3 (2026-09-11): this used to be `url + ".sig"`, which is
-    a different file only when the feed URL is a bare path. The threat model
-    contemplates "an S3 bucket, whatever a customer's outbound network
-    reaches", and a pre-signed or CDN-token URL carries a query string --
-    `.../channel.json?X-Amz-Signature=...sig` is a URL that does not exist, so
-    every check failed with a 404 naming a URL the operator never configured
-    and the site quietly stopped receiving builds (REL-11's shape).
+    dash-release-jobs-4 (2026-09-11; the comment said `-3`, corrected by
+    dash-release-jobs-6 on 2026-09-11b): this used to be `url + ".sig"`, which
+    is a different file only when the feed URL is a bare path. The threat
+    model contemplates "an S3 bucket, whatever a customer's outbound network
+    reaches", and a CDN-TOKEN URL carries a query string --
+    `.../channel.json?token=...sig` is a URL that does not exist, so every
+    check failed with a 404 naming a URL the operator never configured and the
+    site quietly stopped receiving builds (REL-11's shape).
+
+    A query TOKEN is what this handles, and only that. dash-release-jobs-5
+    (2026-09-11b): a pre-signed SigV4 URL cannot be handled here at all and
+    the old docstring claimed it was -- the signature is computed over the
+    canonical request INCLUDING the object key, so the same `X-Amz-Signature`
+    against `channel.json.sig` answers 403 SignatureDoesNotMatch. The failure
+    moves from 404 to 403 and the site still stops receiving builds, so
+    `_presigned_hint` names it in the reason instead of leaving the operator
+    with a refusal about a URL they never configured.
 
     A fragment is dropped: it is a client-side construct that never reaches
     the server anyway, and carrying it would only put it in the log lines."""
@@ -353,12 +367,43 @@ def _signature_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path + ".sig", parts.query, ""))
 
 
+# Query keys that mean "this URL's signature is bound to this exact object
+# key": AWS SigV4 / SigV2 and Azure's SAS. dash-release-jobs-5 (2026-09-11b).
+_PRESIGNED_QUERY_KEYS = ("x-amz-signature", "x-amz-credential", "awsaccesskeyid", "sig")
+
+
+def _presigned_hint(url: str) -> str:
+    """"" unless `url` is a pre-signed object URL, in which case the sentence
+    that tells the operator why its `.sig` sibling can never be fetched."""
+    try:
+        keys = {k.strip().lower() for k, _ in parse_qsl(urlsplit(url).query,
+                                                        keep_blank_values=True)}
+    except ValueError:
+        return ""
+    if not keys & set(_PRESIGNED_QUERY_KEYS):
+        return ""
+    return (" -- this feed URL is PRE-SIGNED, and a pre-signed signature covers the "
+            "object key, so the same credentials cannot fetch channel.json.sig. Host "
+            "the channel at a plain URL (a query TOKEN is fine) or publish the two "
+            "files where one URL can be derived from the other")
+
+
 def fetch_and_verify_channel(
-    url: str, pubkeys: tuple[str, ...]
+    url: str, pubkeys: tuple[str, ...], sig_url: str = "",
 ) -> tuple[dict[str, Any] | None, str | None]:
     """(channel, None) on a fully verified channel; (None, reason) otherwise.
     NEVER returns a channel that failed signature verification -- the one
-    rule this whole module exists to enforce (see the module docstring)."""
+    rule this whole module exists to enforce (see the module docstring).
+
+    `sig_url` is the operator's explicit signature URL (`settings
+    .release_feed_sig_url` / `DASH_RELEASE_FEED_SIG_URL`, dash-core's
+    hand-off for dash-release-jobs-5, 2026-09-11b). It exists because
+    `_signature_url` DERIVES the signature URL from the channel's, and there
+    is a whole class of host where that derivation cannot work: a pre-signed
+    SigV4 or SAS object URL signs the object key, so the same credentials
+    against `channel.json.sig` answer 403. Given explicitly, it is used
+    verbatim and no derivation is attempted. Blank keeps the derivation,
+    which is what every configured site does today."""
     try:
         raw = _fetch_bytes(url, cap=FEED_MAX_BYTES)
     except FeedError as exc:
@@ -369,10 +414,17 @@ def fetch_and_verify_channel(
         return None, f"channel.json is not valid JSON: {exc}"
     if not isinstance(channel, dict) or channel.get("schema") != 1:
         return None, "channel.json is not a schema=1 object"
+    declared = str(sig_url or "").strip()
     try:
-        sig_raw = _fetch_bytes(_signature_url(url), cap=8192)
+        sig_raw = _fetch_bytes(declared or _signature_url(url), cap=8192)
     except FeedError as exc:
-        return None, str(exc)
+        # dash-release-jobs-5 (2026-09-11b): a pre-signed feed URL fails HERE,
+        # with a 403 about a URL the operator never typed. Name the cause in
+        # the reason the admin page and `feed_state.last_error` both show.
+        # Not when the operator DECLARED the signature URL: the hint would
+        # then be advice to do the thing they have already done, and the
+        # refusal is about the URL they typed.
+        return None, str(exc) + ("" if declared else _presigned_hint(url))
     signature = sig_raw.decode("utf-8", errors="replace").strip()
     ok, detail = verify_channel_signature(channel, signature, pubkeys)
     if not ok:
@@ -458,7 +510,8 @@ def apply_retractions(conn, channel: Any, now: str) -> list[str]:
     return applied
 
 
-def _valid_records(channel: dict[str, Any], pubkeys: tuple[str, ...]) -> list[dict[str, Any]]:
+def _valid_records(channel: dict[str, Any], pubkeys: tuple[str, ...],
+                   rejected: list[str] | None = None) -> list[dict[str, Any]]:
     """Every package record in `channel` whose OWN signature verifies.
     Belt-and-braces on top of the channel-level signature: a compromised or
     buggy feed host could otherwise splice in an unsigned or mis-signed
@@ -509,6 +562,16 @@ def _valid_records(channel: dict[str, Any], pubkeys: tuple[str, ...]) -> list[di
                         "under either one",
                         rec.get("kind"), rec.get("platform"), rec.get("version"),
                         " and ".join(odd))
+            # dash-release-jobs-4 (2026-09-11b): a build that cannot be
+            # offered is a PROBLEM THE SERVER FOUND, not a WARNING in a
+            # container log nobody opens. Before the -7 fix the record was at
+            # least LISTED as available and 404'd on the button, which is a
+            # visible fault; dropped silently it is an invisible one -- the
+            # admin's [ CHECK NOW ] answers ok, the feed page lists nothing
+            # new and the fleet simply stops updating.
+            if rejected is not None:
+                rejected.append("%s/%s %s" % (rec.get("kind"), rec.get("platform"),
+                                              rec.get("version")))
             continue
         # A validly signed record can still be a typo that would brick the
         # channel: min_version above the version it describes raises every
@@ -663,19 +726,38 @@ def check_now(conn, settings, app_state) -> dict[str, Any]:
     now = db.utcnow_iso()
     if not settings.release_feed_url:
         return {"ok": False, "error": "DASH_RELEASE_FEED_URL is not configured"}
-    channel, err = fetch_and_verify_channel(settings.release_feed_url, settings.release_pubkeys)
+    # getattr, not settings.release_feed_sig_url: dash-core adds the field in
+    # this same pass, and a dashboard whose Settings object predates it (a
+    # rollback to an older tree, a test double) must keep deriving the URL
+    # rather than raising on the boot-adjacent poll path.
+    channel, err = fetch_and_verify_channel(
+        settings.release_feed_url, settings.release_pubkeys,
+        str(getattr(settings, "release_feed_sig_url", "") or ""))
     if err:
         log.warning("release feed check failed: %s", err)
         db.set_feed_state(conn, last_checked_at=now, last_error=err)
         conn.commit()
         return {"ok": False, "error": err}
-    valid_records = _valid_records(channel, settings.release_pubkeys)
+    rejected: list[str] = []
+    valid_records = _valid_records(channel, settings.release_pubkeys, rejected)
     cache = _cache(app_state)
     cache["channel"] = channel
     cache["valid_records"] = valid_records
     cache["checked_at"] = now
+    # dash-release-jobs-4 (2026-09-11b): the channel verified, so this is not
+    # a feed OUTAGE -- but a record this dashboard refuses to offer has to
+    # reach the admin page and `_check_feed_stale` somehow, and last_error is
+    # the only durable sentence the feed has. The check still answers ok.
+    rejected_error = ""
+    if rejected:
+        rejected_error = (
+            "%d record(s) in the channel are not offered here: %s. Their kind or "
+            "platform is not in the lower-case spelling every other surface uses, "
+            "and the signature covers that string, so they cannot be published "
+            "under either spelling. The feed has to republish them."
+            % (len(rejected), ", ".join(rejected[:5])))
     db.set_feed_state(
-        conn, last_checked_at=now, last_error="",
+        conn, last_checked_at=now, last_error=rejected_error,
         last_channel_generated_at=str(channel.get("generated_at") or ""),
     )
     conn.commit()
@@ -712,7 +794,8 @@ def check_now(conn, settings, app_state) -> dict[str, Any]:
             conn, settings, app_state, effective_policy(conn, settings), now)
     except Exception:                                                 # noqa: BLE001
         log.warning("the unattended dashboard update check failed", exc_info=True)
-    return {"ok": True, "error": None, "applied": applied, "retracted": retracted,
+    return {"ok": True, "error": rejected_error or None, "applied": applied,
+            "retracted": retracted, "rejected": rejected,
             "refused": refused, "dashboard_applied": dashboard_applied}
 
 
@@ -1261,23 +1344,49 @@ class FeedPoller:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        # dash-release-jobs-4 (2026-09-11): clear the event and drop the dead
-        # thread, so stop() then start() on the SAME poller really polls again.
-        # It used to return early on a `_thread` stop() never cleared, leaving
-        # a poller that reported itself started and never checked the feed --
+        # dash-release-jobs-5 (2026-09-11, id corrected from -4 by
+        # dash-release-jobs-6): clear the event and drop the dead thread, so
+        # stop() then start() on the SAME poller really polls again. It used
+        # to return early on a `_thread` stop() never cleared, leaving a
+        # poller that reported itself started and never checked the feed --
         # green while dead. cards_exec.PinnedExecutor has always had this
         # shape; the two threads in this territory now agree.
-        if self._thread is not None:
-            return
+        #
+        # dash-release-jobs-1 / res-fleet-4 (2026-09-11b): but only a thread
+        # that really ENDED may be dropped. `_run` loops on
+        # `while not self._stop.is_set()`, so clearing the event under a
+        # poller that outlived stop()'s join (a feed check inside
+        # fetch_artifact_to runs for minutes on a slow link) un-stops it: it
+        # finishes its cycle, re-tests a now-cleared event and keeps going.
+        # Two pollers on one object then race into store_verified_package on
+        # separate connections under the `auto` policy.
+        thread = self._thread
+        if thread is not None:
+            if thread.is_alive():
+                log.warning("the release feed poller is still running from a previous "
+                            "start (a check that outlived stop()'s join) -- not starting "
+                            "a second one")
+                return
+            self._thread = None
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="release-feed-poller", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        # dash-release-jobs-1 / res-fleet-4 (2026-09-11b): KEEP the handle
+        # when the join times out. `join(timeout)` returns None either way,
+        # so dropping it unconditionally left a live thread nothing could
+        # see -- and start()'s `_stop.clear()` then resurrected it.
         self._stop.set()
-        thread, self._thread = self._thread, None
-        if thread is not None:
-            thread.join(timeout=5.0)
+        thread = self._thread
+        if thread is None:
+            return
+        thread.join(timeout=POLLER_STOP_JOIN_SECONDS)
+        if thread.is_alive():
+            log.warning("the release feed poller did not stop within 5s (it is inside a "
+                        "feed check) -- keeping its handle so nothing starts a second one")
+            return
+        self._thread = None
 
     def _run(self) -> None:
         # A short initial delay, not an immediate check at import time: a

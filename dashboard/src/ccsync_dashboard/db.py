@@ -4711,9 +4711,29 @@ def request_machine_update(
     handler's clear rule, which retires a push when the machine reports a
     version at or past the one asked for. That is right for an upgrade and
     fatal for a rollback, which asks for a LOWER version and was therefore
-    retired on the next report without ever being delivered. Empty (every row
-    written before this column, and every caller that does not know) keeps
-    exactly the old behaviour."""
+    retired on the next report without ever being delivered.
+
+    A CALLER THAT DOES NOT SAY IS LOOKED UP HERE (dash-db-1 / res-fleet-1,
+    2026-09-11): only `roll_fleet_back` ever passed `from_version`, so the
+    three per-machine doors ([ UPDATE NOW ] on Settings -> Packages, its
+    "update to current" twin, and POST /admin/machines/{editor}/{machine}/
+    update) wrote NULL and got the old upgrade rule back - a downward push at
+    one machine, which is what an admin reaches for BEFORE a fleet recall,
+    was cleared on that machine's next report with `commands.upgrade` never
+    emitted and nothing on the page or in the log saying so. The direction of
+    a push is derivable from state the dashboard already holds, so it is
+    derived here rather than trusted to the caller: one seam, and a fourth
+    door cannot repeat this. An explicit `from_version` still wins (the fleet
+    route knows the version it is rolling BACK from), and a machine that has
+    never reported one leaves the column NULL, i.e. exactly the old
+    behaviour."""
+    if not str(from_version or "").strip():
+        row = conn.execute(
+            "SELECT companion_version FROM machine_state "
+            " WHERE editor_username=? AND machine=?", (editor, machine),
+        ).fetchone()
+        if row is not None:
+            from_version = str(row["companion_version"] or "")
     cur = conn.execute(
         """UPDATE machines
               SET update_requested_version=?, update_requested_at=?,
@@ -5484,14 +5504,33 @@ def expire_delivered_file_moves(
 
     Returns the rows just expired, so the caller can say so. Undelivered
     targets are untouched, deliberately: those machines have not had their
-    chance yet."""
+    chance yet.
+
+    A MACHINE THAT IS STILL ANSWERING IS NOT SILENT (comp-app-1 /
+    regression-18, 2026-09-11). comp-sync-20 taught the companion to answer
+    `state='retrying'` while the sync drive is out, on the stated ground that
+    this expiry measures "told and never answered" - but the predicate here
+    never read `state`, and the retrying arm of `mark_file_move_applied`
+    refreshes no timestamp, so an editor away for a fortnight with the drive
+    in their bag had the command retired on day 7 while their machine was
+    answering it every thirty seconds. `pending_file_moves` then stops
+    offering it, the drive comes back, and lane A (which never deletes)
+    re-uploads the file at the old path: the exact undo docs/FILE_MOVES.md
+    exists to prevent. So a `retrying` target is spared for as long as its
+    machine is still reporting, and expires on the machine's SILENCE - the
+    server's own `received_at`, never the companion's clock."""
     cutoff = _file_move_cutoff(now, max_age_days)
     rows = [dict(r) for r in conn.execute(
-        """SELECT move_id, editor_username, machine, delivered_at
-             FROM file_move_targets
-            WHERE applied_at IS NULL AND expired_at IS NULL
-              AND delivered_at IS NOT NULL AND delivered_at < ?""",
-        (cutoff,),
+        """SELECT t.move_id, t.editor_username, t.machine, t.delivered_at
+             FROM file_move_targets t
+            WHERE t.applied_at IS NULL AND t.expired_at IS NULL
+              AND t.delivered_at IS NOT NULL AND t.delivered_at < ?
+              AND NOT (COALESCE(t.state, '') = ? AND EXISTS (
+                    SELECT 1 FROM machine_state s
+                     WHERE s.editor_username = t.editor_username
+                       AND s.machine = t.machine
+                       AND COALESCE(s.received_at, s.reported_at) >= ?))""",
+        (cutoff, FILE_MOVE_TARGET_RETRYING, cutoff),
     )]
     for row in rows:
         conn.execute(
@@ -6736,7 +6775,17 @@ def fetch_machine_selections(
     error notice about a correct configuration. It is a PARAMETER rather
     than the new default because the admin tick grid (assignments.py) reads
     the same map and must keep showing that stale tick: a cell filtered out
-    of the grid is a row in the table with no button left to clear it."""
+    of the grid is a row in the table with no button left to clear it.
+
+    THE ENFORCE CYCLE ITSELF DOES NOT PASS IT (dash-db-4, 2026-09-11), and
+    the name above therefore over-promises. `collector._run_enforce` reads
+    this map with no flag and drops wired machines further down its own
+    function, on CR-110's separate `base_pairs`/`base_editors` belt. So the
+    two answers to "what should this machine hold" are computed by two rules
+    and agree only because that second filter happens to exist: an edit to
+    the belt, or a new consumer written from this docstring, brings the
+    CR-110/B16 shape back. Either side may be made the single one; whichever
+    is chosen, they must be changed together."""
     wanted = set(sync_modes) if sync_modes else None
     wired = base_machines(conn)
     by_editor_machines: dict[str, list[str]] = {}
@@ -8733,6 +8782,56 @@ def fetch_lane_reports(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     )]
 
 
+COLLECTOR_STALE_BOUND_MAX_SECONDS = 2 * 3600.0
+
+
+def collector_stale_bound(
+    conn: sqlite3.Connection, floor_seconds: float = COLLECTOR_STALE_SECONDS,
+) -> float:
+    """How old the newest cycle START may be before the collector counts as
+    stopped, on THIS deployment.
+
+    dash-collector-alerts-1 (2026-09-11): dash-collector-alerts-3 was right
+    that liveness is the START of a cycle of any kind, and wrong to measure
+    it against a fixed 180 s. A deployment with no `syncthing_url` runs only
+    SYNCTHING_FREE_KINDS (prune 3600 s, invariants 900 s, alerts 600 s), so
+    the newest start on a perfectly healthy collector is normally ten minutes
+    old and the flag was permanently True - an `error` finding on PROBLEMS
+    THE SERVER FOUND, a red topbar chip and a daily mail, on every vendor,
+    zero-touch and dev deployment before Syncthing is configured.
+
+    The bound is therefore read off the collector's own observed rhythm: the
+    shortest gap between two consecutive starts of the same kind, doubled, and
+    never below the caller's floor. A collector that has actually stopped
+    still ages past it (that is the whole point of a bound rather than a
+    gate), just at the cadence the deployment really runs at. A kind that has
+    run only once tells us nothing about cadence, so a container with no
+    repeat yet keeps the floor.
+    """
+    floor = float(floor_seconds)
+    gaps: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT kind, started_at FROM poll_runs ORDER BY id DESC LIMIT 200"
+    ):
+        seen = gaps.setdefault(str(row["kind"]), [])
+        if len(seen) < 2 and row["started_at"]:
+            seen.append(str(row["started_at"]))
+    shortest: float | None = None
+    for starts in gaps.values():
+        if len(starts) < 2:
+            continue
+        try:
+            gap = age_seconds(starts[1], starts[0])
+        except (ValueError, TypeError):
+            continue
+        if gap <= 0:
+            continue
+        shortest = gap if shortest is None else min(shortest, gap)
+    if shortest is None:
+        return floor
+    return max(floor, min(shortest * 2.0, COLLECTOR_STALE_BOUND_MAX_SECONDS))
+
+
 def fetch_collector_status(
     conn: sqlite3.Connection, now: str | None = None,
     stale_after_seconds: float = COLLECTOR_STALE_SECONDS,
@@ -8749,7 +8848,10 @@ def fetch_collector_status(
     `collector_stale` asks a different question about the same rows: is the
     THREAD turning. It is computed from the last cycle START of any kind
     (dash-collector-alerts-3), so a collector whose cycles are failing is
-    still visibly alive and one that has stopped is visibly stopped."""
+    still visibly alive and one that has stopped is visibly stopped -- and
+    against `collector_stale_bound`, this deployment's own observed cadence,
+    rather than a flat 180 s that a Syncthing-less deployment can never meet
+    (dash-collector-alerts-1)."""
     now = now or utcnow_iso()
     kinds: dict[str, dict[str, Any]] = {}
     for row in conn.execute(
@@ -8790,7 +8892,8 @@ def fetch_collector_status(
     stale = False
     if started:
         try:
-            stale = age_seconds(started, now) >= stale_after_seconds
+            stale = age_seconds(started, now) >= collector_stale_bound(
+                conn, stale_after_seconds)
         except (ValueError, TypeError):
             stale = False
     folder_errors = [
@@ -9455,10 +9558,23 @@ def fail_job(
     before it); a job that failed because one laptop went to sleep must not be
     lost. `retryable=False` is the runner saying the fault is in the JOB -- a
     folder with no audio in it -- which no number of machines will fix.
+
+    A CANCELLED JOB DOES NOT COME BACK HERE EITHER (dash-db-2 /
+    regression-3, 2026-09-11). dash-api-2 taught `expire_leases` that rule
+    and belted `queued_jobs`/`claim_job` with it, but this is the third route
+    from a held state back to `queued` and it was not taught: a companion on
+    0.9.65..0.9.70 predates `commands.jobs.cancel`, so it never reports
+    "cancelled, not retryable" - it reports whatever its ffmpeg did. The row
+    then parked in `queued` carrying `cancel_requested_at`: invisible to
+    `queued_jobs`, refused by `claim_job`, never terminal, and still counted
+    in the queue depth the companion backs off on. The click already said
+    what should happen to this row, and the holder has now let go of it.
     """
     now = now or utcnow_iso()
     row = conn.execute(
-        "SELECT kind, attempts FROM jobs WHERE id=? AND claimed_by=? "
+        # SELECT * so a database that predates `cancel_requested_at` reads as
+        # "not cancelled" through _row_value instead of raising here.
+        "SELECT * FROM jobs WHERE id=? AND claimed_by=? "
         " AND claimed_machine=? AND state IN (?, ?)",
         (int(job_id), str(editor), str(machine), JOB_CLAIMED, JOB_RUNNING),
     ).fetchone()
@@ -9466,13 +9582,20 @@ def fail_job(
         return None
     attempts = int(row["attempts"] or 0) + 1
     spent = attempts >= job_retry_budget(row["kind"])
+    cancelled = bool(_row_value(row, "cancel_requested_at"))
     state = (JOB_FAILED if not retryable
              else (_spent_state(row["kind"], pin) if spent else JOB_QUEUED))
+    detail = str(error or "")[:2000]
+    if cancelled:
+        state = JOB_FAILED
+        if not detail.startswith(JOB_CANCELLED_ERROR):
+            detail = f"{JOB_CANCELLED_ERROR}: the holder reported a failure instead " \
+                     f"({detail or 'no detail'})"[:2000]
     conn.execute(
         """UPDATE jobs SET state=?, attempts=?, last_error=?, claimed_by=NULL,
                            claimed_machine=NULL, lease_expires_at=NULL, updated_at=?
             WHERE id=? AND claimed_by=? AND claimed_machine=?""",
-        (state, attempts, str(error or "")[:2000], now,
+        (state, attempts, detail, now,
          int(job_id), str(editor), str(machine)),
     )
     # THE MACHINE IS LEFT ALONE FOR A WHILE (v45), but only when the fault
@@ -9480,8 +9603,9 @@ def fail_job(
     # fault is in the JOB -- a clip with no audio track -- and cooling down a
     # good machine for a bad clip is how a fleet stops for a reason nobody
     # can see. A cancelled job comes back the same way, and must not punish
-    # the machine that obeyed.
-    if retryable and cooldown_seconds > 0:
+    # the machine that obeyed (dash-db-2: including the old companion that
+    # could not be told to stop and failed for its own reason instead).
+    if retryable and not cancelled and cooldown_seconds > 0:
         set_machine_job_cooldown(
             conn, editor, machine,
             f"job #{int(job_id)} ({row['kind']}) failed here: "
@@ -9610,13 +9734,21 @@ def queue_depth(conn: sqlite3.Connection, now: str | None = None) -> dict[str, A
     """
     now = now or utcnow_iso()
     counts: dict[str, int] = {}
+    # dash-db-2 (2026-09-11): `queued` here must mean what `queued_jobs`
+    # means, or the report reply tells a companion to back off over rows no
+    # scheduler will ever hand it. A row an admin has asked to stop is not a
+    # backlog; a fleet with nothing to do otherwise looks like a fleet with a
+    # permanent one, with `oldest_age_s` growing without bound.
     for row in conn.execute("SELECT state, COUNT(*) AS n FROM jobs "
-                            " WHERE state NOT IN (%s) GROUP BY state"
+                            " WHERE state NOT IN (%s)"
+                            "   AND NOT (state=? AND cancel_requested_at IS NOT NULL)"
+                            " GROUP BY state"
                             % ",".join("?" * len(JOB_TERMINAL_STATES)),
-                            JOB_TERMINAL_STATES):
+                            (*JOB_TERMINAL_STATES, JOB_QUEUED)):
         counts[str(row["state"])] = int(row["n"])
     oldest = conn.execute(
-        "SELECT created_at FROM jobs WHERE state=? ORDER BY id ASC LIMIT 1",
+        "SELECT created_at FROM jobs WHERE state=? AND cancel_requested_at IS NULL"
+        " ORDER BY id ASC LIMIT 1",
         (JOB_QUEUED,)).fetchone()
     age: float | None = None
     if oldest is not None:

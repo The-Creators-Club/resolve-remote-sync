@@ -23,6 +23,17 @@
     <div class="banner">▲ reverted automatically: {{ dash_update.current.reverted_reason }}</div>
   {% endif %}
 
+  {# res-fleet-2 (2026-09-11): the automatic revert REFUSED to run, because the
+     tree it would have gone back to knows an older database schema than this
+     database is on. Silence here would be the worst outcome of all: the
+     container keeps restarting a tree that does not come up and nothing says
+     why. Undefined until dashboard_update.status() passes the key through
+     (OWED to dash-release-jobs), and an undefined value renders nothing. #}
+  {% if dash_update.current.revert_refused_reason %}
+    <div class="banner">▲ this dashboard did not roll itself back automatically:
+      {{ dash_update.current.revert_refused_reason }}</div>
+  {% endif %}
+
   {% if not dash_update.image_mode %}
     <div class="muted" style="margin-top:0.6rem">
       This deployment updates from your wired computer, not over the air: its code is read

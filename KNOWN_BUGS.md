@@ -18707,7 +18707,7 @@ done, in_progress: False` and says so in the log. A process that was killed
 mid-restart therefore exits 0 rather than 75 at its next shutdown, which is
 correct: the re-exec already happened.
 
-### CR-242b - a feed URL with a query string could never fetch its signature, so such a site silently received nothing - FIXED (dashboard, `release_feed.py`, dash-release-jobs-3)
+### CR-242b - a feed URL with a query string could never fetch its signature, so such a site silently received nothing - FIXED (dashboard, `release_feed.py`, dash-release-jobs-4)
 
 The detached channel signature was fetched at `<feed url> + ".sig"`, which is
 the right file only when the feed URL is a bare path. The threat model this
@@ -18720,7 +18720,7 @@ receiving builds - REL-11's exact shape. `_signature_url` splits the URL and
 appends `.sig` to the PATH, leaving the query intact (a fragment is dropped:
 it never reaches the server anyway).
 
-### CR-242c - `FeedPoller.start()` after `stop()` started nothing and said it had - FIXED (dashboard, `release_feed.py`, dash-release-jobs-4)
+### CR-242c - `FeedPoller.start()` after `stop()` started nothing and said it had - FIXED (dashboard, `release_feed.py`, dash-release-jobs-5)
 
 `stop()` set the event and joined but never cleared `_thread`, and `start()`
 returned early whenever `_thread` was set, so a reused poller reported itself
@@ -18764,9 +18764,9 @@ we ship emits one; a hand-edited channel is what this defends.
 
 ### Verification
 - dashboard/tests/test_dashboard_update.py::test_a_restart_request_left_by_a_DEAD_process_is_spent_not_honoured -> fails at 40f931a, passes now (dash-release-jobs-2)
-- dashboard/tests/test_release_feed.py::test_a_feed_url_with_a_query_string_still_finds_its_signature -> fails at 40f931a, passes now (dash-release-jobs-3)
+- dashboard/tests/test_release_feed.py::test_a_feed_url_with_a_query_string_still_finds_its_signature -> fails at 40f931a, passes now (dash-release-jobs-4)
 - dashboard/tests/test_release_feed.py::test_a_plain_feed_url_still_asks_for_the_same_signature_url -> passes before and after, pins the unchanged half
-- dashboard/tests/test_release_feed.py::test_a_stopped_feed_poller_starts_again -> fails at 40f931a, passes now (dash-release-jobs-4)
+- dashboard/tests/test_release_feed.py::test_a_stopped_feed_poller_starts_again -> fails at 40f931a, passes now (dash-release-jobs-5)
 - dashboard/tests/test_cards_tunnel.py::test_the_body_s_own_name_is_never_the_machine_half -> fails at 40f931a, passes now (dash-release-jobs-6)
 - dashboard/tests/test_release_feed.py::test_a_capitalised_platform_is_never_offered_as_available -> fails at 40f931a, passes now (dash-release-jobs-7)
 - dashboard/tests/test_release_feed.py::test_a_record_key_speaks_one_spelling -> fails at 40f931a, passes now (dash-release-jobs-7)
@@ -18792,10 +18792,13 @@ we ship emits one; a hand-edited channel is what this defends.
   where every other surface says `windows`. The cost of the choice made: such
   a build disappears from the page with only a log line to say why, the same
   way a record with a bad `min_version` already does.
-- Not fixed here because they are `db.py` and belong to dash-api-jobs:
-  dash-release-jobs-1 (a cancelled job re-queued when its lease expires) and
-  dash-release-jobs-3-as-numbered-by-the-hunter (the per-kind fleet cap is
-  advisory across concurrent claims).
+- dash-release-jobs-1 (a cancelled job re-queued when its lease expires) was
+  fixed under CR-239 (`db.py`, dash-api-jobs); dash-release-jobs-3 (the
+  per-kind fleet cap advisory across concurrent claims) was fixed there too:
+  the cap moved into `db.claim_job`'s compare-and-set (`db.py`, `claim_job`),
+  wired from `api.py`'s claim route, pinned by
+  `test_the_fleet_cap_is_enforced_by_the_compare_and_set`. (Relabelled
+  2026-09-11b, regression-13: CR-242b/c were off by one finding id.)
 
 ## Dashboard surface, mounts and deploy machinery, 2026-09-11 (CR-243)
 
@@ -19748,6 +19751,4167 @@ rule holds on every path and not just the happy one.
 - install-onboard-5: a name with any other explicit port (say 9443) is still
   guessed as http. Probing https first and falling back was the other option
   and adds a network call to a page that must stay instant.
+
+## The 2026-09-11b hunt of the fix pass (CR-249..CR-265, 2026-09-11)
+
+The eighth fleet hunt (`docs/bug-hunt-2026-09-11b.md`) read the seventh's fix pass
+(18e69f3, CR-233..CR-248) the evening it was committed: 23 Opus hunters, 154 raw /
+136 distinct findings, 11 high, 27 of them a same-day fix that did not close the
+scenario it cited. Fixed the same evening by 17 Opus builders on disjoint file
+territories plus an eight-builder hand-off wave for the cross-territory halves
+(`docs/bug-hunt-2026-09-11b/HANDOFFS.md`). One entry per territory below, each
+fix citing its finding id at the code site. Versions: dashboard 0.7.44 (schema v52,
+unchanged), companion 0.9.72, installer 1.0.43. Deploy the dashboard first: it now
+accepts the float `repath_events[].at` a 0.9.71+ companion sends (wire-2), the
+reason 0.9.71 was never published.
+
+## comp-sync, 2026-09-11b (CR-249)
+
+# The sync lanes, the file moves and the asset libraries (CR-249, 2026-09-11)
+
+Nine findings from the 2026-09-11b hunt, all in the companion's `sync/*` and
+`file_moves.py`. Seven of them are the morning's own fix pass (CR-234)
+landing half of itself; two are new.
+
+### CR-249a (comp-sync-b-1) - the abandoned-lane-B latch could be set after the pass had already ended, and then nothing ever cleared it - FIXED (sync/sequencer.py)
+
+comp-sync-7 latched `_lane_b_abandoned` from the SEQUENCER thread, after
+`thread.is_alive()` had already answered True, while the only code that can
+ever clear it is that same lane B thread's own `finally`. The two orderings
+cross: a wedged pass that ends in the window between the `is_alive()` check
+and the assignment - a `_note_lane_moved()` and a lock acquire wide - clears
+first and is latched second. From that moment the latch is permanently on:
+every project turn logs "not starting lane B ... an earlier pass was
+abandoned", lane B reads `stalled on <y>`, and NO proxy downloads again until
+the editor restarts the tray. The lane is not red and no notice is raised, so
+it is green while dead, for the one lane an editor notices last.
+
+Every lane B pass now takes a GENERATION number, minted under `_lock` beside
+`_lane_b_subpath`. The pass's `finally` calls `_retire_lane_b_generation(gen)`
+and `_note_lane_b_abandoned(subpath, thread, gen)` refuses to latch a
+generation that has already retired - both sides take the same lock, so there
+is no window left to lose, and the sequencer says so in the log rather than
+latching silently. Belt and braces, the latch remembers its THREAD and
+`_run_lanes_a_and_b` drops one whose thread is no longer alive before
+honouring it: a pass that died without reaching its finally at all costs one
+turn, not the process.
+
+### CR-249b (regression-4) - the stale-subpath gate is the ROTATION's, not the lane's: CONSOLIDATE's proxy pull was silently dropped - FIXED (sync/rclone_lane.py, sync/sequencer.py)
+
+comp-sync-7's second half put "has the rotation moved on?" inside
+`_run_once_locked`, i.e. on every caller of `run_once`. CONSOLIDATE and FIX
+ALL call `run_once` on the SAME lane object the sequencer holds
+(`app._consolidate_upload_phase`), and `_lane_b_subpath` is sticky between
+turns - it names the last project the rotation visited. So an editor
+consolidating project X while the last turn was on Y had their proxy pull
+answered with `skipped a queued pass: the rotation had moved on`, after the
+progress UI had already published "Downloading proxies from the server...".
+The consolidated project ended with no proxies and a log warning nobody reads.
+
+`run_once` takes `rotation_pass` (default False) and only a rotation pass may
+be dropped for having gone stale. `Sequencer._run_lane` passes it for lane B,
+duck-typed through `_accepts_kw` the way the time budget already is, so a lane
+adapter or test double that predates it behaves exactly as it did.
+
+### CR-249c (comp-sync-b-3, res-companion-3) - an in-flight deletion credit that was never reconciled made the NEXT pass's deletions invisible to the breaker - FIXED (sync/lane_guard.py, sync/rclone_lane.py)
+
+`_in_flight_credited` was reset only by `note_pass()` and `resume()`, and
+`run_once` has return paths that never reach `_account_pass` (an exception out
+of `_run_popen` or `subprocess_run` after the run had already emitted
+`--stats` ticks). The counter was then left at the dead pass's total, so the
+next pass's `delta = total - credited` was negative for its whole length and
+`note_pass` subtracted the same stale figure a second time: a pass that really
+did trash 400 proxies added zero to the cumulative account the breaker trips
+on. Exactly the direction res-companion-5 was written to stop, in the fix that
+introduced it.
+
+`LaneBBreaker.begin_pass()` starts a run's in-flight account at zero and the
+lane calls it immediately before the spawn (`_begin_breaker_pass`, duck-typed
+and never raising, because a safety device that can fail the run it guards is
+worse than none). `note_deletes_in_flight` additionally re-baselines when the
+running total is BELOW what is credited, which cannot be the same run - the
+backstop for any caller that does not use `begin_pass`.
+
+### CR-249d (comp-sync-b-2) - an `applying` intent row was indistinguishable from a completed move, so Resolve could be repointed at a file that was never moved - FIXED (file_moves.py)
+
+res-companion-1 started writing `old_local`/`new_local` and
+`relink_pending=True` BEFORE the first filesystem call, and `record()` carries
+that pair forward into every later row for the id. Neither `pending_relinks()`
+nor `moved_to()` looked at `state` or `ok`, and no consumer checked that
+`new_local` exists. A companion killed between `record_intent` and
+`src.replace(dest)` - CR-93's routine "died without a shutdown", or the
+supervisor's own restart - therefore came back and, on the next project the
+editor opened, walked the media pool and repointed every clip under
+`old_local` at a path that does not exist on that machine: Media Offline,
+journalled as a real Resolve mutation, in a project the editor was in the
+middle of. The watcher's dialog was the same defect with a human in the loop,
+telling the editor in writing that "Your copy has already been moved to
+match".
+
+`record_intent` now writes `relink_pending=False` (the completion row sets it
+properly either way, including on the crash-resume path), and
+`pending_relinks()` skips `applying` rows outright. `moved_to()` keeps the
+one-click relink res-companion-1 built, but asks the DISK which of the two
+crashes happened: the row is offered only when the file really is at
+`new_local` and gone from `old_local`. Cannot tell counts as no.
+
+### CR-249e (regression-6) - the case-only rename left its proxy behind - FIXED (file_moves.py)
+
+Every other arm of `apply_move` calls `move_proxy_siblings`; comp-sync-12's
+new case-only arm returned without touching `<parent>/Proxy/` at all. The
+dashboard renames the proxy on the NAS with the original
+(`docs/FILE_MOVES.md`), so the editor was left with `Clip.mov` beside
+`Proxy/clip.mov`: lane B sees one proxy missing locally and one extraneous, so
+it downloads the first, trashes the second into `.ccsync-trash` and charges
+that deletion to the breaker's account. `move_proxy_siblings` could not be
+reused as it stands - it keeps each proxy's own name, which for a rename that
+differs only in spelling moves nothing. `rename_proxy_siblings_case_only`
+renames each matching proxy to the destination's spelling through the same
+staging two-step, and the count is folded into the detail the dashboard shows.
+
+### CR-249f (comp-sync-b-4) - a failed case-only rename could leave the clip under a `.ccsync-move-` name that lane A then uploaded - FIXED (sync/rclone_lane.py, file_moves.py)
+
+`_rename_case_only` stages the file at `.ccsync-move-<pid>-<original name>`,
+and if both the second replace and the restore fail (Resolve holding a handle:
+WinError 32 on both) that is what the editor is left holding. The staging name
+keeps the original extension, and `recent_excludes` excludes the OLD rel path,
+not this one - so the next lane A pass uploaded it to the NAS beside the real
+clip, which is the duplicate-at-the-cleared-path failure `docs/FILE_MOVES.md`
+exists to prevent, wearing a different name. `MOVE_STAGING_EXCLUDE_RULE` is in
+both lanes' rule lists ahead of every include, and `path_matches_lane_a_filter`
+refuses it too - express is lane A's other door, and a staging name sits
+perfectly still on disk, so it clears the size-stability and min-age gates
+easily.
+
+### CR-249g (comp-sync-b-5) - a fleet halt held the borrowed folders but not the shared asset libraries - FIXED (sync/shared_folders.py)
+
+`SharedFolderManager.reconcile` honours the halt only for a folder that
+already EXISTS and is paused. A library being accepted for the FIRST time went
+through `_accept` -> `admin.accept_folder`, which ends in an unpause, so an
+admin who halted the fleet and then had the provision cycle offer a machine a
+new library (LUTs, music) got that machine syncing it while every other lane
+was stopped - the sync-safety-2 / CR-48 shape. comp-sync-10 edited both
+`_accept` methods this afternoon and gave the guard to one of them.
+`SharedFolderManager._accept` now returns `OUTCOME_HALTED` before it accepts,
+exactly as the borrowed manager does; the offer keeps, and the next reconcile
+after the halt takes it.
+
+### CR-249h (security-4) - the Syncthing helpers followed redirects while carrying the API key - FIXED (sync/syncthing_admin.py, sync/syncthing_lane.py)
+
+`syncthing_admin.http_request` and `syncthing_lane.default_http_get` both
+handed a request carrying `X-API-Key` to the bare `urllib.request.urlopen`,
+which follows 3xx and RE-SENDS the header to the new location. The shipped
+`base_url` is loopback, so the peer is normally benign - but the constructor
+takes a `base_url`, and a site that points a companion at a Syncthing GUI on
+another host over plain http (or anything that can answer on that port first)
+gets the machine's full lane C admin credential posted wherever it likes for
+the cost of one 302. Every other outbound caller in this product installs
+`build_no_redirect_opener` for exactly this reason; these two were the last
+that did not. Both now share one lazily built no-redirect opener, so a 3xx
+surfaces as an HTTPError and the key stays on the machine.
+
+### Verification
+
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_a_lane_b_that_ends_inside_the_latch_window_does_not_latch_for_ever -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_a_latch_whose_thread_has_died_is_not_honoured -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_a_consolidate_pass_is_not_dropped_by_the_rotations_subpath -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_a_rotation_pass_for_a_stale_subpath_is_still_dropped -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_the_sequencer_marks_its_own_passes_as_rotation_passes -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_deletions_after_a_pass_that_never_finished_still_reach_the_account -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_a_running_total_below_the_credit_is_read_as_a_new_run -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_lane_b_clears_the_in_flight_credit_before_it_spawns -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_an_intent_row_is_never_offered_as_a_completed_move -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_the_finished_move_is_still_offered -> the control: passes both sides
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_a_case_only_rename_renames_the_proxy_beside_it -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_the_rename_staging_name_is_refused_by_both_lane_a_doors -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_a_halt_holds_a_new_asset_library_offer -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_the_offer_is_accepted_once_the_halt_is_over -> the control: passes both sides
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_the_admin_helper_refuses_a_redirect_rather_than_resend_the_key -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_the_lane_c_helper_refuses_a_redirect_rather_than_resend_the_key -> fails at f1eeb42, passes now
+
+Two existing tests were updated for the new contracts, both in this
+territory's own files: `test_rclone_filters.py`'s lane B rule-list equality
+(the new staging exclude) and
+`test_bug_hunt_2026_09_11_comp_sync.py::test_a_queued_pass_for_a_stale_subpath_is_dropped`
+(which now passes `rotation_pass=True`, since that is the only kind of call
+the gate may drop).
+
+Also run green after the change: test_sequencer.py, test_rclone_lane.py,
+test_rclone_lane_races.py, test_rclone_express.py, test_rclone_filters.py,
+test_lane_guard.py, test_file_moves.py, test_shared_folders.py,
+test_borrowed_folders.py, test_syncthing_admin.py, test_syncthing_lane.py,
+test_sync_sequencer_policy.py, test_bug_hunt_2026_09_11_comp_sync.py.
+
+### OWED TO ANOTHER TERRITORY
+
+- comp-app: `companion/src/ccsync_companion/app.py`: `_relink_pending_moves`
+  (~:7759) and `_show_moved_clip_dialog` (~:7801): refuse an entry whose
+  `entry["new_local"]` does not exist on disk before calling
+  `resolve_bridge.replace_clip` / before telling the editor "Your copy has
+  already been moved to match". comp-sync-b-2's belt and braces: the ledger
+  half is fixed here (an `applying` row is no longer offered as a completed
+  move), so this is defence in depth, not a dependency. No deploy ordering:
+  both halves are companion-side.
+- comp-app: `companion/src/ccsync_companion/app.py`: `_relink_moved`
+  (~:7846-7857): this is regression-5, already assigned to comp-app. Noting
+  it only because `file_moves.cmp_key` - the public spelling it must use - is
+  in this territory and is unchanged by anything above.
+
+### Owner decisions
+
+- comp-sync-b-2: the hunter's suggested fix would have dropped the
+  `applying` row from `moved_to()` outright, which would have taken
+  res-companion-1's whole point with it (the one-click relink after a crash
+  BETWEEN the rename and the record). I kept the offer and gated it on
+  filesystem evidence instead: the row is offered only when the file really
+  is at `new_local`. A case-only rename's two paths fold together on Windows
+  and macOS, so an interrupted case-only rename is never offered - it answers
+  "no relink to offer" rather than guessing.
+- security-4's second half ("reject a non-loopback `base_url` over http") is
+  NOT implemented. A site that has deliberately pointed a companion at
+  another host's Syncthing GUI would stop syncing at the upgrade, and the
+  no-redirect opener closes the leak this finding is about. Say the word and
+  it becomes a refusal.
+- comp-sync-b-4 spells `.ccsync-move-` in two places (`file_moves.py` and
+  `rclone_lane.MOVE_STAGING_PREFIX`) rather than importing one from the
+  other: `file_moves.py` deliberately imports nothing of its own. Each site
+  names the other in a comment.
+- The case-only rename's detail line reuses the existing "N proxy file(s)
+  with it" wording from the ordinary move arm. It is the same string the
+  dashboard already shows for every other move; the "(s)" plural ban's scan
+  covers tray/settings/app/popup, not this module.
+
+### Hand-off wave
+
+#### CR-249i (regression-19, owed from comp-app) - the relink answer still said "clip(s)" to the editor - FIXED (`file_moves.py`)
+
+`relink_moved`'s detail used to be a log line and a wire `detail`. comp-sync-11
+folded `CompanionApp._relink_moved`'s own sentence into it, so the string is
+now what the editor reads: the RELINK IT dialog answers with it through
+`_notify_tray`, and `_relink_pending_moves` puts it in the answer that comes
+back after a project change. It still spelled the plural "N Resolve clip(s)
+relinked" - the developer shorthand the owner's 2026-08-18 rule retired from
+copy an editor reads, and the one regression-19 could not reach because
+app.py is not this territory. It goes through `ui_copy.count` now ("1 Resolve
+clip relinked" / "3 Resolve clips relinked"); the refused tail is unchanged,
+because a clip Resolve will not let us repoint is not something another pass
+fixes and the sentence must still say so. The "proxy file(s)" details in
+`apply_move` are deliberately NOT converted: those are the wire `detail` the
+dashboard stores and shows an admin, the audience regression-19's owner note
+draws the line at.
+
+### Verification (hand-off wave)
+
+From `companion/` with `.venv\Scripts\python.exe -m pytest`:
+
+- tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_the_relink_answer_the_editor_reads_has_a_real_plural[1-...] -> fails on the wave-1 source ("1 Resolve clip(s) relinked"), passes now
+- tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_the_relink_answer_the_editor_reads_has_a_real_plural[3-...] -> fails on the wave-1 source, passes now
+- tests/test_bug_hunt_2026_09_11b_comp_sync.py::test_the_refused_half_of_the_relink_answer_is_still_reported -> fails on the wave-1 source, passes now (the failed tail must survive the rewording)
+- Both runs measured by reverting the one line and re-running, not by reading.
+- tests/test_file_moves.py re-run green: its SYNC-102 case asserted the old
+  spelling and now asserts the new one (one line, cited).
+- `py_compile` clean on file_moves.py.
+
+### OWED TO ANOTHER TERRITORY (hand-off wave)
+
+- none.
+
+### Owner decisions (hand-off wave)
+
+- Only the editor-visible sentence was converted. `apply_move`'s "N proxy
+  file(s) with it" strings stay as they are: they are the dashboard-side
+  `detail`, the same audience the comp-app ledger left alone.
+
+## comp-app, 2026-09-11b (CR-250)
+
+# The companion's app core, 2026-09-11b (CR-250)
+
+Twelve findings from the eighth fleet hunt's `comp-app` territory, plus three
+routed here from other territories mid-pass: the file moves the report reply
+carries, the thread watchdog comp-app-7 rewrote that afternoon, "Sync now",
+and several half-landed fixes from the same day's pass.
+Everything here is `companion/src/ccsync_companion/app.py` unless the heading
+says otherwise; the regression tests are
+`companion/tests/test_bug_hunt_2026_09_11b_comp_app.py`.
+
+### CR-250a (res-companion-1 / wire-1) - the crash-resume for an interrupted file move was unreachable - FIXED (app.py)
+
+The same-day fix wrote an `applying` intent row before the first filesystem
+call and taught `file_moves.apply_move` to finish the job when a redelivered
+command finds `src` gone, `dest` present and OUR row. `_apply_file_moves`
+never called it again: the ledger gate short-circuits on
+`done is not None and not retry_due(done)`, and `retry_due()` is False for
+every state except `retryable`. An `applying` row therefore took the
+already-answered branch and replied `ok=False, state=None`, which on the
+dashboard means "an old companion answered, and a failure is an answer":
+`applied_at` was stamped and the command retired for ever. The project page
+showed that machine FAILED with an internal state name as the detail, the
+`applying` row stayed in `recent_excludes`'s unresolved set so lane A was
+muzzled on that path permanently, and in the kill-BEFORE-the-rename variant
+the move was never applied at all while the server was told it had been
+answered. The gate now recognises `STATE_APPLYING` as a move this machine was
+interrupted in the middle of and falls through to `apply_move`, which either
+finishes it or applies it from scratch; a drive that is out when the
+redelivery arrives still answers `retrying`, because the root check sits
+after the gate. Both of the fix pass's tests missed this (one calls
+`apply_move` directly, the other monkeypatches it away), so the new ones
+drive `_apply_file_moves` across a simulated kill on both sides of the
+rename.
+
+### CR-250b (comp-app-2) - "waiting for the sync drive" rode every report - FIXED (app.py)
+
+comp-sync-20 was right that silence lets the dashboard's 7 day expiry drop a
+move for an editor who is away with the drive in their bag, and wrong to say
+it twice a minute. `pending_file_moves` re-offers every unanswered move on
+every report and `mark_file_move_applied`'s retrying UPDATE matches while
+`applied_at IS NULL`, so it can never become a no-op: three moves and a
+fortnight away is tens of thousands of identical WARNING lines in the log an
+admin opens to find out why something else went wrong. The answer is now
+queued at most once per `FILE_MOVE_DRIVE_ANSWER_SECONDS` (30 minutes) per
+move, and the record is cleared the moment a report is processed with the
+drive present, so a new outage says so at once. Deliberately not "once per
+outage": a lost report would then cost the move, and half an hour is well
+inside the 7 days the answer exists to hold off. The dashboard half of this
+finding (log only on a CHANGE of state or detail) is OWED to dash-api.
+
+### CR-250c (comp-app-3) - the watchdog's hourly ceiling was dead code - FIXED (app.py)
+
+`LANE_WATCHDOG_MAX_RESTARTS_PER_HOUR = 6` and a wait of
+`60 * 2**len(recent)` capped at 30 minutes are one policy, and they
+contradicted each other: the earliest six restarts fall at t = 0, 120, 360,
+840, 1800 and 3720 s, by which time the first has aged out of the hour, so
+`len(recent)` never reached 6. The branch that says "this needs a human, not
+another restart" could not run, and a sequencer whose loop dies immediately
+was restarted for ever - 97 times in a simulated day, which is the behaviour
+comp-app-7 says it removed. The backoff cap is 10 minutes now, which leaves
+room for six attempts (0, 120, 360, 840, 1440, 2040 s) inside the window they
+are counted over. The two tests that claimed to assert the ceiling were
+satisfied by the backoff alone; the new one counts the restarts in the first
+hour and reads the ceiling's own line out of the log.
+
+### CR-250d (comp-app-4) - the clock-skew tolerance was missing from the policy it was written for - FIXED (app.py)
+
+comp-app-7 widened `_load_record`'s filter to tolerate an event stamped in
+the future, with the comment "and the ceiling above reads these events". The
+ceiling and the backoff still filtered `0 <= now - t`, so a clock that steps
+BACKWARDS (an NTP correction, a VM resume, a dual-boot RTC: the three cases
+the comment names) emptied `recent` for the length of the step and the dead
+thread was restarted every 60 s tick with no backoff and no ceiling - exactly
+what the persisted record exists to prevent. `_restart_held_off` now uses the
+same `-_WATCHDOG_CLOCK_SKEW_SECONDS` bound, and clamps `since` at 0 so an
+event in the future reads as "just now" rather than as older than the wait.
+
+### CR-250e (comp-app-6) - "Sync now" ran a lane this machine has disabled - FIXED (app.py)
+
+comp-app-1 unified the refusals behind `_lanes_refusal()` and left the
+ACCEPTED path iterating `self.lanes` unfiltered. `_start_lanes` has always
+skipped lane B where `lane_b_enabled=false` (a machine that reads the proxies
+straight off the share) and writes "disabled: direct NAS access" on its
+status line, and `rclone_lane.run_once` has no enable check of its own - its
+early returns are the root, the stop event (never set on a lane that was
+never started), the breaker and the disk floor - so the click ran a full
+proxy pull DOWN onto that machine and named lane B in the toast over the
+status line that says it is off. `_runnable_lanes()` is the one predicate
+now, used by `sync_now`, by the `lanes` list in the verdict and by
+`_start_lanes` itself, so a fourth caller cannot miss it.
+
+### CR-250f (regression-5) - the relink twin comp-sync-11's own comment names - FIXED (app.py)
+
+CR-234 routed `file_moves.relink_moved` through the public `cmp_key` (NFC
+plus case fold) and its comment says "anything outside this module that
+compares two paths must come through here". `CompanionApp._relink_moved` went
+on comparing with a bare `os.path.normcase(os.path.normpath(...))` and taking
+the folder tail with `os.path.relpath` on the raw strings - and the FILE MOVE
+feature (the apply path, the pending-relink sweep and the RELINK IT dialog)
+all go through that twin, while the fixed one has a single caller on the
+project-rename path. A Mac answers NFD and the ledger's old path is the
+dashboard's NFC, so a clip whose name carries a diacritic matched nothing,
+`matched` stayed False, the ledger kept `relink_pending` for the whole 30 day
+window and RELINK IT answered "Nothing in this project pointed at the old
+location" about a clip sitting offline in front of the editor. The private
+copy of the walk is gone: `_relink_moved` delegates to
+`file_moves.relink_moved`, which is where the folded comparison and the
+component-count tail live.
+
+### CR-250g (comp-app-5) - the hold-off wrote a WARNING every tick - FIXED (app.py)
+
+comp-app-7 removed the per-tick JSON write and left the per-tick log line, at
+a different level: a thread down for a day produced about 1,350 WARNING lines
+plus the ERRORs, and the 5 MB rotating log still lost the day's other
+evidence. The refusal is written once per CHANGE of answer (a new wait, or
+the transition into the ceiling) and at DEBUG in between, so the editor's log
+still says the thread is down and says it about six times an hour instead of
+sixty.
+
+### CR-250h (comp-app-7) - the consolidate toast hid the count in the common case - FIXED (app.py)
+
+`f"Copy & upload finished ({copied} copied in{skipped_part})." if skipped
+else "Copy & upload finished."` - the conditional governs the whole f-string,
+so the number appeared only where the editor had skipped something. A clean
+40 clip consolidate said "Copy & upload finished." with nothing to compare
+against the 40 they expected, while the rehearsal, the cancelled and the
+failure branches all print one. comp-resolve-2 corrected the arithmetic in an
+expression most editors never saw. The count is unconditional now.
+
+### CR-250i (comp-app-8) - a corrupt machine.json was permanent, silent and unrepairable - FIXED (machine.py, app.py)
+
+comp-app-5 was right to stop minting a SECOND id over a file that exists but
+cannot be read - the dashboard reads a new id as another computer and the old
+one is gone for good - and gave the condition no exit. `machine_id()`
+answered "" for ever, `reporter.py` cached that for the life of the process
+by design, nothing wrote a notice, nothing reached the report, and the
+machine kept its hostname key, so a power loss that truncated
+`~/.ccsync/machine.json` cost the rename affordance invisibly until somebody
+renamed that computer. `machine.machine_id_unreadable()` is the accessor,
+`machine.remint()` the deliberate repair (it sets the unreadable bytes aside
+as `machine.json.unreadable-<epoch>` rather than destroying them, and refuses
+to touch a file it CAN read), and the companion says it once per process in
+the log and in one tray line that does not ask the editor to do anything
+risky. The tray/Settings button that calls `remint()` is OWED to comp-ui.
+
+### CR-250j (regression-19) - four editor-visible "(s)" plurals still shipped from app.py - FIXED (app.py)
+
+comp-ui-4's blanket "no new `(s)` in a visible string" loop names tray.py and
+settings_window.py only, and app.py was still checked against a nine-phrase
+retired list, so "Re-addressed 3 clip(s)", "Rehearsal finished: 5 file(s)
+were checked", "(2 folder(s) are set to be left alone)", "and 3 other
+clip(s)" and both LUT sentences went on reaching editors while the test that
+asserts UX-10's plurals were retired passed. All six now go through
+`ui_copy.count`. The remaining `(s)` in app.py are log lines, report `detail`
+strings and the diagnostics block an admin pastes into a ticket: a different
+audience, and the file-wide loop belongs with whoever converts those.
+
+### CR-250k (regression-20) - the second trash-summary producer handed out the DEFAULT retention - FIXED (app.py)
+
+comp-sync-15 passed `path` and `max_age_days` to the lane's producer and left
+`app.trash_summary()`, which is in the pinned app contract, calling
+`lane_guard.trash_summary(root)` with one argument and hardcoding
+`DEFAULT_TRASH_MAX_AGE_DAYS` in its fallback branch. A site with
+`trash_max_age_days = 3` would have had its next recovery-folder surface say
+"copies are kept 14 days" about a folder pruned at 3, which is the
+wrong-deadline defect SYNC-112 and comp-sync-15 both exist to stop, delivered
+by the next caller. Both paths read the configured value now, through one
+`_configured_trash_max_age_days()` that cannot raise.
+
+### CR-250l (res-companion-5) - the answer queue was rebuilt from two threads with no lock - FIXED (app.py)
+
+`_queue_file_move_answer` is a read-filter-assign followed by an append,
+called from the report-reply path and from the watcher thread, while the
+reporter swaps the list out. A swap landing between the filter-assign and the
+append either dropped the answer being queued or assigned answers that had
+just been reported back into the list, re-publishing a verdict the dashboard
+had already acted on; comp-sync-20 made it hotter by queueing an answer on
+every report while the drive is out. Both accesses are under one lock now.
+The lock and comp-app-2's record are built on demand by module-level helpers
+because `_apply_file_moves` and `_queue_file_move_answer` are called UNBOUND
+on an object that never ran `CompanionApp.__init__` (the file-move suite's
+stub is how the redelivery path is tested at all), and a new constructor
+attribute would otherwise be an AttributeError swallowed by that function's
+never-raise handler - silently no file moves applied on every machine.
+
+### CR-250m (comp-broll-music-2, owed here) - CLEAR FINISHED STAGING said there was nothing to clear about bytes the editor can see - FIXED (app.py)
+
+`prune_staging` now deliberately keeps a drop that was staged and never run:
+it has no `ended_at`, so it is not FINISHED, and its retention clock is the
+later of when it was staged and when a byte last landed in it. The button the
+space refusal names answered "There is no finished staging to clear on this
+computer" about exactly those bytes, which is the sentence that makes an
+editor press it a second time. When nothing was removed and `held_unrun` is
+not zero, the answer now says what that staging is - drops that were never
+indexed - and that it clears itself once it is past the retention window, or
+as soon as the drop is run.
+
+### CR-250n (comp-resolve-b-2, owed here) - the relink limiter's hold-off line repeated every 900 s - FIXED (app.py)
+
+`_handle_non_canonical`'s "holding N clip(s)" INFO line was written on every
+refusal, and RES-19's watcher re-offers the same clips every 900 s for the
+life of the process, so it repeated all afternoon about a queue that had not
+changed. Once per `AUTOMATIC_MIN_INTERVAL_SECONDS` window now (and through
+`ui_copy.count`, which is where the last of regression-19's plurals was).
+
+### CR-250o (comp-sync-b-2, owed here) - a pending relink whose file is not on disk - FIXED (app.py)
+
+The `applying` intent row is written before the rename and carries
+`relink_pending`, so a companion killed in between leaves a ledger row that
+reads like a completed move. `_relink_pending_moves` (watcher thread) and the
+RELINK IT dialog would both repoint this project's clips at a path that does
+not exist, which is worse than the offline clip they are fixing: the fixer's
+answer to an in-tree missing clip is to copy it back to the path the admin
+just cleared. `_moved_destination_is_there` asks the disk before either one
+runs; a path that cannot be tested at all (a permission error, a drive that
+is out) is never a refusal, because never relinking would be its own
+permanent fault. The dialog says so to the editor instead of opening on a
+move that has not landed. comp-sync fixed the ledger half in file_moves.py;
+this is the defence in depth they asked for.
+
+### Verification
+
+All in `companion/tests/test_bug_hunt_2026_09_11b_comp_app.py` unless noted;
+each fails at f1eeb42 (18 of the 20 do; the two named as controls pass before
+and after on purpose) and passes now.
+
+- `test_a_move_interrupted_after_the_rename_is_finished_on_redelivery` -> fails at f1eeb42, passes now (res-companion-1)
+- `test_a_move_interrupted_before_the_rename_is_applied_on_redelivery` -> fails at f1eeb42, passes now (res-companion-1)
+- `test_a_move_being_applied_when_the_drive_goes_out_is_not_retired` -> fails at f1eeb42, passes now (res-companion-1)
+- `test_the_drive_is_out_answer_is_not_repeated_on_every_report` -> fails at f1eeb42, passes now (comp-app-2)
+- `test_a_long_outage_still_re_answers_so_a_lost_report_is_not_final` -> fails at f1eeb42, passes now (comp-app-2)
+- `test_the_drive_coming_back_ends_the_outage` -> CONTROL: green before and after (comp-app-2)
+- `test_the_hourly_ceiling_is_reachable_within_the_hour` -> fails at f1eeb42 (5 restarts, no ceiling line), passes now (comp-app-3)
+- `test_a_clock_that_steps_backwards_does_not_restart_on_every_tick` -> fails at f1eeb42, passes now (comp-app-4)
+- `test_the_hold_off_does_not_write_a_warning_every_tick` -> fails at f1eeb42 (55 lines in an hour), passes now (comp-app-5)
+- `test_sync_now_does_not_run_a_lane_this_machine_has_disabled` -> fails at f1eeb42, passes now (comp-app-6)
+- `test_sync_now_still_runs_lane_b_where_it_is_enabled` -> CONTROL: green before and after (comp-app-6)
+- `test_the_apps_relink_matches_a_mac_spelling_of_the_same_name` -> fails at f1eeb42, passes now (regression-5)
+- `test_the_consolidate_success_toast_says_how_many_were_copied` -> fails at f1eeb42, passes now (comp-app-7)
+- `test_an_unreadable_machine_file_is_reported_and_repairable` -> fails at f1eeb42, passes now (comp-app-8)
+- `test_a_healthy_machine_file_is_never_reminted` -> fails at f1eeb42, passes now (comp-app-8)
+- `test_the_editor_is_told_when_this_computer_cannot_read_its_id` -> fails at f1eeb42, passes now (comp-app-8)
+- `test_app_py_writes_real_plurals` -> fails at f1eeb42, passes now (regression-19)
+- `test_the_trash_summary_uses_the_sites_own_retention` -> fails at f1eeb42, passes now (regression-20)
+- `test_the_trash_summary_fallback_uses_it_too` -> fails at f1eeb42, passes now (regression-20)
+- `test_an_answer_already_reported_is_not_resurrected` -> fails at f1eeb42, passes now (res-companion-5)
+- `test_clear_finished_staging_explains_a_drop_that_was_never_run` -> fails at f1eeb42, passes now (comp-broll-music-2, owed here)
+- `test_clear_finished_staging_still_says_so_when_there_is_nothing` -> CONTROL: green before and after
+- `test_the_rate_limiters_hold_off_is_logged_once_per_cooldown` -> fails at f1eeb42 (five lines), passes now (comp-resolve-b-2, owed here)
+- `test_a_pending_relink_whose_file_is_not_there_is_not_offered` -> fails at f1eeb42, passes now (comp-sync-b-2, owed here)
+- `test_the_relink_it_dialog_refuses_a_destination_that_is_not_there` -> fails at f1eeb42, passes now (comp-sync-b-2, owed here)
+
+Also run (unchanged, still green): `tests/test_bug_hunt_2026_09_11_comp_app.py`,
+`tests/test_file_moves.py`, `tests/test_sweep_2026_09_04_copy.py`,
+`tests/test_app_contract.py`, `tests/test_app.py`, `tests/test_machine.py` -
+850 passed with the 25 above. `py_compile` on both source files.
+
+Three findings were folded in from other territories mid-pass (the
+orchestrator's OWED routing): comp-broll-music-2's sentence, comp-resolve-b-2's
+log throttle and comp-sync-b-2's on-disk check. All three are companion-only
+and need no deploy ordering.
+
+### OWED TO ANOTHER TERRITORY
+
+- dash-db: `dashboard/src/ccsync_dashboard/db.py`: `expire_delivered_file_moves`: exclude rows whose `state` is `retrying` from the 7 day expiry (comp-app-1, already assigned to dash-db). With CR-250b the companion now re-answers every 30 minutes rather than every report, which is still far inside the window - but the expiry must read `state`, or an editor away for a fortnight still loses the move. Dashboard deploys first; the companion half is safe alone.
+- dash-api: `dashboard/src/ccsync_dashboard/api.py` (~8994, the file-move result logging): log the `retrying` answer only when `state` or `detail` CHANGED for that move (the row already holds the previous detail), instead of on every `rowcount > 0`. comp-app-2's companion half cuts the volume by about sixty; a machine on 0.9.65..0.9.71 still answers on every report, so the dashboard's own de-dupe is what makes the log quiet for the fleet as it is today. Either side may deploy first.
+- comp-ui: `settings_window.py` (and/or the tray menu): an item that calls `machine.remint()` when `machine.machine_id_unreadable()` is True, so the editor whose tray line CR-250i adds has a button to repair the file with. The companion half (the accessor, the repair function and the advisory) is in; the button is additive and needs no deploy ordering.
+- comp-sync: `file_moves.py`: `record_intent` writes `relink_pending=True` before the file has moved (comp-sync-b-2, already assigned there). CR-250a makes the resume run, which makes that row shorter-lived, but it does not close the window where `_relink_pending_moves` can repoint a clip at a path that does not exist yet.
+- comp-sync: `file_moves.relink_moved` returns the detail string `"N Resolve clip(s) relinked"`, which reaches the editor through the RELINK IT dialog now that app.py delegates to it. It is one `ui_copy.count` call in that module.
+
+### Owner decisions
+
+- dash-api's `state="applying"` tolerance is noted and NOT used: `_apply_file_moves` answers `retrying` for an `applying` ledger row it cannot resolve this pass, so a dashboard below 0.7.44 does not 422 on it.
+- comp-app-2 is answered at most once per 30 minutes per move while the drive is out, not once per outage: once per outage is quieter still, but a single lost report would then cost the move. The interval is `CompanionApp.FILE_MOVE_DRIVE_ANSWER_SECONDS`.
+- comp-app-3 was fixed by capping the backoff at 10 minutes rather than by counting the ceiling over 24 hours. The alternative would refuse a seventh restart of a thread that had recovered six times in a day, which is a different and worse policy; this way the ceiling means what its constant says.
+- regression-19 converted the six toast/dialog plurals the finding names and did NOT add app.py to the blanket file-wide `(s)` loop in `test_sweep_2026_09_04_copy.py`: the remaining hits are log lines, wire `detail` strings and the diagnostics block, and that file is shared with comp-ui this pass.
+- comp-app-8's tray line tells the editor to send their log to their admin and says CCSync will not overwrite the file on its own. It does not offer to re-mint from the toast: the id in the unreadable file may still be recoverable, and a one-click id change is not a decision to take from a notification.
+
+## The tray, the Settings window and the supervisor, 2026-09-11 (CR-251)
+
+### CR-251a (comp-ui-1 / regression-7) - a failed Explorer-restart re-add killed the tray refresh loops for the life of the process - FIXED (`tray_native.py`, `tray.py`)
+
+`_ccsync_stop` is the flag `start_tray` wraps `icon.stop()` to set: it means
+"this icon is dead, stop refreshing it", and NOTHING in the repo ever clears
+it. CR-235 reused it as a side effect of the new diagnostic path
+(`_report_windows_icon_failure`) and wired that path to the Explorer-restart
+handler as well as to the terminal failure in `run()`. An Explorer restart is
+recoverable: the pump thread is still alive and the next `TaskbarCreated`
+broadcast calls `_add_icon()` again. So an Explorer that restarts twice in
+quick succession (a shell crash, a GPU driver reset, an update) failed the
+first re-add, ended the refresh and pulse threads, and then succeeded on the
+third broadcast - leaving the editor a CCSync icon showing the colour, the
+tooltip and the menu as they were at the moment of the failure, for the rest
+of the session. The lane lines never move, the icon never changes colour, and
+the lane B breaker, fleet halt and disk-floor lines can never appear. Green
+while dead, which is worse than the headless companion CR-235 set out to fix.
+`_announce_failure` now takes `fatal` (True from `run()`, where the pump never
+started and stopping the loops is right; False from the TaskbarCreated
+handler), and `_report_windows_icon_failure` sets `_ccsync_stop` only when
+fatal. The ERROR line and the crash report are written either way, so the
+diagnostic half of CR-235 is untouched. The hook's arity is asked with
+`inspect.signature` rather than discovered by catching TypeError - a TypeError
+raised inside a two-argument hook would otherwise be read as "it takes one"
+and run the hook twice.
+
+### CR-251b (comp-ui-2 / regression-16) - the Explorer-restart re-add froze the tray for 15.5 s, against its own comment - FIXED (`tray_native.py`)
+
+CR-235 gave the first registration an exponential backoff and its comment
+says, in as many words, "The Explorer-restart re-add keeps the short schedule;
+it runs on the pump thread, where a two-minute sleep would freeze the tray."
+Only the attempt COUNT stayed short. `_add_icon()` with no argument still got
+six attempts, but the delays came from `_nim_add_delays(6)` =
+`[0.5, 1, 2, 4, 8, 15]`, so a re-add against an Explorer that has only just
+come back slept 0.5+1+2+4+8 = 15.5 s INSIDE the window procedure, against 2.5 s
+before the change. For those 15.5 s the message pump processes nothing: no
+right-click menu, no `_CCSYNC_WM_QUIT_TRAY`, no NIM_MODIFY from the refresh
+thread, a `stop()` from another thread timing out at its own 5 s wait, and
+Windows free to mark the window as not responding. `_add_icon` now takes a
+`cap`, and the FLAT delay is its default: any caller that does not ask for the
+long schedule gets the pump-safe one, and only `run()`'s first registration
+opts in. The comment's arithmetic was wrong too and is corrected: twelve
+attempts sleep 1 min 46 s, not two and a half minutes.
+
+### CR-251c (comp-ui-3) - every relaunch was counted twice, so the "three relaunches an hour" ceiling fired after two - FIXED (`supervisor.py`)
+
+`merge_history` de-duplicates through a set of floats, and the two sources
+spell the same relaunch differently: `write_history` persists `time.time()` at
+full precision, and `supervisor_argv` formats the argv copy `%.3f`. They are
+two different floats, so the union carried two entries per relaunch and
+`decide`'s `len(recent) >= MAX_RELAUNCHES` counted both. On the build that
+aborts on every start - the CR-93 shape this supervisor exists for - the
+companion got two attempts, not three, and the third was refused with "already
+relaunched 4 times in the last 60 minutes"; `note["attempt"]`, rendered into
+the editor-facing unclean-exit report as "relaunch N of 3", said "3 of 3" on
+the second. The stamps are now quantised to milliseconds (`round(x, 3)`)
+before the union, which makes the file spelling and the argv spelling the same
+value and the merge idempotent; milliseconds is finer than anything here
+measures. CR-234's own tests could not see this because every one of them uses
+`NOW = 1_700_000_000.0`, which is exactly representable in `%.3f` and
+round-trips unchanged - the "passes for a reason unrelated to the fix" shape.
+The new tests use a `NOW` with microseconds.
+
+### CR-251d (comp-ui-4) - the "cannot save its safety state" line told the editor to do the one thing that drops the latch - FIXED (`tray.py`)
+
+The sentence ended "Restarting CCSync would clear it." Every other BLOCKING
+advisory in that list ends with the action the editor should take, so that
+read as the remedy on offer - and a restart is exactly what silently drops the
+lane B breaker, the fleet halt or the disk-floor latch that the line exists to
+protect. `docs/SYNC_SAFETY.md`'s rule is that only a human clears a latch; the
+copy invited the editor to clear one by accident, with proxy download
+resuming against the same NAS and no record that anything was ever set. It now
+says what a restart would cost and names an action the editor can take: "...
+so restarting CCSync would silently resume what it stopped. Press COPY
+DIAGNOSTICS FOR YOUR ADMIN below and send that to your admin before you
+restart." The button name comes from `ui_copy.ROUTE_ROWS`, so a rename of the
+button moves the sentence with it.
+
+### CR-251e (comp-ui-5) - the Quit-while-copying confirmation was garbled when the batch total was not known - FIXED (`tray.py`)
+
+`quit_confirm_text` fell back to the fragment `"files in"` when `total` was
+falsy and then spliced it after "copying file {index}": with an `index` and no
+`total` - which `popup.py`'s progress publisher produces, since it coerces a
+missing `total` to 0 - the editor was asked to confirm against "CCSync is
+copying file 3 files in.", broken English on the one dialog that asks him to
+make a careful choice. With no total there is no "N of M" to say, so the index
+is dropped rather than half-rendered: "CCSync is copying a file into your
+synced folder." The known-total sentences are unchanged.
+
+### CR-251f (comp-ui-6) - three Settings-only advisories were in the tray MENU fingerprint - FIXED (`tray.py`)
+
+`_guard_fingerprint` is what decides whether the tray menu is rebuilt, and
+three entries in it (the persist-failure flags from CR-233's comp-sync-1, the
+shared-folder count and the repath ids from comp-sync-4) each carried a
+comment saying the value "adds a LINE, so without it here the line would not
+appear until something unrelated moved the menu". They do not.
+`_persist_failed_line`, `_shared_folders_line` and `_repath_line` have exactly
+one caller in the repo, `settings_window._lane_advisories`, and every advisory
+line was deliberately moved out of the tray menu into Settings, which
+re-renders on its own 2 s timer. The entries bought nothing and cost a full
+`_build_menu` plus its HMENU teardown every time a repath list or a flapping
+state directory moved - and the fingerprint is the mechanism that keeps the
+2026-07-26 hover hang away. They are gone and the comment now says where the
+lines actually render, with the condition under which an input belongs back
+there. CR-235's two tests asserted the fingerprint moves; they assert the
+opposite now, citing this id.
+
+### CR-251g (comp-ui-7) - show_settings could release a lock another window now held - FIXED (`settings_window.py`)
+
+`_popup_active_lock` is a plain `threading.Lock`, so `locked()` cannot say
+WHOSE. When the builder failed, CR-235's `_release_and_close` released the
+lock and `_build_and_show` re-raised; `show_settings`' handler then asked
+`lock.locked()` and released it again. A second Settings click or the
+watcher's popup taking the lock in the microseconds between the two is enough
+for the handler to release THEIR lock, and a third `tk.Tk` root can then be
+built beside the second - the CR-93 shape. `show_settings` now tracks whether
+the lock is still its own (`mine`, cleared the moment `_build_and_show` is
+entered) instead of asking the lock.
+
+### CR-251h (comp-resolve-b-1) - FIX ALL still counted a rehearsal as bytes copied - FIXED (`popup.py`)
+
+CR-236 taught three call sites that `fixer.fix_clip`'s rehearsal arm answers
+`{"ok": True, "dry_run": True}` and copied nothing:
+`consolidate.run_consolidation`, `consolidate.count_copied` and app.py's
+consolidate toast. `popup.perform_fix_all`, the loop behind the FIX ALL button
+every editor actually presses, was not touched - it still did
+`if outcome.get("ok"): batch_done += file_total`. An admin who sets
+`fixer_dry_run` (the RES-15 rehearsal switch, whose entire purpose is a screen
+that can be trusted) and runs FIX ALL over 40 clips and 800 GB watched
+`batch_bytes_done` climb to 800 GB in a second or two, the bar fill, and
+RateEstimator's speed and ETA read off nonsense. The loop now credits bytes
+only when the copy was real, counts `fixed` as ok-and-not-dry_run, publishes
+`rehearsal` alongside it as `run_consolidation` does, and subtracts the
+rehearsed files from `failed`. The counts are spelled out rather than imported
+from `consolidate.count_copied`: consolidate imports popup, and the reverse
+import would close the cycle.
+
+### CR-251i (regression-12 / res-companion-3) - an interrupted self-upgrade left a machine with no companion and nothing that could put it back - FIXED (`supervisor.py`)
+
+res-companion-3 was claimed fixed in the CR-233..248 pass and no fix existed
+anywhere in the tree. A self-upgrade is two `os.replace` calls (exe -> exe.old,
+then the download -> exe); killed between them - a power cut, a reboot, an AV
+quarantine of the new binary - the machine has no `ccsync-companion.exe` at
+all. Every in-companion recovery lives inside a companion that cannot start,
+the Run key points at a name that is not there, and the supervisor, the one
+awake process outside it, logged "the companion exe is no longer on disk:
+nothing to relaunch" and exited. The machine then synced nothing until a human
+renamed the file. `supervisor.restore_interrupted_upgrade` renames `<exe>.old`
+back when, and only when, the exe is MISSING and the marker says the companion
+we watched died: it fills a hole and never overwrites, because an `.old`
+beside a companion that IS on disk is the ordinary post-upgrade state
+(`upgrade.cleanup_old_exe` deletes it on the next start) and renaming over that
+would silently downgrade the machine. Loud in the supervisor log either way -
+`installer/windows_upgrade.ps1` swaps the same two paths and a human may be
+mid-install. The `.old` suffix is spelled in `supervisor.py` rather than
+imported: this module deliberately imports nothing from the companion package.
+
+### CR-251j (regression-21) - the relaunch note is a file too, and it failed silently - FIXED (`supervisor.py`)
+
+`merge_history`'s docstring calls the argv copy a source "that does not need a
+filesystem at all", but the count only reaches the relaunched COMPANION
+through `<crash>/relaunched.json`. CR-234 made `write_history` return a bool
+and log a loud WARNING on failure and left `write_relaunch_note` returning
+None, swallowing every failure with a bare `pass` and writing in place. With
+that file unwritable (an AV lock, or it exists as a directory) and
+`<state>/supervisor.json` unwritable too, `decide` saw an empty history for
+ever and a build that could not stay up was relaunched every ten seconds with
+nothing in any log saying the ceiling had been lost. It returns whether it
+wrote, writes tmp+replace like everything else in the package, and `main` logs
+the same loud line the history failure gets.
+
+### Verification
+
+Companion suite, run from `companion/` with `.venv\Scripts\python.exe -m pytest`:
+
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_a_failed_explorer_re_add_does_not_kill_the_refresh_loops -> fails at f1eeb42, passes now (comp-ui-1)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_a_first_registration_that_never_succeeds_still_stops_the_loops -> the other arm, unchanged behaviour (comp-ui-1)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_the_failure_hook_takes_a_one_argument_callable -> fails at f1eeb42, passes now (comp-ui-1)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_the_explorer_re_add_keeps_the_short_schedule -> fails at f1eeb42 (15.5 s), passes now (comp-ui-2)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_a_relaunch_is_counted_once_not_once_per_source -> fails at f1eeb42, passes now (comp-ui-3)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_the_ceiling_still_allows_three_relaunches_through_the_whole_chain -> fails at f1eeb42 (2 of 3), passes now (comp-ui-3)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_the_supervisor_puts_a_half_swapped_exe_back -> fails at f1eeb42, passes now (regression-12)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_the_restore_never_touches_a_live_exe -> fails at f1eeb42 (no such function), passes now (regression-12)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_a_relaunch_note_that_cannot_be_written_says_so -> fails at f1eeb42, passes now (regression-21)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_the_persist_failure_line_does_not_recommend_a_restart -> fails at f1eeb42, passes now (comp-ui-4)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_the_quit_confirmation_reads_as_english_with_no_batch_total -> fails at f1eeb42, passes now (comp-ui-5)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_settings_only_advisories_do_not_rebuild_the_tray_menu -> fails at f1eeb42, passes now (comp-ui-6)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_show_settings_never_releases_a_lock_another_window_took -> fails at f1eeb42 (two releases), passes now (comp-ui-7)
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_fix_all_credits_no_bytes_for_a_rehearsal -> fails at f1eeb42, passes now (comp-resolve-b-1)
+
+Also re-run green, with five CR-235-era assertions updated to the new
+behaviour (the hook's arity, the reworded persist line, and the two
+fingerprint tests that comp-ui-6 inverts):
+tests/test_bug_hunt_2026_09_11_comp_ui.py (31), tests/test_supervisor.py,
+tests/test_tray.py, tests/test_tray_guard.py, tests/test_crash_report.py,
+tests/test_settings_window.py (389 together), tests/test_popup.py,
+tests/test_consolidate.py, tests/test_sweep_2026_09_04_copy.py,
+tests/test_tray_native_main_thread.py (501 together),
+tests/test_tray_copy_names_real_menu_items.py, tests/test_no_em_dash.py (201
+together). `py_compile` clean on all five source files.
+
+### OWED TO ANOTHER TERRITORY
+
+- comp-ytdl-jobs: `companion/src/ccsync_companion/upgrade.py`: `_OLD_SUFFIX`:
+  no change needed today, but `supervisor.py` now spells `.old` itself
+  (`_UPGRADE_OLD_SUFFIX`) because it must not import the companion package. If
+  the suffix or the two-rename swap ever changes, `restore_interrupted_upgrade`
+  changes with it. Companion-only; no deploy ordering.
+- Nothing else. Every change here is inside the companion process: no wire
+  field, no dashboard half, no schema. A companion carrying these can run
+  against any dashboard 0.7.34..0.7.43, and an older companion is unaffected.
+
+### Owner decisions
+
+- comp-ui-6 offered two choices: drop the three entries from the tray menu
+  fingerprint, or render those three lines in the tray menu. I dropped them,
+  because the lines were moved to Settings deliberately and the menu rebuild
+  is the thing the 2026-07-26 hover hang taught us to spend sparingly. If the
+  intent was that a latch that cannot persist should also show in the tray
+  MENU, that is the other fix and this one has to be reversed with it.
+- comp-ui-4's new sentence names COPY DIAGNOSTICS FOR YOUR ADMIN as the
+  action. The alternative was naming no action at all and only warning about
+  the restart; the hunter's finding asked for an action the editor can take.
+- `_add_icon`'s flat retry schedule is now the DEFAULT and the long backoff is
+  opt-in, rather than the reverse. A future caller that forgets the argument
+  then blocks its thread for 2.5 s, not 105.
+
+### Hand-off wave
+
+#### CR-251k (comp-app-8's owed half) - the unreadable machine id had an advisory and no way out - FIXED (`settings_window.py`)
+
+comp-app-5 stopped the companion minting a SECOND id over a `machine.json`
+it could not read, which is right - the dashboard reads a new id as another
+computer and the old one is gone for good - and gave the condition no exit.
+comp-app-8 added the accessor (`machine.machine_id_unreadable`), the repair
+(`machine.remint`) and one tray line per process; the button a human presses
+was owed here. Settings -> THIS COMPUTER now carries the warning line while
+the file is unreadable and a [ GIVE THIS COMPUTER A NEW ID ] button under
+it. The button asks first, in the themed confirm dialog, because this is the
+one act in that window whose undo lives only in the bytes `remint` sets
+aside (`machine.json.unreadable-<epoch>`); a cancel never reaches `remint`.
+"" back from `remint` means the file became readable in between or the new
+one could not be written, and neither renders as done. The model builder
+asks through `settings_window.machine_id_unreadable()`, which cannot raise:
+this runs on the window's 2 s refresh timer, where one exception costs the
+editor the whole window. NOT offered in the tray menu: comp-ui-6 has just
+taken the Settings-only advisories out of the menu fingerprint, and the
+ten-item layout (CR-88) is the owner's.
+
+#### CR-251l (tests-5) - every assertion about the persist-failed line bypassed the caller - FIXED (`tests/test_bug_hunt_2026_09_11b_comp_ui.py`)
+
+tests-5's point: a test that drives a new helper directly cannot see the
+helper being kept and stopped being CALLED. `tray._persist_failed_line` had
+five assertions across two files and all five called it directly, so
+dropping its row from `settings_window._lane_advisories` - its only caller in
+the repo, and what `build_settings_model` renders - was invisible. The new
+test goes through `_lane_advisories`, checks the severity is BLOCKING
+(comp-sync-1's reason: the latch it warns about is one a restart silently
+drops) and re-ranks through `rank_advisories`, so SYNC-118's cap cannot hide
+it either. Verified by mutation: deleting the producer row fails it.
+
+### Verification (hand-off wave)
+
+Companion suite, from `companion/` with `.venv\Scripts\python.exe -m pytest`:
+
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_an_unreadable_id_file_gets_a_repair_button_in_settings -> fails at f1eeb42 and on wave 1 (no button anywhere), passes now
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_a_readable_id_file_offers_nothing -> CONTROL: the button is an answer to a fault, not furniture
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_an_id_check_that_raises_does_not_cost_the_whole_settings_window -> fails on an inline `machine_mod.machine_id_unreadable()` call, passes now
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_the_repair_asks_first_and_never_reminds_on_a_cancel -> fails at f1eeb42 (no action), passes now
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_the_repair_reminds_and_says_so -> fails at f1eeb42, passes now
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_a_repair_that_changed_nothing_does_not_render_as_done -> fails at f1eeb42, passes now
+- tests/test_bug_hunt_2026_09_11b_comp_ui.py::test_the_persist_failure_line_reaches_the_settings_window -> passes on wave-1 source (it is tests-5's missing coverage, not a defect); FAILS with the producer row removed from `_lane_advisories`, which is the bypass it exists to catch (mutation run)
+
+Also re-run green with the change: tests/test_settings_window.py,
+tests/test_sweep_2026_09_04_copy.py, tests/test_no_em_dash.py,
+tests/test_tray_copy_names_real_menu_items.py,
+tests/test_bug_hunt_2026_09_11b_comp_ui.py (654 together). The vocabulary
+scan caught the first spelling of the worker-thread label ("Repair machine
+id" - "machine" is a retired word); it is "Repair this computer id".
+`py_compile` clean on settings_window.py.
+
+### OWED TO ANOTHER TERRITORY (hand-off wave)
+
+- none. The button is inside the companion process: no wire field, no
+  dashboard half, no schema, and an older companion simply does not have it.
+
+### Owner decisions (hand-off wave)
+
+- The repair is in Settings only, not in the tray menu. The hand-off allowed
+  either; the menu is the owner's ten-item layout (CR-88) and comp-ui-6 has
+  just removed the Settings-only advisories from its fingerprint.
+- The button label is "GIVE THIS COMPUTER A NEW ID" rather than "REPAIR...":
+  what happens is a new id, and a label that says "repair" would read as
+  "recover the old one", which is exactly what this cannot do.
+
+## The Resolve bridge, the watcher and the Timeline Cards role (CR-252, 2026-09-11)
+
+Five findings from the second hunt of 2026-09-11, all of them inside a fix
+that landed this morning: two same-day fixes that covered one arm of the case
+they were written for, one helper that grows a string it was asked to cut, and
+one regression test that a half-revert leaves green.
+
+### CR-252a (comp-resolve-b-2) - a clip the rate limiter refused waited for the life of the process - FIXED (companion/src/ccsync_companion/watcher.py)
+
+The watcher latches a NON_CANONICAL path in `_offered_non_canonical` at OFFER
+time, and until now the only thing that ever lifted the latch was
+`rearm_non_canonical`, which `app._note_non_canonical_result` calls after a
+ReplaceClip has been ATTEMPTED and refused. When
+`resolve_journal.allow_automatic` refuses the whole burst - the 900 s
+unprompted-pass limiter - no clip is attempted, so nothing is re-armed: the
+clips sit on `app._canon_relink_pending`, which no timer and no report hook
+drains, and `_handle_non_canonical` is never re-entered unless some other path
+is newly offered. A companion that restarts inside the limiter's window (a
+self-upgrade, the 0.9.62 supervisor's relaunch after a CR-93 abort) refuses its
+first burst because `allow_automatic`'s bars are persisted, and every
+non-canonical clip in the open project is then latched, queued and stranded
+under its local spelling. The log said "holding N clip(s)" once and pointed at
+Tray > Settings > SCAN WHOLE PROJECT, which is a sentence in `companion.log`
+that no editor reads. Before comp-sync-13 the unconditional re-offer on every
+3 s poll masked it; the 900 s cooldown that fix added made the queue's only
+automatic drain rarer still.
+
+The OFFER now arms the same cooldown the failed relink does, through one
+helper (`_arm_rearm`), so a latched path is offered again 900 s later whether
+or not anything was ever attempted on it. That is what drains the queue: the
+caller de-dupes each offer against its pending list (comp-sync-13), so a
+re-offer the limiter refuses again costs a dictionary lookup, and the offer
+that arrives after the limiter's window is what starts the burst. comp-sync-13's
+own property is untouched - a re-offer is still never more often than the
+cooldown. A second hole went with it: a key evicted by the `MAX_REARM_TRACKED`
+ceiling had no due date and so could never come due again, which stranded
+exactly the clips the book overflowed on; a missing record now reads as due,
+and the re-offer re-arms it.
+
+### CR-252b (regression-8) - a Timeline Cards role that lost ONE of its two loops was never recovered - FIXED (companion/src/ccsync_companion/timeline_cards_role.py)
+
+CR-236's comp-resolve-4 made the watchdog test liveness (`any(t.is_alive())`)
+instead of `if self._threads`, which recovers the both-loops-dead case.
+`health()` is stricter: `_note_loop_end` records `_loop_error` on the FIRST
+loop death and `health()` returns HEALTH_STOPPED as soon as it is set. So a
+role whose push loop raised on a Resolve state the other repo's client cannot
+encode, with the pull loop still long-polling, showed STOPPED on the fleet grid
+with that sentence for ever while `supervise_now` answered "running" every
+minute and never called `_clear_dead`/`_start_guarded`. The asymmetry the
+finding is named for - the report is honest and the recovery is not - was
+narrowed by one loop, not removed. The liveness test is now "there are threads,
+ALL of them are alive, and no loop has reported an end", which is the same
+predicate `health()` uses, so the two can no longer disagree. The restart path
+is unchanged and still bounded by MAX_START_FAILURES, and `_clear_dead` already
+clears `_loop_error`, so a recovered role goes green again.
+
+### CR-252c (comp-resolve-b-3) - `_elide` could return more characters than the cap it was given - FIXED (companion/src/ccsync_companion/timeline_cards_role.py)
+
+For `limit == 4`, `head = max(1, limit // 3)` is 1 and the tail slice was
+`text[-(limit - head - 3):]`, i.e. `text[-0:]` - the whole string. The helper
+whose contract is "cut this to `limit`" returned `text[:1] + "..." + text`. Not
+reachable from today's one caller (the standalone-agent refusal's budget is
+`255 - 57 - 103 = 95`), but that budget is computed from two sentences in the
+same file, and the cut exists precisely to pre-empt the dashboard's silent
+`max_length=255` truncation of `CardsAgentIn.detail`. The tail width is clamped
+at zero now and the slice is skipped when there is no room for one.
+
+### CR-252d (comp-resolve-b-4) - a blind probe closed the launch window with "Resolve registered" - FIXED (companion/src/ccsync_companion/resolve_bridge.py)
+
+comp-resolve-6 split the close of the CR-68 launch window into READY and
+ABSENT, but the fall-through took UNKNOWN with READY. UNKNOWN is the fail-open
+answer: the TCP table could not be read (a locked-down endpoint agent), or 1144
+is held by something that is not fuscript. Logging it as "script server has its
+host now - connecting" writes a positive claim the probe never made into the
+one line a CR-68 diagnosis is read out of, so the next reader of a diagnostics
+bundle concludes scripting was healthy at the moment the guard was actually
+blind and the call went through unguarded. `_note_starting`'s `ready` is
+tri-state now - True registered, False went away, None could not tell - and
+UNKNOWN gets its own sentence saying the probe could not tell and that the
+connection was made anyway, which is what fail-open means. Nothing about when
+the companion connects changed.
+
+### CR-252e (comp-resolve-b-5) - the res-companion-2 regression test passed on a half-reverted fix - FIXED (companion/tests/test_bug_hunt_2026_09_11_comp_resolve.py)
+
+`test_a_start_that_fails_after_engine_start_stops_that_engine` asserted
+`engine.stopped is True or engine.started is False`. res-companion-2's fix has
+two independent halves - the client is built before `engine.start()`, and the
+failure path calls `_release_engine` - and the disjunction is satisfied by
+either, so reverting the release alone left the suite green over the exact
+breach the module exists to prevent: a Timeline Cards engine driving Resolve
+with nothing holding a reference to it, and the watchdog starting a second one
+a minute later. The two properties are asserted separately now, and a second
+case covers the half the ordering cannot: an engine whose own `start()` raises
+after a successful client build is stopped and let go. Both fail with
+`_release_engine` removed from `_start`'s except arm (verified by reverting it
+and re-running).
+
+### Verification
+- companion/tests/test_bug_hunt_2026_09_11b_comp_resolve.py::test_a_path_the_limiter_refused_is_offered_again -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_resolve.py::test_the_re_offer_is_still_no_more_often_than_the_cooldown -> passes before and after (comp-sync-13's property, pinned so this fix cannot undo it)
+- companion/tests/test_bug_hunt_2026_09_11b_comp_resolve.py::test_the_offer_book_is_still_bounded -> passes before and after (the new writer must stay bounded)
+- companion/tests/test_bug_hunt_2026_09_11b_comp_resolve.py::test_a_role_that_lost_one_loop_is_restarted -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_resolve.py::test_a_role_whose_loops_reported_an_error_is_not_called_running -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_resolve.py::test_a_healthy_role_is_still_left_alone -> passes before and after (the watchdog must not become a restarter)
+- companion/tests/test_bug_hunt_2026_09_11b_comp_resolve.py::test_elide_never_returns_more_than_its_cap[4] -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_resolve.py::test_a_blind_probe_does_not_claim_resolve_registered -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_resolve.py::test_a_real_registration_still_says_so -> passes before and after (the READY sentence is unchanged)
+- companion/tests/test_bug_hunt_2026_09_11_comp_resolve.py::test_a_start_that_fails_after_engine_start_stops_that_engine -> passes at f1eeb42 by accident (the or-assertion); fails with `_release_engine` reverted, which is the point
+- companion/tests/test_bug_hunt_2026_09_11_comp_resolve.py::test_an_engine_that_will_not_start_is_stopped_and_let_go -> new; fails with `_release_engine` reverted
+
+Also run (both green, both cover a module in this territory):
+companion/tests/test_watcher.py (68 passed) and the comp-sync-13 relink tests
+in companion/tests/test_bug_hunt_2026_09_11_comp_sync.py (5 passed, -k relink),
+because the watcher change touches the path they pin.
+
+### OWED TO ANOTHER TERRITORY
+- comp-app: `companion/src/ccsync_companion/app.py`: `_handle_non_canonical`: nothing REQUIRED - CR-252a drains the queue from the watcher side alone, and the app's de-dupe makes the re-offer cheap. Optional and strictly better: when the limiter refuses, log the holding line at most once per window instead of once per offer (it now fires every 900 s per project rather than once), and consider scheduling one retry at `resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS` so the drain does not depend on Resolve still being open at the next poll. No deploy ordering: both halves are inside one companion build, nothing on the wire.
+- comp-ui: `companion/src/ccsync_companion/popup.py`: `run_fix_all`: comp-resolve-b-1 (comp-resolve-2's fix landed in consolidate only, so FIX ALL still counts a rehearsal as bytes copied) is assigned to comp-ui and was left alone here. `consolidate.count_copied` / `count_rehearsed` are import-safe and take a plain result list.
+
+### Owner decisions
+- CR-252a re-offers a latched non-canonical path every 900 s for as long as the project stays open and the clips stay non-canonical, where before it was once per process. On a machine with a wrong `canonical_prefix` that means the "holding N clip(s)" log line appears every fifteen minutes instead of once. That is the price of the queue draining by itself; the alternative (a timer in app.py) is the comp-app half recorded above.
+- CR-252d's UNKNOWN sentence is a third INFO line in the launch-window log. It does not change whether the companion connects - UNKNOWN still fails open, per CR-68 - only what the log claims about it.
+
+## The companion's b-roll and music ingest: a retry that burned the drop, staging that could never be deleted, orphaned uploads, a false "nothing to do" (CR-253, 2026-09-11)
+
+The 2026-09-11b hunt of that afternoon's fix pass, territory `comp-broll-music`
+(`broll_ingest.py`, `music_ingest.py`, `broll_server.py`). Five of the six
+findings are the neighbour a same-day fix opened; the sixth is the half of
+comp-app-6 the latch did not reach.
+
+### CR-253A (comp-broll-music-1, companion half) - a claim that names no staging id is refused, not spent (broll_ingest.py)
+
+The page's RETRY FAILED posts `{batch_uid, staging_id: null}`. `run()` reads
+`self._staging[staging_id]` and nothing else, and `_item_from_manifest` is the
+only place `local_path` is ever populated, so with no staging id every item of
+the re-claimed batch is built with `local_path: ""` and `_crunch_item` fails it
+on its first line. Three clips that failed on a wifi blip therefore failed
+again immediately, twice each (MAX_ITEM_ATTEMPTS), and `_maybe_finish` released
+the batch as failed - with the bytes still sitting in staging and the button
+repeating it exactly on every press. The page's half of this belongs to the
+`broll` builder (send `ing.stagingId`, guarded as the music page already does).
+This side is now belt and braces: after the claim, a batch whose manifest
+yields ZERO local paths while this machine holds a staging entry for the very
+files it lists is refused 409 `staging_id_missing` (with the id it found, so
+the page can retry with it) instead of being crunched into failure. The new
+`_staging_holding` matches the way `_item_from_manifest` matches, name plus
+`rel_dir`, so a genuine take-over by a machine that staged nothing is
+untouched and still claims. The refusal does not release the batch, for the
+reason `_fits` gives a few lines above: the lease expires and the corrected
+request, or another machine, takes it, whereas releasing it `failed` would
+make the editor re-create it.
+
+### CR-253B (comp-broll-music-2, also regression-9) - a drop that was never run can be deleted again, and the space refusal stops naming a button that cannot act (broll_ingest.py)
+
+CR-238's fix replaced `prune_staging`'s `at` fallback with a bare `continue`
+for any entry with no `ended_at`. That was right for the tray's CLEAR FINISHED
+STAGING (`max_age_days=0`), which used to delete a drop mid-PUT, but
+`ended_at` is written in exactly one place, `_note_staging_ended`, reached only
+for a batch that was CLAIMED. A drop that was staged and abandoned (400 clips
+dropped, tab closed) therefore has no `ended_at` at any point in its life, and
+`prune_staging` is the only caller of `shutil.rmtree` in the whole ingest
+stack: those bytes had become permanent, inside a dot-folder in the archive
+that no editor has any UI to see, and the next drop's space refusal counted
+them and sent the editor to a button that answers "There is no finished
+staging to clear on this computer."
+
+Now: the button still holds an unrun drop back (and REPORTS it, `held_unrun`),
+but the ordinary retention sweep reaches it again. The clock for an unrun drop
+is the later of when it was staged and when a byte last landed in it
+(`_dir_newest_mtime`), so a drop whose PUTs are still arriving is never a
+candidate however old its `at` is - which is the loss the CR-238 fix was
+protecting against, kept. `staging_report` now splits `finished_bytes` from
+`unrun_bytes`, and `_space_refusal` names CLEAR FINISHED STAGING only when
+there are finished bytes for it to clear; unrun staging gets its own sentence
+that points at the page and says it is cleared automatically after the
+retention. CR-238's `test_the_retention_sweep_leaves_an_old_drop_that_has_not_run`
+pinned the leak, so it is retitled
+`test_the_retention_sweep_leaves_a_drop_still_being_written_into` and now
+proves the property that is actually wanted.
+
+### CR-253C (comp-broll-music-3) - a clip whose original vanished uploads nothing at all (broll_ingest.py)
+
+CR-238's `_enqueue_uploads` enqueued each rel as it went and only afterwards
+asked whether the ORIGINAL was among the lost. `_upload_plan` is poster ->
+sprite -> proxy -> original and dicts keep insertion order, so by the time the
+missing original was noticed the other three were already handed to
+`UploadQueue`, whose worker thread starts on `enqueue`. The item was then
+failed and `item["uploads"]` cleared, so nothing ever posted `mark_uploaded`
+for them: a poster, a sprite and a proxy in an editor-visible archive folder
+for a clip with no `live` row, referenced by nothing and cleaned up by nothing.
+The card being pulled between describe and upload is the live case. The whole
+plan is now stat'ed before anything is handed over, and the decision to fail is
+taken first. The original is also enqueued FIRST of what survives, which costs
+nothing (`UploadQueue` sorts by `UploadJob.order`, not insertion order) and
+means an `enqueue` that raises cannot orphan the stills either.
+
+### CR-253D (comp-broll-music-4) - a track waiting out a result retry is not "nothing to do" (broll_ingest.py)
+
+music-2's `result_retry_at` skip in `_next_item` makes `_drain` find no
+crunchable item, and `_drain` answered `STATE_NOTHING_TO_DO`. In `tick` that
+means stop the model server and publish "nothing to do" - for up to 300 s, i.e.
+twenty ticks, while this machine holds a lease on a live batch and its
+heartbeat keeps renewing it. The page and the tray said the machine was idle
+during a NAS mount blip, which is exactly when an editor re-drops the album,
+and the 4-12 GB model was torn down and rebuilt around the wait. `_drain` now
+asks `_waiting_on_retry()` and answers `STATE_RUNNING` while any item of the
+batch is inside its backoff, so the gate note stays empty, the model stays up
+and the state matches what the machine is actually doing.
+
+### CR-253E (comp-broll-music-5) - the deferred CLAP analysis is dropped with its batch, and a landed result resets the budget (music_ingest.py)
+
+`_deferred_analysis` (music-2's in-memory parking for a mid-retry track's
+embedding, peaks and windows, about 25 kB a track) was popped only inside
+`_post_result`. `cancel()`, `_lease_lost()` and a `_maybe_finish` that gave up
+on the item all dropped the batch without touching it, so three cancelled album
+drops during a long NAS outage left that memory held for the life of the tray
+process, unfreeable without restarting it. The base orchestrator now has a
+`_forget_batch_scratch(batch)` hook beside `_note_staging_ended`, called from
+all three places a batch is dropped; it is a no-op for b-roll, which keeps
+nothing off the item, and clears the map for music. Separately,
+`item["result_retries"]` was never reset after a POST that landed, so a rel
+that recovered on try 5 started its next refusal one away from
+MAX_RESULT_RETRIES and was failed for good by a blip the first one survived; a
+200 now clears it alongside `result_retry_at`.
+
+### CR-253F (comp-broll-music-6) - a non-OSError failure to start the loopback is latched too (broll_server.py)
+
+CR-24x's comp-app-6 fix latched the `OSError` branch of `broll_server.start()`
+on `_LAST_BIND_ERROR` and left the `except Exception` branch below it
+untouched: it logged a full WARNING with traceback on every attempt of the new
+backoff loop, which is the exact log flooding the latch was added to stop, and
+never wrote `_LAST_BIND_ERROR`, so any reader of that global saw a stale
+message from an earlier bind fault. A failure that is not a bind error (a bad
+`mounts` table, a resolver that raises inside `resolve_mounts`) now takes the
+same latch, on the same rule: loud once per distinct fault, DEBUG on a repeat,
+cleared by a successful start.
+
+### Verification
+- companion/tests/test_bug_hunt_2026_09_11b_comp_broll_music.py::test_a_claim_with_no_staging_id_is_refused_when_this_machine_staged_it -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_broll_music.py::test_a_take_over_by_a_machine_that_staged_nothing_still_works -> guards the guard (passes both)
+- companion/tests/test_bug_hunt_2026_09_11b_comp_broll_music.py::test_the_retention_sweep_expires_a_drop_that_was_never_run -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_broll_music.py::test_a_drop_still_being_written_into_survives_the_sweep -> pins what the CR-238 fix protected (passes both)
+- companion/tests/test_bug_hunt_2026_09_11b_comp_broll_music.py::test_clear_finished_staging_still_leaves_an_unrun_drop_and_says_so -> fails at f1eeb42 (no `held_unrun`), passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_broll_music.py::test_the_space_refusal_does_not_name_a_button_that_cannot_act -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_broll_music.py::test_the_space_refusal_still_names_the_button_for_finished_staging -> the other direction (passes both)
+- companion/tests/test_bug_hunt_2026_09_11b_comp_broll_music.py::test_nothing_is_uploaded_for_a_clip_whose_original_vanished -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_broll_music.py::test_a_track_waiting_out_a_result_retry_is_not_nothing_to_do -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_broll_music.py::test_a_cancel_drops_the_deferred_analysis -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_broll_music.py::test_a_result_that_lands_resets_the_retry_budget -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_broll_music.py::test_a_non_oserror_start_failure_is_latched_and_recorded -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11_comp_broll_music.py::test_the_retention_sweep_leaves_a_drop_still_being_written_into -> retitled from ...leaves_an_old_drop_that_has_not_run, which pinned the CR-253B leak
+
+Run: `cd companion; .venv\Scripts\python.exe -m pytest tests/test_bug_hunt_2026_09_11b_comp_broll_music.py -q` -> 12 passed. The
+territory's older files (`test_broll_ingest.py`, `test_music_ingest.py`,
+`test_broll_server.py`, `test_broll_upload.py`, `test_music_server.py`,
+`test_loopback_guard.py`, `test_bug_hunt_2026_09_11_comp_broll_music.py`) -> 537
+passed, 1 skipped, 1 failed, and the failure is NOT this territory's:
+`test_music_server.py::test_the_frozen_flag_is_the_one_app_run_answers` reads
+`inspect.getsource(app.run)` and `app.py` is being edited by the comp-app
+builder while this ran.
+
+### OWED TO ANOTHER TERRITORY
+- broll: `broll/web/static/ingest.js`: `ingestRetryFailedBatch` (and
+  `ingestTakeOver`, older): send the page's own `ing.stagingId` guarded by
+  `uid === ing.batchUid` rather than `staging_id: null`, or dispatch to
+  `POST /broll/ingest/retry {batch_uid, staging_id}` the way
+  `music/web/static/ingest.js:1296` already does (the companion handler at
+  `broll_server.py:1814` is shared and needs no change). With the companion
+  half alone, a 0.9.72 machine answers 409 `staging_id_missing` instead of
+  failing the drop: recoverable, but the button still does not work until the
+  page is fixed. The PAGE is served by the dashboard, so the dashboard deploys
+  first; a page that sends a staging id to a companion below 0.9.72 works
+  exactly as it always did, so the two halves are independent.
+- comp-app: `companion/src/ccsync_companion/app.py`:
+  `clear_finished_ingest_staging`: `prune_staging` now returns `held_unrun`
+  (how many staged-but-never-run drops it deliberately kept). When `removed`
+  is 0 and `held_unrun` is not, the sentence "There is no finished staging to
+  clear on this computer." should say instead that the staging on this
+  computer is drops that were never indexed, and that they clear themselves
+  after the retention. Companion-only, no deploy order.
+
+### Owner decisions
+- CR-253A refuses the claim rather than resolving the staging id itself.
+  Auto-resolving (matching the manifest to a staging entry and using its local
+  paths) would make RETRY FAILED work with no page change at all, but it
+  guesses which drop the editor meant when two drops hold files with the same
+  names in the same `rel_dir`, and a wrong guess indexes the wrong bytes. The
+  hunter suggested the refusal; if the owner prefers the button to work without
+  waiting on the page fix, `_staging_holding` already returns the id that would
+  be used.
+- CR-253B lets the retention sweep delete an abandoned drop after the
+  configured window (7 days by default). That is what the docs promised from
+  the day the feature shipped, but it is a deletion of an editor's staged
+  originals that no one confirms. The two guards are that the drop must have had
+  no byte written into it for the whole window, and that `max_age_days=0` (the
+  button) never takes it.
+- CR-253D publishes `running` during a result-retry wait rather than adding a
+  new `waiting-result` state. A new state string would render as its raw
+  spelling in both SPAs (`ingGateLabel` falls back to `String(gate)`) until the
+  b-roll and music pages learned it, which is a two-sided change for a
+  cosmetic gain.
+
+## Companion: the upgrade refusal, the sidecar tools and the fleet job runner (CR-254, 2026-09-11)
+
+Seven findings from the 2026-09-11b hunt, six of them about the state the same
+morning's CR-237 pass created: a refusal with no way out, a cause and a counter
+that reached only one of the two entry points, a liveness check on the wrong
+thread, an unbounded list of local stops, and a fleet-visible change with no
+test. The seventh is the companion half of wire-5 / dash-api-4: dash-api-6's
+account bar answers 403 on the job heartbeat and the result, and nothing in the
+runner read that as "stop".
+
+### CR-254a (comp-ytdl-jobs-1) - a refusal an admin cannot clear - FIXED (companion/src/ccsync_companion/upgrade.py)
+
+CR-237 narrowed `refusal()`'s self-clear from SAME-or-OLDER to SAME only, which
+is right: a refusal produced by the downgrade floor is by construction about a
+build at or below the running one, and retiring OLDER threw away the one
+refusal REL-3 exists to surface. What it left behind was a record with exactly
+one remaining retirement path - `_accept_offer` succeeding on a later offer -
+and a dashboard that stops offering anything at all once the machine is running
+the current build (`api._upgrade_info` returns None when `running ==
+current["version"]`). So the abandoned rollback is permanent: the admin
+publishes 0.9.65, every 0.9.71 companion refuses it at the floor and reports
+`refused_version=0.9.65`, the admin gives up and makes 0.9.71 current again,
+and `[ REFUSING 0.9.65 ]` plus the `upgrade_refused` alert stay lit on the whole
+fleet until each tray is restarted - while the alert's own action text tells
+the admin to publish a build that computer will accept, which is what they just
+did. The fix is the second way out the fix's own comment asked for, and it is
+not an age bound: `note_report_response` clears the record when a well-formed
+reply carries NO offer at all. Nothing true is lost, because a rollback that is
+still current is re-offered and re-refused on the very next report. An
+`upgrade` key that could not be parsed is deliberately not this case.
+
+### CR-254b (comp-ytdl-jobs-5) - the SAME-vs-OLDER compare had no test - FIXED (companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py)
+
+The one CR-237 fix in this territory that changed fleet-visible behaviour was
+the one with no regression test: nothing in the 827 companion tests called
+`UpgradeManager.refusal()` at all, so a revert to the tolerant compare would
+have stayed green, and `refusal()`'s docstring still described only the
+running-version case. Two tests now pin both directions, and the docstring
+names both ways a refusal retires.
+
+### CR-254c (comp-ytdl-jobs-2) - the sidecar cause and counter never reached a YouTube machine's report - FIXED (companion/src/ccsync_companion/sidecar_tools.py)
+
+CR-237 attached `cause` and `consecutive_failures` to `ensure_ffmpeg_pair`'s
+returns. `ensure()` - the wrapper `ytdlp_manager._loop` uses on every machine
+where `youtube_download` is ON - has two failure returns of its own, and
+neither was updated. The `no_room` return (no writable tools dir, or a full
+disk: the two commonest failures there) carried no `failed`, no `cause` and no
+`consecutive_failures` at all, and the deno-only `failed` return read the
+counter after `ensure_ffmpeg_pair` had already reset it to 0. Both published
+`{action: failed, consecutive_failures: 0, cause: None}`, which makes
+`sidecar_warning_line` return "" for ever and tells `sync_guard.ytdlp.sidecar`
+nothing - so a machine that has quietly stopped being offered `proxy-480p` /
+`audio-extract` / `peaks` had no sentence anywhere a person looks, which is the
+state the original finding was raised about. Both returns now carry the three
+keys, the deno no-room arm records its own cause, and the pass accounting is
+counted ONCE whichever entry point ran (`pair_failed` is "the pair already took
+this pass"), so the two-pass warning cannot fire on pass one. The streak itself
+stays the pair's: an ffmpeg that installs cleanly resets it every pass, which
+is what keeps the "cannot make proxies" line off a machine whose only missing
+tool is the JS runtime.
+
+### CR-254d (comp-ytdl-jobs-4) - the drain liveness check judged the wrong thread, and first - FIXED (companion/src/ccsync_companion/jobs_media.py)
+
+CR-237's `_read_pcm` fix joined both drain threads and failed the job if EITHER
+was still alive. The stderr drain carries the last 200 characters of ffmpeg's
+log and never a sample of audio, so a stderr pipe an inherited handle is
+holding open cannot truncate the peaks - but it failed a complete job, which
+the fleet then retried on another machine, and so on. Worse, the new `raise`
+sat AHEAD of `if failure:`, so a genuine read error on a stalled share (which
+leaves the thread alive too) had its own message - the only diagnosis anyone
+had - replaced by the generic "the decode output could not be read to the end".
+Now only the PCM thread's liveness is a verdict, the recorded failure is raised
+first, and the stderr join gets a token `STDERR_JOIN_SECONDS` (2 s) instead of
+a second full `DRAIN_JOIN_SECONDS`, which was a minute in series on a job that
+was already finished. CR-237's own property - truncated peaks published under
+the final name are worse than no peaks - is kept and re-pinned; its test could
+not tell the two streams apart because it stalled both with the same stub.
+
+### CR-254e (comp-ytdl-jobs-6) - 16 stale local stops crowded out the fleet's cancel - FIXED (companion/src/ccsync_companion/jobs_runner.py)
+
+CR-237 kept the person at this machine's [ STOP ] in `_local_cancel`, out of
+reach of a report reply that replaces `_cancel` wholesale. Ids only leave that
+set in `_post_result`, so a job that ends without a posted result (the process
+killed between the kill and the post, `stop()` racing `_execute`) leaves its id
+there for the life of the tray - and the merge put every local id in FRONT of
+the admin's list before capping the result at sixteen. Sixteen stale local
+stops therefore truncated away an admin's `commands.jobs.cancel` for the job
+actually running, and the dashboard's [ CANCEL ] did nothing on that machine,
+silently. `_local_cancel` is now a bounded list (newest last,
+`LOCAL_CANCEL_MAX` = 16, one helper `_note_local_cancel`) and the admin's stops
+are merged FIRST, so whichever end is truncated it is never the fleet's.
+
+### CR-254f (wire-5, dash-api-4) - a 403 on the heartbeat is an account bar, not a blip - FIXED (companion/src/ccsync_companion/jobs_runner.py)
+
+dash-api-6 put the suspended-account gate on `_require_fleet_caller`, which
+gates claim, heartbeat and result alike. The runner treated ONLY 410 as "this
+job is not ours"; a 403 fell through as "keep going", so a machine whose owner
+was suspended mid-transcode ran the job to the end, wrote its output into the
+shared vault (SMB, which no gate reaches), and then had its result refused -
+while the lease it could not renew had already expired and sent the same job to
+a second machine. 401 and 403 on the heartbeat now stop the job the way 410
+does, and the same statuses on the claim and on the result are recorded rather
+than swallowed. The editor is told: `status()["gate"]["reason"]` carries "This
+computer's fleet work is not being accepted right now: ask the studio to check
+this account." until a fleet call gets through again, and `credential_refused`
+rides the same dict for the diagnostics bundle. The result still goes out with
+its own `retryable` verdict - the WORK is retryable on another machine, and
+only this machine's account is barred.
+
+### CR-254g (res-companion-4, companion half) - "this machine cannot keep its crash-loop counter" left the machine - FIXED (companion/src/ccsync_companion/upgrade.py)
+
+The supervisor half was closed by CR-237 (`--prior` means the relaunch ceiling
+no longer needs a writable state dir); the companion half was a WARNING in the
+log of the machine with the full disk and an accessor, `write_failures()`, with
+no caller anywhere. A machine that cannot write `~/.ccsync/state` has a
+crash-loop counter that reads "first start" on every start, so APP-5's revert
+can never fire and a build that will not stay up keeps coming back - and the
+dashboard sees a machine reporting normally with no hint of why.
+`sync_guard.upgrade.state_write_failures` now carries the count, always sent
+and normally zero, exactly as `lane_guard._PersistedLatch._persist_report`'s
+`persist_failed` does for the lane latches.
+
+### Verification
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_reply_with_no_offer_retires_the_standing_refusal -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_reply_that_still_carries_the_refused_offer_keeps_the_refusal -> guards the other direction
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_an_unreadable_reply_does_not_retire_the_refusal -> guards the parse-failure case
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_refusal_of_an_older_build_survives_and_the_running_one_does_not -> fails at f1eeb42 only if the CR-237 compare is reverted; it is the test that was missing
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_the_swallowed_state_writes_ride_the_upgrade_report -> fails at f1eeb42 (KeyError), passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_full_disk_on_a_youtube_machine_reaches_the_editor -> fails at f1eeb42 (KeyError 'failed'), passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_deno_only_failure_reports_the_streak_it_is_on -> fails at f1eeb42 (0 failures, no cause), passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_one_pass_is_counted_once_whichever_entry_point_ran -> guards the double-count the fix could have introduced
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_stalled_stderr_drain_does_not_fail_a_complete_decode -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_real_read_error_keeps_its_own_message -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_stalled_pcm_drain_still_fails_the_job -> CR-237's property, kept
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_an_admin_cancel_is_never_the_entry_that_is_truncated -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_the_newest_local_stop_is_the_one_that_is_kept -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_403_on_the_heartbeat_stops_the_job -> fails at f1eeb42, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_410_on_the_heartbeat_is_still_not_a_credential_problem -> guards the wording split
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_500_on_the_heartbeat_is_still_a_blip -> guards CR-31's shape
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_refused_result_is_recorded_rather_than_swallowed -> fails at f1eeb42, passes now
+- companion/tests/test_upgrade.py::test_upgrade_report_is_always_a_full_shape -> edited for the new always-sent key
+
+Also run (unchanged, all green): test_bug_hunt_2026_09_11_comp_ytdl_jobs.py,
+test_jobs_runner.py, test_jobs_media.py, test_sidecar_tools.py,
+test_ytdlp_manager.py, test_jobs_phase4.py, test_jobs_resilience.py,
+test_jobs_runner_visibility.py, test_upgrade_floor_guards.py - 473 passed,
+plus the 17 new ones.
+
+### OWED TO ANOTHER TERRITORY
+- dash-api: `dashboard/src/ccsync_dashboard/api.py`: `UpgradeIn`: declare
+  `state_write_failures: int | None = Field(default=None, ge=0)` (and store it
+  beside the other upgrade fields if dash-db adds a column). Without it
+  `undeclared_report_sections` names `sync_guard.upgrade.state_write_failures`
+  in the daily log line and on the SYS-3 banner - a true warning about a key
+  nothing reads, but noise until it is declared. DEPLOY THE DASHBOARD FIRST;
+  the companion side is harmless either way (an older dashboard ignores it,
+  `_BoundedSectionIn` is `extra="ignore"`).
+- dash-collector-alerts: `dashboard/src/ccsync_dashboard/alerts.py`: one
+  `ALERT_KINDS` row reading the stored `ytdlp.sidecar` block (action ==
+  `failed` and `consecutive_failures >= 2`), naming the machine and the cause
+  (comp-ytdl-jobs-3, regression-11). The companion half is built and, with
+  CR-254c, now populated on the `ensure()` path too; nothing on the dashboard
+  reads it, so the admin still cannot tell "never set up" from "cannot reach
+  GitHub". Dashboard-only change, no ordering constraint.
+- dash-collector-alerts: `alerts.py` `_check_upgrade_refused`: with CR-254a the
+  refusal retires on the next offer-free report, so the row now clears by
+  itself on a fleet running 0.9.72+. A staleness bound on that row would also
+  cover the machines still on 0.9.65..0.9.71, where the refusal is still
+  sticky for the life of the process. Dashboard-only.
+- dash-api: `api.py` `_require_fleet_caller`: answering 410 rather than 403 on
+  `/jobs/{id}/heartbeat` and `/jobs/{id}/result` when the refusal is an account
+  bar would also reach the companions already in the field (0.9.65..0.9.71),
+  which stop only for 410. CR-254f fixes 0.9.72 onwards; the dashboard half is
+  what covers the fleet today. Either side may deploy first.
+- comp-ui: `companion/src/ccsync_companion/supervisor.py`: regression-12
+  (res-companion-3, claimed fixed with no fix in the tree) is listed under
+  comp-ui and `supervisor.py` is not in this territory's file list - untouched
+  here.
+
+### Owner decisions
+- A reply with no offer clears the refusal; an age bound was not added. An age
+  bound alone would have kept a truly stuck machine's chip lit for a day or a
+  week after the cause was gone, and would still have needed a number nobody
+  can pick. If you would rather have both, the hook is `_clear_refusal`.
+- A 403 on the RESULT does not change the job's `retryable` verdict. The work
+  itself is fine and another machine should do it; only this machine's account
+  is barred. The alternative (marking it not retryable) would strand a job on a
+  403 that turned out to be a dashboard misconfiguration.
+- The credential-refused sentence is appended to the jobs gate reason, which
+  Settings and the tray already render, rather than a new tray line: no tray.py
+  change (not this territory) and nothing new to plumb.
+
+### Hand-off wave
+
+Two OWED lines routed back to this territory: ytdl-web's third machine door,
+and the half of CR-254f that wave 1's ledger claimed was already rendered.
+
+#### CR-254h (ytdl-web-3, hand-off) - the fleet calls named this computer in the body only - FIXED (companion/src/ccsync_companion/ytdl_executor.py)
+
+`routes_fleet._machine_of` reads three doors on purpose - a body field on the
+two POSTs, a query parameter on the manifest GET, and `X-CCSync-Machine` as the
+shape-independent fallback - and the companion filled only the first two. The
+header is the one that does not depend on the call's shape: a route that grows
+a second POST, or a body something between the two ends rewrites, loses the id
+and the lease silently goes back to answering per EDITOR, which is exactly the
+stale-laptop bug ytdl-web-3 was raised for (a machine that lost the job to its
+owner's desktop and woke up re-extending the other computer's lease). `_headers`
+now carries it on every fleet call - claim, heartbeat, manifest and clip status
+alike. Optional both ways: an older server sees an unknown header, and
+`_machine_of` prefers the body/query spelling, so the two can never disagree.
+An id that cannot be an HTTP header is not sent at all (`_header_safe`):
+machine.json is a plain file an editor can replace by hand, `http.client` raises
+on a newline or a non-ASCII value, and a claim that dies in the transport is
+strictly worse than one the server answers per editor.
+
+#### CR-254i (wire-5, surfacing half) - "Taking fleet work" while nothing this machine does is accepted - FIXED (companion/src/ccsync_companion/jobs_runner.py)
+
+CR-254f put the refusal sentence on `status()["gate"]["reason"]` and the ledger
+said Settings and the tray already render it. Settings does - but only when the
+gate is CLOSED: `settings_window._jobs_section` prints "Taking fleet work" and
+drops the reason when `taking_work` is true, and this runner's resting state is
+`STATE_NOTHING_OFFERED`, whose verdict is true. So in the commonest case - a
+suspended account, nothing running - the one sentence a person at that machine
+could act on was rendered nowhere at all. A door that answers 401/403 to claim,
+heartbeat and result alike is not a machine that is taking work, so the verdict
+now says so: `taking_work` is false while a refusal stands, an already-closed
+state keeps its own words and gains the note (somebody at the keyboard is still
+why nothing is running), and an open one is replaced by it, because "ready for
+fleet work" beside "not being accepted" is two answers to one question. It
+clears on the next fleet call that gets through, so an un-suspended account does
+not need a tray restart. `app.jobs_gate()` rides the same verdict, so
+`GET /api/v1/jobs/<id>/why` stops printing a machine as willing when its own
+credential is being refused.
+
+Also confirmed, not changed: `_heartbeat` already treats 401/403 as terminal for
+the current job (`CREDENTIAL_REFUSED_STATUSES`), both callers terminate the
+child on a false answer rather than killing it from the beat thread, and
+`_post_result` records a refused result instead of swallowing it. Tests for all
+three are in wave 1's section above.
+
+### Verification (hand-off wave)
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_every_ytdl_fleet_call_carries_the_machine_header -> fails before the fix (no header), passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_machine_with_no_id_sends_no_machine_header -> guards the optional-on-the-wire property
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_machine_id_that_is_not_header_safe_is_left_out -> guards the transport raise the fix could have introduced
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_refused_credential_closes_the_gate_it_contradicts -> fails before the fix (taking_work True), passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_call_that_gets_through_reopens_the_gate -> fails before the fix, passes now
+- companion/tests/test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py::test_a_closed_gate_keeps_its_own_reason_and_gains_the_note -> guards the wording split
+
+Run green: test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py (23), plus
+test_bug_hunt_2026_09_11_comp_ytdl_jobs.py, test_ytdl_executor.py,
+test_jobs_runner.py, test_jobs_runner_visibility.py, test_jobs_phase4.py,
+test_jobs_resilience.py, test_ytdl_server.py, test_ytdl_feature_gate.py - 392
+passed. py_compile on both touched source files.
+
+### OWED TO ANOTHER TERRITORY (hand-off wave)
+- comp-ui (OPTIONAL, low): `companion/src/ccsync_companion/tray.py` renders
+  only `jobs_forced_line`, never the jobs gate reason, so the credential
+  refusal reaches the editor through Settings -> JOBS and not the tray menu. A
+  one-line `jobs_credential_line(snap["jobs_status"])` beside it, shown only
+  while `credential_refused` is set, would put it where an editor looks first.
+  Companion-only, no ordering constraint.
+- ytdl-web: nothing. `routes_fleet` already accepts `X-CCSync-Machine` on the
+  heartbeat, the manifest and the status post; either side may deploy first.
+
+### Owner decisions (hand-off wave)
+- The header goes on EVERY ytdl fleet call, not only the heartbeat the OWED
+  line named. One header on one call would have left the same gap on the next
+  route that grows a body, and the server prefers the body/query spelling where
+  it has one, so nothing changes for a call that already carried the id.
+- A refused credential closes the jobs gate rather than only annotating it.
+  The alternative (leave `taking_work` true and teach Settings to print the
+  reason anyway) needs a settings_window.py change, which is comp-ui's, and
+  would still report this machine as willing to `/jobs/<id>/why`.
+
+## A rename took a machine off the fleet grid, the rollback button walked past the gate, and five of sync_guard's sub-sections still dropped what they were sent (CR-255, 2026-09-11)
+
+### CR-255a (wire-2) - a project rename 422'd every report that machine sent afterwards - FIXED (`dashboard/src/ccsync_dashboard/api.py`)
+
+`RepathEventIn.at` was declared `str | None` and the producer,
+`companion/sync/repath.py`'s `RepathLedger.record`, writes `float(self._now())`
+- an epoch float. `_BoundedSectionIn`'s before-validator truncates and clamps;
+it does not coerce types, and pydantic v2 will not turn a float into a string.
+`sync_guard` is deliberately NOT one of ReportIn's tolerant sections, so the
+whole report failed validation. One rename by an admin, and from the moment the
+companion (0.9.71, shipping tonight) repathed that folder, every 30 s report
+from that machine was rejected 422 for the life of the ledger entry: no lane
+state, no breaker or halt state on the grid, and - because the reply is the only
+channel back - no `commands.halt`, no `commands.upgrade`, no
+`commands.file_moves`, no lane B resume. The editor saw nothing at all. The
+companion-side regression test that was supposed to pin this fed the model an
+ISO string the producer never writes. `at` is `float | str | None` now, the two
+spellings an older reader may hold; `max_length` cannot live on the Field
+(pydantic applies it to the float arm and raises), so the string arm is bounded
+by a validator on the same truncate-rather-than-reject terms as every other cap
+in the file. The test loads the COMPANION's `repath.py` from source and feeds
+`record(...)`'s actual output through `ReportIn`.
+
+### CR-255b (wire-3) - the same section sent seven keys and declared four, so the first rename of the week would have put four "nothing is wrong" lines on the SYS-3 banner - FIXED (`api.py`)
+
+comp-app-2 flipped `_BoundedSectionIn` to `extra="allow"` and taught
+`_nested_extra_keys` to walk list items precisely so a dropped sub-key is NAMED
+on the fleet page. The same afternoon comp-sync-4 added a section whose items
+carry `id`, `slug`, `note` and `moved` undeclared, and `trash` has carried an
+undeclared `skipped` since the breaker prune guard was written. As soon as
+wire-2 was fixed, every machine that had had a rename would have logged four
+undeclared keys a day and rendered them on the banner that exists to catch a
+real dropped section. All five are declared now rather than dropped: `slug` is
+the project, `moved=False` is "this machine could not follow the rename" (which
+nothing on the server could previously see) and `skipped` is "the breaker is
+down, so nothing was pruned".
+
+### CR-255c (dash-api-1) - the rollback button was a sixth door into "make current", and it walked past the gate - FIXED (`api.py`)
+
+CR-239's dash-api-3 fix added `db.set_current_package(...)` straight into
+`roll_fleet_back` - the one call that function's own docstring forbids, and one
+of the five doors `package_store.make_current_refusal` says it gates. The
+in-line justification was "`ever_current` is the evidence this one already
+earned", but nothing on that path read `ever_current`; `set_current_package`
+only sets it. So the REL-1 soak gate, the UX-9 unsigned-binary confirmation and
+the REL-4 `requires_dashboard` ordering check were all bypassed for any
+published, non-retracted version an admin typed into `?to=`:
+`POST .../0.9.66/roll-fleet-back?to=0.9.64` made an unsigned 0.9.64 current
+with no confirmation, every companion then refused the offer's signature, and
+the whole platform stopped updating with nothing on any page saying why. The
+re-pointing goes through `make_current_refusal` now. On a refusal the FAN-OUT
+still happens - the recall is the half that reaches the machines - `current` is
+left where it is, and the refusal is named in the answer and the audit row
+rather than raised, because a rollback that delivers nothing is how a recall
+turns into a fleet nobody can reach. `ever_current` still passes the gate on its
+own, so dash-api-3's re-pointing is not undone for a real rollback.
+
+### CR-255d (dash-api-7) - the rollback re-pointed `current` for the whole platform and named nobody - FIXED (`api.py`)
+
+`_upgrade_info` offers a version that DIFFERS, not a newer one (equality, by
+design), so re-pointing `current` at the rollback target reaches machines that
+were never on the build being rolled off: the base rig after a `-AllowDirty`
+hotfix, or a machine that took a targeted push, starts being offered a
+downgrade nobody asked for. The response, the audit row and the log line now
+carry `newer_machines`, the machines on that platform running something ABOVE
+the target, with the build being rolled off excluded - those are the point of
+the exercise, not a surprise. A version that cannot be compared is left out
+rather than guessed at.
+
+### CR-255e (dash-api-2) - five of sync_guard's sub-models still dropped undeclared keys in silence, and 422'd rather than truncated - FIXED (`api.py`)
+
+comp-app-2 switched `_BoundedSectionIn` to `extra="allow"` so the walker could
+NAME a dropped sub-key, and switched exactly one model. `lane_b_breaker`,
+`halt`, `trash`, `skipped_exists` and `removal_overrides` stayed plain
+`BaseModel`s - which is to say the three latches an editor's safety depends on,
+and the very sections whose silently-dropped fields comp-sync-1 and comp-sync-15
+were raised about the same afternoon. A model with `extra="ignore"` has an empty
+`model_extra` by construction, so the detector was blind to exactly the
+recurrence the fix pass was patching; and without `_bound_rather_than_reject`, a
+value over a declared cap (`BreakerIn.editor_reason`, 1000 chars of free text)
+422'd the whole report instead of truncating, which is the SYS-3 shape. All five
+subclass `_BoundedSectionIn` now, and
+`test_every_sync_guard_subsection_truncates_rather_than_rejects` walks
+`SyncGuardIn.model_fields` so the next model added cannot be silent by default.
+
+### CR-255f (dash-api-4, wire-5) - suspending an editor mid-job burned forty minutes of GPU and then threw the work away - FIXED (`api.py`)
+
+dash-api-6 put the account bar on `_require_fleet_caller`, which gates the job
+heartbeat and result routes as well as claim. The companion's runner treats
+ONLY 410 as "this job is no longer ours, stop"; a 403 is read as a blip. So a
+machine whose owner was suspended mid-transcode ran the job to completion,
+wrote into the shared vault (SMB, which the bar does not reach), posted a result
+that was refused, and the dashboard re-queued the same job onto a second machine
+to do it all again - neither the editor nor the admin told anything. The bar has
+three answers now, one per door: 403 on claim (no new work under a barred name),
+410 on the heartbeat (the only status the runner acts on, so the child is
+stopped within a heartbeat interval), and the result door is not gated at all,
+because it only RETIRES work already claimed and refusing it is what threw the
+work away.
+
+### CR-255g (security-1) - "suspended means the same everywhere" stopped at api.py - FIXED IN PART (`api.py`)
+
+dash-api-6's own docstring says suspension "meant one door only: /report ... One
+line per gate makes the word mean the same thing everywhere", and added the line
+to four api.py doors. The package door never asked, and the three mounted fleet
+APIs (broll, music, ytdl) could not: `_refuse_barred_account` is private to
+api.py and those apps have no notion of a suspended account at all. DCORE-4
+revokes neither the session nor the `cce1.` token, so a suspended freelancer's
+laptop kept a working credential and could still push indexed clips, re-score a
+music library, claim a ytdl download into the shared tree - and keep itself
+upgraded. `account_bar_reason(settings, conn, editor)` is public now (raising is
+the caller's business; those apps answer in their own shapes, and it fails open
+on a database error like the predicate it wraps), and
+`GET /api/v1/companion/package/{platform}/{version}` asks it for an
+editor-bound token. The shared token identifies nobody and is unchanged, and so
+is an admin session. The three mount halves are OWED below.
+
+### CR-255h (wire-1, res-companion-1 dashboard half) - the companion's crash-resume state had no spelling on the wire - FIXED (`api.py`)
+
+The companion's file-move ledger writes an `applying` INTENT row before the
+rename and clears it after, so a tray killed in between (a CR-93 abort, a
+reboot, an upgrade swap) starts again holding one. `FileMoveResultIn.state` was
+`done|failed|retrying|blocked`, and a MISSING state means "answered, stop
+asking": the redelivered command was answered `ok=false` with no state,
+`mark_file_move_applied` wrote `applied_at`, and a crash mid-move became a
+PERMANENT failed move with the resume - proxy siblings, the Resolve relink -
+never run. `applying` is accepted now and stored as `retrying`, the one state
+`db.py` spells that records the attempt WITHOUT retiring the command. THE
+DASHBOARD DEPLOYS FIRST: a companion sending `applying` to a dashboard below
+0.7.44 fails the Literal, and `file_moves_applied` is not a tolerant section.
+
+### CR-255i (dash-api-6) - `resolve_health_detail` carried unbounded undeclared keys out of the validator, against its own comment - FIXED (`api.py`)
+
+`_BoundedSectionIn`'s comment asserted "nothing reads `model_extra` except that
+reporting, so an undeclared key is still not stored". Not true of the VALUE:
+`model_dump()` on an `extra="allow"` model includes the extras, and
+`_bound_to_field_caps` bounds declared fields only, so a 200 KB string posted
+into `sync_guard.resolve_health` rode out of the validator, through the
+flattened dict and into two db writers - each of which happens to filter it by
+an allow-list of its own. "Happens to" is not a bound. `_declared_dump` is what
+the three blob columns (`resolve_health_detail`, `ytdlp`, `youtube_import`) use
+now, and the comment says where the real bound is.
+
+### CR-255j (dash-api-5) - a machine with no platform was "unknown" here and "windows" in `rollout_status`, so the ship gate could never clear it - FIXED (`api.py`)
+
+`ReportIn.platform` is optional, so a `machine_state` row can carry NULL.
+`db.rollout_status` reads that as `windows`; `_rollout_platforms_block` read the
+same row as `unknown`, and `tools/ship_gates.ps1` then looked for a channel
+covering the platform key `unknown`, never found one, and emitted a straggler on
+every ship that no build an admin could publish would ever clear. One coercion,
+`or "windows"`, the same one the counter it is compared against uses.
+
+### CR-255k (tests-3) - an authorization assertion that could never fail - FIXED (`dashboard/tests/test_selection_api.py`)
+
+`assert client.get("/api/v1/selection/jsmith").status_code == 401 or True` in
+`test_auth_matrix` was the only line asserting that a signed-in editor cannot
+READ another editor's sync plan. The `or True` is gone; the gate is correct
+today, so this was a hole rather than a live bug.
+
+### Verification
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_a_real_repath_event_does_not_422_the_whole_report -> fails at f1eeb42, passes now (wire-2)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_the_model_keeps_the_float_and_still_bounds_a_string -> fails at f1eeb42, passes now (wire-2)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_every_key_the_repath_ledger_writes_is_declared -> fails at f1eeb42, passes now (wire-3)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_the_prune_guards_skipped_key_is_declared -> fails at f1eeb42, passes now (wire-3)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_every_sync_guard_subsection_truncates_rather_than_rejects -> fails at f1eeb42, passes now (dash-api-2)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_a_new_breaker_key_is_named_rather_than_dropped -> fails at f1eeb42, passes now (dash-api-2)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_a_long_breaker_reason_truncates_rather_than_422ing_the_report -> fails at f1eeb42, passes now (dash-api-2)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_resolve_health_detail_carries_only_declared_keys -> fails at f1eeb42, passes now (dash-api-6)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_a_machine_with_no_platform_is_counted_the_way_rollout_status_counts_it -> fails at f1eeb42, passes now (dash-api-5)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_a_rollback_cannot_make_an_unsigned_build_current -> fails at f1eeb42, passes now (dash-api-1)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_a_rollback_to_a_build_that_has_been_current_still_repoints -> pins dash-api-3's fix against dash-api-1's gate (green both sides)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_the_rollback_names_the_machines_it_would_downgrade -> fails at f1eeb42, passes now (dash-api-7)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_a_suspended_editors_running_job_is_told_to_stop -> fails at f1eeb42, passes now (dash-api-4 / wire-5)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_a_suspended_editors_finished_job_can_still_be_retired -> fails at f1eeb42, passes now (dash-api-4)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_the_account_bar_is_importable_by_the_mounted_apps -> fails at f1eeb42, passes now (security-1)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_a_suspended_editors_machine_cannot_keep_itself_upgraded -> fails at f1eeb42, passes now (security-1)
+- tests/test_file_moves.py::test_a_crash_mid_move_is_answered_applying_and_keeps_the_command -> fails at f1eeb42 (422 on the Literal), passes now (wire-1)
+- tests/test_selection_api.py::test_auth_matrix -> the assertion can fail now (tests-3); green today
+- tests/test_bug_hunt_2026_09_11_dash_api_jobs.py::_publish_rows -> its two rollback tests now publish SIGNED rows, because dash-api-1's gate refuses the re-pointing of an unsigned one
+
+### OWED TO ANOTHER TERRITORY
+- dash-mounts-ui: `ui.py`: `partial_admin_roll_fleet_back`: pass `settings=request.app.state.settings` into `api.roll_fleet_back` (it defaults to None, which makes `make_current_refusal` read the DEFAULT soak minutes rather than this site's when `meta` has no override), and render the response's new `current_refused` / `newer_machines` on the Packages page - the JSON route answers them and the htmx door shows an error only on an exception; dashboard deploys alone, no companion side.
+- dash-mounts-ui: `ui.py`: the home page (`ui.py:649`) and `/partials/queue` (`ui.py:925`) call `api.build_queue_view(conn, editor)` with no machine, so dash-api-4's per-machine `resolve_project` / `root_*` fix (CR-239) is still unreachable from the only template that renders them (`partials/fix_root.html`): thread the `?machine=` the assignments grid already uses (or the person's single machine) into both calls and assert on the rendered sentence through the HTTP route (dash-api-3). Dashboard only.
+- dash-collector-alerts: `alerts.py`: an `ALERT_KINDS` row WITH its writer reading `ytdlp.sidecar.ok/cause/consecutive_failures` off the `ytdlp:` meta blob api.py already stores (regression-11 / comp-ytdl-jobs-3). The report model and the storage are done here; no reader exists anywhere. Dashboard only.
+- dash-mounts-ui + dash-release-jobs: render that sidecar cause beside `cap_ffmpeg` on the jobs machine list, and in `GET /api/v1/jobs/{id}/why`'s `no_capable_machine` explanation (regression-11's second half). Dashboard only.
+- broll / music / ytdl-web: `broll/web/app/routes_fleet.py`, `music/web/musicweb/routes_fleet.py`, `ytdl/web/ytdlweb/routes_fleet.py` (or the three `_fleet_stamp` helpers in `dashboard/src/ccsync_dashboard/{broll,music,ytdl}.py`, which is the one place all three already share): after `api.resolve_companion_credential` resolves an editor, call `api.account_bar_reason(settings, conn, editor)` and refuse when it answers (security-1). Dashboard deploys alone; nothing on the companion changes.
+- comp-ytdl-jobs: `companion/src/ccsync_companion/jobs_runner.py`: `_heartbeat` must treat 401/403 as terminal for the current job the way 410 is (stop the child, record cancelled, do not retry), and surface the refusal on the tray the way `reporter`'s APP-1 notice does (wire-5). The dashboard half answers 410 now, so a companion of ANY version already stops - this is belt and braces for the claim door and for an older dashboard. Dashboard first either way.
+- dash-db: `db.py`: a first-class `applying` state in `file_move_targets` if the companion is meant to report it distinctly - api.py stores it as `retrying` today, which gives the behaviour (the command stays live) but not the word on the project page (wire-1). Dashboard deploys before any companion that sends `applying`.
+- comp-sync (optional): `sync/repath.py` may also stringify `at` on the wire; it does not need to, since `RepathEventIn` takes the float now, and the dashboard is the half that lets 0.9.71 machines report at all.
+
+### Owner decisions
+- On a `make_current_refusal` refusal the rollback still asks every machine to move and leaves `current` alone, returning the refusal in `current_refused` rather than raising it. The alternative (refuse the whole call) would mean an admin recalling a bad build gets nothing at all until they clear the gate. If you would rather the button refuse outright, it is one branch in `roll_fleet_back`.
+- The job RESULT door is now outside the account bar on purpose: a suspended editor's machine may still retire work it already holds. The claim door and the heartbeat are what stop it.
+- Noticed while running the suite, NOT mine and NOT touched: `db.fetch_collector_status` raises `NameError: name 'collector_stale_bound' is not defined` (an unterminated docstring around `db.py:8832`), logged by every notice check. It is another builder's in-flight edit to `db.py`; the gate will fail on it if it is left.
+
+### Hand-off wave
+
+The OWED lines other territories routed to `api.py` (`HANDOFFS.md`,
+"## dash-api"). Same numbering: these are further sub-entries of CR-255.
+
+#### CR-255l (res-companion-4, from comp-ytdl-jobs) - the upgrade block's new counter was undeclared, so the banner that catches a dropped section would have named it every day - FIXED (`api.py`)
+
+`upgrade.upgrade_report` sends `state_write_failures` on every report from a
+0.9.72 companion (zero is the normal answer, and always sent, so that "cannot
+count" and "nothing to count" stay different answers). `UpgradeIn` did not
+declare it, and comp-app-2's walker NAMES an undeclared sub-key on the SYS-3
+banner - so the fleet's whole population would have put
+`sync_guard.upgrade.state_write_failures` on the banner that exists to catch a
+section the dashboard is really dropping, daily, for ever. Declared now,
+`int | None`, `ge=0`. Nothing stores or renders it yet: the counter is
+non-zero only on a machine whose `~/.ccsync/state` is unwritable, which is
+APP-5's crash-loop guard reading "first start" for ever, and that is worth an
+alert row - OWED below. The test reads the producer's own dict literal out of
+`companion/src/ccsync_companion/upgrade.py` with `ast` rather than restating
+its keys by hand, which is the wire-2 lesson.
+
+#### CR-255m (dash-db-5, from dash-db) - a locked database turned the Users page into a 500 - FIXED (`api.py`)
+
+CR-240's dash-db-2 made the suspension and archive readers re-raise
+`database is locked` rather than answer the empty value. That is right where
+the empty answer was a fail-OPEN (the enforce cycle re-sharing folders an
+admin had just suspended) and wrong on a page that only RENDERS:
+`_build_admin_users_view` called `db.suspended_editors`,
+`db.editor_suspension` and `db.fetch_pending_ssh_keys` unguarded, so a lock
+during a slow collector write 500'd the whole Users page - the page carrying
+[ RESUME ] and the pending-SSH-key approval, i.e. the two buttons the admin
+opened it to press, both of them unreachable exactly while something else is
+busy. The reads are guarded on their own terms now (`sqlite3.OperationalError`
+only, the two groups independently) and answer the empty value plus
+`suspensions_unreadable` / `pending_ssh_keys_unreadable`, so the page can say
+"could not read this right now" instead of stating as fact that nobody is
+suspended and no key is waiting. `assignments._assignments_view`'s
+`archived_unreadable` is the same move on the same afternoon. The strip that
+renders the two flags is OWED to dash-mounts-ui; until it lands the page
+renders as it did before CR-240 rather than 500ing, which is the point.
+
+#### CR-255n (comp-app-2, from comp-app) - a drive left out overnight wrote the same WARNING a thousand times - FIXED (`api.py`)
+
+A `retrying` answer deliberately does not retire the file-move command, so
+the move is re-sent on the next report and re-answered, every 30 s, per move,
+per machine, for as long as the external drive is out or Resolve holds the
+file open. The report handler logged on every `rowcount > 0`, so one editor's
+drive pulled overnight with four moves owed wrote thousands of identical lines
+and pushed the events an operator reads the next morning out of the log.
+The previous answer is read off the row (`_file_move_answer`, a read rather
+than state in this process - a container restart must not make the fleet shout
+again) and the line is written only when `state` or `detail` CHANGED. A
+terminal answer cannot repeat at all, because `mark_file_move_applied` only
+matches `applied_at IS NULL`. A read that cannot be made counts as "no
+previous answer", i.e. log it: the safe direction for a de-dupe is to say it
+twice. comp-app-2's companion half cuts the volume at the source for 0.9.72;
+this is what makes the log quiet for the fleet as it is today
+(0.9.65..0.9.71), and either side may deploy first.
+
+#### Confirmations (no code change)
+
+- `_require_fleet_caller`'s three doors are as comp-ytdl-jobs asked: claim
+  403 (`barred="refuse"`), heartbeat 410 (`barred="gone"`, the only status
+  `jobs_runner` acts on), result ungated (`barred="allow"`, because it only
+  retires work already claimed). Wave 1 covered the heartbeat and the result;
+  a control test for the claim door is added here so the split cannot be
+  collapsed by accident.
+- `_rollout_platforms_block` already buckets a NULL/blank
+  `machine_state.platform` as `windows`, the coercion `db.rollout_status`
+  uses (CR-255j, wave 1, with
+  `test_a_machine_with_no_platform_is_counted_the_way_rollout_status_counts_it`).
+  Nothing to do for server-tools's line.
+- DECLINED (one sentence, as the brief allows): the OPTIONAL first-class
+  `applying` state for `file_move_targets` is in `db.py`, which is dash-db's
+  territory, not mine - it stays OWED below, and `applying` continues to be
+  stored as `retrying`, which gives the behaviour without the word.
+
+### Verification (hand-off wave)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_every_key_the_upgrade_report_writes_is_declared -> fails without the field, passes now (res-companion-4)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_the_upgrade_section_names_no_undeclared_key -> fails without the field, passes now (res-companion-4)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_the_users_page_survives_a_locked_suspension_read -> fails without the guard (sqlite3.OperationalError out of the view), passes now (dash-db-5)
+- tests/test_file_moves.py::test_a_machine_retrying_the_same_move_logs_once -> fails without the de-dupe (7 lines where 1 is owed), passes now (comp-app-2)
+- tests/test_bug_hunt_2026_09_11b_dash_api.py::test_a_suspended_editor_cannot_claim_new_work -> control: the claim door stays 403 while the heartbeat is 410 (green both sides)
+- Suites run: tests/test_bug_hunt_2026_09_11b_dash_api.py (20 passed), tests/test_file_moves.py (18 passed), and the three api.py-driven Users-page suites tests/test_admin_users{,_local,_partial_parity}.py (57 passed). py_compile on api.py.
+
+### OWED TO ANOTHER TERRITORY (hand-off wave)
+- dash-mounts-ui: `templates/admin_users.html`: render a "could not read this right now" strip when `suspensions_unreadable` or `pending_ssh_keys_unreadable` is true, instead of the empty suspension list and the empty key table (dash-db-5). Dashboard only.
+- dash-db: `db.store_upgrade_state`: keep `state_write_failures` on the machine's row so something can read it; the report model declares it now and nothing stores it (res-companion-4). Dashboard only, and harmless until it lands.
+- dash-collector-alerts: an `ALERT_KINDS` row WITH its writer for `state_write_failures > 0` ("this machine cannot write its own state, so the crash-loop guard can never fire"), once dash-db stores it. Dashboard only.
+- dash-db (still OWED, unchanged from wave 1): a first-class `applying` state in `file_move_targets` if the project page should show the word; api.py stores it as `retrying` today.
+
+### Owner decisions (hand-off wave)
+- The file-move de-dupe key is (state, detail) only: a `retrying` answer whose ATTEMPTS went up but whose state and detail did not is no longer logged. The attempt count is on the project page and in the row; the log is for changes. If you would rather see every attempt, it is one tuple in `api.py`.
+- `suspensions_unreadable` and `pending_ssh_keys_unreadable` are two flags, not one, because the two reads fail independently and the page has two sections - the same reason DASH-7 split `truenas_error` from `syncthing_error`.
+
+## The collector's own alarms told the truth about everything but themselves (CR-256, 2026-09-11)
+
+The 2026-09-11 fix pass rewired four of the self-diagnosis paths and each one
+landed about three quarters of itself: a silence spelled with a call that
+mutates, a liveness flag with one threshold on a fleet that has two shapes, a
+keep-list rebuilt from the rows the same pass deletes, and a restore that
+refuses a walk it cannot trust while the preview it is chosen from still
+prints the numbers that walk invented.
+
+### CR-256a (dash-collector-alerts-2 / regression-2) - a machine on a personal project stopped reaching the RED backstop - FIXED (alerts.py)
+
+CR-241 taught `_check_out_of_tree` to say NOTHING about a machine whose open
+project is not one of the tree's, unless it had already raised that subject.
+It spelt the test as `if ctx.name(who) not in ctx.open_alert_subjects(...)`,
+and `Ctx.name` is not a getter: it ADDS the subject to `ctx.named`.
+`_check_red_unexplained` is the last kind in the registry and reports only
+machines no other check named, so the one backstop that turns "green while
+dead" into a message went quiet for exactly the machines this check had
+decided to be quiet about. An editor with a personal project open and lanes
+RED for three hours was reported by nobody. The fix asks the question without
+naming: the raw `who` against the open-subject set, with `ctx.name` left where
+it was, on the line that only findings which are actually emitted reach.
+Test: `test_a_quiet_out_of_tree_machine_can_still_reach_the_red_backstop`,
+with the other direction (an already-raised subject stays named and quiet)
+beside it.
+
+### CR-256b (dash-collector-alerts-1, the alerts half) - a Syncthing-less dashboard called its own healthy collector STOPPED - FIXED (alerts.py)
+
+`collector_stale` is the age of the newest `poll_runs.started_at` against a
+fixed 180 s. A deployment with no `syncthing_url` runs `SYNCTHING_FREE_KINDS`
+alone - prune 3600 s, invariants 900 s, alerts 600 s - so the newest start
+there is ALWAYS older than three minutes and the flag is permanently True. A
+vendor or zero-touch dashboard, before Syncthing is configured, put "The
+server's background collector has not completed a cycle" on PROBLEMS THE
+SERVER FOUND within ten minutes of booting, counted it in the topbar's red
+chip and mailed it every day. `_check_collector_stale` now derives the
+threshold this site can actually meet (`_stale_after_seconds`: two cadences of
+the quickest kind that runs, never below the constant) and re-asks the
+question against it before raising anything. A collector that has genuinely
+stopped on such a site still raises within twenty minutes. The stored flag
+itself, which the home page and `/api/v1/health` also read, is db.py's and is
+OWED to dash-db below.
+
+### CR-256c (dash-collector-alerts-8) - the duplicate liveness query is gone - FIXED (alerts.py)
+
+Two builders fixed dash-collector-alerts-3 in two places with the same SQL:
+`db.fetch_collector_status` derives the flag from `MAX(started_at)`, and
+`alerts._collector_started_recently` re-ran that query against the same
+constant, so the branch it guarded could never change the verdict. One extra
+full-table aggregate per pass, and two thresholds to keep in step. Deleted;
+what is in its place asks the opposite question (CR-256b) and only on the
+sites where the stored threshold is meaningless.
+
+### CR-256d (dash-collector-alerts-3) - the truncated-invariant keep-list survived exactly one pass - FIXED (invariants.py)
+
+An invariant broken on 45 subjects reports the first 20, and CR-241 kept the
+previously-stored broken subjects in the keep-list so the cap could not close
+the notices for the other 25. But the keep-list is built from
+`db.broken_invariants`, i.e. from `invariant_results`, and
+`db.record_invariant_result` runs a few lines above and DELETES every subject
+row a BROKEN pass did not name. From the second pass the stored set is only
+the 20 currently visible; by the third window, the notices for the first
+twenty are closed as "this has cleared" while all 45 are still broken, which
+is the mistake the hunk's own comment is written against. `_TRUNCATED_CARRY`
+now holds, per invariant, the broken subjects the cap has hidden - the union
+of what the ledger held and what earlier truncated passes carried, minus what
+this pass named, capped at `MAX_CARRY_SUBJECTS` - and is dropped the moment
+the invariant answers OK or a whole BROKEN verdict. A module global on
+`mount_status`'s rule (one process, one app), so a container restart still
+loses it: the durable half is OWED to dash-db.
+Test: `test_a_truncated_invariant_keeps_its_hidden_subjects_past_pass_two`
+(three windows over 45 subjects).
+
+### CR-256e (dash-collector-alerts-4) - the mount registry replayed a boot verdict over a newer one - FIXED (mount_status.py)
+
+`recheck` stashes the pre-degrade verdict and replays it when the root comes
+back, and `_STATE` is not its own: the ytdl feature gate rewrites that entry
+from a request thread whenever `[features] youtube_download` flips. Root goes
+away, gate records "disabled", root comes back, `recheck` puts "mounted" back
+on a page that answers 404 to every request - and `_check_feature_mounts`
+clears the notice saying so, because `ytdl._record` short-circuits on "same
+status" and never re-asserts itself. The restore now only replaces a verdict
+that is still the DEGRADED one this function installed; anything else drops
+the stash and leaves the newer verdict alone.
+Test: `test_a_verdict_written_while_a_root_was_away_is_not_overwritten`, with
+the ordinary restore pinned beside it.
+
+### CR-256f (dash-collector-alerts-5) - the registry lock was held across a filesystem probe - FIXED (mount_status.py)
+
+The `is_dir` per recorded root ran with `_LOCK` held. It is cheap on a local
+bind mount and not cheap on a hard NFS/CIFS mount whose export has hung rather
+than gone - the exact case res-fleet-2 was written for - where it blocks in
+the kernel; the collector thread then parked holding the registry and every
+reader queued behind it, including `/api/v1/health` and the nav, i.e. the page
+an admin opens to find out why. `recheck` now snapshots the roots and verdicts
+under the lock, probes with no lock held, and re-takes it to apply - skipping
+any entry another thread rewrote while the probe ran, since a verdict from now
+beats one planned from a reading taken before it.
+Test: `test_the_registry_is_readable_while_a_root_is_being_probed` (the probe
+holds until a second thread has taken `snapshot()`, bounded by a timeout).
+
+### CR-256g (dash-collector-alerts-7) - the restore refused a walk the preview still put a number on - FIXED (recovery.py)
+
+CR-241 made `restore_into_quarantine` refuse when either walk hit
+`MAX_SCAN_FILES`, because a truncated LIVE walk classifies every file it never
+reached as missing. `preview_restore` has the identical defect and is where
+the owner DECIDES: it still returned "18,402 files missing, 4.1 TB", almost
+all of it present, with `truncated: True` as the only hint, and then the
+button 409'd. A truncated preview now withholds the counts entirely and
+carries the refusal's own sentence in `note` (plus `counts_unavailable`), with
+the numeric keys kept as zeros because the template does arithmetic on them -
+which also hides the restore form, correctly, since the restore would refuse.
+The template line that still prints "0 file(s) missing" beside that note is
+OWED to dash-mounts-ui.
+Test: `test_a_preview_that_stopped_early_shows_no_counts`, with the untruncated
+preview pinned beside it.
+
+### CR-256h (regression-25 / res-fleet-4) - a half-hour relay outage deleted the week's report - FIXED (alerts.py)
+
+res-fleet-4 stopped a failed send from retiring a slot and bounded the retries
+with `MAX_SEND_ATTEMPTS_PER_SLOT = 3`. The alerts cycle runs every 600 s, so
+three attempts cover about twenty minutes: an SMTP relay down 07:55 to 08:40
+on a Monday spent the budget and the week's report was gone, not late - the
+outcome the finding was raised about. The ceiling is now a BACKOFF
+(`SEND_BACKOFF_SECONDS`, 10 min then 1 h then 6 h since the last attempt, for
+the weekly report and the daily heartbeat alike), so a sink that comes back
+inside the slot still delivers, and a dead sink costs about five SMTP timeouts
+a day rather than one per cycle.
+Test: `test_a_sink_outage_over_the_weekly_slot_delays_the_report_not_deletes_it`.
+
+### CR-256i (dash-collector-alerts-6) - NOT A BUG, pinned (alerts.py)
+
+The finding says a vendor-default site now writes three failed heartbeat rows
+a day. It cannot: `heartbeat_due` has returned False on
+`alerts_sink == none` since CR-155..164 (`999b3e3`), above the attempt gate,
+so no heartbeat row is written on such a site at all. No change; a test pins
+the gate, because removing it is exactly what the finding describes.
+Test: `test_a_site_with_no_sink_writes_no_heartbeat_rows_at_all`.
+
+### Verification
+All in `dashboard/tests/test_bug_hunt_2026_09_11b_dash_collector_alerts.py`,
+run with the dashboard venv:
+- `test_a_quiet_out_of_tree_machine_can_still_reach_the_red_backstop` -> fails at f1eeb42, passes now
+- `test_a_syncthing_less_site_whose_collector_is_turning_is_not_stopped` -> fails at f1eeb42, passes now
+- `test_the_duplicate_collector_liveness_query_is_gone` -> fails at f1eeb42, passes now
+- `test_a_truncated_invariant_keeps_its_hidden_subjects_past_pass_two` -> fails at f1eeb42, passes now
+- `test_a_verdict_written_while_a_root_was_away_is_not_overwritten` -> fails at f1eeb42, passes now
+- `test_the_registry_is_readable_while_a_root_is_being_probed` -> fails at f1eeb42, passes now
+- `test_a_preview_that_stopped_early_shows_no_counts` -> fails at f1eeb42, passes now
+- `test_a_sink_outage_over_the_weekly_slot_delays_the_report_not_deletes_it` -> fails at f1eeb42, passes now
+- `test_a_site_with_no_sink_writes_no_heartbeat_rows_at_all` -> passes at f1eeb42 too (CR-256i is a pin, not a fix)
+Also green, unchanged: `test_alerts.py`, `test_invariants.py`,
+`test_recovery.py`, `test_mount_status.py`,
+`test_bug_hunt_2026_09_11_dash_collector_alerts.py`,
+`test_bug_hunt_2026_09_03_dash_collector.py` (224 passed).
+
+### OWED TO ANOTHER TERRITORY
+- dash-db: `dashboard/src/ccsync_dashboard/db.py`: `fetch_collector_status`: derive the `collector_stale` threshold from the cadences this deployment actually runs (only `SYNCTHING_FREE_KINDS` run without a `syncthing_url`, and the quickest of those is 600 s against a 180 s constant), or gate the flag on `syncthing_url` the way `_check_nas_engine` is gated; the alert is safe without it (CR-256b), but the home page's collector panel and `/api/v1/health` still read the raw flag as STOPPED on a Syncthing-less site. Dashboard-only, no deploy ordering.
+- dash-db: `dashboard/src/ccsync_dashboard/db.py`: `record_invariant_result`: take a `truncated: bool = False` and skip the "DELETE the subject rows this pass did not name" when it is set, exactly as a non-verdict already does; `invariants.run_cycle` would then pass `truncated=result.get("truncated")` and `_TRUNCATED_CARRY` could be deleted. Until then the carry is in-process only and a container restart loses the hidden subjects. Dashboard-only, no deploy ordering.
+- dash-mounts-ui: `dashboard/templates/partials/recovery.html` (the `recovery_preview` block, around line 141): when `recovery_preview.counts_unavailable` is true, print `recovery_preview.note` instead of the "N file(s) missing / N different / N the same" line, which now reads "0 file(s) missing" on a folder this server could not walk. The counts are already zeros and the restore form is already hidden, so the page is safe without the change. Dashboard-only, no deploy ordering.
+
+### Owner decisions
+- The send backoff ladder is 10 minutes, 1 hour, 6 hours (CR-256h). That is at most about five SMTP timeouts a day on a dead sink, and a relay that comes back before 15:00 on a Monday still delivers that week's report. A tighter ladder delivers sooner and costs more timeouts.
+- A truncated preview withholds its counts rather than labelling them (CR-256g). The alternative - keep the numbers and print "these are not the whole picture" - leaves a number on the page that is wrong by orders of magnitude, and the restore refuses anyway.
+- `MAX_CARRY_SUBJECTS = 200` bounds how many hidden broken subjects one invariant carries between passes (CR-256d). Past that the notices for the oldest hidden subjects can still close.
+
+
+### Hand-off wave
+
+The OWED lines wave 1 routed here. Two are new alert kinds for conditions the
+companion and the boot loader have been reporting to a dashboard that read
+neither; one is a leftover alarm that outlived what it was about; one closes
+the "two rules for one question" that CR-110's belt was quietly holding up; one
+is the registry half of a probe another territory needs.
+
+#### CR-256j (regression-11 / comp-ytdl-jobs-3) - the media sidecar's cause reached nobody - FIXED (alerts.py)
+
+comp-ytdl-jobs-3 landed its companion half in 0.9.71: which of
+ffmpeg/ffprobe/deno failed, why, and how many checks in a row, all carried in
+`sync_guard.ytdlp.sidecar`. On the dashboard only the pydantic model was
+added. `api._store_ytdlp_state` swallowed the block whole into the `ytdlp:`
+meta JSON and NO READER EXISTED - no `ALERT_KINDS` row, no render, nothing in
+`GET /api/v1/jobs/{id}/why`. A Mac editor whose sidecar install fails on an SSL
+CA problem reports `capabilities.ffmpeg = false`; the admin queues a
+`proxy-480p` job, `why` answers `no_capable_machine`, and the whole fleet
+picture says only that the machine is not capable - which reads as "nobody set
+that computer up". The cause was in exactly one place, that editor's own tray,
+which is the audience the finding was raised about.
+`_check_media_sidecar_failed` is now an `ALERT_KINDS` row REGISTERED WITH ITS
+WRITER (`media_sidecar_failed`, warn), naming the machine, the tools and the
+companion's own cause sentence. `consecutive_failures >= 2`, not the first
+failure: the installer retries and one miss on a flaky network heals itself on
+the next daily check. An ABSENT sidecar block (a companion below 0.9.71) is
+silence, never "it is fine".
+Tests: `test_a_failing_media_sidecar_reaches_the_alerts_page`, with the single
+failure and the too-old companion pinned beside it.
+
+#### CR-256k (res-fleet-3, the alerts half) - a container booting the image over an applied tree said so to nobody - FIXED (alerts.py)
+
+dash-mounts-ui-8 moved the boot counter below `check_tree` so an
+environment-shaped refusal ("DASH_RELEASE_PUBKEYS is not set") stops counting
+against a good bundle. Its neighbour: a PERMANENT refusal no longer accumulates
+either, so it never reaches the two boots that produced a revert with a
+sentence on the Packages page. An image update that changes `/venv/.runtime-id`
+leaves the applied 0.7.43 tree unbootable, the container runs the image's older
+code on every restart for ever, and the page still names 0.7.43 as current. The
+only evidence was a stderr line in the container log and `source: "image"` in
+`status()`; nothing in alerts, notices or invariants read `running_source` or
+`reverted_reason`. `_check_code_not_applied` (`code_not_applied`, error) is the
+registry row with its writer: `source == "image"` AND `current.json` naming a
+version different from the one running. It reads `running_source` and the
+`current.json` file directly rather than `dashboard_update.status()`, on the
+`_ytdl_health` rule - there is no app object on the collector thread, and
+status() would pull the verified feed records for two facts that are a
+`sys.path` check and one small file read. It carries
+`revert_refused_reason`, which select_code_root now writes, when it is there. A
+checkout, a `volume` source, an image that has caught up and an unreadable
+`current.json` are all silence.
+Tests: `test_a_container_booting_the_image_over_an_applied_tree_is_reported`,
+`test_the_applied_tree_answering_is_not_a_finding`,
+`test_a_current_json_this_server_cannot_read_raises_nothing`, and
+`test_both_new_kinds_are_registered_with_their_writers` (the row, the writer
+identity and the weekly report's "checked and found nothing wrong" line, for
+both new kinds - a registered kind with no writer was a prior build's own bug).
+
+#### CR-256l (comp-ytdl-jobs-1, the dashboard side) - a refusal an admin had already cleared stayed lit - FIXED (alerts.py)
+
+`_check_upgrade_refused` fired on any stored `upgrade_refused_version`, with no
+bound. The companion re-stamps `refused_at` every time it turns an offer down
+and reports every heavy tick, so a live refusal is minutes old; an OLD stamp
+means the opposite, that nothing is being offered and refused any more. On
+companions 0.9.65..0.9.71 the standing refusal only ever cleared by taking a
+LATER offer, which a machine already running the current build is never given -
+so an admin who published 0.9.65 as a rollback, watched the fleet refuse it and
+put the newer build back left `[ REFUSING 0.9.65 ]` and this alert lit on every
+machine for the life of each tray process, with the alert's own action text
+("publish a build that computer will accept") describing the move that had just
+failed to clear it. 0.9.72 clears it from a reply with no offer; the fleet will
+hold older builds for months, so the row also ages out here at
+`UPGRADE_REFUSED_STALE_SECONDS = 24 h`. A machine that is merely switched off
+ages out too, which is right: `machine_silent` owns that.
+Tests: `test_a_refusal_nobody_is_restamping_stops_alarming`, with the
+re-stamped refusal still alarming beside it.
+
+#### CR-256m (dash-db-4) - the enforce cycle now asks for the enforce view - FIXED (collector.py)
+
+`db.fetch_machine_selections(for_enforce=True)` is named after this cycle and
+this cycle did not pass it: `_run_enforce` read the ADMIN view (which keeps a
+wired machine's own rows so the tick grid still has a button to clear them) and
+dropped wired machines further down its own function on CR-110's separate
+`base_pairs`/`base_editors` belt. Two rules for one question, agreeing only
+because the belt happens to exist, with the db docstring itself warning that an
+edit to the belt or a new consumer written from it brings the CR-110/B16 shape
+back. The read now asks the same question `notices._check_plan_without_share`
+and `invariants._check_plan_has_share` ask. THE BELT STAYS: it is what kept the
+shape away while the two rules were apart, and a flag is not a reason to remove
+a latch. No behaviour change today, by construction - that is what the belt
+was for.
+Test: `test_the_enforce_cycle_asks_for_the_enforce_view` (the real cycle
+against the fake Syncthing, asserting the flag on the real call).
+
+#### CR-256n (dash-mounts-ui-b-1, the registry half) - a mount may name a file as its witness - FIXED (mount_status.py)
+
+`recheck` probed each recorded root with `os.path.isdir`. A bind mount that
+goes away LEAVES ITS MOUNT POINT BEHIND, so for a mount with no directory of
+its own inside that root the probe can never see the failure it was written
+for: `/music-data` holds `music.db` and nothing else the music mount creates,
+and `MUSIC_PROXIES_DIR` is a separate bind outside the root. `record_root` now
+takes `witness=""` - the path actually probed - and `recheck` probes EXISTENCE,
+so a file is a legal witness; recording a file under the old probe would have
+reported every healthy deployment as degraded, which is worse than the bug. The
+degraded sentence still names the ROOT: the admin has to be told which mount is
+gone, not which file this server happened to stat. The argument is optional and
+`recheck`'s probe parameter keeps its position, so every existing caller and
+test is unchanged; passing the witness from music and ytdl is dash-mounts-ui's
+half, below.
+Tests: `test_a_mount_may_name_a_file_as_its_witness`, with the witness-less
+caller pinned beside it.
+
+#### CR-256o (dash-collector-alerts-1, the second look) - NOT DONE, and why - (alerts.py)
+
+The hand-off asked `_stale_after_seconds` to compare against
+`db.collector_stale_bound` as well, as "the other way the false positive
+fires". By the time it was read, dash-db's wave-1 fix had already made
+`db.fetch_collector_status` compute the stored flag against exactly that bound,
+with the same 180 s floor. Re-running it in the alert would be
+dash-collector-alerts-8 in its purest form: a second query, of the same rows,
+against the same threshold, that can never change the verdict the first one
+reached - the duplicate this very ledger deleted eight hours earlier. What is
+left in `_stale_after_seconds` is the half `collector_stale_bound` cannot
+reach, because it is not in the data: a container whose `poll_runs` hold no
+REPEAT of any kind yet, where the observed bound falls back to the floor and
+only the CONFIGURED intervals say what the site can meet. The docstring now
+says so at the code site. Wave 1's three
+`test_a_syncthing_less_site_*` tests cover the surviving half.
+
+### Verification
+Hand-off wave, all in
+`dashboard/tests/test_bug_hunt_2026_09_11b_dash_collector_alerts.py`, run with
+the dashboard venv:
+- `test_a_failing_media_sidecar_reaches_the_alerts_page` -> fails at f1eeb42 (no such kind), passes now
+- `test_one_failed_sidecar_check_is_not_yet_a_finding` -> pins the 2-failure floor
+- `test_a_companion_too_old_to_send_a_sidecar_block_is_silent` -> pins "absent is not fine"
+- `test_a_refusal_nobody_is_restamping_stops_alarming` -> fails at f1eeb42, passes now
+- `test_a_refusal_that_is_being_restamped_still_alarms` -> the other direction
+- `test_a_container_booting_the_image_over_an_applied_tree_is_reported` -> fails at f1eeb42 (no such kind), passes now
+- `test_the_applied_tree_answering_is_not_a_finding` -> the four silent shapes
+- `test_a_current_json_this_server_cannot_read_raises_nothing` -> "could not ask" is not an alarm
+- `test_both_new_kinds_are_registered_with_their_writers` -> fails at f1eeb42, passes now
+- `test_a_mount_may_name_a_file_as_its_witness` -> fails at f1eeb42 (record_root took no witness), passes now
+- `test_a_mount_with_no_witness_still_probes_its_root` -> passes at f1eeb42 too: it pins that the optional argument did not change the ordinary caller
+- `test_the_enforce_cycle_asks_for_the_enforce_view` -> fails at f1eeb42, passes now
+
+27 passed in that file. Also green, unchanged, and covering every module
+touched: `test_alerts.py`, `test_mount_status.py`, `test_collector.py`,
+`test_bug_hunt_2026_09_11_dash_collector_alerts.py`,
+`test_bug_hunt_2026_09_03_dash_collector.py` (164 passed), plus the mount half
+of `test_bug_hunt_2026_09_11b_dash_mounts_ui.py` (13 passed), which exercises
+`mount_status.recheck` with a real filesystem and is the one other territory's
+file the probe change could have broken.
+
+### OWED TO ANOTHER TERRITORY
+- dash-mounts-ui: `dashboard/src/ccsync_dashboard/music.py` (~457-461): `mount_status.record_root("music", str(music_config.DATA_ROOT), witness=str(music_config.DATA_ROOT / "music.db"))`, and replace the comment block that says the witness "needs `mount_status.recheck` to probe existence" - it does now. Same offer for `ytdl.py` (~704) if that root has no directory of its own. Dashboard-only, no deploy ordering; the registry half is already in and is harmless without it.
+- dash-db: `dashboard/src/ccsync_dashboard/db.py`: `fetch_machine_selections` docstring, the paragraph beginning "THE ENFORCE CYCLE ITSELF DOES NOT PASS IT (dash-db-4, 2026-09-11)": it does now (`collector._run_enforce`, hand-off wave). The two rules are one; CR-110's belt is kept deliberately as a latch, not as the rule. Comment only.
+- dash-api / dash-release-jobs / dash-mounts-ui: the other three surfaces regression-11 asked for are still theirs - the `ytdlp.sidecar` cause beside `cap_ffmpeg` on Settings -> JOBS, and in `GET /api/v1/jobs/{id}/why`'s `no_capable_machine` explanation. The alert now carries it to the Alerts page and the mail, so the fleet is no longer silent about it either way.
+- The three wave-1 OWED lines above (db.py's collector_stale threshold, `record_invariant_result(truncated=...)`, and the `recovery.html` counts line) are unchanged and still owed.
+
+### Owner decisions
+- `UPGRADE_REFUSED_STALE_SECONDS = 24 h` (CR-256l). A refusal that is really being made is re-stamped within minutes, so a day is generous; the cost is that a machine switched off for two days with a real refusal goes quiet here, where `machine_silent` picks it up instead.
+- `MEDIA_SIDECAR_MIN_FAILURES = 2` (CR-256j). One failed daily check is a flaky network; alerting on the first would put a warn on the Alerts page for something that heals itself overnight.
+- `code_not_applied` is an ERROR, not a warn (CR-256k). The fleet is running a build the studio believes it replaced, and every restart repeats it: that is the same severity class as the collector having stopped.
+- The two OPTIONAL hand-off items are DECLINED: a `feed_record_rejected` notice kind and a `client_shares_unreadable` notice kind both belong in `db.NOTICE_KINDS`, which is dash-db's file, so neither could be registered WITH its writer from this territory in this wave - and a registered kind with no writer is exactly the bug the rule exists to prevent.
+
+## The dashboard core: the wizard, the login throttle, the sidecar env pair, /help (CR-257, 2026-09-11)
+
+Eight findings from the 2026-09-11b hunt of that morning's fix pass. Six of
+them are the other half of a fix that landed once: a warn that outlived the
+condition it described, a clamp applied after the overflow it was meant to
+prevent, a pair written independently and read atomically, a COPY that
+hard-fails on a document the policy calls best effort, a login-gate carve-out
+that outlived its route, and a regression test that asserted a constant.
+
+### CR-257a (dash-core-1) - a `warn` on the EULA task was sticky, so the licence was never accepted once it arrived - FIXED (dashboard/src/ccsync_dashboard/setup_engine.py)
+
+dash-core-6 (CR-248) made a stored `warn` on the `eula` task stop gating the
+wizard, because a REQUIRED task whose only reachable end state is `warn` is a
+wall with no button that clears it. But the carve-out read the ROW, and
+nothing re-runs a task's check on its own: `setup.js` only POSTs
+`/api/v1/setup/tasks/eula/check` when an admin presses CHECK on that one row.
+So the warn was a latch. An appliance that booted on a build whose
+`docs/legal` did not land wrote `warn` once and stayed satisfied for ever -
+including after the next OTA bundle carried `docs/legal/EULA.md`.
+`outstanding_required` did not list it, `outstanding_for_done` did not list
+it, the Setup badge was clear, the wizard's `done` task passed, the
+post-login steer to `/setup` stopped, and no human had ever accepted the
+licence agreement on that customer's server. The amber line was stale too: it
+still said no licence is included in this build, which was no longer true.
+That is exactly the state the other half of the same fix (`eula_path()`,
+which re-resolves so a late bundle IS seen) exists to make recoverable, with
+the gate that would have sent the admin back already switched off.
+
+`WARN_SATISFIES_IDS` is now derived from `WARN_SATISFIES`, a map of id ->
+predicate, and `eula`'s predicate is `not eula_path().is_file()`:
+`_gate_satisfied` asks the world, never the row. One `is_file()` per render of
+the nav badge. The row stays the display; it stops being the authority for a
+condition that is a property of the filesystem.
+
+### CR-257b (dash-core-2) - the "other direction" regression test asserted a constant and could never fail - FIXED (dashboard/tests/test_bug_hunt_2026_09_11_dash_db_core.py)
+
+`test_a_required_task_that_is_merely_warn_still_gates` claimed to prove that
+only `eula` is exempt and that a required task warning for a reason an admin
+can act on keeps the badge lit. Its entire body was `assert
+setup_engine.WARN_SATISFIES_IDS == frozenset({"eula"})` - a literal one line
+above itself in the source. It built no state, called neither
+`_gate_satisfied` nor `outstanding_required`, and would have stayed green
+through a change that dropped the id test inside `_gate_satisfied` and
+widened the carve-out to every warn. Nothing else in the suite covers a
+non-`eula` required task in `warn`, and `_check_syncthing` can put one there
+(reachable but reporting no device id) for a reason an admin CAN act on. The
+test now puts a real required task into `warn` and asserts it is in BOTH
+`outstanding_required` and `outstanding_for_done`, i.e. it drives the
+predicate instead of reading the constant the predicate reads.
+
+### CR-257c (dash-core-3) - the login backoff raised OverflowError once a key passed ~1024 recorded failures - FIXED (dashboard/src/ccsync_dashboard/sessions.py)
+
+`record_failure` computed `min(LOGIN_BACKOFF_BASE_SECONDS * (2 ** (failures -
+limit)), LOGIN_BACKOFF_MAX_SECONDS)`. The exponent is an unbounded Python int
+and the base is a float, so the multiply ran before `min` clamped anything:
+past 1024 over the limit, `float * int` raises `OverflowError`. That is not
+an `sqlite3.OperationalError`, so `SessionStore._run` did not catch it and it
+escaped `auth.record_login_failure` into the login route. `failures` only
+grows on attempts made while the key is NOT blocked and the block caps at
+3600 s while the failure window is also 3600 s, so a patient attacker
+retrying once an hour increments the counter for ever; after about six weeks
+against one username - or one gateway IP, whose budget every editor behind
+Tailscale Serve shares - the throttle for that key is replaced by a 500 on
+every further failed sign-in. The exponent is clamped before the multiply
+(`2 ** min(failures - limit, 16)`, already far past the hour ceiling) and the
+product clamped as before.
+
+### CR-257d (dash-core-4) - `APP_UID` without `APP_GID` was written to internal.env and ignored by the reader - FIXED (dashboard/src/ccsync_dashboard/secrets_boot.py, internal_sftp.py)
+
+`_write_sidecar_env_files` emitted the two lines independently (`if app_uid:`
+/ `if app_gid:`), so a compose file or an OTA-updated stack that set only one
+produced an `internal.env` with half a pair. The dashboard's own reader,
+`internal_sftp._uid_gid`, takes the pair or neither and otherwise falls back
+to `os.getuid()`/`os.getgid()` with nothing logged, because the warning there
+only fires on values that are present but non-integer. So the sftp sidecar
+started with `APP_UID` from the file while `GET /internal/sftp/users`
+answered with the container's own ids: files the sidecar writes into `/tree`
+land owned by one pair and the dashboard and Syncthing expect another, which
+is SPEC 3.1's whole reason for the variable. The symptom is a permission
+failure on an editor's lane days later with nothing in either log pointing at
+it. The writer now treats the pair as atomic - both or neither - and WARNs
+when it is half configured; the reader WARNs on the same shape instead of
+silently downgrading.
+
+### CR-257e (dash-core-5) - the /help index re-walked and re-opened the whole docs tree on every admin render - FIXED (dashboard/src/ccsync_dashboard/help.py)
+
+`document_groups` did an `rglob("*.md")` over the docs root and then, per
+entry, a `resolve_document` (`Path.resolve()` + `is_file()`) and a `_title_of`
+(open plus up to 60 readlines), with no cache and no mtime check. On a dev
+checkout or the base rig that is 185 documents: roughly 370 filesystem calls
+and 185 file opens per `/help` render, repeated on every internal link click,
+on the single-worker container's threadpool competing with the collector for
+the same disk. The audience gate added that morning filters the list but does
+not reduce the work for an admin. The index is now cached per (root,
+audience), keyed on the root's own mtime with a 30 s ceiling as well, because
+a write inside a subfolder does not touch the root's mtime; copies go in and
+out so a caller that mutates an entry cannot poison the next render, and
+`help.invalidate_index()` drops it. A customer's image is 7 entries, so this
+was a base-rig cost, but it is the page an admin clicks through.
+
+### CR-257f (dash-mounts-ui-b-4) - the image build hard-failed on a document `published_docs.py` calls best effort - FIXED (dashboard/src/ccsync_dashboard/published_docs.py, dashboard/deploy/Dockerfile)
+
+`published_docs.py` states the policy: `HOW_IT_WORKS.md` and the `legal` tree
+are REQUIRED, and "everything else on the list is best effort, because a
+missing document is not a reason to refuse to ship a dashboard". The
+Dockerfile named `docs/EDITOR_SETUP.md` in a COPY, and a COPY that names a
+missing file fails the BUILD - which is why the line it replaced was a glob.
+So the three shipping routes disagreed about how bad its absence is: rename
+the file on a branch and the OTA bundler and the bind-mode deploy ship
+happily while the image build dies with a bare `COPY failed` and no mention
+of the doc policy. `EDITOR_SETUP.md` is promoted to `REQUIRED_DOCS` - one
+decision, written down - so the bundler refuses it by name in the same
+sentence it refuses a missing guide with, and the rule is now testable: every
+document the Dockerfile names by hand must be in the required set.
+
+### CR-257g (music-6) - `editor:` stamps were rejected for any editor name with a space - FIXED (music/web/musicweb/fleet_auth.py)
+
+The dashboard's MusicGate stamps `editor:{editor}` with the account name it
+decoded. `musicweb`'s parser was `^(shared|editor:[^\s]{1,64})$`, so a name
+containing whitespace (or over 64 characters) yielded `(None, None)` and fell
+through to the SHARED token comparison, which a per-editor `cce1.` token can
+never satisfy: such an editor lost music fleet ingest entirely and was
+answered 403 "missing or invalid X-CCSync-Token", naming the wrong
+credential. b-roll and ytdl accept the same name. The parser is now b-roll's -
+prefix plus a non-empty remainder - and a stamp with the prefix and no name
+is logged. The stamp never becomes WHO the caller is on its own
+(`require_fleet_caller` compares it against the signed identity), so its
+shape is not a security boundary; three mounts disagreeing about it is.
+
+### CR-257h (security-2) - the login-gate carve-out for `GET /broll/api/fleet/ingest/batches` outlived the route it was written for - FIXED (dashboard/src/ccsync_dashboard/app.py)
+
+broll-3 (CR-245) deleted the b-roll discovery route because nothing called
+it; the other half of that wire, `_broll_fleet_list_re` in `login_gate`, was
+left behind. Today that is only dead code - the request skips the session
+gate, reaches BrollGate and 404s - but the carve-out names a COLLECTION path
+with no route behind it, so any GET route added there later is
+unauthenticated by inheritance and nothing in that diff would say so. The
+regex and its `or (...)` clause are gone, with a comment saying that if
+discovery comes back, the route and the carve-out land in the same commit.
+
+### Verification
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_core.py::test_a_stored_eula_warn_stops_gating_only_while_the_licence_is_missing -> fails at f1eeb42 ("eula" absent from outstanding_required), passes now
+- dashboard/tests/test_bug_hunt_2026_09_11_dash_db_core.py::test_a_required_task_that_is_merely_warn_still_gates -> the old body could not fail; the new one fails against a `_gate_satisfied` that drops its id test (checked by hand) and passes now
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_core.py::test_the_login_backoff_survives_a_thousand_recorded_failures -> fails at f1eeb42 (OverflowError), passes now
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_core.py::test_a_half_set_uid_pair_is_not_written_to_internal_env -> fails at f1eeb42 (APP_UID alone written), passes now
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_core.py::test_a_half_set_uid_pair_is_logged_by_the_reader -> fails at f1eeb42 (no warning), passes now
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_core.py::test_the_help_index_is_not_re_walked_on_every_render -> fails at f1eeb42 (two walks for two renders), passes now
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_core.py::test_the_image_only_hard_copies_documents_the_policy_calls_required -> fails at f1eeb42 (EDITOR_SETUP.md copied but optional), passes now
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_core.py::test_the_broll_fleet_batch_list_has_no_login_gate_carve_out -> fails at f1eeb42 (404, i.e. admitted past the gate), passes now
+- music/web/tests/test_bug_hunt_2026_09_11b_music.py::test_a_stamp_the_mount_can_produce_is_parsed (the music territory's own test, written for music-6) -> passes with this fix; test_an_unparseable_stamp_is_still_not_a_credential passes too
+
+Also run, unchanged: dashboard tests test_help_page.py, test_internal_sftp.py,
+test_sessions.py, test_setup_engine.py, test_setup_api.py, test_setup_routes.py,
+test_secrets_boot.py (260 passed). The one red in
+test_bug_hunt_2026_09_11_dash_mounts_ui.py
+(`test_a_refused_tree_is_not_counted_as_a_failed_boot`, a TypeError on a lambda
+arity) is another territory's in-flight edit, not this one's.
+
+### OWED TO ANOTHER TERRITORY
+- server-tools: `server/install_dashboard_app.py`: `SHIPPED_DOCS` is a hand-written copy of the REQUIRED set and still reads `("HOW_IT_WORKS.md",)`; add `"EDITOR_SETUP.md"` so the bind-mode deploy refuses the same absence the image and the bundler now refuse. No deploy order: it only changes what a deploy REFUSES, and the file is present in the tree today.
+- broll: `broll/web/app/routes_fleet.py`: the comment at :65-67 and `test_the_fleet_docstrings_do_not_claim_the_gate_needs_widening` still describe `_broll_fleet_list_re` as present in the dashboard; it is deleted now (broll-4's other half). Dashboard side deploys first or together - deleting a carve-out for a route that does not exist changes nothing on the wire.
+- music: `music/web/musicweb/fleet_auth.py` is that territory's file. music-6 was assigned here, so the fix is applied there; music's builder already wrote its regression test (see Verification). If both edits land, keep this one - it is the b-roll parser verbatim.
+
+### Owner decisions
+- `EDITOR_SETUP.md` is now REQUIRED rather than best effort (CR-257f). The alternative was to make the Dockerfile's COPY tolerate its absence, which Docker has no clean syntax for. The consequence: a checkout without `docs/EDITOR_SETUP.md` now fails `tools/build_dashboard_bundle.py` by name instead of shipping a thinner /help.
+- The /help index cache carries a 30 s ceiling as well as the root mtime (CR-257e). A document edited in place inside `docs/` on the base rig can therefore be up to 30 s stale in the INDEX (its title); the document itself is read per request and is never stale.
+- The login backoff exponent is clamped at 16 doublings (CR-257c). Nothing observable changes - 60 s * 2**16 is already 45 days against a 1 hour ceiling - but if the ceiling is ever raised above 45 days this constant has to move with it.
+
+### Hand-off wave
+
+Two OWED lines were routed here. One was already done in wave 1 and is
+confirmed below; the other adds a settings field whose reader lives in
+another territory's file.
+
+**broll -> dash-core: delete `_broll_fleet_list_re` and its GET clause.**
+Already done in wave 1 as CR-257h (security-2): `app.py` carries no
+`_broll_fleet_list_re` and no collection-path carve-out, only the two
+per-batch regexes (`app.py:1062` for b-roll, `:1085` for music) and the
+comment at `:1065` saying the discovery route and its carve-out must land in
+the same commit if discovery ever comes back. The regression test exists
+too - `test_the_broll_fleet_batch_list_has_no_login_gate_carve_out` asserts
+401, not 404, for both the bare and trailing-slash forms of the collection
+path. Nothing further was needed and nothing was changed.
+
+### CR-257i (dash-release-jobs-5, hand-off) - an explicit signature URL for the vendor feed - ADDED (dashboard/src/ccsync_dashboard/settings.py)
+
+`release_feed._signature_url` derives the detached signature's URL by putting
+`.sig` on the feed URL's path. That handles a CDN-token URL (the query
+survives) but it cannot handle a PRE-SIGNED URL at all: a SigV4 signature is
+computed over the canonical request including the object key, so the derived
+URL answers 403 SignatureDoesNotMatch and the site quietly stops receiving
+builds. There was no way for an operator to name the two URLs separately.
+
+`Settings.release_feed_sig_url` (env `DASH_RELEASE_FEED_SIG_URL`, stripped,
+default empty) is that escape hatch. Empty keeps the derivation exactly as it
+is, so no deployment in the field changes. A signature URL set with no
+`release_feed_url` is half a configured pair in the CR-257d sense - the feed
+is disabled, so the override is read by nothing - and `__post_init__` now
+WARNs at boot rather than leaving the operator to wonder why their explicit
+URL is never fetched.
+
+The READ half is `release_feed.fetch_and_verify_channel`, which is
+dash-release-jobs's file; the hand-off sheet routes it to them in the same
+wave. The settings half alone is inert and harmless in either order.
+
+### Verification
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_core.py::test_an_explicit_release_feed_signature_url_is_read_from_the_environment -> fails at f1eeb42 (no such field: `from_env` has no `release_feed_sig_url` keyword and the attribute does not exist), passes now
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_core.py::test_a_signature_url_with_no_feed_url_is_named_at_boot -> fails at f1eeb42 (no warning; the setting does not exist), passes now
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_core.py::test_the_broll_fleet_batch_list_has_no_login_gate_carve_out -> unchanged from wave 1, re-run green (the broll OWED line's confirmation)
+- Whole file re-run: 9 passed. Also re-run unchanged: test_settings_hub.py, test_settings_auto_derived.py, test_settings_projects_dir.py (49 passed). py_compile on settings.py.
+
+### OWED TO ANOTHER TERRITORY (hand-off wave)
+- dash-release-jobs: `dashboard/src/ccsync_dashboard/release_feed.py`: `fetch_and_verify_channel` (and `_signature_url`'s caller at :408): use `getattr(settings, "release_feed_sig_url", "")` when non-empty instead of `_signature_url(url)`, getattr-guarded so an older Settings object still works. `fetch_and_verify_channel` takes `url` and `pubkeys` only today, so the URL has to be threaded from `release_feed.py:715` (which holds `settings`) - an optional third parameter, defaulting to "". Already on their hand-off sheet. No deploy order: both halves are in the same process, and the field is inert until read.
+
+### Owner decisions (hand-off wave)
+- The signature URL is NOT validated as https at config time. `release_feed._fetch_bytes` refuses a non-https URL at fetch time already, and duplicating the rule in settings would refuse a boot for a feed that is not even enabled.
+
+## The dashboard database: a move expiry that never read the answer, a liveness bound no Syncthing-less deployment could meet, a rollback push that forgot which way it pointed, and a cancelled job's third way back onto the queue (CR-258, 2026-09-11)
+
+### CR-258A (comp-app-1 / regression-18) - a machine answering "retrying" every thirty seconds was still expired as never having answered - FIXED (`dashboard/src/ccsync_dashboard/db.py`)
+
+comp-sync-20 taught the companion to answer `state="retrying"` while the sync
+drive is out, on the stated ground that the dashboard "EXPIRES it after 7 days
+of told and never answered". The dashboard never read `state`:
+`expire_delivered_file_moves` selected on `applied_at IS NULL AND expired_at
+IS NULL AND delivered_at < cutoff`, and the retrying arm of
+`mark_file_move_applied` writes only `state`, `attempts`, `last_error` and
+`detail` - no `applied_at`, no refreshed `delivered_at`. So the companion half
+of that fix landed and the dashboard half did not: an editor away for a
+fortnight with the drive in their bag had file move #7 delivered on day 1,
+answered every report, and stamped `expired_at` on day 8 anyway.
+`pending_file_moves` filters on `expired_at IS NULL`, so the command stopped
+being offered; the drive came back on day 15, lane A (which never deletes)
+re-uploaded the file at the OLD path, and the move was undone on the server -
+the exact failure `docs/FILE_MOVES.md` exists to prevent.
+
+The expiry now measures SILENCE rather than age: a target whose state is
+`retrying` is spared for as long as its machine is still reporting, judged on
+`machine_state`'s server-side `received_at` (never the companion's clock)
+against the same 7 day cutoff. A machine that answered once and then vanished
+still expires, and a target that never answered at all is untouched by the
+change. `COALESCE(t.state, '')` in the predicate is load-bearing: a NULL state
+compared to `'retrying'` is NULL, and `NOT (NULL AND 1)` is NULL, which would
+have quietly spared every target that has never answered.
+
+### CR-258B (dash-collector-alerts-1) - a Syncthing-less deployment reported its own healthy collector as STOPPED, for ever - FIXED (`dashboard/src/ccsync_dashboard/db.py`)
+
+dash-collector-alerts-3 was right that liveness is the START of a cycle of any
+kind and wrong to keep measuring it against a flat 180 s. A deployment with no
+`syncthing_url` runs only `SYNCTHING_FREE_KINDS` - prune (3600 s), invariants
+(900 s), alerts (600 s) - so the newest start on a perfectly healthy collector
+is normally ten minutes old and `collector_stale` was permanently True.
+`_check_collector_stale` is an `error` kind: within ten minutes of boot, every
+vendor, zero-touch and bare dev dashboard said "The server's background
+collector has not completed a cycle" on PROBLEMS THE SERVER FOUND, counted it
+in the topbar's red chip and mailed it daily. At 40f931a `reachable` was False
+on such a site so the flag was never computed at all; this was a new false
+positive, one commit old.
+
+`db.collector_stale_bound(conn, floor)` now reads the bound off the
+collector's own observed rhythm - the shortest gap between two consecutive
+starts of the same kind, doubled, floored at `COLLECTOR_STALE_SECONDS` and
+capped at two hours - and `fetch_collector_status` measures the newest start
+against that. A collector that has actually stopped still ages past it (a
+bound, not a gate), at the cadence the deployment really runs at; a
+Syncthing-backed site, whose fastest kind cycles in tens of seconds, keeps the
+180 s constant; a container with no kind that has run twice keeps the floor,
+because one run says nothing about cadence.
+
+### CR-258C (dash-db-1 / res-fleet-1) - the per-machine [ UPDATE NOW ] still could not deliver a rollback - FIXED (`dashboard/src/ccsync_dashboard/db.py`)
+
+v52's `update_requested_from` exists because "at or past the version asked
+for" retires a DOWNWARD push before `commands.upgrade` is ever emitted. Only
+`roll_fleet_back` passed it. The three per-machine doors - `POST
+/admin/machines/{editor}/{machine}/update`, `[ PUSH TO ONE MACHINE ]` and its
+"update to current" twin on Settings -> Packages - left the default `""`,
+which `machine_update_request` normalises to `""`, which `_update_push_done`
+reads as an upgrade. So an admin who re-currented the previous build (a
+first-class rollback, per CLAUDE.md) and clicked [ UPDATE NOW ] next to the
+one unhappy machine got `{"ok": true}`, a green partial, and a request cleared
+on that machine's next 30 s report with nothing delivered and nothing on the
+page or in the log saying so. That is the canary-rollback case REL-1's soak
+flow depends on, and the one an admin reaches for before a fleet-wide recall.
+
+`request_machine_update` now looks the direction up itself: with no
+`from_version` from the caller it reads that machine's last reported
+`companion_version` from `machine_state` and stores that. One seam, so api.py,
+ui.py x2 and any fourth door are correct by construction. An explicit
+`from_version` still wins (the fleet route knows what it is rolling back
+from), and a machine that has never reported a version leaves the column NULL,
+which is exactly the pre-v52 behaviour. Upward and same-version pushes are
+unchanged: `_update_push_done` only takes the rollback branch when the
+requested version is strictly below the one recorded.
+
+### CR-258D (dash-db-2 / regression-3) - a cancelled job re-queued by an older companion became a permanently unclaimable row that still counted as backlog - FIXED (`dashboard/src/ccsync_dashboard/db.py`)
+
+dash-api-2 closed "a cancelled job comes back when the lease expires" in
+`expire_leases` and belted `queued_jobs` and `claim_job` with `AND
+cancel_requested_at IS NULL`. `fail_job(retryable=True)` is the THIRD route
+from a held state back to `queued` and was not taught the rule. A companion on
+0.9.65..0.9.70 predates `commands.jobs.cancel`, so it never reports
+"cancelled, not retryable" - it reports whatever its ffmpeg did. The row then
+parked in `queued` carrying `cancel_requested_at`: invisible to `queued_jobs`,
+refused by `claim_job`, never terminal, rendered on the jobs page as queued,
+and counted by `queue_depth` with `oldest_age_s` growing without bound - which
+is the backpressure signal the companion backs off on. A fleet with nothing to
+do looked like a fleet with a permanent backlog, and the only recovery was to
+press cancel a second time with nothing saying so.
+
+`fail_job` now reads the row's `cancel_requested_at` (via `SELECT *` and
+`_row_value`, so a database that predates the column reads as "not
+cancelled") and forces `JOB_FAILED` with the `cancelled` prefix regardless of
+`retryable` - the same rule `expire_leases` learned - and skips the machine
+cooldown, since the machine that could not be told to stop must not be
+punished for obeying late. `queue_depth` now counts and ages only the rows
+`queued_jobs` would return, so the two answers can no longer disagree.
+
+### CR-258E (dash-db-3 / regression-22) - the includes cap bounded the rows and left the work quadratic - FIXED (`dashboard/src/ccsync_dashboard/links.py`)
+
+CR-240's fix moved the cap to the results loop, so a tampered marker could no
+longer make `project_links` rows without bound. `parse_includes` and both
+dedupe passes still ran over every declared entry first: `declared in ordered`
+is a list scan, and the nesting check was a `next(o for o in ordered ...)`
+inside a loop over `ordered`. Measured against the real function: 1,000
+entries 0.05 s, 5,000 1.13 s, 20,000 22.9 s. `provision.read_marker_data` puts
+no size limit on the marker, every editor can write the share, and `_run_links`
+runs this on every provision cycle inside the collector's guarded loop holding
+its connection - and the collector is the thing that tells everyone whether
+their footage is syncing. CR-240's own regression test asserted only on
+`len(results)`, so it passed while the cost stayed unbounded.
+
+Three changes: `MAX_INCLUDE_ENTRIES` (four times the row cap) truncates the
+parsed list before any dedupe, the exact-duplicate pass is a `set`, and the
+nesting pass is one sorted scan with a stack of open ancestors. The sort key
+is the path plus its separator, NOT the bare path: `a!` sorts between `a` and
+`a/b`, so on bare keys the descendants of a declaration are not contiguous and
+`a/b` would escape its ancestor. The refusal row still names the marker's OWN
+declared total rather than what survived the entry cap - that number is how
+big the file on the share is, which is the tampering worth seeing.
+
+### CR-258F (dash-db-4) - the enforce cycle does not pass the flag the reader is named for - DOCUMENTED, fix OWED (`dashboard/src/ccsync_dashboard/db.py`)
+
+`fetch_machine_selections`'s docstring calls `for_enforce=True` "the view for
+anyone deciding what SHOULD be happening on a machine", and
+`collector._run_enforce` - the cycle that decides exactly that - does not pass
+it. It survives only on CR-110's separate `base_pairs`/`base_editors` belt
+further down its own function, so the two answers to "what should this machine
+hold" are computed by two rules and agree only because a second filter happens
+to exist. No wrong behaviour today (the belt covers the `own` branch as well
+as the bucket); the defect is that the next hand to touch either side has
+nothing telling it they must match. The docstring now says so, names the belt
+and says the two must change together. The one-line call-site change is OWED
+to dash-collector-alerts (collector.py is theirs).
+
+### CR-258G (dash-db-5) - the archive read's new raise reached a display-only admin page - FIXED (`dashboard/src/ccsync_dashboard/assignments.py`)
+
+CR-240's dash-db-2 made the five suspension/archive readers re-raise a
+`database is locked` instead of answering the empty value, which is right
+where the empty answer was a fail-OPEN (the enforce cycle re-sharing folders
+an admin had just suspended). The admin PAGE readers gain no safety from
+raising: they only render. `_assignments_view` calls `fetch_archived_projects`
+unguarded, so a lock during a slow collector write 500s the assignments grid -
+the page carrying [ UNARCHIVE ], which is what the admin came for. That read
+is now guarded on its own: an empty list plus `archived_unreadable`, so the
+page says "could not read this right now" instead of stating as fact that
+nothing is archived. The `_build_admin_users_view` half (three reads in
+api.py, the page where [ RESUME ] and the pending-SSH-key approval live) is
+OWED to dash-api, and the strip that renders the flag is OWED to
+dash-mounts-ui; until it lands the grid renders with no archived section,
+which is the pre-CR-240 behaviour rather than a 500.
+
+### Verification
+All in `dashboard/tests/test_bug_hunt_2026_09_11b_dash_db.py`, run with
+`dashboard\.venv\Scripts\python.exe -m pytest tests/test_bug_hunt_2026_09_11b_dash_db.py -q`
+(17 passed; 9 of them fail against f1eeb42's db.py/links.py/assignments.py,
+the other 8 are the controls that must keep passing).
+
+- `::test_a_machine_still_answering_retrying_is_not_expired` -> fails at f1eeb42, passes now (comp-app-1)
+- `::test_a_machine_that_went_silent_while_retrying_still_expires` -> control: the clock still measures silence
+- `::test_a_machine_that_never_answered_at_all_still_expires` -> control: the original UX-5 case
+- `::test_a_syncthing_less_collector_turning_normally_is_not_stale` -> fails at f1eeb42, passes now (dash-collector-alerts-1)
+- `::test_a_fast_deployment_keeps_the_three_minute_floor` -> fails at f1eeb42 (no such function), passes now
+- `::test_a_collector_that_has_actually_stopped_is_still_stale` -> control: the bound widens, it does not go away
+- `::test_a_per_machine_push_records_the_version_the_machine_is_on` -> fails at f1eeb42, passes now (dash-db-1); asserts through the real `api._update_push_done`
+- `::test_an_explicit_from_version_still_wins` / `::test_a_machine_that_has_never_reported_a_version_keeps_the_old_shape` -> controls
+- `::test_a_cancelled_job_an_old_companion_fails_retryably_goes_terminal` -> fails at f1eeb42, passes now (dash-db-2)
+- `::test_the_queue_depth_counts_what_the_scheduler_would_hand_out` -> fails at f1eeb42, passes now (dash-db-2)
+- `::test_an_ordinary_retryable_failure_still_comes_back` -> control: an uncancelled failure still re-queues
+- `::test_a_tampered_marker_cannot_buy_unbounded_work` -> fails at f1eeb42 (20.9 s for one call), passes now (dash-db-3)
+- `::test_the_refusal_still_names_how_many_the_marker_declared` / `::test_nesting_and_duplicates_collapse_exactly_as_before` -> controls on the rewritten dedupe
+- `::test_the_assignments_grid_renders_when_the_archive_read_is_locked` -> fails at f1eeb42, passes now (dash-db-5)
+- `::test_the_grid_still_lists_archived_projects_when_the_read_works` -> fails at f1eeb42 (no flag), passes now
+
+Also run, unchanged and green, because they read the functions touched:
+`test_links.py`, `test_file_moves.py`, `test_jobs.py`, `test_jobs_cancel.py`,
+`test_jobs_retry.py`, `test_jobs_backpressure.py`, `test_db.py`,
+`test_release_channel.py`, `test_admin_assignments.py`, `test_collector.py`,
+`test_alerts.py`, `test_health.py`,
+`test_bug_hunt_2026_09_11_dash_db_core.py`,
+`test_bug_hunt_2026_09_11_dash_collector_alerts.py` (478 passed, 2 skipped).
+
+### OWED TO ANOTHER TERRITORY
+- dash-collector-alerts: `collector.py`: `_run_enforce` (line ~1317): pass `for_enforce=True` to `db.fetch_machine_selections(conn, sync_modes=(db.SYNC_MODE_FULL,))` and keep CR-110's `base_pairs`/`base_editors` belt as a belt (dash-db-4). Dashboard-only, no deploy ordering.
+- dash-collector-alerts: `alerts.py`: `_collector_started_recently`: it compares against the flat `db.COLLECTOR_STALE_SECONDS`, which is the same false positive CR-258B fixes one layer down - it is the OTHER way `_check_collector_stale` can fire. Use `db.collector_stale_bound(ctx.conn)` instead of the constant (it takes the floor as its argument). Dashboard-only.
+- dash-api: `api.py`: `_build_admin_users_view` (lines ~3829-3833): wrap `suspended_editors`, `editor_suspension` and `fetch_pending_ssh_keys` in `try/except sqlite3.OperationalError` and render the Users page with a "could not read this right now" strip rather than 500ing (dash-db-5). Dashboard-only.
+- dash-mounts-ui: `dashboard/templates/admin_assignments.html`: render an "the archived list could not be read right now" strip when the new `archived_unreadable` context key is true (dash-db-5). Harmless if never rendered; dashboard-only.
+
+### Owner decisions
+- CR-258A spares a `retrying` target while its machine is REPORTING (the
+  server's `received_at`), rather than sparing every retrying row for ever or
+  bumping `delivered_at` on each answer. Bumping `delivered_at` would have
+  been one line, but that column is also the project page's "how long has
+  this machine been owed this" chip, and a move that has been outstanding for
+  a fortnight would have rendered as thirty seconds old. No schema change was
+  needed; v53 is still unused.
+- CR-258B derives the staleness bound from the collector's own observed
+  cadence rather than importing the interval settings (db.py cannot import
+  collector.py) or gating the flag on `syncthing_url` (db.py has no settings).
+  The visible consequence: on a Syncthing-less deployment a genuinely stopped
+  collector is now reported after about 20 minutes instead of 3. If the owner
+  would rather have the flag gated on the deployment shape, that belongs in
+  alerts.py next to `_check_nas_engine`'s twin gate.
+- CR-258E drops marker entries past 128 unread. A marker whose first 128
+  entries are all duplicates of each other would previously have found
+  distinct folders further down; that is not a shape an editor writes by
+  hand, and the alternative is leaving the collector's CPU bounded only by
+  what an editor can type into a file on the share.
+- CR-258C stores the machine's last REPORTED version as the push's
+  `from_version`. If a machine upgraded itself and has not reported since,
+  that value is stale and the push reads as an upgrade - which is exactly the
+  behaviour before v52, so nothing regresses, but it means a rollback aimed
+  at a machine that is offline right now can still be retired when it comes
+  back on a newer build than the dashboard last saw.
+
+## The dashboard's UI, its three mounts and its boot (CR-259, 2026-09-11)
+
+The second hunt of 2026-09-11 read the morning's fix pass (CR-233..CR-248)
+rather than the code it changed, and this territory's six findings are all of
+that shape: a watchdog that was taught not to blame the bundle and stopped
+covering it, a runtime probe that watches the one thing that never goes away,
+a revalidation nothing holds alive, and two sentences that say the wrong thing
+to the person who has to act.
+
+### CR-259a (res-fleet-2) - the automatic crash-loop revert could revert into a dashboard that can never boot again - FIXED (dashboard/deploy/select_code_root.py)
+
+`dashboard_update.rollback()` refuses a MANUAL rollback whose target knows a
+lower database schema than the live database and names the backup to restore
+(REL-10). The automatic watchdog revert - the one that runs with nobody
+watching - had no equivalent. An OTA tree runs `db.migrate` at the top of its
+lifespan, so the database can already be at the NEW tree's schema by the time
+the boot fails; `select_code_root` then rewrote `current.json` to the previous
+tree (or to the image), whose `migrate()` raises `RuntimeError: database schema
+is newer than this build` on every start, uncaught, for ever. The escape hatch
+was the thing that closed the hatch, and on an appliance there is then no
+dashboard, no rollback page, no `restore_db` and no `/help` - only a shell on
+the NAS, which is the one thing a zero-touch deployment is supposed not to
+need.
+
+The fix teaches the boot script REL-10's own test, with the image's own
+stdlib and nothing imported from the tree being judged: `live_schema_version()`
+reads `PRAGMA user_version` from `DASH_DB_PATH` read-only,
+`tree_schema_version()` reads the revert target's `manifest.json`
+(`schema_version`, written at apply time) or, for the image, parses the highest
+step out of the image's own `db.py` the way `image_version()` parses VERSION.
+Lower than the live database is a refusal; equal or higher reverts exactly as
+before; CANNOT TELL does not refuse, which is REL-10's third answer and the
+reason a pre-REL-10 tree still gets its escape hatch. A refusal keeps booting
+the applied tree - the only code that can open this database at all - says so
+on stderr, and records `revert_refused_reason` / `revert_refused_from` into
+`current.json`, which `partials/admin_dashboard_update.html` now renders in its
+own banner. The refusal is dropped again on the first boot where the counter is
+back to zero, so the banner cannot outlive the problem.
+
+### CR-259b (dash-mounts-ui-b-2, res-fleet-3) - a tree that can never boot stopped counting, so the watchdog stopped covering it - FIXED (dashboard/deploy/select_code_root.py)
+
+CR-243's dash-mounts-ui-8 moved `bump_boot_attempts` below `check_tree` so that
+an environment-shaped refusal ("DASH_RELEASE_PUBKEYS is not set") could not
+blame a perfectly good bundle. It went one step too far: `check_tree` also
+refuses for TREE-shaped reasons - a missing `manifest.json`, a `record.json`
+that does not verify, a `runtime_id` that no longer matches the image after a
+dependency bump - and `revert()` is reachable only through the counter. A
+bundle that can never be selected therefore never reverted: the container
+booted the image on every restart for ever while `current.json` went on naming
+the applied version, `boot_attempts` rendered 0, `reverted_reason` stayed empty
+and the only evidence anywhere was one WARNING per boot in a container log. The
+studio believes the fleet is running an update that has never run.
+
+Now the refusal is classified. `ENV_REFUSALS` (plus one marker for "the image's
+own verifier could not be imported") are the refusals where the container is
+wrong and the bundle is fine, and they are still free; every other refusal
+counts, carries its sentence in `boot_attempts.json`, and reaches the same
+revert on the MAX_BOOT_ATTEMPTS'th try - with the real reason in
+`reverted_reason` rather than "failed to reach a healthy boot", which was never
+true of a tree that was never booted. `check_tree` returns the two constants
+verbatim so the classifier and the message cannot drift, and a test pins that.
+
+### CR-259c (dash-mounts-ui-b-1, regression-1) - the per-cycle mount probe watched the bind mountpoint, which never goes away - FIXED (dashboard/src/ccsync_dashboard/broll.py)
+
+res-fleet-2's fix in the morning pass has the collector re-probe each mount's
+recorded data root every cycle with one `os.path.isdir`. On every shipped
+deployment that root is a bind-mount TARGET (`BROLL_DATA_ROOT=/broll-data`),
+and a bind mount whose backing export goes away leaves its mount point behind
+inside the container - the same mechanism `alerts._check_nas_tree` states in so
+many words, which is why IT probes for an entry. So `isdir` answered True in
+every failure the re-probe was written for, `mount_status` kept saying
+`mounted`, the topbar kept advertising B-ROLL, and every request under it
+failed with no notice and no degraded verdict. `_init_broll_storage` also
+`mkdir`s that root at boot, so the directory provably exists whatever the host
+does.
+
+b-roll now records the `proxies` directory it creates INSIDE the root: still a
+directory (the probe is `os.path.isdir`), created on whatever is really mounted
+there, and gone with it. Music and ytdl have no directory of their own under
+their roots - `/music-data` holds `music.db` and MUSIC_PROXIES_DIR is its own
+bind - so their witness has to be the database FILE, which needs
+`mount_status.recheck` to probe existence rather than `isdir`. That half is
+OWED below; recording a file under today's probe would report every healthy
+deployment as degraded, which is worse than the bug. Both call sites carry a
+comment saying so.
+
+### CR-259d (dash-mounts-ui-b-3, regression-23) - the stale-while-revalidate write was not held alive - FIXED (dashboard/static/sw.js)
+
+A service worker's lifetime is extended only by the promises handed to
+`event.respondWith` and `event.waitUntil`. dash-mounts-ui-5's fix returned the
+cached hit immediately and left the revalidating `fetch(...).then(cache.put)`
+detached, so the user agent may terminate the worker before the cache write
+runs - most likely on exactly the slow, flaky mobile connection the fix exists
+for. A CSS hotfix redeployed under an unchanged VERSION then stayed stale
+indefinitely, behind a fix that looked applied. The handler now builds a
+`stored` promise that settles when the bytes are IN the cache and passes it to
+`event.waitUntil` beside the cached response; the no-hit branch still answers
+from the network without waiting for the write.
+
+### CR-259e (dash-mounts-ui-b-5) - the uid warning blamed APP_UID for a number it read off /data - FIXED (dashboard/deploy/run.sh)
+
+CR-243's dash-mounts-ui-6 gave the uid advisory a fallback for bind-mount mode,
+where `APP_UID` is not in the environment: the expected uid is read off `/data`
+instead. The sentence was not branched with it, so on the case the fallback
+exists for - a `/data` docker created as root, before
+`install_dashboard_app.py`'s chown - the warning told the admin that the
+deployment's files are owned by uid 0 "(APP_UID)" and to change compose's
+`user:` line to 0, which is the one change that would be wrong. The two
+provenances now get two sentences: "(APP_UID)" only when APP_UID was set, and
+otherwise "chown /data to <our uid>, or fix `user:` if <that uid> is right".
+
+### CR-259f (dash-mounts-ui-b-6) - an out-of-band error banner lost its button - FIXED (dashboard/static/htmx_errors.js)
+
+htmx fires `htmx:afterSwap` once per settled element, and an out-of-band swap
+adds its elements to that same list with the same xhr. The WeakMap fallback
+added by dash-mounts-ui-7 deleted its entry on the FIRST of them, so a response
+that answers with a main partial plus an `hx-swap-oob` error strip lost the
+path on the swap that actually carries the banner, and the refusal stayed two
+thousand pixels above the viewport: DUI-6 again for that shape of response. The
+entry is no longer deleted; the map is weak and keyed on the xhr, so it dies
+with the request anyway.
+
+### Verification
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py::test_the_watchdog_does_not_revert_into_a_build_that_cannot_open_the_database -> fails at f1eeb42, passes now
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py::test_the_image_is_judged_by_its_own_migration_list -> fails at f1eeb42, passes now
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py::test_the_refusal_is_cleared_once_the_applied_tree_boots_healthily -> fails at f1eeb42, passes now
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py::test_the_watchdog_still_reverts_when_the_schema_allows_it and ::test_a_target_whose_schema_is_unknown_still_reverts -> the controls: the guard is a refusal, not an off switch (both pass before and after)
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py::test_a_tree_shaped_refusal_counts_towards_the_revert -> fails at f1eeb42, passes now
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py::test_check_tree_still_returns_the_two_environment_reasons_verbatim and ::test_an_environment_shaped_refusal_is_still_free -> the anti-drift pair for CR-259b
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py::test_a_bind_mount_that_goes_empty_is_seen_by_the_broll_re_probe -> fails at f1eeb42, passes now (a real emptied directory, not an injected `is_dir`)
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py::test_the_revalidation_is_an_extend_lifetime_promise -> fails at f1eeb42, passes now (the node harness models worker termination and records a cache.put that arrives after it)
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py::test_the_uid_warning_blames_the_right_thing_when_it_read_the_number_off_data -> fails at f1eeb42, passes now (the block executed under a real `sh` with `id`/`stat` stubs, not grepped)
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py::test_the_uid_warning_still_names_app_uid_when_app_uid_is_what_it_read -> the image-mode control
+- dashboard/tests/test_bug_hunt_2026_09_11b_dash_mounts_ui.py::test_an_out_of_band_banner_still_reaches_its_button -> fails at f1eeb42, passes now
+- dashboard/tests/test_bug_hunt_2026_09_11_dash_mounts_ui.py -> 20 passed (its finding-8 test now stubs `check_tree` with the constant check_tree really returns; a paraphrase would have exercised the new tree-shaped branch and pinned nothing)
+
+### OWED TO ANOTHER TERRITORY
+- dash-release-jobs: `dashboard/src/ccsync_dashboard/dashboard_update.py`: `status()`: add `"revert_refused_reason": str(current.get("revert_refused_reason") or "")` and `"revert_refused_from": ...` to the `current` dict it builds (it has a fixed key set, so the two keys select_code_root now writes are dropped before the template sees them). The template half is already in and renders nothing while the key is Undefined, so either order is safe; no companion involved.
+- dash-collector-alerts: `dashboard/src/ccsync_dashboard/mount_status.py`: `recheck()`: probe EXISTENCE (`os.path.exists`, or `any(os.scandir(root))`) instead of `os.path.isdir`, and give `record_root(name, root, witness="")` a second argument so the degraded sentence can keep naming the ROOT while the probe watches the witness. With that in, `music.py` and `ytdl.py` can record `music_config.DB_PATH` / `<root>/ytdl.db` and CR-259c is closed for all three (b-roll's directory witness works under either probe, so there is no deploy order: dashboard only).
+- dash-collector-alerts: `alerts.py` / `notices.py`: res-fleet-3's other half. Nothing anywhere reads `running_source` or `reverted_reason`, so "this container is booting the image while `current.json` names a version" reaches no one but the container log. CR-259b makes that state revert itself after two boots, which is the urgent half; an ALERT_KINDS row for it is still worth having.
+
+### Owner decisions
+- The schema guard REFUSES the revert and keeps booting the applied tree, rather than reverting and restoring the `before-<version>` backup automatically. Restoring a database with nobody watching takes the day's reports back to that moment, which is a bigger decision than a builder should make; the refusal is the part that must not wait. If the owner wants the automatic restore too, it belongs beside `dashboard_update.restore_backup` and is a second change.
+- CANNOT TELL (a target with no `schema_version` in its manifest, an unreadable database) does not refuse, following REL-10's own rule. The alternative - refusing whenever the number is missing - would make every pre-REL-10 tree unrevertible.
+
+### Hand-off wave
+
+Seven items other builders finished half of and routed here, because the other
+half is a template, a mount or a UI call site. One of them (security-1) is the
+only door in this wave a stranger can push on.
+
+#### CR-259g (security-1) - a suspended editor's laptop was still stamped by all three mounts - FIXED (broll.py, music.py, ytdl.py)
+
+DCORE-4 revokes no session and no `cce1.` token when an admin suspends an
+account, and dash-api-6 closed that gap one door at a time on the dashboard's
+own routes. The three MOUNTED fleet APIs were not among them: they cannot reach
+`_refuse_barred_account`, had no notion of a suspended account at all, and each
+mints `X-CCSync-Fleet-Auth: editor:<name>` from the per-editor token - which is
+the whole of what the sub-app authorises a write on. A freelancer who left on
+Friday could still claim an ingest batch and push clips into the shared
+archive, take a whole-library music re-score, and pull a YouTube download into
+the tree, from the laptop nobody collected.
+
+All three now ask dash-api's `api.account_bar_reason` (public for exactly this)
+before minting, and WITHHOLD the stamp on a refusal rather than raising: the
+sub-app then falls back to its own fail-closed shared-secret compare, which a
+`cce1.` token never matches, and each of the three answers in its own shape.
+`_account_bar` lives in broll.py beside `_header_value` - music imports it the
+way it already imports that - and ytdl has its own, beside the `_credential`
+dance it already owns. FAILS OPEN on an unopenable database, like the
+predicate itself: a read that cannot answer must never lock a fleet out of its
+own archive.
+
+#### CR-259h (dash-api-1) - the rollback button read the DEFAULT soak minutes, and a refusal it earned reached nobody - FIXED (ui.py, partials/admin_packages.html)
+
+`api.roll_fleet_back` takes the re-pointing of `current` through
+`package_store.make_current_refusal` now, which reads this site's soak minutes
+from `settings`. The htmx twin passed none, so the gate read
+`getattr(None, "release_soak_minutes", DEFAULT)`: a site that had turned the
+gate off - `[releases] soak_minutes = 0`, the documented escape - was refused
+the re-pointing the JSON route performs, `current` stayed on the build being
+rolled off, and every machine that took the older build was offered the bad one
+again on its next report. Unattended where `auto_update` is on.
+
+The button passes `settings=request.app.state.settings`, and the refusal is now
+RENDERED: it is deliberately not raised (the fan-out is the half a recall is
+about), so nothing anywhere said the channel had been left where it was. One
+strip above the packages table, on its own key rather than the error banner,
+because this is not a failed action.
+
+#### CR-259i (dash-api-4) - the per-machine queue view was unreachable from the only two templates that render it - FIXED (ui.py, fleet.html, partials/fix_root.html)
+
+dash-api-4 made `build_queue_view` about ONE COMPUTER - which is what the panel
+under it claims to be, since "where does FIX ALL put the files for the project
+open in Resolve" has no answer for two computers at once. The home page and
+`/partials/queue` both called it with no machine, so leso's MacBook page still
+named whatever was open on the iMac and the fix reached nobody.
+
+Both callers read `?machine=` through `_queue_machine`, which accepts only a
+name in `db.machines_of` - a typo, or a bookmark taken before a rename, is the
+PERSON's view and never an empty one that reads as "nothing is ticked on that
+computer". The poll URL carries it, or the panel would silently become about
+the other machine ten seconds after it was opened, and `fix_root.html` grew the
+chips that switch between them (plain links, because the choice has to survive
+the poll) plus the computer's name in the sentence.
+
+#### CR-259j (dash-collector-alerts' hand-off) - "0 file(s) missing" from a preview that could not count - FIXED (partials/recovery.html)
+
+A snapshot comparison that exceeds `MAX_SCAN_FILES` withholds its counts and
+returns zeros with `counts_unavailable` and a sentence. The template printed
+the zeros: "0 file(s) missing from the server now, 0 that are there but
+different, 0 the same", to the person deciding whether they need a restore at
+all. The counts line is conditional now, `[ CANNOT SAY ]` takes its place, and
+the refusal's own sentence is what is read.
+
+#### CR-259k (dash-db-5's hand-off) - an unreadable archived list read as "nothing is archived" - FIXED (admin_assignments.html)
+
+dash-db-5 separated the archived read so a table this database cannot answer
+for stops taking the whole page down. What was left was an empty list, and an
+empty list on that page says the one thing it does not know. A strip says so,
+and says the projects above are unaffected.
+
+#### CR-259l (broll-5's hand-off) - a client-folder ledger locked for two seconds at boot hid the whole archive - FIXED (broll.py)
+
+`_init_broll_storage` called `client_folders.ensure_schema()` bare. It is a
+BOOT path, and its caller marks the whole /broll mount DEGRADED on an exception
+- nav link hidden, home page saying every /broll request will fail - which
+since broll-2's request-path guard is simply false: the archive serves every
+search fine without a client-folder ledger, and the migration takes
+`BEGIN IMMEDIATE` now, so a ledger locked for the seconds the container starts
+is a real possibility. It calls `ensure_schema_best_effort` through `getattr`,
+because `BROLL_WEB_SRC` can point at a checkout older than that function.
+
+#### CR-259m (regression-11's hand-off) - the ffmpeg sidecar cause on the jobs machine list - FIXED (partials/admin_jobs.html)
+
+dash-release-jobs landed the reader (`jobs.sidecar_notes` / `sidecar_cause`),
+which folds the cause into the per-machine sentence and puts it on its own
+`sidecar_cause` key so a page need not parse a sentence apart. Settings -> JOBS
+chips it now: "this tool's installer failed" and "this computer was never set
+up" are the same empty answer without something that tells them apart, and the
+chip is what makes the line scannable in a list of eight machines.
+
+#### CR-259n (dash-mounts-ui-b-1, closing CR-259c) - music and ytdl now name a witness that goes away with their export - FIXED (music.py, ytdl.py)
+
+CR-259c fixed b-roll and recorded the other two as OWED, because a file witness
+needed `mount_status.recheck` to probe existence rather than `os.path.isdir`.
+dash-collector-alerts shipped that half (and `record_root(name, root,
+witness=)`), so music records `music_config.DB_PATH` and ytdl `ytdl.db`: the
+root is a bind-mount TARGET whose mount point survives its export, and neither
+mount creates a directory of its own inside it. The degraded sentence still
+names the ROOT - the admin has to be told which mount is gone, not which file
+this server stat'ed.
+
+### Verification
+- dashboard/tests/test_hand_off_2026_09_11b_dash_mounts_ui.py::test_a_suspended_editors_laptop_is_not_stamped_by_the_broll_mount -> fails before, passes now (with `api.account_bar_reason` stubbed back to None the claim is answered 200 and stamped `editor:editor2`, which is the pre-fix world)
+- dashboard/tests/test_hand_off_2026_09_11b_dash_mounts_ui.py::test_a_suspended_editors_laptop_is_not_stamped_by_the_music_mount -> fails before, passes now
+- dashboard/tests/test_hand_off_2026_09_11b_dash_mounts_ui.py::test_a_suspended_editors_laptop_is_not_stamped_by_the_ytdl_mount -> fails before, passes now (each of the three claims ONCE while in good standing first, so a test that passed by refusing everything would fail on its own control)
+- dashboard/tests/test_hand_off_2026_09_11b_dash_mounts_ui.py::test_the_rollback_button_reads_this_sites_soak_minutes -> fails before, passes now
+- dashboard/tests/test_hand_off_2026_09_11b_dash_mounts_ui.py::test_the_page_says_when_current_was_left_where_it_was -> fails before, passes now
+- dashboard/tests/test_hand_off_2026_09_11b_dash_mounts_ui.py::test_the_queue_panel_can_be_asked_about_one_computer and ::test_the_home_page_queue_can_be_asked_about_one_computer -> fail before, pass now (each asks about BOTH computers: `reported_at` is clamped to the server's clock on receipt, so "the newest wins" is a tie inside a test and pinning it would be pinning a coin toss)
+- dashboard/tests/test_hand_off_2026_09_11b_dash_mounts_ui.py::test_an_unknown_computer_is_not_taken_as_a_machine -> the control for the same fix
+- dashboard/tests/test_hand_off_2026_09_11b_dash_mounts_ui.py::test_a_preview_that_could_not_count_says_so_instead_of_zero -> fails before, passes now (through the real POST route, with recovery.preview_restore returning the refusal shape recovery.py builds)
+- dashboard/tests/test_hand_off_2026_09_11b_dash_mounts_ui.py::test_an_unreadable_archived_list_says_so -> fails before, passes now (the real page, with `db.fetch_archived_projects` raising OperationalError, so assignments.py's own except is what is exercised)
+- dashboard/tests/test_hand_off_2026_09_11b_dash_mounts_ui.py::test_a_locked_client_ledger_does_not_degrade_the_whole_broll_mount -> fails before, passes now
+- dashboard/tests/test_hand_off_2026_09_11b_dash_mounts_ui.py::test_the_jobs_page_names_the_ffmpeg_sidecar_cause -> fails before, passes now (a real report carrying the sidecar block, an idle machine with ffmpeg false, so the CAPABILITY refusal is the one that fires)
+- dashboard/tests/test_hand_off_2026_09_11b_dash_mounts_ui.py::test_the_music_mount_notices_its_export_going_away and ::test_the_ytdl_mount_notices_its_export_going_away -> fail before, pass now (the database file is really deleted and the mount point really left behind; re-recording the root with no witness reproduces the old empty answer)
+- Also run, because they read what I changed: test_broll_fleet_stamp, test_music_fleet_stamp, test_broll_mount, test_music_mount, test_ytdl_mount, test_home_layout, test_no_em_dash, test_admin_assignments, test_bug_hunt_2026_09_11_dash_api_jobs, test_jobs_machines, test_packages, test_recovery, test_upload_only, test_mount_status, and both earlier dash-mounts-ui files -> all green. `py_compile` on ui.py, broll.py, music.py, ytdl.py.
+
+### OWED TO ANOTHER TERRITORY (hand-off wave)
+- dash-release-jobs: `dashboard/src/ccsync_dashboard/dashboard_update.py`: `status()`: STILL OWED from wave 1 - add `revert_refused_reason` / `revert_refused_from` to the `current` dict it builds (fixed key set, so the two keys select_code_root writes are dropped before the template sees them). Dashboard only, either order.
+- dash-collector-alerts: `alerts.py` / `notices.py`: STILL OWED from wave 1 - an ALERT_KINDS row for "this container is booting the image while `current.json` names a version" (`running_source` / `reverted_reason` / `revert_refused_reason`). CR-259b makes that state revert itself after two boots, which was the urgent half.
+- Nothing NEW is owed: every hand-off item landed whole.
+
+### Owner decisions (hand-off wave)
+- A suspended editor's machine is refused by WITHHOLDING the fleet stamp rather than by a 403 at the gate. It is the smaller change and the fail-open rule survives it, but it means the sub-app answers with its own wording, not a sentence naming the suspension. If the owner wants "your account is suspended" on the editor's tray for these three doors too, that is a refusal in `login_gate` with a companion-visible `detail`, which is dash-core's file and a bigger change.
+- The queue panel's computer is chosen with `?machine=` on the URL plus chips in the [ FIX DESTINATION ROOT ] box, shown only to a person with more than one computer. The alternative - defaulting the home page to the computer the browser is sitting on - is not knowable server side, and remembering the last choice per editor is a preference store this page does not have.
+
+## The release channel, the pinned worker and the Timeline Cards mount, 2026-09-11 (CR-260)
+
+### CR-260a (dash-release-jobs-1, with res-fleet-4) - stop() then start() ran TWO pollers, and two pinned ffmpeg workers - FIXED (`release_feed.py`, `cards_exec.py`)
+
+`FeedPoller.stop()` set `_stop`, joined with a 5 s timeout and dropped
+`self._thread` unconditionally. `threading.Thread.join(timeout)` returns None
+either way, so a cycle that outlived the join - `fetch_artifact_to` on a slow
+link runs for minutes, a hung socket for a read timeout - left a live thread
+with no handle to it. `start()` then saw `_thread is None` and called
+`self._stop.clear()`, which is exactly the flag `_run`'s
+`while not self._stop.is_set()` loop is waiting on: the old thread finished
+its cycle, re-tested a now-cleared event and kept polling, beside the new one.
+Two pollers on one object then run `check_now` on independent connections;
+under the `auto` policy both pass the "already published" test for the same
+record and race into `store_verified_package`, and both stamp `valid_records`
+and `db.set_feed_state`. `cards_exec.PinnedExecutor` had the same shape from
+the day it was written, and there the revived thread is a SECOND ffmpeg worker
+draining the same pinned queue - the one thing §4.4 rule 5 promises cannot
+happen on the NAS. Both classes now keep the handle when the join expires (and
+say so in the log), and `start()` refuses while a previous thread is alive
+instead of clearing the event under it. The join timeouts are named constants
+(`POLLER_STOP_JOIN_SECONDS`, `STOP_JOIN_SECONDS`) so a test can reach the
+overrun case without sitting out five real seconds. The fix that opened this
+(dash-release-jobs-5 of the morning hunt, "stop() then start() really polls
+again") is intact: a thread that actually ended is still dropped and restarted.
+
+### CR-260b (dash-release-jobs-2) - the staged half of the SELECTED CARDS block was truncated silently, and its count lied - FIXED (`cards_ai.py`)
+
+`selection_block`'s selected half caps at `MAX_SELECTION_ROWS` and then prints
+"...and N more, by id alone: ..." so the model knows the list is partial. The
+staged half printed the FULL count in its header ("Staged cards selected on
+the shelf (120)") and then rendered 40 rows with nothing at all saying the
+other 80 existed. An editor who marquee-selects 120 staged cards and asks for
+"the selected staged cards" gets an op naming 40 of them, presented as the
+answer to a request about 120. Timeline Cards' own `chat_edit.selection_block`
+does not truncate at all, so the two doors disagreed about what the model was
+told. The staged branch now carries the same "...and N more, by id alone:"
+line, so every id the header counts is in the prompt.
+
+### CR-260c (dash-release-jobs-3 / wire-4) - an older companion's Cards agent lost its machine name, and one editor's two computers became one string - FIXED (`cards_tunnel.py`)
+
+dash-release-jobs-6 (morning) stopped trusting the agent's self-asserted
+`name` and took `body["machine"]` only - and added that field to the companion
+in the SAME commit (18e69f3, companion 0.9.71). The two halves ship
+separately, the dashboard first by house rule, and the field runs
+0.9.65..0.9.71 with a Mac on 0.9.70. Every machine below 0.9.71 therefore
+registered as the bare editor: leso's iMac and MacBook both became `leso`, in
+the away/stale text, in `agent_name`, and in anything the cards server keys by
+that name - precisely where "which computer is driving Resolve" is the
+question being asked. The anti-spoofing stands: the body's `name` is never the
+whole identity and never the editor half. It is now taken as the MACHINE HALF
+alone, only when no `machine` was declared, sanitised by the same rule, and
+rendered `editor/~HOST` - the `~` says that half is the agent's word and not
+ours. `test_the_name_is_the_editor_alone_when_no_machine_is_declared`, which
+pinned the degraded string as correct, was rewritten.
+
+### CR-260d (dash-release-jobs-4) - a feed record with a non-canonical kind or platform was dropped with nothing at all to tell the admin - FIXED (`release_feed.py`)
+
+The morning's fix for dash-release-jobs-7 case-folds `_record_key` AND drops
+any record whose kind/platform is not already lower-case (folding it would
+break the record's own signature, so dropping is right). The drop incremented
+nothing, set no `last_error` and added no notice; `db.set_feed_state` still
+recorded `ok`, so `alerts._check_feed_stale` stayed quiet. The vendor
+publishes `companion`/`Windows` 0.10.0, [ CHECK NOW ] answers ok, the feed
+page lists nothing new, the fleet never updates, and the only evidence is one
+WARNING in a container log nobody opens - an invisible fault where the
+pre-fix behaviour was at least a visible one (listed, then 404 on the button).
+`_valid_records` now collects what it refused, and `check_now` writes a
+sentence naming the versions into `feed_state.last_error` and returns them as
+`rejected`. The check still answers `ok: True`: the channel verified, and this
+is a build that cannot be offered, not a feed outage.
+
+### CR-260e (dash-release-jobs-5) - `_signature_url` cannot fetch the signature for the pre-signed URL its docstring was about - FIXED, as a refusal that says so (`release_feed.py`)
+
+The morning fix appends `.sig` to the PATH and carries the query across, which
+is correct for a CDN token. For the case the docstring named - "a pre-signed
+URL" - it cannot work at all: an S3 SigV4 signature is computed over the
+canonical request INCLUDING the object key, so the same `X-Amz-Signature`
+against `channel.json.sig` answers 403 SignatureDoesNotMatch. The failure
+moved from 404 to 403 and the site still stops receiving builds, with the
+comment above the code saying the case was handled. The docstring is narrowed
+to query-TOKEN URLs, and `_presigned_hint` now names the cause in the reason
+that reaches `feed_state.last_error` and the admin page, so the operator is
+not left with a refusal about a URL they never configured. A real fix needs a
+second setting (`RELEASE_FEED_SIG_URL`) on `Settings`, which is dash-core's
+file: it is under OWED below.
+
+### CR-260f (dash-release-jobs-6 / regression-13) - two different fixes cited "dash-release-jobs-3", and the citations were off by one from -3 onward - FIXED in the code, OWED in the ledger (`release_feed.py`)
+
+The morning hunt's ids are -3 the per-kind fleet cap, -4 the signature URL, -5
+the poller. The builder labelled the signature-URL fix `-3` and the poller fix
+`-4`, so `grep -rn dash-release-jobs-3` returned two unrelated fixes (the
+correct one in `db.py:9334` and `api.py:10321`) and `grep -rn
+dash-release-jobs-5` returned none - the audit trail the fix-pass rules
+depend on. Both code comments and the two test docstrings in
+`test_release_feed.py` are relabelled to -4 and -5, each noting the
+correction. The KNOWN_BUGS.md half (CR-242b, CR-242c, the missing entry for
+dash-release-jobs-3's `claim_job` change, and that entry's stale "Owner
+decisions" line) is OWED to the orchestrator: this brief forbids editing
+KNOWN_BUGS.md directly.
+
+### CR-260g (dash-release-jobs-7) - `read_state` writes to disk, so a full or read-only data dir turned a status read into an exception on the boot and shutdown paths - FIXED (`dashboard_update.py`)
+
+`_read_json` is deliberately exception-proof because these files are read on
+the boot path, but `read_state` always calls `_heal_orphaned_progress`, which
+WRITES through an unguarded `_write_json` - and the new `restart_requested`
+branch (dash-release-jobs-2, morning) added a second write site on the path
+`finish_restart -> consume_restart_request -> read_state`. On a data dataset
+that is full, or read-only after a pool fault, the OSError escaped the
+lifespan shutdown: `_exit_process(RESTART_EXIT_CODE)` never ran, the process
+exited 0, `deploy/run.sh` did not re-exec, and the code that had just been
+applied never started running - with nothing in the state file to say why. The
+same OSError 500'd every `GET /api/v1/admin/dashboard-update`. The healer's
+two writes now go through `_write_json_best_effort`, which logs and returns:
+the in-memory correction is what unwedges the routes, and persisting it is
+best effort. Every other `_write_json` caller is unchanged - a staged
+`current.json` that cannot be written MUST still raise.
+
+### Verification
+
+Run from `dashboard/` with `.venv\Scripts\python.exe -m pytest <file>`.
+
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_a_feed_check_that_outlives_stop_is_not_revived_by_start -> fails at f1eeb42 ("stop() dropped the handle to a live thread"), passes now
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_a_pinned_tick_that_outlives_stop_is_not_revived_by_start -> fails at f1eeb42 ("stop() dropped the handle to a live worker"), passes now
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_the_staged_half_of_the_selection_block_says_what_it_truncated -> fails at f1eeb42 (no "...and 80 more" line), passes now
+- tests/test_cards_tunnel.py::test_an_older_companion_keeps_its_own_machine_half_marked_unverified -> fails at f1eeb42 ("assert 'leso' != 'leso'"), passes now
+- tests/test_cards_tunnel.py::test_the_name_is_sanitised_and_bounded -> extended for the unverified half; fails at f1eeb42, passes now
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_a_non_canonical_feed_record_is_reported_and_not_merely_dropped -> fails at f1eeb42 ("a build that cannot be offered left nothing to see"), passes now
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_a_canonical_feed_record_still_clears_the_last_error -> the no-regression half of CR-260d (a clean channel still clears last_error)
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_a_presigned_feed_url_is_named_as_the_cause_of_the_signature_refusal -> fails at f1eeb42 (the reason is a bare 404 on a URL nobody configured), passes now
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_a_query_token_feed_url_still_derives_its_signature -> the no-regression half of CR-260e (the morning fix keeps working)
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_the_healer_survives_a_data_directory_it_cannot_write -> fails at f1eeb42 (OSError 28 escapes read_state), passes now
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_a_spent_restart_request_is_healed_on_a_full_disk_too -> fails at f1eeb42 (OSError 30 escapes read_state), passes now
+
+Files run (territory only): tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py,
+tests/test_cards_tunnel.py, tests/test_release_feed.py, tests/test_cards_ai.py,
+tests/test_dashboard_update.py, tests/test_cards_mount.py -> 224 passed, plus
+`py_compile` on every file touched.
+
+Reverted-source verification was done by copying the f1eeb42 bytes of the five
+source files over the working tree, running the two test files, and copying the
+fixed files back. No git state was changed.
+
+### OWED TO ANOTHER TERRITORY
+
+- dash-core: `dashboard/src/ccsync_dashboard/settings.py`: add a
+  `release_feed_sig_url: str = ""` setting (env `DASH_RELEASE_FEED_SIG_URL`),
+  read by `release_feed.fetch_and_verify_channel` when set instead of
+  `_signature_url(url)`. This is the real fix for dash-release-jobs-5 (a host
+  where the two URLs cannot be derived from one another, i.e. any pre-signed
+  object URL). Dashboard only, no deploy ordering. My side is safe without it:
+  the refusal now names the cause instead of naming a URL nobody configured.
+- dash-collector-alerts: `alerts.py`: CR-260d writes the rejected-record
+  sentence into `feed_state.last_error`, which `_check_feed_stale` already
+  reads, so a refused build now raises that notice. If the operator would
+  rather have its own kind (`feed_record_rejected`, with the version and "the
+  feed has to republish it" as the next action), that is one `ALERT_KINDS` row
+  plus its writer. Dashboard only.
+- server-tools: `tools/publish_feed.py:810`: `--from-manifest` assigns
+  `args.platform` from the manifest AFTER argparse, so the
+  `choices=sign_release.PLATFORMS` guard does not cover that path - it is what
+  makes a non-canonical record publishable at all (the cause behind CR-260d).
+  Fold the platform to lower case (or re-validate it) before it is signed.
+  Vendor-side tool, no fleet deploy.
+- orchestrator (KNOWN_BUGS.md, forbidden to me by rule 7): relabel CR-242b
+  from `dash-release-jobs-3` to `dash-release-jobs-4`, CR-242c from
+  `dash-release-jobs-4` to `dash-release-jobs-5`, add the missing one-line
+  entry for the real dash-release-jobs-3 (the per-kind fleet cap moved into
+  `db.claim_job`'s compare-and-set, `db.py:9334`, wired from `api.py:10321`),
+  and correct that entry's "Owner decisions" line, which still says the cap
+  "is not fixed here". `docs/bug-hunt-2026-09-11/ledger/dash-release-jobs.md`
+  lines 33, 44 and 105-108 carry the same three errors.
+
+### Deploy ordering
+
+Every change here is dashboard-side and needs no companion change. CR-260c is
+written FOR the deploy window (dashboard first, companions behind): a 0.9.71
+companion sends `machine` and is unaffected; anything from 0.9.65 up gets
+`editor/~HOST` instead of the bare editor. When the whole fleet is on 0.9.71
+the `~` form stops appearing on its own.
+
+### Owner decisions
+
+- CR-260c renders the unverified machine half as `editor/~HOST`. The `~` is
+  mine, chosen so the cards page can show a legible computer name without
+  presenting a self-asserted string as verified. The alternative the hunter
+  offered - leave it degraded and document it - is one line to revert
+  (`cards_tunnel.agent_name`).
+- CR-260d puts the rejected record into `feed_state.last_error`, which means
+  the existing feed-stale notice fires for it. That is deliberate (a build
+  that cannot be offered should be a PROBLEM THE SERVER FOUND), but it does
+  mean a malformed vendor record shows on the home page as a feed problem
+  until the feed republishes it. A dedicated notice kind would read better;
+  it is OWED to dash-collector-alerts above.
+- CR-260a makes `start()` refuse while a previous thread is alive, rather than
+  waiting for it. A poller whose cycle is wedged on a socket therefore stays
+  the only poller until that cycle ends, and the log says so. Waiting would
+  block the lifespan; killing it is not possible in Python.
+
+### Hand-off wave
+
+The three OWED lines routed back to this territory in `HANDOFFS.md`
+("## dash-release-jobs"). All three done; nothing declined.
+
+#### CR-260h (res-fleet-3, from dash-mounts-ui) - the refused-revert banner could never have rendered - FIXED (`dashboard_update.py`)
+
+dash-mounts-ui's CR-259a writes `revert_refused_reason` / `revert_refused_from`
+into `current.json` when the boot selector refuses to revert into a tree whose
+schema is older than the live database, and added a banner for them to
+`templates/partials/admin_dashboard_update.html`. That banner is fed by
+`dashboard_update.status()`, which rebuilds `current` with a FIXED key set of
+four - so the two new keys were dropped on the way out and the banner was dead
+code from the moment it was written, on the one page that is supposed to say
+why this container is still running the applied tree. Both keys are in the
+dict now, "" when absent, which is also what a pre-fix `current.json` renders
+as. This is the API half of res-fleet-3 as well: a notice or alert kind for
+"booting the image while current.json names a version" can now read the
+refusal out of `GET /api/v1/admin/dashboard-update` instead of opening
+`current.json` itself.
+
+#### CR-260i (dash-release-jobs-5's real fix, from dash-core) - the signature URL can be configured instead of derived - FIXED (`release_feed.py`)
+
+CR-260e narrowed `_signature_url`'s promise to query-TOKEN URLs and made the
+refusal name the pre-signed case; the actual escape hatch needed a setting,
+which is dash-core's file. `fetch_and_verify_channel` now takes a third
+argument, `sig_url`, and uses it verbatim when it is non-blank - no
+derivation, and no `_presigned_hint` appended, because advising an operator to
+configure the thing they have just configured is worse than saying nothing.
+`check_now` reads it with `getattr(settings, "release_feed_sig_url", "")`, so
+a Settings object that predates dash-core's half (a rollback to an older tree,
+a test double) keeps deriving exactly as before rather than raising on the
+boot-adjacent poll path. Blank is the shipped default and every configured
+site today is unchanged.
+
+#### CR-260j (regression-11, from dash-api) - `why` said "cannot do this kind of work" about a machine that was telling us why - FIXED (`jobs.py`)
+
+comp-ytdl-jobs-3 (2026-09-11) landed the companion half of "say WHY this
+computer has no ffmpeg": the cause, the consecutive-failure count and a tray
+line. On the dashboard the block was validated by `YtdlpSidecarIn`, stored
+whole into the `ytdlp:` meta blob by `_store_ytdlp_state`, and read by NOBODY.
+So a Mac whose sidecar install fails on an SSL CA problem reports
+`ffmpeg: false`, an admin queues a `proxy-480p` job, and
+`GET /api/v1/jobs/{id}/why` - the page whose entire reason for existing is
+"unschedulable, and why" - answered "ffmpeg is not available on this
+computer", which reads as "nobody ever set that machine up" for a machine that
+is trying to set itself up and failing for a nameable reason.
+
+`jobs.sidecar_notes(conn)` reads every stored verdict in ONE fleet-wide query
+(the Ctx rule `alerts.py` states; `explain` calls it once, not once per
+machine), and `jobs.sidecar_cause(note, requires, capabilities)` turns one
+into a sentence under three conditions, all of which matter: the check must
+have FAILED (`ok is False` or `action == "failed"` - an absent verdict is
+never "it is fine"), the job must require one of the tools that check covers,
+and that tool must actually be missing from the capabilities. Without the
+third, a machine refused for a `mount` or a VRAM floor would be blamed on an
+unrelated `deno` failure. The sentence rides the per-machine line's `why` AND
+its own `sidecar_cause` key (so a page can render it beside `cap_ffmpeg`
+without parsing a sentence apart), and the job-level summary names the first
+machine that has one, because that line is what an admin reads before the
+list. A bad meta row is skipped, never raised.
+
+### Hand-off wave: Verification
+
+Run from `dashboard/` with `.venv\Scripts\python.exe -m pytest <file>`.
+
+- tests/test_dashboard_update.py::test_status_carries_a_refused_revert_out_of_current_json -> fails before the fix (KeyError: the fixed key set dropped it), passes now
+- tests/test_dashboard_update.py::test_status_says_an_empty_string_when_no_revert_was_refused -> the no-regression half (a current.json with no refusal renders "", never a missing key)
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_a_declared_signature_url_is_fetched_instead_of_the_derived_one -> fails before the fix (the third argument does not exist and the derived URL 404s), passes now
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_check_now_reads_the_declared_signature_url -> fails before the fix (check_now fetched the derived .sig and 404'd), passes now
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_a_settings_without_the_new_field_still_derives_the_signature_url -> the getattr no-regression half
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_why_names_the_sidecar_cause_when_that_is_why_ffmpeg_is_missing -> fails before the fix ("ffmpeg is not available on this computer" and nothing else), passes now
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_an_unrelated_sidecar_failure_does_not_explain_a_mount_refusal -> the third condition: a deno failure never explains a mount refusal
+- tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py::test_a_sidecar_that_succeeded_explains_nothing -> a healthy verdict on a machine with no ffmpeg still reads as "nobody set it up"
+
+Files run (territory only): tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py,
+tests/test_dashboard_update.py, tests/test_release_feed.py, tests/test_jobs.py,
+tests/test_jobs_backpressure.py, tests/test_jobs_scheduling.py,
+tests/test_jobs_machines.py, tests/test_jobs_contract.py,
+tests/test_jobs_ranking.py, tests/test_jobs_cancel.py,
+tests/test_jobs_pinning.py, tests/test_jobs_retry.py,
+tests/test_bug_hunt_2026_09_11_dash_api_jobs.py -> 388 passed, 1 skipped, plus
+`py_compile` on every file touched.
+
+Reverted-source verification: the three hand-off edits were undone in place
+(the wave-1 fixes left standing, since the hunt's baseline f1eeb42 predates
+them) and the two test files run - 7 failed, 74 passed - then the fixed files
+were copied back and everything re-run green. No git state was changed.
+
+### Hand-off wave: OWED TO ANOTHER TERRITORY
+
+- dash-mounts-ui: nothing blocking. Both halves of what was asked are
+  available now: `dashboard_update.status()["current"]` carries
+  `revert_refused_reason` / `revert_refused_from`, and
+  `jobs.sidecar_notes(conn)` + `jobs.sidecar_cause(note, requires, caps)` are
+  public, so the jobs machine list can print the cause beside `cap_ffmpeg`
+  without re-reading the meta blob.
+- dash-core: `settings.release_feed_sig_url` still has to exist for the new
+  argument to be reachable from a deployment (`DASH_RELEASE_FEED_SIG_URL`).
+  My side is complete and inert without it - `getattr` with a "" default, and
+  "" keeps the derivation. Dashboard only, no deploy ordering.
+- dash-collector-alerts: the `ytdlp.sidecar` ALERT_KINDS row is still theirs
+  (their own hand-off line). `jobs.sidecar_notes` is the fleet-wide read if
+  they would rather not add a second query.
+- server-tools: `tools/publish_feed.py:810` (the `--from-manifest` platform
+  bypassing argparse `choices`) is unchanged - routed to them in this same
+  wave.
+
+### Hand-off wave: Owner decisions
+
+- A declared `release_feed_sig_url` suppresses the pre-signed hint on a
+  failure. The reasoning is that the hint is advice to configure the setting;
+  once it IS configured, the refusal is about the URL the operator typed. If
+  the owner would rather always see it, that is one conditional in
+  `fetch_and_verify_channel`.
+- The sidecar cause is appended to the per-machine `why` with " - " and named
+  once in the job-level summary (the first machine that has one, not all of
+  them), on the grounds `_blocked_summary` already states: one sentence an
+  admin can act on, with the list underneath for the rest.
+
+## The b-roll web app, 2026-09-11 (CR-261)
+
+Seven findings, all of them against fixes that landed earlier the same day:
+the retry button that finally dispatched to the right route but with the one
+field that makes the claim useless, the two ways its failures reached the
+editor as fiction, and the ledger migration whose hardening stopped one branch
+short of the branch that creates the file.
+
+### CR-261a (comp-broll-music-1) - RETRY FAILED claimed the batch with no staging id, so every clip in it failed at once - FIXED (`broll/web/static/ingest.js`)
+
+This afternoon's broll-1 fix re-pointed [ try the N failed again ] at the
+loopback's `/broll/ingest/run` with `{batch_uid, staging_id: null}`. The
+companion populates an item's `local_path` in exactly one place -
+`_item_from_manifest` matches the server's manifest rows against the items of
+`self._staging[staging_id]` - and `run()` only looks a staging entry up when
+`staging_id` is truthy. With `null`, every item of the re-claimed batch was
+built with `local_path: ""`, `_crunch_item` failed it immediately ("the source
+file is not on this computer any more"), twice each up to MAX_ITEM_ATTEMPTS,
+and `_maybe_finish` released the batch failed - while the page toasted "3
+clips queued again." in success green. Pressing the button again repeated it
+exactly, so a drop whose bytes were still sitting in staging was
+unrecoverable without re-dropping the files. The music half of the same fix
+pass got this right on the same day: `music/web/static/ingest.js` sends
+`{batch_uid, staging_id: mi.stagingId}` guarded by `uid === mi.batchUid &&
+mi.stagingId`. The b-roll page now sends the same thing under the same guard:
+this page's own staging id when it is still the batch this page staged, and
+`null` otherwise, which is the take-over case and is what that call has always
+meant.
+
+### CR-261b (broll-1) - the 409 branch printed the one sentence that is almost always false, and then set the panel running on a dispatch that failed - FIXED (`broll/web/static/ingest.js`)
+
+The same fix added `if (e.status === 409)` -> "Another of your computers is
+still working on this batch, so it picks them up." By construction that is the
+one 409 that cannot arrive: `run()` answers "this computer is already indexing
+another batch" FIRST, ahead of the enabled check, the identity checks and any
+claim, and the server's `retry-failed` route (broll-5, same commit) refuses
+the call outright while another machine holds a live lease. So the editor
+indexing batch B who pressed retry on batch A was told to wait for a machine
+that was never told anything - nothing polls for queued batches, the discovery
+route went in the same commit - while A sat in `queued` holding its
+archive-name reservations, which is the BROLL-8 state the whole feature exists
+to prevent. The companion's own sentence was in `e.message` and was thrown
+away. It is shown now, and the dispatch failing no longer sets
+`ing.running`/starts the live poller: a panel polling a run that does not
+exist is the same lie in a second place. The toast on that path is a warning,
+not success green.
+
+### CR-261c (broll-2) - the held-batch refusal reached the editor as "[object Object]" - FIXED (`broll/web/static/app.js`)
+
+`retry_failed` raises `HTTPException(409, {...})` with a DICT detail, so the
+body is `{"detail": {"detail": "EDIT-01 is still working on this batch. Stop
+it first, ...", "reason": "held", ...}}`. `fetchJson` did `new Error(body.detail
+|| body.message)`, and `Error.message` of an object is the string "[object
+Object]" - which is what the red toast said, in place of the one sentence that
+tells the editor which computer to go and stop. `fetchJson` now unwraps an
+object detail once, centrally (the same file's batch-create handler had been
+working around this by hand since 2026-08-18), and keeps the whole object on
+`err.body` for the callers that read `reason`. The new test asserted `"EDIT-01"
+in r.text`, which passes on the raw JSON and proves nothing about what is
+rendered; the one here runs the page's own `fetchJson` over that exact body.
+
+### CR-261d (broll-3, regression-14) - the ledger's CREATE half was still the crash-unsafe shape broll-2 fixed the ALTER half of - FIXED (`broll/web/app/client_folders.py`)
+
+broll-2 hardened the v1 -> v2 step this morning (IMMEDIATE lock, column probe,
+idempotent backfill) and left the `version == 0` branch above it exactly as it
+was: `conn.executescript(_SCHEMA)`, which commits any open transaction and
+then runs in autocommit, so each CREATE was durable the instant it ran while
+`PRAGMA user_version = 2` was the last statement of the script. The identical
+"durable DDL, un-stamped version" shape. A container killed or OOM-ed inside
+the first request that creates `client_shares.db` - a bind-mounted file on a
+spinning pool - left tables at version 0, and every later entry re-ran the
+script and raised `table client_folders already exists`, for ever, on every
+client-folder route and every public `/broll/share/<token>/` link. And the new
+`except sqlite3.Error` in `get_shares_db` then SWALLOWED that, so the cure
+(hand-deleting a file on the NAS) was documented nowhere and the symptom was a
+500 with one container log line. The create now runs inside the same `BEGIN
+IMMEDIATE` with the version stamped inside it (a `user_version` write goes
+through the pager and rolls back with the DDL), statement by statement because
+`executescript` cannot be in a transaction, and every CREATE is IF NOT EXISTS
+so a file the old code already left on a customer's NAS finishes rather than
+raising. regression-14, same function: that swallow caught `sqlite3.Error`
+only, while `ensure_schema` opens with a `mkdir` and a `sqlite3.connect` that
+raise OSError - which is exactly what an unmounted or read-only dataset
+raises, the failure most likely to reach a handler whose whole job is keeping
+the public share door open. It catches OSError too now. The deliberately fatal
+"newer user_version" RuntimeError still is not caught.
+
+### CR-261e (broll-5) - a ledger problem at BOOT degraded the whole /broll mount, which the same fix said must not happen - FIXED (`broll/web/app/main.py`, `broll/web/app/client_folders.py`)
+
+broll-2 guarded `ensure_schema` on the request path only ("a sqlite failure
+HERE is not allowed to take the public share door out"). Both boot paths still
+called it bare. Under the dashboard the exception was caught a level up and
+the whole /broll mount was marked DEGRADED - nav link hidden, home page saying
+"every /broll request will fail until the data root is writable" - which after
+that same fix is FALSE: every request works. Standalone, `uvicorn app.main:app`
+did not boot at all. A ledger locked for longer than the busy timeout exactly
+as the container starts is a real possibility now that the migration takes
+`BEGIN IMMEDIATE`. There is one way to call it from anything but a test now,
+`ensure_schema_best_effort()`, which logs and answers whether it worked, and
+`main.py`'s lifespan uses it. Client folders are one feature of this app and
+do not get to take the archive's search page down with them. The dashboard's
+`_init_broll_storage` is the other boot path and is owed below.
+
+### CR-261f (broll-6) - a failed backfill still stamped the schema version, so those items lost the hash identity for ever - FIXED (`broll/web/app/client_folders.py`)
+
+`_backfill_hashes` returns on any `sqlite3.Error` - an unreadable `broll.db`
+is the realistic one, and `publish_db.py` renames a new index over the live
+file - and `ensure_schema` then wrote `PRAGMA user_version = 2` regardless. The
+step was never retried and those items kept `hash = ''`: the third identity,
+the one that survives an `/api/ingest/moved` rename, permanently and silently
+absent for every clip curated before v2. The next index publish that renames
+one of them drops it out of the client's folder page. The backfill now reports
+whether it ran to the end (OSError counted as a failure too, and logged rather
+than swallowed) and the version is stamped only when it did. A missing
+`broll.db` is not a failure - there is nothing to read hashes out of, and
+holding a deployment at version 1 waiting for one would be worse.
+
+### CR-261g (broll-4) - the deleted discovery route left its login-gate carve-out behind, and the test asserted the opposite - FIXED (`broll/web/app/routes_fleet.py`, `broll/web/tests/test_bug_hunt_2026_09_11_broll.py`)
+
+broll-3 deleted `GET /api/fleet/ingest/batches` this morning and left
+`_broll_fleet_list_re` in the dashboard's `login_gate`, so
+`/broll/api/fleet/ingest/batches` is still admitted with no session - onto a
+404 today, and onto whatever collection GET lands there next, session-gated in
+its author's head and not in fact. The regression test written beside it
+pinned the claim that the gate "was widened in the same commit", a wrong fact
+about a security gate held in place by a green test, which is the very thing
+its own docstring says gets a correct gate "fixed". The test now says what
+happened and asserts that `routes_fleet.py` - the file that owns the path
+shape - records why the carve-out is gone. Deleting the carve-out itself is
+one line in `app.py` and is owed below; nothing on this side depends on it,
+and this side has no GET at that path for it to expose.
+
+### Verification
+Run from `broll\web` with `.venv\Scripts\python.exe -m pytest <file> -q`.
+
+- `tests/test_bug_hunt_2026_09_11b_broll.py::test_retry_failed_hands_the_companion_this_pages_staging_id` -> fails at f1eeb42, passes now
+- `tests/test_bug_hunt_2026_09_11b_broll.py::test_retry_failed_sends_no_staging_id_for_someone_elses_batch` -> the guard; passes either way by design (it pins the case that must STAY null)
+- `tests/test_bug_hunt_2026_09_11b_broll.py::test_a_busy_companion_is_quoted_and_the_panel_does_not_start_polling` -> fails at f1eeb42, passes now
+- `tests/test_bug_hunt_2026_09_11b_broll.py::test_a_held_batch_reaches_the_editor_as_a_sentence` -> fails at f1eeb42 ("[object Object]"), passes now
+- `tests/test_bug_hunt_2026_09_11b_broll.py::test_a_kill_inside_the_create_leaves_nothing_behind` -> fails at f1eeb42, passes now
+- `tests/test_bug_hunt_2026_09_11b_broll.py::test_a_ledger_created_by_the_old_code_still_finishes` -> fails at f1eeb42 ("table client_folders already exists"), passes now
+- `tests/test_bug_hunt_2026_09_11b_broll.py::test_a_backfill_that_failed_is_not_retired_by_the_version_stamp` -> fails at f1eeb42, passes now
+- `tests/test_bug_hunt_2026_09_11b_broll.py::test_the_share_door_survives_a_data_root_that_went_read_only` -> fails at f1eeb42 (PermissionError out of the dependency), passes now
+- `tests/test_bug_hunt_2026_09_11b_broll.py::test_a_ledger_problem_at_boot_does_not_degrade_the_whole_mount` -> fails at f1eeb42, passes now
+- `tests/test_bug_hunt_2026_09_11b_broll.py::test_the_standalone_boot_uses_the_best_effort_call` -> fails at f1eeb42 (the lifespan raises), passes now
+- `tests/test_bug_hunt_2026_09_11_broll.py::test_the_fleet_docstrings_do_not_claim_the_gate_needs_widening` -> fails at f1eeb42 on the corrected assertion, passes now
+
+The three page tests RUN the page: `app.js` + `ingest.js` load in a bare V8
+(ingest.js touches the DOM only inside functions, which
+`test_ingest_ui.py`'s sanitiser-parity test already relies on) and
+`ingestRetryFailedBatch` is called for real with `fetch` and the loopback
+stubbed, so what is asserted is the body that goes to 8899 and the string the
+editor is shown - not a source scan.
+
+Also run, because they read the two files I edited and the module I changed:
+`tests/test_client_folders.py`, `tests/test_ingest_retry_and_takeover.py`,
+`tests/test_ingest_ui.py`, `tests/test_no_em_dashes.py`,
+`tests/test_mounted_prefix.py`, `tests/test_one_vocabulary.py` - 153 passed.
+`py_compile` on the three .py files, `node --check` on both .js files.
+
+### OWED TO ANOTHER TERRITORY
+- dash-core: `dashboard/src/ccsync_dashboard/app.py`: `login_gate`: delete `_broll_fleet_list_re` (line ~1075) and the `request.method == "GET" and _broll_fleet_list_re.match(path)` clause (~1176-1178) with its comment - the route it carved out for was deleted this morning (broll-3), so the gate opens an unauthenticated collection path onto nothing. No deploy order: both halves are the dashboard image, and the b-roll side has no GET at that path either way.
+- dash-mounts-ui: `dashboard/src/ccsync_dashboard/broll.py`: `_init_broll_storage` (last statement, ~line 568): call `client_folders.ensure_schema_best_effort()` instead of `client_folders.ensure_schema()`, so a ledger that cannot be opened at BOOT degrades client folders and not the whole /broll mount (broll-5). Guard it for a `broll/web` checkout older than this change (`getattr(client_folders, "ensure_schema_best_effort", client_folders.ensure_schema)`): `BROLL_WEB_SRC` can point at a tree the image did not ship. b-roll web deploys with the dashboard, so no cross-release order.
+- comp-broll-music: `companion/src/ccsync_companion/broll_ingest.py`: `run()`: belt and braces for CR-261a - refuse (409, with a sentence) a claim whose manifest yields zero `local_path`s while this machine DOES hold a staging entry for that batch, rather than claiming it and failing every item. The page half is fixed and shipped independently; this only protects a stale page (a browser tab cached before this build) from spending a batch's attempts. Companion side alone, no order.
+- dash-collector-alerts: OPTIONAL, low: a `notices` row when `client_shares.db` cannot be opened (`kind = "client_shares_unreadable"`), so a swallowed ledger failure says so on the home page rather than in one container log line. Both swallow points (`get_shares_db`, `ensure_schema_best_effort`) log with `log.exception` today. Needs a notice kind WITH its writer, which is dash-collector-alerts' rule.
+
+### Owner decisions
+- The 409 branch that said "another of your computers picks them up" is gone rather than re-aimed. The case it describes cannot reach it (the server route refuses a held batch before the loopback is called), so the honest thing was to quote the companion. If that sentence is wanted for the server's held-batch 409, it belongs on the `toast` in the first catch block, which now shows the route's own wording ("EDIT-01 is still working on this batch. Stop it first, then try the failed clips again.") - which says the same thing and names the machine.
+- The retry dispatch still uses `/broll/ingest/run`, not `/broll/ingest/retry` (which the music page uses and which `broll_server.py` already accepts for both kinds). `run` works on every companion in the field; the `batch_uid` branch of `/retry` only exists in builds carrying this morning's music-2 fix, and an older one would answer 200 with nothing claimed - the exact failure broll-1 was written to kill.
+- `CREATE TABLE IF NOT EXISTS` means a ledger left half-created by the OLD code is completed rather than raising, but a table that got created with a wrong shape (only possible from a hand-edited file) would be kept as it is. Permanent 500s on every client link is the worse of the two.
+
+### Hand-off wave
+
+#### CR-261h (broll-4's third wrong fact) - the corrected note described the gate as still open - FIXED (`broll/web/app/routes_fleet.py`, `broll/web/tests/test_bug_hunt_2026_09_11_broll.py`)
+
+broll-4 was about a wrong fact in this file's own comment: a security gate
+described as needing to be WIDENED when it did not. The correction written
+this morning carried a third one, in its tense. It says the carve-out "still
+admitted an unauthenticated GET ... onto a 404 today" - written while
+dash-core was deleting `_broll_fleet_list_re` from `login_gate` in the same
+pass (security-2, CR-257h). The paragraph now reads as history and names the
+change that closed it, and says what IS true today: only `_broll_fleet_re`
+(the POST carve-out these routes need) remains, so a GET route added here
+would be behind the session gate like everything else. Same reason as
+broll-4 itself: a file that describes a gate as open when it is shut is how
+the next reader re-opens it to match the comment.
+
+### Verification (hand-off wave)
+
+From `broll/web` with `.venv\Scripts\python.exe -m pytest`:
+
+- tests/test_bug_hunt_2026_09_11_broll.py::test_the_fleet_docstrings_do_not_claim_the_gate_needs_widening -> fails on the wave-1 source (neither "security-2" present nor "onto a 404 today" absent), passes now
+- The two earlier assertions (the broll-4 wording) are unchanged and still green.
+
+### OWED TO ANOTHER TERRITORY (hand-off wave)
+
+- none. dash-core's half is already done (security-2, wave 1); this is the
+  b-roll side catching up with it.
+
+### Owner decisions (hand-off wave)
+
+- none.
+
+## The music ingest panel after its own fix pass (CR-262, 2026-09-11)
+
+The morning's music fixes (CR-246) ported b-roll's BROLL-18 retry button, cached
+the library readiness probe and taught the rescore to clear only the snapshot it
+scored. The second hunt of the same day found that the port was taken from
+b-roll BEFORE b-roll's own fix of the same morning, that the cache turned a
+fail-closed gate into one that stays open for five seconds, and that the probe
+now samples the rows least likely to be on disk.
+
+### CR-262A (music-1) - retry-failed took a live batch away from the machine indexing it - FIXED (music/web/musicweb/routes_batches.py)
+`POST /api/ingest-batches/{uid}/retry-failed` reset the batch to `queued` with
+`lease_expires_at = NULL` whenever one item had failed, without asking whether a
+machine was still holding it. b-roll grew the refusal for exactly this the same
+morning (broll-5, CR-246) and that half was missing here: fifteen tracks in, one
+failed, the batch `running` on RAZER, one click and RAZER is 410'd on its next
+per-item POST - and because `claim` only refuses a second machine while the
+lease is live, a second computer of the same editor could claim beside it and
+both index the same tracks into the same library. The route now 409s
+`reason: held` while `ingest_batches.lease_live(batch)`, and expires stale
+leases first so a machine that went away hours ago is still retryable (that
+orphaned batch is what the button exists for).
+
+### CR-262B (music-2) - the retry button was drawn on running batches and on other editors' - FIXED (music/web/static/ingest.js)
+The port dropped both of b-roll's conditions: the button appeared next to
+`cancel` on a `claimed`/`running` batch as soon as one track failed, and in the
+admin "all machines" scope over other editors' work. That click is how CR-262A
+was reached in practice, and in the admin scope the dispatch half cannot help
+anyway - the admin's computer has none of the audio staged. It is now drawn only
+in the `mine` scope and only for a batch in `MI_TERMINAL_STATES`. The server
+guard above is the contract; this is the button.
+
+### CR-262C (music-3) - a retried batch was undispatchable after a page reload - FIXED (music/web/static/ingest.js)
+`miRetryFailed` only told the companion to pick the batch up when the page still
+remembered the drop (`mi.batchUid` + `mi.stagingId`, in memory, lost on every
+reload), and the fallback line said "press Run" - which submits the CURRENTLY
+staged selection as a brand new batch. The normal case (come back after lunch to
+`done_with_errors`, press the button) therefore re-queued the items and left the
+batch in `queued` with nothing anywhere that could pick it up. The dispatch is
+unconditional now - the companion's `run()` accepts an empty staging id and
+takes the items from the server's claim - and the SPA grew b-roll's BROLL-8
+control, `take over on this computer`, on any `queued` batch in the `mine`
+scope. The fallback line names that button instead of Run.
+
+### CR-262D (music-4) - the readiness cache kept the write gate open after the mount disappeared - FIXED (music/web/musicweb/config.py)
+music-5 cached the POSITIVE answer of the mount probe for five seconds to save
+the per-item stat storm. `share_root_ready` is the only thing between an
+unmounted bind mount and a write path that mints filenames and `tracks` rows for
+audio that lands in the container's own filesystem, and caching the whole answer
+meant a NAS reboot mid-album was invisible to it for five seconds: three rows and
+three `uploaded` destinations pointing at a directory that is not the library.
+The cache now covers only the 50-stat SAMPLE; `root.is_dir()` is one stat and
+runs on every call.
+
+### CR-262E (regression-10) - a live drop refused itself from item ~51 - FIXED (music/web/musicweb/config.py)
+music-5 flipped the probe from the oldest 50 `tracks` rows to the newest 50. But
+a fleet `result` writes the `tracks` row BEFORE the companion uploads the audio,
+and `tracks` has no status column to exclude an unlanded row, so once a drop had
+written fifty of them the newest-50 sample was entirely files that are not there
+yet: item 51 of a 120-track import was answered 503 "the music library is there
+but empty", which with the new retry burns six tries over twenty minutes per
+track and then fails it permanently, pointing the operator at a mount that is
+fine. The sample is both ends now, 25 newest and 25 oldest: one end missing is a
+normal library, both ends missing is a share that is not mounted.
+
+### CR-262F (music-5) - the "cannot tell" token raised instead - FIXED (music/web/musicweb/rescore.py, ingest_batches.py)
+`_snapshot_token`'s try covered `SELECT MAX(id)` but not the `meta` read beside
+it, so a locked or malformed database raised out of `rescore_library`'s first
+statement rather than yielding the never-equal sentinel the docstring promises.
+Worse, `write_item_result`'s own failure handler then called
+`rescore.scores_stale(conn)` again from inside its except block and raised a
+second time, turning a track that WAS written into an HTTP 500 - which the
+companion's `_result_retry_wait` reads as terminal for that track. Both reads
+are guarded now.
+
+### CR-262G (music-6) - an editor name with a space was not an editor - FIXED (music/web/musicweb/fleet_auth.py)
+`_STAMP_RE` refused an `editor:` stamp carrying whitespace or more than 64
+characters; `gate_stamp` then returned `(None, None)` and the call fell through
+to the SHARED token comparison, which a per-editor `cce1.` token can never
+satisfy - so such an editor lost music fleet ingest entirely and was told their
+`X-CCSync-Token` was missing or invalid. b-roll and ytdl accept the same name.
+Music now uses b-roll's parser (prefix plus non-empty remainder) and logs a
+stamp that carries no name at all.
+
+### CR-262H (security-3) - the gate stamp was believed on an environment variable - FIXED (music/web/musicweb/config.py, DEPLOY.md)
+The comment above `_LOGIN_GATED` reads "It is NOT inferred from the environment"
+and the line under it was `os.environ.get('MUSIC_LOGIN_GATED') == '1'`. That flag
+is what makes `fleet_auth` believe an inbound `X-CCSync-Fleet-Auth` stamp, and
+the stamp SKIPS the fleet-token comparison entirely - so a standalone musicweb
+with the documented hatch set, behind a proxy that did not strip the header, no
+longer required `DASH_REPORT_TOKEN` on `/api/fleet/ingest/*` (the remaining
+barrier was `require_identity`, which is why this is one credential lost and not
+an open door). b-roll and ytdl can only be told by a call from their mount. The
+flag is `False` now and only `set_login_gated(True)` turns it on; nothing in the
+tree ever set the variable, and DEPLOY.md says so and points a standalone
+deployment at `MUSIC_INGEST_TOKEN` instead.
+
+### Verification
+All in `music/web/tests/test_bug_hunt_2026_09_11b_music.py` unless noted; run
+with `cd music\web; .venv\Scripts\python.exe -m pytest tests\test_bug_hunt_2026_09_11b_music.py -q`.
+- test_a_batch_a_machine_is_still_holding_is_not_retried -> fails at f1eeb42 (200, lease nulled), passes now  (music-1)
+- test_a_batch_whose_lease_has_run_out_is_still_retryable -> the guard does not close the orphaned-batch door  (music-1)
+- test_the_retry_button_is_drawn_only_on_the_editors_own_finished_batches -> fails at f1eeb42, passes now  (music-2)
+- test_the_retry_dispatch_does_not_depend_on_what_this_page_remembers -> fails at f1eeb42, passes now  (music-3)
+- test_a_queued_batch_can_be_taken_over_on_this_computer -> fails at f1eeb42, passes now  (music-3)
+- test_a_mount_that_disappears_inside_the_cache_window_closes_the_gate -> fails at f1eeb42, passes now  (music-4)
+- test_a_live_drop_does_not_refuse_itself_once_fifty_rows_are_unlanded -> fails at f1eeb42, passes now  (regression-10)
+- test_a_database_that_cannot_answer_yields_a_token_not_an_exception -> fails at f1eeb42 (raises), passes now  (music-5)
+- test_a_result_whose_rescore_and_marker_both_fail_is_still_a_200 -> fails at f1eeb42 (500), passes now  (music-5)
+- test_a_stamp_the_mount_can_produce_is_parsed[Jane Smith|80 chars|jsmith] -> fails at f1eeb42, passes now  (music-6)
+- test_an_unparseable_stamp_is_still_not_a_credential[5 shapes] -> the refusal is unchanged  (music-6)
+- test_an_environment_variable_does_not_make_this_app_login_gated -> fails at f1eeb42 (True in a subprocess), passes now  (security-3)
+- test_bug_hunt_2026_09_11_music.py::test_the_page_only_says_running_when_the_companion_claimed_it -> its "press Run" assertion was updated to the take-over wording music-3 replaced it with; the 202 assertion is untouched.
+- Re-run after the fixes: the ten music/web test files that touch these modules (fleet ingest, the two ingest gates, ingest batches, the ingest UI, the mounted prefix, em dashes, plain words, both rescore files, the UI scan) - 214 passed.
+
+### OWED TO ANOTHER TERRITORY
+- comp-broll-music: `companion/src/ccsync_companion/broll_server.py`, the `/music/ingest/retry` handler: nothing is required, but note that the browser now sends `run_mode` with that body and always sends `staging_id` (possibly `""`). Both are already read (`body.get("run_mode")`, `str(body.get("staging_id") or "")`), so an unchanged companion behaves exactly as before; no deploy order between the two.
+- comp-broll-music: `companion/src/ccsync_companion/broll_server.py` / `broll_ingest.py`: the new `take over on this computer` button posts `/music/ingest/run` with `staging_id: ""`, which `run()` already accepts (the items come from the server's claim). No change owed unless that ever stops being true.
+- dash-api: `api.py` (security-1): when the suspended-account predicate is made importable, music's fleet routes (`music/web/musicweb/routes_fleet.py`, via `fleet_auth.require_fleet_caller`) must ask it too, the same as b-roll and ytdl. Not built here: the predicate does not exist yet and music must not grow a second notion of "suspended". Dashboard deploys first.
+
+Deploy order for everything above: the dashboard (which is what carries `music/web`) can deploy on its own - no companion change is needed, and a companion on 0.9.65..0.9.71 sees no difference.
+
+### Owner decisions
+- security-3: I removed the `MUSIC_LOGIN_GATED` hatch outright (the hunter's first suggestion) rather than splitting it into a second `MUSIC_TRUST_GATE_STAMP` flag. Nothing in the tree ever set it, only DEPLOY.md mentioned it, and one flag meaning two things is how it went wrong. A standalone deployment behind its own proxy now sets `MUSIC_INGEST_TOKEN` instead. Say the word and the split version is a ten-line change.
+- music-2: the retry button is hidden in the admin `all machines` scope, exactly as b-roll hides it. An admin who wants to retry another editor's failed tracks has to switch to that editor's machine, which is where the audio is.
+- music-6: the 64-character cap on an editor name in the stamp is gone (b-roll has none). The name is compared against the signed identity before it means anything, so its shape is not a boundary.
+
+## The YouTube downloader's disk gate, its claim door and its page copy (CR-263, 2026-09-11)
+
+The morning's CR-244 pass rebuilt this territory's free-space refusal, its
+claim compare-and-set and its house-style scan. Every finding below is the
+neighbour one of those fixes opened, plus the two coverage holes the same pass
+left behind.
+
+### CR-263a (ytdl-web-b-1) - ytdl-web-1's own guard left the stale number behind, so the press after the share came back said "free some space" - FIXED (`ytdl/web/ytdlweb/routes_api.py`)
+
+`_refuse_if_full` called the two new helpers in the wrong order:
+`_refuse_if_the_tree_is_gone(job)` RAISES, so on the `tree_missing` path
+`_forget_free_at(outdir)` never ran and the container-overlay figure measured
+while the bind mount was gone stayed in `_free_cache` for the rest of its 60 s
+TTL, keyed on `PROJECTS_ROOT` and therefore on every project. The admin
+remounts ten seconds later, the tree guard now passes, and the next press falls
+through to the ordinary `disk_full` 409 quoting the overlay's 2 GB on a share
+with 900 GB free: the exact sentence ytdl-web-1 exists to stop an editor from
+acting on, emitted by ytdl-web-1's own fix. Only the third press succeeded. The
+fix drops the cached number BEFORE the tree guard: a refusal of either shape is
+the one moment a fresh stat is worth its cost.
+
+### CR-263b (ytdl-web-b-2) - ytdl-web-4 removed the only free-space gate from exactly the jobs the NAS worker is the fallback executor for - FIXED (`ytdl/web/ytdlweb/worker.py`)
+
+ytdl-web-4 skips `_refuse_if_full` for a job created local while requester-first
+downloads are on, and that is right at the DOWNLOAD press: the editor's own disk
+is the one that will be written and the companion decides for itself at claim
+time. But a created-local job is only OFFERED. The tray is not running, the
+claim is refused on a template or sidecar skew or an out-of-scope quality, the
+machine is asleep, a lease expires and `_reclaim_local_job` takes the rest back
+- and this worker becomes the executor, into the NAS tree, with no free-space
+check anywhere in `worker.py`. For that whole class of job YTWEB-9 was undone: a
+full NAS back to N opaque per-clip ENOSPC failures with no sentence before a
+byte is fetched. `_no_room_note` now measures the tree once the grace has
+expired and it is settled that the server is the executor, and ends the job
+`failed` with the same one-sentence error the 409 carries. It fails OPEN on
+anything it cannot measure, the rows keep their `pending` state so RETRY FAILED
+re-queues exactly them, and it only runs for the jobs whose press skipped the
+check. The helpers are imported inside the function because `routes_api`
+imports `worker`.
+
+### CR-263c (regression-26) - the new claim refusal reached the page as "this computer declined the job (HTTP 503)" - FIXED (`ytdl/web/static/app.js`, `ytdl/web/ytdlweb/db.py`)
+
+`created_local` is fixed when the job is CREATED; the SPA re-reads its own
+"download on this computer" switch at dispatch time. An editor who ticks the box
+after the search was submitted therefore holds a job with `created_local = 0`
+and hands it to their companion anyway: since ytdl-web-5 the claim CAS refuses
+it, the fleet route answers 410 `created_widened`, the companion answers 503 and
+the page painted a bare HTTP code, which reads as a broken tray on a download
+that is going fine. `db.job_dict` now publishes `created_local` as a bool
+through the same tolerant reader the claim gate uses, and `dispatchLocal` takes
+it as a third argument: a job created on the server is never probed for, and the
+editor gets a sentence saying which switch decided it and when to tick it. An
+older server sends no field, which dispatches exactly as before.
+
+### CR-263d (ytdl-web-b-4) - the worker held the claim door open for 4 s per job `claim_download` can no longer grant - FIXED (`ytdl/web/ytdlweb/worker.py`)
+
+ytdl-web-5 made `created_local=0` a hard refusal at the CAS, but
+`_await_local_claim` still gated on `config.LOCAL_DOWNLOAD` alone. Every job
+created on the server cost `LOCAL_CLAIM_GRACE_SECONDS` of polled dead time on a
+single-threaded worker that also serves the queue, and logged that the requester
+had been given first refusal, which was no longer true of anybody. It now
+returns False immediately for a job no machine can claim.
+
+### CR-263e (ytdl-web-b-5) - `free_bytes_at` stopped caching its negative answer, so a hung mount was re-stat'd on every press - FIXED (`ytdl/web/ytdlweb/routes_api.py`)
+
+The pre-ytdl-web-6 version stored `(now, None)` when no ancestor answered; the
+refactor into `_answering_path` returned before the cache write. The docstring
+still said the cache exists because "a stat per request against a NAS mount that
+has gone away is a request that hangs, not one that answers" - precisely the
+case that had become uncached, at up to eight `disk_usage` calls per press. The
+miss is cached again.
+
+### CR-263f (ytdl-web-b-6) - `_refuse_if_the_tree_is_gone` compared a database label against on-disk bytes with no normaliser - FIXED (`ytdl/web/ytdlweb/routes_api.py`)
+
+The guard decided "the share is gone" from an exact-bytes stat of
+`PROJECTS_ROOT/<project_label>`. CR-90's rule applies here as everywhere: a
+label that reached this database from a Mac is NFD, the NAS writes NFC, and
+`is_dir()` answers False for a folder that is there - so a project with a
+decomposable accent in its name earned "the footage tree is not there, tell
+whoever runs the dashboard" when the real fault was a full disk, and the admin
+found nothing wrong. `_named_under_the_root` now walks the label segment by
+segment against the root's entries with both sides NFC-normalised, and only a
+miss there is a refusal. Safe in this one place because the path is compared,
+never opened, renamed or deleted, and it is reached only on the way to a refusal
+that has already been decided.
+
+### CR-263g (ytdl-web-b-3) - the ' -- ' scan added for ytdl-web-7 did not cover the SPA, where most editor-facing copy is written - FIXED (`ytdl/web/tests/test_no_em_dash.py`)
+
+The em-dash scan has three arms (HTML, JS, Python literals); the double-hyphen
+scan had one, the Python arm over six modules. `static/app.js` writes every
+toast, banner, status cell and hint on the page and was not scanned at all, nor
+was `static/index.html`, so the owner's 2026-08-18 rule was enforced for HTTP
+`detail` strings only and ytdl-web-7's own rationale ("nothing to stop a
+seventh") still held for the biggest surface. Both arms now exist, stripping
+comments the way the em-dash arms already do. Both files are clean today, so
+this is coverage, not a live violation.
+
+### Verification
+- `ytdl/web/tests/test_bug_hunt_2026_09_11b_ytdl_web.py::test_the_press_after_the_share_comes_back_is_measured_fresh` -> fails at f1eeb42 (409 disk_full on the second press), passes now
+- `...::test_the_server_will_not_execute_a_local_job_onto_a_full_tree` -> fails at f1eeb42 (the job ends `done` having fetched the clips onto a full tree), passes now
+- `...::test_a_server_job_with_room_still_downloads` -> the fail-open half
+- `...::test_the_double_hyphen_scan_covers_the_page_copy` -> fails at f1eeb42 (nothing in `test_no_em_dash.py` catches a doctored app.js or index.html), passes now
+- `...::test_a_job_created_on_the_server_costs_no_grace_period` -> fails at f1eeb42 (it waits out the grace), passes now
+- `...::test_a_job_created_local_still_gets_its_grace` -> the CR-34 half that must not regress
+- `...::test_an_unreadable_tree_is_stat_ed_once_a_minute_not_once_a_press` -> fails at f1eeb42 (16 stats for two presses), passes now
+- `...::test_a_decomposed_project_label_is_not_a_missing_tree` -> fails at f1eeb42 (`tree_missing` for a folder that is there), passes now; skipped on a filesystem that folds the two spellings
+- `...::test_the_job_says_whether_it_was_created_local` and `...::test_the_spa_skips_the_hand_off_for_a_job_created_on_the_server` -> fail at f1eeb42 (raw int / no guard in the source), pass now
+- `ytdl/web/tests/test_static_app.py::test_a_job_created_on_the_server_is_never_handed_to_this_computer` -> fails with the guard removed from app.js (the page probes 127.0.0.1 and toasts the HTTP code), passes now; the behavioural half of regression-26, run in the node harness
+- Neighbours re-run green as a check on the worker/db changes: `test_local_download.py`, `test_worker.py`, `test_bug_hunt_2026_09_11_ytdl_web.py`, `test_static_app.py`, `test_no_em_dash.py` (382 + 32 passed)
+
+### OWED TO ANOTHER TERRITORY
+- comp-ytdl-jobs: `companion/src/ccsync_companion/ytdl_executor.py`: `heartbeat()`: send the `X-CCSync-Machine` header that `routes_fleet._machine_of` accepts as its shape-independent fallback (the header arm has no caller anywhere today, so it is untested surface rather than a working fallback). Optional on both sides; either may deploy first.
+- dash-api / dash-mounts-ui (security-1): the ytdl mount's `_fleet_stamp` in `dashboard/src/ccsync_dashboard/ytdl.py` must ask the suspended-account predicate before `ytdlweb`'s fleet routes see the credential. `ytdlweb` has no notion of an account and should not grow one: the gate belongs in the dashboard half. Dashboard deploys first; no companion change.
+
+### Owner decisions
+- CR-263b ends a job that cannot fit as `failed` with a sentence, rather than pausing it or letting it fail clip by clip. That matches the circuit breaker's shape (rows stay pending, RETRY FAILED re-queues them) but it does mean a server-executed local job now has one more way to end without fetching anything.
+- CR-263c's skip is a toast rather than silence: an editor who ticked the box mid-session is told the server has it and why. The alternative, silently dispatching and letting the 410 happen, is what the finding is about.
+- CR-263f trusts a normalised match as evidence the share is present. It can only ever turn a `tree_missing` refusal back into the `disk_full` one it was masking, never the other way round.
+
+## The deploy script and the release tooling (CR-264, 2026-09-11)
+
+Nine findings from the 2026-09-11b hunt, all of them about the SAME DAY's
+work: the Timeline Cards snapshot deploy, the docs-disclosure fix and the
+-EmitKindExtras gate. The shape they share is a fix that removed one failure
+and left the opposite one invisible.
+
+### CR-264a (server-tools-b-1) - the cards snapshot shipped a commit and never said the checkout was dirty - FIXED (server/install_dashboard_app.py, tools/check_deploy_drift.ps1, tools/ship_gates.ps1)
+
+Until 2026-09-11 `[timeline_cards] src` shipped the operator's WORKING COPY,
+and the snapshot change made "half-finished edits cannot reach the NAS" true
+by construction. In doing so it inverted the failure: FINISHED edits that were
+never committed do not reach it either, and nothing anywhere compared the two.
+`git status --porcelain` was never run, and `cards_head_moved_on` compares the
+shipped commit against the ref's head - which are equal PRECISELY when the
+work is uncommitted. So an evening's Cards wave (both the 2026-09-10 and
+2026-09-11 waves are recorded as uncommitted) deployed, printed
+`Timeline Cards snapshot: <sha> (main)` with no qualifier, and
+`check_deploy_drift.ps1` then said `OK ... which is still its head` about a
+page that had not changed. Every channel said success.
+
+`cards_dirty_files()` now asks git what is modified, staged or untracked under
+the subtree; `export_cards_snapshot` prints a NOTE naming the count and the
+first files ("are therefore NOT in this deploy ... commit them first if they
+were meant to ship") whenever the export is the CHECKED-OUT commit - a deploy
+pinned with `--cards-commit` is a deliberate act and says nothing. The count
+travels in `info`, in `DEPLOYED_COMMIT` on the NAS (`dirty_at_export=`) and in
+the local record, and the drift doctor re-reads the live checkout: a clean
+head is `OK ... and that checkout is clean`, a dirty one is DRIFT naming how
+many files are not on the NAS.
+
+### CR-264b (server-tools-b-2) - the two rollout blocks bucket a NULL platform differently, so the ship gate refused on a phantom - FIXED on the gate side (tools/ship_gates.ps1)
+
+`machine_state.platform` is nullable (SCHEMA_V8 added it as a bare ALTER
+TABLE, and `record_report` keeps a NULL with COALESCE). `db.rollout_status`
+counts such a row as `windows`; the `_rollout_platforms_block` added on
+2026-09-11 reports the same row as `unknown`. `Get-KindExtrasVerdict` then
+found a platform with computers that no channel covers and refused
+`-EmitKindExtras` for ever: "1 unknown computer(s) have no current build on
+this dashboard, so their versions were never checked against 0.9.55" - a
+platform that does not exist, about a machine that WAS checked inside the
+windows channel, with no command anywhere that could clear it.
+
+`Get-RolloutPlatformName` now gives one spelling to the platform NAMES on the
+counting side (blank or `unknown` -> `windows`, the fallback the counting side
+has always used), so a NULL row cannot be a straggler of its own. The honest
+fix is on the dashboard, where one health body would stop naming two platforms
+for one row; it is recorded as OWED below, and this gate is safe without it.
+
+### CR-264c (server-tools-b-3) - an explicit --cards-src-dir deploy left the previous snapshot's record standing - FIXED (server/install_dashboard_app.py, tools/ship_gates.ps1, tools/check_deploy_drift.ps1)
+
+`~/.ccsync/state/cards_deployed.json` was written only when a commit snapshot
+shipped. The documented escape hatch (`--cards-src-dir`, `CARDS_SRC`) ships a
+working directory and produces no `info`, so the LAST snapshot's record
+survived untouched and the doctor - which has no NAS shell and reads nothing
+else - printed `OK /cards was shipped from main at <old sha>, which is still
+its head` about a tree that is nobody's commit. That is wave 4's own rule
+("an unverified check is NOT CHECKED, never OK") broken by the new code.
+
+`record_cards_deploy()` is now the ONE writer for every shape of cards deploy:
+a snapshot records the commit, the override records `commit=""` plus the
+directory it shipped, and a dry run records nothing. The doctor prints
+`? /cards was last shipped as the DIRECTORY <path>, not a commit ... NOT
+CHECKED, not OK` for the second. An absent commit can no longer be read as an
+old commit.
+
+### CR-264d (tests-2) - the eighth installer table test was in no local gate - FIXED (tools/run_all_tests.ps1)
+
+The installer row named its scripts one by one and aggregated exactly seven
+exit codes. `installer/tests` has held eight since the 2026-09-11 fix pass
+added `Test-BinDirLeftovers.ps1`, so the gate the owner runs before a ship
+never executed it: the uninstaller's leftover report was guarded only on a PR
+run, and not at all for a hotfix shipped with `ship.cmd` from this rig. The
+row now enumerates `installer\tests\Test-*.ps1` the way
+`.github/workflows/ci.yml` always has, prints each script's name as it runs,
+keeps the first non-zero exit for the one "installer" summary row, and FAILS
+if the directory is empty or missing. The comment in `CLAUDE.md` that says
+SEVEN and names them is now wrong a third time; it is OWED below.
+
+### CR-264e (server-tools-b-4) - the drift doctor asked every site about a feature most do not have - FIXED (tools/check_deploy_drift.ps1, tools/ship_gates.ps1)
+
+The TIMELINE CARDS section was unconditional, so every customer who did not
+buy Cards - and any base rig that has never run the deploy - got a permanent
+`? no cards deploy record ... NOT CHECKED, not OK` pointing at an internal
+runbook. The expensive outcome is not the chase, it is learning to ignore the
+doctor's `?` lines, which is how three other real checks report. The section
+is now skipped entirely when the site manifest names no `[timeline_cards]`
+src or enabled, there is no record and `CCSYNC_CARDS_RECORD` is unset.
+
+### CR-264f (server-tools-b-5) - the docs staging could still raise out of a function documented never to - FIXED (server/install_dashboard_app.py)
+
+`published_docs_module()` swallows every LOAD failure and documents None as
+"ship the required set", but the two attribute reads that follow were outside
+that guard: a module that imports cleanly and no longer defines
+`PUBLISHED_DOCS`/`PUBLISHED_TREES` raised `AttributeError` straight out of
+`_stage_docs_tree`. `ship_dashboard_docs`'s `try/finally` only removed the
+temp dir, so it escaped to `main()` at step 2a - AFTER the code swap - and
+skipped the container restart the swap requires, leaving the running container
+on the old inode with a traceback instead of the documented NOTE. The reads
+are `getattr(..., ())` now and the staging call is wrapped: a NOTE and False,
+as the docstring always promised.
+
+### CR-264g (server-tools-b-6) - a failed path comparison turned a subtree export into a whole-repo export - FIXED (server/install_dashboard_app.py)
+
+`cards_repo_for` swallowed `ValueError`/`OSError` from `relative_to` and
+returned an empty prefix, which is the value that means "this checkout IS the
+repository": `export_cards_snapshot` then skipped the subtree check and
+archived the ENTIRE repo. A `src` reached through a subst drive, a junction or
+a UNC spelling that `git rev-parse --show-toplevel` does not resolve to the
+same object would ship hundreds of MB of the wrong tree, fail the
+`handler.py` check, and tell the operator the package was "missing AT THAT
+COMMIT" - sending them to look at the wrong repository state. The two cases
+are told apart now: only a src that resolves to the root itself gets the empty
+prefix (and it is the empty string, not the `"."` the old code produced), and
+a comparison that fails is a whole-sentence refusal naming both paths.
+
+### CR-264h (server-tools-b-7) - ro,rslave reaches TrueNAS's middleware, and nothing offline can say it is accepted - MITIGATED (server/install_dashboard_app.py)
+
+The 2026-09-11 fix changed the snapshot bind from `host:/snapshots:ro` to
+`host:/snapshots:ro,rslave`. Unlike a `docker run -v`, this dict is POSTed to
+the TrueNAS middleware, which VALIDATES the volume spec before creating or
+updating the app; whether it accepts a propagation flag in the third field is
+not verifiable from this repo and was never verified live. It cannot be
+proved offline, so what it gets is a way through it at the NAS's keyboard:
+`CCSYNC_SNAPSHOT_RSLAVE=0` ships the plain `:ro` bind this deploy used before
+that date, and a refused create/update prints `snapshot_refusal_hint()` -
+two lines saying the flag is new, that the middleware validates it, and how
+to re-run without it. Nothing is retried automatically: a deploy POST is not
+a thing to repeat on a guess.
+
+### CR-264i (tests-5) - a new helper's unit test is not the hunter's scenario - PARTLY FIXED (server/tests/test_bug_hunt_2026_09_11b_server_tools.py)
+
+A large share of the 2026-09-11 tests fail on the old code only because the
+symbol is new, so a later change that KEEPS the helper and stops calling it
+(or calls it after the irreversible step) is invisible to them. The cards
+deploy record is the one in this territory: eleven tests drive
+`write_cards_deploy_record` and nothing asserted the deploy calls it. The
+record now has one writer, `record_cards_deploy`, and a test asserts `main()`
+goes through it and no longer carries the old call. The other two cases the
+lens names (the uninstaller's leftover report, the tray's persist-failed line)
+are other territories and are OWED below.
+
+### Verification
+- server/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_a_dirty_checkout_is_named_loudly_by_the_export -> fails at f1eeb42 (KeyError: dirty_at_export), passes now
+- server/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_a_clean_checkout_says_nothing -> fails at f1eeb42, passes now
+- tools/tests/test_bug_hunt_2026_09_11b_server_tools.py::TestTheCardsVerdict::test_an_uncommitted_checkout_is_not_ok -> fails at f1eeb42 (no Get-CardsDeployVerdict; the doctor printed OK), passes now
+- tools/tests/test_bug_hunt_2026_09_11b_server_tools.py::TestTheTwoRolloutBlocksAgreeOnANullPlatform::test_an_unknown_bucket_is_not_a_phantom_straggler -> fails at f1eeb42, passes now
+- server/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_an_explicit_directory_deploy_invalidates_the_previous_record -> fails at f1eeb42, passes now
+- server/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_a_dry_run_records_nothing -> fails at f1eeb42, passes now
+- tools/tests/test_bug_hunt_2026_09_11b_server_tools.py::TestTheCardsVerdict::test_a_directory_override_is_not_checked -> fails at f1eeb42, passes now
+- tools/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_the_installer_row_enumerates_its_directory -> fails at f1eeb42, passes now
+- tools/tests/test_bug_hunt_2026_09_11b_server_tools.py::TestTheCardsVerdict::test_a_site_without_timeline_cards_is_not_asked -> fails at f1eeb42, passes now
+- server/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_a_published_docs_module_without_the_constants_is_not_a_traceback -> fails at f1eeb42 (AttributeError), passes now
+- server/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_a_raising_staging_is_a_note_and_false -> fails at f1eeb42, passes now
+- server/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_a_src_that_does_not_sit_under_its_repo_root_is_refused -> fails at f1eeb42, passes now
+- server/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_the_propagation_flag_has_an_off_switch -> fails at f1eeb42, passes now
+- server/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_a_refused_deploy_names_the_off_switch -> fails at f1eeb42, passes now
+- server/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_the_deploy_writes_the_record_through_that_one_helper -> fails at f1eeb42, passes now
+- Also run green, unchanged in meaning: server/tests/test_cards_snapshot.py, server/tests/test_snapshot_mount.py, server/tests/test_bug_hunt_2026_09_11_server_tools.py, tools/tests/test_bug_hunt_2026_09_11_server_tools.py, tools/tests/test_release_scripts.py (two assertions in the last now read the doctor's wording out of ship_gates.ps1, where the decision moved).
+
+### OWED TO ANOTHER TERRITORY
+- dash-api: dashboard/src/ccsync_dashboard/api.py: `_rollout_platforms_block`: bucket a NULL/blank `machine_state.platform` the way `db.rollout_status` does (`COALESCE(platform,'windows')`, lower-cased) instead of `unknown`, so the two blocks of one /health body cannot name different platforms for the same row. Dashboard deploys first; the gate is already safe without it (CR-264b), and this removes the phantom at the source. Related to dash-api-5, already assigned there.
+- install-onboard: installer/tests/Test-BinDirLeftovers.ps1: add one case that drives the uninstaller's public path and asserts the leftover report is REPORTED, not merely computed (tests-5). No deploy ordering.
+- comp-ui: companion/tests/...: the same for `tray._persist_failed_line` - a test through the public entry point, so the helper being bypassed is visible (tests-5). No deploy ordering.
+- orchestrator (repo root, no territory): CLAUDE.md "Running tests": the installer row still says SEVEN scripts and names them. `tools\run_all_tests.ps1` enumerates `installer\tests\Test-*.ps1` now, so the comment should point at the enumeration rather than a count (`ls installer/tests/*.ps1` is still the list).
+
+### Owner decisions
+- server-tools-b-7: I did NOT add an automatic retry that drops `rslave` and re-POSTs. A refused create/update is a step to understand, not one to repeat on a guess, so what shipped is an off switch (`CCSYNC_SNAPSHOT_RSLAVE=0`) and two lines of advice printed on a failed deploy. If you would rather the deploy fell back by itself on a refusal whose message names the volume, say so - it is a small change on top.
+- The dirty-checkout NOTE is advisory and never fails the deploy: shipping the last commit while you hold uncommitted work is a legitimate thing to do, and a deploy that refused it would be one more thing to override on a Cards evening. It is the doctor's OK line that was changed to DRIFT, because that is the line that told you nothing was owed.
+- `Get-RolloutPlatformName` maps a blank/`unknown` platform to `windows` rather than treating it as covered by any channel: a Mac-only fleet with a NULL row would then be reported as an uncovered `windows` bucket, which is true and visible, instead of silently waved through.
+
+### Hand-off wave
+
+Three OWED lines routed here from wave 1 (`HANDOFFS.md`, `## server-tools`).
+All three are vendor-side or CI-side: nothing in this section changes a byte
+that reaches an editor's machine, and no deploy ordering applies.
+
+#### CR-264j (dash-core-6) - the bind-mode deploy's required docs set was a stale copy of the policy - FIXED (server/install_dashboard_app.py)
+
+`SHIPPED_DOCS` is a hand-written copy of `published_docs.REQUIRED_DOCS` -
+server/ cannot import the dashboard package (its own venv; that is why
+`published_docs_module()` loads by path), so the two lists cannot be one
+object. dash-core promoted `EDITOR_SETUP.md` to REQUIRED on the image and
+bundler side, because the Dockerfile's `COPY docs/HOW_IT_WORKS.md
+docs/EDITOR_SETUP.md` fails the build when the file is absent. This list still
+said `("HOW_IT_WORKS.md",)`, so the one deploy path that is neither the image
+nor an OTA bundle would have shipped a thinner /help and printed nothing: the
+same "an unverified check is not OK" direction wave 4 exists to close. The
+required set is now both documents, and the test reads `REQUIRED_DOCS` out of
+`published_docs.py` rather than restating it, so the next promotion fails here
+by name instead of drifting.
+
+#### CR-264k (install-onboard-1, second half) - the only macOS-only suite ran on no Mac - FIXED (.github/workflows/ci.yml)
+
+The `macos` job ran the companion suite and the release dry run. The
+onboarding suite - whose subject IS macOS-only behaviour: the firmlink home
+guard, `macos_bootstrap.sh`'s argv, the launchd labels - ran only on the
+Windows runners, where `os.path` is `ntpath` and `ntpath.ismount` never reads
+a mount table, so the tests that matter most there SKIPPED everywhere in the
+world. One of them says exactly that in its own skip reason. The job now
+installs `onboarding/requirements.lock` with `--require-hashes` into
+`onboarding/.venv` (`bin/python`, not `Scripts/`) and runs the suite from the
+component directory, writing `junit-onboarding-macos.xml` so it cannot collide
+with the Windows job's `junit-onboarding.xml` in the artefact namespace. The
+lock is added to that job's pip cache key.
+
+#### CR-264l (dash-release-jobs, the cause behind CR-260d) - a manifest could put an unclaimable platform into a SIGNED record - FIXED (tools/publish_feed.py)
+
+`parse_args` guards `--platform` with `choices=sign_release.PLATFORMS`, and
+`_apply_manifest` then assigns `args.platform` from the manifest AFTER argparse
+has run - the one path into the value that no guard covers. The platform is
+matched EXACTLY by every reader (the companion's channel pick, the feed's
+`current` key, the per-platform artefact directory), so a manifest saying
+`Windows`, `darwin` or `osx` produced a record that is published, verifiable,
+signed and offered to no machine on earth: the shape CR-260d's rejection was
+about. The manifest value is now folded to lower case where it enters, and one
+that is still not a platform is a refusal (`EXIT_CONDEMNED`) naming the value
+and the three canonical spellings, before anything is signed. `--platform`
+passed explicitly is unchanged.
+
+### Verification (hand-off wave)
+- server/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_the_required_docs_set_matches_the_dashboard_policy -> fails with SHIPPED_DOCS reverted to ("HOW_IT_WORKS.md",), passes now
+- server/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_a_missing_editor_setup_refuses_the_docs_ship -> fails with SHIPPED_DOCS reverted, passes now
+- tools/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_the_macos_job_runs_the_onboarding_suite -> fails at f1eeb42, passes now
+- tools/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_the_two_onboarding_junit_files_do_not_collide -> fails at f1eeb42, passes now
+- tools/tests/test_bug_hunt_2026_09_11b_server_tools.py::test_a_manifest_platform_is_folded_and_re_validated -> fails at f1eeb42 (args.platform == "Windows", no refusal), passes now
+- Also run green: server/tests/test_bug_hunt_2026_09_11b_server_tools.py (14), server/tests/test_image_mode.py (40, the two docs-staging cases), tools/tests/test_bug_hunt_2026_09_11b_server_tools.py (14), tools/tests/test_publish_feed.py, tools/tests/test_publish_latest.py.
+- `test_a_raising_staging_is_a_note_and_false` (wave 1) now builds its fixture from `SHIPPED_DOCS` instead of naming HOW_IT_WORKS.md: with two required documents it was refusing at the missing-file check and never reaching the staging it is about.
+- ci.yml parses as YAML and the macos job's step list reads: companion install, rclone, companion pytest, licence gate, onboarding install, onboarding pytest, release dry run, upload junit.
+
+### OWED TO ANOTHER TERRITORY (hand-off wave)
+- none. The three routed lines are done.
+
+### Owner decisions (hand-off wave)
+- The onboarding suite has never executed on a Mac, so its first green run is the CI run after this lands. It already carries `sys.platform != "win32"` skipifs written in anticipation (`test_cleanup_steps.py` even names a darwin runner), so the expectation is a clean run with the firmlink tests finally EXECUTING rather than skipping - but if that job comes back red, it is new information about the suite, not about the wizard, and the step can be dropped again in one edit.
+- A non-canonical manifest platform is a refusal, not a fold-and-warn: publishing is the irreversible half (the record is signed), and a manifest whose platform is not one of three spellings is a broken builder, which is a thing to look at rather than to guess about.
+
+## Installers and the first-run wizard (CR-265, 2026-09-11)
+
+The hunt of the 2026-09-11 fix pass found six defects in this territory: one
+regression test that could not fail on the bug it was written for, one
+half-landed cache fallback, and four pieces of closing copy that tell an
+editor the opposite of what happened. All six are fixed.
+
+### CR-265a (tests-1) - the macOS mount-guard regression test passed against the bug on every runner it runs on - FIXED (onboarding/tests/test_bug_hunt_2026_09_11_install_onboard.py)
+
+CR-248's headline fix (the frozen wizard refused from Downloads, the Desktop
+and /Applications, because `os.path.ismount("/Users")` is True on a volume-group
+Mac) was real, and its regression test was not. The tests drive the shipped
+guard with `os.stat` / `os.lstat` swapped for a firmlink simulation, which is
+the right idea, but the PRE-FIX guard reached the mount table through
+`os.path.ismount` - and on the Windows dev box and the Windows CI job, the only
+runners this suite has, `os.path` is `ntpath`, whose `ismount` never looks at
+`st_dev` and answers False for every POSIX path. The old code therefore
+returned "not refused" there, so the whole file was green against the shipped
+bug; reverting only `steps.py` gave 8 failed, 12 passed, and the 12 included
+every test about the home folder. The canary written expressly to stop this
+probed `posixpath.ismount`, not the callable the code used, so it was green
+too.
+
+The fix puts the macOS semantics back under the mechanism a revert would
+restore: `_guard_under_firmlinks` now also substitutes `posixpath.ismount` for
+`steps._default_is_mount` (which the shipped guard does not call at all, so
+nothing under test changes), `_FakeStat` carries an `st_ino` so a real
+posix ismount walk resolves, and a new
+`test_the_pre_fix_walk_refuses_what_the_shipped_guard_allows` keeps the pre-fix
+darwin branch verbatim in the test file and asserts the two verdicts DIFFER
+under the same simulation - a regression test that cannot state the bug cannot
+fail on it. The probe of the module's own `_default_is_mount` is kept as a
+separate test that SAYS OUT LOUD where it cannot run: it is
+`skipif(os.path is not posixpath)` with a reason naming ntpath, this suite's
+Windows-only runners, and the CI gap. Reverting `steps.py` to 40f931a now
+fails 19 tests including all four home-folder cases.
+
+The second half of the finding, that the onboarding suite is the only suite
+whose subject is macOS-only behaviour and the only one that never runs on the
+macOS CI job, is OWED below: `.github/workflows/ci.yml` is not this
+territory's.
+
+### CR-265b (install-onboard-1) - a stale, unbounded, unidentified cache could override a manifest this run fetched - FIXED (onboarding/steps.py)
+
+`site_manifest_value` fell back to `site_mod.cached_site()` whenever the value
+in the passed manifest was empty, not only when the fetch had failed. Since
+`site.normalise` fills every absent string key with `""`, a manifest this run
+fetched successfully from a dashboard that publishes no `tree_name` silently
+took the tree name out of a cache written by some earlier - possibly
+different - deployment while `canonical_prefix` came from this run: a mixed
+pair from two sources, put on argv as `-CanonicalPrefix` / `-TreeName`, where
+`windows_bootstrap.ps1` only calls `Get-SiteValue` when the flag is empty. The
+cache therefore beat the script's own live fetch, which happens later in the
+install once Tailscale is up and is exactly the fetch most likely to succeed
+when the wizard's did not. The cache itself is a single unkeyed
+`~/.ccsync/state/site.json`, was read with `max_age_seconds=None` (any age),
+and was never checked against the `dashboard_url` it carries - so a machine
+re-onboarded from deployment A (`Q:\`) to deployment B (`P:\`) with one timed
+out `GET /api/v1/site` got A's letter, A's tree name, a `CCSync-SubstQ` logon
+task and a `CCSync_Q` share, none of it correctable except by hand.
+
+Now: the cache answers for a MISSING MANIFEST, never for a missing key; the
+read is bounded by `SITE_CACHE_MAX_AGE_SECONDS` (30 days); and a cached
+manifest whose `dashboard_url` host differs from the URL this run signed in to
+is ignored. Only a PROVEN mismatch refuses - a dashboard that predates the key
+publishes no `dashboard_url`, and refusing there would undo install-onboard-2,
+whose whole point is that the cache answers when the fetch failed.
+`run_bootstrap` passes the `dashboard_url` it was given.
+
+### CR-265c (install-onboard-5) - "8443 means TLS" was one deployment's Funnel port applied to every customer's hostname - FIXED (onboarding/steps.py)
+
+CR-248 correctly stopped guessing `http://` for `.ts.net` names, but it also
+promoted ANY non-numeric, non-local hostname on port 8443 to `https://`,
+because 8443 is this studio's client-share Funnel port. That is a property of
+one operator's Tailscale Serve configuration, not of the number, and the
+wizard is vendor software: an admin typing `dash.studio.internal:8443` for a
+plain-HTTP container port behind their own proxy got `https://` written into
+the field, into config.toml and into the companion's loopback origin
+allow-list - the identical failure the finding described, pointing the other
+way. 443 stays https everywhere and a bare name stays https; 8443 now implies
+TLS only where Serve terminates it, which is a `.ts.net` name. The CR-248
+parametrised case that pinned `("dash.example.com:8443", "https://...")` as
+intended behaviour is inverted with the reason beside it.
+
+### CR-265d (install-onboard-2) - the closing advice on a failed uninstall contradicted itself - FIXED (installer/windows_uninstall.ps1)
+
+On the leftovers path the uninstaller printed "CCSync uninstall NOT complete:
+... run this uninstaller again from Apps & features" and then, four lines
+later and unconditionally, "this uninstaller is still on disk at <path> (it
+was running). Delete that file, and the folder it is in, whenever you like."
+Following the second line deletes the only retry path the first one just
+named, and "the folder it is in" is `$BinDir`, which still holds the program
+files - the OPS-17 "a button that fails" shape CR-248 was written to avoid.
+The leftovers case is not rare: PowerShell 5.1's `Remove-Item -Recurse`
+deletes NOTHING AT ALL when one child is locked, so a partial failure leaves
+the entire bin dir, not one file. The whole closing paragraph is now
+`Get-UninstallClosingAdvice`, which returns Kind/Text lines the body prints:
+on the leftovers path the self-on-disk notice becomes "LEAVE this uninstaller
+where it is ... it is what Apps & features runs when you retry", and the
+healthy path keeps the OPS-17 wording unchanged.
+
+### CR-265e (install-onboard-3) - the macOS uninstaller claimed "removed" and "complete" over a removal that did not happen - FIXED (installer/macos_uninstall.sh)
+
+install-onboard-3 was fixed on Windows only. `rm -rf "$CCSYNC_LOCAL"` was
+followed unconditionally by `step "removed ... (binaries and the Syncthing
+identity)"` and the run ended `CCSync uninstall complete`, while nine lines
+later the same script already knew better (`if [ -d "$BIN_DIR" ]; then warn`).
+On a Mac where part of `~/.local/ccsync` is root-owned (a sudo-run install, a
+`--companion-file` copied with sudo) both sentences print in the same run, the
+reassuring one first, and the editor reinstalls on top of a half-removed tree
+whose old Syncthing identity then fights the new device ID on lane C. The
+removal is `remove_local_tree` now: it re-tests the directory after the `rm
+-rf`, says "removed" only when it is gone and "could NOT remove ... sudo rm -rf"
+when it is not, and its exit status sets `REMOVAL_INCOMPLETE`, which the
+`$BIN_DIR` warn also sets and which `closing_verdict` gates the closing line
+on. The Syncthing-identity warning is only printed when the removal really
+took it.
+
+### CR-265f (install-onboard-4) - a failed Mac run can leave no companion autostart at all, and the warning block did not say so - FIXED (installer/macos_bootstrap.sh)
+
+CR-248 hoisted `retire_legacy_agent "$COMPANION_PLIST_LEGACY"` above the
+`COMPANION_MISSING` branch, which is right - the legacy agent holding loopback
+8899 is what breaks the next successful install - but it means the retirement
+now also runs on the failure path, and that path then removes our own plist
+too. A Mac whose legacy agent was starting a working companion at some other
+path (`--companion-path` can move it) ends a failed run with both agents gone,
+stops syncing at the next logon, and the unmissable warning block explains
+only that the sync app is not installed. `retire_legacy_agent` now records
+whether it actually deleted anything (`LEGACY_AGENT_RETIRED`), and the
+`COMPANION_MISSING` block says, when it did, that this Mac will not start the
+sync app at logon at all until an install succeeds - not even the older copy
+it used to start. The delete stays unconditional: the alternative (skip when
+the legacy plist names a program that exists) re-opens the port-8899 fight.
+
+### Verification
+- `onboarding/tests/test_bug_hunt_2026_09_11_install_onboard.py::test_the_pre_fix_walk_refuses_what_the_shipped_guard_allows` -> new; with `steps.py` reverted to 40f931a the file now fails 8 of 8 mount-guard cases (was: all 8 green against the bug), passes now  (tests-1)
+- `onboarding/tests/test_bug_hunt_2026_09_11b_install_onboard.py::test_a_fetched_manifest_is_never_completed_from_the_cache` (and `test_a_cache_from_another_dashboard_is_ignored`, `test_a_cache_from_the_same_dashboard_is_still_used`, `test_a_cache_that_names_no_dashboard_is_still_used`, `test_the_cache_read_is_bounded`, `test_run_bootstrap_passes_the_url_it_signed_in_to`, `test_an_unreadable_cache_is_still_not_fatal`) -> fail at f1eeb42, pass now  (install-onboard-1)
+- `onboarding/tests/test_bug_hunt_2026_09_11b_install_onboard.py::test_8443_means_tls_only_where_this_fleet_publishes_it[dash.studio.internal:8443-http://dash.studio.internal:8443]` -> fails at f1eeb42, passes now  (install-onboard-5)
+- `installer/tests/Test-BinDirLeftovers.ps1` ("the leftovers path does not tell the editor to delete its own retry path", plus the AST check that the notice is not printed outside `Get-UninstallClosingAdvice`) -> fails at f1eeb42 naming the line, passes now  (install-onboard-2)
+- `installer/tests/test_macos_site_values.sh` ("a removal that did not happen says so", "an incomplete uninstall does not end complete", and the scan for `rm -rf` followed by `step "removed`) -> fails at f1eeb42, passes now  (install-onboard-3)
+- `installer/tests/test_macos_site_values.sh` ("retiring a legacy plist deletes it and sets the flag", "the COMPANION_MISSING warning block says when the old autostart was removed too") -> fails at f1eeb42, passes now  (install-onboard-4)
+
+Run: `cd onboarding; python -m pytest tests/test_bug_hunt_2026_09_11b_install_onboard.py tests/test_bug_hunt_2026_09_11_install_onboard.py tests/test_site_prefix_handoff.py -q` -> 58 passed, 1 skipped (the skip is the POSIX-only canary, with its reason printed).
+`powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-BinDirLeftovers.ps1` and `...\Test-UninstallEntry.ps1` -> pass.
+`bash installer/tests/test_macos_site_values.sh` -> pass. No installer, uninstaller or upgrade script was executed against this machine.
+
+### OWED TO ANOTHER TERRITORY
+- server-tools: `.github/workflows/ci.yml`: the `macos` job (lines ~464-537, which today runs the COMPANION suite only): add the onboarding suite (`cd onboarding && python -m pytest tests -q`). It is the only suite whose subject is macOS-only behaviour and the only one that never runs on a Mac; the skipped canary in `test_bug_hunt_2026_09_11_install_onboard.py` names this gap in its skip reason and would then run. No deploy ordering.
+- server-tools: `tools/run_all_tests.ps1`: the installer row (lines ~161-203) still names seven scripts and `ls installer/tests/*.ps1` is eight - this is tests-2, already assigned there. `Test-BinDirLeftovers.ps1` now carries the install-onboard-2 cases as well, so the local gate misses those too until that row enumerates the directory.
+
+### Owner decisions
+- `SITE_CACHE_MAX_AGE_SECONDS` is 30 days. The cache is rewritten by whoever last talked to the dashboard, so on a machine being re-onboarded it is normally hours old; a month is generous and only affects a wizard whose own fetch failed. Shorter is safer, longer is friendlier to a machine that has been off for a season.
+- install-onboard-5: `dash.example.com:8443` now normalises to `http://`, reversing a case CR-248 pinned as intended. 8443 is a conventional TLS port in the wider world, so this is a judgement call: the argument for it is that this fleet's 8443 is a Funnel port, every other deployment's is whatever their proxy does, and a typed `https://` prefix is always honoured. If you would rather guess https there, the one-line change is in `normalise_dashboard_url` and the case is in both test files.
+- The macOS uninstaller / bootstrap behaviour tests were added to `installer/tests/test_macos_site_values.sh` rather than a new file, because a new `.sh` would be run by neither the local gate nor CI (both enumerate `*.ps1` only and name that one bash file). Its closing line now says "macos_bootstrap.sh / macos_uninstall.sh"; renaming the file would need the two gate references changed and was left alone.
+
+### Hand-off wave
+
+#### CR-265g (tests-5) - the leftover report was tested as a computation, never as a report - FIXED (`installer/tests/Test-BinDirLeftovers.ps1`)
+
+tests-5 named this file as the clearest case of the pass's test shape: it
+extracts `Get-BinDirLeftovers` with the PowerShell parser, tests it
+thoroughly, and checks the delete/unregister ORDER with a line-number regex
+over the script text - so a refactor that keeps the function, keeps the call
+and stops PRINTING the answer leaves every case green while the uninstaller
+silently reports success over a bin dir full of program files. That is the
+install-onboard-3 defect exactly, re-arriving through the door the tests do
+not watch.
+
+Two cases now execute the uninstaller's OWN statements. They are taken from
+its AST (the `if` that deletes the bin dir and re-reads it, and the `foreach`
+that prints `Get-UninstallClosingAdvice`), so they cannot drift from what
+runs, and they run in a child scope where `Write-Step`/`Write-Skip`/
+`Write-Warn2` are captured and `Remove-Item` is a no-op - which is PowerShell
+5.1's real leftovers case, one locked child and the whole recursive delete
+does nothing. The assertions are on what an editor would see: the locked
+exe's full path, the "run this uninstaller again from Apps & features" retry
+line, no "removed program binaries" claim, and the closing "NOT complete"
+line arriving as a WARNING with its count. A helper for the AST lookup
+(`Get-ScriptStatement`) fails loudly if either statement stops existing,
+rather than silently testing nothing.
+
+### Verification (hand-off wave)
+
+`powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-BinDirLeftovers.ps1`
+-> 23 PASS, exit 0 (was 17 cases).
+
+- "the leftover is PRINTED by the uninstaller's own statements, not just computed" -> FAILS when the `Write-Warn2 "    $leftover"` inside the script's own loop is replaced with a no-op while everything else stays (mutation run, measured); passes on the real script.
+- "the script's own block finds the locked exe", "the printed report names the retry path", "a run with leftovers never claims the binaries were removed", "the closing advice reaches the editor as a WARNING on the leftovers path", "the closing advice names how many files are left" -> pass.
+- `windows_uninstall.ps1` is NOT changed by this wave (the mutation was reverted byte for byte); the script parses.
+
+### OWED TO ANOTHER TERRITORY (hand-off wave)
+
+- none new. The wave-1 OWED line still stands: `tools/run_all_tests.ps1`'s
+  installer row must enumerate `installer\tests\Test-*.ps1` (tests-2,
+  server-tools), or the local gate runs neither these cases nor the
+  install-onboard-2 ones.
+
+### Owner decisions (hand-off wave)
+
+- The uninstaller itself is driven statement by statement rather than end to
+  end. Running `windows_uninstall.ps1` for real on the gate machine would
+  stop the companion, remove the Run key, unmap the tree drive and delete
+  the SMB share on the base rig; a sandboxed whole-script run would need
+  parameters the script does not take. The AST lookup is the closest thing
+  to the public path that is safe here, and it fails loudly rather than
+  quietly if the statements move.
+
+## The live dashboard's open notices, 2026-09-11 (CR-266)
+
+Not from the hunt reports: from the live dashboard's own PROBLEMS THE SERVER
+FOUND panel, read on 2026-09-11. One row was a `server_error` from the Claude
+Code SET UP wizard whose traceback no longer existed anywhere, because the
+notice sent the reader to a log that a container recreate had already deleted:
+that is one finding about the route that raised (CR-266a) and one about the
+notice that could not describe it (CR-266b). Twenty more rows were
+`invariant_broken` about a folder somebody had moved on the NAS two days
+earlier, which the check could no longer see to re-raise and nothing was in a
+position to close (CR-266c). The pattern behind all three is the same one the
+hunt found everywhere: a diagnosis that describes evidence the deployment does
+not keep.
+
+### CR-266a (live notice, 2026-09-10T06:55Z) - the SET UP wizard's 500 became a sentence, and the check that could raise stopped raising - FIXED (`cli_tools.py`)
+
+The live dashboard recorded exactly one `server_error` notice,
+`/api/v1/admin/ai-providers/claude_code/install (TypeError)`, at
+2026-09-10T06:55Z, when the admin clicked the Claude Code SET UP wizard. The
+traceback is gone: in image mode `/data` survives a recreate and the
+container's log does not (CR-266b covers that half, in `notices.py`). So this
+entry is honest about what it found and what it fixed.
+
+**The exact line was not identified, and this entry does not claim it was.**
+Every shape the two publishers' APIs can answer with was driven through
+`_install_claude` and `_install_codex` behind a stubbed
+`release_feed.open_https_stream`: a `/latest` that is `null`, a manifest that
+is `null` or a JSON list, `platforms: null`, a platform entry that is `null`,
+a `checksum` that is a number, a `size` that is `null` / a string / a dict, a
+`binary` that is `null` or a number, a release whose `assets` is `null`, an
+asset whose `name` is a number, an asset dict that is `null`, a tag with no
+version in it, and a `SHA256SUMS` body that is not text. Every one of them is
+already a `ToolError` refusal, because `claude_platform_entry`,
+`codex_release`, `codex_asset`, `codex_version` and `parse_sha256sums` coerce
+with `str()` / guarded `int()` before they use anything. And they all run in
+the install THREAD, whose `except Exception` turns any failure into a status
+field: a publisher shape can therefore never be the 500 the notice recorded.
+The request thread's own code (`install_supported`, the lock, `_write_inflight`,
+`install_status`) was then driven through the real route with the admin-session
+fixtures against a wrong-typed `state.json` / `install.json`, a missing data
+directory and a polluted status dict, and none of those 500 either.
+
+What WAS wrong, and is fixed:
+
+1. `install_supported`'s docstring says "Never raises" and both its callers
+   depend on it - the wizard's render, and `start_install` on the request
+   thread of the route the notice named - but it caught `UnsupportedPlatform`
+   only. `Path(settings.db_path)` on a settings object with no path, an
+   `os.access` the kernel refuses, or a `dashboard_update.space_refusal`
+   whose signature has drifted (a TypeError raised AT the call site, which
+   that function's own broad try/except cannot see) all left the route as a
+   bare 500. The room half moved into `_install_room` and the contract is now
+   enforced: a check that cannot COMPLETE is a refusal naming the exception
+   type, never an accidental yes, and it points at the "type its full path"
+   fallback. This is a reproduced TypeError, not a hypothetical one.
+2. The route had no last resort. Whatever raised on 2026-09-10, the admin got
+   `{"detail": "internal error"}` from `app.py`'s generic handler, and there
+   was nothing else to read. `POST` and `DELETE` on
+   `/admin/ai-providers/{name}/install` now answer 503 with a sentence that
+   names the tool as the page names it, names the exception TYPE, says nothing
+   was left half-installed and names the fallback. The exception's own message
+   never crosses (this module handles sign-in transcripts and download URLs).
+   `DELETE` gets the same treatment because `record_server_error` keys on
+   (path, exception class) and never carried the method, so the remove route -
+   an `rmtree` of a 313 MB tree plus `cancel_signin`, in a threadpool, where
+   an exception DOES reach the route - is as likely an origin as the POST.
+   `ToolError` stays 400 and `ToolBusy` stays 409, and the `server_error`
+   notice is still recorded (by the route now, best effort, because answering
+   503 takes the request out of the handler that used to write it).
+3. The install thread's own crash status read `TypeError while installing
+   claude_code`: a Python class name and the tool's internal name, with
+   nothing about whether anything was installed. It now names the tool's
+   label, the STEP it died on (the one piece of a lost traceback the status
+   still holds), that nothing was installed and what to do instead.
+
+The checksum CONDITION (trust-model-7) is untouched and re-pinned by a test:
+a Codex release that publishes no checksum for the asset is still refused and
+nothing is installed unverified.
+
+### CR-266b - a server error pointed at a log the container had thrown away - FIXED (notices.py, crash_report.py)
+
+`notices.record_server_error` stored the exception's CLASS and nothing else,
+deliberately: the message is the one string that could hold a path, a query or
+a credential fragment, and the body said "the full error is in the server log
+with this same path" instead. That sentence is not true of the deployment this
+server actually runs. In image mode `/data` survives a container recreate and
+the container's log does not, so the one fault the live dashboard recorded on
+2026-09-10 ("/api/v1/admin/ai-providers/claude_code/install (TypeError)",
+once, 06:55Z) has no surviving account of itself: no type beyond TypeError, no
+message, no line. A notice that names a fault and then points at nothing is a
+log line with better placement, which is the thing this whole module was
+written to stop being.
+
+The body now carries `notices.error_detail(exc)` after its own sentence: the
+exception type, its message, and the innermost three frames as
+`ccsync_dashboard/cli_tools.py:412: install_tool <- ...`, repo-relative so the
+container's directory layout does not reach the home page. The mitigations are
+the pair the omission was standing in for: every character goes through
+`crash_report.redact` first, and the detail is bounded
+(`SERVER_ERROR_DETAIL_CHARS = 1500`, with the message capped separately at 700
+so a five-thousand-character `repr` cannot spend the budget and leave the
+frames out). `crash_report._REDACTIONS` gained the three key shapes that turn
+up BARE in an exception message with no `key=` in front of them to be
+recognised: `sk-`/`sk-ant-`/`sk-proj-`, a `cce1.` fleet token, and a GitHub
+`ghp_`/`gho_` token - all three reachable from exactly the route CR-266a is
+about. The subject is untouched, because it is the `(kind, subject)` de-dup
+key, and the occurrence count still reads back out of the previous body
+because the detail is appended AFTER the counted sentence, never in front of
+it. `error_detail` never raises: it is called from the 500 handler.
+
+The daily digest already quotes notice bodies (`alerts._check_notices` ->
+`notice_error` -> `_finding_body`), so the mail an owner reads at 07:00 now
+holds the same three facts the panel does; that path is pinned by a test
+rather than changed. `docs/SELF_DIAGNOSIS.md` section 3's description of the
+kind was updated in the same change.
+
+### CR-266c - twenty notices about a folder that had been moved rode the digest for ever - FIXED (invariants.py)
+
+Twenty open `invariant_broken` notices, `proxy_pairs:
+2026-creator-profiles-season-1/Interviewees/Interviews/Gold Card Meetup/Proxy/
+<clip>.mp4`, first_seen 2026-09-09. The folder had been moved to
+`Projects/2026/FF5/Talent Gap/Interviewees/Gold Card Meetup/`, where the
+originals sit beside the Proxy folder: nothing is wrong on the NAS, and
+nothing on the server could say so. `run_cycle` only ever names the subjects a
+pass SAW, and a subject the check can no longer see is neither re-raised nor
+cleared. Twenty is `db.INVARIANT_MAX_SUBJECTS` exactly, which is the other
+half: while ANY pass of that invariant is capped - and a fleet with more than
+twenty orphaned proxies caps every pass - the truncated-pass keep-list (CR-241,
+made durable by CR-256d's `_TRUNCATED_CARRY` earlier in this same wave) holds
+every subject the ledger ever remembered, so those rows stayed open for the
+life of the container and rode the daily digest with it.
+
+The fix is that the cap is a REPORTING cap, never a knowledge cap: a per-path
+check walks the whole tree and then hands over the first twenty. `Outcome`
+carries a new `found` - every broken subject NAME this pass saw, names only,
+bounded at `MAX_FOUND_SUBJECTS = 2000`, pass-local and never stored - and
+`invariants.broken()` fills it. A truncated pass that HAS a `found` set is
+authoritative: the keep-list is exactly that set, so the twenty the cap could
+not report stay open (CR-241's outcome, unchanged) and a subject that has
+VANISHED from it is closed like any other cleared subject. An outcome that
+cannot name its whole set (`Outcome(..., truncated=True)` built by hand, or a
+set past the bound) falls back to `_TRUNCATED_CARRY` exactly as CR-256d left
+it, and a pass that reached no verdict at all still clears nothing: NOT
+CHECKED is not OK (bug-hunt-2026-09-03 dash-collector-2). Both directions are
+pinned by their own test.
+
+### Verification
+
+CR-266a, in `dashboard/tests/test_bug_hunt_2026_09_11b_cr266a_cli_tools.py`
+(15 passed), run with the dashboard venv:
+- `tests/test_bug_hunt_2026_09_11b_cr266a_cli_tools.py::test_a_space_check_that_raises_is_a_refusal_not_a_traceback` -> fails at f1eeb42 (TypeError escapes), passes now
+- `...::test_a_data_volume_with_no_path_is_a_refusal_not_a_traceback` -> fails at f1eeb42, passes now
+- `...::test_the_install_route_refuses_instead_of_500ing_when_the_room_check_breaks` -> fails at f1eeb42 (the route raises TypeError, i.e. a 500), passes now as a 400 naming the cause
+- `...::test_an_unforeseen_fault_is_a_503_with_a_sentence` -> fails at f1eeb42, passes now
+- `...::test_a_failing_remove_on_the_same_path_answers_the_same_way` -> fails at f1eeb42, passes now
+- `...::test_an_unforeseen_crash_in_the_worker_names_the_tool_and_the_step` -> fails at f1eeb42, passes now
+- Guards, not regressions (they pass either way, and are here so the publisher-shape half and the checksum CONDITION stay that way): `test_a_refusal_is_still_a_400_and_a_busy_install_still_a_409`, the seven `test_a_wrong_typed_publisher_manifest_is_a_refusal_never_a_typeerror` cases, `test_a_codex_release_with_no_published_checksum_is_still_refused`
+- `tests/test_cli_tools.py` (the module's own suite, same territory): 120 passed, unchanged
+
+CR-266b and CR-266c, all in
+`dashboard/tests/test_bug_hunt_2026_09_11b_cr266_live_notices.py`, run
+with the dashboard venv. "fails before" for the CR-266c tests means against
+the working tree WITH CR-256d and without this hunk (the carry is uncommitted,
+so f1eeb42 alone cannot show the shape):
+- `test_a_server_error_notice_carries_the_exception_and_its_frames` -> fails at f1eeb42, passes now
+- `test_the_counter_still_reads_back_out_of_the_longer_body` -> pins the counted-sentence-first ordering
+- `test_only_three_frames_and_a_bounded_body` -> fails at f1eeb42, passes now
+- `test_a_secret_in_the_exception_message_is_masked` -> fails at f1eeb42, passes now
+- `test_an_exception_with_no_traceback_is_still_described` -> fails at f1eeb42 (no such function), passes now
+- `test_the_daily_digest_quotes_the_traceback_under_the_subject` -> fails at f1eeb42, passes now
+- `test_a_subject_that_has_vanished_is_cleared_by_a_capped_pass` -> fails before (the notice stays open), passes now
+- `test_a_pass_that_cannot_name_its_whole_set_clears_nothing` -> pins CR-256d's keep-list
+- `test_a_check_that_could_not_run_clears_nothing_either` -> pins the NOT CHECKED rule
+- `test_an_uncapped_pass_still_clears_what_it_did_not_find` -> pins the direction that already worked
+- `test_the_found_set_is_names_only_and_bounded` -> fails before, passes now
+
+11 passed in that file. Also green, unchanged: `test_alerts.py`,
+`test_invariants.py`, `test_notices.py`, `test_notices_sweep_wave2.py`,
+`test_crash_report.py`, `test_bug_hunt_2026_09_11_dash_collector_alerts.py`,
+`test_bug_hunt_2026_09_11b_dash_collector_alerts.py` (256 passed).
+
+### OWED TO ANOTHER TERRITORY
+- CR-266a: none. `notices.record_server_error` is CALLED from `cli_tools.py`, never edited there, and the call is wrapped so a signature change cannot fail the request twice. No schema change, no wire change, no deploy ordering.
+- dash-db: `dashboard/src/ccsync_dashboard/db.py`: `record_invariant_result`: take a `truncated: bool = False` and skip the "DELETE the subject rows this pass did not name" when it is set. Still owed from wave 1, and CR-266c narrows it rather than replacing it: with `found` in hand the carry is only reached by an outcome that cannot name its whole set, but a container restart still loses that carry. Dashboard-only, no deploy ordering.
+
+### Owner decisions
+- The refusals name the exception TYPE ("TypeError") in text an admin reads. That is jargon, and it is the same judgement CR-266b made for the notice body: it is the one word that makes two different faults on one button distinguishable when the log is gone. If the owner would rather not see it, it is one f-string in `_unexpected` and one in `install_supported`.
+- A failed ROOM CHECK refuses the install rather than proceeding on the assumption there is room ("an unverified check is NOT CHECKED, never OK"). The cost is that a container where the check itself is broken cannot install a CLI from the page at all, and must use the typed-path fallback.
+- Observed and NOT fixed (no TypeError, outside this item): `claude_platform_entry` accepts the manifest's `binary` verbatim, so a publisher answering `"binary": "../x"` would put `..` in the download URL segment. The bytes are still checked against the manifest's own sha256 and the local filename comes from `spec(name).rel_binary`, so nothing is written outside the version directory; it is a URL-shape hardening (the `validate_version` rule, applied to one more field) for whoever next owns this file.
+- A `server_error` notice now stores the exception's MESSAGE, which the 2026-08-28 code deliberately refused to do (CR-266b). The alternative is to keep the refusal and write the detail to a file under `/data` instead, which survives a recreate and is not rendered on a page - it also puts the diagnosis back somewhere nobody opens, which is the failure this reverses. The mitigation is masking plus a bound; the HTTP 500 body is unchanged and still carries nothing derived from the exception.
+- The bound is 1500 characters of detail, of which at most 700 is the message, and three frames (CR-266b). A longer body would be a crash dump in a table nothing prunes, and it is rendered inline on the home page.
+- `MAX_FOUND_SUBJECTS = 2000` (CR-266c). Past that an invariant's pass carries no `found` set and behaves exactly as it did before this change: the carry keeps its notices open, and the stale ones among them need a pass that is not truncated to clear.
+- The nas_media side of the live symptom is NOT touched. If the collector's `nas_media` rows for a hand-moved folder are what the check is still seeing, the notices are honest and the row pruning is the fix; this change is about the case where the subject has gone from the scan, which is what the panel showed. Worth one look at the live server after the deploy: the twenty should clear on the first pass of `proxy_pairs` that finds its whole set.
 
 ## Carryover — unchanged from before the 2026-08-11 hunt
 

@@ -449,10 +449,14 @@ def test_a_refused_tree_is_not_counted_as_a_failed_boot(tmp_path, monkeypatch):
     (tmp_path / "current.json").write_text(json.dumps({"version": "0.7.43"}),
                                            encoding="utf-8")
     monkeypatch.setattr(scr, "read_runtime_id", lambda: "")
-    monkeypatch.setattr(scr, "check_tree",
-                        lambda v, r: ("", "DASH_RELEASE_PUBKEYS is not set"))
+    # dash-mounts-ui-b-2 (2026-09-11): only the ENVIRONMENT-shaped refusals are
+    # free now, so the stub returns the constant check_tree really returns
+    # rather than a paraphrase of it - a paraphrase would exercise the
+    # tree-shaped branch and pin nothing about this finding.
+    monkeypatch.setattr(scr, "check_tree", lambda v, r: ("", scr.ENV_REFUSALS[0]))
     bumped = []
-    monkeypatch.setattr(scr, "bump_boot_attempts", lambda v: bumped.append(v) or 1)
+    monkeypatch.setattr(scr, "bump_boot_attempts",
+                        lambda v, reason="": bumped.append(v) or 1)
 
     assert scr.main() == 0
     assert bumped == [], "an environment-shaped refusal counted against the tree"

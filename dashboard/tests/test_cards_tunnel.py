@@ -206,24 +206,47 @@ def test_the_verified_identity_becomes_the_agent_name(env):
     assert upstream.calls[0]["body"]["name"] == "jsmith/CREATOR-1"
 
 
-def test_the_body_s_own_name_is_never_the_machine_half(env):
-    """dash-release-jobs-6 (2026-09-11): the declared `machine` or nothing.
+def test_the_body_s_own_name_is_never_the_whole_identity(env):
+    """dash-release-jobs-6 (2026-09-11): the declared `machine` first.
 
     `name` is the agent's own socket.gethostname() string, which is the value
     rule 1 exists to distrust. The editor half is verified either way, so the
     old fallback was display spoofing rather than an auth bypass - but it was
     spoofing of exactly the thing the cards page is being asked ("which
     computer is driving Resolve"), by anything holding a fleet token.
+
+    dash-release-jobs-3 / wire-4 (2026-09-11b): the body's `name` is still
+    taken as the MACHINE HALF for a companion below 0.9.71, and it is marked
+    `~` there so the page never presents it as verified.
     """
     client, upstream, _ = env
     client.post("/cards/agent/state",
-                json={"state": None, "name": "SOMEBODY-ELSES-PC"},
+                json={"state": None, "machine": "CREATOR-1",
+                      "name": "SOMEBODY-ELSES-PC"},
                 headers=fleet_headers("jsmith"))
-    assert upstream.calls[0]["body"]["name"] == "jsmith"
+    assert upstream.calls[0]["body"]["name"] == "jsmith/CREATOR-1"
     assert "SOMEBODY-ELSES-PC" not in json.dumps(upstream.calls[0]["body"])
 
 
-def test_the_name_is_the_editor_alone_when_no_machine_is_declared(env):
+def test_an_older_companion_keeps_its_own_machine_half_marked_unverified(env):
+    """dash-release-jobs-3 / wire-4 (2026-09-11b): `machine` arrived in
+    companion 0.9.71 and the dashboard ships FIRST. With no fallback at all,
+    every machine from 0.9.65 up registered as the bare editor - so one
+    editor's two computers became one name on the cards server, in the
+    away/stale text and in anything keyed by it.
+    """
+    client, upstream, _ = env
+    client.post("/cards/agent/state", json={"state": None, "name": "LESO-IMAC"},
+                headers=fleet_headers("leso"))
+    client.post("/cards/agent/state", json={"state": None, "name": "LESO-MBP"},
+                headers=fleet_headers("leso"))
+    first = upstream.calls[0]["body"]["name"]
+    second = upstream.calls[1]["body"]["name"]
+    assert first != second, "two of one editor's machines collapsed onto one name"
+    assert first == "leso/~LESO-IMAC" and second == "leso/~LESO-MBP"
+
+
+def test_the_name_is_the_editor_alone_when_nothing_at_all_is_declared(env):
     client, upstream, _ = env
     client.post("/cards/agent/state", json={"state": None},
                 headers=fleet_headers("jsmith"))
@@ -233,6 +256,12 @@ def test_the_name_is_the_editor_alone_when_no_machine_is_declared(env):
 def test_the_name_is_sanitised_and_bounded():
     assert cards_tunnel.agent_name("jsmith", "a/../b") == "jsmith/a..b"
     assert len(cards_tunnel.agent_name("jsmith", "M" * 500)) <= cards_tunnel.MAX_NAME_CHARS
+    # the unverified half is sanitised by the same rule, and never becomes
+    # the editor half (dash-release-jobs-3 / wire-4, 2026-09-11b)
+    assert cards_tunnel.agent_name("jsmith", "", declared="a/../b") == "jsmith/~b"
+    assert cards_tunnel.agent_name("jsmith", "", declared="jsmith") == "jsmith"
+    assert cards_tunnel.agent_name("jsmith", "", declared="jsmith/HOST") == "jsmith/~HOST"
+    assert len(cards_tunnel.agent_name("jsmith", "", declared="M" * 500))         <= cards_tunnel.MAX_NAME_CHARS
 
 
 def test_the_state_body_is_otherwise_passed_through_verbatim(env):

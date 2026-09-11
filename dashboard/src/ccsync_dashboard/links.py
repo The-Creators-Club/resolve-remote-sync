@@ -43,6 +43,19 @@ PROJECTS_SEGMENT = "Projects"
 # make either unbounded.
 MAX_INCLUDES = 32
 
+# ...and a cap on the ENTRIES considered, not just the rows produced
+# (dash-db-3 / regression-22, 2026-09-11). The row cap bounded the table and
+# left the WORK unbounded: both dedupe passes below ran over every declared
+# entry first, `declared in ordered` being a list scan and the nesting check a
+# scan inside a scan, so a 20,000-entry marker (about 700 KB, and every editor
+# can write the share) cost 23 s of CPU inside the collector's guarded loop on
+# EVERY provision cycle, holding its connection. Four times the row cap is
+# deliberately generous: nothing legitimate comes near it, and the entries past
+# it are dropped unread: at most MAX_INCLUDES rows can survive anyway, and a
+# marker that needs more than four times the cap to name its first 32 distinct
+# folders is not one an editor wrote by hand.
+MAX_INCLUDE_ENTRIES = MAX_INCLUDES * 4
+
 STATUS_OK = "ok"
 STATUS_MISSING = "missing"
 STATUS_INVALID = "invalid"
@@ -194,20 +207,50 @@ def resolve_marker_includes(projects_dir: Path, borrower_rel: str,
         log.warning("marker of %s: %d includes entr%s carried no usable path and were "
                     "skipped", borrower_rel, unusable, "y" if unusable == 1 else "ies")
 
+    # dash-db-3 (2026-09-11): bound the WORK before the two dedupe passes, not
+    # only the rows after them. `declared_total` is kept so the refusal below
+    # still names how many the marker really declared.
+    declared_total = len(paths)
+    if declared_total > MAX_INCLUDE_ENTRIES:
+        log.warning("marker of %s: %d includes entries is past the %d this reads at all; "
+                    "the rest were dropped unread",
+                    borrower_rel, declared_total, MAX_INCLUDE_ENTRIES)
+        paths = paths[:MAX_INCLUDE_ENTRIES]
+
     # Normalise + dedupe first, order-independently: an include equal to or
     # BELOW another of the same marker is a duplicate whichever was written
     # first -- the outermost declaration covers it (§2.2 step 9).
+    #
+    # Both passes are sets and one sorted scan (dash-db-3): the list-membership
+    # test and the nested `next(...)` they replace were each O(n^2), which the
+    # entry cap above bounds but does not make cheap.
     ordered: list[str] = []
+    seen: set[str] = set()
     for path in paths:
         declared = normalise_declared(path)
-        if declared in ordered:
+        if declared in seen:
             log.info("marker of %s: duplicate include %s dropped", borrower_rel, declared)
             continue
+        seen.add(declared)
         ordered.append(declared)
+    # An include is a duplicate when ANY other declaration of the same marker
+    # is a proper prefix of it; in sorted order that ancestor is the last one
+    # still open, so one scan answers every row. The sort key is the path plus
+    # its separator, NOT the bare path: `a!` sorts between `a` and `a/b`, so on
+    # bare keys the block of descendants is not contiguous and `a/b` would
+    # escape its ancestor.
+    inside: dict[str, str] = {}
+    stack: list[str] = []
+    for declared in sorted(ordered, key=lambda d: d + "/"):
+        while stack and not declared.startswith(stack[-1] + "/"):
+            stack.pop()
+        if stack:
+            inside[declared] = stack[-1]
+        else:
+            stack.append(declared)
     kept: list[str] = []
     for declared in ordered:
-        outer = next((o for o in ordered if o != declared and declared.startswith(o + "/")),
-                     None)
+        outer = inside.get(declared)
         if outer is not None:
             log.info("marker of %s: include %s is inside %s -- dropped as duplicate",
                      borrower_rel, declared, outer)
@@ -226,12 +269,18 @@ def resolve_marker_includes(projects_dir: Path, borrower_rel: str,
             # written by anyone who can write the share) - rewritten every
             # provision cycle and rendered on the admin page. One row says the
             # same thing and bounds the table by the constant.
+            # The count is the marker's OWN total, not what survived the entry
+            # cap above (dash-db-3): an admin reading this row is being told
+            # how big the file on the share is, and a number that shrank to
+            # the cap would hide exactly the tampering worth seeing.
+            ignored = max(len(kept) - MAX_INCLUDES,
+                          declared_total - MAX_INCLUDES)
             log.warning("marker of %s: %d includes over the limit of %d were ignored",
-                        borrower_rel, len(kept) - MAX_INCLUDES, MAX_INCLUDES)
+                        borrower_rel, ignored, MAX_INCLUDES)
             results.append(LinkResult(
                 declared=declared, status=STATUS_INVALID,
                 detail=f"too many includes (limit {MAX_INCLUDES}); "
-                       f"{len(kept) - MAX_INCLUDES} ignored"))
+                       f"{ignored} ignored"))
             break
         results.append(resolve_include(projects_dir, borrower_rel, declared))
     return results

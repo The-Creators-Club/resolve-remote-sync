@@ -476,6 +476,18 @@ class SharedFolderManager:
             return "not-offered"
 
         device_id = str(offered_by[0])
+        if self.halted():
+            # comp-sync-b-5 (2026-09-11b): accept_folder ends in an unpause,
+            # and reconcile's halt check below only covers a folder that
+            # already EXISTS and is paused -- so a library the dashboard
+            # offered during a fleet halt came online and started syncing
+            # while every other lane on the machine was stopped (the
+            # sync-safety-2 / CR-48 shape). The borrowed-folder manager has
+            # had this guard since comp-sync-10; this is its twin. The offer
+            # keeps: the next reconcile after the halt accepts it.
+            log.info("shared folder %s: offer left pending, syncing is stopped here",
+                     folder_id)
+            return OUTCOME_HALTED
         log.info(
             "accepting shared asset folder %s (%s) from %s at %s",
             folder_id, label, device_id, want_path)

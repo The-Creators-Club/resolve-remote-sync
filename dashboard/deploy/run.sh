@@ -35,15 +35,32 @@ VENV=/venv
 # means everything this process writes lands under the wrong one. No gid
 # fallback: /data is chowned to the app's PRIVATE gid, not to APP_GID
 # (`editors`), so comparing them would warn on every healthy boot.
+#
+# dash-mounts-ui-b-5 (2026-09-11): the two provenances need two sentences. The
+# fallback reads the number off /data, and blaming it on APP_UID sent the admin
+# to change compose's `user:` line - which on the case the fallback exists for
+# (a /data docker created as root, before install_dashboard_app's chown) is the
+# one change that is wrong. The container is running as the right uid there;
+# the tree is not.
 expected_uid="${APP_UID:-}"
+uid_from="APP_UID"
 if [ -z "$expected_uid" ]; then
     expected_uid="$(stat -c %u /data 2>/dev/null || true)"
+    uid_from="/data"
 fi
 if [ -n "$expected_uid" ] && [ "$(id -u)" != "$expected_uid" ]; then
     echo "run.sh: WARNING: running as uid $(id -u), but this deployment's own" >&2
-    echo "run.sh: WARNING: files are owned by uid $expected_uid (APP_UID)." >&2
-    echo "run.sh: WARNING: files written into the tree will have the WRONG owner." >&2
-    echo "run.sh: WARNING: fix compose's \`user:\` line (site.toml [stack] uid/gid)." >&2
+    if [ "$uid_from" = "APP_UID" ]; then
+        echo "run.sh: WARNING: files are owned by uid $expected_uid (APP_UID)." >&2
+        echo "run.sh: WARNING: files written into the tree will have the WRONG owner." >&2
+        echo "run.sh: WARNING: fix compose's \`user:\` line (site.toml [stack] uid/gid)." >&2
+    else
+        echo "run.sh: WARNING: /data is owned by uid $expected_uid (APP_UID is not set" >&2
+        echo "run.sh: WARNING: here, so that number was read off /data itself)." >&2
+        echo "run.sh: WARNING: files written into the tree will have the WRONG owner." >&2
+        echo "run.sh: WARNING: either chown /data to $(id -u), or fix compose's" >&2
+        echo "run.sh: WARNING: \`user:\` line (site.toml [stack] uid/gid) if $expected_uid is right." >&2
+    fi
 fi
 if [ -n "${APP_GID:-}" ] && [ "$(id -g)" != "$APP_GID" ]; then
     echo "run.sh: WARNING: running as gid $(id -g), but APP_GID says $APP_GID." >&2

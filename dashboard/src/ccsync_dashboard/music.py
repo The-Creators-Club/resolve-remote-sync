@@ -84,7 +84,7 @@ from typing import Any, Callable
 from fastapi import FastAPI
 
 from . import api, auth, db, mount_status
-from .broll import _header_value, _session_cookie
+from .broll import _account_bar, _header_value, _session_cookie
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -208,6 +208,16 @@ class MusicGate:
         if kind == api.AUTH_SHARED:
             return b"shared"
         if kind == api.AUTH_EDITOR and editor:
+            # security-1 (fix pass 2026-09-11b): a suspended account's laptop
+            # could still take a whole-library re-score through this door,
+            # because suspension revokes no `cce1.` token (DCORE-4) and this
+            # mount had no notion of the word. `_account_bar` is broll.py's,
+            # for the same reason `_header_value` is: one predicate, one
+            # sentence, three mounts. Withholding the stamp IS the refusal.
+            barred = _account_bar(self._settings, editor)
+            if barred:
+                log.warning("music fleet stamp withheld for %r: %s", editor, barred)
+                return None
             encoded = _header_value(f"editor:{editor}")
             if encoded is None:
                 # Same fail-closed rule as the identity header: a name that
@@ -447,7 +457,17 @@ def _init_music_storage() -> None:
     from musicweb import db as music_db  # type: ignore[import-not-found]
 
     # res-fleet-2 (2026-09-11): the root the collector re-probes every cycle.
-    mount_status.record_root("music", str(music_config.DATA_ROOT))
+    #
+    # THE ROOT IS NOT THE WITNESS (dash-mounts-ui-b-1, closed in the hand-off
+    # wave 2026-09-11b now that `recheck` probes EXISTENCE). A bind mount that
+    # goes away leaves its mount point behind inside the container, so probing
+    # /music-data answers True in every failure the re-probe was written for.
+    # B-roll records a directory it creates inside its root; music creates
+    # none - /music-data holds music.db and nothing else, and
+    # MUSIC_PROXIES_DIR is its own bind outside the root - so the witness is
+    # the database FILE. The root is still what the degraded sentence names.
+    mount_status.record_root("music", str(music_config.DATA_ROOT),
+                             witness=str(music_config.DB_PATH))
     music_config.DATA_ROOT.mkdir(parents=True, exist_ok=True)
     con = music_db.connect()
     try:

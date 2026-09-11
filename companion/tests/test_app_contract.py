@@ -201,7 +201,9 @@ def test_trash_summary_prefers_the_lanes_own_summary_when_it_has_one(tmp_path, m
     (Path(app.config["local_root"]) / ".ccsync-trash").mkdir(parents=True)
     monkeypatch.setattr(
         app_mod.lane_guard, "trash_summary",
-        lambda root: {"count": 7, "bytes": 99, "oldest": None, "retention_days": 30},
+        # regression-20 (2026-09-11b): the site's retention is passed in now.
+        lambda root, **kw: {"count": 7, "bytes": 99, "oldest": None,
+                            "retention_days": 30},
         raising=False)
     summary = app.trash_summary()
     assert summary["count"] == 7

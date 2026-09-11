@@ -668,6 +668,21 @@ class LaneBBreaker(_PersistedLatch):
         self.trip(reason, cause)
         return reason
 
+    def begin_pass(self) -> None:
+        """A lane B run is about to spawn: start its in-flight account at
+        zero (comp-sync-b-3 / res-companion-3, 2026-09-11b).
+
+        The credit is a per-RUN running total, and it used to be reset only
+        by note_pass() -- which a run that died on an exception above
+        _account_pass never reaches. The next run then started with its
+        predecessor's total already credited, so its own deletions produced
+        a negative delta and were never counted at all: a flapping NAS could
+        walk past the cumulative trigger the breaker exists for. Never
+        raises: a safety device that can fail the run it guards is worse
+        than none."""
+        with self._lock:
+            self._in_flight_credited = 0
+
     def note_deletes_in_flight(self, deleted_so_far: int) -> None:
         """Credit what the pass RUNNING RIGHT NOW has already trashed
         (res-companion-5, 2026-09-11).
@@ -690,6 +705,17 @@ class LaneBBreaker(_PersistedLatch):
         except (TypeError, ValueError):
             return
         with self._lock:
+            if total < self._in_flight_credited:
+                # comp-sync-b-3 / res-companion-3 (2026-09-11b): a running
+                # total BELOW what is already credited cannot be the same
+                # run, so it is a new one whose predecessor never reached
+                # note_pass (an exception out of _run_popen, above
+                # _account_pass). Left alone, the stale figure made every
+                # deletion of the next pass invisible to the breaker -- and
+                # note_pass then subtracted it a second time. begin_pass()
+                # is the ordinary reset; this is the backstop for a caller
+                # that does not use it.
+                self._in_flight_credited = 0
             delta = total - self._in_flight_credited
             if delta <= 0:
                 return

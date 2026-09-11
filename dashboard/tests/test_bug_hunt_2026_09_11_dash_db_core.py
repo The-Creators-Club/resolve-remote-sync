@@ -222,10 +222,26 @@ def test_a_build_with_no_eula_does_not_wall_the_wizard(conn, monkeypatch, tmp_pa
     assert "eula" not in dict(setup_engine.outstanding_for_done(conn))
 
 
-def test_a_required_task_that_is_merely_warn_still_gates(conn, monkeypatch, tmp_path):
+def test_a_required_task_that_is_merely_warn_still_gates(conn):
     """The other direction: only `eula` is exempt. A required task that warns
-    for a reason an admin can act on must keep the badge lit."""
-    assert setup_engine.WARN_SATISFIES_IDS == frozenset({"eula"})
+    for a reason an admin can act on must keep the badge lit.
+
+    dash-core-2 (2026-09-11b): this asserted `WARN_SATISFIES_IDS ==
+    frozenset({"eula"})` and nothing else - a literal one line above itself in
+    the source, which cannot fail for the bug it is named for. A change that
+    dropped the id test inside `_gate_satisfied` (widening the carve-out to
+    every warn) left the constant alone and the suite green, and `syncthing`
+    reachable-but-no-device-id is a REQUIRED task that warns for a reason an
+    admin can act on. So drive the predicate instead.
+    """
+    task_id = next(t.id for t in setup_engine.TASKS
+                   if not t.optional and t.id not in ("eula", "done"))
+    setup_engine.save_state(conn, task_id, setup_engine.TaskState(
+        status="warn", detail="a probe that did not finish",
+        at=setup_engine.now_iso()))
+    conn.commit()
+    assert task_id in setup_engine.outstanding_required(conn)
+    assert task_id in dict(setup_engine.outstanding_for_done(conn))
 
 
 def test_eula_path_is_re_resolved_when_the_import_time_answer_is_missing(monkeypatch):

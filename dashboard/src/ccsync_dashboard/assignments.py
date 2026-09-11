@@ -50,6 +50,11 @@ def _editor_presence(conn: sqlite3.Connection) -> dict[str, str]:
 
 
 def _assignments_view(conn: sqlite3.Connection) -> dict[str, Any]:
+    try:
+        archived = db.fetch_archived_projects(conn)
+        archived_unreadable = False
+    except sqlite3.OperationalError:
+        archived, archived_unreadable = [], True
     projects = [dict(r) for r in conn.execute(
         "SELECT slug, label FROM projects WHERE active=1 ORDER BY label"
     )]
@@ -123,7 +128,16 @@ def _assignments_view(conn: sqlite3.Connection) -> dict[str, Any]:
         # answer, and the confirm has to be able to say how many editors
         # still sync the thing before it is pressed -- hence the count here
         # rather than a round trip per row.
-        "archived_projects": db.fetch_archived_projects(conn),
+        # dash-db-5 (2026-09-11): dash-db-2 made the five suspension/archive
+        # readers RAISE on a lock instead of answering the empty value, which
+        # is right where an empty answer is a fail-open (the enforce cycle).
+        # This one only renders: the page it is on is where [ UNARCHIVE ]
+        # lives, and a `database is locked` while the collector writes must
+        # not 500 the page carrying the button. An empty list plus the strip
+        # below says "could not read this right now" - never "nothing is
+        # archived", which the page would otherwise state as fact.
+        "archived_projects": archived,
+        "archived_unreadable": archived_unreadable,
         "tick_editor_counts": {
             slug: len(set(names)) for slug, names in ticks.items()},
     }

@@ -574,6 +574,7 @@ def ensure(cfg: Optional[dict[str, Any]] = None,
         if wants_deno and not is_installed("deno"):
             directory = ytdlp_manager.ensure_tools_dir()
             if directory is None or not _free_space_ok(directory):
+                _note_cause("deno", "no tools dir, or not enough free space for it")
                 failed.append("deno")
                 no_room = True
             else:
@@ -583,15 +584,39 @@ def ensure(cfg: Optional[dict[str, Any]] = None,
                 else:
                     failed.append("deno")
 
+        # comp-ytdl-jobs-2 (2026-09-11b): ONE PASS IS COUNTED ONCE, whichever
+        # entry point ran. `ensure_ffmpeg_pair` above counts its own verdict,
+        # so a failure it already recorded must not be counted a second time
+        # here (that would fire the two-pass warning on pass one), and a
+        # failure only this function can see -- deno, or the tools dir going
+        # away between the two calls -- must be counted at all. `pair_failed`
+        # is exactly "the pair already took this pass".
+        pair_failed = bool(pair.get("failed"))
+        if (no_room or failed) and not pair_failed:
+            failures = _note_pass(True, list(failed) or ["ffmpeg"])
+        else:
+            failures = consecutive_failures()
         if no_room:
+            # CR-237 attached the cause and the counter to ensure_ffmpeg_pair's
+            # returns only, and these two are the returns a machine with the
+            # downloader ON actually reaches (ytdlp_manager._loop calls
+            # ensure() there and ensure_ffmpeg_pair() only when it is off).
+            # Without them `sidecar_warning_line` returns "" for ever and
+            # `sync_guard.ytdlp.sidecar` says nothing, so a machine that has
+            # silently stopped being offered proxy/audio/peaks work has no
+            # sentence anywhere a person looks -- which is the state the
+            # finding was raised about.
             return {"ok": False, "action": ACTION_FAILED,
+                    "failed": list(failed) or ["ffmpeg", "ffprobe"],
+                    "cause": failure_cause(list(failed) or None),
+                    "consecutive_failures": failures,
                     "message": "sidecar tools could not be installed (tools dir or free space) "
                                "-- YouTube downloads stay on the server"}
         if failed:
             cause = failure_cause(failed)
             return {"ok": False, "action": ACTION_FAILED,
                     "failed": list(failed), "cause": cause,
-                    "consecutive_failures": consecutive_failures(),
+                    "consecutive_failures": failures,
                     "message": f"could not install {', '.join(failed)} -- "
                                + ("YouTube downloads stay on the server"
                                   if "ffmpeg" in failed else

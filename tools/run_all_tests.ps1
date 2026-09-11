@@ -159,47 +159,28 @@ foreach ($s in $Suites) {
 }
 
 Write-Host "`n=== installer (Pester-less table tests) ===" -ForegroundColor Cyan
-$global:LASTEXITCODE = 9999
-powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-DriveMapParser.ps1"
-$driveMapExit = $LASTEXITCODE
-# windows_upgrade.ps1's licence-version compare (CR-22). Its own file rather
-# than more cases in the drive-map one: they slice out of different scripts,
-# and both are named in the summary as one "installer" row so a failure in
-# either still fails the suite.
-$global:LASTEXITCODE = 9999
-powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-LicenceGate.ps1"
-$licenceExit = $LASTEXITCODE
-# The two renames that decide whether a build which will not start leaves the
-# machine on the previous one or with no companion at all (REL-12, 2026-08-28).
-$global:LASTEXITCODE = 9999
-powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-PrevRollback.ps1"
-$prevRollbackExit = $LASTEXITCODE
-# The wrong-profile refusal and the low-space warning (OPS-7 / UX-14,
-# 2026-08-28). Both are pure helpers inside windows_bootstrap.ps1, extracted
-# with the PowerShell parser rather than dot-sourced.
-$global:LASTEXITCODE = 9999
-powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-ConsoleUser.ps1"
-$consoleUserExit = $LASTEXITCODE
-# The uninstaller's "is the SMB share actually gone" re-read that gates the
-# firewall block rule (bug-hunt-2026-09-03 install-onboard-3): a failed
-# Remove-SmbShare used to drop the rule with the share still published.
-$global:LASTEXITCODE = 9999
-powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-SmbShareGone.ps1"
-$smbShareExit = $LASTEXITCODE
-# The bootstrap's foreign-tree-drive refusal reaching the capability channel
-# (OPS-1, usability + resilience sweep 2026-09-04): it used to exit 0, so the
-# wizard showed DONE to a machine with no project drive.
-$global:LASTEXITCODE = 9999
-powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-ForeignDriveMiss.ps1"
-$foreignDriveExit = $LASTEXITCODE
-# The Add/Remove Programs entry the uninstaller has to be able to find again
-# (OPS-17, usability + resilience sweep 2026-09-04).
-$global:LASTEXITCODE = 9999
-powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-UninstallEntry.ps1"
-$installerExit = @($driveMapExit, $licenceExit, $prevRollbackExit, $consoleUserExit, $smbShareExit,
-                   $foreignDriveExit, $LASTEXITCODE) |
-    Where-Object { $_ -ne 0 } | Select-Object -First 1
-if ($null -eq $installerExit) { $installerExit = 0 }
+# ENUMERATED, never hand-listed (tests-2, 2026-09-11b). This row named its
+# scripts one by one and aggregated exactly those seven exit codes; the eighth
+# (Test-BinDirLeftovers.ps1, added the same afternoon) was in none of them, so
+# the gate the owner runs before a ship never executed it and a local green
+# meant less than it said. .github/workflows/ci.yml has always enumerated the
+# directory -- this does now too, so the row cannot drift again.
+# They are separate files because each slices its helpers out of a different
+# script; they are one "installer" row because a failure in any of them has to
+# fail the suite.
+$installerScripts = @(Get-ChildItem -Path (Join-Path $repo "installer\tests") -Filter "Test-*.ps1" -File |
+    Sort-Object Name)
+$installerExit = 0
+if (@($installerScripts).Count -eq 0) {
+    Write-Host "  no installer table tests found -- installer\tests is empty or missing" -ForegroundColor Red
+    $installerExit = 1
+}
+foreach ($script in $installerScripts) {
+    Write-Host "--- $($script.Name)" -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 9999
+    powershell -NoProfile -ExecutionPolicy Bypass -File $script.FullName
+    if ($LASTEXITCODE -ne 0 -and $installerExit -eq 0) { $installerExit = $LASTEXITCODE }
+}
 $results += @{ Name = "installer"; Outcome = $(if ($installerExit -eq 0) { "PASS" } else { "FAIL (exit $installerExit)" }) }
 
 # The macOS half of the same two checks -- the site-manifest reader, the

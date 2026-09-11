@@ -40,6 +40,12 @@ SHIP = (TOOLS / "ship.ps1").read_text(encoding="utf-8")
 RELEASE = (TOOLS / "release.ps1").read_text(encoding="utf-8")
 SIGN = (TOOLS / "sign_windows_binary.ps1").read_text(encoding="utf-8")
 DRIFT = (TOOLS / "check_deploy_drift.ps1").read_text(encoding="utf-8")
+# The doctor's pure decision helpers moved into ship_gates.ps1 on 2026-09-11b
+# (server-tools-b-1/-b-3/-b-4) so the tools suite can dot-source and DRIVE
+# them rather than read them; the doctor dot-sources it. Source-text
+# assertions about the wording it prints have to look at both files.
+GATES = (TOOLS / "ship_gates.ps1").read_text(encoding="utf-8")
+DRIFT_WORDS = DRIFT + GATES
 BUILD_PKG = (REPO / "installer" / "build_editor_package.ps1").read_text(encoding="utf-8")
 WF_WINDOWS = (REPO / ".github" / "workflows" / "release-windows.yml").read_text(encoding="utf-8")
 WF_MACOS = (REPO / ".github" / "workflows" / "release-macos.yml").read_text(encoding="utf-8")
@@ -523,11 +529,11 @@ class TestTheDriftDoctorReportsTheCardsCommit:
 
     def test_a_missing_record_is_not_checked_rather_than_ok(self):
         # wave 4's rule: an unverified check is NOT CHECKED, never OK.
-        assert "NOT CHECKED, not OK" in DRIFT
+        assert "NOT CHECKED, not OK" in DRIFT_WORDS
 
     def test_it_says_whether_the_repo_has_moved_past_the_shipped_commit(self):
         assert "rev-list --count" in DRIFT
-        assert "ahead of the shipped" in DRIFT
+        assert "ahead of the shipped" in DRIFT_WORDS
         assert "install_dashboard_app.py" in DRIFT
 
     def test_nothing_names_the_retired_ship_worktree(self):

@@ -110,6 +110,14 @@ def _uid_gid() -> tuple[int, int]:
         except ValueError:
             log.warning("APP_UID/APP_GID are set but not integers (%r/%r) -- ignored",
                         app_uid, app_gid)
+    elif app_uid or app_gid:
+        # dash-core-4 (2026-09-11b): half a pair is silently the same as none
+        # here, which is how a deployment ends up with the sidecar writing one
+        # ownership and this answer naming another. Say so once per call
+        # rather than let it turn into a lane permission failure days later.
+        log.warning("APP_UID/APP_GID are half configured (uid=%r, gid=%r): both are "
+                    "needed, so this process's own ids are used instead",
+                    app_uid, app_gid)
     if hasattr(os, "getuid"):
         return os.getuid(), os.getgid()  # type: ignore[attr-defined]
     return 3000, 3001

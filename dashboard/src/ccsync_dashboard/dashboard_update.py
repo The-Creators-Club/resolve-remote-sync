@@ -225,6 +225,28 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _write_json_best_effort(path: Path, payload: dict[str, Any]) -> None:
+    """The healer's write, and only the healer's.
+
+    dash-release-jobs-7 (2026-09-11b): `_read_json` is deliberately
+    exception-proof because these files are read on the BOOT path, but
+    `read_state` always runs `_heal_orphaned_progress`, which WRITES. On a
+    data dataset that is full or read-only after a pool fault the OSError
+    escaped: `finish_restart -> consume_restart_request -> read_state` then
+    threw out of the lifespan shutdown, `_exit_process(RESTART_EXIT_CODE)`
+    never ran, the process exited 0, run.sh did not re-exec, and the applied
+    code never started -- with nothing in the state file to say why. Every
+    `GET /api/v1/admin/dashboard-update` 500'd on the same OSError too.
+    The in-memory correction is what unwedges the routes; persisting it is
+    best effort."""
+    try:
+        _write_json(path, payload)
+    except OSError as exc:
+        log.warning("could not persist the healed dashboard-update state to %s: %s "
+                    "(the correction stands for this process; the data directory is "
+                    "full or read-only)", path, exc)
+
+
 # ----------------------------------------------------------- what is running
 
 def image_runtime_id() -> str:
@@ -507,7 +529,7 @@ def _heal_orphaned_progress(settings, state: dict[str, Any]) -> dict[str, Any]:
             "finished_at": db.utcnow_iso(),
             "updated_at": db.utcnow_iso(),
         })
-        _write_json(update_state_path(settings), state)
+        _write_json_best_effort(update_state_path(settings), state)
         return state
     step = str(state.get("step") or "?")
     log.warning("clearing a stale dashboard-update in-progress flag left at step %s "
@@ -522,7 +544,7 @@ def _heal_orphaned_progress(settings, state: dict[str, Any]) -> dict[str, Any]:
         "finished_at": db.utcnow_iso(),
         "updated_at": db.utcnow_iso(),
     })
-    _write_json(update_state_path(settings), state)
+    _write_json_best_effort(update_state_path(settings), state)
     return state
 
 
@@ -1572,6 +1594,18 @@ def status(settings, app_state) -> dict[str, Any]:
             "previous": str(current.get("previous") or ""),
             "applied_at": str(current.get("applied_at") or ""),
             "reverted_reason": str(current.get("reverted_reason") or ""),
+            # res-fleet-3 (2026-09-11b, hand-off from dash-mounts-ui): the
+            # boot selector records a revert it REFUSED here (a target tree
+            # whose schema is older than the live database), and until now
+            # only `partials/admin_dashboard_update.html` read current.json
+            # directly. A refusal that reaches no API body reaches no notice
+            # and no alert either, which is the whole shape of res-fleet-3:
+            # the container boots the image while current.json names a
+            # version and nothing anywhere says so. The key set stays FIXED -
+            # callers render these by name, and an empty string is the honest
+            # answer both for "no refusal" and for a pre-fix current.json.
+            "revert_refused_reason": str(current.get("revert_refused_reason") or ""),
+            "revert_refused_from": str(current.get("revert_refused_from") or ""),
         },
         "code_updates": code_updates,
         "rollback_candidates": rollback_candidates,

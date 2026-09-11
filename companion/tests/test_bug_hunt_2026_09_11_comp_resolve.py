@@ -212,9 +212,20 @@ class FakeAgentClient:
     pull_loop = push_loop
 
 
-def _fake_loader(tmp_path, *, client_raises=False):
-    engine_mod = types.SimpleNamespace(SyncEngine=FakeEngine,
-                                       BRIDGE_CONTRACT_VERSION=1)
+class StartRaisesEngine(FakeEngine):
+    """An engine whose own `start()` raises AFTER the client was built
+    (comp-resolve-b-5): the half of res-companion-2 that only
+    `_release_engine` can cover."""
+
+    def start(self):
+        self.started = True
+        raise RuntimeError("the project library would not open")
+
+
+def _fake_loader(tmp_path, *, client_raises=False, engine_start_raises=False):
+    engine_mod = types.SimpleNamespace(
+        SyncEngine=StartRaisesEngine if engine_start_raises else FakeEngine,
+        BRIDGE_CONTRACT_VERSION=1)
 
     class Boom:
         def __init__(self, *a, **k):
@@ -225,13 +236,14 @@ def _fake_loader(tmp_path, *, client_raises=False):
     return lambda checkout: (engine_mod, agent_mod)
 
 
-def _a_role(tmp_path, *, client_raises=False, **over):
+def _a_role(tmp_path, *, client_raises=False, engine_start_raises=False, **over):
     FakeEngine.made = []
     return role_mod.TimelineCardsRole(
         _a_cfg(tmp_path, **over),
         request_fn=lambda *a, **k: (200, {}),
         processes_fn=lambda: [],
-        engine_loader=_fake_loader(tmp_path, client_raises=client_raises),
+        engine_loader=_fake_loader(tmp_path, client_raises=client_raises,
+                                   engine_start_raises=engine_start_raises),
         bridge=object(),
     )
 
@@ -282,7 +294,28 @@ def test_a_start_that_fails_after_engine_start_stops_that_engine(tmp_path):
     assert role.start() is False
     assert len(FakeEngine.made) == 1
     engine = FakeEngine.made[0]
-    assert engine.stopped is True or engine.started is False
+    # comp-resolve-b-5 (2026-09-11b): BOTH properties, separately. The fix has
+    # two independent halves -- the client is built before engine.start(), and
+    # the failure path releases the engine -- and `stopped or not started`
+    # was satisfied by either, so reverting the release alone left the suite
+    # green over a Timeline Cards engine driving Resolve with nothing holding
+    # it: the two-clients-on-one-machine breach this module exists to stop.
+    assert engine.started is False
+    assert engine.stopped is True
+    assert role._engine is None
+
+
+def test_an_engine_that_will_not_start_is_stopped_and_let_go(tmp_path):
+    """comp-resolve-b-5: the other half. The client builds, `engine.start()`
+    itself raises (a project library that will not open), and only
+    `_release_engine` on the failure path can cover this one -- the ordering
+    half cannot."""
+    role = _a_role(tmp_path, engine_start_raises=True)
+    assert role.start() is False
+    assert len(FakeEngine.made) == 1
+    engine = FakeEngine.made[0]
+    assert engine.started is True
+    assert engine.stopped is True
     assert role._engine is None
 
 

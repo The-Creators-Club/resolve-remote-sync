@@ -256,12 +256,33 @@ def list_states(conn: sqlite3.Connection) -> dict[str, TaskState]:
 # property of the BUILD, not something the admin can act on. The amber line
 # still says so; it just stops gating. Keep this set to ids whose warn means
 # "nothing here to do", never to ones an admin could fix.
-WARN_SATISFIES_IDS = frozenset({"eula"})
+#
+# dash-core-1 (2026-09-11b): and the carve-out asks the WORLD, not the row.
+# Nothing re-runs a task's check on its own (setup.js only POSTs
+# .../tasks/eula/check when an admin presses CHECK on that row), so a stored
+# `warn` is a latch: once a build with no docs/legal had written one, the gate
+# stayed satisfied for ever, including after the OTA bundle that carried the
+# licence arrived - and no human had ever accepted it. The condition is a
+# property of the filesystem, so the predicate reads the filesystem; the row
+# stays the display, never the authority.
+def _eula_warn_still_true() -> bool:
+    try:
+        return not eula_path().is_file()
+    except OSError:
+        return True
+
+
+WARN_SATISFIES: dict[str, Callable[[], bool]] = {"eula": _eula_warn_still_true}
+WARN_SATISFIES_IDS = frozenset(WARN_SATISFIES)
 
 
 def _gate_satisfied(task_id: str, state: TaskState) -> bool:
-    return state.status == "ok" or (
-        state.status == "warn" and task_id in WARN_SATISFIES_IDS)
+    if state.status == "ok":
+        return True
+    if state.status != "warn":
+        return False
+    still_true = WARN_SATISFIES.get(task_id)
+    return still_true is not None and still_true()
 
 
 def outstanding_required(conn: sqlite3.Connection) -> list[str]:

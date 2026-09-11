@@ -180,19 +180,42 @@ stop_ours "syncthing" "Syncthing"
 # ccsync-companion.old (extensionless on macOS; only Windows has the .exe
 # forms) -- and a per-file whitelist would leave those behind. If this is
 # ever refactored into a selective delete, those two names have to be in it.
+# install-onboard-3 (2026-09-11b): the Windows half of this finding was fixed
+# on 2026-09-11 and the Mac half was not. `rm -rf` was followed
+# unconditionally by "removed ..." and the run still ended "CCSync uninstall
+# complete", while the script itself warned nine lines later that the
+# directory was still there. On a Mac where part of ~/.local/ccsync is
+# root-owned (a sudo-run install, a --companion-file copied with sudo) the
+# reassuring line is the one the editor reads, and they reinstall on top of a
+# half-removed tree whose old Syncthing identity then fights the new device ID
+# on lane C. LOOK after removing, and say which of the two happened.
+REMOVAL_INCOMPLETE=0
+
+remove_local_tree() {
+    rm -rf "$1" 2>/dev/null
+    if [ -d "$1" ]; then
+        warn "could NOT remove $1: some of it is still there (a root-owned file from a sudo install, or a volume that refuses the delete). Remove it by hand: sudo rm -rf \"$1\""
+        return 1
+    fi
+    step "removed $1 (binaries and the Syncthing identity)"
+    return 0
+}
+
 if [ -d "$CCSYNC_LOCAL" ]; then
     if [ "$DRY_RUN" = 1 ]; then
         dry "would delete $CCSYNC_LOCAL (rclone/syncthing/companion binaries in bin/, plus the Syncthing identity in syncthing-config/)"
     else
-        rm -rf "$CCSYNC_LOCAL"
-        step "removed $CCSYNC_LOCAL (binaries and the Syncthing identity)"
+        remove_local_tree "$CCSYNC_LOCAL" || REMOVAL_INCOMPLETE=1
     fi
-    warn "that included the Syncthing identity in $SYNCTHING_HOME. A reinstall generates a NEW device ID, so the admin has to approve this Mac again on the dashboard before lane C syncs. Your media was not touched."
+    if [ "$REMOVAL_INCOMPLETE" = 0 ]; then
+        warn "that included the Syncthing identity in $SYNCTHING_HOME. A reinstall generates a NEW device ID, so the admin has to approve this Mac again on the dashboard before lane C syncs. Your media was not touched."
+    fi
 else
     skip "already absent: $CCSYNC_LOCAL"
 fi
 
 if [ -d "$BIN_DIR" ]; then
+    REMOVAL_INCOMPLETE=1
     warn "$BIN_DIR still exists -- remove it by hand: rm -rf \"$CCSYNC_LOCAL\""
 fi
 
@@ -273,7 +296,17 @@ fi
 # ----------------------------------------------------------------------
 echo ""
 echo "=================================================================="
-step "CCSync uninstall complete$([ "$DRY_RUN" = 1 ] && echo ' (dry run -- nothing changed)')."
+# Gated on the same test as the "removed" line above (install-onboard-3,
+# 2026-09-11b): "complete" over a tree that is still on disk is the one
+# sentence that stops an editor looking.
+closing_verdict() {  # $1 = 1 when something could not be removed
+    if [ "$1" = 1 ]; then
+        warn "CCSync uninstall NOT complete: some of $CCSYNC_LOCAL is still on this Mac (see the WARNING above). Remove it by hand, or run this script again, before reinstalling."
+    else
+        step "CCSync uninstall complete$([ "$DRY_RUN" = 1 ] && echo ' (dry run -- nothing changed)')."
+    fi
+}
+closing_verdict "$REMOVAL_INCOMPLETE"
 step "Resolve still maps $CANONICAL_PREFIX -> ${LOCAL_ROOT:-your local root}; remove it in DaVinci Resolve > Preferences > Media Storage if desired."
 step "Tailscale / rclone / Syncthing installed with Homebrew were left alone; 'brew uninstall' them yourself if you want them gone."
 step "YOUR SYNCED MEDIA ON THE SSD WAS NOT TOUCHED -- not one file in ${LOCAL_ROOT:-your project tree} was read, moved or deleted by this script."

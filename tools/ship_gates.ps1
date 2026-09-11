@@ -46,6 +46,30 @@ function Get-JsonProperty {
     return [pscustomobject]@{ Present = $true; Value = $Object.$Name }
 }
 
+function Get-RolloutPlatformName {
+    <#
+      One spelling for a machine's platform, whichever block of the health
+      answer it came out of (server-tools-b-2, 2026-09-11b).
+
+      machine_state.platform is NULLABLE - SCHEMA_V8 added it as a bare ALTER
+      TABLE and record_report keeps a NULL with COALESCE - and the two blocks
+      of ONE health body disagreed about such a row: db.rollout_status counts
+      it as `windows` (str(... or "windows")), while _rollout_platforms_block
+      reports it as `unknown`. This gate then found a platform with computers
+      that no channel covers and refused -EmitKindExtras for ever, naming a
+      platform that does not exist, about a machine that WAS checked inside
+      the windows channel, with no command anywhere that could clear it.
+
+      windows is the fallback because that is what the counting side has
+      always used; the honest fix is on the dashboard, and until that ships
+      this keeps the gate from refusing on a phantom.
+    #>
+    param([string]$Name)
+    $p = "$Name".Trim().ToLower()
+    if (-not $p -or $p -eq "unknown") { return "windows" }
+    return $p
+}
+
 function Get-KindExtrasVerdict {
     <#
     .SYNOPSIS
@@ -120,7 +144,7 @@ function Get-KindExtrasVerdict {
         }
     }
     foreach ($prop in $platforms.Value.PSObject.Properties) {
-        $p = "$($prop.Name)".Trim().ToLower()
+        $p = Get-RolloutPlatformName "$($prop.Name)"
         $count = 0
         if (-not [int]::TryParse("$($prop.Value)", [ref]$count)) {
             $stragglers += "$p reported an unreadable computer count ($($prop.Value))"
@@ -133,4 +157,75 @@ function Get-KindExtrasVerdict {
     }
     $verdict.Stragglers = @($stragglers)
     return $verdict
+}
+
+function Get-CardsDeployVerdict {
+    <#
+      What check_deploy_drift.ps1 may say about /cards, given the facts it can
+      gather locally (2026-09-11b). Pure, so the tools suite can feed it the
+      states nobody can produce on a base rig with a live dashboard:
+
+        server-tools-b-1  an uncommitted checkout is NOT OK. The snapshot
+          deploy ships a commit, so the state it was written to prevent -
+          half-finished work reaching the NAS - became a state nothing could
+          see: finished work NOT reaching it. `head -eq commit` is exactly
+          what an uncommitted wave looks like, and it used to print OK.
+        server-tools-b-3  a record with no commit is the DIRECTORY override,
+          and an absent commit must not be readable as an old commit.
+        server-tools-b-4  a site with no Timeline Cards is not asked about
+          them at all: a permanent "? NOT CHECKED" pointing at an internal
+          runbook for a feature the customer does not have teaches an
+          operator to ignore the doctor's ? lines, which is how the three
+          real checks that use them stop being read.
+
+      Returns @{ Kind = 'ok'|'drift'|'unknown'|'skip'; Text = <line> }.
+    #>
+    param(
+        $Record,
+        [string]$Head = "",
+        [int]$Dirty = 0,
+        [bool]$SiteHasCards = $true,
+        [string]$RecordPath = "",
+        [string]$Ahead = ""
+    )
+    $v = @{ Kind = "unknown"; Text = "" }
+    if (-not $Record) {
+        if (-not $SiteHasCards) {
+            $v.Kind = "skip"
+            $v.Text = "this site has no Timeline Cards ([timeline_cards] in site.toml), so there is nothing to check"
+            return $v
+        }
+        $v.Text = "no cards deploy record at $RecordPath -- this machine has not shipped /cards since 2026-09-11 (docs\CARDS_DEPLOY.md). NOT CHECKED, not OK."
+        return $v
+    }
+    $commit = "$($Record.commit)".Trim()
+    $override = "$($Record.override)".Trim()
+    if (-not $commit) {
+        $where = if ($override) { $override } else { "an unnamed directory" }
+        $v.Text = "/cards was last shipped as the DIRECTORY $where, not a commit -- nothing here can say which code that was. NOT CHECKED, not OK."
+        return $v
+    }
+    $short = "$($Record.short)".Trim()
+    if (-not $short) { $short = $commit.Substring(0, [Math]::Min(12, $commit.Length)) }
+    $ref = "$($Record.ref)".Trim()
+    if (-not $ref) { $ref = "main" }
+    if (-not $Head) {
+        $v.Text = "cannot read $ref in the Timeline Cards repo -- cannot compare"
+        return $v
+    }
+    if ($Head -ne $commit) {
+        $v.Kind = "drift"
+        $count = ""
+        if ($Ahead -and $Ahead -ne "0") { $count = " ($Ahead commits)" }
+        $v.Text = "$ref is now $($Head.Substring(0, [Math]::Min(12, $Head.Length)))$count, ahead of the shipped $short"
+        return $v
+    }
+    if ($Dirty -gt 0) {
+        $v.Kind = "drift"
+        $v.Text = "/cards was shipped from $ref at $short, which is still its head -- but $Dirty file(s) in that checkout are uncommitted, so THEY ARE NOT ON THE NAS. Commit them and re-ship."
+        return $v
+    }
+    $v.Kind = "ok"
+    $v.Text = "/cards was shipped from $ref at $short, which is still its head, and that checkout is clean"
+    return $v
 }

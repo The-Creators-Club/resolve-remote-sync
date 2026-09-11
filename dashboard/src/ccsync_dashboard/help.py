@@ -65,11 +65,13 @@ from the document tree itself, and nothing writes.
 """
 from __future__ import annotations
 
+import copy
 import html
 import logging
 import os
 import posixpath
 import re
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -249,6 +251,11 @@ def document_groups(is_admin: bool = False) -> list[dict]:
     root = document_root()
     if root is None:
         return []
+    key = (str(root), bool(is_admin))
+    cached = _INDEX_CACHE.get(key)
+    if cached is not None and not _index_is_stale(root, cached[0]):
+        return copy.deepcopy(cached[1])
+    stamp = _root_stamp(root)
     rels = [r for r in _iter_markdown(root)
             if is_admin or published_docs.is_published(r)]
     for name in ROOT_FILES:
@@ -275,7 +282,41 @@ def document_groups(is_admin: bool = False) -> list[dict]:
                                                         e["name"].lower()))
         out.append({"label": _group_label(folder), "folder": folder,
                     "entries": entries})
+    _INDEX_CACHE[key] = (stamp, copy.deepcopy(out))
     return out
+
+
+# dash-core-5 (2026-09-11b): the index was rebuilt on every render - an
+# rglob over the tree, then a resolve() and a 60-line read PER DOCUMENT (185
+# of them on a dev checkout, on the single-worker container's threadpool,
+# competing with the collector for the same disk) - and every internal link
+# click repeated it. The docs tree only changes on a deploy, an OTA bundle or
+# a bind-mount, so the cache is keyed on the root's own mtime and given a
+# short ceiling as well, because a write INSIDE a subfolder does not touch the
+# root's mtime. Copies go in and out: a caller that mutates an entry (ui.py
+# renders these dicts) must not be able to poison the next render.
+_INDEX_TTL_SECONDS = 30.0
+_INDEX_CACHE: dict[tuple[str, bool], tuple[tuple[float, float], list[dict]]] = {}
+
+
+def _root_stamp(root: Path) -> tuple[float, float]:
+    try:
+        mtime = root.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    return (mtime, time.monotonic())
+
+
+def _index_is_stale(root: Path, stamp: tuple[float, float]) -> bool:
+    mtime, taken = stamp
+    if time.monotonic() - taken > _INDEX_TTL_SECONDS:
+        return True
+    return _root_stamp(root)[0] != mtime
+
+
+def invalidate_index() -> None:
+    """Drop the cached index (a deploy, an OTA bundle, or a test)."""
+    _INDEX_CACHE.clear()
 
 
 def _group_order(folder: str) -> tuple:

@@ -182,10 +182,15 @@ def test_a_cancel_lost_to_a_concurrent_claim_is_not_reported_as_done(env):
 # ------------------------------------------------------------- dash-api-3
 
 def _publish_rows(conn):
+    # SIGNED rows (dash-api-1, fix pass 2026-09-11b): the rollback goes
+    # through make_current_refusal now, and an unsigned build is refused the
+    # re-pointing rather than silently made current - which is what this
+    # helper used to prove by accident.
     for version in ("0.9.64", "0.9.66"):
         dbmod.insert_companion_package(
             conn, version=version, platform="windows", filename=f"c{version}.exe",
-            sha256="a" * 64, size_bytes=1, published_by="owen", now=NOW)
+            sha256="a" * 64, size_bytes=1, published_by="owen", now=NOW,
+            signature="sig", pubkey_id="k1")
     dbmod.set_current_package(conn, "windows", "0.9.66", "companion")
     conn.commit()
 

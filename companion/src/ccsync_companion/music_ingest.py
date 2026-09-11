@@ -103,6 +103,18 @@ class MusicIngestor(broll_ingest.BrollIngestor):
         # mid-wait re-embeds, which costs seconds.
         self._deferred_analysis: dict[str, dict] = {}
 
+    def _forget_batch_scratch(self, batch: Optional[dict]) -> None:
+        """comp-broll-music-5 (2026-09-11b): the vectors of a track that was
+        mid-retry when the batch ended.
+
+        `_post_result` pops its own entry, but a cancel, a lost lease and a
+        finish that gave up on the item never reach it, so every cancelled
+        album drop left ~25 kB per waiting track in this process for ever.
+        Keyed by item uid, which is unique per batch, so clearing the whole
+        map when a batch is dropped is correct: there is only ever one batch.
+        """
+        self._deferred_analysis.clear()
+
     # -- the model ---------------------------------------------------------
     def _tier(self) -> str:
         """Music has none. "" rather than "good", so nothing downstream can
@@ -516,6 +528,12 @@ class MusicIngestor(broll_ingest.BrollIngestor):
             return False
         self._deferred_analysis.pop(str(item.get("uid") or ""), None)
         item.pop("result_retry_at", None)
+        # comp-broll-music-5 (2026-09-11b): the budget is per EPISODE of
+        # refusals, not per track for the life of the batch. It was never
+        # reset, so a rel that recovered on try 5 started its next refusal one
+        # away from MAX_RESULT_RETRIES and was failed for good by a blip the
+        # first one survived.
+        item.pop("result_retries", None)
         if isinstance(parsed, dict):
             item["dest_name"] = str(parsed.get("rel_path") or item.get("dest_name") or "")
             item["track_id"] = parsed.get("track_id")

@@ -69,6 +69,11 @@ FLOOR_UPLOAD_ONLY = "0.9.54"
 # says more than the list. Mirrors alerts.MAX_FINDINGS_PER_KIND's reasoning.
 MAX_SUBJECTS = db.INVARIANT_MAX_SUBJECTS
 
+# CR-266c (2026-09-11b): how many subject NAMES one outcome carries past the
+# reporting cap, so `run_cycle` can tell a subject the pass could not report
+# from one that has stopped existing. Names only, one pass, never stored.
+MAX_FOUND_SUBJECTS = 2000
+
 # The installable-app files a browser fetches with NO cookie jar, per mounted
 # app (SYS-17 invariant 13). CR-100: the cards page links its manifest
 # document-relative, the outer `login_gate` answered that fetch with a 303 to
@@ -134,6 +139,16 @@ class Outcome:
     # said nothing about subject 21 onward, and `run_cycle`'s keep-list reads
     # this so those subjects' notices are not closed by the cap.
     truncated: bool = False
+    # CR-266c (2026-09-11b): every subject NAME this pass found broken, not
+    # just the MAX_SUBJECTS it reported. The cap is a REPORTING cap, never a
+    # knowledge cap - a per-path check walks the whole tree and then hands
+    # over the first twenty - and the difference decides whether a subject
+    # that has VANISHED (the footage was moved and the leftover Proxy folder
+    # went with it) can ever have its notice closed. Empty means "this
+    # outcome cannot say", which is not the same as "nothing was found": the
+    # keep-list falls back to `_TRUNCATED_CARRY` there, so a check built by
+    # hand with `truncated=True` keeps its CR-256d behaviour exactly.
+    found: tuple[str, ...] = ()
 
 
 def ok(detail: str = "") -> Outcome:
@@ -142,8 +157,15 @@ def ok(detail: str = "") -> Outcome:
 
 def broken(subjects: Iterable[tuple[str, str]], detail: str = "") -> Outcome:
     rows = list(subjects)
+    # CR-266c: the whole found set only while it is bounded. An invariant
+    # broken on more subjects than this is one finding about the fleet, and
+    # carrying a hundred thousand names through a pass to decide which
+    # notices to close would cost more than the notices are worth.
+    found: tuple[str, ...] = ()
+    if len(rows) <= MAX_FOUND_SUBJECTS:
+        found = tuple(str(s) for s, _d in rows)
     return Outcome(BROKEN, detail or f"{len(rows)} subject(s)", rows[:MAX_SUBJECTS],
-                   truncated=len(rows) > MAX_SUBJECTS)
+                   truncated=len(rows) > MAX_SUBJECTS, found=found)
 
 
 def not_checked(reason: str) -> Outcome:
@@ -1170,8 +1192,50 @@ def evaluate(ctx: Ctx) -> list[dict[str, Any]]:
             "severity": inv.severity, "state": outcome.state,
             "detail": outcome.detail, "subjects": list(outcome.subjects),
             "truncated": bool(outcome.truncated),
+            # CR-266c: the whole found set, or () for "this outcome cannot
+            # say". Read by `run_cycle` alone; nothing stores it.
+            "found": tuple(outcome.found),
         })
     return results
+
+
+# invariant key -> the subjects known broken that the MAX_SUBJECTS cap has
+# hidden from the ledger. dash-collector-alerts-3 (2026-09-11b): the keep-list
+# below is built from `db.broken_invariants`, i.e. from `invariant_results` -
+# and `db.record_invariant_result` DELETES on a BROKEN verdict every subject
+# row this pass did not name, so from the second pass onward the stored set is
+# only the 20 currently visible and the other 25 have left the keep-list. This
+# is the half that can be fixed here: a module global, on `mount_status`'s
+# rule (one process, one app; a test calls `_TRUNCATED_CARRY.clear()`), so the
+# hidden subjects survive pass after pass for the life of the container. The
+# durable half is OWED to dash-db (a `truncated=True` that suppresses the
+# delete), and until it lands a container restart still loses them.
+_TRUNCATED_CARRY: dict[str, list[str]] = {}
+
+# Two caps' worth of subjects. A carry is a list of names an invariant has
+# already proved broken, not an unbounded accumulator: an invariant broken on
+# ten thousand subjects is one finding about the fleet, not ten thousand.
+MAX_CARRY_SUBJECTS = 200
+
+
+def _carry_truncated(key: str, stored: Any, visible: list[str]) -> list[str]:
+    """The broken subjects this truncated pass has said NOTHING about.
+
+    Everything the ledger held plus everything an earlier truncated pass
+    carried, minus the ones this pass named (those are being written now).
+    """
+    seen = set(visible)
+    out: list[str] = []
+    for subject in list(stored) + _TRUNCATED_CARRY.get(key, []):
+        name = str(subject)
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+        if len(out) >= MAX_CARRY_SUBJECTS:
+            break
+    _TRUNCATED_CARRY[key] = out
+    return out
 
 
 def run_cycle(
@@ -1216,8 +1280,34 @@ def run_cycle(
                 # are still broken and this pass has said nothing about them,
                 # so they stay in the keep-list below rather than having their
                 # `invariant_broken` notice closed by the truncation.
-                for subject in stored_broken.get(inv.key, ()):
-                    broken_subjects.append(f"{inv.key}: {subject}")
+                #
+                # CR-266c (2026-09-11b): unless the pass CAN say. A per-path
+                # check walks everything and then hands over the first twenty,
+                # so `found` is the whole broken set and is authoritative: the
+                # keep-list is exactly that set, and a subject that has
+                # VANISHED from it has its notice closed like any other
+                # cleared subject. Twenty `proxy_pairs` notices for a folder
+                # somebody moved on the NAS on 2026-09-09 were still open, and
+                # still riding the daily digest, two days later: the check
+                # could no longer see those paths to re-raise them, and while
+                # any pass of that invariant was truncated (the fleet has more
+                # than twenty orphaned proxies) the carry kept them open for
+                # the life of the container. Only an outcome that cannot name
+                # its whole set falls back to the carry.
+                found = tuple(result.get("found") or ())
+                if found:
+                    _TRUNCATED_CARRY.pop(inv.key, None)
+                    named = {s for s, _d in result["subjects"]}
+                    for subject in found:
+                        if subject not in named:
+                            broken_subjects.append(f"{inv.key}: {subject}")
+                else:
+                    for subject in _carry_truncated(
+                            inv.key, stored_broken.get(inv.key, ()),
+                            [s for s, _d in result["subjects"]]):
+                        broken_subjects.append(f"{inv.key}: {subject}")
+            else:
+                _TRUNCATED_CARRY.pop(inv.key, None)
             for subject, detail in result["subjects"]:
                 key = f"{inv.key}: {subject}"
                 broken_subjects.append(key)
@@ -1226,6 +1316,10 @@ def run_cycle(
                     body=(f"{inv.consequence} This server checks that "
                           f"{inv.title}, and right now it is not true: {detail}."),
                     fix=inv.fix, now=now)
+        elif result["state"] == db.INVARIANT_OK:
+            # Nothing is broken any more, so there is nothing hidden by a cap
+            # either: the carry must not outlive the verdict that filled it.
+            _TRUNCATED_CARRY.pop(inv.key, None)
         elif result["state"] not in (db.INVARIANT_OK, db.INVARIANT_BROKEN):
             # A pass that did not reach a verdict (check_failed, or a check
             # that answered not_checked) has said NOTHING about the subjects

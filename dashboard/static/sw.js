@@ -129,17 +129,36 @@ self.addEventListener('fetch', function (event) {
   if (url.pathname.indexOf('/static/') === 0) {
     event.respondWith(
       caches.match(req).then(function (hit) {
+        // `stored` settles when the new bytes are IN the cache, which is the
+        // work that has to outlive the response; `network` is the response
+        // itself, which the no-hit branch must not delay behind a cache write.
+        var stored = null;
         var network = fetch(req).then(function (res) {
           if (res && res.ok && res.type === 'basic') {
             var copy = res.clone();
-            caches.open(CACHE).then(function (cache) { cache.put(req, copy); });
+            stored = caches.open(CACHE).then(function (cache) {
+              return cache.put(req, copy);
+            });
           }
           return res;
         });
         // A revalidation that fails must never turn a cached asset into an
         // error: offline is exactly when the cached copy matters most.
+        //
+        // AND IT MUST BE HELD ALIVE (dash-mounts-ui-b-3, 2026-09-11). A
+        // service worker's lifetime is extended only by the promises given to
+        // respondWith and waitUntil. Returning the cached hit settles the
+        // respondWith promise immediately, so a detached background fetch is
+        // the first thing the user agent kills - on exactly the slow, flaky
+        // mobile connection this revalidation was added for. The cache.put
+        // then never ran and the phone was stale again next load, behind a
+        // fix that looked applied. The catch is on the promise we hand over:
+        // an unhandled rejection inside waitUntil is not a page error, but it
+        // is noise in a place nobody can see.
         if (hit) {
-          network.catch(function () { });
+          var alive = network.then(function () { return stored; })
+                             .catch(function () { });
+          try { event.waitUntil(alive); } catch (e) { /* no extendable event */ }
           return hit;
         }
         return network;

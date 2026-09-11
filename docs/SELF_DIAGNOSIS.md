@@ -161,7 +161,11 @@ dashboard build is for a different container image).
 matching quotes around it; the notice names the KEYS only), `dev_insecure`
 (error, boot-time: `DASH_DEV_INSECURE` is set), `server_error` (error: a
 request 500'd, one row per `(path, exception class)` with a rising count in the
-body; the exception's message is never stored).
+body; since CR-266b the body also carries the exception's type, its masked
+message and the innermost three frames as `file:line: function`, because in
+image mode a container recreate deletes the log that sentence used to point
+at. Everything quoted there goes through `crash_report.redact` first and the
+whole detail is bounded at `notices.SERVER_ERROR_DETAIL_CHARS`).
 
 ## 4. What the server checks (alerts)
 
@@ -245,9 +249,10 @@ fleet that stopped updating after ONE release was silent for months:
 
 | kind | sev | fires when |
 |---|---|---|
-| `upgrade_refused` | error | `machine_state.upgrade_refused_*` (v48) is set: that computer turned the offer down at receipt, made no attempt, and no button on the page can fix it |
+| `upgrade_refused` | error | `machine_state.upgrade_refused_*` (v48) is set: that computer turned the offer down at receipt, made no attempt, and no button on the page can fix it. Ages out after 24 h (hand-off wave 2026-09-11b): the companion re-stamps `refused_at` on every offer it turns down, so an OLD stamp means nothing is being offered and refused any more - which is how a refusal an admin had already cleared stayed lit for the life of a 0.9.65..0.9.71 tray process |
 | `rollout_stalled` | warn | a channel made current over 48 h ago with a computer that has REPORTED since and is still behind. Silent when `made_current_at` is NULL (a build made current before v48: cannot tell) |
 | `platform_channel_stale` | warn | one platform's current build is over 7 days older than the other's by `made_current_at`, or more than 2 builds behind when the stamps are missing. The fix is the two Mac commands verbatim, because PyInstaller cannot cross-build a macOS bundle |
+| `code_not_applied` | error | `running_source` is `image` while `current.json` names a DIFFERENT applied version: this container boots the image on every restart while the Packages page says the update is current (res-fleet-3). Silent on a checkout, on a `volume` source, and when the image has caught up |
 
 **Each computer's own tools** (2026-09-04, CYT-7 / CMEDIA-3), from
 `sync_guard`:
@@ -256,6 +261,7 @@ fleet that stopped updating after ONE release was silent for months:
 |---|---|---|
 | `ytdlp_stale` | warn | that computer's yt-dlp is past its shelf life and could not update itself. The body is the COMPANION's own message; the verdict used to reach one INFO line a day in an editor's log |
 | `ytdlp_failed` | error | `action == "failed"`: no usable binary at all, which is a different alarm from an old one |
+| `media_sidecar_failed` | warn | `ytdlp.sidecar.action == "failed"` with 2+ consecutive failures: that computer could not install ffmpeg/ffprobe/deno, and the CAUSE (an SSL CA problem, a proxy, antivirus) existed only in that editor's own tray while every fleet page said only "not capable" (regression-11) |
 | `loopback_down` | warn | the 8899 loopback is enabled and not bound. `enabled` false is a choice and all-NULL is a companion too old to say; neither fires |
 
 **The YouTube stack on this server** (2026-09-04, YTWEB-2 / YTWEB-5), from

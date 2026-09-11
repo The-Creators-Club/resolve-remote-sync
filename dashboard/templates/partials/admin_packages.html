@@ -10,6 +10,17 @@
     <div class="banner error-banner">▲ {{ error }}</div>
   {% endif %}
 
+  {% if rollback_current_refused %}
+    {# The rollback DID reach the machines - that fan-out is the half a recall
+       is about - but `current` was left where it was, so this dashboard is
+       still handing the rolled-off build to everyone, including the machines
+       that have just taken the older one (auto_update installs it again).
+       Not an error and not raised, which is exactly why it used to reach
+       nobody at all. #}
+    <div class="banner">▲ The computers were asked to roll back, but this
+      dashboard is still handing out the build you rolled off: {{ rollback_current_refused }}</div>
+  {% endif %}
+
   {# REL-5 (resilience sweep 2026-08-28): the volume every package below is
      written to, on the page that writes them. Nothing measured it before, and
      a full /data is a SQLite write failure on the database that tells the

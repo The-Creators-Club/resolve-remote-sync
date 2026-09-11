@@ -616,11 +616,44 @@ def install_supported(settings: Any, name: str = "") -> tuple[bool, str]:
 
     `name` is optional because the Settings page asks the question about the
     CONTAINER before an admin has picked a tool; with one, the answer also
-    covers that tool's download size (REL-7)."""
+    covers that tool's download size (REL-7).
+
+    CR-266a (2026-09-11b): "Never raises" is the CONTRACT, not a description -
+    two callers depend on it. `setup_snapshot` runs on every render of the
+    wizard, and `start_install` runs on the request thread of
+    `POST /admin/ai-providers/{name}/install`, where anything that escapes is
+    a bare 500 with "internal error" in it and nothing an admin can act on.
+    Only `UnsupportedPlatform` was ever caught, so an unexpected failure in
+    the three checks below - `Path(settings.db_path)` with no path, an
+    `os.access` on a path the kernel refuses, a `space_refusal` whose
+    signature has drifted under a partial deploy (a TypeError raised AT the
+    call site, which that function's own try/except cannot see) - went out as
+    that 500. A check this could not COMPLETE is now a refusal that names the
+    exception type, never an accidental yes: an unverified check is not
+    checked (docs/SELF_DIAGNOSIS.md), and the admin still has the "type its
+    full path" fallback.
+    """
     try:
         platform_key()
     except UnsupportedPlatform as exc:
         return False, str(exc)
+    try:
+        return _install_room(settings, name)
+    except Exception as exc:                                          # noqa: BLE001
+        log.exception("could not work out whether %r can be installed here",
+                      name or "a CLI")
+        label = TOOLS[name].label if name in TOOLS else "a CLI"
+        return False, (
+            f"this server could not check whether there is room to install "
+            f"{label}: the check itself failed with an unexpected error "
+            f"({type(exc).__name__}). Nothing was installed. The server log has "
+            f"the detail; you can also install {label} on the dashboard host "
+            f"yourself and type its full path below.")
+
+
+def _install_room(settings: Any, name: str) -> tuple[bool, str]:
+    """The writable-and-roomy half of `install_supported`. May raise; its
+    caller is the one that promises not to (CR-266a)."""
     # Checked, never CREATED: this runs on every render of the Settings page,
     # including for a site whose CLI providers are off, and a status call has
     # no business making directories or writing probe files in somebody's data
@@ -988,8 +1021,25 @@ def _install_worker(settings: Any, name: str) -> None:
     except Exception as exc:                                    # noqa: BLE001
         # A background thread that dies with a traceback leaves the page
         # spinning forever; every failure has to become a status.
+        #
+        # CR-266a (2026-09-11b): the status used to read "TypeError while
+        # installing claude_code", which is the internal name of the tool and
+        # the name of a Python class - an admin cannot tell from it whether
+        # anything was installed, whether to retry, or what to do instead. It
+        # now names the tool the page calls it, the STEP it died on (the one
+        # piece of a lost traceback the status still holds) and the fallback
+        # the trust model keeps for exactly this case. The traceback itself
+        # goes to the log below and nowhere else: the transcript may carry a
+        # credential, which is why nothing here formats `exc`.
+        with _install_lock:
+            step = str((_install_status.get(name) or {}).get("step") or "")
         _set_status(name, state="error", finished_at=_utcnow(),
-                    error=f"{type(exc).__name__} while installing {name}")
+                    error=(f"the install of {spec(name).label} stopped with an "
+                           f"unexpected error ({type(exc).__name__})"
+                           + (f" while {step}" if step else "")
+                           + ". Nothing was installed. Try again, or install it on "
+                             "the dashboard host yourself and type its full path "
+                             "below."))
         log.exception("install of %s crashed", name)
     finally:
         with _install_lock:
@@ -1894,6 +1944,50 @@ def _refusal(exc: ToolError) -> HTTPException:
                          detail=str(exc))
 
 
+def _unexpected(conn: Any, request: Request, exc: BaseException, *, name: str,
+                what: str) -> HTTPException:
+    """A fault this wizard did not foresee, as a 503 an admin can read.
+
+    CR-266a (2026-09-11b): the live dashboard recorded ONE `server_error`
+    notice, "/api/v1/admin/ai-providers/claude_code/install (TypeError)", on
+    2026-09-10 at 06:55Z - an admin clicked SET UP and got
+    `{"detail": "internal error"}`. The traceback is gone (in image mode
+    `/data` survives a recreate and the container's log does not, see
+    notices.SERVER_ERROR_BODY_CHARS / CR-266b), and none of the shapes the
+    publisher's API can answer with reproduce it: the manifest, release,
+    asset, checksum and download readers are all typed defensively and the
+    ones that are not are inside the install THREAD, whose failures become a
+    status and never a 500. So this is the half that can be fixed without
+    knowing which line raised: whatever it was, the admin is told the tool,
+    that nothing was installed and what to do instead, and the operator still
+    gets the notice and the traceback.
+
+    The notice is recorded HERE because answering 4xx/5xx with a sentence
+    takes the request out of app.py's unhandled-exception handler, which is
+    what used to write it. Best effort by construction, the same rule that
+    handler follows: a record we could not write must never be the reason a
+    request fails twice.
+    """
+    label = TOOLS[name].label if name in TOOLS else "that CLI"
+    log.exception("the %s wizard could not %s", label, what)
+    try:
+        from . import notices
+
+        route_obj = request.scope.get("route")
+        notices.record_server_error(
+            conn, str(request.url.path), exc,
+            route=str(getattr(route_obj, "path", "") or ""))
+    except Exception:                                                 # noqa: BLE001
+        log.warning("could not record a server-error notice for the %s wizard",
+                    name, exc_info=True)
+    return HTTPException(
+        status_code=503,
+        detail=(f"this server could not {what} {label}: it hit an unexpected "
+                f"error ({type(exc).__name__}). Nothing was left half-installed. "
+                f"Try again, or install {label} on the dashboard host yourself "
+                f"and type its full path below."))
+
+
 @router.get("/admin/ai-providers/{name}/setup")
 async def api_setup_state(name: str, request: Request, conn=Depends(get_conn)) -> dict:
     _admin(request)
@@ -1914,6 +2008,9 @@ async def api_install(name: str, request: Request, conn=Depends(get_conn)) -> di
         status = start_install(settings, name)
     except ToolError as exc:
         raise _refusal(exc) from None
+    except Exception as exc:                                          # noqa: BLE001
+        raise _unexpected(conn, request, exc, name=name,
+                          what="start the install of") from None
     log.info("admin %r started an install of %s", admin, name)
     return status
 
@@ -1926,7 +2023,12 @@ async def api_install_status(name: str, request: Request) -> dict:
 
 
 @router.delete("/admin/ai-providers/{name}/install")
-async def api_remove(name: str, request: Request) -> dict:
+async def api_remove(name: str, request: Request, conn=Depends(get_conn)) -> dict:
+    # CR-266a (2026-09-11b): `conn` is here for the notice `_unexpected`
+    # records. The one live `server_error` was keyed on the PATH and the
+    # exception class; `record_server_error` never carried the method, so
+    # DELETE on this path (rmtree of a 313 MB tree, plus cancel_signin) is as
+    # likely an origin as the POST and gets the same readable refusal.
     admin = _admin(request)
     _tool(name)
     settings = request.app.state.settings
@@ -1934,6 +2036,9 @@ async def api_remove(name: str, request: Request) -> dict:
         status = await run_in_threadpool(remove_install, settings, name)
     except ToolError as exc:
         raise _refusal(exc) from None
+    except Exception as exc:                                          # noqa: BLE001
+        raise _unexpected(conn, request, exc, name=name,
+                          what="remove the install of") from None
     log.info("admin %r removed the %s install", admin, name)
     return status
 

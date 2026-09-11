@@ -49,6 +49,12 @@ before it is healthy counts a boot each time, and on the MAX_BOOT_ATTEMPTS'th
 try this script rewrites `current.json` to the previous tree (or the image)
 with `reverted_reason` and boots that instead. Nobody has to be watching: the
 thing that failed to boot is the thing an admin would have used to fix it.
+A refusal by `check_tree` counts too, unless it is one of `ENV_REFUSALS`
+(dash-mounts-ui-b-2): a bundle that can never be selected has to reach the
+same revert as one that crashes. The ONE thing the watchdog will not do is
+revert into a tree whose schema is older than the database it would open
+(res-fleet-2): that boot cannot succeed either, and there would be no
+dashboard left to fix it from.
 
 Test seams (environment, never set by a deployment): CCSYNC_DATA_DIR,
 CCSYNC_APP_ROOT, CCSYNC_VENV_DIR.
@@ -57,6 +63,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -177,6 +185,33 @@ def release_pubkeys() -> tuple[str, ...]:
     return tuple(k.strip() for k in raw.replace(",", " ").split() if k.strip())
 
 
+# WHICH REFUSALS ARE ABOUT THE ENVIRONMENT AND NOT ABOUT THE BUNDLE
+# (dash-mounts-ui-b-2, 2026-09-11). dash-mounts-ui-8 stopped counting ANY
+# refusal against the tree, which fixed the "keys missing from the deploy
+# command" case and broke its neighbour: a tree that can never pass
+# check_tree - a missing manifest, a record that does not verify, a runtime_id
+# that no image will ever match again - stopped counting too, so `revert()`
+# became unreachable for exactly the bundles the watchdog exists for, and
+# `current.json` went on naming a version that is never booted. These two
+# strings (and the marker below) are the refusals where the BUNDLE is fine and
+# the container is not; everything else check_tree says is about the tree on
+# disk and is counted. They are constants, and check_tree returns them
+# verbatim, so the classifier and the message cannot drift apart.
+ENV_REFUSALS = (
+    "DASH_RELEASE_PUBKEYS is not set, so no code tree can be verified",
+    "this image has no /venv/.runtime-id, so no bundle can be matched to it",
+)
+# An import failure inside verify_record is the image's own verifier failing,
+# not the record: it arrives wrapped in the "does not verify" sentence.
+ENV_REFUSAL_MARKERS = ("the image's own verifier could not be imported",)
+
+
+def environment_refusal(reason: str) -> bool:
+    """Is this refusal about the container rather than about the bundle?"""
+    text = str(reason or "")
+    return text in ENV_REFUSALS or any(m in text for m in ENV_REFUSAL_MARKERS)
+
+
 def check_tree(version: str, runtime_id: str) -> tuple[str, str]:
     """(pythonpath, "") for a tree that passes every check, or ("", reason)."""
     if not version:
@@ -197,14 +232,14 @@ def check_tree(version: str, runtime_id: str) -> tuple[str, str]:
         return "", f"{root}/record.json is missing -- an unsigned tree is never booted"
     pubkeys = release_pubkeys()
     if not pubkeys:
-        return "", "DASH_RELEASE_PUBKEYS is not set, so no code tree can be verified"
+        return "", ENV_REFUSALS[0]
     ok, detail = verify_record(record, pubkeys)
     if not ok:
         return "", f"{root}/record.json does not verify: {detail}"
     if str(record.get("kind")) != "dashboard" or str(record.get("version")) != version:
         return "", f"{root}/record.json describes something other than dashboard {version}"
     if not runtime_id:
-        return "", "this image has no /venv/.runtime-id, so no bundle can be matched to it"
+        return "", ENV_REFUSALS[1]
     if str(record.get("runtime_id") or "") != runtime_id:
         return "", (f"{root} was built for runtime {str(record.get('runtime_id'))[:12]}, "
                     f"this image is {runtime_id[:12]}")
@@ -220,6 +255,105 @@ def check_tree(version: str, runtime_id: str) -> tuple[str, str]:
     return volume_pythonpath(root), ""
 
 
+# ------------------------------------------------- the revert's schema guard
+#
+# res-fleet-2 (2026-09-11). `dashboard_update.rollback()` refuses a MANUAL
+# rollback whose target knows a lower schema than the live database (REL-10)
+# and names the backup to restore. The AUTOMATIC revert below - the one that
+# runs with nobody watching - had no equivalent: an OTA tree migrates the
+# database at the top of its lifespan and can fail its boot AFTER that, and
+# the older code we would revert it to then raises "database schema is newer
+# than this build" out of migrate(), uncaught, on every boot for ever. The
+# escape hatch would have been the thing that closed the hatch, on an
+# appliance whose whole promise is that nobody needs a shell on the NAS.
+#
+# The same three-way answer REL-10 uses: lower is a refusal, equal or higher
+# is safe, and CANNOT TELL does not refuse (a tree applied before REL-10
+# carries no schema in its manifest, and blocking the escape hatch on a missing
+# number would be worse than the risk it guards).
+
+DB_PATH_ENV = "DASH_DB_PATH"
+
+
+def live_schema_version() -> int | None:
+    """`PRAGMA user_version` of the live dashboard database; None = cannot tell.
+
+    Read-only, with sqlite3 from the image's own stdlib: nothing from the tree
+    being judged is imported, and a database that is absent, locked or not a
+    database at all answers "cannot tell" rather than stopping the boot."""
+    raw = os.environ.get(DB_PATH_ENV) or str(DATA_DIR / "dashboard.db")
+    if not Path(raw).exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{raw}?mode=ro", uri=True, timeout=5.0)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute("PRAGMA user_version").fetchone()
+        return int(row[0]) if row else None
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+    finally:
+        conn.close()
+
+
+def image_schema_version() -> int | None:
+    """The highest migration the IMAGE's own db.py knows, parsed rather than
+    imported for the reason image_version() is parsed: this script may be
+    about to print a different tree's path, and importing the app's db module
+    here would put the wrong one in sys.modules. None = cannot tell."""
+    path = APP_ROOT / "src" / "ccsync_dashboard" / "db.py"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    try:
+        body = text.split("_MIGRATION_STEPS", 1)[1].split("SCHEMA_VERSION =", 1)[0]
+    except IndexError:
+        return None
+    steps = [int(m) for m in re.findall(r"^\s*\(\s*(\d+)\s*,", body, re.M)]
+    return max(steps) if steps else None
+
+
+def tree_schema_version(version: str) -> int | None:
+    """The dashboard schema a revert target knows. "" is the image, whose
+    number comes from its own db.py; an installed tree's comes from the
+    manifest the apply wrote (`dashboard_update.tree_schema_version`). None is
+    NOT zero and must never read as safe."""
+    if not version:
+        return image_schema_version()
+    manifest = read_json(CODE_DIR / version / "manifest.json")
+    try:
+        return int(manifest.get("schema_version"))
+    except (TypeError, ValueError):
+        return None
+
+
+def revert_refusal(target: str) -> str:
+    """"" if reverting to `target` is safe or cannot be judged, otherwise the
+    sentence that says why it is not."""
+    live = live_schema_version()
+    known = tree_schema_version(target)
+    if live is None or known is None or known >= live:
+        return ""
+    return (f"{target or 'the image'} knows database schema v{known} and this "
+            f"database is on v{live}: booting it would fail on every start. "
+            f"Restore the backup taken before this update and roll back from "
+            f"the dashboard, or deploy a newer image.")
+
+
+def record_revert_refusal(current: dict, reason: str) -> None:
+    """Leave the evidence where the page that renders a revert can find it.
+
+    current.json is not rewritten to another version here - the whole point is
+    that we are NOT reverting - so every key it already carries is preserved
+    and two are added beside them."""
+    payload = dict(current)
+    payload["revert_refused_reason"] = reason
+    payload["revert_refused_from"] = str(current.get("version") or "")
+    write_json(CURRENT_JSON, payload)
+
+
 def boot_attempts(version: str) -> int:
     """How many times this exact version has been handed to run.sh without
     ever reaching a healthy boot. The app clears the file once it has been up
@@ -231,11 +365,28 @@ def boot_attempts(version: str) -> int:
     return int(state.get("attempts") or 0)
 
 
-def bump_boot_attempts(version: str) -> int:
-    """Count this boot BEFORE the app gets a chance to fail."""
+def bump_boot_attempts(version: str, reason: str = "") -> int:
+    """Count this boot BEFORE the app gets a chance to fail.
+
+    `reason` is carried for the refusals counted by dash-mounts-ui-b-2: the
+    revert happens on a LATER boot, which no longer has the sentence in hand,
+    and "failed to reach a healthy boot" is the wrong sentence for a tree that
+    was never booted at all. An extra key in this file is harmless to every
+    reader of it (dashboard_update reads `attempts`)."""
     attempts = boot_attempts(version) + 1
-    write_json(BOOT_ATTEMPTS, {"version": version, "attempts": attempts})
+    payload = {"version": version, "attempts": attempts}
+    if reason:
+        payload["reason"] = str(reason)
+    write_json(BOOT_ATTEMPTS, payload)
     return attempts
+
+
+def last_refusal(version: str) -> str:
+    """The refusal recorded against this version's last counted boot, if any."""
+    state = read_json(BOOT_ATTEMPTS)
+    if str(state.get("version") or "") != version:
+        return ""
+    return str(state.get("reason") or "")
 
 
 def revert(current: dict, reason: str) -> None:
@@ -271,13 +422,36 @@ def main() -> int:
     # revert, and the tree really is tried that many times rather than being
     # written off after one.
     already_failed = boot_attempts(version)
+    if current.get("revert_refused_reason") and already_failed == 0:
+        # The counter is cleared by start_boot_watchdog once the tree has been
+        # up and healthy for a while, so a zero here means the thing the
+        # refusal was about is over. A banner that stays after the problem has
+        # gone teaches an admin to ignore the banner.
+        payload = {k: v for k, v in current.items()
+                   if k not in ("revert_refused_reason", "revert_refused_from")}
+        write_json(CURRENT_JSON, payload)
+        current = payload
     if already_failed >= MAX_BOOT_ATTEMPTS:
-        revert(current, f"{version} failed to reach a healthy boot {already_failed} times")
-        current = read_json(CURRENT_JSON)
-        version = str(current.get("version") or "")
-        if not version:
-            print(image_pythonpath())
-            return 0
+        # res-fleet-2 (2026-09-11): never revert INTO a dead boot. If the
+        # target knows an older schema than the database is already on, the
+        # tree we would fall back to raises out of db.migrate() on every
+        # start, for ever, and there is no dashboard left to fix it from.
+        # Staying on the applied tree keeps a process that can at least open
+        # the database, and the refusal is recorded where the page can say it.
+        refusal = revert_refusal(str(current.get("previous") or ""))
+        if refusal:
+            say(f"NOT REVERTING {version}: {refusal}")
+            record_revert_refusal(current, refusal)
+        else:
+            refused = last_refusal(version)
+            revert(current, (f"{version} was refused {already_failed} times: {refused}"
+                             if refused else
+                             f"{version} failed to reach a healthy boot {already_failed} times"))
+            current = read_json(CURRENT_JSON)
+            version = str(current.get("version") or "")
+            if not version:
+                print(image_pythonpath())
+                return 0
     pythonpath, reason = check_tree(version, runtime_id)
     if reason:
         # NOT COUNTED (dash-mounts-ui-8, 2026-09-11). The bump used to happen
@@ -290,7 +464,23 @@ def main() -> int:
         # must be there) reverted a perfectly good OTA update and blamed the
         # bundle. boot_attempts' docstring says a non-zero count always means
         # the last boot OF THIS TREE did not work; now it does.
-        say(f"WARNING: booting the image's own code instead of {version}: {reason}")
+        #
+        # COUNTED AGAIN WHEN THE REFUSAL IS ABOUT THE TREE (dash-mounts-ui-b-2,
+        # 2026-09-11). That move went one step too far: a refusal that can
+        # never clear itself - a manifest that is missing, a record that does
+        # not verify, a runtime_id no image will match again after a dependency
+        # bump - stopped counting too, so revert() became unreachable for the
+        # bundles the watchdog was written for. The container then booted the
+        # image on every restart for ever while current.json went on naming the
+        # applied version, boot_attempts rendered 0 and reverted_reason stayed
+        # empty: the studio believes the fleet is running an update that has
+        # never run. Only the environment-shaped refusals are free.
+        if environment_refusal(reason):
+            say(f"WARNING: booting the image's own code instead of {version}: {reason}")
+        else:
+            attempts = bump_boot_attempts(version, reason)
+            say(f"WARNING: booting the image's own code instead of {version} "
+                f"(refusal {attempts} of {MAX_BOOT_ATTEMPTS}): {reason}")
         print(image_pythonpath())
         return 0
     attempts = bump_boot_attempts(version)

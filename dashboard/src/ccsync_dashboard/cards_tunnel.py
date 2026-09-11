@@ -158,17 +158,42 @@ def _upstream(request: Request) -> tuple[str, str]:
     return base, token
 
 
-def agent_name(editor: str, machine: str) -> str:
+def _machine_chars(value: Any) -> str:
+    return "".join(
+        ch for ch in str(value or "").strip() if ch.isalnum() or ch in "-_. "
+    ).strip()
+
+
+def agent_name(editor: str, machine: str, declared: str = "") -> str:
     """The name the cards server will show, built from the VERIFIED identity.
 
     `editor/MACHINE` when the caller declared a machine, the editor alone
-    otherwise. Never the raw `name` the body carried: that is a self-asserted
-    string and this is the one place that knows who is really calling.
+    otherwise. Never the raw `name` the body carried as the WHOLE name: that
+    is a self-asserted string and this is the one place that knows who is
+    really calling.
+
+    dash-release-jobs-3 / wire-4 (2026-09-11b): `machine` is sent only by
+    companion 0.9.71 and later, and the field runs 0.9.65..0.9.71 (a Mac on
+    0.9.70) against a dashboard that ships FIRST by house rule. With the
+    fallback gone entirely, every machine below 0.9.71 registered as the bare
+    editor - so one editor's two computers became one string on the cards
+    server, in the away/stale text and in the release/reload handshake,
+    precisely where "which computer is driving Resolve" is the question. So a
+    body's own `name` is accepted as the MACHINE HALF only, only when no
+    `machine` was declared, and it is rendered `editor/~HOST` - the `~` says
+    this half is the agent's word and not ours. The editor half stays
+    verified either way, which is what keeps this display-only.
     """
     editor = str(editor or "").strip()
-    machine = "".join(
-        ch for ch in str(machine or "").strip() if ch.isalnum() or ch in "-_. "
-    ).strip()
+    machine = _machine_chars(machine)
+    if not machine:
+        # An older engine's `name` may already be `editor/HOST`; only the
+        # machine half of it can mean anything here.
+        machine = _machine_chars(str(declared or "").strip().split("/")[-1])
+        if machine and machine != editor:
+            machine = "~" + machine
+        else:
+            machine = ""
     name = f"{editor}/{machine}" if machine else editor
     return name[:MAX_NAME_CHARS]
 
@@ -244,14 +269,19 @@ def cards_agent_state(
     editor = _require_fleet_caller(request, conn)
     body = dict(payload or {})
     body.pop("token", None)
-    # dash-release-jobs-6 (2026-09-11): the declared `machine` or nothing.
-    # This used to fall back to the body's own `name`, which is the agent's
-    # socket.gethostname() string -- the very value rule 1 exists to distrust.
-    # The editor half stays verified, so the hole was display spoofing rather
-    # than auth bypass: anything holding a fleet token could make the cards
-    # page name a machine it was not calling from, exactly where "which
-    # computer is driving Resolve" is the question being asked.
-    body["name"] = agent_name(editor, body.get("machine") or "")
+    # dash-release-jobs-6 (2026-09-11): the declared `machine` first. This
+    # used to take the body's own `name` as the whole string, which is the
+    # agent's socket.gethostname() -- the very value rule 1 exists to
+    # distrust. The editor half stays verified, so the hole was display
+    # spoofing rather than auth bypass: anything holding a fleet token could
+    # make the cards page name a machine it was not calling from, exactly
+    # where "which computer is driving Resolve" is the question being asked.
+    # dash-release-jobs-3 / wire-4 (2026-09-11b): the body's `name` is still
+    # taken as the machine half for a companion below 0.9.71, marked `~` as
+    # unverified, so the deploy window does not collapse one editor's two
+    # computers onto one identity.
+    body["name"] = agent_name(editor, body.get("machine") or "",
+                              declared=body.get("name") or "")
     body.pop("machine", None)
     engine = local_engine(request)
     if engine is not None:

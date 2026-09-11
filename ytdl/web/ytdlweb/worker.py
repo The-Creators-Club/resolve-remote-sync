@@ -1506,6 +1506,15 @@ def _await_local_claim(c, job_id, sleep=time.sleep):
     """
     if not config.LOCAL_DOWNLOAD or config.LOCAL_CLAIM_GRACE_SECONDS <= 0:
         return False
+    if not db.created_widening_of(db.get_job(c, job_id))[1]:
+        # A job created with `local:false` cannot be claimed at all since
+        # ytdl-web-5 (2026-09-11): claim_download's WHERE carries
+        # COALESCE(created_local,1)=1 and the fleet route answers 410. Waiting
+        # out the grace for it is dead time on a single-threaded worker, once
+        # per job, and the log line below would say the requester was given
+        # first refusal when no machine could have taken it (ytdl-web-b-4,
+        # 2026-09-11b).
+        return False
     deadline = time.monotonic() + config.LOCAL_CLAIM_GRACE_SECONDS
     while time.monotonic() < deadline:
         if db.lease_active(db.get_job(c, job_id)):
@@ -1514,6 +1523,46 @@ def _await_local_claim(c, job_id, sleep=time.sleep):
             return True
         sleep(0.1)
     return False
+
+
+def _no_room_note(job, rows, outdir):
+    """The sentence a full tree earns before a byte is fetched, or None.
+
+    ytdl-web-b-2 (2026-09-11b). ytdl-web-4 skips the press-time free-space
+    check for a job created LOCAL, rightly: that filesystem may never be
+    touched, and the companion makes its own decision at claim time on the disk
+    it actually writes. But a created-local job is only OFFERED. The tray is
+    not running, the claim is refused on a template or sidecar skew, the
+    machine is asleep, a lease expires - and this worker becomes the executor,
+    into the NAS tree, with no check anywhere. That is YTWEB-9 undone for the
+    whole class: a full disk back to N opaque per-clip yt-dlp failures.
+
+    Fails OPEN on everything it cannot measure, exactly as the 409 does: this
+    turns a pile of ENOSPC into one sentence, it is not a new way for a
+    download to be impossible.
+    """
+    if not (config.LOCAL_DOWNLOAD and db.created_widening_of(job)[1]):
+        return None                  # the press already measured this tree
+    # Imported HERE and not at module scope: routes_api imports this module, so
+    # the two can only meet inside a function. The helpers live there because
+    # that is where the 409 that quotes the same two numbers is raised.
+    from ytdlweb import routes_api
+    free = routes_api.free_bytes_at(outdir)
+    if free is None:
+        return None
+    estimate = routes_api.estimated_bytes(rows, job['quality'])
+    need = ((estimate * routes_api.FREE_SPACE_FACTOR) if estimate
+            else routes_api.UNKNOWN_ESTIMATE_FLOOR)
+    if free >= need:
+        return None
+    # The next press must re-stat, for the reason ytdl-web-2 gives: freeing
+    # space is the action this sentence asks for.
+    routes_api._forget_free_at(outdir)
+    size = (f'these {len(rows)} clips need about {routes_api._gb(estimate)}'
+            if estimate else 'this download needs room to work in')
+    return (f'there is only {routes_api._gb(free)} free on the server where '
+            f'these clips go, and {size}, so nothing was fetched. Free some '
+            f'space and press RETRY FAILED.')
 
 
 def _phase_download(c, job):
@@ -1589,6 +1638,17 @@ def _phase_download(c, job):
         db.set_phase(c, job_id, 'failed', note[:500])
 
     pending = db.pending_videos(c, job_id)
+    # The disk this run is about to write, measured now that it is settled that
+    # this worker is the executor (ytdl-web-b-2, 2026-09-11b). The rows keep
+    # their `pending` state, so the retry after the admin frees space re-queues
+    # exactly them.
+    no_room = _no_room_note(job, pending, outdir)
+    if no_room:
+        log.warning('job %s: not starting the download phase: %s',
+                    job_id, no_room)
+        _clear_progress(job_id)
+        db.set_phase(c, job_id, 'failed', no_room[:500])
+        return
     if not job['dl_total']:
         # Normally the API sets this when the editor presses DOWNLOAD; a job
         # resumed after a restart has to recount.

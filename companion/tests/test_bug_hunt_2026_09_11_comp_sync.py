@@ -273,7 +273,10 @@ def test_a_queued_pass_for_a_stale_subpath_is_dropped(tmp_path):
     lane._build_command = lambda *a, **k: spawned.append(a) or ["rclone"]
     lane.subpath_still_current = lambda subpath: subpath == "Projects/Now"
 
-    status = lane.run_once("Projects/Then")
+    # regression-4 (2026-09-11b): the gate is the ROTATION's, so the
+    # sequencer's own passes say so. A consolidate calling run_once on this
+    # same lane object is not a queued rotation pass and is not dropped.
+    status = lane.run_once("Projects/Then", rotation_pass=True)
     assert spawned == []
     assert "rotation" in (status.detail or "")
 

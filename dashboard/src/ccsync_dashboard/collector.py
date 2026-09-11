@@ -1314,7 +1314,17 @@ class Collector:
         # that exists but must not receive is a permanently out-of-sync row
         # on every page that reads completion, and the whole point of the
         # tick is that nothing comes down.
-        selections = db.fetch_machine_selections(conn, sync_modes=(db.SYNC_MODE_FULL,))
+        # dash-db-4 (hand-off wave, 2026-09-11b): `for_enforce=True`, the flag
+        # named after this cycle that this cycle did not pass. It drops a
+        # WIRED machine's own rows as well as the unassigned bucket, which is
+        # what `notices._check_plan_without_share` and
+        # `invariants._check_plan_has_share` already ask for - so "what should
+        # this machine hold" is computed by ONE rule instead of two that agree
+        # only because CR-110's belt below happens to exist. The belt stays:
+        # it is the thing that kept the B16 shape away while these two rules
+        # were apart, and a flag is not a reason to remove a latch.
+        selections = db.fetch_machine_selections(
+            conn, sync_modes=(db.SYNC_MODE_FULL,), for_enforce=True)
         editor_selections = db.fetch_all_selections(conn, sync_modes=(db.SYNC_MODE_FULL,))
         # Cross-project folder links (SHARED_FOLDERS_PLAN.md §4.1): a device
         # whose plan holds a BORROWER of this folder receives the lender's

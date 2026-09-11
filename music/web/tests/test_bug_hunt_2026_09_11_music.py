@@ -219,7 +219,10 @@ def test_the_page_only_says_running_when_the_companion_claimed_it():
     assert 'batch_uid' in fn and 'staging_id' in fn
     assert 'status === 202' in fn, (
         'a 200 from an older companion is a success and not a claim')
-    assert 'press Run' in fn
+    # music-3 (2026-09-11b): the fallback line used to say "press Run", which
+    # submits the CURRENTLY staged selection as a brand new batch. It now
+    # names the take-over button, which is the control that exists for this.
+    assert 'take over on this computer' in fn
 
 
 def test_another_editors_batch_cannot_be_retried(fleet):

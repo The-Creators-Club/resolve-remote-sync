@@ -990,7 +990,8 @@ def _report_icon_placement(app: "CompanionApp", icon) -> None:
                  "shown. Free a menu bar slot and restart CCSync.")
 
 
-def _report_windows_icon_failure(app: "CompanionApp", icon, detail: str) -> None:
+def _report_windows_icon_failure(app: "CompanionApp", icon, detail: str,
+                                 fatal: bool = True) -> None:
     """The Windows half of MAC-7 (comp-ui-1, 2026-09-11).
 
     A Windows icon that never registers used to log one line inside
@@ -1003,9 +1004,18 @@ def _report_windows_icon_failure(app: "CompanionApp", icon, detail: str) -> None
     that says what an editor can do about it. A crash report is written, which
     is the channel that already reaches the dashboard on every tick
     (`sync_guard.crashes`) and build_diagnostics: no new wire field, so a
-    dashboard one release behind is unaffected. And `_ccsync_stop` is set,
-    because the refresh and pulse loops otherwise snapshot and assign on a
-    dead icon for the life of the process.
+    dashboard one release behind is unaffected. And, on the TERMINAL failure
+    only, `_ccsync_stop` is set, because the refresh and pulse loops
+    otherwise snapshot and assign on a dead icon for the life of the process.
+
+    comp-ui-1 (2026-09-11b): `fatal` is that last distinction, and the first
+    version of this fix did not have it. `_ccsync_stop` means "this icon is
+    dead" and NOTHING in the repo ever clears it, so wiring the Explorer
+    restart re-add to the same handler ended both loops on a failure that
+    recovers by itself: the next TaskbarCreated broadcast re-adds the icon
+    and the editor is left with a tray frozen at the moment of the failure -
+    lane lines that never move, a colour that never changes, and no breaker,
+    halt or disk-floor line ever appearing. Green while dead.
 
     Never raises: this runs on the tray's own thread.
     """
@@ -1016,10 +1026,11 @@ def _report_windows_icon_failure(app: "CompanionApp", icon, detail: str) -> None
         "CCSync would have shown you (including 'sync has stopped itself') is "
         "being discarded. Sign out and back in, or restart CCSync, to get it "
         "back.", detail)
-    try:
-        icon._ccsync_stop = True
-    except Exception:
-        log.debug("could not stop the tray refresh loops", exc_info=True)
+    if fatal:
+        try:
+            icon._ccsync_stop = True
+        except Exception:
+            log.debug("could not stop the tray refresh loops", exc_info=True)
     try:
         from . import crash_report
 
@@ -2246,11 +2257,22 @@ def quit_confirm_text(copying: dict) -> str:
     index = int(copying.get("index") or 0)
     total = int(copying.get("total") or 0)
     # comp-ui-4 (2026-09-11): real plurals, via ui_copy.count.
-    where = (f"of {ui_copy.count(total, 'file')} into your synced folder"
-             if total else "files in")
-    counted = f"CCSync is copying file {index} {where}." if index else (
-        f"CCSync is copying {ui_copy.count(total, 'file')} into your synced folder."
-        if total else "CCSync is copying files into your synced folder.")
+    # comp-ui-5 (2026-09-11b): an index with no total is reachable -
+    # popup's progress publisher coerces a missing `total` to 0 - and the
+    # two halves used to splice into "CCSync is copying file 3 files in.",
+    # broken English on the one dialog that asks the editor to choose
+    # carefully. With no total there is no "N of M" to say, so the index is
+    # dropped rather than half-rendered.
+    if total:
+        counted = (f"CCSync is copying file {index} of "
+                   f"{ui_copy.count(total, 'file')} into your synced folder."
+                   if index else
+                   f"CCSync is copying {ui_copy.count(total, 'file')} "
+                   "into your synced folder.")
+    else:
+        counted = ("CCSync is copying a file into your synced folder."
+                   if index else
+                   "CCSync is copying files into your synced folder.")
     return (counted + "\n\n"
             "Quitting now abandons the file it is on. The rest of the batch is not "
             "copied and Resolve is not repointed at it.\n\n"
@@ -2981,8 +3003,17 @@ def _persist_failed_line(guard: dict) -> Optional[str]:
         return None
     # One sentence however many latches are stuck: they share a directory, so
     # they are one fault with up to three symptoms.
+    # comp-ui-4 (2026-09-11b): this used to end "Restarting CCSync would
+    # clear it." Every other BLOCKING advisory ends with the action the
+    # editor should take, so that read as the remedy on offer - and a
+    # restart is exactly what silently drops the latch this line exists to
+    # protect (docs/SYNC_SAFETY.md: only a human clears one, deliberately).
+    # It now says what a restart would cost and names an action the editor
+    # can actually take.
     return (f"⚠ CCSync cannot save its safety state on this computer "
-            f"({'; '.join(errors)}). Restarting CCSync would clear it.")
+            f"({'; '.join(errors)}), so restarting CCSync would silently "
+            f"resume what it stopped. Press {ui_copy.ROUTE_ROWS[ui_copy.DIAGNOSTICS]} "
+            f"below and send that to your admin before you restart.")
 
 
 def _disk_line(guard: dict) -> Optional[str]:
@@ -3718,23 +3749,21 @@ def _guard_fingerprint(guard: Optional[dict]) -> tuple:
         # to rebuild the menu or the item never appears.
         bool((guard.get("disk_floor") or {}).get("parked")),
         str((guard.get("blocked") or {}).get("reason") or ""),
-        # comp-sync-1 (2026-09-11): a latch that cannot write its state file
-        # adds a LINE, so without it here the line would not appear until
-        # something unrelated moved the menu, and would linger after the
-        # retry finally wrote -- UI-3's shape again. Booleans, not the error
-        # text: the error is one string per fault and does not move on its
-        # own, and a path in a fingerprint is a rebuild per machine.
-        tuple(bool((guard.get(key) or {}).get("persist_failed"))
-              for key in _PERSIST_LATCHES),
-        # comp-sync-4 (2026-09-11): both add a LINE, so both have to move the
-        # fingerprint. A COUNT and the repath IDS, never the sentences: those
-        # carry absolute paths and a machine-specific reason, and putting
-        # them here would rebuild the menu for a string that never changes.
-        len((guard.get("shared_folder_problems") or [])),
-        tuple((str(e.get("old") or ""), str(e.get("new") or ""),
-               bool(e.get("relinked")))
-              for e in (guard.get("repath_events") or [])
-              if isinstance(e, dict)),
+        # comp-ui-6 (2026-09-11b): three entries used to sit here -- the
+        # persist-failure flags (comp-sync-1) and the shared-folder /
+        # repath counts (comp-sync-4) -- each with a comment saying it "adds
+        # a LINE, so without it here the line would not appear until
+        # something unrelated moved the menu". They do not. This is the TRAY
+        # MENU's fingerprint, and every advisory line moved out of the menu
+        # into Settings (see _build_menu); `_persist_failed_line`,
+        # `_shared_folders_line` and `_repath_line` have exactly one caller
+        # in the repo, settings_window._lane_advisories, which re-renders on
+        # its own 2 s timer. So the entries bought nothing and cost a full
+        # _build_menu plus its HMENU teardown every time a repath list or a
+        # flapping state directory moved -- and the fingerprint is the
+        # mechanism that keeps the 2026-07-26 hover hang away. If one of
+        # those sentences is ever rendered IN the menu, its input belongs
+        # back here.
     )
 
 
@@ -4992,8 +5021,13 @@ def start_tray(
         # take two and a half minutes, but they can also fail on the first
         # pass if Explorer is gone entirely.
         try:
+            # comp-ui-1 (2026-09-11b): `fatal` says whether the pump is gone
+            # for good (run()) or whether Explorer can still hand the icon
+            # back (a failed TaskbarCreated re-add). Defaulted, so a backend
+            # that calls the hook with one argument still works.
             icon.on_register_failure = (
-                lambda detail: _report_windows_icon_failure(app, icon, detail))
+                lambda detail, fatal=True: _report_windows_icon_failure(
+                    app, icon, detail, fatal))
         except Exception:
             log.debug("tray backend takes no failure hook", exc_info=True)
         icon_thread = threading.Thread(target=icon.run, daemon=True)

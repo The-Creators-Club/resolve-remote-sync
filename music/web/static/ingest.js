@@ -1238,11 +1238,29 @@ function miRenderBatches() {
       stop.addEventListener('click', () => miCancelUid(batch.uid));
       actions.appendChild(stop);
     }
+    // music-3 (2026-09-11b), b-roll's BROLL-8 button: a `queued` batch has
+    // nothing anywhere that can pick it up - a companion only ever acts on a
+    // uid this page hands to its own loopback. Only in the `mine` scope: the
+    // admin's "all machines" tab is other people's work and this computer
+    // cannot index from another editor's staging.
+    if (batch.state === 'queued' && mi.scope !== 'all') {
+      const take = el('button', 'text-btn', 'take over on this computer');
+      take.type = 'button';
+      take.addEventListener('click', () => miTakeOver(batch.uid));
+      actions.appendChild(take);
+    }
     // music-2 (2026-09-11): the way back from "done with errors, 3 failed".
     // A momentary refusal (a bind mount that blipped, a name race) used to end
     // those tracks for good, with their audio still staged on the machine and
     // no button anywhere - b-roll grew this in BROLL-18 and music never did.
-    if (batch.n_failed > 0) {
+    //
+    // music-2 (2026-09-11b): b-roll's two conditions came with it late. On a
+    // claimed/running batch the click nulls a LIVE lease server-side (music-1)
+    // and 410s the machine mid-drop; in the admin `all` scope the dispatch
+    // half cannot help either, because the admin's computer has none of the
+    // audio staged.
+    if (batch.n_failed > 0 && mi.scope !== 'all' &&
+        MI_TERMINAL_STATES.includes(batch.state)) {
       const again = el('button', 'text-btn', 'try the failed tracks again');
       again.type = 'button';
       again.addEventListener('click', () => miRetryFailed(batch.uid));
@@ -1261,12 +1279,51 @@ function miRenderBatches() {
   }
 }
 
+/** Hand a queued batch to THIS computer's companion (music-3, 2026-09-11b).
+ *
+ * The same call `Run` makes, with no staging id: the audio is either already
+ * staged here from the original drop, or the server's claim carries the
+ * manifest. The CLAIM is what settles possession - it 409s while another of
+ * this editor's machines holds a live lease - so this button cannot steal a
+ * batch that is genuinely running somewhere.
+ */
+async function miTakeOver(uid) {
+  try {
+    await miLoopback('POST', '/music/ingest/run',
+                     {batch_uid: uid, staging_id: '', run_mode: mi.runMode});
+  } catch (e) {
+    if (e.status === 409) {
+      toast(el('div', 'row bad',
+               'Another of your computers is still working on this batch.'));
+    } else {
+      miSetNotice(`This computer did not take the batch: ${e.message}`);
+    }
+    miLoadBatches();
+    return;
+  }
+  mi.batchUid = uid;
+  mi.running = true;
+  miSetNotice('');
+  $('#mi-live').classList.remove('hidden');
+  toast(el('div', 'row good', 'This computer has taken the batch on.'));
+  miStartPolling();
+  miLoadBatches();
+}
+
 /** Put a batch's failed tracks back in the queue (music-2, 2026-09-11).
  *
  * The server re-queues; nothing is dispatched from here except to THIS
- * computer, and only when this page is the one that staged the batch - the
- * audio lives in that machine's staging directory and no other machine can
- * read it.
+ * computer, because the audio lives in that machine's staging directory and
+ * no other machine can read it.
+ *
+ * music-3 (2026-09-11b): the dispatch used to be behind `mi.stagingId`, which
+ * lives in memory and dies with the page. The normal case - come back after
+ * lunch to a `done_with_errors` drop and press the button - therefore
+ * re-queued the batch and dispatched nothing, and the fallback line pointed at
+ * a Run button that submits the CURRENTLY staged selection as a brand new
+ * batch. The companion's run() accepts an EMPTY staging id (the items come
+ * back from the server's claim), so the call is unconditional now and the
+ * staging id is passed only when this page really is the one that staged it.
  */
 async function miRetryFailed(uid) {
   let answer;
@@ -1284,24 +1341,25 @@ async function miRetryFailed(uid) {
     return;
   }
   let started = false;
-  if (uid === mi.batchUid && mi.stagingId) {
-    try {
-      // music-2 (2026-09-11): 202 is a companion that re-armed the batch AND
-      // CLAIMED it here. One published before this route existed answers
-      // 200 and claims nothing, leaving the batch queued with no machine, so
-      // any other success is "queued again" and never "running" - an editor
-      // told that work is running on a computer nothing claimed it on waits
-      // for ever.
-      const taken = await miLoopback('POST', '/music/ingest/retry',
-                                     {batch_uid: uid, staging_id: mi.stagingId},
-                                     true);
-      started = taken.status === 202;
-    } catch { /* the batch is queued on the server either way */ }
-  }
+  try {
+    // music-2 (2026-09-11): 202 is a companion that re-armed the batch AND
+    // CLAIMED it here. One published before this route existed answers
+    // 200 and claims nothing, leaving the batch queued with no machine, so
+    // any other success is "queued again" and never "running" - an editor
+    // told that work is running on a computer nothing claimed it on waits
+    // for ever.
+    const taken = await miLoopback('POST', '/music/ingest/retry',
+                                   {batch_uid: uid,
+                                    staging_id: mi.batchUid === uid
+                                      ? (mi.stagingId || '') : '',
+                                    run_mode: mi.runMode},
+                                   true);
+    started = taken.status === 202;
+  } catch { /* the batch is queued on the server either way */ }
   toast(el('div', 'row', started
     ? `${n} track${n === 1 ? '' : 's'} back in the queue on this computer.`
     : `${n} track${n === 1 ? '' : 's'} back in the queue. Open this page on ` +
-      `the computer that staged them and press Run.`));
+      `the computer that has the tracks and press take over on this computer.`));
   miLoadBatches();
   miPollServer();
 }

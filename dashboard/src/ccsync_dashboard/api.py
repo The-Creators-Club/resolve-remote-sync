@@ -226,8 +226,30 @@ def _account_refusal(settings, conn: sqlite3.Connection, editor: str) -> str | N
     return None
 
 
+def account_bar_reason(settings, conn: sqlite3.Connection | None,
+                       editor: str) -> str | None:
+    """The sentence to refuse this editor's machine with, or None.
+
+    PUBLIC on purpose (security-1, fix pass 2026-09-11b): the three mounted
+    fleet APIs (broll, music, ytdl) cannot reach `_refuse_barred_account`,
+    have no notion of a suspended account at all, and were the doors a
+    suspended freelancer's laptop could still write through - an index push,
+    a whole-library re-score, a download into the shared tree. One predicate,
+    importable, is what makes the word mean the same thing everywhere;
+    raising is the caller's business, because those apps answer in their own
+    shapes.
+
+    FAILS OPEN on a database error, like `_account_refusal` itself: a read
+    that cannot answer must never lock the fleet out.
+    """
+    if conn is None:
+        return None
+    refusal = _account_refusal(settings, conn, editor)
+    return _ACCOUNT_REFUSAL_DETAIL[refusal] if refusal else None
+
+
 def _refuse_barred_account(settings, conn: sqlite3.Connection | None,
-                           editor: str) -> None:
+                           editor: str, status: int = 403) -> None:
     """403 if this editor's account is suspended or disabled. (dash-api-6,
     bug hunt 2026-09-11.)
 
@@ -245,7 +267,7 @@ def _refuse_barred_account(settings, conn: sqlite3.Connection | None,
         return
     refusal = _account_refusal(settings, conn, editor)
     if refusal:
-        raise HTTPException(status_code=403,
+        raise HTTPException(status_code=status,
                             detail=_ACCOUNT_REFUSAL_DETAIL[refusal])
 
 
@@ -1546,7 +1568,13 @@ def _rollout_platforms_block(conn: sqlite3.Connection) -> dict[str, int] | None:
         return None
     out: dict[str, int] = {}
     for row in rows:
-        name = str(row["platform"] or "").strip().lower() or "unknown"
+        # dash-api-5 (2026-09-11b): the SAME coercion db.rollout_status
+        # uses. A machine_state row can carry a NULL platform (ReportIn.platform
+        # is optional), and reading it as "unknown" here while the channel
+        # counter reads it as "windows" gave the ship gate a platform with no
+        # channel: a straggler on every ship that no build an admin could
+        # publish would ever clear.
+        name = str(row["platform"] or "").strip().lower() or "windows"
         out[name] = out.get(name, 0) + int(row["n"] or 0)
     return out
 
@@ -2998,6 +3026,29 @@ def api_reissue_project_move(
     return {"ok": True, "move_id": move_id, "editor": editor, "machine": machine}
 
 
+def _file_move_answer(conn: sqlite3.Connection, move_id: int,
+                      editor: str, machine: str) -> tuple[str | None, str | None]:
+    """What this computer last said about this move, as (state, detail).
+
+    comp-app-2 (2026-09-11b): the de-dupe key for the report's file-move
+    logging, read from the row rather than kept in this process - a
+    container restart must not make the fleet shout again. A read that
+    cannot be made is answered as "no previous answer", i.e. log it: the
+    logging is not worth failing a report over, and the safe direction for a
+    de-dupe is to say it twice.
+    """
+    try:
+        row = conn.execute(
+            "SELECT state, detail FROM file_move_targets "
+            " WHERE move_id=? AND editor_username=? AND machine=?",
+            (move_id, editor, machine)).fetchone()
+    except sqlite3.Error:
+        return (None, None)
+    if row is None:
+        return (None, None)
+    return (row["state"], row["detail"])
+
+
 def reconcile_file_moves(settings, conn: sqlite3.Connection) -> dict[str, int]:
     """Finish (or quarantine) every move whose row is still `pending`.
 
@@ -3826,11 +3877,35 @@ def _build_admin_users_view(settings, conn: sqlite3.Connection) -> dict[str, Any
     # here whatever the identity backend: SUSPEND is the button an smb site
     # never had, and a key an editor's wizard has offered is waiting for a
     # click on this page and nowhere else.
-    suspended = db.suspended_editors(conn)
-    result["suspended"] = sorted(suspended)
-    result["suspensions"] = {
-        name: db.editor_suspension(conn, name) for name in sorted(suspended)}
-    result["pending_ssh_keys"] = db.fetch_pending_ssh_keys(conn)
+    # dash-db-5 (2026-09-11b, hand-off wave): these three READ, they do not
+    # decide. CR-240's dash-db-2 made them re-raise `database is locked`
+    # rather than answer the empty value, which is right where the empty
+    # answer was a fail-OPEN (the enforce cycle re-sharing folders an admin
+    # had just suspended) and wrong here: a lock during a slow collector
+    # write 500'd the whole Users page, which is where [ RESUME ] and the
+    # pending-SSH-key approval live - the two buttons an admin opens this
+    # page to press. An empty list plus a flag, so the page can say "could
+    # not read this right now" instead of stating as fact that nobody is
+    # suspended and no key is waiting. `assignments._assignments_view`'s
+    # `archived_unreadable` is the same move on the same afternoon.
+    result["suspensions_unreadable"] = False
+    try:
+        suspended = db.suspended_editors(conn)
+        result["suspended"] = sorted(suspended)
+        result["suspensions"] = {
+            name: db.editor_suspension(conn, name) for name in sorted(suspended)}
+    except sqlite3.OperationalError:
+        log.warning("the Users page could not read the suspension tables", exc_info=True)
+        result["suspended"] = []
+        result["suspensions"] = {}
+        result["suspensions_unreadable"] = True
+    result["pending_ssh_keys_unreadable"] = False
+    try:
+        result["pending_ssh_keys"] = db.fetch_pending_ssh_keys(conn)
+    except sqlite3.OperationalError:
+        log.warning("the Users page could not read the pending SSH keys", exc_info=True)
+        result["pending_ssh_keys"] = []
+        result["pending_ssh_keys_unreadable"] = True
     account_names: set[str] = {
         str(u.get("username") or "").lower() for u in (result["local_users"] or [])
     }
@@ -6250,10 +6325,39 @@ def api_set_current_package(
     return {"ok": True, "view": build_packages_view(conn, request.app.state.settings)}
 
 
+def _machines_newer_than(
+    conn: sqlite3.Connection, platform: str, version: str, skip: str = ""
+) -> list[str]:
+    """`editor/machine` for every machine on this platform whose last report
+    said it is running something ABOVE `version` (dash-api-7).
+
+    Read-only and best-effort: this decides nothing, it only names who a
+    re-pointed `current` newly reaches. `skip` is the build being rolled OFF:
+    those machines are the point of the exercise, not a surprise. A version
+    that cannot be compared (`version_above` -> None) is left out rather than
+    guessed at.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT editor_username, machine, companion_version FROM machine_state "
+            " WHERE LOWER(COALESCE(platform, 'windows')) = LOWER(?)",
+            (platform,)).fetchall()
+    except sqlite3.Error:                                              # noqa: BLE001
+        log.warning("could not list the machines a rollback would downgrade")
+        return []
+    out = []
+    for row in rows:
+        if skip and str(row["companion_version"] or "") == str(skip):
+            continue
+        if release_trust.version_above(row["companion_version"], version):
+            out.append(f"{row['editor_username']}/{row['machine']}")
+    return sorted(out)
+
+
 def roll_fleet_back(
     conn: sqlite3.Connection, *, platform: str, from_version: str,
     to_version: str, admin: str, now: str | None = None,
-    kind: str = "companion",
+    kind: str = "companion", settings: Any = None,
 ) -> dict[str, Any]:
     """Ask every machine running `from_version` to take `to_version` on its
     next report (REL-3, resilience sweep 2026-08-28).
@@ -6313,14 +6417,45 @@ def roll_fleet_back(
     # actually runs, and `ever_current` is the evidence this one already
     # earned (db.set_current_package), while a retracted target was refused
     # above.
+    #
+    # THROUGH THE GATE (dash-api-1, fix pass 2026-09-11b). `ever_current` is
+    # evidence make_current_refusal reads for itself, and it is not the only
+    # rule: a build with no release signature stops EVERY companion updating
+    # silently (UX-9) and one needing a newer dashboard offers nothing at all
+    # to the whole platform (REL-4). Calling db.set_current_package straight
+    # made this the one door of six that asked none of them. On a refusal the
+    # FAN-OUT still happens - the recall is the half that reaches the
+    # machines - and `current` is left where it is, with the refusal named in
+    # the answer and the audit row rather than raised, because a rollback
+    # that delivers nothing is how a recall turns into a fleet nobody can
+    # reach.
     current = db.get_current_package(conn, platform, kind=kind)
     uncurrented = ""
+    current_refused = ""
+    newer_machines: list[str] = []
     if current is not None and str(current["version"]) == str(from_version):
-        if db.set_current_package(conn, platform, to_version, kind, now):
+        refusal = package_store.make_current_refusal(
+            conn, settings, kind=kind, platform=platform, version=to_version,
+            now=now)
+        if refusal is not None:
+            current_refused = refusal[1]
+            log.warning("the rollback to %s %s %s left `current` alone: %s",
+                        platform, kind, to_version, refusal[1])
+        elif db.set_current_package(conn, platform, to_version, kind, now):
             uncurrented = from_version
+            # dash-api-7: re-pointing `current` reaches the whole platform,
+            # and `_upgrade_info` offers a version that DIFFERS rather than a
+            # newer one (equality, by design). A machine running something
+            # newer than the target - the base rig after a hotfix, or one
+            # that took a targeted push - is offered a downgrade nobody asked
+            # for, so the admin is told which ones before they go looking.
+            newer_machines = _machines_newer_than(conn, platform, to_version,
+                                                  skip=from_version)
             log.warning("%s is no longer the current %s %s package: %s rolled the "
-                        "fleet back to %s", from_version, platform, kind, admin,
-                        to_version)
+                        "fleet back to %s%s", from_version, platform, kind, admin,
+                        to_version,
+                        (f"; now offered to {', '.join(newer_machines)}, which "
+                         f"are running something newer") if newer_machines else "")
     machines = db.machines_running_version(conn, platform, from_version)
     asked: list[str] = []
     for m in machines:
@@ -6335,13 +6470,15 @@ def roll_fleet_back(
     db.audit(conn, admin, "package.roll_fleet_back", to_version,
              {"platform": platform, "from_version": from_version,
               "to_version": to_version, "machines": asked,
-              "uncurrented": uncurrented}, now=now)
+              "uncurrented": uncurrented, "current_refused": current_refused,
+              "newer_machines": newer_machines}, now=now)
     conn.commit()
     log.warning("%s rolled %d machine(s) back from %s to %s on %s",
                 admin, len(asked), from_version, to_version, platform)
     return {"ok": True, "platform": platform, "from_version": from_version,
             "to_version": to_version, "machines": asked,
-            "uncurrented": uncurrented}
+            "uncurrented": uncurrented, "current_refused": current_refused,
+            "newer_machines": newer_machines}
 
 
 @router.post("/admin/packages/{platform}/{version}/roll-fleet-back")
@@ -6378,7 +6515,8 @@ def api_roll_fleet_back(
             detail=f"{version} is what those computers are already running. Pick the "
                    f"build to put them BACK on with ?to=.")
     return roll_fleet_back(conn, platform=platform, from_version=version,
-                           to_version=target, admin=admin, kind=kind)
+                           to_version=target, admin=admin, kind=kind,
+                           settings=request.app.state.settings)
 
 
 @router.delete("/admin/packages/{platform}/{version}")
@@ -6417,9 +6555,20 @@ def _require_package_read(request: Request,
     """Same dual auth as _require_selection_read, minus the editor scoping:
     any signed-in user, or any companion holding EITHER fleet credential (the
     shared report token or its own per-editor one), may download a published
-    package -- it is the same exe everyone runs."""
+    package -- it is the same exe everyone runs.
+
+    A per-editor token whose owner is SUSPENDED is refused (security-1, fix
+    pass 2026-09-11b): DCORE-4 revokes neither the session nor the cce1
+    token, so a suspended freelancer's laptop kept a working credential and
+    kept itself upgraded from the fleet it is barred from. The shared token
+    identifies nobody and is unchanged, and so is an admin session.
+    """
     settings = request.app.state.settings
-    if companion_token_ok(settings, conn, request.headers.get("x-ccsync-token", "")):
+    auth_kind, token_editor = resolve_companion_credential(
+        settings, conn, request.headers.get("x-ccsync-token", ""))
+    if auth_kind != AUTH_NONE:
+        if auth_kind == AUTH_EDITOR and token_editor:
+            _refuse_barred_account(settings, conn, str(token_editor).strip().lower())
         return
     if auth.get_session_user(request) is not None:
         return
@@ -6973,10 +7122,22 @@ class _BoundedSectionIn(BaseModel):
     here, silently, and the banner could not see it because a model with
     extra='ignore' has an empty `model_extra` by construction. Accepting an
     undeclared sub-key is what lets `undeclared_report_sections` NAME it, on
-    the same terms ReportIn and SyncGuardIn already do; nothing reads
-    `model_extra` except that reporting, so an undeclared key is still not
-    stored, still not rendered as data, and still cannot reach a table. Its
-    only ceiling is the request-size limit, which is ReportIn's answer too.
+    the same terms ReportIn and SyncGuardIn already do. Its only ceiling is
+    the request-size limit, which is ReportIn's answer too.
+
+    EVERY sync_guard sub-model is one of these (dash-api-2, fix pass
+    2026-09-11b). Five of them were left as plain BaseModels -- `breaker`,
+    `halt`, `trash`, `skipped_exists` and `removal_overrides`, which is to
+    say the three latches an editor's safety depends on -- so a field added
+    inside them was dropped exactly as silently as the nine resolve_health
+    fields were, and they 422'd rather than truncated on a long value.
+    `test_every_sync_guard_subsection_truncates_rather_than_rejects` is what
+    keeps the next model added from being silent by default.
+
+    An extra is not STORED, but that is a property of the two storers'
+    allow-lists and not of this class (dash-api-6): `model_dump()` on an
+    extra="allow" model carries the extras, and `_bound_to_field_caps` bounds
+    declared fields only. `_declared_dump` is what the flatteners use.
     """
     model_config = ConfigDict(extra="allow")
 
@@ -6986,7 +7147,7 @@ class _BoundedSectionIn(BaseModel):
         return _bound_to_field_caps(cls, data)
 
 
-class BreakerIn(BaseModel):
+class BreakerIn(_BoundedSectionIn):
     """companion sync/lane_guard.LaneBBreaker.report() -- lane B's circuit
     breaker (COMMERCIAL_READINESS.md item 9, 2026-08-17). `tripped` means
     that machine has STOPPED downloading proxies and needs a human."""
@@ -7013,7 +7174,7 @@ class BreakerIn(BaseModel):
     persist_failed_at: str | None = Field(default=None, max_length=64)
 
 
-class TrashIn(BaseModel):
+class TrashIn(_BoundedSectionIn):
     """`.ccsync-trash` -- what lane B removed and can still be recovered."""
     count: int | None = Field(default=None, ge=0)
     bytes: int | None = Field(default=None, ge=0)
@@ -7032,9 +7193,15 @@ class TrashIn(BaseModel):
     kept_bytes: int | None = Field(default=None, ge=0)
     truncated: bool | None = None
     at: str | None = Field(default=None, max_length=64)
+    # wire-3 (2026-09-11b): lane_guard.prune_trash answers
+    # {"skipped": "breaker tripped", ...} when the latch is down, and no
+    # model has ever declared it. Undeclared is now NAMED on the SYS-3
+    # banner, so every machine with a tripped breaker would have carried a
+    # line saying nothing is wrong.
+    skipped: str | None = Field(default=None, max_length=200)
 
 
-class HaltIn(BaseModel):
+class HaltIn(_BoundedSectionIn):
     """companion sync/lane_guard.HaltState.report() -- "stop all sync"."""
     active: bool = False
     scope: str | None = Field(default=None, max_length=16)   # 'local' | 'fleet'
@@ -7048,7 +7215,7 @@ class HaltIn(BaseModel):
     persist_failed_at: str | None = Field(default=None, max_length=64)
 
 
-class SkippedExistsIn(BaseModel):
+class SkippedExistsIn(_BoundedSectionIn):
     """Lane A files the NAS already holds AT A DIFFERENT SIZE --
     `copy --ignore-existing` will never replace them (item 9)."""
     count: int | None = Field(default=None, ge=0)
@@ -7056,7 +7223,7 @@ class SkippedExistsIn(BaseModel):
     checked_at: str | None = Field(default=None, max_length=64)
 
 
-class RemovalOverrideIn(BaseModel):
+class RemovalOverrideIn(_BoundedSectionIn):
     """An editor who deleted a project's local copy anyway, past the
     caught-up gate. Reported so the deletion is not only in one machine's
     log file."""
@@ -7152,6 +7319,16 @@ class UpgradeIn(_BoundedSectionIn):
     refused_version: str | None = Field(default=None, max_length=64)
     refused_reason: str | None = Field(default=None, max_length=500)
     refused_at: str | None = Field(default=None, max_length=64)
+    # res-companion-4 (2026-09-11b, hand-off wave): the state writes this
+    # machine's process has swallowed. `upgrade.write_failures()` is always
+    # sent by a 0.9.72 companion (zero is the normal answer), so leaving it
+    # undeclared meant `undeclared_report_sections` named
+    # `sync_guard.upgrade.state_write_failures` on the SYS-3 banner every day
+    # for every machine in the fleet - the banner that exists to catch a
+    # section the dashboard is really dropping. Non-zero is a machine whose
+    # ~/.ccsync/state is unwritable, which is APP-5's crash-loop counter
+    # reading "first start" for ever.
+    state_write_failures: int | None = Field(default=None, ge=0)
 
 
 class SyncConflictsIn(_BoundedSectionIn):
@@ -7264,8 +7441,35 @@ class RepathEventIn(_BoundedSectionIn):
     """
     old: str | None = Field(default=None, max_length=1000)
     new: str | None = Field(default=None, max_length=1000)
-    at: str | None = Field(default=None, max_length=64)
+    # wire-2 (2026-09-11b): THE PRODUCER WRITES AN EPOCH FLOAT
+    # (sync/repath.py's `"at": float(self._now())`), and a str-only field
+    # 422s the WHOLE report -- sync_guard is deliberately not one of
+    # ReportIn's tolerant sections, so one rename took a machine off the
+    # fleet grid for the life of its ledger entry, commands and all. Both
+    # spellings are accepted because an older reader of this column may hold
+    # either; `max_length` cannot live on the Field (pydantic applies it to
+    # the float arm too and raises), so the string arm is bounded by the
+    # validator below on the same truncate-rather-than-reject terms as every
+    # other cap in this file.
+    at: float | str | None = None
     relinked: bool | None = None
+    # wire-3 (2026-09-11b): the other four keys `RepathLedger.record` writes.
+    # Declared rather than dropped: `slug` is the project, `moved=False` is
+    # "this machine could not follow the rename" (which nothing on the server
+    # could see), and an undeclared key is now NAMED on the SYS-3 banner --
+    # so leaving them undeclared would put four "nothing is wrong" lines on
+    # the one banner that exists to catch a real dropped section.
+    id: str | None = Field(default=None, max_length=64)
+    slug: str | None = Field(default=None, max_length=200)
+    note: str | None = Field(default=None, max_length=512)
+    moved: bool | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bound_repath_at(cls, data):
+        if isinstance(data, dict) and isinstance(data.get("at"), str):
+            data = {**data, "at": data["at"][:64]}
+        return data
 
 
 class ResolveClipIn(_BoundedSectionIn):
@@ -7724,7 +7928,7 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
         # rule is the storer's, and it has to be able to see that a field
         # this machine used to answer is None now.
         "resolve_health_detail": (
-            None if rh is None else rh.model_dump(exclude_none=False)),
+            None if rh is None else _declared_dump(rh)),
         "stray_projects_count": stray.count if stray is not None else None,
         "stray_projects_bytes": stray.bytes if stray is not None else None,
         # A LIST is flattened to its length: an absent list is "nothing moved",
@@ -7754,11 +7958,10 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
             (loopback.since or None) if loopback is not None else None),
         # CYT-7. NOT a column: see _store_ytdlp_state for why this one lives
         # in `meta`. None is "this computer said nothing about yt-dlp".
-        "ytdlp": (None if ytdlp is None
-                  else ytdlp.model_dump(exclude_none=False)),
+        "ytdlp": (None if ytdlp is None else _declared_dump(ytdlp)),
         # CYT-3, on exactly the same terms (see _store_youtube_import_state).
         "youtube_import": (None if youtube_import is None
-                           else youtube_import.model_dump(exclude_none=False)),
+                           else _declared_dump(youtube_import)),
     }
 
 
@@ -8408,7 +8611,20 @@ class FileMoveResultIn(BaseModel):
     # the command (the file is open in Resolve; it will be tried again),
     # "blocked" is the companion having run out of attempts and is a distinct
     # thing on the project page from a one-off failure.
-    state: Literal["done", "failed", "retrying", "blocked"] | None = None
+    # "applying" (wire-1 / res-companion-1, fix pass 2026-09-11b): the
+    # companion's ledger writes an INTENT row before the rename and clears it
+    # after, so a tray killed in between (a CR-93 abort, a reboot, an upgrade
+    # swap) starts again holding one. The state had no spelling on the wire
+    # at all, so the redelivered command was answered ok=False with no
+    # `state` - which means "answered, stop asking" - and a crash mid-move
+    # became a PERMANENT failed move with the resume never run. It is stored
+    # as `retrying` below: the command stays live and is re-sent, which is
+    # the whole point of the two-phase answer.
+    #
+    # THE DASHBOARD DEPLOYS FIRST. A companion sending "applying" to a
+    # dashboard below 0.7.44 fails this Literal, and `file_moves_applied` is
+    # not a tolerant section: it would 422 the whole report.
+    state: Literal["done", "failed", "retrying", "blocked", "applying"] | None = None
     attempts: int | None = Field(default=None, ge=0, le=1000)
     # RES-10: moved on disk, but no media pool has been walked yet that
     # references it, so Resolve is not repointed.
@@ -8436,6 +8652,37 @@ def _ignored_sections_to_log(machine: str, keys: list[str], day: str) -> list[st
             _IGNORED_SECTION_LOGGED[(machine, key)] = day
             fresh.append(key)
     return fresh
+
+
+def _section_models(annotation: Any) -> list[type[BaseModel]]:
+    """Every pydantic model reachable from a field annotation.
+
+    Unwraps the two shapes the report models use - `X | None` and
+    `list[X] | None` - so a test (and anything else) can ask what a section
+    is made of. dash-api-2 (fix pass 2026-09-11b).
+    """
+    found: list[type[BaseModel]] = []
+    todo = [annotation]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, type) and issubclass(node, BaseModel):
+            found.append(node)
+            continue
+        todo.extend(getattr(node, "__args__", ()) or ())
+    return found
+
+
+def _declared_dump(model: BaseModel) -> dict[str, Any]:
+    """`model_dump()` WITHOUT the extras an extra="allow" model carries.
+
+    dash-api-6 (fix pass 2026-09-11b): `_bound_to_field_caps` bounds declared
+    fields only, so an undeclared key's value is capped by nothing but the
+    request-size limit - a 200 KB string rode out of the validator, through
+    the flattened dict and into two db writers, each of which happens to
+    filter it by an allow-list of its own. "Happens to" is not a bound, and
+    the next reader of these blobs would inherit the hole.
+    """
+    return model.model_dump(exclude_none=False, exclude=set(model.model_extra or {}))
 
 
 def _nested_extra_keys(prefix: str, model: Any, depth: int = 1) -> list[str]:
@@ -8991,14 +9238,33 @@ def api_report(
     # Recorded before the reply is built below, so a move answered in THIS
     # report is not re-sent in its own reply.
     for outcome in payload.file_moves_applied or []:
+        # wire-1: "applying" is stored as "retrying" - the one state db.py
+        # spells that records the attempt WITHOUT retiring the command. A
+        # first-class `applying` in file_move_targets is owed to dash-db; the
+        # behaviour an editor sees (the move comes back and is finished)
+        # needs only this.
+        state = ("retrying" if outcome.state == "applying" else outcome.state)
+        # comp-app-2 (2026-09-11b, hand-off wave): LOG THE CHANGE, NOT THE
+        # REPEAT. A `retrying` answer does not retire the command, so the
+        # same move is re-sent and re-answered on every report - once every
+        # 30 s, per move, per machine, for as long as the external drive is
+        # out or Resolve holds the file open. A drive pulled overnight with
+        # four moves owed wrote thousands of identical WARNING lines and
+        # pushed the real events out of the log an operator reads the next
+        # morning. The row already holds the previous answer, so the
+        # de-dupe is a read rather than state in this process (which a
+        # container restart would lose). Terminal answers cannot repeat:
+        # mark_file_move_applied only matches `applied_at IS NULL`.
+        previous = _file_move_answer(conn, outcome.id, editor, machine)
         if db.mark_file_move_applied(conn, outcome.id, editor, machine,
                                      outcome.ok, outcome.detail, received_at,
-                                     state=outcome.state, attempts=outcome.attempts,
+                                     state=state, attempts=outcome.attempts,
                                      relink_pending=outcome.relink_pending):
-            (log.info if outcome.ok else log.warning)(
-                "%s/%s file move #%s: %s%s", editor, machine, outcome.id,
-                "done" if outcome.ok else (outcome.state or "failed").upper(),
-                f" ({outcome.detail})" if outcome.detail else "")
+            if previous != (state, outcome.detail or None):
+                (log.info if outcome.ok else log.warning)(
+                    "%s/%s file move #%s: %s%s", editor, machine, outcome.id,
+                    "done" if outcome.ok else (outcome.state or "failed").upper(),
+                    f" ({outcome.detail})" if outcome.detail else "")
     # ...and to the admin-side Resolve undos (v40, SYS-15b), on exactly the
     # same contract and in the same place, for the same reason: an undo
     # answered in THIS report must not be re-sent in its own reply.
@@ -9877,8 +10143,24 @@ def api_machine_resolve_undo(
 MAX_JOB_OFFERS = 8
 
 
-def _require_fleet_caller(request: Request, conn: sqlite3.Connection) -> str:
+def _require_fleet_caller(request: Request, conn: sqlite3.Connection,
+                         barred: str = "refuse") -> str:
     """The VERIFIED editor behind a fleet job call, or an HTTPException.
+
+    `barred` is what a SUSPENDED account means on this door (dash-api-4 /
+    wire-5, fix pass 2026-09-11b), and there are three answers because the
+    doors are not alike:
+
+      * "refuse"  403, the claim door: no new work under a barred name;
+      * "gone"    410, the heartbeat: the only status the companion's runner
+                  reads as "this job is not yours, stop" (jobs_runner.py). A
+                  403 there is read as a blip, so a machine whose owner was
+                  suspended mid-transcode burned the GPU for another forty
+                  minutes, wrote into the shared vault and had its result
+                  refused - the work the gate exists to prevent, done anyway;
+      * "allow"   the result door. It only RETIRES work already claimed, and
+                  refusing it throws that work away and hands the same job to
+                  a second machine to do again.
 
     Both gates, in the order they fail closed, exactly as ytdl's
     require_fleet_caller does them (H5, ytdl-web-1):
@@ -9927,7 +10209,9 @@ def _require_fleet_caller(request: Request, conn: sqlite3.Connection) -> str:
     # dash-api-6: a suspended editor's machines are turned away from /report
     # and were turned away from nothing else - including claiming fleet jobs
     # that write into the shared vault under roots they still have mounted.
-    _refuse_barred_account(request.app.state.settings, conn, name)
+    if barred != "allow":
+        _refuse_barred_account(request.app.state.settings, conn, name,
+                               status=410 if barred == "gone" else 403)
     return name
 
 
@@ -10344,8 +10628,12 @@ def api_heartbeat_job(
     expired and the job was re-queued, somebody else has it, it finished --
     and the companion's response to all of them is the same one: stop,
     quietly. A 403 would read as "fix your credentials".
+
+    An account bar answers 410 here too (dash-api-4 / wire-5): "your claim is
+    over" is exactly what a suspension means to a machine that is still
+    encoding, and it is the only answer the runner acts on.
     """
-    editor = _require_fleet_caller(request, conn)
+    editor = _require_fleet_caller(request, conn, barred="gone")
     machine = payload.machine.strip()
     now = db.utcnow_iso()
     ok = db.heartbeat_job(conn, job_id, editor, machine, now, note=payload.note,
@@ -10367,8 +10655,15 @@ def api_job_result(
 ) -> dict[str, Any]:
     """How it went. The row records PATHS, never bytes (§4.4 rule 6): the
     output is in the vault, which every machine shares, and nothing streams a
-    transcript through the dashboard."""
-    editor = _require_fleet_caller(request, conn)
+    transcript through the dashboard.
+
+    NOT gated on the account bar (dash-api-4, fix pass 2026-09-11b): this
+    door only RETIRES work already claimed. Refusing a suspended editor's
+    result throws away the forty minutes their machine already spent and
+    re-queues the same job onto a second one - the opposite of what
+    suspending them was for. The heartbeat is where an in-flight job is
+    stopped."""
+    editor = _require_fleet_caller(request, conn, barred="allow")
     machine = payload.machine.strip()
     now = db.utcnow_iso()
     if payload.ok:

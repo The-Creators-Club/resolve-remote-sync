@@ -113,6 +113,11 @@ COPY dashboard/static /app/static
 #
 # /app/docs, because every reader resolves it from its own __file__ the way
 # ui.py resolves /app/templates (help.document_root, setup_engine._find_eula).
+# Every file named here is in published_docs.REQUIRED_DOCS, and must stay
+# there (dash-mounts-ui-b-4, 2026-09-11b): a COPY that names a missing file
+# fails the BUILD with a bare "COPY failed", so a document this list calls
+# best effort must never be hard-copied - the three shipping routes would
+# then disagree about how bad its absence is.
 COPY docs/HOW_IT_WORKS.md docs/EDITOR_SETUP.md /app/docs/
 COPY docs/legal /app/docs/legal
 COPY broll/web /broll-app

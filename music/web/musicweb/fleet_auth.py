@@ -36,7 +36,6 @@ It is ~40 lines of policy either way, and the two headers say so.
 """
 import hmac
 import logging
-import re
 
 from fastapi import Header, HTTPException
 
@@ -58,7 +57,8 @@ log = logging.getLogger(__name__)
 # is what strips every inbound copy of the header. Standalone the flag is off
 # and this is inert, so a header on the wire proves nothing there.
 FLEET_AUTH_HEADER = 'X-CCSync-Fleet-Auth'
-_STAMP_RE = re.compile(r'^(shared|editor:[^\s]{1,64})$')
+STAMP_SHARED = 'shared'
+STAMP_EDITOR_PREFIX = 'editor:'
 
 
 def gate_stamp(presented):
@@ -76,11 +76,24 @@ def gate_stamp(presented):
     if not config.login_gated():
         return None, None
     raw = str(presented or '').strip()
-    if not _STAMP_RE.match(raw):
-        return None, None
-    if raw == 'shared':
-        return 'shared', None
-    return 'editor', raw[len('editor:'):].strip()
+    if raw == STAMP_SHARED:
+        return STAMP_SHARED, None
+    # music-6 (2026-09-11b): b-roll's parser, character for character. This
+    # was `^(shared|editor:[^\s]{1,64})$`, so an account name with a space in
+    # it (or over 64 characters) yielded (None, None), fell through to the
+    # SHARED token comparison that a per-editor `cce1.` token can never
+    # satisfy, and the editor was answered 403 "missing or invalid
+    # X-CCSync-Token" - naming the wrong credential, for a name b-roll and
+    # ytdl both accept. The name is never WHO the caller is on its own
+    # (require_fleet_caller compares it against the signed identity), so its
+    # shape is not a security boundary; three mounts disagreeing about it is.
+    if raw.startswith(STAMP_EDITOR_PREFIX):
+        editor = raw[len(STAMP_EDITOR_PREFIX):].strip()
+        if editor:
+            return 'editor', editor
+        log.warning('music ingest: an %s stamp carried no editor name',
+                    FLEET_AUTH_HEADER)
+    return None, None
 
 
 def token_ok(configured, presented):

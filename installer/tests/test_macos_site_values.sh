@@ -294,9 +294,132 @@ else
     bad "retire_legacy_agent is called $LEGACY_COUNT times for the companion: it must be hoisted, not duplicated"
 fi
 
+# --- install-onboard-4 (2026-09-11b): the retirement runs on the failure path
+# too now, and that path also removes OUR plist. A Mac can end a failed run
+# with no companion autostart at all, and the unmissable warning block did not
+# mention it. retire_legacy_agent is sliced out and run against a real temp
+# plist with launchctl stubbed: the delete and the flag are shell, not launchd.
+RETIRE_SRC="$(slice 'retire_legacy_agent() {' 'retire_legacy_agent \"$SYNCTHING_PLIST_LEGACY\"')"
+case "$RETIRE_SRC" in
+    *"LEGACY_AGENT_RETIRED=1"*) ok "retire_legacy_agent records that it removed something" ;;
+    *) bad "retire_legacy_agent does not record whether it removed anything, so the COMPANION_MISSING block cannot say the Mac lost its autostart" ;;
+esac
+(
+    DRY_RUN=0
+    LEGACY_AGENT_RETIRED=0
+    step() { :; }
+    dry() { :; }
+    launchctl() { return 0; }
+    id() { echo 501; }
+    eval "$RETIRE_SRC"
+    TMP_PLIST="${TMPDIR:-/tmp}/ccsync-test-legacy-$$.plist"
+    echo "<plist/>" > "$TMP_PLIST"
+    retire_legacy_agent "$TMP_PLIST" "com.creatorsclub.ccsync.companion"
+    [ "$LEGACY_AGENT_RETIRED" = 1 ] || exit 2
+    [ -f "$TMP_PLIST" ] && { rm -f "$TMP_PLIST"; exit 3; }
+    LEGACY_AGENT_RETIRED=0
+    retire_legacy_agent "$TMP_PLIST" "com.creatorsclub.ccsync.companion"
+    [ "$LEGACY_AGENT_RETIRED" = 0 ] || exit 4
+    exit 0
+)
+case "$?" in
+    0) ok "retiring a legacy plist deletes it and sets the flag; a run with no legacy plist sets nothing" ;;
+    2) bad "retire_legacy_agent deleted the plist without setting LEGACY_AGENT_RETIRED" ;;
+    3) bad "retire_legacy_agent did not delete the legacy plist" ;;
+    4) bad "LEGACY_AGENT_RETIRED is set even when there was no legacy agent to retire" ;;
+    *) bad "retire_legacy_agent could not be exercised (slice marker changed?)" ;;
+esac
+MISSING_BLOCK="$(awk '/^if \[ "\$COMPANION_MISSING" = 1 \]; then/{on=1} on{print} on && /^else$/{exit}' "$SCRIPT")"
+case "$MISSING_BLOCK" in
+    *"COMPANION_LEGACY_AGENT_RETIRED"*)
+        ok "the COMPANION_MISSING warning block says when the old autostart was removed too" ;;
+    *)
+        bad "the COMPANION_MISSING block never mentions the legacy autostart this run retired: a Mac can be left with no companion autostart at all and nothing says so" ;;
+esac
+case "$MISSING_BLOCK" in
+    *—*) bad "the COMPANION_MISSING block contains an em dash" ;;
+    *) ok "the COMPANION_MISSING block has no em dash" ;;
+esac
+
+# --- install-onboard-3 (2026-09-11b): the macOS uninstaller claimed "removed"
+# and "complete" over a removal that did not happen. Both halves are sliced out
+# of macos_uninstall.sh and RUN: rm is shadowed to simulate the root-owned
+# tree that rm -rf cannot clear, which is the case no Mac in this fleet can be
+# made to reproduce on demand.
+UNINSTALL_SCRIPT="$HERE/../macos_uninstall.sh"
+[ -f "$UNINSTALL_SCRIPT" ] || { echo "FAIL: no $UNINSTALL_SCRIPT"; exit 1; }
+uslice() {
+    awk -v s="$1" -v e="$2" '
+        index($0, s) { on = 1 }
+        on && index($0, e) && !index($0, s) { exit }
+        on { print }
+    ' "$UNINSTALL_SCRIPT"
+}
+# The pre-fix shape, named as itself: rm -rf followed straight by "removed".
+if grep -A1 'rm -rf "\$CCSYNC_LOCAL"' "$UNINSTALL_SCRIPT" | grep -q 'step "removed'; then
+    bad "macos_uninstall.sh still prints 'removed' on the line after rm -rf, with nothing testing whether the tree is gone (install-onboard-3)"
+else
+    ok "the removal is not reported before it is checked"
+fi
+REMOVE_SRC="$(uslice 'remove_local_tree() {' 'if [ -d "$CCSYNC_LOCAL" ]; then')"
+VERDICT_SRC="$(uslice 'closing_verdict() {' 'closing_verdict "$REMOVAL_INCOMPLETE"')"
+if [ -z "$REMOVE_SRC" ] || [ -z "$VERDICT_SRC" ]; then
+    bad "macos_uninstall.sh has no remove_local_tree / closing_verdict to test: the removal is unchecked again (install-onboard-3)"
+else
+    OUT="$(
+        step() { echo "STEP: $1"; }
+        warn() { echo "WARN: $1"; }
+        eval "$REMOVE_SRC"
+        DIR="${TMPDIR:-/tmp}/ccsync-test-uninst-$$"
+        mkdir -p "$DIR/bin"; echo x > "$DIR/bin/ccsync-companion"
+        remove_local_tree "$DIR" && echo "RC0" || echo "RC1"
+        # A tree rm cannot clear: shadowing rm is the only portable way to
+        # reproduce the root-owned / restrictive-ACL case this is about.
+        mkdir -p "$DIR/bin"
+        rm() { :; }
+        remove_local_tree "$DIR" && echo "RC0" || echo "RC1"
+        unset -f rm
+        command rm -rf "$DIR"
+    )"
+    case "$OUT" in
+        *"STEP: removed"*) ok "a real removal still says removed" ;;
+        *) bad "the successful removal no longer reports itself: $OUT" ;;
+    esac
+    case "$OUT" in
+        *"could NOT remove"*) ok "a removal that did not happen says so" ;;
+        *) bad "a failed removal is still reported as removed: $OUT" ;;
+    esac
+    case "$OUT" in
+        *RC0*RC1*) ok "remove_local_tree's exit status tells the two apart" ;;
+        *) bad "remove_local_tree returns the same status either way: $OUT" ;;
+    esac
+    VOUT="$(
+        step() { echo "STEP: $1"; }
+        warn() { echo "WARN: $1"; }
+        DRY_RUN=0
+        CCSYNC_LOCAL="$HOME/.local/ccsync"
+        eval "$VERDICT_SRC"
+        closing_verdict 0
+        echo "--"
+        closing_verdict 1
+    )"
+    case "${VOUT%%--*}" in
+        *"uninstall complete"*) ok "a clean uninstall still ends complete" ;;
+        *) bad "a clean uninstall no longer says complete: $VOUT" ;;
+    esac
+    case "${VOUT##*--}" in
+        *"NOT complete"*) ok "an incomplete uninstall does not end complete" ;;
+        *) bad "an uninstall that left the tree on disk still ends complete: $VOUT" ;;
+    esac
+    case "$VOUT" in
+        *—*) bad "the closing verdict contains an em dash" ;;
+        *) ok "the closing verdict has no em dash" ;;
+    esac
+fi
+
 echo ""
 if [ "$fail" -gt 0 ]; then
     echo "$fail FAILED"
     exit 1
 fi
-echo "all macos_bootstrap.sh site-value / pinned-download cases pass"
+echo "all macos_bootstrap.sh / macos_uninstall.sh cases pass"

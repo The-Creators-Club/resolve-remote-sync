@@ -45,6 +45,9 @@ def make_repo(tmp_path: Path) -> Path:
         (root / rel).mkdir(parents=True)
     (root / "docs/legal/EULA.md").write_text("<!-- EULA-VERSION: 1.0 -->\n")
     (root / "docs/HOW_IT_WORKS.md").write_text("# How it works\n")
+    # dash-mounts-ui-b-4 (2026-09-11b): EDITOR_SETUP.md is REQUIRED now, like
+    # the guide - a bundle without it is a /help that says it is not installed.
+    (root / "docs/EDITOR_SETUP.md").write_text("# Editor setup\n")
     (root / "dashboard/src/ccsync_dashboard/__init__.py").write_text('VERSION = "9.9.9"\n')
     (root / "dashboard/templates/base.html").write_text("<html></html>\n")
     (root / "dashboard/static/style.css").write_text("body{}\n")
@@ -94,6 +97,7 @@ def test_bundle_carries_exactly_the_seven_trees_and_the_two_documents(repo, tmp_
         # first-run wizard makes an admin accept, and the guide /help renders.
         # An over-the-air dashboard that arrived without them showed an empty
         # licence box with a disabled [ ACCEPT ] and ticked `eula` green.
+        "docs/EDITOR_SETUP.md",
         "docs/HOW_IT_WORKS.md",
         "docs/legal/EULA.md",
         "music-app/musicweb/main.py",
@@ -153,14 +157,17 @@ def test_only_the_customer_facing_documents_travel(repo, tmp_path):
     assert set(manifest["files_sha256"]) == set(names)
 
 
-def test_a_published_document_a_checkout_lacks_is_not_fatal(repo, tmp_path):
-    """The guide and the legal tree are REQUIRED (the test below); the rest of
-    the list is best effort, because a missing document is a thinner /help,
-    not a broken dashboard."""
-    result = bdb.build(repo, tmp_path / "out", allow_dirty=True, version="9.9.9")
-    _manifest, names = read_bundle(result["path"])
-    assert "docs/EDITOR_SETUP.md" not in names
-    assert "docs/HOW_IT_WORKS.md" in names
+def test_a_required_document_a_checkout_lacks_is_refused_by_name(repo, tmp_path):
+    """dash-mounts-ui-b-4 (2026-09-11b): EDITOR_SETUP.md joined the guide in
+    published_docs.REQUIRED_DOCS, so a checkout without it is refused the way
+    a checkout without HOW_IT_WORKS.md is (the test below) - and the refusal
+    names the file, because the operator's next move is to find it. The old
+    "best effort" reading is gone: every published document is required now
+    (PUBLISHED_DOCS == REQUIRED_DOCS), so a thinner /help cannot ship."""
+    (repo / "docs" / "EDITOR_SETUP.md").unlink()
+    with pytest.raises(bdb.BundleError) as exc:
+        bdb.build(repo, tmp_path / "out", allow_dirty=True, version="9.9.9")
+    assert "EDITOR_SETUP" in str(exc.value)
 
 
 def test_templates_and_static_are_in_the_bundle(repo, tmp_path):

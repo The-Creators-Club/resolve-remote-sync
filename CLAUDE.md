@@ -292,11 +292,9 @@ cd music\web;     .venv\Scripts\python.exe -m pytest tests -q                # o
 cd music\indexer; python -m pytest tests -q                                  # system python; the path/config half, torch-free on purpose
 cd ytdl\web;      ..\..\dashboard\.venv\Scripts\python.exe -m pytest tests -q # no venv of its own -- the deployed reality is the dashboard's
 cd tools;         ..\dashboard\.venv\Scripts\python.exe -m pytest tests -q   # stdlib-only by design; the dashboard venv has pytest + packaging
-powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-DriveMapParser.ps1   # the "installer" row is SEVEN scripts: this,
-#   Test-LicenceGate.ps1, Test-PrevRollback.ps1 (wave 3), Test-ConsoleUser.ps1 (wave 4, OPS-7),
-#   Test-SmbShareGone.ps1 (bug hunt 2026-09-03, install-onboard-3), Test-ForeignDriveMiss.ps1
-#   (sweep 2026-09-04, OPS-1) and Test-UninstallEntry.ps1 (sweep 2026-09-04, OPS-17), each run
-#   the same way. `ls installer/tests/*.ps1` is the list: this comment has now been wrong twice.
+powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-DriveMapParser.ps1   # the "installer" row is EVERY installer\tests\Test-*.ps1,
+#   each run the same way. run_all_tests.ps1 enumerates the directory since 2026-09-11b (tests-2),
+#   because a hand-written list here was wrong three times. `ls installer/tests/*.ps1` is the list.
 bash installer/tests/test_macos_site_values.sh                               # Git Bash; macos_bootstrap.sh's string helpers, no Mac needed
 ```
 

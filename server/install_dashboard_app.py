@@ -298,7 +298,13 @@ BROLL_EXCLUDE_DIRS = EXCLUDE_DIRS | {".git", ".github", "tests", "node_modules"}
 # is re-shipped on every deploy by construction.
 LOCAL_DOCS_DIR = Path(__file__).resolve().parents[1] / "docs"
 LOCAL_REPO_DIR = Path(__file__).resolve().parents[1]
-SHIPPED_DOCS = ("HOW_IT_WORKS.md",)
+# Kept in step with published_docs.REQUIRED_DOCS by hand: server/ does not
+# import the dashboard package (see published_docs_module below), so the two
+# lists cannot be one object. dash-core-6 (hand-off wave, 2026-09-11b) promoted
+# EDITOR_SETUP.md to REQUIRED there - the image's Dockerfile COPY names it and
+# a COPY of an absent file fails the build - so the bind-mode deploy refuses
+# the same absence rather than shipping a thinner /help without saying so.
+SHIPPED_DOCS = ("HOW_IT_WORKS.md", "EDITOR_SETUP.md")
 SHIPPED_DOC_TREES = ("legal",)
 # The WHOLE docs tree travelled here from 2026-09-04 (Alex: /help is a browser
 # now), and the four top-level documents with it under `_root/`. NOT ANY MORE
@@ -624,11 +630,51 @@ def cards_repo_for(src: Path):
         return None, "", (f"{src} is not inside a git repository "
                           f"({err or 'git rev-parse --show-toplevel failed'}).")
     root = Path(top)
+    # server-tools-b-6 (2026-09-11b): an empty prefix means "this checkout IS
+    # the repository", and export_cards_snapshot skips the subtree check and
+    # archives the WHOLE repo for it. Until today a relative_to that RAISED
+    # (a subst drive, a junction, a UNC spelling git does not resolve to the
+    # same object) fell into that same branch, so a failed comparison shipped
+    # hundreds of MB of the wrong tree and the operator was told the cards
+    # package was "missing at that commit". The two cases are now told apart:
+    # only an src that resolves to the root itself gets the empty prefix.
     try:
-        prefix = src.resolve().relative_to(root.resolve()).as_posix()
-    except (ValueError, OSError):
-        prefix = ""
+        resolved_src, resolved_root = src.resolve(), root.resolve()
+    except OSError as exc:
+        return None, "", (f"{src} could not be resolved against its git "
+                          f"repository at {root} ({exc}).")
+    if resolved_src == resolved_root:
+        return root, "", ""
+    try:
+        prefix = resolved_src.relative_to(resolved_root).as_posix()
+    except ValueError:
+        return None, "", (f"{src} is not inside its own git repository root "
+                          f"{root} - the two paths do not compare (a subst "
+                          f"drive, a junction or a UNC spelling). Point "
+                          f"[timeline_cards] src at the checkout by the same "
+                          f"path git reports.")
     return root, prefix, ""
+
+
+def cards_dirty_files(root: Path, prefix: str) -> list:
+    """The uncommitted paths under `prefix` - modified, staged or untracked.
+
+    server-tools-b-1 (2026-09-11b). The snapshot deploy made "half-finished
+    edits cannot reach the NAS" true by construction, and in doing so inverted
+    the failure: FINISHED edits that were never committed do not reach it
+    either, and nothing said so. `cards_head_moved_on` cannot see it - it
+    compares the shipped commit against the ref's head, which are equal
+    precisely when the work is uncommitted.
+
+    Best effort: a git that cannot answer is an empty list, never a refusal.
+    """
+    args = ["status", "--porcelain"]
+    if prefix:
+        args += ["--", prefix]
+    ok_, out, _err = git_out(args, cwd=root)
+    if not ok_ or not out:
+        return []
+    return [line for line in out.splitlines() if line.strip()]
 
 
 def export_cards_snapshot(src: Path, ref: str, dest_parent=None):
@@ -698,6 +744,21 @@ def export_cards_snapshot(src: Path, ref: str, dest_parent=None):
 
     _, subject, _ = git_out(["log", "-1", "--format=%s", sha], cwd=root)
     _, committed, _ = git_out(["log", "-1", "--format=%cI", sha], cwd=root)
+    # server-tools-b-1: say what is NOT in the tree being shipped. Only when
+    # the snapshot is the checked-out commit: a deploy pinned with
+    # --cards-commit is a deliberate act, and every edit since is expected to
+    # be absent from it.
+    dirty = cards_dirty_files(root, prefix)
+    _, head_sha, _ = git_out(["rev-parse", "--verify", "HEAD^{commit}"], cwd=root)
+    if dirty and head_sha == sha:
+        shown = ", ".join(line[3:].strip() for line in dirty[:6])
+        if len(dirty) > 6:
+            shown += f", and {len(dirty) - 6} more"
+        print(f"NOTE: {len(dirty)} file(s) in {root / prefix if prefix else root} "
+              f"are modified or untracked and are therefore NOT in this deploy "
+              f"({shown}). The snapshot is commit {sha[:12]} ({ref}) and holds "
+              f"its tracked files only: commit them first if they were meant "
+              f"to ship.", file=sys.stderr)
     info = {
         "commit": sha,
         "short": sha[:12],
@@ -707,6 +768,10 @@ def export_cards_snapshot(src: Path, ref: str, dest_parent=None):
         "subject": subject,
         "committed": committed,
         "exported": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        # server-tools-b-1: how many files in the source checkout did NOT
+        # travel. In the marker and the record too, so the drift doctor and
+        # anyone reading DEPLOYED_COMMIT on the NAS see it months later.
+        "dirty_at_export": str(len(dirty)),
     }
     write_cards_marker(out, info)
     return out, info, ""
@@ -728,7 +793,7 @@ def write_cards_marker(tree: Path, info: dict) -> Path:
         "# nothing untracked, dirty or ignored can be in it.",
     ]
     for key in ("commit", "short", "ref", "repo", "subtree", "subject",
-                "committed", "exported"):
+                "committed", "exported", "dirty_at_export"):
         value = str(info.get(key, "")).replace("\n", " ")
         lines.append(f"{key}={value}")
     marker.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -774,6 +839,38 @@ def write_cards_deploy_record(info: dict) -> None:
         path.write_text(json.dumps(dict(info), indent=2) + "\n", encoding="utf-8")
     except (OSError, TypeError, ValueError):
         pass
+
+
+def record_cards_deploy(cards_src, info: dict | None, dry_run: bool) -> None:
+    """Record what THIS deploy shipped to /cards, whatever shape it was.
+
+    server-tools-b-3 (2026-09-11b): the record used to be written only for a
+    commit snapshot, so an explicit `--cards-src-dir` / `CARDS_SRC` deploy
+    left the PREVIOUS snapshot's record standing and the drift doctor read it
+    back as "OK, shipped from main at <sha>, still its head" about a tree that
+    is nobody's commit. An absent commit must not be readable as an old one,
+    so the override writes a record with an empty commit and the directory it
+    shipped; the doctor prints NOT CHECKED for that (wave 4's rule).
+
+    One writer for both shapes on purpose: two writers is how the override
+    path came to have none.
+    """
+    if dry_run:
+        return
+    if info:
+        write_cards_deploy_record(info)
+        return
+    if not cards_src:
+        return
+    write_cards_deploy_record({
+        "commit": "",
+        "short": "",
+        "ref": "",
+        "repo": "",
+        "subtree": "",
+        "override": str(cards_src),
+        "exported": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    })
 
 
 def cards_head_moved_on(info: dict) -> str:
@@ -1087,7 +1184,48 @@ def snapshot_volumes(source: tuple[str, str] | None = None) -> list:
     commands that check and set it.
     """
     host = (source or ("", ""))[0]
-    return [f"{host}:{SNAPSHOT_MOUNT}:ro,rslave"] if host else []
+    if not host:
+        return []
+    # server-tools-b-7 (2026-09-11b): this dict is POSTed to the TrueNAS
+    # middleware, which validates the volume spec before the app is created or
+    # updated - unlike a `docker run -v`, where an unknown option is the
+    # daemon's problem at start time. Whether that validator accepts a
+    # propagation flag in the third field cannot be established from this repo
+    # and was never verified live, so there is an off switch that does not
+    # need a code change at the NAS's keyboard: CCSYNC_SNAPSHOT_RSLAVE=0 ships
+    # the plain `:ro` bind this deploy used before 2026-09-11, at the cost of
+    # the automount propagation snapshot_propagation_note() describes.
+    if not snapshot_propagation_enabled():
+        return [f"{host}:{SNAPSHOT_MOUNT}:ro"]
+    return [f"{host}:{SNAPSHOT_MOUNT}:ro,rslave"]
+
+
+def snapshot_propagation_enabled() -> bool:
+    """False when the operator has turned rslave off (server-tools-b-7)."""
+    return os.environ.get("CCSYNC_SNAPSHOT_RSLAVE", "").strip() not in ("0", "no",
+                                                                       "false")
+
+
+def snapshot_refusal_hint(source: tuple[str, str] | None = None) -> list:
+    """What to say when a deploy carrying the propagation flag is REFUSED.
+
+    server-tools-b-7: the middleware names a volume string, not this change,
+    and the operator is mid-deploy on the one step where the snapshot mount is
+    all that moved. Empty when there is no snapshot mount, or when the flag is
+    already off and so cannot be the cause.
+    """
+    host = (source or ("", ""))[0]
+    if not host or not snapshot_propagation_enabled():
+        return []
+    return [
+        f"NOTE: this deploy asked for {host}:{SNAPSHOT_MOUNT}:ro,rslave. The "
+        f"propagation flag (rslave) is new on 2026-09-11 and is validated by "
+        f"the NAS middleware, not by docker.",
+        "      If the refusal names the volume, re-run with "
+        "CCSYNC_SNAPSHOT_RSLAVE=0 - the mount then works exactly as it did "
+        "before that date, and only the .zfs/snapshot automounts that appear "
+        "after the container starts are invisible to it.",
+    ]
 
 
 def snapshot_propagation_note(source: tuple[str, str] | None = None) -> list:
@@ -4330,10 +4468,21 @@ def ship_dashboard_docs(root: str, dry_run: bool, staging_parent: str) -> bool:
         return False
     staging_local = tempfile.mkdtemp(prefix="ccsync-docs-")
     try:
-        _stage_docs_tree(Path(staging_local))
-        ok = install_tree(root, "app/docs", Path(staging_local), dry_run,
-                          staging_slug="ccsync-docs-upload",
-                          staging_parent=staging_parent)
+        # server-tools-b-5 (2026-09-11b): this runs at step 2a, AFTER the code
+        # swap, and the docstring above promises a NOTE and False rather than
+        # an exception. The try/finally only removed the temp dir, so anything
+        # _stage_docs_tree raised escaped to main() and skipped the container
+        # restart the swap requires - the running container keeps serving the
+        # old inode until it is restarted.
+        try:
+            _stage_docs_tree(Path(staging_local))
+            ok = install_tree(root, "app/docs", Path(staging_local), dry_run,
+                              staging_slug="ccsync-docs-upload",
+                              staging_parent=staging_parent)
+        except Exception as exc:                                 # noqa: BLE001
+            print(f"NOTE: the documents could not be staged ({exc}).",
+                  file=sys.stderr)
+            ok = False
     finally:
         shutil.rmtree(staging_local, ignore_errors=True)
     if not ok:
@@ -4360,8 +4509,14 @@ def _stage_docs_tree(staging: Path) -> None:
     files = list(SHIPPED_DOCS)
     trees = list(SHIPPED_DOC_TREES)
     if published is not None:
-        files += [n for n in published.PUBLISHED_DOCS if n not in files]
-        trees += [n for n in published.PUBLISHED_TREES if n not in trees]
+        # getattr, not attribute access: published_docs_module() swallows every
+        # LOAD failure and documents None as "ship the required set", but a
+        # module that imports cleanly and has been renamed underneath us used
+        # to raise AttributeError straight out of here (server-tools-b-5).
+        files += [n for n in getattr(published, "PUBLISHED_DOCS", ())
+                  if n not in files]
+        trees += [n for n in getattr(published, "PUBLISHED_TREES", ())
+                  if n not in trees]
 
     def _copy(path: Path, rel: Path) -> None:
         if path.is_symlink() or not path.is_file():
@@ -5733,8 +5888,10 @@ def main():
         # cards snapshot deploy, 2026-09-11. DEPLOYED_COMMIT went to the NAS
         # inside the tree; this is the same fact where the drift doctor can
         # read it, since that runs on the base rig with no NAS shell.
+        # server-tools-b-3: every shape of cards deploy leaves a record, the
+        # override included - see record_cards_deploy.
+        record_cards_deploy(cards_src, cards_info, args.dry_run)
         if cards_info and not args.dry_run:
-            write_cards_deploy_record(cards_info)
             moved = cards_head_moved_on(cards_info)
             print(f"installed Timeline Cards: commit {cards_info['short']} "
                   f"({cards_info['ref']}), marker {CARDS_MARKER_NAME} in "
@@ -5934,6 +6091,12 @@ def main():
         env=env_file,
     )
     if rc_deploy != 0 or args.dry_run:
+        if rc_deploy != 0:
+            # server-tools-b-7: a refused create/update names a volume string,
+            # and this is the one line that connects it to the propagation
+            # flag added on 2026-09-11.
+            for line in snapshot_refusal_hint(snapshot):
+                print(line, file=sys.stderr)
         print(snapshot_verdict())
         return rc_deploy
 

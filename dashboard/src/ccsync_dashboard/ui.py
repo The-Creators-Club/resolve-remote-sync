@@ -594,6 +594,32 @@ def _queue_editor(request: Request) -> str | None:
     return user
 
 
+def _queue_machine(request: Request, conn: sqlite3.Connection,
+                   editor: str | None) -> str:
+    """WHICH COMPUTER the queue panel is about, or '' for the person.
+
+    dash-api-4's hand-off (fix pass 2026-09-11b). `build_queue_view` grew a
+    `machine=` that made the panel about one computer - which is what it says
+    it is, since [ FIX DESTINATION ROOT ] answers "where does FIX ALL put the
+    files for the project open in Resolve" and there is no such thing as the
+    project open in Resolve on two computers at once. The only two templates
+    that render it called it with no machine, so the fix was unreachable and
+    leso's MacBook page named whatever was open on the iMac.
+
+    A machine this person does not own is NOT a machine: a typo, or a
+    bookmark taken before a rename, must read as the person's view and never
+    as "nothing is ticked on that computer".
+    """
+    name = (request.query_params.get("machine") or "").strip()
+    if not name or not editor:
+        return ""
+    try:
+        return name if name in db.machines_of(conn, editor) else ""
+    except sqlite3.Error:                                              # noqa: BLE001
+        log.warning("could not list %r's computers for the queue panel", editor)
+        return ""
+
+
 def _as_qs(request: Request, editor: str | None) -> str:
     """'&as=<editor>' when the viewer is ticking for somebody else, else ''.
 
@@ -637,6 +663,7 @@ def page_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     # from their own `now`, so one page render was ~2x the queries and the two
     # panels could disagree by construction (DASH-6, 2026-08-14).
     projects_view = build_projects_view(conn)
+    queue_machine = _queue_machine(request, conn, queue_editor)
     scope = auth.scope_for(request)
     context = {
         # _sidebar_context, not a bare view: the every-30s /partials/sidebar
@@ -646,8 +673,12 @@ def page_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
         # Scoped: an editor sees their own machines plus the summary counts,
         # an admin sees the fleet (COMMERCIAL_READINESS.md L1, 2026-08-17).
         "fleet": _fleet_view(conn, scope),
-        "queue": build_queue_view(conn, queue_editor, projects_view=projects_view)
+        "queue": build_queue_view(conn, queue_editor, projects_view=projects_view,
+                                  machine=queue_machine or None)
                  if queue_editor else None,
+        # The computer the panel is about, threaded into the poll URL below
+        # (fleet.html) so the 10s refresh keeps asking about the same one.
+        "queue_machine": queue_machine,
         # First paint for the windowed live-transfers panel (2026-08-18). The
         # panel polls /partials/transfers every 2s like the /transfers page
         # does, so this build costs one extra pass on page load and nothing
@@ -921,8 +952,10 @@ def partial_queue(request: Request, conn: sqlite3.Connection = Depends(get_conn)
     # is where "what is still going up" lives; the 10s poll pays for one
     # editor-scoped build, not a fleet one.
     transfers = build_transfers_view(conn, editor=editor)
+    machine = _queue_machine(request, conn, editor)
     return _render(request, "partials/queue_section.html", {
-        "queue": build_queue_view(conn, editor),
+        "queue": build_queue_view(conn, editor, machine=machine or None),
+        "queue_machine": machine,
         "safe_to_close": safe_to_close(transfers, editor),
     })
 
@@ -3479,7 +3512,8 @@ def _feed_next_check_seconds(last_checked_at: str | None, interval: float) -> in
 
 
 def _packages_and_feed(conn, request: Request, error: str | None = None,
-                       refused: list | None = None) -> dict:
+                       refused: list | None = None,
+                       current_refused: str = "") -> dict:
     settings = request.app.state.settings
     feed = release_feed.build_feed_view(conn, settings, request.app.state)
     # REL-11 (2026-09-03): the panel said when it LAST checked and never when
@@ -3504,6 +3538,10 @@ def _packages_and_feed(conn, request: Request, error: str | None = None,
         # not accept is otherwise indistinguishable from one the vendor never
         # published, and both look like "nothing new".
         "feed_refused": refused or [],
+        # What a rollback's re-pointing of `current` was refused for, when it
+        # was (dash-api-1's hand-off, 2026-09-11b). Empty on every other
+        # render of this panel, which is most of them.
+        "rollback_current_refused": current_refused or "",
     }
 
 
@@ -3651,13 +3689,30 @@ async def partial_admin_roll_fleet_back(
     from_version = form.get("from_version", "").strip()
     to_version = form.get("to_version", "").strip()
     error = None
+    current_refused = ""
     try:
-        api_roll_fleet_back_impl(conn, platform=platform, from_version=from_version,
-                                 to_version=to_version, admin=admin)
+        # `settings` (dash-api-1's hand-off, fix pass 2026-09-11b): without it
+        # the gate this call goes through read `getattr(None,
+        # "release_soak_minutes", DEFAULT)` - the DEFAULT soak, never this
+        # site's. A site that turned the gate off (`[releases] soak_minutes =
+        # 0`, the documented escape) was still refused the re-pointing the
+        # JSON route performs, so `current` stayed on the build being rolled
+        # off and the channel offered it straight back.
+        answer = api_roll_fleet_back_impl(
+            conn, platform=platform, from_version=from_version,
+            to_version=to_version, admin=admin,
+            settings=request.app.state.settings)
+        # NOT an error: the fan-out happened, and that is the half that
+        # reaches the machines. But `current` was left where it was, so every
+        # computer that takes the older build is offered the rolled-off one
+        # again on its next report - unattended where auto_update is on.
+        # Nothing rendered this, so the admin read a silent success.
+        current_refused = str(answer.get("current_refused") or "")
     except HTTPException as exc:
         error = str(exc.detail)
     return _render(request, "partials/admin_packages.html",
-                   _packages_and_feed(conn, request, error))
+                   _packages_and_feed(conn, request, error,
+                                      current_refused=current_refused))
 
 
 @router.post("/partials/admin/machines/update")

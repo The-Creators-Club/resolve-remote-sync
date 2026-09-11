@@ -133,6 +133,35 @@ def check_ingest_token(token: str) -> str | None:
     return None
 
 
+def _account_bar(settings, editor: str) -> str | None:
+    """Why this editor's machines may not be stamped right now, or None.
+
+    security-1 (fix pass 2026-09-11b). The predicate is `api.account_bar_reason`
+    and lives there on purpose, so "suspended" means the same thing at every
+    door; the only thing each mount owns is the short-lived connection, which
+    it opens exactly as it opens one to resolve the token itself. FAILS OPEN
+    on an unopenable database, like the predicate: a read that cannot answer
+    must never lock the fleet out of its own archive.
+
+    Imported inside the call for the reason `_fleet_stamp` gives: auth.py
+    imports this module, so a module-level `from . import api` closes the loop
+    at boot.
+    """
+    from . import api, db
+
+    try:
+        conn = db.connect(settings.db_path)
+    except Exception:                                                  # noqa: BLE001
+        return None
+    try:
+        return api.account_bar_reason(settings, conn, editor)
+    except Exception:                                                  # noqa: BLE001
+        log.warning("could not read the account state for %r", editor, exc_info=True)
+        return None
+    finally:
+        conn.close()
+
+
 class BrollGate:
     """ASGI wrapper around the b-roll sub-app. Four jobs, all fail-closed.
 
@@ -268,6 +297,18 @@ class BrollGate:
         if kind == api.AUTH_SHARED:
             return b"shared"
         if kind == api.AUTH_EDITOR and editor:
+            # security-1 (fix pass 2026-09-11b): SUSPENDED is a word this
+            # mount had no notion of. DCORE-4 revokes no `cce1.` token when an
+            # admin suspends an account, so the one door suspension closed was
+            # /report - a suspended freelancer's laptop could still claim an
+            # ingest batch and push clips into the shared archive through this
+            # one. The stamp IS the authorisation, so withholding it is the
+            # refusal: the sub-app falls back to its own shared-secret
+            # compare, which a per-editor token never matches.
+            barred = _account_bar(self._settings, editor)
+            if barred:
+                log.warning("b-roll fleet stamp withheld for %r: %s", editor, barred)
+                return None
             encoded = _header_value(f"editor:{editor}")
             if encoded is None:
                 # Same fail-closed rule as the identity header: a name that
@@ -532,10 +573,23 @@ def _init_broll_storage() -> None:
     from app import config as broll_config  # type: ignore[import-not-found]
     from app.db import ensure_schema  # type: ignore[import-not-found]
 
-    # res-fleet-2 (2026-09-11): the root the collector re-probes every cycle.
+    # res-fleet-2 (2026-09-11): the path the collector re-probes every cycle.
     # Recorded before the mkdir, so a root that later disappears is still the
     # one this mount was serving.
-    mount_status.record_root("broll", str(broll_config.get_data_root()))
+    #
+    # A MOUNTPOINT IS NEVER EVIDENCE ABOUT WHAT IS MOUNTED ON IT
+    # (dash-mounts-ui-b-1, 2026-09-11). This used to record the data root, and
+    # on every shipped deployment that root is a bind-mount TARGET
+    # (BROLL_DATA_ROOT=/broll-data). A bind mount whose backing export goes
+    # away leaves its mount point behind inside the container - the same thing
+    # alerts._check_nas_tree says in so many words, which is why IT probes for
+    # an entry rather than for the directory - so `os.path.isdir` answered True
+    # in every failure the re-probe was written for, and the flapping NAS the
+    # docstring describes went on being advertised as MOUNTED. The recorded
+    # path is now the `proxies` directory the loop below creates INSIDE the
+    # root: it is still a directory (the probe is `os.path.isdir`), it is
+    # created on whatever is really mounted there, and it goes away with it.
+    mount_status.record_root("broll", str(broll_config.get_proxies_dir()))
     for d in (
         broll_config.get_data_root(),
         broll_config.get_proxies_dir(),
@@ -552,4 +606,14 @@ def _init_broll_storage() -> None:
         from app import client_folders  # type: ignore[import-not-found]
     except ImportError:
         return
-    client_folders.ensure_schema()
+    # BEST EFFORT (broll-5's hand-off, 2026-09-11b). This is a BOOT path, and
+    # the caller marks the whole /broll mount DEGRADED on an exception - nav
+    # link hidden, home page saying every request will fail - which since
+    # broll-2's request-path guard is simply false: the archive serves every
+    # search fine without a client-folder ledger. A ledger locked for the
+    # seconds the container starts is a real possibility now that the
+    # migration takes BEGIN IMMEDIATE. `getattr` because BROLL_WEB_SRC can
+    # point at a checkout older than that change; the fallback is what the
+    # mount did before.
+    getattr(client_folders, "ensure_schema_best_effort",
+            client_folders.ensure_schema)()

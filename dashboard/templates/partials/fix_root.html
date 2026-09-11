@@ -7,9 +7,25 @@
 <div class="fix-root-box">
   <div class="side-head">[ FIX DESTINATION ROOT ]
     <span class="muted">where FIX ALL puts the files for the project open in Resolve</span></div>
+  {# WHICH COMPUTER (dash-api-4's hand-off, 2026-09-11b). "The project open in
+     Resolve" is a fact about one computer, and a person with two of them read
+     whichever reported last with nothing on the page saying which. Plain
+     links, not hx-get: the choice has to survive the 10s poll, and the poll
+     URL is built from the page's own query string. #}
+  {% if queue.machines and queue.machines | length > 1 %}
+  <div class="mono-sm" style="margin-top:0.3rem">
+    <span class="muted">computer:</span>
+    <a class="chip {{ '' if queue_machine | default('', true) else 'amber' }}" href="/">[ LAST TO REPORT ]</a>
+    {% for m in queue.machines %}
+      <a class="chip {{ 'amber' if (queue_machine | default('', true)) == m else '' }}"
+         href="/?machine={{ m | urlencode }}">[ {{ m }} ]</a>
+    {% endfor %}
+  </div>
+  {% endif %}
   <div class="mono-sm root-line">
     {% if queue.resolve_project %}
-      open in Resolve: <span class="who">{{ queue.resolve_project }}</span> →
+      open in Resolve{% if queue_machine | default('', true) %} on <span class="who">{{ queue_machine }}</span>{% endif %}:
+      <span class="who">{{ queue.resolve_project }}</span> →
       {% if queue.root_label %}
         files into <span class="who">{{ queue.root_label }}</span>
         <span class="muted">({{ "admin-set" if queue.root_source == "admin" else "auto-matched, fixed" }};

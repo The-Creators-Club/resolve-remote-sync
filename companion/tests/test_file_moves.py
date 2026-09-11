@@ -515,7 +515,9 @@ def test_relink_moved_repoints_the_pool_through_replace_clip(tmp_path, monkeypat
 
     matched, text = file_moves.relink_moved(old, new, str(root), "P:" + chr(92),
                                             is_dir=True)
-    assert matched is True and "1 Resolve clip(s) relinked" in text
+    # regression-19 hand-off (2026-09-11b): a real plural, because this
+    # sentence reaches the editor through the RELINK IT toast.
+    assert matched is True and "1 Resolve clip relinked" in text
     assert len(replaced) == 1
     assert replaced[0][0].endswith(chr(92).join(["Renamed", "B-roll", "A001_0512.braw"]))
     assert replaced[0][1] == "file_move"

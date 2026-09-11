@@ -241,11 +241,15 @@ def _include_is_valid(entry: object) -> Optional[dict]:
             "lender_slug": lender_slug.strip()}
 
 
-def _accepts_max_duration(fn: Any) -> bool:
+def _accepts_kw(fn: Any, name: str) -> bool:
     try:
-        return "max_duration_seconds" in inspect.signature(fn).parameters
+        return name in inspect.signature(fn).parameters
     except (TypeError, ValueError):
         return False
+
+
+def _accepts_max_duration(fn: Any) -> bool:
+    return _accepts_kw(fn, "max_duration_seconds")
 
 
 def _is_not_found(exc: BaseException) -> bool:
@@ -435,6 +439,19 @@ class Sequencer:
         # per project turn, unbounded, was the other half.
         self._lane_b_subpath: Optional[str] = None
         self._lane_b_abandoned: Optional[str] = None
+        # comp-sync-b-1 (2026-09-11b): the latch is set by THIS thread after
+        # thread.is_alive() said yes, and cleared by the lane B thread's own
+        # finally. Those two orderings can cross -- a pass that ends 50 ms
+        # after the abort join gives up clears first and is latched second,
+        # and nothing then ever clears it again: proxy download is off for
+        # the life of the process, green and silent. Every lane B pass takes
+        # a generation number; a pass that has already run its finally can no
+        # longer be latched, and both sides go through _lock, so there is no
+        # window left to lose.
+        self._lane_b_gen = 0
+        self._lane_b_finished_gen = 0
+        self._lane_b_abandoned_gen: Optional[int] = None
+        self._lane_b_abandoned_thread: Optional[threading.Thread] = None
         try:
             self.lane_b.subpath_still_current = self._subpath_is_current
         except Exception:
@@ -1995,7 +2012,13 @@ class Sequencer:
         # behind that one, for as long as the wedge lasts, and every project
         # turn adds one more. Report the lane as stalled and carry on with
         # lane A, which is the same containment the join was written for.
-        abandoned = self._lane_b_abandoned
+        abandoned = self._lane_b_abandoned if run_b else None
+        if abandoned is not None and self._abandoned_thread_is_gone():
+            # comp-sync-b-1: belt and braces for a latch whose thread died
+            # without reaching its finally at all. Honouring one of those
+            # costs every later pass; re-checking it costs an is_alive().
+            self._clear_lane_b_abandoned()
+            abandoned = None
         if run_b and abandoned is not None:
             log.warning(
                 "sequencer: not starting lane B for %s -- an earlier pass on %s was "
@@ -2009,6 +2032,8 @@ class Sequencer:
             run_b = False
         with self._lock:
             self._lane_b_subpath = subpath if run_b else None
+            self._lane_b_gen += 1
+            generation = self._lane_b_gen
         outcomes: dict[str, Any] = {}
 
         def _a() -> None:
@@ -2021,7 +2046,8 @@ class Sequencer:
 
         def _b() -> None:
             try:
-                outcomes["b"] = self._run_lane(self.lane_b, subpath, budget)
+                outcomes["b"] = self._run_lane(
+                    self.lane_b, subpath, budget, rotation_pass=True)
             except Exception:
                 log.exception("sequencer: lane B run_once failed for %s", subpath)
             finally:
@@ -2030,7 +2056,10 @@ class Sequencer:
                 # finally, which is the only place that knows the wedge is
                 # over. Nothing else may clear it: a restart is otherwise the
                 # only thing that drains the queue.
-                self._clear_lane_b_abandoned()
+                # comp-sync-b-1: and it retires its OWN generation, so a
+                # latch the sequencer is in the middle of writing for this
+                # same pass is refused rather than left on for ever.
+                self._retire_lane_b_generation(generation)
 
         if not (self.concurrent_lanes and run_b):
             _a()
@@ -2090,14 +2119,17 @@ class Sequencer:
                     # below used to claim the held _run_lock contained this;
                     # it contains the abandoned thread only, and every later
                     # turn queued another one behind it.
-                    with self._lock:
-                        self._lane_b_abandoned = subpath
-                    log.error(
-                        "sequencer: lane B is STILL running after the abort "
-                        "(%s) -- continuing without it; the next project's "
-                        "repath may be blocked until it ends",
-                        "child killed" if aborted else "no child to kill",
-                    )
+                    if self._note_lane_b_abandoned(subpath, thread, generation):
+                        log.error(
+                            "sequencer: lane B is STILL running after the abort "
+                            "(%s) -- continuing without it; the next project's "
+                            "repath may be blocked until it ends",
+                            "child killed" if aborted else "no child to kill",
+                        )
+                    else:
+                        log.warning(
+                            "sequencer: the lane B pass on %s ended while it was "
+                            "being marked abandoned -- not latching it", subpath)
         self._note_transport(outcomes, run_b)
 
     # -- comp-sync-7: the abandoned lane B latch --------------------------
@@ -2116,9 +2148,49 @@ class Sequencer:
         except Exception:
             return True
 
+    def _note_lane_b_abandoned(self, subpath: str, thread: Optional[threading.Thread],
+                               generation: Optional[int]) -> bool:
+        """Latch this pass as abandoned. False when it has already ended.
+
+        comp-sync-b-1 (2026-09-11b): the generation is the whole point. The
+        pass being latched may be running its own finally right now, and
+        that finally is the ONLY thing that can ever clear the latch -- so a
+        set that lands after it is permanent. Both sides take `_lock`, and a
+        generation that has already retired is never latched."""
+        with self._lock:
+            if generation is not None and generation <= self._lane_b_finished_gen:
+                return False
+            self._lane_b_abandoned = subpath
+            self._lane_b_abandoned_gen = generation
+            self._lane_b_abandoned_thread = thread
+        return True
+
+    def _retire_lane_b_generation(self, generation: int) -> None:
+        with self._lock:
+            if generation > self._lane_b_finished_gen:
+                self._lane_b_finished_gen = generation
+            if self._lane_b_abandoned_gen is not None and \
+                    self._lane_b_abandoned_gen > generation:
+                # A later pass owns the latch; this one has nothing to clear.
+                return
+        self._clear_lane_b_abandoned()
+
+    def _abandoned_thread_is_gone(self) -> bool:
+        """Is the latch held by a thread that is no longer running? Never
+        raises, and "cannot tell" is False: honouring a live wedge costs one
+        pass, and dropping a real one costs the containment."""
+        try:
+            with self._lock:
+                thread = self._lane_b_abandoned_thread
+            return thread is not None and not thread.is_alive()
+        except Exception:
+            return False
+
     def _clear_lane_b_abandoned(self) -> None:
         with self._lock:
             was, self._lane_b_abandoned = self._lane_b_abandoned, None
+            self._lane_b_abandoned_gen = None
+            self._lane_b_abandoned_thread = None
         if was is not None:
             log.warning("sequencer: the abandoned lane B pass on %s has ended -- "
                         "proxy download is back in the rotation", was)
@@ -2190,14 +2262,26 @@ class Sequencer:
         return self.sequencer_idle_seconds * IDLE_BACKOFF_STEPS[step]
 
     @staticmethod
-    def _run_lane(lane: Any, subpath: str, budget: Optional[float]) -> Any:
+    def _run_lane(lane: Any, subpath: str, budget: Optional[float],
+                  rotation_pass: bool = False) -> Any:
         """run_once with a per-project time budget where the lane supports
         one. Adapters that predate the budget (and test doubles) take
         (subpath) only -- checked by signature rather than by catching
-        TypeError, which would silently re-run a lane whose body raised."""
-        if budget is None or not _accepts_max_duration(lane.run_once):
-            return lane.run_once(subpath)
-        return lane.run_once(subpath, max_duration_seconds=budget)
+        TypeError, which would silently re-run a lane whose body raised.
+
+        regression-4 (2026-09-11b): `rotation_pass` is what tells the lane
+        this call belongs to the ROTATION. comp-sync-7's stale-subpath gate
+        was a property of the lane object, and consolidate/FIX ALL call
+        run_once on the very same object -- so an editor consolidating
+        project X while the rotation's last turn was on Y had their proxy
+        pull silently dropped. Only the sequencer's own passes may be
+        dropped for having gone stale."""
+        kwargs: dict[str, Any] = {}
+        if budget is not None and _accepts_max_duration(lane.run_once):
+            kwargs["max_duration_seconds"] = budget
+        if rotation_pass and _accepts_kw(lane.run_once, "rotation_pass"):
+            kwargs["rotation_pass"] = True
+        return lane.run_once(subpath, **kwargs)
 
     def _maybe_clone_structure(self, subpath: str, slug: str, forced: bool = False) -> bool:
         """Structure clone, but not on every pass.

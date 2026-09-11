@@ -310,6 +310,30 @@ def preview_restore(settings: Any, conn: sqlite3.Connection, slug: str,
         else:
             unchanged += 1
     added = sorted(set(live_files) - set(snap_files))
+    if snap_cut or live_cut:
+        # dash-collector-alerts-7 (2026-09-11b). `restore_into_quarantine`
+        # refuses a truncated walk (dash-collector-alerts-5) because every
+        # file the LIVE walk never reached is classified here as missing. The
+        # preview is where that decision is MADE, and it was still handing the
+        # owner "18,402 files missing, 4.1 TB" - a number the cap invented,
+        # almost all of it present - with `truncated: True` as the only hint.
+        # The counts are withheld rather than corrected: this server cannot
+        # compare a folder this size, and the restore below would 409 anyway.
+        which = "snapshot" if snap_cut else "project"
+        return {
+            "slug": slug, "label": label, "snapshot": snapshot,
+            "live_exists": live.is_dir(),
+            "missing": [], "missing_count": 0, "missing_bytes": 0,
+            "changed": [], "changed_count": 0, "changed_bytes": 0,
+            "unchanged_count": 0,
+            "added": [], "added_count": 0,
+            "truncated": True, "counts_unavailable": True,
+            "note": (f"That {which} folder holds more than {MAX_SCAN_FILES} files, "
+                     f"more than this server compares in one go, so it cannot say "
+                     f"what is missing without guessing. Restore the folder with "
+                     f"the commands on the recovery page instead: a restore this "
+                     f"large is a transfer, not a click."),
+        }
     return {
         "slug": slug, "label": label, "snapshot": snapshot,
         "live_exists": live.is_dir(),
@@ -319,7 +343,7 @@ def preview_restore(settings: Any, conn: sqlite3.Connection, slug: str,
         "changed_bytes": sum(int(c["bytes"]) for c in changed),
         "unchanged_count": unchanged,
         "added": added[:MAX_PREVIEW_ROWS], "added_count": len(added),
-        "truncated": bool(snap_cut or live_cut),
+        "truncated": False, "counts_unavailable": False,
         # Said on the page every time, not only in the docs: this is the
         # property that makes the choice above safe to get wrong.
         "note": ("Nothing here is overwritten. Whatever you restore is copied into a "

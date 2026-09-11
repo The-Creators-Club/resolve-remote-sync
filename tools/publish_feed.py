@@ -807,7 +807,25 @@ def _apply_manifest(args: argparse.Namespace, manifest: dict, manifest_dir: Path
     if not args.version:
         args.version = str(manifest.get("version") or "")
     if not args.platform:
-        args.platform = str(manifest.get("platform") or "")
+        # dash-release-jobs (hand-off wave, 2026-09-11b): argparse's
+        # `choices=sign_release.PLATFORMS` guards --platform and NOTHING ELSE,
+        # so a manifest was the one way a non-canonical platform reached a
+        # SIGNED record - "Windows", "darwin", "osx". The platform is matched
+        # exactly by every reader (the companion's channel pick, the feed's
+        # `current` key, the per-platform artefact directory), so such a record
+        # is published, verifiable and claimed by no machine on earth: the
+        # shape behind CR-260d. Fold the case here, where the value enters,
+        # and refuse what is still not a platform rather than sign it.
+        measured = str(manifest.get("platform") or "").strip()
+        folded = measured.lower()
+        if folded and folded not in sign_release.PLATFORMS:
+            raise PublishFeedError(
+                f"the manifest says platform={measured!r}, which is not one of "
+                f"{', '.join(sign_release.PLATFORMS)}. A record signed with that "
+                "platform is offered to nobody: pass --platform explicitly if the "
+                "manifest is wrong, or rebuild it.",
+                EXIT_CONDEMNED)
+        args.platform = folded
     if not args.artifact:
         name = str(manifest.get("artifact") or "")
         if name:

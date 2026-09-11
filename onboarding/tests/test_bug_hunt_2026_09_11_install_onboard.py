@@ -43,22 +43,46 @@ _DEV_EXTERNAL = 16777230
 
 
 class _FakeStat:
-    def __init__(self, dev: int) -> None:
+    def __init__(self, dev: int, ino: int = 0) -> None:
         self.st_dev = dev
+        self.st_ino = ino
         self.st_mode = 0o040755  # a directory, never a symlink
 
 
 def _firmlink_stat(path, *args, **kwargs) -> _FakeStat:
     p = posixpath.normpath(str(path))
+    # st_ino is per-path and stable: posixpath.ismount falls back to it when
+    # a path and its parent share a device, and the pre-fix mechanism this
+    # file has to be able to run is posixpath.ismount (tests-1, 2026-09-11b).
+    ino = abs(hash(p)) % (2 ** 31) or 1
     if p.startswith("/Volumes/") or p.startswith("/mnt/"):
-        return _FakeStat(_DEV_EXTERNAL)
+        return _FakeStat(_DEV_EXTERNAL, ino)
     for firmlinked in ("/System/Volumes/Data", "/Users", "/Applications"):
         if p == firmlinked or p.startswith(firmlinked + "/"):
-            return _FakeStat(_DEV_DATA)
-    return _FakeStat(_DEV_SYSTEM)
+            return _FakeStat(_DEV_DATA, ino)
+    return _FakeStat(_DEV_SYSTEM, ino)
 
 
-def _guard_under_firmlinks(monkeypatch, exe, probe=None):
+def _old_guard_verdict(exe: str) -> bool:
+    """The pre-fix darwin branch, verbatim from 40f931a: walk up from the exe
+    and refuse at the first mount point. Kept here (tests-1, 2026-09-11b)
+    because the shipped guard no longer contains the mechanism the shipped
+    bug was, and a regression test that cannot state the bug cannot fail on
+    it."""
+    if exe.startswith("/Volumes/"):
+        return True
+    path = posixpath.dirname(exe)
+    while path and path != "/":
+        if posixpath.ismount(path):
+            return True
+        parent = posixpath.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return False
+
+
+def _guard_under_firmlinks(monkeypatch, exe, probe=None, pre_fix_is_mount=True):
     """Run the REAL guard (no injected callable) against a simulated
     volume-group Mac.
 
@@ -66,10 +90,24 @@ def _guard_under_firmlinks(monkeypatch, exe, probe=None):
     finally: pytest's own collection, caching and traceback formatting all
     stat real files, so a fixture-wide patch takes the test session down
     rather than the test.
+
+    tests-1 (2026-09-11b): `_default_is_mount` is substituted with posixpath's
+    ismount as well. The pre-fix guard reached the mount table through
+    `os.path.ismount`, and on the Windows dev box and the Windows CI job --
+    THE ONLY RUNNERS THIS SUITE HAS -- os.path is ntpath, whose ismount never
+    reads st_dev and answers False for every POSIX path. The old code was
+    therefore green against this whole file, and these tests could not fail on
+    the bug they were written for. The new guard does not call
+    `_default_is_mount` at all, so the substitution changes nothing about what
+    is under test; it only puts the macOS semantics back under the mechanism
+    a revert would restore.
     """
     monkeypatch.setattr(steps.sys, "frozen", True, raising=False)
     monkeypatch.setattr(steps.sys, "executable", exe)
     monkeypatch.setenv("HOME", "/Users/leso")
+    if pre_fix_is_mount:
+        monkeypatch.setattr(steps, "_default_is_mount",
+                            lambda path: posixpath.ismount(path))
     real_stat, real_lstat = os.stat, os.lstat
     os.stat = _firmlink_stat
     os.lstat = _firmlink_stat
@@ -84,13 +122,44 @@ def _guard_under_firmlinks(monkeypatch, exe, probe=None):
 
 def test_the_simulation_really_is_a_mount_boundary(monkeypatch):
     """If this stops being true the rest of the file proves nothing: the old
-    guard's refusal came from os.path.ismount("/Users") being True."""
+    guard's refusal came from ismount("/Users") being True."""
     verdict, ismount_users = _guard_under_firmlinks(
         monkeypatch, "/Users/leso/Desktop/onboard",
         probe=lambda: posixpath.ismount("/Users"))
     assert ismount_users is True
     assert stat_mod.S_ISDIR(_firmlink_stat("/Users").st_mode)
     assert verdict is False
+
+
+def test_the_pre_fix_walk_refuses_what_the_shipped_guard_allows(monkeypatch):
+    """tests-1 (2026-09-11b): the two answers must DIFFER under the same
+    simulation. Without this, a revert of the darwin branch is green
+    everywhere the suite runs."""
+    exe = "/Users/leso/Desktop/onboard"
+    verdict, old = _guard_under_firmlinks(
+        monkeypatch, exe, probe=lambda: _old_guard_verdict(exe))
+    assert old is True, "the simulation no longer reproduces the shipped bug"
+    assert verdict is False
+
+
+@pytest.mark.skipif(
+    os.path is not posixpath,
+    reason="os.path is ntpath on this runner and ntpath.ismount never reads "
+           "st_dev, so the unpatched pre-fix mechanism answers False for every "
+           "POSIX path here. SAID OUT LOUD rather than passing (tests-1): the "
+           "rest of the file substitutes posixpath.ismount for "
+           "steps._default_is_mount so the mechanism is exercised anyway. "
+           "This suite runs on Windows only -- see the OWED note in "
+           "docs/bug-hunt-2026-09-11b/ledger/install-onboard.md about adding "
+           "onboarding to the macOS CI job.")
+def test_the_shipped_default_is_mount_is_the_pre_fix_mechanism(monkeypatch):
+    """On a POSIX runner, the module's own `_default_is_mount` is the thing
+    that used to refuse the home folder."""
+    _verdict, probed = _guard_under_firmlinks(
+        monkeypatch, "/Users/leso/Desktop/onboard",
+        probe=lambda: steps._default_is_mount("/Users"),
+        pre_fix_is_mount=False)
+    assert probed is True
 
 
 @pytest.mark.parametrize("exe", [
@@ -162,7 +231,7 @@ def _script(tmp_path, name):
 
 def test_windows_bootstrap_gets_the_cached_prefix_after_a_failed_fetch(
         tmp_path, monkeypatch):
-    monkeypatch.setattr(site_mod, "cached_site", lambda: dict(Q_CACHE))
+    monkeypatch.setattr(site_mod, "cached_site", lambda **kw: dict(Q_CACHE))
     calls = []
     steps.run_bootstrap(
         editor_name="jane", dashboard_token="t", tailnet_host="nas",
@@ -176,7 +245,7 @@ def test_windows_bootstrap_gets_the_cached_prefix_after_a_failed_fetch(
 
 def test_macos_bootstrap_gets_the_cached_prefix_after_a_failed_fetch(
         tmp_path, monkeypatch):
-    monkeypatch.setattr(site_mod, "cached_site", lambda: dict(Q_CACHE))
+    monkeypatch.setattr(site_mod, "cached_site", lambda **kw: dict(Q_CACHE))
     calls = []
     steps.run_bootstrap(
         editor_name="jane", dashboard_token="t", tailnet_host="nas",
@@ -192,7 +261,7 @@ def test_no_cache_means_the_script_fetches_for_itself(tmp_path, monkeypatch):
     """The wizard's own P:\\ default must NEVER reach the bootstrap: an env
     var or a flag carrying it would beat the script's fetch, which is
     install-onboard-2 pointing the other way."""
-    monkeypatch.setattr(site_mod, "cached_site", lambda: {})
+    monkeypatch.setattr(site_mod, "cached_site", lambda **kw: {})
     calls = []
     steps.run_bootstrap(
         editor_name="jane", dashboard_token="t", tailnet_host="nas",
@@ -213,7 +282,7 @@ def test_no_cache_means_the_script_fetches_for_itself(tmp_path, monkeypatch):
 
 
 def test_a_fetched_manifest_still_beats_the_cache(tmp_path, monkeypatch):
-    monkeypatch.setattr(site_mod, "cached_site", lambda: dict(Q_CACHE))
+    monkeypatch.setattr(site_mod, "cached_site", lambda **kw: dict(Q_CACHE))
     calls = []
     steps.run_bootstrap(
         editor_name="jane", dashboard_token="t", tailnet_host="nas",
@@ -228,7 +297,7 @@ def test_a_fetched_manifest_still_beats_the_cache(tmp_path, monkeypatch):
 
 
 def test_an_unreadable_cache_is_not_fatal(tmp_path, monkeypatch):
-    def boom():
+    def boom(**kw):
         raise OSError("~/.ccsync is not readable")
 
     monkeypatch.setattr(site_mod, "cached_site", boom)
@@ -249,7 +318,9 @@ def test_an_unreadable_cache_is_not_fatal(tmp_path, monkeypatch):
     # port 8443, both TLS. Guessing http:// for 8443 wrote an unusable URL
     # into the field, config.toml and the companion's loopback allow-list.
     ("nas.tail26290e.ts.net:8443", "https://nas.tail26290e.ts.net:8443"),
-    ("dash.example.com:8443", "https://dash.example.com:8443"),
+    # install-onboard-5 (2026-09-11b): 8443 is this deployment's Funnel
+    # port, and a customer's own 8443 is as often the plain container port.
+    ("dash.example.com:8443", "http://dash.example.com:8443"),
     # A tailnet name is https on any port: Serve terminates TLS for all of them.
     ("nas.tail26290e.ts.net:8480", "https://nas.tail26290e.ts.net:8480"),
     # Unchanged: a bare container port on someone's own deployment, and every

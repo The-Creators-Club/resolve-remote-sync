@@ -131,7 +131,7 @@ def _cmp_key(path: object) -> str:
     bug-hunt-2026-09-03 comp-sync-2: Unicode is folded too (CR-90). The
     ledger's `old_local` is built from the dashboard's NFC `from_rel`, while
     the path `moved_to()` is asked about came out of Resolve on a Mac, i.e.
-    NFD -- so `Matej Šimalčík.mov` missed itself and the RES-10 one-click
+    NFD -- so `Matej Å imalÄÃ­k.mov` missed itself and the RES-10 one-click
     relink was never offered for any accented name. Comparison only, which
     is the one case CLAUDE.md's rule allows normalising."""
     folded = os.path.normcase(os.path.normpath(unicodedata.normalize("NFC", str(path))))
@@ -203,7 +203,7 @@ def _stem_key(stem: str) -> str:
 
     `iterdir()` on a Mac hands back NFD while the command's `from_rel` is the
     dashboard's NFC, so a raw `.lower()` compare orphaned the proxy of every
-    accented name: the original moved, `Proxy/Šimalčík_A001.mov` stayed behind
+    accented name: the original moved, `Proxy/Å imalÄÃ­k_A001.mov` stayed behind
     under the old project, where lane B's sync eventually trashed it. The same
     CR-90 class as `_cmp_key`, on the one comparison in this module that did
     not go through it."""
@@ -244,6 +244,13 @@ def _rename_case_only(src: Path, dest: Path) -> None:
     and a day later -- once `recent_excludes` lapsed -- lane A uploaded the
     old spelling back beside the new one, which is the duplicate-at-the-
     cleared-path failure docs/FILE_MOVES.md exists to prevent."""
+    # comp-sync-b-4 (2026-09-11b): the prefix is load-bearing and is spelled
+    # the same in rclone_lane.MOVE_STAGING_PREFIX, which is what keeps a
+    # staging name left behind by a failed rename (Resolve holding a handle:
+    # WinError 32 on the replace AND on the restore) out of both of lane A's
+    # doors. It keeps the original extension, so without that rule the next
+    # pass uploaded it to the NAS beside the real clip. Kept as a literal
+    # here on purpose: this module deliberately imports nothing of its own.
     staging = src.with_name(f".ccsync-move-{os.getpid()}-{src.name}")
     src.replace(staging)
     try:
@@ -256,6 +263,62 @@ def _rename_case_only(src: Path, dest: Path) -> None:
             log.exception("file moves: could not restore %s after a failed "
                           "case-only rename -- it is at %s", src, staging)
         raise
+
+
+def _move_is_on_disk(entry: dict[str, Any]) -> bool:
+    """Did this move's file actually reach `new_local`? (comp-sync-b-2.)
+
+    Never raises: a filesystem that cannot answer counts as NO, because the
+    thing this gates is repointing Resolve at a path we would then be
+    guessing about."""
+    new_local = str(entry.get("new_local") or "")
+    old_local = str(entry.get("old_local") or "")
+    if not new_local:
+        return False
+    try:
+        return os.path.exists(new_local) and not os.path.exists(old_local)
+    except OSError:
+        return False
+
+
+def rename_proxy_siblings_case_only(src: Path, dest: Path) -> int:
+    """The case-only twin of move_proxy_siblings (regression-6, 2026-09-11b).
+
+    move_proxy_siblings keeps each proxy's OWN name, which for a rename that
+    differs only in spelling means it moves nothing at all: the target is the
+    same file. The dashboard renames the proxy on the NAS with the original
+    ("the dashboard renames it (proxies with it)", docs/FILE_MOVES.md), so
+    leaving the local proxy under the old spelling hands lane B a proxy that
+    is missing locally and one that is extraneous -- it downloads the first
+    and trashes the second, and charges the deletion to the breaker's
+    account. Never raises: the original has already been renamed by the time
+    this runs, and a proxy that could not follow is a cosmetic loss beside
+    undoing that."""
+    proxy_dir = src.parent / "Proxy"
+    if not proxy_dir.is_dir():
+        return 0
+    want = _stem_key(src.stem)
+    moved = 0
+    for candidate in sorted(proxy_dir.iterdir()):
+        try:
+            if not candidate.is_file() or _stem_key(candidate.stem) != want:
+                continue
+            target_dir = dest.parent / "Proxy"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / (dest.stem + candidate.suffix)
+            if os.path.normpath(str(target)) == os.path.normpath(str(candidate)):
+                continue
+            if _same_file(target, candidate):
+                _rename_case_only(candidate, target)
+            elif not target.exists():
+                candidate.replace(target)
+            else:
+                continue
+            moved += 1
+        except OSError:
+            log.warning("file moves: the proxy %s could not follow the rename to %s",
+                        candidate, dest.name, exc_info=True)
+    return moved
 
 
 def apply_move(move: dict[str, Any], local_root: str,
@@ -309,7 +372,10 @@ def apply_move(move: dict[str, Any], local_root: str,
             _rename_case_only(src, dest)
         except OSError as exc:
             return False, f"could not rename it on this machine: {exc}", None
-        return True, "renamed to match the server's spelling", (str(src), str(dest))
+        proxies = rename_proxy_siblings_case_only(src, dest)
+        detail = ("renamed to match the server's spelling"
+                  + (f", {proxies} proxy file(s) with it" if proxies else ""))
+        return True, detail, (str(src), str(dest))
     if dest.exists():
         return False, f"the destination already exists on this machine ({dest})", None
     if src.is_dir() and _is_inside(dest, src):
@@ -348,7 +414,7 @@ def relink_moved(old_local: str, new_local: str, local_root: str,
     either way, and the fixer meets an offline clip like any other.
     """
     try:
-        from . import canon, resolve_bridge
+        from . import canon, resolve_bridge, ui_copy
 
         result = resolve_bridge.get_media_pool_items()
         if not result.get("ok"):
@@ -396,7 +462,12 @@ def relink_moved(old_local: str, new_local: str, local_root: str,
                             file_path, canonical, outcome.get("message"))
         if not relinked and not failed:
             return False, ""
-        text = f"{relinked} Resolve clip(s) relinked"
+        # regression-19 hand-off (2026-09-11b): this string is editor-visible
+        # now. app.py used to build its own sentence and comp-sync-11 folded
+        # the two halves into this one, so the developer plural rides out to
+        # the RELINK IT toast and the moved-clip dialog's answer (owner's
+        # rule, 2026-08-18: no "(s)" in copy an editor reads).
+        text = f"{ui_copy.count(relinked, 'Resolve clip')} relinked"
         if failed:
             text += f", {failed} could not be"
         # A walk that FOUND the old path answered the question, even where
@@ -477,10 +548,20 @@ class FileMoveLedger:
         The paths are precomputed here because they are what both recovery
         routes need and what the crash used to take with it: `moved_to()` can
         then still offer the watcher's one-click relink, and `apply_move` can
-        finish the job on the redelivered command."""
+        finish the job on the redelivered command.
+
+        comp-sync-b-2 (2026-09-11b): `relink_pending` is FALSE here, and both
+        readers skip `applying` rows besides. An intent row is written before
+        the first filesystem call, so the file is still at the old path -- a
+        row that looked like a finished move sent _relink_pending_moves() and
+        the watcher's "RELINK IT" dialog at a `new_local` that does not
+        exist, taking every clip under it Media Offline and journalling it as
+        a real Resolve mutation. The move's own completion row sets
+        relink_pending properly (app._apply_file_moves), including on the
+        crash-resume path."""
         return self.record(move, ok=False, detail="applying it on this machine",
                            state=STATE_APPLYING, paths=(old_local, new_local),
-                           relink_pending=True)
+                           relink_pending=False)
 
     def record_attempt_failed(self, move: dict[str, Any], detail: str) -> dict[str, Any]:
         """A move that could not be applied THIS time (RES-1).
@@ -525,6 +606,9 @@ class FileMoveLedger:
         cutoff = float(self._now()) - RELINK_WINDOW_SECONDS
         return [e for e in self._entries
                 if e.get("relink_pending") and e.get("old_local")
+                # comp-sync-b-2: an `applying` row is an INTENT. Its
+                # new_local is where the file is going, not where it is.
+                and e.get("state") != STATE_APPLYING
                 and float(e.get("at") or 0) >= cutoff]
 
     def clear_relink_pending(self, move_id: int) -> None:
@@ -547,6 +631,17 @@ class FileMoveLedger:
         for entry in reversed(self._entries):
             old = entry.get("old_local")
             if not old or not entry.get("new_local"):
+                continue
+            if entry.get("state") == STATE_APPLYING and not _move_is_on_disk(entry):
+                # comp-sync-b-2 (2026-09-11b): an `applying` row is written
+                # BEFORE the first filesystem call, so on its own it says
+                # nothing about where the file is. res-companion-1 wants the
+                # one-click relink offered after a crash BETWEEN the rename
+                # and record(), and the disk is the only witness to which of
+                # the two crashes happened: offer it when the file really is
+                # at new_local, refuse it when it is not. Without this the
+                # dialog told the editor, in writing, "Your copy has already
+                # been moved to match" for a move that never happened.
                 continue
             if float(entry.get("at") or 0) < cutoff:
                 continue

@@ -318,9 +318,13 @@ _NIM_ADD_RETRY_DELAY = 0.5
 # that gives up at three seconds leaves the companion permanently headless --
 # no icon, no menu, no Quit, and every toast after it discarded, including the
 # four safety latches. So the FIRST registration backs off instead: 0.5, 1, 2,
-# 4, 8, then 15 s a try, about two and a half minutes in twelve attempts. The
-# Explorer-restart re-add keeps the short schedule; it runs on the pump
-# thread, where a two-minute sleep would freeze the tray.
+# 4, 8, then 15 s a try: 1 min 46 s across twelve attempts (comp-ui-2,
+# 2026-09-11b -- this comment said "about two and a half minutes", which is
+# what the SUM of all twelve delays would be if the last were slept, and it
+# is not). The Explorer-restart re-add keeps the short flat schedule; it runs
+# on the pump thread, where a two-minute sleep would freeze the tray, and it
+# gets that schedule by passing `cap` to _add_icon, not by attempt count
+# alone -- which is what the first version of this fix got wrong.
 _NIM_ADD_STARTUP_ATTEMPTS = 12
 _NIM_ADD_MAX_DELAY = 15.0
 
@@ -861,7 +865,8 @@ class _WindowsIcon:
         self._pump_thread_id = threading.get_ident()
         try:
             self._create_window()
-            self._add_icon(attempts=_NIM_ADD_STARTUP_ATTEMPTS)
+            self._add_icon(attempts=_NIM_ADD_STARTUP_ATTEMPTS,
+                           cap=_NIM_ADD_MAX_DELAY)
         except Exception as exc:
             log.exception("the tray icon could not be created")
             self._announce_failure(str(exc) or exc.__class__.__name__)
@@ -883,15 +888,35 @@ class _WindowsIcon:
         """
         return bool(self._added)
 
-    def _announce_failure(self, detail: str) -> None:
+    def _announce_failure(self, detail: str, fatal: bool = True) -> None:
         """Tell whoever asked to be told. Never raises: this runs on the
-        pump thread, and a diagnostic must not be what kills the tray."""
+        pump thread, and a diagnostic must not be what kills the tray.
+
+        comp-ui-1 (2026-09-11b): `fatal` separates the two callers. run()'s
+        registration failure is terminal - the pump never started, nothing
+        can re-add the icon and the refresh loops must stop. An
+        Explorer-restart re-add failure is NOT: the pump thread is alive and
+        the next TaskbarCreated broadcast can still succeed, so a handler
+        that stops the loops leaves the editor with an icon whose colour,
+        tooltip and menu are frozen at the moment of the failure. The
+        argument is positional-or-keyword with a default so a hook written
+        against the one-argument signature keeps working.
+        """
         self._register_error = detail
         hook = self.on_register_failure
         if hook is None:
             return
         try:
-            hook(detail)
+            # The arity is asked, not discovered by catching TypeError: a
+            # TypeError raised INSIDE a two-argument hook would otherwise be
+            # read as "it takes one" and the hook run a second time.
+            import inspect
+
+            try:
+                takes_fatal = len(inspect.signature(hook).parameters) >= 2
+            except (TypeError, ValueError):
+                takes_fatal = False
+            hook(detail, fatal) if takes_fatal else hook(detail)
         except Exception:  # noqa: BLE001
             log.debug("tray icon failure hook raised", exc_info=True)
 
@@ -1025,7 +1050,17 @@ class _WindowsIcon:
             self._hicon_cache[id(image)] = (image, hicon)
         return hicon
 
-    def _add_icon(self, attempts: Optional[int] = None) -> None:
+    def _add_icon(self, attempts: Optional[int] = None,
+                  cap: float = _NIM_ADD_RETRY_DELAY) -> None:
+        # comp-ui-2 (2026-09-11b): `cap` exists because only the ATTEMPT
+        # COUNT used to be per-caller. The Explorer-restart re-add kept six
+        # attempts but inherited the startup backoff, so it slept
+        # 0.5+1+2+4+8 = 15.5 s inside the window procedure (against 2.5 s
+        # before) with the message pump processing nothing: no menu, no
+        # _CCSYNC_WM_QUIT_TRAY, no NIM_MODIFY, and Windows free to mark the
+        # window as not responding. The flat delay is the DEFAULT now, so
+        # any caller that does not ask for the long schedule gets the
+        # pump-safe one; only run()'s first registration opts in.
         import time
 
         import ctypes
@@ -1037,7 +1072,7 @@ class _WindowsIcon:
         data.hIcon = self._icon_handle()
         data.szTip = self._title[:127]
         attempts = _NIM_ADD_RETRIES if attempts is None else max(1, int(attempts))
-        delays = _nim_add_delays(attempts)
+        delays = _nim_add_delays(attempts, cap=cap)
         for attempt in range(attempts):
             if api.shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(data)):
                 self._added = True
@@ -1154,16 +1189,27 @@ class _WindowsIcon:
             log.info("Explorer restarted -- re-adding the CCSync tray icon")
             self._added = False
             try:
+                # comp-ui-2 (2026-09-11b): the default flat schedule the
+                # comment on _NIM_ADD_STARTUP_ATTEMPTS promises. This runs on
+                # the pump thread; every second slept here is a second of
+                # frozen tray.
                 self._add_icon()
             except Exception as exc:
                 log.warning("could not re-add the tray icon after an Explorer restart",
                             exc_info=True)
                 # comp-ui-1: the same announcement as a failed first
-                # registration. From here on every toast is dropped, and the
+                # registration, so an admin reading the log after "my icon is
+                # gone" finds it. From here on every toast is dropped, and the
                 # only other TaskbarCreated broadcast is the next time
                 # Explorer restarts -- which may be never.
+                # comp-ui-1 (2026-09-11b): fatal=False. The pump thread is
+                # still alive and a later TaskbarCreated can still re-add the
+                # icon, so this must NOT stop the refresh and pulse loops --
+                # an icon that comes back with a frozen colour, tooltip and
+                # menu is green-while-dead, worse than no icon at all.
                 self._announce_failure(
-                    f"Explorer restarted and the icon could not be re-added: {exc}")
+                    f"Explorer restarted and the icon could not be re-added: {exc}",
+                    fatal=False)
             return 0
         return api.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 

@@ -132,7 +132,7 @@ from ccsync_companion import site as site_mod
 # CCSYNC_CANONICAL_PREFIX/CCSYNC_TREE_NAME) so one failed fetch cannot map
 # one letter while config.toml names another. Both bootstraps changed, so
 # the shared number moves.
-INSTALLER_VERSION = "1.0.42"
+INSTALLER_VERSION = "1.0.43"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every
@@ -227,29 +227,69 @@ def site_drive_letter(site: Optional[dict] = None) -> str:
     return m.group(1).upper() if m else DEFAULT_DRIVE_LETTER
 
 
-def site_manifest_value(site: Optional[dict], key: str) -> str:
-    """A manifest key exactly as the site published it, from the passed
-    manifest when there is one and from the CACHE when there is not, and ""
-    when neither says.
+# How old a cached manifest may be before it stops being evidence about the
+# deployment this run is joining (install-onboard-1, 2026-09-11b). The cache
+# is rewritten by whoever last talked to the dashboard, so on a machine that
+# is being RE-onboarded it is normally hours old; a month-old file is a
+# machine that has not synced in a month, and its letter is a guess. Bounded,
+# not banned: the bootstrap fetches for itself when nothing is passed.
+SITE_CACHE_MAX_AGE_SECONDS = 30 * 24 * 3600
+
+
+def _same_dashboard(cached_url: str, dashboard_url: str) -> bool:
+    """Could this cached manifest have come from the dashboard this run
+    signed in to? Only a PROVEN mismatch is False: a dashboard that predates
+    the key sends no dashboard_url at all, and refusing there would undo
+    install-onboard-2 (the whole point of the cache path)."""
+    a = str(cached_url or "").strip()
+    b = str(dashboard_url or "").strip()
+    if not a or not b:
+        return True
+    try:
+        ha = urlparse(normalise_dashboard_url(a)).hostname or ""
+        hb = urlparse(normalise_dashboard_url(b)).hostname or ""
+    except Exception:
+        return True
+    if not ha or not hb:
+        return True
+    return ha.lower() == hb.lower()
+
+
+def site_manifest_value(site: Optional[dict], key: str,
+                        dashboard_url: str = "") -> str:
+    """A manifest key exactly as the site published it: from the passed
+    manifest when this run HAS one, from the cache when the fetch failed
+    outright, and "" when neither says.
 
     The raw value, deliberately: site_canonical_prefix normalises and defaults
     to P:\\, which is the right answer for config.toml and the WRONG one to
     hand a bootstrap script (install-onboard-2, 2026-09-11). A wizard with no
     cache must let the script do its own fetch rather than force our fallback
     onto a site whose tree is Q:\\.
+
+    The cache is consulted for a MISSING MANIFEST, never for a missing key
+    (install-onboard-1, 2026-09-11b). site.normalise fills every absent string
+    key with "", so per-key fallback meant a manifest this run fetched
+    successfully from a dashboard that publishes no tree_name silently took
+    the tree name from some earlier - possibly different - deployment, while
+    canonical_prefix came from this run: a mixed pair from two sources, on
+    argv, beating windows_bootstrap.ps1's own later fetch (it only calls
+    Get-SiteValue when the flag is empty). Bounded by age and checked against
+    the dashboard this run signed in to for the same reason: the cache is a
+    single unkeyed ~/.ccsync/state/site.json with no site identity of its own.
     """
-    value = ""
-    if isinstance(site, dict):
-        value = str(site.get(key) or "").strip()
-    if value:
-        return value
+    if isinstance(site, dict) and any(
+            str(site.get(k) or "").strip() for k in site_mod.STRING_KEYS):
+        return str(site.get(key) or "").strip()
     try:
-        cached = site_mod.cached_site()
+        cached = site_mod.cached_site(max_age_seconds=SITE_CACHE_MAX_AGE_SECONDS)
     except Exception:
         return ""
-    if isinstance(cached, dict):
-        return str(cached.get(key) or "").strip()
-    return ""
+    if not isinstance(cached, dict):
+        return ""
+    if not _same_dashboard(cached.get("dashboard_url", ""), dashboard_url):
+        return ""
+    return str(cached.get(key) or "").strip()
 
 
 def site_canonical_prefix(site: Optional[dict] = None) -> str:
@@ -946,10 +986,16 @@ def normalise_dashboard_url(dashboard_url: str) -> str:
     # 8443 is the conventional second TLS port; an address or a local name has
     # no certificate whatever the port, and a bare container port on somebody
     # else's deployment is still the plain one.
+    # install-onboard-5 (2026-09-11b): 8443 is THIS deployment's Funnel port,
+    # not a property of the number. A customer publishing the container's own
+    # port as 8443 behind their own proxy got https:// written into the field,
+    # config.toml and the loopback origin allow-list - the identical failure
+    # pointing the other way. 443 stays https everywhere; 8443 only where
+    # Serve terminates TLS, which is a .ts.net name.
     tailnet = host.endswith(".ts.net")
     if numeric or local:
         scheme = "http"
-    elif tailnet or not port or port in ("443", "8443"):
+    elif tailnet or not port or port == "443":
         scheme = "https"
     else:
         scheme = "http"
@@ -1472,8 +1518,13 @@ def run_bootstrap(
     # wrote the cached answer into config.toml a minute later. The raw cached
     # key, never site_canonical_prefix's P:\\ default -- an env var or a flag
     # carrying OUR fallback would beat the script's own fetch.
-    canonical_prefix = site_manifest_value(site, "canonical_prefix")
-    tree_name = site_manifest_value(site, "tree_name")
+    # dashboard_url: the cache is a single unkeyed file with no site identity,
+    # and a machine re-onboarded from deployment A to deployment B must not be
+    # handed A's letter (install-onboard-1, 2026-09-11b).
+    canonical_prefix = site_manifest_value(site, "canonical_prefix",
+                                           dashboard_url=dashboard_url)
+    tree_name = site_manifest_value(site, "tree_name",
+                                    dashboard_url=dashboard_url)
 
     if _is_mac(platform):
         cmd = [

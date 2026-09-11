@@ -341,7 +341,18 @@ class TimelineWatcher:
                 # come due.
                 if key in self._offered_non_canonical and not self._rearm_is_due(key):
                     continue
-                self._rearm_due.pop(key, None)
+                # comp-resolve-b-2 (2026-09-11b): the OFFER arms the next one.
+                # Only a FAILED relink used to lift the latch, so when
+                # resolve_journal.allow_automatic refused the whole burst
+                # nothing was attempted, nothing was re-armed, and the clips
+                # sat on app's pending queue that no timer drains -- until the
+                # editor happened to click SCAN WHOLE PROJECT, which only a
+                # log line they never read tells them to do. Re-offering on
+                # the same 900 s cooldown is what drains it: the caller
+                # de-dupes against its pending list (comp-sync-13), so the
+                # cost of a re-offer the limiter refuses again is one
+                # dictionary lookup.
+                self._arm_rearm(key)
                 self._offered_non_canonical.add(key)
                 item = dict(item)
                 item["resolve_project_name"] = resolve_project_name
@@ -503,9 +514,7 @@ class TimelineWatcher:
         # ~300 appends of the same 158 clips per window, every failure
         # re-arming the cycle. The key stays latched and the cooldown is what
         # lifts it.
-        self._rearm_due[key] = self._rearm_clock() + REARM_COOLDOWN_SECONDS
-        if len(self._rearm_due) > MAX_REARM_TRACKED:
-            self._rearm_due.pop(next(iter(self._rearm_due)), None)
+        self._arm_rearm(key)
         # comp-app-4 (2026-09-11): capped AT THE SOURCE. The report truncates
         # this list to 50 on its way out, but the dict itself was unbounded,
         # and the one machine that produces refusals in bulk is the machine
@@ -522,11 +531,36 @@ class TimelineWatcher:
             self._non_canonical_refused.pop(
                 next(iter(self._non_canonical_refused)), None)
 
+    def _arm_rearm(self, key: str) -> None:
+        """This path may be offered again once the cooldown elapses.
+
+        Written on both paths that latch a key (the offer and a failed
+        relink), and bounded here rather than at either caller: the machine
+        that produces these in bulk is the machine with a wrong
+        canonical_prefix, whose every poll walks a media pool full of them.
+        Oldest out first, and an evicted key is offered again by the next
+        poll (see _rearm_is_due), which is the same answer the queue ceiling
+        in app._handle_non_canonical gives.
+        """
+        self._rearm_due.pop(key, None)
+        self._rearm_due[key] = self._rearm_clock() + REARM_COOLDOWN_SECONDS
+        while len(self._rearm_due) > MAX_REARM_TRACKED:
+            self._rearm_due.pop(next(iter(self._rearm_due)), None)
+
     def _rearm_is_due(self, key: str) -> bool:
-        """Has this path's re-arm cooldown elapsed (comp-sync-13)?"""
+        """Has this path's re-arm cooldown elapsed (comp-sync-13)?
+
+        A key with NO record is due (comp-resolve-b-2, 2026-09-11b): the only
+        way a latched path loses its record is the eviction above, and
+        answering "not due" there would strand exactly the clips the book
+        overflowed on, for the life of the process. The re-offer re-arms, so
+        an evicted key costs one extra offer, not one per poll.
+        """
         due = self._rearm_due.get(key)
+        if due is None:
+            return True
         try:
-            return due is not None and self._rearm_clock() >= float(due)
+            return self._rearm_clock() >= float(due)
         except (TypeError, ValueError):
             return True
 

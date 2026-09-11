@@ -1171,7 +1171,8 @@ def test_a_runtime_update_says_it_needs_the_image_manager(env, monkeypatch):
 
 
 def test_a_feed_url_with_a_query_string_still_finds_its_signature(monkeypatch):
-    """dash-release-jobs-3: the detached signature is `.sig` on the PATH.
+    """dash-release-jobs-4 (id corrected by dash-release-jobs-6, 2026-09-11b):
+    the detached signature is `.sig` on the PATH.
 
     The threat model contemplates "an S3 bucket, whatever a customer's
     outbound network reaches", and a pre-signed or CDN-token URL carries a
@@ -1256,7 +1257,8 @@ def test_a_record_key_speaks_one_spelling(monkeypatch):
 
 
 def test_a_stopped_feed_poller_starts_again(tmp_path, monkeypatch):
-    """dash-release-jobs-4: stop() then start() has to poll again.
+    """dash-release-jobs-5 (id corrected by dash-release-jobs-6, 2026-09-11b):
+    stop() then start() has to poll again.
 
     `start()` returned early on a `_thread` that `stop()` never cleared, so
     the second start was a poller that reported itself started and never

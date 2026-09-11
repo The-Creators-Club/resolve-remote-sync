@@ -71,6 +71,12 @@ log = logging.getLogger("ccsync.jobs.media")
 # after the child has exited. A named constant so a test can prove what
 # happens when it expires without sitting out half a minute.
 DRAIN_JOIN_SECONDS = 30.0
+# comp-ytdl-jobs-4 (2026-09-11b): the stderr drain gets a token wait and no
+# verdict. It carries the last 200 characters of ffmpeg's log and never a
+# sample of audio, so a stderr pipe still open cannot shorten the peaks -- and
+# the full drain timeout on both threads in series was a minute of a
+# completed job's life.
+STDERR_JOIN_SECONDS = 2.0
 
 KIND_PROXY_480P = "proxy-480p"
 KIND_AUDIO_EXTRACT = "audio-extract"
@@ -646,12 +652,12 @@ def _read_pcm(
     errors: list[str] = []
     chunks: list[bytes] = []
     failure: list[str] = []
-    threads = [
-        threading.Thread(target=_drain_text, args=(proc.stderr, errors),
-                         name="ccsync-media-stderr", daemon=True),
-        threading.Thread(target=_drain_binary,
-                         args=(proc.stdout, chunks, failure),
-                         name="ccsync-media-pcm", daemon=True)]
+    stderr_thread = threading.Thread(target=_drain_text, args=(proc.stderr, errors),
+                                     name="ccsync-media-stderr", daemon=True)
+    pcm_thread = threading.Thread(target=_drain_binary,
+                                  args=(proc.stdout, chunks, failure),
+                                  name="ccsync-media-pcm", daemon=True)
+    threads = [stderr_thread, pcm_thread]
     for thread in threads:
         thread.start()
     started = clock()
@@ -673,11 +679,21 @@ def _read_pcm(
             thread.join(timeout=5.0)
         raise MediaJobError(
             stopped or f"ffmpeg did not finish within {int(ceiling)}s")
-    for thread in threads:
-        # The child has exited; the drain still has to reach EOF, or the tail
-        # of the audio is silently missing from the peaks.
-        thread.join(timeout=DRAIN_JOIN_SECONDS)
-    if any(thread.is_alive() for thread in threads):
+    # The child has exited; the PCM drain still has to reach EOF, or the tail
+    # of the audio is silently missing from the peaks. THE STDERR DRAIN IS NOT
+    # LOAD-BEARING (comp-ytdl-jobs-4, 2026-09-11b): it carries no audio, so a
+    # stderr pipe an inherited handle is holding open cannot truncate
+    # anything, and waiting the full DRAIN_JOIN_SECONDS on it as well cost a
+    # second 30 s in series for a job that was already complete.
+    pcm_thread.join(timeout=DRAIN_JOIN_SECONDS)
+    stderr_thread.join(timeout=STDERR_JOIN_SECONDS)
+    if failure:
+        # BEFORE the liveness test (comp-ytdl-jobs-4): a genuine read error on
+        # a stalled share leaves the drain thread alive too, and the generic
+        # sentence below used to replace the only diagnosis anyone had.
+        _kill(proc)
+        raise MediaJobError(f"the decode failed: {failure[0]}")
+    if pcm_thread.is_alive():
         # comp-ytdl-jobs-4 (2026-09-11): the join has a timeout, and until now
         # nothing looked at whether it expired -- so a drain still appending to
         # `chunks` (a share holding the read end open after the child exits)
@@ -687,9 +703,6 @@ def _read_pcm(
         # answer: the job is retryable, the silent truncation is not.
         _kill(proc)
         raise MediaJobError("the decode output could not be read to the end")
-    if failure:
-        _kill(proc)
-        raise MediaJobError(f"the decode failed: {failure[0]}")
     try:
         proc.wait(timeout=30)
     except Exception:

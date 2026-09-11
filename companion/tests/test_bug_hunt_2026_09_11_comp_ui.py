@@ -39,6 +39,11 @@ def _windows_icon(monkeypatch, shell, slept):
     monkeypatch.setattr(icon, "_icon_handle", lambda: 0)
     monkeypatch.setattr(tray_native._Win32, "get", staticmethod(lambda: _Api(shell)))
     monkeypatch.setattr("time.sleep", slept.append)
+    # ctypes.get_last_error exists only on Windows; the companion suite also
+    # runs on the macOS release runner (release-macos 2026-09-11 went red on
+    # exactly this), and what these tests exercise is the retry schedule,
+    # not GetLastError.
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 0, raising=False)
     return icon
 
 

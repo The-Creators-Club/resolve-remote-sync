@@ -587,6 +587,24 @@ def test_the_applied_tree_answering_is_not_a_finding(env, monkeypatch):
     assert "code_not_applied" not in _kinds(alerts.scan(conn, settings, NOW))
 
 
+def test_an_image_newer_than_the_applied_tree_has_retired_it(env, monkeypatch):
+    """CR-270 (2026-09-12): the first build silenced only equality, so a
+    0.7.45 image over the 0.7.17 record applied on 2026-08-29 alarmed for two
+    weeks about the healthy case (the boot selector now clears that record
+    too). Newer-or-equal is silence; an applied tree the image is BEHIND is
+    still the finding, and a version nobody can parse keeps the exact-match
+    rule rather than falling into silence."""
+    client, conn, settings = env
+    _code(monkeypatch, "image", "0.7.17", refused="built for runtime 869eed1052a8",
+          running="0.7.45")
+    assert "code_not_applied" not in _kinds(alerts.scan(conn, settings, NOW))
+    _code(monkeypatch, "image", "0.7.50", running="0.7.45")
+    finding = _one(alerts.scan(conn, settings, NOW), "code_not_applied")
+    assert "0.7.50" in finding["diagnosis"]
+    _code(monkeypatch, "image", "0.7.17+dirty", running="0.7.45")
+    assert "code_not_applied" in _kinds(alerts.scan(conn, settings, NOW))
+
+
 def test_a_current_json_this_server_cannot_read_raises_nothing(env, monkeypatch):
     """"Could not ask" is never an alarm about what the file says."""
     client, conn, settings = env

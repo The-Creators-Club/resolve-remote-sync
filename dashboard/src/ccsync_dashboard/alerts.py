@@ -2646,7 +2646,20 @@ def _check_code_not_applied(ctx: Ctx) -> list[Finding]:
         return []
     applied = str(code.get("applied") or "")
     running = str(code.get("running") or "")
-    if not applied or (running and applied == running):
+    if not applied:
+        return []
+    # An image that carries the applied version OR BETTER has retired the
+    # bundle, and select_code_root now clears the record at boot (CR-270,
+    # 2026-09-12). The first build of this check silenced only equality, so a
+    # 0.7.45 image over a 0.7.17 record alarmed for two weeks about the
+    # healthy case. Comparable versions are compared; an unparseable one
+    # falls back to the exact-match rule rather than to silence.
+    from .dashboard_update import version_tuple
+
+    applied_tuple, running_tuple = version_tuple(applied), version_tuple(running)
+    if applied_tuple and running_tuple and applied_tuple <= running_tuple:
+        return []
+    if running and applied == running:
         return []
     refused = str(code.get("revert_refused_reason") or "")
     why = (f" The last boot refused that tree and could not undo it: {refused}."

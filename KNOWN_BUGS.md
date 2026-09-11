@@ -24102,6 +24102,45 @@ the button folding onto `db.file_move_target_machines`, and a basename
 column or index on `nas_media` so locate is one query rather than a size
 prefilter plus a Python match.
 
+## Two dashboard false alarms (CR-269, CR-270, 2026-09-12; dashboard 0.7.46)
+
+Both found from one screenshot of the fleet grid and one of the problems
+panel. Neither machine nor server had anything wrong; the dashboard said
+otherwise, in red.
+
+### CR-269 - "proxy download stopped itself" on a machine that never stopped: the why-line read the disk chip's 5% instead of the companion's floor - FIXED (health.py)
+
+ruskin's row: "Not downloading proxies: proxy download stopped itself, the
+drive has 135 GB free", beside a lane chip saying "proxy download: syncing".
+His sync drive is 4 TB with 145 GB free, 3.6%; `disk_status` paints the
+chip red below 5%, and `why_not_syncing` / `_second_cause` took that red as
+the disk-floor stop. The companion parks lane B at an absolute 20 GB
+(`lane_guard.DEFAULT_LANE_B_MIN_FREE_BYTES`) and nowhere else, and reports
+its own park as `blocked_reason == "disk_full"`, which the why-line already
+handles first. Every one of his eight ticked projects held exactly the
+NAS's proxies, count and bytes. Now `_disk_floor_hit` (free below
+`DISK_RED_FREE_BYTES`, the same 20 GB) is the only dashboard-derived
+disk_full; the percentage stays the chip's warning. The 34 clips his
+Resolve reports missing in Civil Defence are not proxies (every proxy is
+present) and are a relink question, not a sync one.
+
+### CR-270 - "this server is not running the update that was applied to it" for an image that had retired the update: the boot selector refused a stale tree on runtime before version and counted it, and the alert silenced only equality - FIXED (deploy/select_code_root.py, alerts.py)
+
+0.7.17 was applied over the air on 2026-08-29; every deploy since has been
+an image, 0.7.45 by the time the alert was read. `check_tree` asked the
+runtime_id question before the version question, so a new image (a new
+runtime) refused the old tree as if the bundle were broken, counted it
+("refusal 1 of 2" in the container log), and the next restart would have
+"reverted" current.json to 0.7.16, equally stale. `_check_code_not_applied`
+silenced only `applied == running`, so a newer image alarmed about the
+healthy case, and the Packages page named 0.7.17 as current for two weeks.
+Now `main()` compares versions FIRST: a tree the image carries (older or
+equal) is RETIRED - current.json cleared with `retired_from` /
+`retired_reason`, boot_attempts cleared, files left alone, nothing counted
+- and the alert is silent whenever the image is newer or equal (an
+unparseable version keeps the exact-match rule). The live record on the
+NAS was retired by hand the same day, in the shape the new boot writes.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

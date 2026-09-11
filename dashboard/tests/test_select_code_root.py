@@ -231,6 +231,49 @@ def test_an_equal_version_loses_to_the_image(world):
     assert proc.stdout.strip() == image_path(world)
 
 
+def test_a_tree_the_image_has_caught_up_with_is_retired_not_refused(world):
+    """CR-270 (2026-09-12): 0.7.17 was applied over the air on 2026-08-29 and
+    every deploy since has been an image, 0.7.45 by the time anyone looked.
+    A new image is a new runtime, so the runtime_id check fired first, the
+    refusal counted ("refusal 1 of 2"), the next boot would have reverted the
+    record to 0.7.16, and the Packages page named 0.7.17 as current for two
+    weeks while code_not_applied alarmed about the healthy case. The version
+    question comes first now, and a tree the image carries is RETIRED: the
+    record cleared and the reason written, nothing counted."""
+    install_tree(world, version="0.4.0",
+                 record=make_record(version="0.4.0", runtime_id="b" * 64),
+                 runtime_id="b" * 64)
+    set_current(world, "0.4.0", previous="0.3.0")
+    proc = run(world)
+    assert proc.stdout.strip() == image_path(world)
+    assert "RETIRED 0.4.0" in proc.stderr
+    assert "refusal" not in proc.stderr
+    current = json.loads((world["code"] / "current.json").read_text())
+    assert current["version"] == ""
+    assert current["retired_from"] == "0.4.0"
+    assert "not newer than the image" in current["retired_reason"]
+    assert "reverted_from" not in current
+    attempts = json.loads((world["code"] / "boot_attempts.json").read_text())
+    assert attempts == {"version": "", "attempts": 0}
+    # The tree's files are left alone, like a reverted tree's.
+    assert (world["code"] / "0.4.0" / "manifest.json").is_file()
+    # And the next boot is the quiet no-record path: nothing to say again.
+    proc = run(world)
+    assert proc.stdout.strip() == image_path(world)
+    assert "RETIRED" not in proc.stderr and "WARNING" not in proc.stderr
+
+
+def test_a_newer_tree_for_another_runtime_is_still_a_counted_refusal(world):
+    """The retirement must not swallow the case the counter exists for: a
+    bundle NEWER than the image that no image will ever match again."""
+    install_tree(world, record=make_record(runtime_id="b" * 64), runtime_id="b" * 64)
+    set_current(world, NEW_VERSION)
+    proc = run(world)
+    assert proc.stdout.strip() == image_path(world)
+    assert "refusal 1 of" in proc.stderr
+    assert "RETIRED" not in proc.stderr
+
+
 def test_no_pubkeys_configured_means_nothing_can_be_verified(world):
     install_tree(world)
     set_current(world, NEW_VERSION)

@@ -152,6 +152,11 @@ def test_the_image_is_judged_by_its_own_migration_list(tmp_path, monkeypatch):
     than imported, the way image_version() is read."""
     scr, code = _world(tmp_path, monkeypatch, user_version=99, previous_schema=None)
     monkeypatch.setattr(scr, "APP_ROOT", REPO / "dashboard")
+    # The real repo as the image gives a real VERSION, and since CR-270
+    # (2026-09-12) a tree the image has caught up with is RETIRED before the
+    # revert logic runs. This test is about the revert's schema guard, so the
+    # image must be OLDER than the 0.7.43 tree, as it was when it was written.
+    monkeypatch.setattr(scr, "image_version", lambda: "0.7.42")
     (code / "current.json").write_text(json.dumps({
         "version": "0.7.43", "previous": ""}), encoding="utf-8")
     monkeypatch.setattr(scr, "check_tree", lambda v, r: ("/data/code/%s/src" % v, ""))

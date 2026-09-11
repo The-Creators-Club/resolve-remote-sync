@@ -281,6 +281,23 @@ def disk_status(
     return GREEN, percent
 
 
+def _disk_floor_hit(free_bytes: Any) -> bool:
+    """Is the sync drive below the floor the COMPANION stops at?
+
+    CR-269 (2026-09-12). `DISK_RED_FREE_BYTES` is the same 20 GB as
+    lane_guard.DEFAULT_LANE_B_MIN_FREE_BYTES, the only number at which a
+    machine actually parks proxy download. The percentage half of
+    `disk_status` colours the chip and never speaks for the companion. None
+    ("this build did not say") is False: no evidence is not a stop.
+    """
+    if free_bytes is None:
+        return False
+    try:
+        return int(free_bytes) < DISK_RED_FREE_BYTES
+    except (TypeError, ValueError):
+        return False
+
+
 def _round_bytes(n: float) -> str:
     """Bytes as one figure a person reads out loud. ui.human_bytes' twin,
     duplicated on purpose: health.py is imported BY the view layer and must
@@ -665,9 +682,16 @@ def _why_first(
     except (TypeError, ValueError):
         pass
 
-    # The disk chip's own RED, not a second threshold to reconcile (SYS-5).
-    if disk_status(_why_get(row, "disk_root_free_bytes"),
-                   _why_get(row, "disk_root_total_bytes"))[0] == RED:
+    # The COMPANION's floor, not the chip's red (CR-269, 2026-09-12). The
+    # chip goes red at 5% free as a warning, and on a 4 TB sync drive 5% is
+    # 200 GB; the companion parks proxy download at an absolute 20 GB
+    # (lane_guard.DEFAULT_LANE_B_MIN_FREE_BYTES) and nowhere else. Reading
+    # the chip here put "proxy download stopped itself" on ruskin's row with
+    # 145 GB free and every proxy present, beside a lane chip honestly
+    # saying "syncing". A stop the machine never made is not a why. The
+    # companion reports its own park as `blocked_reason == "disk_full"`,
+    # handled above; this branch is only for a build too old to send it.
+    if _disk_floor_hit(_why_get(row, "disk_root_free_bytes")):
         return "disk_full", _why_sentence("disk_full", row)
 
     halt_active = bool(_why_get(row, "halt_active"))
@@ -747,11 +771,7 @@ def _second_cause(row: Mapping[str, Any], first: str) -> tuple[str, str] | None:
     halt_active = bool(_why_get(row, "halt_active"))
     fleet_halt = bool(row.get("fleet_halt_active")) or (
         halt_active and str(_why_get(row, "halt_scope") or "") == "fleet")
-    try:
-        disk_red = disk_status(_why_get(row, "disk_root_free_bytes"),
-                               _why_get(row, "disk_root_total_bytes"))[0] == RED
-    except (TypeError, ValueError):
-        disk_red = False
+    disk_red = _disk_floor_hit(_why_get(row, "disk_root_free_bytes"))
     reported = str(_why_get(row, "blocked_reason") or "").strip()
     live = {
         "fleet_halt": fleet_halt,

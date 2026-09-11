@@ -39,7 +39,11 @@ WHAT IT CHECKS, in order, and any single failure means "boot the image":
     not here).
  5. The version is NEWER than the image's own. Older or equal is the image's
     job: a bundle cannot roll the image backwards, and an equal version is the
-    same code with more moving parts.
+    same code with more moving parts. This one is asked FIRST in main(), before
+    the record is even read, and it is not a refusal: a tree the image has
+    caught up with is RETIRED (current.json cleared, `retired_from` and
+    `retired_reason` recorded, the tree's files left alone) so nothing counts
+    it, reverts it or names it as current again (CR-270, 2026-09-12).
  6. The four roots exist.
 
 THE WATCHDOG. Before printing a volume tree, `boot_attempts.json` is
@@ -414,6 +418,35 @@ def main() -> int:
     if not version:
         # The normal state for a dashboard that has never taken an OTA update,
         # and not worth a warning on every boot.
+        print(image_pythonpath())
+        return 0
+
+    # RETIRE a tree the image has caught up with, BEFORE anything is checked
+    # or counted (CR-270, 2026-09-12). An OTA bundle is meant to be retired
+    # by the next image that carries its version or better; until now nothing
+    # retired it. current.json went on naming 0.7.17 under a 0.7.45 image for
+    # two weeks, every boot hit the runtime_id check FIRST (a new image is a
+    # new runtime), refused the tree as if the bundle were broken, counted the
+    # refusal, and after the second boot "reverted" the record to 0.7.16 --
+    # equally stale -- while the Packages page named a version that was never
+    # going to boot and code_not_applied alarmed about the healthy case.
+    # Version first, then: not newer than the image means the image carries
+    # it, and the record is cleared here rather than left for the counter.
+    # An image whose own version cannot be read is not evidence of anything,
+    # so the tree goes on to check_tree as before.
+    installed, image = parse_version(version), parse_version(image_version())
+    if installed and image and installed <= image:
+        reason = (f"{version} is not newer than the image's own {image_version()} "
+                  "-- the image carries it")
+        write_json(CURRENT_JSON, {
+            "version": "",
+            "previous": "",
+            "applied_at": current.get("applied_at") or "",
+            "retired_from": version,
+            "retired_reason": reason,
+        })
+        write_json(BOOT_ATTEMPTS, {"version": "", "attempts": 0})
+        say(f"RETIRED {version}: {reason}")
         print(image_pythonpath())
         return 0
 

@@ -323,7 +323,7 @@ def test_clock_skew_is_named_with_its_size():
     assert health.why_not_syncing(_row(guard={"clock_skew_seconds": 12.0}), NOW) is None
 
 
-def test_a_full_disk_uses_the_chips_own_red():
+def test_a_full_disk_uses_the_companions_own_floor():
     code, sentence = health.why_not_syncing(
         _row(guard={"disk_root_free_bytes": 8 * GB,
                     "disk_root_total_bytes": 1000 * GB}), NOW)
@@ -333,6 +333,36 @@ def test_a_full_disk_uses_the_chips_own_red():
     assert health.why_not_syncing(
         _row(guard={"disk_root_free_bytes": 60 * 1024 ** 3,
                     "disk_root_total_bytes": 1000 * 1024 ** 3}), NOW) is None
+
+
+def test_a_big_drive_under_five_percent_is_a_red_chip_and_not_a_stop():
+    """CR-269 (2026-09-12): ruskin's 4 TB sync drive with 145 GB free is
+    3.6%, so the chip is red, and the grid said "proxy download stopped
+    itself" beside a lane chip saying "syncing" and every proxy present. The
+    companion parks at an absolute 20 GB and nowhere else; the percentage is
+    the chip's warning, never a stop the machine made."""
+    row = _row(guard={"disk_root_free_bytes": 145 * GB,
+                      "disk_root_total_bytes": 4000 * GB})
+    assert health.disk_status(145 * GB, 4000 * GB)[0] == health.RED
+    assert health.why_not_syncing(row, NOW) is None
+    assert health.why_causes(row, NOW) == []
+    # A second cause is held to the same floor: a halt on that machine is
+    # one switch, not two.
+    row = _row(guard={"disk_root_free_bytes": 145 * GB,
+                      "disk_root_total_bytes": 4000 * GB, "halt_active": True})
+    assert [c for c, _s in health.why_causes(row, NOW)] == ["local_halt"]
+    # The companion SAYING it parked is still the whole answer, whatever the
+    # percentage.
+    code, sentence = health.why_not_syncing(
+        _row(guard={"disk_root_free_bytes": 145 * GB,
+                    "disk_root_total_bytes": 4000 * GB,
+                    "blocked_reason": "disk_full"}), NOW)
+    assert code == "disk_full" and "stopped itself" in sentence
+    # Under the floor on any size of drive is the stop it says it is.
+    code, _s = health.why_not_syncing(
+        _row(guard={"disk_root_free_bytes": 12 * GB,
+                    "disk_root_total_bytes": 4000 * GB}), NOW)
+    assert code == "disk_full"
 
 
 def test_a_machine_that_never_reported_a_disk_is_not_called_full():

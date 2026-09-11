@@ -349,6 +349,7 @@ def main() -> int:
 
     published, skipped = [], []
     with tempfile.TemporaryDirectory(prefix="ccsync-publish-") as tmp:
+        downloaded: dict[str, Path] = {}
         for src in wanted:
             wf, kind, plat = src["workflow"], src["kind"], src["platform"]
             step(f"--- {kind}/{plat} ({wf}) ---")
@@ -370,17 +371,26 @@ def main() -> int:
                      "release branch does not contain. A force-push can remove a commit CI "
                      "went green on; merge it again, or re-run the workflow on the tip.")
 
-            dest = Path(tmp) / f"{kind}-{plat}"
-            dest.mkdir(parents=True, exist_ok=True)
-            rc, _, err = run(["gh", "run", "download", str(run_info["databaseId"]),
-                              "--dir", str(dest)])
-            if rc != 0:
-                # Expired artifacts are the common case here (GitHub keeps them
-                # ~90 days), and a re-run of the workflow is the fix -- not
-                # anything this script can do.
-                step(f"could not download artifacts: {err.strip() or 'no artifact'}")
-                skipped.append(f"{kind}/{plat}: no downloadable artifact")
-                continue
+            # One download per RUN, not per (kind, platform): the companion
+            # and the onboard package for a platform come out of the same
+            # workflow run, and fetching its artifact twice was half the
+            # time a publish took (2026-09-11).
+            run_id = str(run_info["databaseId"])
+            dest = downloaded.get(run_id)
+            if dest is None:
+                dest = Path(tmp) / f"run-{run_id}"
+                dest.mkdir(parents=True, exist_ok=True)
+                rc, _, err = run(["gh", "run", "download", run_id, "--dir", str(dest)])
+                if rc != 0:
+                    # Expired artifacts are the common case here (GitHub keeps
+                    # them ~90 days), and a re-run of the workflow is the fix
+                    # -- not anything this script can do.
+                    step(f"could not download artifacts: {err.strip() or 'no artifact'}")
+                    skipped.append(f"{kind}/{plat}: no downloadable artifact")
+                    continue
+                downloaded[run_id] = dest
+            else:
+                step(f"reusing the artifact already downloaded for run {run_id}")
 
             manifest_path = find_manifest(dest, src["manifest"])
             if manifest_path is None:

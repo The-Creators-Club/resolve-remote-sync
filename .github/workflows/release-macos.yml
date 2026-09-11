@@ -193,11 +193,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ccsync-companion-macos
-          # Both shapes: the script's own dist/ output and whatever the wizard
-          # produced. if-no-files-found: error, because "the Mac build ran and
-          # produced nothing" is the exact failure this workflow exists to stop
-          # going unnoticed.
+          # The four deliverables and nothing else (2026-09-11). `dist/**`
+          # shipped the wizard's whole unpacked .app beside its zip: a 413 MB
+          # artifact that publish_latest downloaded twice per release, for a
+          # 50 MB binary and a 63 MB zip. if-no-files-found: error, because
+          # "the Mac build ran and produced nothing" is the exact failure this
+          # workflow exists to stop going unnoticed.
           path: |
-            companion/dist/**
-            onboarding/dist/**
+            companion/dist/ccsync-companion
+            companion/dist/ccsync-release.json
+            onboarding/dist/ccsync-onboard-macos-*.zip
+            onboarding/dist/ccsync-onboard.json
           if-no-files-found: error

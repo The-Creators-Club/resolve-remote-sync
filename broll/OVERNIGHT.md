@@ -6,7 +6,7 @@ indexes, then builds search vectors.
 ```powershell
 Start-Process -FilePath "$env:BROLL_PYTHON" `
   -ArgumentList "-u","run_queue.py","--model","haiku","--api-workers","12" `
-  -WorkingDirectory "E:\Projects\resolve-remote-sync\broll\indexer" `
+  -WorkingDirectory "E:\Projects\Editing\ccsync\broll\indexer" `
   -RedirectStandardOutput "E:\broll-queue\claude.log" `
   -RedirectStandardError "E:\broll-queue\claude.err" -WindowStyle Hidden
 ```
@@ -90,7 +90,7 @@ folders, deliberately excluded.
 ## Measure the result in the morning
 
 ```powershell
-cd E:\Projects\resolve-remote-sync\broll
+cd E:\Projects\Editing\ccsync\broll
 E:\Projects\broll-platform\web\.venv\Scripts\python.exe eval\run_eval_api.py E:\broll-queue\broll.db --queries ..\private\broll\eval\queries_archive.yaml
 ```
 

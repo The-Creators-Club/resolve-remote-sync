@@ -55,7 +55,7 @@ through.
 These components were NOT scanned; their packages are missing from
 every table below.
 
-- ytdl/web: no venv at E:\Projects\resolve-remote-sync\ytdl\web\.venv — SKIPPED, its packages are not in this inventory
+- ytdl/web: no venv at E:\Projects\Editing\ccsync\ytdl\web\.venv — SKIPPED, its packages are not in this inventory
 
 ## Python dependencies by component
 
@@ -66,7 +66,7 @@ installs `dashboard/deploy/requirements.txt`.
 
 ### companion
 
-editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv: `E:\Projects\resolve-remote-sync\companion\.venv` — 28 package(s).
+editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv: `E:\Projects\Editing\ccsync\companion\.venv` — 28 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -101,7 +101,7 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv:
 
 ### dashboard
 
-FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Venv: `E:\Projects\resolve-remote-sync\dashboard\.venv` — 55 package(s).
+FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Venv: `E:\Projects\Editing\ccsync\dashboard\.venv` — 55 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -163,7 +163,7 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 
 ### music/web
 
-music search UI mounted at /music; deliberately no torch. Venv: `E:\Projects\resolve-remote-sync\music\web\.venv` — 32 package(s).
+music search UI mounted at /music; deliberately no torch. Venv: `E:\Projects\Editing\ccsync\music\web\.venv` — 32 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|

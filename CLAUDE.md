@@ -17,7 +17,7 @@ defect ledger (numbered entries, per-platform prefixes).
 | `onboarding/` | first-run wizard | editor machines |
 | `bench/` | `ccbench` sync-engine benchmark harness | ad hoc |
 | `broll/` | the b-roll platform, folded in from the standalone `broll-platform` repo 2026-08-10 (pre-fold git history stays there): `web/` search UI + API, `indexer/` Claude-based clip indexing pipeline, `eval/` search eval | web: mounted in-process at `/broll` by the dashboard (see below); indexer: base rig |
-| `music/` | the music tagger, folded in from the standalone `music-tagger` repo 2026-08-10 (pre-fold history stays there): `web/` CLAP search UI + API, `indexer/` CLAP embedding/tagging pipeline, `eval/` quality measurement | web: mounted in-process at `/music` by the dashboard; indexer: base rig (needs the GPU) |
+| `music/` | the music tagger, folded in from the standalone `music-tagger` folder 2026-08-10 (its pre-fold git history was NOT preserved: `E:\Projects\music-tagger` has no `.git`, and no copy exists on GitHub, checked 2026-09-11): `web/` CLAP search UI + API, `indexer/` CLAP embedding/tagging pipeline, `eval/` quality measurement | web: mounted in-process at `/music` by the dashboard; indexer: base rig (needs the GPU) |
 | `docs/` | operational docs (SERVER, EDITOR_SETUP, GOTCHAS, bug-hunt notes) | — |
 
 `broll/companion/` no longer exists: the standalone BRoll Companion was
@@ -286,7 +286,7 @@ cd dashboard;     .venv\Scripts\python.exe -m pytest tests -q
 cd server;        ..\dashboard\.venv\Scripts\python.exe -m pytest tests -q   # no venv of its own; RUN IT FROM GIT BASH (see below)
 cd onboarding;    python -m pytest tests -q                                  # system python
 cd bench;         .venv\Scripts\python.exe -m pytest tests -q
-cd broll\web;     E:\Projects\broll-platform\web\.venv\Scripts\python.exe -m pytest tests -q
+cd broll\web;     .venv\Scripts\python.exe -m pytest tests -q                                # own venv since 2026-09-11 (was borrowed from broll-platform)
 cd broll\indexer; python -m pytest tests -q                                  # system python
 cd music\web;     .venv\Scripts\python.exe -m pytest tests -q                # own venv, deliberately no torch
 cd music\indexer; python -m pytest tests -q                                  # system python; the path/config half, torch-free on purpose
@@ -300,9 +300,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-DriveMa
 bash installer/tests/test_macos_site_values.sh                               # Git Bash; macos_bootstrap.sh's string helpers, no Mac needed
 ```
 
-`broll/web` still borrows the old standalone repo's venv; `run_all_tests.ps1`
-falls back to the dashboard venv when that path is absent, and the dashboard
-venv can substitute by hand too.
+`broll/web` has its own venv since 2026-09-11, built from its own
+`requirements.lock` (before that it borrowed the standalone broll-platform
+checkout's); `run_all_tests.ps1` falls back to the dashboard venv when it is
+absent, and the dashboard venv can substitute by hand too.
 
 Not pytest, but part of the gate: `dashboard\.venv\Scripts\python.exe
 tools\check_licenses.py` reads every `requirements.lock` and exits 1 on

@@ -463,8 +463,10 @@ def _heal_orphaned_progress(settings, state: dict[str, Any]) -> dict[str, Any]:
     `restart_requested` is the ONE in-progress state that legitimately
     outlives its process: an update that reached request_restart WANTS the
     next process to see it, and `consume_restart_request` is what clears it.
+    It outlives its process for ONE boot, though, not for ever -- see the
+    ownership test below.
     """
-    if not state.get("in_progress") or state.get("restart_requested"):
+    if not state.get("in_progress"):
         return state
     owner = state.get("owner_pid")
     # REL-9 (resilience sweep 2026-08-28): the pid alone was not "this
@@ -474,6 +476,38 @@ def _heal_orphaned_progress(settings, state: dict[str, Any]) -> dict[str, Any]:
     # 409ing every apply AND every rollback for ever, on the appliance shape
     # where there is no shell to delete the file with.
     if owner == os.getpid() and state.get("owner_nonce") == PROCESS_NONCE:
+        return state
+    if state.get("restart_requested"):
+        # dash-release-jobs-2 (2026-09-11): the exemption is for a flag whose
+        # PROCESS is still here, not for the flag itself. A container killed
+        # between request_restart and the lifespan's shutdown (SIGKILL, OOM,
+        # NAS power loss) left `in_progress: true, restart_requested: true`
+        # owned by a dead nonce, and the old early return (above the ownership
+        # test) meant nothing ever healed it: every preflight and every
+        # rollback answered 409 "an update is in progress (step: restarting)"
+        # for the life of the process, on the appliance shape where there is
+        # no shell to delete update_state.json with -- the one door REL-9 left
+        # open. The NONCE alone decides here, not the pid: request_restart's
+        # own process must still see its flag at shutdown (that is what picks
+        # RESTART_EXIT_CODE), and a nonce that is not ours means the restart
+        # already happened or was lost. Either way it is spent, and this
+        # process will exit 0 rather than 75, which is correct: the re-exec is
+        # behind us.
+        if state.get("owner_nonce") == PROCESS_NONCE:
+            return state
+        log.warning("clearing a spent restart request left by pid %s/%s (this process is "
+                    "%s/%s) -- the restart it asked for has already happened",
+                    owner, state.get("owner_nonce") or "?", os.getpid(), PROCESS_NONCE)
+        state.update({
+            "step": "done",
+            "in_progress": False,
+            "restart_requested": False,
+            "owner_pid": None,
+            "owner_nonce": "",
+            "finished_at": db.utcnow_iso(),
+            "updated_at": db.utcnow_iso(),
+        })
+        _write_json(update_state_path(settings), state)
         return state
     step = str(state.get("step") or "?")
     log.warning("clearing a stale dashboard-update in-progress flag left at step %s "

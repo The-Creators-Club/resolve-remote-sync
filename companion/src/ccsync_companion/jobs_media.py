@@ -67,6 +67,11 @@ from . import ffmpeg_tools, proxy_gen, proxy_scan
 
 log = logging.getLogger("ccsync.jobs.media")
 
+# comp-ytdl-jobs-4 (2026-09-11): how long the drain threads get to reach EOF
+# after the child has exited. A named constant so a test can prove what
+# happens when it expires without sitting out half a minute.
+DRAIN_JOIN_SECONDS = 30.0
+
 KIND_PROXY_480P = "proxy-480p"
 KIND_AUDIO_EXTRACT = "audio-extract"
 KIND_PEAKS = "peaks"
@@ -671,7 +676,17 @@ def _read_pcm(
     for thread in threads:
         # The child has exited; the drain still has to reach EOF, or the tail
         # of the audio is silently missing from the peaks.
-        thread.join(timeout=30.0)
+        thread.join(timeout=DRAIN_JOIN_SECONDS)
+    if any(thread.is_alive() for thread in threads):
+        # comp-ytdl-jobs-4 (2026-09-11): the join has a timeout, and until now
+        # nothing looked at whether it expired -- so a drain still appending to
+        # `chunks` (a share holding the read end open after the child exits)
+        # produced peaks built from a partial buffer, published under the final
+        # name and cached by Timeline Cards as current because its mtime beats
+        # the source's. A short answer that reports success is worse than no
+        # answer: the job is retryable, the silent truncation is not.
+        _kill(proc)
+        raise MediaJobError("the decode output could not be read to the end")
     if failure:
         _kill(proc)
         raise MediaJobError(f"the decode failed: {failure[0]}")

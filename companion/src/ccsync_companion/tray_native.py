@@ -312,6 +312,30 @@ _ERROR_CLASS_ALREADY_EXISTS = 1410
 # recommends retrying NIM_ADD rather than treating the first failure as final.
 _NIM_ADD_RETRIES = 6
 _NIM_ADD_RETRY_DELAY = 0.5
+# comp-ui-1 (2026-09-11): six half-second tries is three seconds, and at LOGIN
+# Explorer's notification area is regularly not ready for far longer than that
+# (the machine is still starting fifty other things). A first registration
+# that gives up at three seconds leaves the companion permanently headless --
+# no icon, no menu, no Quit, and every toast after it discarded, including the
+# four safety latches. So the FIRST registration backs off instead: 0.5, 1, 2,
+# 4, 8, then 15 s a try, about two and a half minutes in twelve attempts. The
+# Explorer-restart re-add keeps the short schedule; it runs on the pump
+# thread, where a two-minute sleep would freeze the tray.
+_NIM_ADD_STARTUP_ATTEMPTS = 12
+_NIM_ADD_MAX_DELAY = 15.0
+
+
+def _nim_add_delays(attempts: int,
+                    base: float = _NIM_ADD_RETRY_DELAY,
+                    cap: float = _NIM_ADD_MAX_DELAY) -> list[float]:
+    """The wait before each retry. Pure, so the schedule is testable without
+    a tray, a display or Windows."""
+    delays = []
+    delay = float(base)
+    for _ in range(max(0, int(attempts))):
+        delays.append(min(delay, cap))
+        delay *= 2
+    return delays
 
 
 def _clamp_menu_anchor(x: int, y: int, flags: int, taskbar_rect, taskbar_edge: int):
@@ -795,6 +819,13 @@ class _WindowsIcon:
         self._taskbar_created_msg = 0
         self._detached_thread: Optional[threading.Thread] = None
         self._pump_thread_id: Optional[int] = None
+        # comp-ui-1 (2026-09-11): why the icon is not in the tray, and who to
+        # tell. Nothing read `_stopped`, so a failed registration was a
+        # companion that ran all day headless with every toast discarded in
+        # silence; tray.py sets the hook and turns it into an ERROR line, a
+        # crash report and a stop for the two refresh loops.
+        self._register_error = ""
+        self.on_register_failure: Optional[Callable[[str], None]] = None
         # Queue latency of the click being dispatched, stamped by _pump
         # just before DispatchMessageW and consumed by _show_menu (CR-70).
         self._click_queued_ms = 0
@@ -830,9 +861,10 @@ class _WindowsIcon:
         self._pump_thread_id = threading.get_ident()
         try:
             self._create_window()
-            self._add_icon()
-        except Exception:
+            self._add_icon(attempts=_NIM_ADD_STARTUP_ATTEMPTS)
+        except Exception as exc:
             log.exception("the tray icon could not be created")
+            self._announce_failure(str(exc) or exc.__class__.__name__)
             self._stopped.set()
             return
         self._running.set()
@@ -841,6 +873,27 @@ class _WindowsIcon:
         finally:
             self._teardown()
             self._stopped.set()
+
+    @property
+    def registered(self) -> bool:
+        """Is the icon actually in the notification area right now?
+
+        comp-ui-1: "the tray started" and "the tray is there" were the same
+        question to every caller, and on Windows they are not.
+        """
+        return bool(self._added)
+
+    def _announce_failure(self, detail: str) -> None:
+        """Tell whoever asked to be told. Never raises: this runs on the
+        pump thread, and a diagnostic must not be what kills the tray."""
+        self._register_error = detail
+        hook = self.on_register_failure
+        if hook is None:
+            return
+        try:
+            hook(detail)
+        except Exception:  # noqa: BLE001
+            log.debug("tray icon failure hook raised", exc_info=True)
 
     def run_detached(self) -> None:
         """Start the pump on a thread of its own and return.
@@ -876,6 +929,14 @@ class _WindowsIcon:
         is cut here -- through fit_toast, which cuts the MIDDLE (APP-4).
         """
         if not self._added:
+            # comp-ui-1 (2026-09-11): this used to be a bare `return`. Four of
+            # the things that arrive here are SAFETY LATCHES -- the lane B
+            # breaker, a fleet halt, the free-space park, a sync drive pulled
+            # mid-transfer -- and a machine that has stopped syncing with no
+            # icon to say so needs the sentence somewhere a human can find it.
+            log.warning("tray toast DROPPED, no icon is registered%s: %s",
+                        f" ({self._register_error})" if self._register_error else "",
+                        message)
             return
         self._modify(info=(fit_toast(message), str(title or self.name)[:60]))
 
@@ -964,7 +1025,7 @@ class _WindowsIcon:
             self._hicon_cache[id(image)] = (image, hicon)
         return hicon
 
-    def _add_icon(self) -> None:
+    def _add_icon(self, attempts: Optional[int] = None) -> None:
         import time
 
         import ctypes
@@ -975,14 +1036,28 @@ class _WindowsIcon:
         data.uCallbackMessage = _CCSYNC_WM_TRAY
         data.hIcon = self._icon_handle()
         data.szTip = self._title[:127]
-        for attempt in range(_NIM_ADD_RETRIES):
+        attempts = _NIM_ADD_RETRIES if attempts is None else max(1, int(attempts))
+        delays = _nim_add_delays(attempts)
+        for attempt in range(attempts):
             if api.shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(data)):
                 self._added = True
+                self._register_error = ""
                 return
-            time.sleep(_NIM_ADD_RETRY_DELAY)
+            last = attempt + 1 >= attempts
+            # comp-ui-1: at WARNING on EVERY attempt. This loop used to be
+            # entirely silent until it gave up, so "my tray icon is missing"
+            # had exactly one line of evidence in the log and no timeline.
+            log.warning(
+                "the CCSync tray icon could not be registered with Explorer "
+                "(attempt %d of %d, GetLastError=%d)%s",
+                attempt + 1, attempts, ctypes.get_last_error(),
+                " -- giving up" if last else " -- retrying in %.1fs" % delays[attempt])
+            if last:
+                break
+            time.sleep(delays[attempt])
         raise OSError(
             "Shell_NotifyIcon(NIM_ADD) failed after "
-            f"{_NIM_ADD_RETRIES} attempts (GetLastError={ctypes.get_last_error()})")
+            f"{attempts} attempts (GetLastError={ctypes.get_last_error()})")
 
     def _modify(self, icon: bool = False, tip: bool = False, info=None) -> None:
         import ctypes
@@ -1080,9 +1155,15 @@ class _WindowsIcon:
             self._added = False
             try:
                 self._add_icon()
-            except Exception:
+            except Exception as exc:
                 log.warning("could not re-add the tray icon after an Explorer restart",
                             exc_info=True)
+                # comp-ui-1: the same announcement as a failed first
+                # registration. From here on every toast is dropped, and the
+                # only other TaskbarCreated broadcast is the next time
+                # Explorer restarts -- which may be never.
+                self._announce_failure(
+                    f"Explorer restarted and the icon could not be re-added: {exc}")
             return 0
         return api.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
@@ -1357,6 +1438,11 @@ class _DarwinIcon:
         self._delegate = None
         self._targets: list = []
         self._stopped = threading.Event()
+        # comp-ui-1 (2026-09-11): the same two names the Windows icon carries,
+        # so "is it actually there?" is one question on both platforms. macOS
+        # answers it a second, richer way as well (MAC-7's placement check).
+        self._register_error = ""
+        self.on_register_failure: Optional[Callable[[str], None]] = None
         # The main-thread hop, per instance so a test can hold it
         # (comp-app-core-2, 2026-08-21). Assigned before anything can call
         # __setattr__'s `menu` branch below.
@@ -1576,6 +1662,8 @@ class _NullIcon:
         self.title = title or ""
         self.menu = menu
         self._stopped = threading.Event()
+        self._register_error = "there is no tray backend on this platform"
+        self.on_register_failure: Optional[Callable[[str], None]] = None
         log.warning("no tray backend for platform %r -- the companion will run "
                     "with no tray icon", sys.platform)
 

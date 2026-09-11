@@ -9,6 +9,8 @@ database is.
 import os
 import re
 import sys
+import threading
+import time
 from pathlib import Path, PureWindowsPath
 
 PKG_DIR = Path(__file__).resolve().parent        # music/web/musicweb
@@ -429,6 +431,33 @@ def resolve_path(share, rel_path):
 # and one file present is all the evidence "the library is mounted" needs.
 _READY_SAMPLE = 50
 
+# music-5 (2026-09-11): how long a POSITIVE answer is trusted. The probe costs
+# up to _READY_SAMPLE stat()s over SMB/NFS and runs once per item of every drop
+# (allocate_name) as well as on every browser ingest; a mount that was there a
+# moment ago is not a fact that changes between two items of one batch. Only
+# "ready" is cached - a share that looks wrong is re-probed every time, so the
+# write path reopens the instant the mount is back.
+_READY_CACHE_SECONDS = 5.0
+_ready_cache = {}
+_ready_cache_lock = threading.Lock()
+
+
+def _ready_cached(key):
+    with _ready_cache_lock:
+        when = _ready_cache.get(key)
+    return when is not None and (time.monotonic() - when) < _READY_CACHE_SECONDS
+
+
+def _remember_ready(key):
+    with _ready_cache_lock:
+        _ready_cache[key] = time.monotonic()
+
+
+def forget_ready_cache():
+    """Drop the positive readiness cache. For tests and for a deliberate probe."""
+    with _ready_cache_lock:
+        _ready_cache.clear()
+
 
 def share_root_ready(con=None, share=SHARE):
     """Is this host actually looking at the library? -> (ok, reason).
@@ -457,6 +486,8 @@ def share_root_ready(con=None, share=SHARE):
     root = share_root(share)
     if not isinstance(root, Path):
         return True, ''
+    if _ready_cached(str(root)):
+        return True, ''
     try:
         exists = root.is_dir()
     except OSError as exc:                                     # noqa: BLE001
@@ -473,8 +504,15 @@ def share_root_ready(con=None, share=SHARE):
     if con is None:
         return True, ''
     try:
+        # music-5 (2026-09-11): the NEWEST rows, not the oldest. `ORDER BY id`
+        # sampled the fifty first cues ever indexed, which are the rows most
+        # likely to have been replaced or tidied away without a --prune (a
+        # normal state, per db.prune_missing and _taken_by_a_track). A library
+        # whose oldest fifty files are gone answered "not mounted" for ever, on
+        # a share that was mounted and full, and closed the whole write path
+        # with a message blaming the mount.
         rows = con.execute('SELECT rel_path FROM tracks WHERE rel_path IS NOT NULL '
-                           'ORDER BY id LIMIT ?', (_READY_SAMPLE,)).fetchall()
+                           'ORDER BY id DESC LIMIT ?', (_READY_SAMPLE,)).fetchall()
     except Exception:                                          # noqa: BLE001
         return True, ''
     if not rows:
@@ -482,6 +520,7 @@ def share_root_ready(con=None, share=SHARE):
     for r in rows:
         try:
             if safe_join(root, r[0]).exists():
+                _remember_ready(str(root))
                 return True, ''
         except (PathTraversalError, UnknownShareError, OSError):
             continue

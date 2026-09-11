@@ -366,8 +366,24 @@ def restore_into_quarantine(
     if not source.is_dir():
         raise RecoveryError(
             f"the snapshot {snapshot} holds no folder for {label}.", 404)
-    snap_files, _cut = _walk(source)
-    live_files, _cut2 = _walk(live)
+    snap_files, snap_cut = _walk(source)
+    live_files, live_cut = _walk(live)
+    if snap_cut or live_cut:
+        # dash-collector-alerts-5 (2026-09-11): `_walk` stops at
+        # MAX_SCAN_FILES and SAYS it stopped; the preview has always shown
+        # that flag and this function used to throw it away, which made a
+        # restore that covered the first 50,000 files of a project render
+        # exactly like a complete one - the "half-recovery that looks
+        # complete" its own comment above warns about. And when the LIVE walk
+        # is the truncated one, every file it never reached is classified as
+        # missing, so the comparison the copy is planned from is wrong as
+        # well. Refused, with the way through printed on the page beside it.
+        which = "snapshot" if snap_cut else "project"
+        raise RecoveryError(
+            f"that {which} folder holds more than {MAX_SCAN_FILES} files, more than "
+            f"this server compares in one go, so it cannot tell you what is missing "
+            f"without guessing. Restore the folder with the commands on the recovery "
+            f"page instead: a restore this large is a transfer, not a click.", 409)
     rels = sorted(rel for rel in snap_files
                   if rel not in live_files
                   or (include_changed and live_files[rel][0] != snap_files[rel][0]))

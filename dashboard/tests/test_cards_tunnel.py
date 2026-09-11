@@ -200,9 +200,27 @@ def test_the_token_is_not_in_the_query_string(env):
 def test_the_verified_identity_becomes_the_agent_name(env):
     client, upstream, _ = env
     client.post("/cards/agent/state",
+                json={"state": None, "machine": "CREATOR-1",
+                      "name": "SOMEBODY-ELSES-PC"},
+                headers=fleet_headers("jsmith"))
+    assert upstream.calls[0]["body"]["name"] == "jsmith/CREATOR-1"
+
+
+def test_the_body_s_own_name_is_never_the_machine_half(env):
+    """dash-release-jobs-6 (2026-09-11): the declared `machine` or nothing.
+
+    `name` is the agent's own socket.gethostname() string, which is the value
+    rule 1 exists to distrust. The editor half is verified either way, so the
+    old fallback was display spoofing rather than an auth bypass - but it was
+    spoofing of exactly the thing the cards page is being asked ("which
+    computer is driving Resolve"), by anything holding a fleet token.
+    """
+    client, upstream, _ = env
+    client.post("/cards/agent/state",
                 json={"state": None, "name": "SOMEBODY-ELSES-PC"},
                 headers=fleet_headers("jsmith"))
-    assert upstream.calls[0]["body"]["name"] == "jsmith/SOMEBODY-ELSES-PC"
+    assert upstream.calls[0]["body"]["name"] == "jsmith"
+    assert "SOMEBODY-ELSES-PC" not in json.dumps(upstream.calls[0]["body"])
 
 
 def test_the_name_is_the_editor_alone_when_no_machine_is_declared(env):

@@ -58,7 +58,7 @@ COMPONENTS: list[tuple[str, Path, str]] = [
      "dashboard/deploy/requirements.txt, not this venv"),
     ("music/web", REPO / "music" / "web" / ".venv",
      "music search UI mounted at /music; deliberately no torch"),
-    ("broll/web", Path("E:/Projects/broll-platform/web/.venv"),
+    ("broll/web", REPO / "broll" / "web" / ".venv",
      "b-roll search UI mounted at /broll; borrowed from the pre-fold repo"),
     ("ytdl/web", REPO / "ytdl" / "web" / ".venv",
      "YouTube downloader UI mounted at /ytdl; no venv of its own as of "

@@ -322,13 +322,32 @@ class SynologyClient:
         headers = {"X-SYNO-TOKEN": self._token} if self._token else {}
         try:
             if post:
-                return self.session.post(url, data=params, headers=headers,
-                                         verify=self.verify_ssl, timeout=self.timeout)
-            return self.session.get(url, params=params, headers=headers,
-                                    verify=self.verify_ssl, timeout=self.timeout)
+                resp = self.session.post(url, data=params, headers=headers,
+                                         verify=self.verify_ssl, timeout=self.timeout,
+                                         allow_redirects=False)
+            else:
+                resp = self.session.get(url, params=params, headers=headers,
+                                        verify=self.verify_ssl, timeout=self.timeout,
+                                        allow_redirects=False)
         except requests.RequestException as exc:
             raise NasError(
                 f"cannot reach the DSM web API at {self.host}:{self.port}: {exc}") from exc
+        # dash-core-1 (2026-09-11): no dashboard call follows a redirect
+        # (CLAUDE.md; CR-111 did this for the OIDC token POST and every TrueNAS
+        # request and missed this backend). Every DSM credential we hold rides
+        # in a POST BODY - the admin password on login, `_sid` + `SynoToken` on
+        # every call, a freshly set editor password in set_known_password - and
+        # a 307/308 replays method and body verbatim to the redirect target.
+        # `requests` strips an Authorization header across a host change but
+        # never a form body and never X-SYNO-TOKEN. The refusal must live here
+        # rather than in `_json`, which only ever sees the resolved response.
+        if 300 <= resp.status_code < 400:
+            raise NasError(
+                f"DSM answered {resp.status_code} redirecting to "
+                f"{resp.headers.get('Location', '(no Location)')!r}. Nothing was sent on. "
+                "Point DASH_NAS_HOST / DASH_NAS_PORT at the address DSM actually serves"
+            )
+        return resp
 
     @staticmethod
     def _json(resp: requests.Response, what: str) -> dict[str, Any]:

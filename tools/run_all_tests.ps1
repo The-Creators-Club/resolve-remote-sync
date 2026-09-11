@@ -71,7 +71,7 @@ $Suites = @(
     # since 2026-08-17 it falls back to the dashboard venv, which carries the
     # same deps -- otherwise this suite reads "NO INTERPRETER" on every other
     # clone, which is a silent skip of test_mounted_prefix.py.
-    @{ Name = "broll/web";     Dir = "$repo\broll\web";     Py = "E:\Projects\broll-platform\web\.venv\Scripts\python.exe";
+    @{ Name = "broll/web";     Dir = "$repo\broll\web";     Py = "$repo\broll\web\.venv\Scripts\python.exe";
                                                             Fallback = "$repo\dashboard\.venv\Scripts\python.exe" },
     @{ Name = "broll/indexer"; Dir = "$repo\broll\indexer"; Py = "python" },
     @{ Name = "music/web";     Dir = "$repo\music\web";     Py = "$repo\music\web\.venv\Scripts\python.exe" },

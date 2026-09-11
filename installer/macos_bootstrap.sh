@@ -53,7 +53,7 @@
 #     Finish page without scraping the human-facing summary.
 set -u
 
-INSTALLER_VERSION="1.0.41"
+INSTALLER_VERSION="1.0.42"
 
 # ----------------------------------------------------------------------
 # PINNED DOWNLOADS (2026-08-17, docs/COMMERCIAL_READINESS.md item 13)
@@ -2440,6 +2440,17 @@ fi
 # ----------------------------------------------------------------------
 # 6a. Companion LaunchAgent
 # ----------------------------------------------------------------------
+# Retire com.creatorsclub.ccsync.companion BEFORE anything else here: two
+# loaded agents both exec the companion, and the second one loses the loopback
+# port 8899 the b-roll and music "send to Resolve" buttons call (2026-08-17,
+# docs/COMMERCIAL_READINESS.md item 10). Unconditional since install-onboard-6
+# (2026-09-11): it used to be in the else branch only, so a run with no
+# companion binary deleted OUR correctly-labelled agent and left the
+# pre-2026-08-17 one running an old companion - the very process that holds
+# 8899 against the new one when a later run succeeds. Same placement as the
+# Syncthing one.
+retire_legacy_agent "$COMPANION_PLIST_LEGACY" "$COMPANION_LABEL_LEGACY"
+
 if [ "$COMPANION_MISSING" = 1 ]; then
     # INST-6: this used to be one skippable WARNING line in the middle of an
     # otherwise successful-looking run that ended with "Bootstrap complete"
@@ -2479,11 +2490,6 @@ if [ "$COMPANION_MISSING" = 1 ]; then
         fi
     fi
 else
-    # Retire com.creatorsclub.ccsync.companion BEFORE writing com.ccsync.*:
-    # two loaded agents both exec the companion, and the second one loses the
-    # loopback port 8899 the b-roll and music "send to Resolve" buttons call
-    # (2026-08-17, docs/COMMERCIAL_READINESS.md item 10).
-    retire_legacy_agent "$COMPANION_PLIST_LEGACY" "$COMPANION_LABEL_LEGACY"
     COMPANION_PLIST_PROGRAM="$(plist_program "$COMPANION_PLIST")"
     COMPANION_PLIST_OK=0
     if [ -f "$COMPANION_PLIST" ] && [ "$COMPANION_PLIST_PROGRAM" = "$COMPANION_PATH" ] \

@@ -4,7 +4,7 @@ One group per finding, named by its id. Everything here is offline; run from
 GIT BASH (see CLAUDE.md -- 18 of this suite's tests mean something different
 when pytest is launched from PowerShell).
 
-    cd E:\\Projects\\resolve-remote-sync\\server
+    cd E:\\Projects\\Editing\\ccsync\\server
     ../dashboard/.venv/Scripts/python.exe -m pytest tests -q
 """
 import re

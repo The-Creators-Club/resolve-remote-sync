@@ -61,7 +61,7 @@ Why split: no single tool expresses "video up-only, proxy down-only, rest both w
 
 ## Components to build
 
-New repo: `E:\Projects\resolve-remote-sync`
+New repo: `E:\Projects\Editing\ccsync`
 
 ### 1. Server setup (scripted, `server/`)
 - Re-auth TrueNAS Tailscale app; confirm editors get **direct** (not DERP) connections — forward UDP 41641 on the HiNet router if needed. Postgres reachable at tailnet address:5432 (check container pg_hba allows it).

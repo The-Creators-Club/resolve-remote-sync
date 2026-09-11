@@ -177,6 +177,10 @@ def _read_json(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+# res-companion-4 (2026-09-11): swallowed state writes, this run.
+_WRITE_FAILURES = 0
+
+
 def _write_json(path: Path, data: dict) -> bool:
     """tmp + os.replace, like identity.save_identity: a half-written record
     that fails to parse reads as "we know nothing", and for the crash-loop
@@ -189,8 +193,26 @@ def _write_json(path: Path, data: dict) -> bool:
         os.replace(tmp, path)
         return True
     except Exception:
-        log.debug("upgrade: could not write %s", path, exc_info=True)
+        # res-companion-4 (2026-09-11): this used to be one DEBUG line, and
+        # `note_version_start` never looked at the return -- so a state dir
+        # that could not be written (a full disk, an unwritable ~/.ccsync, an
+        # AV lock) silently turned the crash-loop counter into "we know
+        # nothing" on every start, which is exactly the answer APP-5's revert
+        # must not be allowed to invent. WARNING, and counted in-process so
+        # `write_failures()` can say how long it has been going on.
+        global _WRITE_FAILURES
+        _WRITE_FAILURES += 1
+        log.warning("upgrade: could not write %s (failure %s this run) -- the "
+                    "crash-loop counter cannot be kept on this machine",
+                    path, _WRITE_FAILURES, exc_info=True)
         return False
+
+
+def write_failures() -> int:
+    """How many state writes have been swallowed since this process started
+    (res-companion-4). In-process on purpose: the thing that cannot be done
+    is writing to disk, so a counter on disk would be the same failure."""
+    return _WRITE_FAILURES
 
 
 def version_state_path(state_dir: Path) -> Path:
@@ -269,11 +291,19 @@ def note_version_start(state_dir: Path, now: Optional[float] = None) -> dict:
             record["starts"] >= CRASH_LOOP_STARTS
             and (stamp - float(record["first_start_at"])) <= CRASH_LOOP_WINDOW_SECONDS
         )
-        _write_json(version_state_path(state_dir), {
+        written = _write_json(version_state_path(state_dir), {
             key: record[key] for key in
             ("version", "previous_version", "starts", "first_start_at",
              "last_clean_shutdown")
         })
+        if not written:
+            # res-companion-4: a crash-loop counter that cannot be persisted
+            # means every start looks like the first one, so APP-5's revert
+            # can never fire and a build that is not staying up keeps coming
+            # back for ever. That is a machine that needs a human.
+            log.warning("upgrade: this start was NOT recorded in %s -- the "
+                        "crash-loop guard cannot count on this machine",
+                        version_state_path(state_dir))
         # Still written so a pre-APP-5 build can read it after a rollback.
         try:
             marker = state_dir / _VERSION_MARKER
@@ -1472,8 +1502,15 @@ class UpgradeManager:
         if not isinstance(record, dict) or not record:
             return None
         try:
-            if compare_to_running(record.get("version")) in (
-                    VERSION_SAME, VERSION_OLDER):
+            # comp-ytdl-jobs-1 (2026-09-11): SAME only, never OLDER. A refusal
+            # produced by the downgrade floor -- REL-3's first example -- is by
+            # construction about a version at or below the running one, so
+            # retiring OLDER here threw away the one refusal REL-3 exists to
+            # surface: an admin republishing 0.9.65 as a rollback saw the whole
+            # fleet render as "pending" instead of "refusing", with the reason
+            # (delete upgrade_floor.json on that machine) nowhere but a log.
+            # If an old refusal should ever self-retire, retire it on AGE.
+            if compare_to_running(record.get("version")) == VERSION_SAME:
                 self.last_refusal = None
                 return None
         except Exception:

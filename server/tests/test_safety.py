@@ -5,7 +5,7 @@ script under a stub `sudo` in a temp directory, so the actual semantics are
 exercised (marker preserved, refusals, no injection) without a NAS.
 
 Run with:
-    cd E:\\Projects\\resolve-remote-sync\\server
+    cd E:\\Projects\\Editing\\ccsync\\server
     python -m pytest tests -v
 """
 import json

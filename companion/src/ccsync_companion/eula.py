@@ -59,6 +59,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import config as config_mod
+# comp-app-3: the route into the Settings window is spelled in ONE module
+# (ui_copy's docstring), so the next time that button moves this sentence
+# moves with it. identity.py imports it the same way.
+from . import ui_copy
 
 log = logging.getLogger("ccsync.eula")
 
@@ -233,15 +237,15 @@ def acceptance_problem(path: Optional[Path] = None) -> Optional[str]:
     record = read_acceptance(path)
     if not record:
         return ("The CC Sync licence agreement has not been accepted on this computer. "
-                "Press [ READ AND ACCEPT THE LICENCE ] in Settings, THIS COMPUTER.")
+                f"Open {ui_copy.ACCEPT_LICENCE_SETTINGS}.")
     accepted = str(record.get("version") or "").strip()
     if not accepted:
         return ("The licence acceptance record on this computer is unreadable. "
-                "Press [ READ AND ACCEPT THE LICENCE ] in Settings, THIS COMPUTER.")
+                f"Open {ui_copy.ACCEPT_LICENCE_SETTINGS}.")
     if not version_at_least(accepted, EULA_VERSION):
         return (f"The CC Sync licence agreement has been updated (version {EULA_VERSION}; "
-                f"this computer accepted {accepted}). Press [ READ AND ACCEPT THE LICENCE ] "
-                "in Settings, THIS COMPUTER.")
+                f"this computer accepted {accepted}). "
+                f"Open {ui_copy.ACCEPT_LICENCE_SETTINGS}.")
     return None
 
 

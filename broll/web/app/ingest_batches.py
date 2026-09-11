@@ -583,9 +583,12 @@ def retry_failed(conn: sqlite3.Connection, batch: sqlite3.Row) -> dict:
         log.info("b-roll ingest: batch %s retrying %d failed clip(s)",
                  batch["uid"], retried)
     fresh = get_batch(conn, batch["uid"])
-    # `items` are the uids that moved, in batch order: that is the body the
-    # companion's `/broll/ingest/retry` takes, so the page can hand them
-    # straight on without a second read.
+    # `items` are the uids that moved, in batch order, for the page to show.
+    # They are NOT a body any companion route takes (broll-1, 2026-09-11): the
+    # loopback's `/broll/ingest/retry` matches its `items` against the
+    # browser's staging local ids, which these 32-hex server-minted uids never
+    # are, and it is a different ledger anyway (staged uploads, not batch
+    # items). The page dispatches the take-over run call instead.
     return {"ok": True, "retried": retried, "state": fresh["state"],
             "items": item_uids, **counts}
 

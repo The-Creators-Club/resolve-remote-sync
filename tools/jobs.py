@@ -116,6 +116,17 @@ class Http:
                 return Response(resp.status, dict(resp.headers.items()), resp.read())
         except urllib.error.HTTPError as exc:
             return Response(exc.code, dict(exc.headers.items()), exc.read() or b"")
+        except (urllib.error.URLError, OSError) as exc:
+            # server-tools-5 (2026-09-11): a dashboard that is rebooting, a DNS
+            # failure or a TLS failure is the COMMONEST way this tool fails,
+            # and it was the one failure that came back as a urllib traceback
+            # instead of a sentence naming the next action. HTTPError is a
+            # subclass of URLError, so it has to stay caught above this.
+            reason = getattr(exc, "reason", None) or exc
+            raise JobsError(
+                f"could not reach the dashboard at {url}: {reason}. "
+                f"Check it is running and that the URL is the one this "
+                f"computer reaches it on, then re-run.", EXIT_CALL)
 
 
 class Client:

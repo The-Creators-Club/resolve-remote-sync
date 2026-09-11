@@ -83,7 +83,7 @@ from typing import Any, Callable
 
 from fastapi import FastAPI
 
-from . import api, auth, db
+from . import api, auth, db, mount_status
 from .broll import _header_value, _session_cookie
 from .settings import Settings
 
@@ -446,6 +446,8 @@ def _init_music_storage() -> None:
     from musicweb import config as music_config  # type: ignore[import-not-found]
     from musicweb import db as music_db  # type: ignore[import-not-found]
 
+    # res-fleet-2 (2026-09-11): the root the collector re-probes every cycle.
+    mount_status.record_root("music", str(music_config.DATA_ROOT))
     music_config.DATA_ROOT.mkdir(parents=True, exist_ok=True)
     con = music_db.connect()
     try:

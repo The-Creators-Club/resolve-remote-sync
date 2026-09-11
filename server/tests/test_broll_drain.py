@@ -17,7 +17,7 @@ Two groups:
      anything on the NAS is renamed.
 
 Offline. Run from GIT BASH (see CLAUDE.md):
-    cd E:\\Projects\\resolve-remote-sync\\server
+    cd E:\\Projects\\Editing\\ccsync\\server
     ../dashboard/.venv/Scripts/python.exe -m pytest tests/test_broll_drain.py -q
 """
 import json

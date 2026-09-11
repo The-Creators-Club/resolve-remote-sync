@@ -37,7 +37,7 @@ $log     = 'E:\broll-queue\watchdog.log'
 # PS 5.1: $PSScriptRoot is empty when a script is piped to the interpreter
 # rather than run by path, so fall back to the in-repo location.
 $indexer = $PSScriptRoot
-if (-not $indexer) { $indexer = 'E:\Projects\resolve-remote-sync\broll\indexer' }
+if (-not $indexer) { $indexer = 'E:\Projects\Editing\ccsync\broll\indexer' }
 $db      = 'E:\broll-queue\broll.db'
 
 function Write-Log($msg) {

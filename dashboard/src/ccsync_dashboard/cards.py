@@ -53,6 +53,7 @@ from typing import Any, Callable
 
 from fastapi import FastAPI
 
+from . import mount_status
 from .settings import Settings
 
 log = logging.getLogger("ccsync.dashboard.cards")
@@ -396,6 +397,9 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
         return _detail(ABSENT, f"the WSGI shim did not build "
                                f"({type(e).__name__}: {e})")
 
+    # res-fleet-2 (2026-09-11): the vault root the collector re-probes every
+    # cycle. A Timeline Cards page with no vault under it answers nothing.
+    mount_status.record_root("cards", str(root))
     app.mount(MOUNT_PATH, CardsGate(asgi))
     log.info("Timeline Cards mounted at %s (root %s, from %s)",
              MOUNT_PATH, root, src)

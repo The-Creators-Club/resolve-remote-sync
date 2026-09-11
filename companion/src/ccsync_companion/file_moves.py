@@ -63,6 +63,11 @@ RETRY_MAX_SECONDS = 7 * 24 * 3600
 STATE_DONE = "done"
 STATE_RETRYABLE = "retryable"
 STATE_BLOCKED = "blocked"
+# res-companion-1 (2026-09-11): "we are part-way through applying this one".
+# Written before the first filesystem call and replaced by the real outcome a
+# moment later, so the only way to READ it is to be the process that came
+# after a crash. It holds the lane A exclusion open like every other row.
+STATE_APPLYING = "applying"
 # RES-10: how long an applied move keeps asking to be relinked. The editor
 # may not open that project for weeks, and the clip is offline in it until
 # they do; after this the fixer meets it like any other offline clip.
@@ -135,6 +140,16 @@ def _cmp_key(path: object) -> str:
     return folded
 
 
+# comp-sync-11 (2026-09-11): the public spelling. `relink_moved` below and
+# CompanionApp._relink_moved (its twin) both compared media-pool paths with a
+# bare normcase/normpath, which on darwin folds NEITHER case nor Unicode -- so
+# a moved clip whose name carries a diacritic never matched, the pending
+# relink never retired and the clip stayed Media Offline for the whole 30 day
+# window. Anything outside this module that compares two paths must come
+# through here rather than grow a third private copy of the rule.
+cmp_key = _cmp_key
+
+
 def _under(full: str, root: str) -> str:
     """`full` re-expressed relative to the run root `root`, or "" when it is
     not inside it. Both are `/`-separated tree-relative paths, and the
@@ -159,6 +174,20 @@ def _under(full: str, root: str) -> str:
     return "/".join(parts[len(root_parts):])
 
 
+def _raw_tail(full: str, root: str) -> str:
+    """`full` minus `root`'s leading components, in `full`'s own spelling
+    (comp-sync-11, 2026-09-11). "" when there is nothing left over.
+
+    Counting components rather than slicing the string: the caller has
+    already established that `full` is under `root` through the folded keys,
+    and the two may be spelled differently (NFC vs NFD), which makes every
+    length-based slice wrong by a few bytes per accent."""
+    parts = os.path.normpath(str(full)).replace("\\", "/").split("/")
+    root_parts = os.path.normpath(str(root)).replace("\\", "/").split("/")
+    tail = parts[len(root_parts):]
+    return os.path.join(*tail) if tail else ""
+
+
 def _same_file(a: Path, b: Path) -> bool:
     return _cmp_key(a) == _cmp_key(b)
 
@@ -169,6 +198,18 @@ def _is_inside(path: Path, root: Path) -> bool:
     return p == r or p.startswith(r.rstrip("\\/") + os.sep)
 
 
+def _stem_key(stem: str) -> str:
+    """A file stem folded for COMPARISON only (comp-sync-18, 2026-09-11).
+
+    `iterdir()` on a Mac hands back NFD while the command's `from_rel` is the
+    dashboard's NFC, so a raw `.lower()` compare orphaned the proxy of every
+    accented name: the original moved, `Proxy/Šimalčík_A001.mov` stayed behind
+    under the old project, where lane B's sync eventually trashed it. The same
+    CR-90 class as `_cmp_key`, on the one comparison in this module that did
+    not go through it."""
+    return unicodedata.normalize("NFC", str(stem)).lower()
+
+
 def move_proxy_siblings(src: Path, dest: Path) -> int:
     """The `Proxy/<stem>.*` beside a file goes where the file goes -- the
     convention Resolve's auto-link and both rclone lanes are built on. Never
@@ -177,8 +218,9 @@ def move_proxy_siblings(src: Path, dest: Path) -> int:
     if not proxy_dir.is_dir():
         return 0
     moved = 0
+    want = _stem_key(src.stem)
     for candidate in sorted(proxy_dir.iterdir()):
-        if not candidate.is_file() or candidate.stem.lower() != src.stem.lower():
+        if not candidate.is_file() or _stem_key(candidate.stem) != want:
             continue
         target_dir = dest.parent / "Proxy"
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -190,21 +232,93 @@ def move_proxy_siblings(src: Path, dest: Path) -> int:
     return moved
 
 
-def apply_move(move: dict[str, Any], local_root: str) -> tuple[bool, str, Optional[tuple[str, str]]]:
+def _rename_case_only(src: Path, dest: Path) -> None:
+    """Rename a file whose old and new names differ only in spelling
+    (comp-sync-12, 2026-09-11).
+
+    `src.replace(dest)` is a no-op or an error on a case-insensitive
+    filesystem when the two names fold together, so the rename goes through a
+    temporary name the filesystem agrees is a third file. The NAS is
+    case-sensitive and DID rename it: without this the companion answered
+    "already where the server has it", nothing moved on the editor's disk,
+    and a day later -- once `recent_excludes` lapsed -- lane A uploaded the
+    old spelling back beside the new one, which is the duplicate-at-the-
+    cleared-path failure docs/FILE_MOVES.md exists to prevent."""
+    staging = src.with_name(f".ccsync-move-{os.getpid()}-{src.name}")
+    src.replace(staging)
+    try:
+        staging.replace(dest)
+    except OSError:
+        # Put it back rather than leave the editor's file under a dot name.
+        try:
+            staging.replace(src)
+        except OSError:
+            log.exception("file moves: could not restore %s after a failed "
+                          "case-only rename -- it is at %s", src, staging)
+        raise
+
+
+def apply_move(move: dict[str, Any], local_root: str,
+               ledger: Optional["FileMoveLedger"] = None,
+               ) -> tuple[bool, str, Optional[tuple[str, str]]]:
     """Move this machine's copy. Returns (ok, detail, (old_local, new_local))
     -- the pair is None when nothing was here to move. Never deletes and
-    never overwrites; every refusal leaves the tree exactly as it was."""
+    never overwrites; every refusal leaves the tree exactly as it was.
+
+    `ledger` is optional and is the crash window's answer (res-companion-1,
+    2026-09-11): given one, an INTENT row is written before the first
+    filesystem call and a redelivered command whose file is already at the
+    new path resumes from it instead of answering "nothing at the old path
+    on this machine". Without it the behaviour is exactly what it was, which
+    is what lets an older caller keep working."""
     root = Path(local_root) / "Projects"
     src = root / Path(*move["from_project_rel"].split("/")) / Path(*move["from_rel"].split("/"))
     dest = root / Path(*move["to_project_rel"].split("/")) / Path(*move["to_rel"].split("/"))
     if not src.exists():
+        # res-companion-1: the move itself is not crash-atomic with the
+        # record of it (the proxy loop and the media-pool walk are seconds to
+        # tens of seconds, and "died without a shutdown" is routine here --
+        # CR-93). A process killed in that window left the file moved, no
+        # ledger row, and a redelivery that answered ok/relink_pending=False:
+        # the clip was offline in Resolve for ever and the fixer's answer to
+        # an in-tree missing clip is to copy it back to the path the admin
+        # just cleared. Resume only on the exact evidence the verdict names
+        # -- OUR intent row, src gone AND dest present -- so a machine that
+        # never held the file still answers "nothing at the old path".
+        if ledger is not None and dest.exists():
+            entry = ledger.entry(move["id"]) or {}
+            if entry.get("state") == STATE_APPLYING:
+                proxies = 0 if dest.is_dir() else move_proxy_siblings(src, dest)
+                detail = ("finished a move this machine was interrupted during"
+                          + (f", {proxies} proxy file(s) with it" if proxies else ""))
+                return True, detail, (str(src), str(dest))
         return True, "nothing at the old path on this machine", None
     if _same_file(src, dest):
-        return True, "already where the server has it", None
+        # ...unless the two names differ in bytes and fold to the same key:
+        # that is a real rename on the server's case-sensitive filesystem
+        # (comp-sync-12).
+        if os.path.normpath(str(src)) == os.path.normpath(str(dest)):
+            return True, "already where the server has it", None
+        if src.is_dir():
+            return False, ("a folder cannot be renamed by spelling alone on this "
+                           "machine; ask your admin to do it in two steps"), None
+        if ledger is not None:
+            ledger.record_intent(move, str(src), str(dest))
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            _rename_case_only(src, dest)
+        except OSError as exc:
+            return False, f"could not rename it on this machine: {exc}", None
+        return True, "renamed to match the server's spelling", (str(src), str(dest))
     if dest.exists():
         return False, f"the destination already exists on this machine ({dest})", None
     if src.is_dir() and _is_inside(dest, src):
         return False, "a folder cannot be moved into itself", None
+    # res-companion-1: the intent goes down BEFORE the first filesystem call,
+    # so a crash between the rename and record() leaves evidence to resume
+    # from rather than a file nobody can account for.
+    if ledger is not None:
+        ledger.record_intent(move, str(src), str(dest))
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         src.replace(dest)
@@ -239,18 +353,31 @@ def relink_moved(old_local: str, new_local: str, local_root: str,
         result = resolve_bridge.get_media_pool_items()
         if not result.get("ok"):
             return False, f"Resolve not relinked ({result.get('message') or 'not open'})"
-        old_n = os.path.normcase(os.path.normpath(old_local))
+        # comp-sync-11 (2026-09-11): through _cmp_key, like every other
+        # comparison in this module. A bare normcase folds neither case nor
+        # Unicode on darwin, and `old_local` is built from the dashboard's NFC
+        # `from_rel` while Resolve hands back the Mac's NFD -- so the walk
+        # matched nothing, `matched` stayed False, and the toast's promise
+        # ("the clip reconnects next time you open that project") was never
+        # kept on any accented name. The raw strings are what relpath/join
+        # below still operate on: `target` is written into Resolve.
+        old_n = cmp_key(old_local)
         relinked = failed = 0
         for item in result.get("items") or []:
             file_path = str(item.get("file_path") or "")
             local = canon.canonical_to_local(file_path, local_root, canonical_prefix) \
                 or file_path
-            local_n = os.path.normcase(os.path.normpath(local))
+            local_n = cmp_key(local)
             if is_dir:
                 if not (local_n == old_n or local_n.startswith(old_n.rstrip("\\/") + os.sep)):
                     continue
-                target = os.path.join(new_local, os.path.relpath(local, old_local)) \
-                    if local_n != old_n else new_local
+                # comp-sync-11: os.path.relpath compares the two RAW strings,
+                # so an NFD clip path under an NFC root shares no prefix with
+                # it and comes back full of `..`. The tail is taken by
+                # COMPONENT COUNT instead, off the raw path, so the spelling
+                # that goes into Resolve is the one on the disk.
+                tail = _raw_tail(local, old_local)
+                target = os.path.join(new_local, tail) if tail else new_local
             elif local_n == old_n:
                 target = new_local
             else:
@@ -341,6 +468,19 @@ class FileMoveLedger:
         self._entries = self._entries[-LEDGER_MAX_ENTRIES:]
         self._save()
         return entry
+
+    def record_intent(self, move: dict[str, Any], old_local: str,
+                      new_local: str) -> dict[str, Any]:
+        """Write the `applying` row for a move about to be made
+        (res-companion-1).
+
+        The paths are precomputed here because they are what both recovery
+        routes need and what the crash used to take with it: `moved_to()` can
+        then still offer the watcher's one-click relink, and `apply_move` can
+        finish the job on the redelivered command."""
+        return self.record(move, ok=False, detail="applying it on this machine",
+                           state=STATE_APPLYING, paths=(old_local, new_local),
+                           relink_pending=True)
 
     def record_attempt_failed(self, move: dict[str, Any], detail: str) -> dict[str, Any]:
         """A move that could not be applied THIS time (RES-1).
@@ -456,7 +596,10 @@ class FileMoveLedger:
             # so letting the window lapse is letting lane A -- which never
             # deletes -- put the file back on the NAS at the path the admin
             # cleared, which is the failure this feature exists to prevent.
-            unresolved = e.get("state") in (STATE_RETRYABLE, STATE_BLOCKED)
+            # res-companion-1: an `applying` row is a move this machine was
+            # interrupted part-way through, i.e. the one state where we least
+            # know where the file is. It holds its exclusion open too.
+            unresolved = e.get("state") in (STATE_RETRYABLE, STATE_BLOCKED, STATE_APPLYING)
             if not unresolved and float(e.get("at") or 0) < cutoff:
                 continue
             project = str(e.get("from_project_rel", "")).replace("\\", "/").strip("/")

@@ -156,8 +156,11 @@ def test_no_offer_is_routine(tmp_path):
 def test_halted_machine_leaves_the_offer_pending(tmp_path):
     admin = FakeAdmin(pending={SLUG: {"offeredBy": {"DEV-SERVER": {}}}})
     mgr = _manager(admin, tmp_path, halted=lambda: True)
-    assert mgr.reconcile() == {SLUG: "not-offered"}
+    # comp-sync-10 (2026-09-11): its own outcome, so the editor is not told to
+    # chase their admin about a share their own halt is holding back.
+    assert mgr.reconcile() == {SLUG: "halted"}
     assert "accept" not in admin.names()
+    assert mgr.problems() == []
 
 
 # ---------------------------------------------------------------- steady state

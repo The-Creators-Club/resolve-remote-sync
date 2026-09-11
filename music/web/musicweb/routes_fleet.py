@@ -44,7 +44,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from musicweb import ingest_batches, rescore
 from musicweb.db import con
-from musicweb.fleet_auth import require_fleet_token, require_identity
+from musicweb.fleet_auth import require_fleet_caller
 from musicweb.schemas import (ClaimIn, HeartbeatIn, ItemResultIn, ItemStatusIn,
                               ItemUploadedIn, ReleaseIn)
 
@@ -152,8 +152,13 @@ def _settle_scores(conn):
                   'marked as needing a retag', type(exc).__name__, exc)
 
 
-@router.post('/batches/{uid}/claim', dependencies=[Depends(require_fleet_token)])
-def claim(uid: str, body: ClaimIn, editor: str = Depends(require_identity)):
+# CR-55 (2026-08-21, brought to music by the bug hunt of 2026-09-11,
+# comp-broll-music out of territory): ONE dependency, not two. The machine
+# credential and the signed identity are checked together so a per-editor
+# `cce1.` token cannot carry another editor's name, and so the order of the
+# two checks cannot drift route by route.
+@router.post('/batches/{uid}/claim')
+def claim(uid: str, body: ClaimIn, editor: str = Depends(require_fleet_caller)):
     """Take the batch and receive the work order.
 
     Mints no `tracks` rows (see ingest_batches' docstring) -- what it settles
@@ -166,8 +171,8 @@ def claim(uid: str, body: ClaimIn, editor: str = Depends(require_identity)):
         companion_version=body.companion_version, capabilities=body.capabilities)
 
 
-@router.post('/batches/{uid}/heartbeat', dependencies=[Depends(require_fleet_token)])
-def heartbeat(uid: str, body: HeartbeatIn, editor: str = Depends(require_identity),
+@router.post('/batches/{uid}/heartbeat')
+def heartbeat(uid: str, body: HeartbeatIn, editor: str = Depends(require_fleet_caller),
               x_ccsync_machine: str = Header(default=None)):
     """Keep the lease alive, and learn whether to stop.
 
@@ -181,10 +186,9 @@ def heartbeat(uid: str, body: HeartbeatIn, editor: str = Depends(require_identit
     return ingest_batches.heartbeat(conn, batch)
 
 
-@router.post('/batches/{uid}/items/{item_uid}/status',
-             dependencies=[Depends(require_fleet_token)])
+@router.post('/batches/{uid}/items/{item_uid}/status')
 def item_status(uid: str, item_uid: str, body: ItemStatusIn,
-                editor: str = Depends(require_identity),
+                editor: str = Depends(require_fleet_caller),
                 x_ccsync_machine: str = Header(default=None)):
     """One checkpoint. 400 on an illegal transition, 410 on a lost lease.
 
@@ -200,10 +204,9 @@ def item_status(uid: str, item_uid: str, body: ItemStatusIn,
         transcoded=body.transcoded, probe=body.probe)
 
 
-@router.post('/batches/{uid}/items/{item_uid}/result',
-             dependencies=[Depends(require_fleet_token)])
+@router.post('/batches/{uid}/items/{item_uid}/result')
 def item_result(uid: str, item_uid: str, body: ItemResultIn,
-                editor: str = Depends(require_identity),
+                editor: str = Depends(require_fleet_caller),
                 x_ccsync_machine: str = Header(default=None)):
     """The embedding the editor's machine computed, turned into a track.
 
@@ -228,10 +231,9 @@ def item_result(uid: str, item_uid: str, body: ItemResultIn,
     return result
 
 
-@router.post('/batches/{uid}/items/{item_uid}/uploaded',
-             dependencies=[Depends(require_fleet_token)])
+@router.post('/batches/{uid}/items/{item_uid}/uploaded')
 def item_uploaded(uid: str, item_uid: str, body: ItemUploadedIn,
-                  editor: str = Depends(require_identity),
+                  editor: str = Depends(require_fleet_caller),
                   x_ccsync_machine: str = Header(default=None)):
     """Go live -- once the server has stat'ed the file itself.
 
@@ -244,8 +246,8 @@ def item_uploaded(uid: str, item_uid: str, body: ItemUploadedIn,
     return ingest_batches.mark_uploaded(conn, batch, item, size=body.size)
 
 
-@router.post('/batches/{uid}/release', dependencies=[Depends(require_fleet_token)])
-def release(uid: str, body: ReleaseIn, editor: str = Depends(require_identity),
+@router.post('/batches/{uid}/release')
+def release(uid: str, body: ReleaseIn, editor: str = Depends(require_fleet_caller),
             x_ccsync_machine: str = Header(default=None)):
     """Finish the batch and drop the lease.
 

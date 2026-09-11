@@ -1688,9 +1688,17 @@ async function ingestTakeOver(uid) {
  *
  * The server moves them back to `pending` and the batch back to `queued`
  * FIRST, because that is the durable half; the loopback call after it is only
- * so this machine starts within the second. `/broll/ingest/retry` arrived with
- * companion 0.9.67 - an older build 404s it, and the run call is the fallback
- * that reaches the same place through the claim. */
+ * so this machine starts within the second.
+ *
+ * broll-1 (2026-09-11): that loopback call used to be
+ * `/broll/ingest/retry {items: <the server's item uids>}`, and the companion
+ * matches `items` against the BROWSER's staging local ids - two namespaces
+ * that cannot intersect, so it answered `200 {retried: 0}`, the `404`
+ * fallback to the run call never fired, and the batch sat in `queued` while
+ * the toast said "12 clips queued again". The two routes are also about
+ * different failures: `/ingest/retry` re-uploads STAGED bytes (BROLL-5),
+ * retry-failed re-INDEXES batch items. So this is the take-over dispatch,
+ * the same call `Run` makes, which works on every build in the fleet. */
 async function ingestRetryFailedBatch(uid) {
   let answer;
   try {
@@ -1707,18 +1715,14 @@ async function ingestRetryFailedBatch(uid) {
     return;
   }
   try {
-    await ingestLoopback("POST", "/broll/ingest/retry", { items: answer.items || [] });
+    await ingestLoopback("POST", "/broll/ingest/run", {
+      batch_uid: uid, staging_id: null, run_mode: ing.runMode,
+      start_now: ing.runMode === "foreground",
+    });
   } catch (e) {
-    if (e.status === 404) {
-      try {
-        await ingestLoopback("POST", "/broll/ingest/run", {
-          batch_uid: uid, staging_id: null, run_mode: ing.runMode,
-          start_now: ing.runMode === "foreground",
-        });
-      } catch (e2) {
-        ingestSetNotice(`The clips are queued again, but this computer did not ` +
-                        `pick them up: ${e2.message}`);
-      }
+    if (e.status === 409) {
+      ingestSetNotice("The clips are queued again. Another of your computers " +
+                      "is still working on this batch, so it picks them up.");
     } else {
       ingestSetNotice(`The clips are queued again, but this computer did not ` +
                       `pick them up: ${e.message}`);

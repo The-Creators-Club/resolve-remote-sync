@@ -124,6 +124,15 @@ MAX_ITEM_ATTEMPTS = 2
 # fourth attempt would be the fourth identical one.
 MAX_UPLOAD_ATTEMPTS = 3
 
+# comp-broll-music-1 (2026-09-11), belt and braces: how many pumps a declared
+# rel may be neither landed, nor failed, NOR known to the queue before the item
+# is ended. Not a timeout on the upload itself -- a 40 GB original is hours,
+# and the queue still has it -- but on the one shape that never resolves: the
+# queue has forgotten the job (a worker thread that died, comp-broll-music-7),
+# so nothing will ever put it in either ledger. Three ticks rather than one
+# because `tracks()` is read across a lock a real upload is moving under.
+LOST_UPLOAD_TICKS = 3
+
 # How long a FINISHED batch's staging directory is kept before the tick
 # deletes it. docs/BROLL_INGEST_PLAN.md:219,259 has promised seven days since
 # the feature shipped; MEDIA-3 (resilience sweep 2026-08-28) is that nothing
@@ -2092,6 +2101,16 @@ class BrollIngestor:
                     continue
                 if stage == ITEM_FAILED and int(item.get("attempts") or 0) >= MAX_ITEM_ATTEMPTS:
                     continue
+                # music-2 (2026-09-11): an item the SERVER asked us to come
+                # back to (a 503 while the library's mount is away, a 409
+                # name_race) waits here rather than failing. Skipped, not
+                # returned, because `_drain` loops on this function: an item
+                # handed back before its deadline would be a hot loop against
+                # a NAS that is rebooting. It is still outstanding, so
+                # `_maybe_finish` keeps the batch and the lease.
+                retry_at = item.get("result_retry_at")
+                if retry_at is not None and self._clock() < float(retry_at):
+                    continue
                 return item
         return None
 
@@ -2474,15 +2493,39 @@ class BrollIngestor:
         """
         plan = self._upload_plan(item)
         queue = self._queue()
-        item["uploads"] = {rel: kind for rel, (kind, _local) in plan.items()}
+        # comp-broll-music-1 (2026-09-11): declared only once the queue has
+        # actually TAKEN it. `item["uploads"]` is what `_pump_uploads` waits
+        # on, and a rel that was never handed over can neither land nor fail:
+        # the item sat in `uploading` for ever, the heartbeat kept renewing
+        # the lease, and every later drop on the machine got run()'s 409.
+        # The card being pulled between describe and upload is the live case.
+        declared: dict[str, str] = {}
+        lost: list[str] = []
         for rel, (kind, local) in plan.items():
             if not local or not os.path.isfile(local):
+                lost.append(rel)
+                self.log.warning("%s is not on this computer any more, so %s "
+                                 "cannot be uploaded", local or "(no path)", rel)
                 continue
             try:
                 queue.enqueue(local, rel, kind, item_uid=item["uid"],
                               size_bytes=os.path.getsize(local))
             except Exception:
                 self.log.exception("could not queue %s", rel)
+                lost.append(rel)
+                continue
+            declared[rel] = kind
+        item["uploads"] = declared
+        if not declared or any(plan[rel][0] == broll_upload.KIND_ORIGINAL
+                               for rel in lost):
+            # The original is the clip. A poster that went missing is a clip
+            # with no thumbnail; a missing original is nothing to archive, and
+            # an ending is the only answer that frees the batch.
+            item["uploads"] = {}
+            self._fail_item(item, "the files for this clip are not on this "
+                                  "computer any more, so it could not be "
+                                  "uploaded")
+            return
         item["stage"] = ITEM_UPLOADING
         self._stage(item, ITEM_UPLOADING, 90)
 
@@ -2526,6 +2569,24 @@ class BrollIngestor:
             self.log.debug("the upload snapshot failed", exc_info=True)
             return {"queued": 0, "active": None}
 
+    def _tracked_rels(self, queue: Any, rels: list) -> set:
+        """Which of these the upload queue still has, queued or in flight.
+
+        comp-broll-music-1 (2026-09-11). FAIL OPEN: a queue with no `tracks`
+        (an older double, a replacement implementation) counts everything as
+        tracked, because "I could not tell" must never read as "it is lost" --
+        that direction ends an item that is uploading perfectly well.
+        """
+        probe = getattr(queue, "tracks", None)
+        if probe is None:
+            return set(rels)
+        try:
+            return {str(rel) for rel in (probe(list(rels)) or [])}
+        except Exception:
+            self.log.debug("could not ask the upload queue what it holds",
+                           exc_info=True)
+            return set(rels)
+
     def _pump_uploads(self) -> None:
         """Turn "rclone finished" into "the server says it is live".
 
@@ -2550,6 +2611,12 @@ class BrollIngestor:
                 continue
             rels = item.get("uploads") or {}
             if not rels:
+                # comp-broll-music-1 (2026-09-11): `uploading` with nothing
+                # declared is a state file written by a build that declared
+                # rels it had not queued. There is nothing to wait for, and
+                # waiting is what held the lease for ever.
+                self._fail_item(item, "this computer has no files left to "
+                                      "upload for this clip")
                 continue
             missing = [rel for rel in rels if rel not in landed]
             if missing:
@@ -2574,6 +2641,23 @@ class BrollIngestor:
                         self._fail_item(item, error)
                     else:
                         self._resend_uploads(item, broken)
+                    item["upload_lost_ticks"] = 0
+                    continue
+                # comp-broll-music-1 (2026-09-11): neither landed nor failed
+                # is normally "still uploading", and the queue is asked which
+                # it is. A rel the queue has never heard of is a job that went
+                # nowhere, and waiting on it is the for-ever wedge.
+                unknown = [rel for rel in missing
+                           if rel not in self._tracked_rels(queue, missing)]
+                if unknown:
+                    ticks = int(item.get("upload_lost_ticks") or 0) + 1
+                    item["upload_lost_ticks"] = ticks
+                    if ticks >= LOST_UPLOAD_TICKS:
+                        self._fail_item(
+                            item, "the upload of %d file(s) never started on "
+                                  "this computer" % len(unknown))
+                else:
+                    item["upload_lost_ticks"] = 0
                 continue
             files = [{"rel": rel, "size": landed[rel].get("size")} for rel in rels]
             original_uploaded = any(
@@ -3049,11 +3133,15 @@ class BrollIngestor:
                 continue
             ended = str(entry.get("ended_at") or "")
             if not ended:
-                # Never run (or ended before this field existed): fall back to
-                # when it was staged, which is the older, safer date.
-                ended = str(entry.get("at") or "")
-                if not entry.get("at"):
-                    continue
+                # comp-broll-music-2 (2026-09-11): NOT the `at` fallback this
+                # used to take. A drop with no `ended_at` has not been run, and
+                # `at` is always in the past, so at max_age_days=0 (the tray's
+                # CLEAR FINISHED STAGING) every staged-but-unrun drop was
+                # deleted mid-PUT and every remaining upload slot 404'd -- the
+                # one thing this function's own docstring promises never
+                # happens. FINISHED is the word on the button, and a drop with
+                # no ending is not finished at any retention value.
+                continue
             if _iso_epoch(ended) > cutoff:
                 continue
             directory = str(entry.get("dir") or "")

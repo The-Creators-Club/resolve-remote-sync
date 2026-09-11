@@ -40,6 +40,7 @@ line above is machine-checkable and nothing was checking it.
 | [`YTDL_LOCAL_DOWNLOAD.md`](YTDL_LOCAL_DOWNLOAD.md) | The YouTube downloader's fleet job model and the local-download path |
 | [`YTDL_RESILIENCE_PLAN.md`](YTDL_RESILIENCE_PLAN.md) | After CR-80: why cookies and pinned player clients keep breaking YouTube downloads, and the fix. WP1-WP7 BUILT in repo 2026-08-26 (CR-83, dashboard 0.7.11 / companion 0.9.52, unshipped); WP8 deliberately not built |
 | [`CLIENT_FOLDERS.md`](CLIENT_FOLDERS.md) | Curated b-roll folders with a link a prospective licensee can open: how to use them, what the client sees, and publishing the one path prefix with Tailscale Funnel |
+| [`STAGE_A_FOLDER.md`](STAGE_A_FOLDER.md) | Stage a folder: a project folder on the NAS to a client link in one click (the one-folder share the owner asked for on 2026-09-10) |
 | [`CLIENT_DELIVERY.md`](CLIENT_DELIVERY.md) | Runbook for handing a client terabytes of footage to download once, without joining the tailnet: stage in Backblaze B2 near the client (TrueNAS Cloud Sync task, scoped read-only key, what to tell them), the shared-Tailscale-node direct route, and why not Funnel, Syncthing, MASV or a port-forward |
 | [`DOCKER.md`](DOCKER.md) | The two ways the dashboard container gets its code and its dependencies |
 | [`CARDS_DEPLOY.md`](CARDS_DEPLOY.md) | Refreshing Timeline Cards on the NAS: the one code mount that is another repo's checkout, why a copy without a restart changes nothing, and the rollback |
@@ -51,6 +52,7 @@ line above is machine-checkable and nothing was checking it.
 | [`YTDL_TERMS_AND_QUEUE.md`](YTDL_TERMS_AND_QUEUE.md) | The YouTube downloader's term review and search queue |
 | [`CI.md`](CI.md) | What runs on a runner, and what still only runs on the base rig |
 | [`PRODUCT_REPO.md`](PRODUCT_REPO.md) | The customer-facing repo, how it is exported, and what is withheld |
+| [`PROJECTS_CLEANUP_PLAN.md`](PROJECTS_CLEANUP_PLAN.md) | **A plan, not yet done.** Renaming this repo's folder to `E:\Projects\Editing\ccsync` and sorting the rest of `E:\Projects` into categories: the five things that break silently (the tray's rclone path, the Claude memory directory, the five venvs), what does not change, and the rollback |
 
 ## Not losing footage
 
@@ -119,6 +121,7 @@ and are deliberately left as they were; do not copy commands out of them.
 | [`bug-hunt-2026-08-14.md`](bug-hunt-2026-08-14.md) | The 94-finding hunt |
 | [`bug-hunt-2026-08-21.md`](bug-hunt-2026-08-21.md) | The 78-finding hunt plus the 53-issue design review. Fixed in the repo on 2026-08-21 and **unshipped**: `KNOWN_BUGS.md` CR-46 to CR-67 is what landed, what was deliberately deferred, and which seams were still open |
 | [`bug-hunt-2026-09-03.md`](bug-hunt-2026-09-03.md) | The 84-finding sixth fleet hunt (seventeen hunters, five verifiers), fixed the same day as CR-102 to CR-119 |
+| [`bug-hunt-2026-09-11.md`](bug-hunt-2026-09-11.md) | The seventh fleet hunt and resilience pass (nineteen hunters incl. two cross-cutting lenses, six verifiers): 131 distinct findings, 10 high, fixed the same day as CR-233 to CR-248 |
 | [`synology-spikes-2026-08-17.md`](synology-spikes-2026-08-17.md) | The eight day-1 spikes run against real Synology hardware |
 | [`macos-first-run-2026-08-04.md`](macos-first-run-2026-08-04.md) | The first macOS bring-up session |
 | [`macos-first-run-2026-08-05.md`](macos-first-run-2026-08-05.md) | The follow-up session |

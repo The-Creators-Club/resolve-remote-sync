@@ -1,0 +1,72 @@
+comp-app-1                               CONFIRMED
+comp-app-2                               CONFIRMED (both sides checked)
+comp-ui-1                                CONFIRMED
+comp-ui-2                                DOWNGRADED to low (and it is the SAME defect as res-companion-4 - see
+comp-resolve-1                           DOWNGRADED to low
+comp-resolve-2                           CONFIRMED
+comp-resolve-3                           CONFIRMED
+comp-resolve-4                           CONFIRMED
+comp-ytdl-jobs-1                         CONFIRMED
+comp-ytdl-jobs-2                         CONFIRMED
+comp-ytdl-jobs-3                         CONFIRMED
+res-companion-1                          CONFIRMED
+res-companion-2                          CONFIRMED (mechanism), with the trigger noted as dormant
+res-companion-3                          DOWNGRADED to low
+res-companion-4                          DOWNGRADED to low - and this is the SAME DEFECT as comp-ui-2
+comp-sync-1                              DOWNGRADED to medium
+comp-sync-2                              CONFIRMED (medium)
+comp-sync-3                              CONFIRMED (medium)
+comp-sync-4                              DOWNGRADED to low
+comp-sync-5                              CONFIRMED (medium)
+comp-sync-6                              CONFIRMED (medium)
+comp-sync-7                              CONFIRMED (medium)
+comp-sync-8                              CONFIRMED (medium)
+comp-sync-9                              CONFIRMED (medium)
+comp-sync-10                             DOWNGRADED to low
+comp-sync-11                             CONFIRMED (medium)
+comp-sync-12                             CONFIRMED (medium)
+comp-sync-13                             CONFIRMED (medium)
+comp-sync-14                             DOWNGRADED to low
+comp-sync-15                             DOWNGRADED to low
+dash-api-1                               CONFIRMED (medium stands)
+dash-api-2                               CONFIRMED (medium stands)
+dash-api-3                               CONFIRMED and UPGRADED to high
+dash-db-1                                CONFIRMED (mechanism), DOWNGRADED to low
+dash-release-jobs-2                      CONFIRMED (mechanism), DOWNGRADED to low
+dash-core-1                              CONFIRMED (high stands)
+dash-core-3                              CONFIRMED (mechanism), DOWNGRADED to low
+dash-core-4                              CONFIRMED (logic), DOWNGRADED to low
+res-fleet-1                              CONFIRMED, DOWNGRADED to medium
+res-fleet-2                              CONFIRMED (medium stands, with one correction)
+res-fleet-4                              CONFIRMED (mechanism), DOWNGRADED to low
+res-fleet-5                              CONFIRMED (mechanism and reachability), DOWNGRADED to low
+dash-collector-alerts-1                  CONFIRMED (high). One verdict for both reports: same line, same
+dash-collector-alerts-2                  CONFIRMED (high)
+dash-collector-alerts-3                  DOWNGRADED to medium
+dash-collector-alerts-4                  CONFIRMED (medium)
+dash-collector-alerts-5                  CONFIRMED (medium), with one half of the failure scenario corrected
+dash-collector-alerts-6                  CONFIRMED (medium), and the hunter's open question resolves AGAINST
+dash-mounts-ui-1                         CONFIRMED (high). One verdict for both reports.
+dash-mounts-ui-2                         DOWNGRADED to low
+dash-mounts-ui-3                         DOWNGRADED to low
+dash-mounts-ui-4                         CONFIRMED (medium)
+dash-mounts-ui-5                         DOWNGRADED to low
+server-tools-1                           CONFIRMED (high)
+server-tools-3                           CONFIRMED on the mechanism; NOT verified live (no NAS access from
+comp-broll-music-1                       CONFIRMED
+comp-broll-music-2                       CONFIRMED
+broll-1                                  CONFIRMED (medium). The fix belongs on the WEB side
+comp-broll-music-4                       DOWNGRADED to low
+broll-2                                  CONFIRMED (high)
+broll-3                                  DOWNGRADED to low
+music-1                                  CONFIRMED (high)
+music-2                                  DOWNGRADED to medium
+music-3                                  CONFIRMED (medium)
+music-5                                  CONFIRMED (medium)
+ytdl-web-1                               CONFIRMED (medium)
+ytdl-web-2                               DOWNGRADED to low
+ytdl-web-3                               CONFIRMED (medium)
+ytdl-web-5                               DOWNGRADED to low
+install-onboard-1                        CONFIRMED (high)
+install-onboard-2                        CONFIRMED (medium)
+install-onboard-3                        CONFIRMED (medium)

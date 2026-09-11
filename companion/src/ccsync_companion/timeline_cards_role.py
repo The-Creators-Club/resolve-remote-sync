@@ -111,6 +111,42 @@ GRACE_SECONDS = 30.0
 # the ONE thing that fixes it, which is not "wait".
 CREDENTIAL_ADVICE = ("the fleet credential is refused: sign in again from the "
                      "tray")
+# THE WIRE'S CAP, KEPT HERE (comp-resolve-3, 2026-09-11). The dashboard's
+# `CardsAgentIn.detail` and `JobsGateIn.detail` are `max_length=255` and
+# _BoundedSectionIn TRUNCATES rather than rejecting, so an over-long sentence
+# is silently cut at whatever character the cap lands on. A sentence that is
+# going to be cut is cut HERE, deliberately, and the actionable half is put
+# first so the cut lands on the advice.
+DETAIL_MAX_CHARS = 255
+# How many failed starts in a row the watchdog will spend before it stops
+# re-entering `_start` every minute (comp-resolve-4 / res-companion-2). A
+# REFUSAL is not a failure and never counts: re-asking the refusal for ever
+# is the whole point of RES-7's watchdog.
+MAX_START_FAILURES = 5
+
+
+def _fit(text: str, limit: int = DETAIL_MAX_CHARS) -> str:
+    """`text` cut to `limit` characters, saying that it was cut."""
+    text = str(text or "")
+    if limit <= 3 or len(text) <= limit:
+        return text[:limit] if limit > 0 else ""
+    return text[:limit - 3].rstrip() + "..."
+
+
+def _elide(text: str, limit: int) -> str:
+    """`text` cut in the MIDDLE, keeping both ends.
+
+    For a command line the two useful halves are at opposite ends: the image
+    name at the front and the script plus its arguments at the back, with a
+    long interpreter path between them. A head-only cut on
+    `C:\\Users\\...\\python.exe E:\\Projects\\MulticamPipeline\\reorder_web.py
+    --agent` loses the only two words that identify what to close.
+    """
+    text = str(text or "")
+    if limit <= 3 or len(text) <= limit:
+        return text[:limit] if limit > 0 else ""
+    head = max(1, limit // 3)
+    return text[:head].rstrip() + "..." + text[-(limit - head - 3):].lstrip()
 
 
 class CardsRoleError(RuntimeError):
@@ -417,6 +453,12 @@ class TimelineCardsRole:
         self._stop_ev = threading.Event()
         self._supervisor: Optional[threading.Thread] = None
         self._logged_detail = ""
+        # Consecutive FAILED starts (a raise, not a refusal). The watchdog
+        # stops re-entering `_start` at MAX_START_FAILURES: a start that
+        # fails the same way every minute is an engine factory
+        # (comp-resolve-4 / res-companion-2, 2026-09-11).
+        self._start_failures = 0
+        self._ceiling_logged = False
 
     # -- config ---------------------------------------------------------
     @property
@@ -521,12 +563,17 @@ class TimelineCardsRole:
                     "this machine's processes could not be listed, so the "
                     "companion is not starting the role (CR-68)")
         if found:
+            # comp-resolve-3 (2026-09-11): THE PROCESS LEADS. The old sentence
+            # put RES-7's `describe_process` last, at character 247 of a field
+            # the dashboard caps at 255, so the fleet grid -- where the admin
+            # looks -- showed eight characters of the one thing an editor can
+            # act on. What gets cut now is constant advice, not the pid.
+            head = "a Timeline Cards process is already driving Resolve here: "
+            tail = (". Close the standalone Timeline Cards agent and this "
+                    "computer picks the page up within a minute (CR-68)")
+            budget = DETAIL_MAX_CHARS - len(head) - len(tail)
             return (STATE_STANDALONE_AGENT,
-                    "a Timeline Cards process is already talking to Resolve on "
-                    "this machine, so the companion will not be a second one "
-                    "(CR-68). Close the standalone Timeline Cards agent window "
-                    "and this computer will pick the page up on its own within "
-                    "a minute. Found: " + describe_process(found))
+                    head + _elide(describe_process(found), budget) + tail)
         return None
 
     # -- start / stop ----------------------------------------------------
@@ -540,6 +587,10 @@ class TimelineCardsRole:
         """
         started = False
         try:
+            # An explicit start is a fresh chance: the ceiling below is only
+            # ever a bound on the WATCHDOG's re-entry, and the editor (or a
+            # companion restart) asking for the role is new information.
+            self._start_failures = 0
             started = self._start_guarded()
         finally:
             if self.enabled:
@@ -548,19 +599,28 @@ class TimelineCardsRole:
 
     def _start_guarded(self) -> bool:
         try:
-            return self._start()
+            started = self._start()
         except CardsRoleError as exc:
+            self._start_failures += 1
             self._set(getattr(exc, "state", STATE_NO_ENGINE), str(exc))
             log.warning("cards: not serving the page here: %s", exc)
             return False
         except Exception:
+            self._start_failures += 1
             log.exception("cards: the Timeline Cards role could not start")
             self._set(STATE_NO_ENGINE, "the role could not start (see the log)")
             return False
+        # A refusal (False without a raise) is not a failure: it is the state
+        # RES-7's watchdog exists to keep re-asking.
+        self._start_failures = 0
+        return started
 
     def _start(self) -> bool:
         with self._lock:
-            if self._threads:
+            # LIVENESS, not list length (comp-resolve-4, 2026-09-11): nothing
+            # clears `_threads` when a loop dies, so `if self._threads` read a
+            # pair of dead Thread objects as a running role for ever.
+            if any(t.is_alive() for t in self._threads):
                 return True
         refused = self.refusal()
         if refused is not None:
@@ -597,10 +657,25 @@ class TimelineCardsRole:
                 "this Timeline Cards checkout has no SyncEngine/ResolveEngine",
                 STATE_NO_ENGINE)
         engine = engine_cls(self.vault_root, bridge=bridge)
-        engine.start()
-        client = make_tunnel_client(agent_mod, self, engine)
+        # res-companion-2 (2026-09-11): RECORDED BEFORE ANYTHING THAT CAN
+        # RAISE, and the client is built before the engine is started. The
+        # engine used to be started first and stored last, so a TypeError out
+        # of `make_tunnel_client` -- which calls ANOTHER REPO's class
+        # positionally -- left an engine driving Resolve that this object no
+        # longer had a reference to, and the watchdog started another one a
+        # minute later. Nothing bounded that.
         with self._lock:
             self._engine = engine
+        try:
+            client = make_tunnel_client(agent_mod, self, engine)
+            engine.start()
+        except Exception:
+            with self._lock:
+                if self._engine is engine:
+                    self._engine = None
+            self._release_engine(engine)
+            raise
+        with self._lock:
             self._client = client
             self._since = self._wall()
             self._threads = [
@@ -641,7 +716,10 @@ class TimelineCardsRole:
             # dies of the same cause a moment later, and overwriting would
             # leave the report naming the symptom rather than the cause.
             if not self._loop_error:
-                self._loop_error = detail[:300]
+                # comp-resolve-3: the wire's cap, not 300 -- the exception
+                # text is what a reader needs and the dashboard would have
+                # cut it mid-word anyway.
+                self._loop_error = _fit(detail)
 
     # -- the watchdog (RES-7) ---------------------------------------------
     def _ensure_supervisor(self) -> None:
@@ -675,12 +753,62 @@ class TimelineCardsRole:
         """
         try:
             with self._lock:
-                if self._threads:
+                # comp-resolve-4 (2026-09-11): LIVENESS. `if self._threads`
+                # answered "running" over two dead Thread objects for ever,
+                # because nothing clears that list -- so the ONE refusal in
+                # this file that does not self-heal was the one that mattered
+                # most, a role whose loops had died. `health()` said stopped
+                # while the watchdog said running: the report was honest and
+                # the recovery was not.
+                if any(t.is_alive() for t in self._threads):
                     return True
+            if self._start_failures >= MAX_START_FAILURES:
+                if not self._ceiling_logged:
+                    self._ceiling_logged = True
+                    log.warning("cards: the role has failed to start %d times "
+                                "in a row: not trying again until the "
+                                "companion is restarted",
+                                self._start_failures)
+                return False
+            self._ceiling_logged = False
+            # A dead role is TAKEN DOWN before another is started, engine and
+            # all: a restart that left the old engine running would be two
+            # Timeline Cards clients on one machine, which is the breach this
+            # module exists to prevent (res-companion-2).
+            self._clear_dead()
             return self._start_guarded()
         except Exception:                                       # noqa: BLE001
             log.debug("cards: the watchdog stumbled", exc_info=True)
             return False
+
+    def _clear_dead(self) -> None:
+        """Forget a role whose loops are gone, stopping its engine. Never
+        raises: this runs on the watchdog thread."""
+        with self._lock:
+            threads, self._threads = self._threads, []
+            engine, self._engine = self._engine, None
+            self._client = None
+            self._since = None
+            self._loop_error = ""
+        if threads:
+            log.info("cards: the Timeline Cards loops are gone: letting go of "
+                     "Resolve before starting the role again")
+        self._release_engine(engine)
+
+    def _release_engine(self, engine: Any) -> None:
+        """Best effort `engine.stop()`. The engine is another repo's object
+        and may not have one; a role that cannot let go is still better off
+        forgetting the reference than keeping it (res-companion-2)."""
+        if engine is None:
+            return
+        stop = getattr(engine, "stop", None)
+        if not callable(stop):
+            return
+        try:
+            stop()
+        except Exception:
+            log.warning("cards: the Timeline Cards engine would not stop",
+                        exc_info=True)
 
     def stop(self) -> None:
         """Let go of Resolve. The loops are daemon threads inside a blocking
@@ -693,8 +821,11 @@ class TimelineCardsRole:
         with self._lock:
             threads, self._threads = self._threads, []
             self._client = None
-            self._engine = None
+            engine, self._engine = self._engine, None
             self._since = None
+        # res-companion-2: stop() used to drop the reference and leave the
+        # engine's own background threads sweeping the media pool.
+        self._release_engine(engine)
         if threads:
             log.info("cards: no longer serving the page from this machine")
             self._set(STATE_DISABLED, "the companion is shutting down")
@@ -738,6 +869,13 @@ class TimelineCardsRole:
         body = None
         if doc is not None:
             body = {k: v for k, v in doc.items() if k != "token"}
+            if suffix == "state":
+                # dash-release-jobs-6 (2026-09-11): the tunnel stopped
+                # trusting the agent's self-asserted `name` and derives the
+                # machine from the editor plus this field. Optional on the
+                # dashboard's side and harmless to an older one, which
+                # ignores it; `name` is still sent by the engine, unchanged.
+                body["machine"] = self.machine
         request = self._request
         if request is None:
             from .broll_ingest import default_request
@@ -883,7 +1021,11 @@ class TimelineCardsRole:
         return {
             "connected": status["health"] == HEALTH_RUNNING,
             "state": status["health"],
-            "detail": status["health_detail"],
+            # comp-resolve-3 (2026-09-11): cut here rather than at the
+            # dashboard's 255-char field cap. `load_engine`'s import failure
+            # and `check_contract`'s no-contract sentence are both longer
+            # than that and both lost their tail on the way to the grid.
+            "detail": _fit(status["health_detail"]),
             "gate_state": status["state"],
             "last_poll_at": _iso(status["last_poll_at"]),
             "last_http_status": status["last_http_status"],

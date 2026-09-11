@@ -187,11 +187,15 @@ def test_marker_dedupes_equal_and_nested_includes(tree):
 
 
 def test_marker_caps_includes(tree):
+    """dash-db-3 (2026-09-11): ONE refusal row, not one per entry over the
+    cap. The cap's comment promises a tampered marker cannot make this
+    unbounded, and every LinkResult becomes a project_links row keyed by an
+    attacker-chosen declared path."""
     raw = [f"Projects/{LENDER}/{SUB}/n{i}" for i in range(links.MAX_INCLUDES + 3)]
     results = links.resolve_marker_includes(tree, BORROWER, raw)
-    assert len(results) == links.MAX_INCLUDES + 3
+    assert len(results) == links.MAX_INCLUDES + 1
     over = [r for r in results if "too many" in r.detail]
-    assert len(over) == 3
+    assert len(over) == 1
     assert all(r.status == "invalid" for r in over)
 
 

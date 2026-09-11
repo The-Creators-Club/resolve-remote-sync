@@ -270,8 +270,19 @@ def test_a_two_digit_minor_is_newer_than_a_one_digit_one(env):
     string compare puts 0.10.0 below 0.9.9."""
     assert api._version_at_least("0.10.0", "0.9.43") is True
     assert api._version_at_least("0.9.43", "0.10.0") is False
-    # An unparsable running version never reads as "past it".
-    assert api._version_at_least("0.9.43+dirty", "0.9.43") is False
+    # A `+dirty` build reads as its NUMERIC PREFIX since dash-api-5 (bug hunt
+    # 2026-09-11): it used to be unparsable, so a push of 0.9.43 to a machine
+    # already running a dirty 0.9.43 could never be cleared and
+    # `commands.upgrade` rode every 30 s report for ever. It is the same
+    # version, so "at least" is satisfied and "newer" is not - and this
+    # function has exactly one caller, the pushed-update clear. The
+    # min_version floor and the channel's own comparisons are
+    # release_trust's, not this one's.
+    assert api._version_at_least("0.9.43+dirty", "0.9.43") is True
+    assert api._version_tuple("0.9.43+dirty") == api._version_tuple("0.9.43")
+    assert api._version_at_least("0.9.43+dirty", "0.9.44") is False
+    # Still nothing to compare when there is no numeric prefix at all.
+    assert api._version_at_least("dev", "0.9.43") is False
     assert api._version_at_least("0.9.43", "0.9.43") is True
 
 

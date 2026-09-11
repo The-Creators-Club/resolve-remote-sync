@@ -9,6 +9,7 @@ Preview traffic is served from a 128k mp3 proxy when one exists (port step 6),
 falling back to the original file when it does not -- so a host with no proxies
 generated yet, or a track added since the last generator run, still plays.
 """
+import logging
 import mimetypes
 import re
 
@@ -17,6 +18,8 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from musicweb import config
 from musicweb.db import con
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -100,7 +103,7 @@ def audio_source(track_id, row, original=False):
     return path, 'original'
 
 
-@router.get('/api/audio/{track_id}')
+@router.api_route('/api/audio/{track_id}', methods=['GET', 'HEAD'])
 def audio_stream(track_id: int, request: Request, original: bool = False):
     """Serve the audio with HTTP range support so the player can seek.
 
@@ -109,6 +112,14 @@ def audio_stream(track_id: int, request: Request, original: bool = False):
     question, and because a 128k mp3 is a preview, not the asset. Resolve does
     not use it either way: it links the original from P: directly, not over
     HTTP, so no timeline is ever fed a proxy.
+
+    HEAD is registered explicitly (music-6, 2026-09-11). Starlette's plain
+    `Route` adds it alongside GET; FastAPI's `APIRoute` does not, so the one
+    route in this app that exists to speak Range correctly answered 405 to the
+    method a player uses to discover `Accept-Ranges` and `Content-Length`
+    before it starts seeking. The body is dropped here rather than left to the
+    response class: only `FileResponse` special-cases HEAD, so the streaming
+    branch would have sent every byte.
     """
     r = con().execute('SELECT share, rel_path FROM tracks WHERE id=?',
                       (track_id,)).fetchone()
@@ -122,8 +133,13 @@ def audio_stream(track_id: int, request: Request, original: bool = False):
     # and "is the proxy being used at all" is the first question anyone
     # debugging Tailscale preview bandwidth asks.
     src_header = {'X-Audio-Source': kind}
+    head = request.method.upper() == 'HEAD'
     rng_header = request.headers.get('range')
     if not rng_header:
+        if head:
+            return Response(status_code=200, media_type=mime,
+                            headers={'Accept-Ranges': 'bytes',
+                                     'Content-Length': str(size), **src_header})
         return FileResponse(path, media_type=mime, headers=src_header)
 
     rng = parse_range(rng_header, size)
@@ -157,6 +173,8 @@ def audio_stream(track_id: int, request: Request, original: bool = False):
         # against one must not be answered from the other -- which is why
         # ?original is a request parameter and never a per-request fallback.
         headers['Content-Range'] = f'bytes {start}-{end}/{size}'
+    if head:
+        return Response(status_code=status, media_type=mime, headers=headers)
     return StreamingResponse(chunks(), status_code=status, media_type=mime,
                              headers=headers)
 
@@ -185,9 +203,22 @@ def peaks(track_id: int):
     except ImportError as exc:
         raise HTTPException(404, 'no stored waveform and no indexer on this '
                                  'host to build one: %s' % exc)
-    data = _audio.peaks_from_file(path)
-    if data:
-        con().execute('INSERT OR REPLACE INTO peaks(track_id,n,data) VALUES(?,?,?)',
-                      (track_id, len(data), data))
-        con().commit()
+    # music-7 (2026-09-11): `decode()` shells out to ffmpeg and raises on a
+    # truncated or undecodable file - a half-synced track is the ordinary case
+    # on a base rig - and an empty return reached `bytes(None)`. Both surfaced
+    # as a 500 with a traceback on a route the SPA calls for every track the
+    # user clicks, which tells the editor nothing and the log no cause.
+    try:
+        data = _audio.peaks_from_file(path)
+    except Exception as exc:                                    # noqa: BLE001
+        log.warning('music: could not build a waveform for track %s (%s): %s: %s',
+                    track_id, path, type(exc).__name__, exc)
+        raise HTTPException(503, 'the waveform could not be built from this '
+                                 'file: %s' % exc) from exc
+    if not data:
+        raise HTTPException(404, 'no stored waveform, and this file decoded to '
+                                 'no audio to build one from')
+    con().execute('INSERT OR REPLACE INTO peaks(track_id,n,data) VALUES(?,?,?)',
+                  (track_id, len(data), data))
+    con().commit()
     return Response(bytes(data), media_type='application/octet-stream')

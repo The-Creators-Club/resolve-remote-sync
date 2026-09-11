@@ -13,8 +13,20 @@ purpose:
     entitled to know.
   - **the destination project is re-validated server-side** on every write.
     The picker in the browser is a convenience; projects.resolve_project() is
-    the check. Without it an editor could post any slug and drop 40 videos into
-    a project they do not sync.
+    the check. Read what that check actually constrains before relying on it
+    (ytdl-web-5, 2026-09-11, correcting a sentence that claimed more than the
+    code has held since CR-96): when the download will run on the SERVER
+    (`local` false, which is what the SPA posts whenever YTDL_LOCAL_DOWNLOAD is
+    off -- i.e. the whole shipped fleet) the destination is DELIBERATELY every
+    ACTIVE project, because no machine's sync plan constrains a fetch nobody's
+    machine performs. So any signed-in editor can put clips in any active
+    project of their own tenancy, by design; what resolve_project still refuses
+    is a retired or unknown slug, and another tenancy's tree, which is what
+    makes it worth running on every write. The narrow "only projects you sync"
+    rule applies to a LOCAL job, and that promise is now kept at the claim door
+    too: db.claim_download refuses a job created under the widening, so a
+    client cannot post `local:false` to reach a project it does not sync and
+    then hand the job id to its own companion on the loopback.
 """
 import json
 import logging
@@ -94,8 +106,8 @@ def accept_attestation(req: AcceptAttestation, request: Request):
     version = str(req.version or '').strip()
     if version != attestation.TEXT_VERSION:
         raise HTTPException(409, {
-            'detail': ('the terms were updated while this page was open -- '
-                       'reload and read the new wording before accepting'),
+            'detail': ('the terms were updated while this page was open. '
+                       'Reload and read the new wording before accepting'),
             'reason': 'stale_version',
             'version': attestation.TEXT_VERSION})
     c = con()
@@ -685,7 +697,7 @@ def create_job(req: NewJob, request: Request):
     if project is None:
         raise HTTPException(
             400, 'that project is not one you are syncing. Tick it on the '
-                 'dashboard first -- downloads go into the projects you sync.')
+                 'dashboard first: downloads go into the projects you sync.')
     if req.period and req.period not in ytsearch.PERIOD_SP:
         raise HTTPException(400, f'unknown period {req.period!r}')
     if req.quality not in ('best', '2160p', '1440p', '1080p', '720p', '480p'):
@@ -973,7 +985,7 @@ def create_url_job(req: NewUrlJob, request: Request):
     if project is None:
         raise HTTPException(
             400, 'that project is not one you are syncing. Tick it on the '
-                 'dashboard first -- downloads go into the projects you sync.')
+                 'dashboard first: downloads go into the projects you sync.')
     if req.quality not in ('best', '2160p', '1440p', '1080p', '720p', '480p'):
         raise HTTPException(400, f'unknown quality {req.quality!r}')
 
@@ -1383,6 +1395,46 @@ _free_cache = {}
 _free_lock = threading.Lock()
 
 
+def _answering_path(path):
+    """The nearest ancestor of `path` that `shutil.disk_usage` answers for.
+
+    The destination folder is created by the download phase, so at the moment
+    of the check it usually does not exist yet -- and with the tree mounted the
+    filesystem being asked about is the same one either way. Which path
+    answered is returned as well, because with the tree NOT mounted it is the
+    only thing that tells the two cases apart (ytdl-web-1, 2026-09-11).
+    """
+    probe = Path(path)
+    for _ in range(8):
+        try:
+            return shutil.disk_usage(probe).free, probe
+        except (OSError, ValueError):
+            if probe.parent == probe:
+                break
+            probe = probe.parent
+    return None, None
+
+
+def _free_key(path):
+    """The cache key: the tree's FILESYSTEM, not the destination path
+    (ytdl-web-6, 2026-09-11).
+
+    Keyed on the path, this dict gained an entry per SEARCH -- every search has
+    its own `<project>/Youtube/<term_dir>` -- and nothing ever removed one, in
+    a process meant to run for months. Every destination lives under
+    PROJECTS_ROOT, so the root is the filesystem for all of them, and it is a
+    PURE path comparison: no stat, which is what lets a cached answer come back
+    while the mount underneath is hanging.
+    """
+    p = Path(path)
+    root = Path(config.PROJECTS_ROOT)
+    try:
+        p.relative_to(root)
+    except ValueError:
+        return str(p)
+    return str(root)
+
+
 def free_bytes_at(path, now=None):
     """`shutil.disk_usage(path).free`, cached 60 s. None when it cannot be read.
 
@@ -1390,33 +1442,39 @@ def free_bytes_at(path, now=None):
     the only caller a later change will add; a stat per request against a NAS
     mount that has gone away is a request that hangs, not one that answers.
 
-    Walks UP to the nearest existing ancestor: the destination folder is
-    created by the download phase, so at the moment of this check it usually
-    does not exist yet and the filesystem being asked about is the same one
-    either way. None (an unreadable path, a vanished mount) FAILS OPEN -- a
-    check that cannot see the disk must not be the thing that refuses a
-    download.
+    None (an unreadable path, a root that does not exist at all) FAILS OPEN --
+    a check that cannot see the disk must not be the thing that refuses a
+    download. It is NOT the answer for a vanished bind mount: the mount point
+    is left behind on the container's own filesystem and disk_usage answers
+    happily with the overlay's free space, which is why _refuse_if_full asks
+    separately whether the destination's project folder is there (ytdl-web-1).
     """
-    p = Path(path)
-    key = str(p)
     now = time.time() if now is None else now
+    key = _free_key(path)
     with _free_lock:
         hit = _free_cache.get(key)
         if hit is not None and now - hit[0] < _FREE_TTL:
             return hit[1]
-    free = None
-    probe = p
-    for _ in range(8):
-        try:
-            free = shutil.disk_usage(probe).free
-            break
-        except (OSError, ValueError):
-            if probe.parent == probe:
-                break
-            probe = probe.parent
+    free, probe = _answering_path(path)
+    if probe is None:
+        return None
     with _free_lock:
         _free_cache[key] = (now, free)
     return free
+
+
+def _forget_free_at(path):
+    """Drop the cached number for `path`'s filesystem.
+
+    Called when the check REFUSES (ytdl-web-2, 2026-09-11): "free some space
+    and press DOWNLOAD again" was the one action a 60 s cache invalidated, so
+    an editor who deleted 300 GB got a byte-identical 409 quoting the
+    pre-deletion figure and reasonably concluded DOWNLOAD was broken. The next
+    press is precisely when a fresh stat is worth its cost. Here rather than in
+    the caller because the key belongs to this module and the lock with it.
+    """
+    with _free_lock:
+        _free_cache.pop(_free_key(path), None)
 
 
 def _gb(n):
@@ -1440,6 +1498,19 @@ def _refuse_if_full(rows, job, outdir):
     need = (estimate * FREE_SPACE_FACTOR) if estimate else UNKNOWN_ESTIMATE_FLOOR
     if free >= need:
         return None
+    # A REFUSAL is the one answer that must be measured against the tree
+    # itself (ytdl-web-1, 2026-09-11). YTDL_PROJECTS_ROOT is a bind mount, and
+    # a mount that has gone away leaves its mount POINT behind on the
+    # container's own filesystem: disk_usage then answers happily with the
+    # overlay's two spare gigabytes, and every download is refused with "free
+    # some space" while the actual fault -- no tree at all -- is named nowhere.
+    # The cheap guard is whether the destination's own project folder is
+    # there; with the tree mounted it is, and with the tree gone the number
+    # above belongs to a filesystem these clips were never going to touch.
+    _refuse_if_the_tree_is_gone(job)
+    # The refusal's own instruction is the one action a 60 s cache invalidated
+    # (ytdl-web-2, 2026-09-11): the next press must re-stat.
+    _forget_free_at(outdir)
     where = f'{job["project_label"]}/{db.YOUTUBE_DIR}'
     if job['term_dir']:
         where = f'{where}/{job["term_dir"]}'
@@ -1451,6 +1522,32 @@ def _refuse_if_full(rows, job, outdir):
                    f'Free some space and press DOWNLOAD again.'),
         'phase': job['phase'], 'reason': 'disk_full',
         'free_bytes': int(free), 'estimate_bytes': int(estimate)})
+
+
+def _refuse_if_the_tree_is_gone(job):
+    """Raise the 409 that names the MOUNT, or return None (ytdl-web-1).
+
+    Only ever consulted on the way to a disk_full refusal, and deliberately so:
+    a download that fits is a download that fits, and a project folder this
+    check cannot see is not a reason to invent a new way for one to be
+    impossible. What it prevents is the WRONG SENTENCE -- an editor sent to
+    delete footage because a vanished share measured as a full disk.
+    """
+    try:
+        project_dir = config.safe_join(config.PROJECTS_ROOT, job['project_label'])
+    except config.PathTraversalError:
+        return None
+    if project_dir.is_dir():
+        return None
+    raise HTTPException(409, {
+        'detail': (f'the footage tree is not there: nothing at '
+                   f'{config.PROJECTS_ROOT} looks like '
+                   f'{job["project_label"]}, so nothing was started. This is '
+                   f'the server having lost the share, not a full disk. Tell '
+                   f'whoever runs the dashboard, and press DOWNLOAD again once '
+                   f'it is back.'),
+        'phase': job['phase'], 'reason': 'tree_missing',
+        'projects_root': str(config.PROJECTS_ROOT)})
 
 
 @router.post('/api/jobs/{job_id}/download')
@@ -1532,6 +1629,16 @@ def start_download(job_id: int, request: Request):
     # same rows that UPDATE is about to claim, and the two predicates must stay
     # identical or this sizes a different download than the one it guards.
     selection = db.selected_for_download(c, job_id)
+    # ...and only when the filesystem it can measure is the one that will be
+    # written (ytdl-web-4, 2026-09-11). With requester-first downloads on, a
+    # job created local is normally fetched onto the EDITOR's own disk and
+    # carried up by lane A later, so this check would size the NAS mount inside
+    # the container and refuse a download that was never going to touch it -
+    # naming a path the editor cannot act on from the machine they are sitting
+    # at. The companion runs its own free-space decision at claim time, on the
+    # disk that is actually written, and the page already shows the estimate.
+    if config.LOCAL_DOWNLOAD and job_local:
+        selection = []
     if selection:
         try:
             outdir = config.safe_join(config.PROJECTS_ROOT, job['project_label'],

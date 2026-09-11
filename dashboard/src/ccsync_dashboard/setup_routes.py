@@ -194,10 +194,11 @@ def api_setup_task_skip(
 @router.get("/setup/eula")
 def api_setup_eula_get(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
     require_setup_access(request, conn)
-    if not setup_engine.EULA_PATH.is_file():
+    path = setup_engine.eula_path()   # dash-core-6: re-resolved, not import-time
+    if not path.is_file():
         return {"text": "", "version": None}
     try:
-        text = setup_engine.EULA_PATH.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"could not read EULA: {exc}")
     return {"text": text, "version": setup_engine.eula_marker_version(text)}

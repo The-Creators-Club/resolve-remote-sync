@@ -1,0 +1,136 @@
+broll-1                  medium  CONFIRMED "try the N failed again" sends the server's item uids to a companion that only understands
+broll-2                  high    CONFIRMED the client_shares.db v1 -> v2 migration cannot run twice: one interrupted or concurrent ru
+broll-3                  medium  CONFIRMED BROLL-8's discovery route has no caller: no companion ever asks for its unfinished batches
+broll-4                  low     CONFIRMED routes_fleet's own docstring says the discovery route is unreachable behind the dashboard;
+broll-5                  low     PLAUSIBLE POST /api/ingest-batches/{uid}/retry-failed accepts a RUNNING batch and silently takes its
+broll-6                  low     CONFIRMED the v1 -> v2 backfill is an unindexed UPDATE per archive row, run inside a request (or the
+comp-app-1               medium  CONFIRMED "Sync now" answers "Sync requested" on a machine whose lanes are halted, paused, unlicense
+comp-app-2               medium  CONFIRMED nine new `resolve_health` fields are sent on every report and silently dropped by the dash
+comp-app-3               low     CONFIRMED the licence refusal sends a parked editor to the wrong section of the Settings window
+comp-app-4               low     CONFIRMED `non_canonical_refused` grows without bound and rides every report
+comp-app-5               low     PLAUSIBLE an unreadable `machine.json` mints a NEW machine id and overwrites the old one
+comp-app-6               low     CONFIRMED the loopback rebind re-runs the whole server start every 120 s and logs a six-line WARNING
+comp-app-7               low     CONFIRMED `LaneWatchdog` restarts a thread with no ceiling and no backoff
+comp-broll-music-1       high    CONFIRMED an artifact whose local file is gone is declared as an upload but never queued, and the it
+comp-broll-music-2       medium  CONFIRMED CLEAR FINISHED STAGING deletes a drop that has been staged but NOT run, which its own docs
+comp-broll-music-3       medium  CONFIRMED the retry-failed handshake passes SERVER item uids to a companion route that matches STAGI
+comp-broll-music-4       medium  CONFIRMED "this computer is already downloading" is now `ok: true`, which an older dashboard's page 
+comp-broll-music-5       low     CONFIRMED `broll_server_port = 0` binds an ephemeral port instead of being refused
+comp-broll-music-6       low     PLAUSIBLE a download whose thread never starts stays `downloading` for ever and eats a fetch slot
+comp-broll-music-7       low     PLAUSIBLE the upload queue worker has no supervisor: one escaped exception pins `_active` and no upl
+comp-resolve-1           medium  CONFIRMED the copy read size ratchets down to 64 KB and never recovers
+comp-resolve-2           medium  CONFIRMED CONSOLIDATE counts a FIX ALL rehearsal as files copied in
+comp-resolve-3           medium  CONFIRMED the Timeline Cards refusal loses its actionable half at the dashboard's 255-char cap
+comp-resolve-4           medium  CONFIRMED the cards watchdog never restarts a role whose loops died, because `_threads` is never cle
+comp-resolve-5           low     CONFIRMED a journal tmp file orphaned by a kill is never swept, contrary to its own comment
+comp-resolve-6           low     CONFIRMED `_note_starting(None)` logs "script server has its host now" when Resolve has actually gon
+comp-sync-1              high    CONFIRMED a latch whose write fails is in-memory only, and nothing retries or says so
+comp-sync-2              medium  CONFIRMED `2 ** (attempts - 1)` overflows, and the shared/borrowed reconcile then dies for the life 
+comp-sync-3              medium  CONFIRMED the SYNC-101 folder problems never reach the editor they were written for
+comp-sync-4              medium  CONFIRMED `shared_folder_problems()` and `repath_events()` on the app object have no reader at all
+comp-sync-5              medium  CONFIRMED a blocked repath's "not syncing" sentence can never be cleared
+comp-sync-6              medium  CONFIRMED `retry_pending_relinks` walks Resolve's media pool N+1 times per pass, for 30 days
+comp-sync-7              medium  CONFIRMED a lane B the sequencer walked away from queues a new blocked thread every project turn, an
+comp-sync-8              medium  CONFIRMED a restored drive-reminder episode ignores what the drive is doing now
+comp-sync-9              medium  PLAUSIBLE a drive that goes absent first and wedges afterwards never gets a SYNC-120 episode
+comp-sync-10             medium  CONFIRMED `not-offered` is three different situations wearing one sentence
+comp-sync-11             medium  CONFIRMED `relink_moved` compares Resolve paths raw, so a moved clip never relinks on a Mac
+comp-sync-12             medium  CONFIRMED a case-only rename is recorded as done and never applied, then lane A recreates the old sp
+comp-sync-13             medium  CONFIRMED a refused canonical relink re-queues itself every 3 s behind a 15-minute rate limiter
+comp-sync-14             medium  CONFIRMED the selection cache's `fetched_at` freezes at the first fetch of a process
+comp-sync-15             medium  CONFIRMED the tray's recovery-folder line reads two keys nothing produces, and a test pins the phant
+comp-sync-16             low     CONFIRMED `reminders_muted` identifies an episode by a float wall-clock stamp, and Windows ticks at 
+comp-sync-17             low     CONFIRMED RepathLedger event ids collide, and a collision strands a pending relink for 30 days
+comp-sync-18             low     CONFIRMED `move_proxy_siblings` folds case but not Unicode, so an NFD proxy is orphaned
+comp-sync-19             low     CONFIRMED only the first folder problem is ever shown, with no count
+comp-sync-20             low     CONFIRMED a move delivered while the sync drive is out expires while the companion is deliberately s
+comp-sync-21             low     CONFIRMED the grade-swap rollback sentence still hardcodes "P:"
+comp-sync-22             low     PLAUSIBLE the structure clone runs for an upload-only project
+comp-ui-1                medium  CONFIRMED a Windows tray icon that fails to register is silently headless, and every toast after it 
+comp-ui-2                medium  CONFIRMED the supervisor's "three relaunches an hour" ceiling is unenforceable when its history file
+comp-ui-3                low     CONFIRMED the fixer's "could not save that choice" line says "FOR YOUR ADMIN" twice
+comp-ui-4                low     CONFIRMED the `(s)` plurals the sweep "retired" are still shipping from tray.py and settings_window.
+comp-ui-5                low     PLAUSIBLE the macOS Quit confirmation blocks the main thread, and with it ui_dispatch's pump, for up
+comp-ui-6                low     PLAUSIBLE an exception while building the Settings window leaves a Tk root on screen with no event l
+comp-ytdl-jobs-1         medium  CONFIRMED `refusal()` throws away every refusal of an OLDER build, which is exactly the downgrade-fl
+comp-ytdl-jobs-2         medium  CONFIRMED a report reply wipes a locally requested job stop, so the tray's [ STOP ] can silently do 
+comp-ytdl-jobs-3         medium  CONFIRMED a sidecar ffmpeg install that keeps failing (the known macOS SSL CA problem) reaches nobod
+comp-ytdl-jobs-4         low     CONFIRMED `_read_pcm` proceeds after its drain-join timeout, which is the silent truncation the code
+comp-ytdl-jobs-5         low     CONFIRMED the gate sentence keeps a stale `_gate_note` on the four early-return states
+dash-api-1               medium  CONFIRMED a deleted package's "30 days in the trash" is measured from when it was PUBLISHED, so most
+dash-api-2               medium  CONFIRMED cancelling a job a sleeping machine holds does not cancel it: the lease expires, the row g
+dash-api-3               medium  CONFIRMED [ ROLL THE FLEET BACK ] silently undoes itself when the build being rolled off is still CU
+dash-api-4               low     CONFIRMED MY QUEUE for one named computer shows a DIFFERENT computer's open Resolve project and dest
+dash-api-5               low     CONFIRMED a `+dirty` companion version can never clear a pushed update
+dash-api-6               low     PLAUSIBLE a SUSPENDED editor's machines are turned away by /report but not by the jobs, selection, d
+dash-collector-alerts-1  high    CONFIRMED CR-232 mails "this has cleared. No action is needed" about footage nobody has touched
+dash-collector-alerts-2  high    CONFIRMED `sink_deliverable` calls a channel that has NEVER delivered anything "delivered something 
+dash-collector-alerts-3  high    CONFIRMED a collector that dies straight after a FAILED cycle is never "stale"; on a Syncthing-less 
+dash-collector-alerts-4  medium  CONFIRMED `MAX_FINDINGS_PER_KIND` truncation silently turns into "recovered", and drops the overflow
+dash-collector-alerts-5  medium  CONFIRMED `restore_into_quarantine` discards the walk-truncation flag the preview reports
+dash-collector-alerts-6  medium  PLAUSIBLE the "unhandled error" notice files the raw request PATH as its subject, unbounded and un-p
+dash-collector-alerts-7  low     PLAUSIBLE `_check_weekly_send` reads a 200-row window, so a failing alert channel silently "recovers
+dash-collector-alerts-8  low     CONFIRMED `_check_feature_mounts` clears its notices for a mount that never recorded a verdict
+dash-core-1              high    CONFIRMED the Synology backend still follows redirects, so a 307 replays the DSM admin password
+dash-core-2              low     CONFIRMED `syncthing_client` follows redirects with the API key attached
+dash-core-3              medium  CONFIRMED the Secrets wizard task rewrites `internal.env` and drops `APP_UID`/`APP_GID`
+dash-core-4              medium  CONFIRMED `Origin: null` is treated as "no Origin", so the /cards/ origin-only CSRF gate lets an opa
+dash-core-5              low     CONFIRMED `DASH_SITE_TEMPLATE_FOLDERS` is the one path-list door with no `..` filter
+dash-core-6              low     CONFIRMED a build with no EULA file leaves the wizard permanently un-finishable
+dash-core-7              low     CONFIRMED `DASH_SESSION_ABSOLUTE_SECONDS=0` bricks sign-in with no message
+dash-db-1                medium  CONFIRMED a WIRED machine's OWN tick still comes out of `fetch_machine_selections`, so a base rig ra
+dash-db-2                low     CONFIRMED a transient `database is locked` reads as "nobody is suspended, nothing is archived", and 
+dash-db-3                low     CONFIRMED `MAX_INCLUDES` bounds the resolution work but not the number of rows a tampered marker cre
+dash-db-4                low     CONFIRMED `retry_job`'s duplicate guard silently passes on a queue deeper than 1,000
+dash-mounts-ui-1         high    CONFIRMED /help serves the whole internal docs tree (KNOWN_BUGS, CLAUDE.md, SECRETS.md, PRODUCT_REPO
+dash-mounts-ui-2         medium  CONFIRMED "Safe to close" is computed for the PERSON, not the computer, and says "this computer"
+dash-mounts-ui-3         medium  CONFIRMED run.sh writes `ok: true` for a youtube_unblock install it never performed or verified
+dash-mounts-ui-4         medium  CONFIRMED CI gates a release on one of the seven installer test scripts
+dash-mounts-ui-5         medium  PLAUSIBLE a same-version dashboard redeploy leaves every installed phone on the old CSS/JS for ever
+dash-mounts-ui-6         low     CONFIRMED the uid/gid mismatch warning run.sh added for a second customer is dead in bind-mount mode
+dash-mounts-ui-7         low     CONFIRMED htmx_errors.js's "move the refusal to the button" can be stolen by a concurrent poll
+dash-mounts-ui-8         low     CONFIRMED select_code_root.py counts a boot against an OTA tree it never booted
+dash-release-jobs-1      medium  CONFIRMED a cancelled job comes back and is handed to another machine when the lease expires
+dash-release-jobs-2      medium  CONFIRMED a `restart_requested` latch left by a killed container wedges apply AND rollback for the l
+dash-release-jobs-3      low     PLAUSIBLE the per-kind fleet cap is advisory: two simultaneous claims both pass it
+dash-release-jobs-4      low     CONFIRMED the channel signature URL is built by string concatenation, so a feed URL with a query str
+dash-release-jobs-5      low     CONFIRMED `FeedPoller.start()/stop()` are documented as idempotent but a stopped poller can never be
+dash-release-jobs-6      low     CONFIRMED the cards tunnel falls back to the agent's self-asserted `name`, which its own docstring f
+dash-release-jobs-7      low     PLAUSIBLE a feed record whose `platform` is not lower-case is unpublishable from the admin button
+install-onboard-1        high    PLAUSIBLE the macOS "installer is on a mounted volume" guard refuses every frozen wizard run from th
+install-onboard-2        medium  CONFIRMED `run_bootstrap` still cannot pass `canonical_prefix` / `tree_name` when the manifest fetch
+install-onboard-3        medium  CONFIRMED the Windows uninstaller announces "removed program binaries" whether or not anything was r
+install-onboard-4        low     CONFIRMED the Apps & features entry gets no icon on a first install, because it is registered ~1250 
+install-onboard-5        low     CONFIRMED `normalise_dashboard_url` guesses `http://` for any explicit port that is not 443, and tha
+install-onboard-6        low     CONFIRMED a macOS run with no companion binary removes OUR LaunchAgent but leaves the legacy `com.cr
+music-1                  high    CONFIRMED `allocate_name`'s collision loop has no ceiling, and both of its "taken?" helpers answer T
+music-2                  high    CONFIRMED the companion fails a track PERMANENTLY on every non-200 `result`, including the server's 
+music-3                  medium  CONFIRMED `rescore_library` clears `scores_stale` from a snapshot it took before the concurrent writ
+music-4                  low     CONFIRMED `apply_for_track(force=True)` has no production caller, and its docstring says otherwise
+music-5                  medium  CONFIRMED `share_root_ready` samples the 50 LOWEST track ids, so a library whose oldest files were t
+music-6                  low     CONFIRMED `HEAD /api/audio/{id}` answers 405, not the headers the module docstring promises
+music-7                  low     PLAUSIBLE `/api/peaks` on-demand fallback can 500 with a traceback, and can `bytes(None)`
+res-companion-1          medium  CONFIRMED a companion killed mid file-move applies the move and then never relinks Resolve, and repo
+res-companion-2          medium  CONFIRMED a Timeline Cards role that fails AFTER `engine.start()` leaks a live engine, and the RES-7
+res-companion-3          medium  PLAUSIBLE a kill in the upgrade's rename window leaves no companion exe at all, and the supervisor d
+res-companion-4          medium  CONFIRMED both crash-loop ceilings are silently disabled by a full or unwritable `~/.ccsync`, turnin
+res-companion-5          low     CONFIRMED a hard kill mid lane-B pass erases that pass's deletions from the breaker's cumulative acc
+res-fleet-1              high    CONFIRMED a job cancelled in the same instant a companion claims it is reported cancelled and keeps 
+res-fleet-2              medium  CONFIRMED the four feature mounts are judged once at boot, so a NAS export that flaps leaves "mounte
+res-fleet-3              medium  CONFIRMED CR-232 makes "footage is outside the tree" send a false RECOVERED every time an editor ope
+res-fleet-4              medium  CONFIRMED a weekly report (and a daily heartbeat) whose send FAILS is recorded as done and never ret
+res-fleet-5              medium  PLAUSIBLE the enforce cycle's person-level fallback can share a folder with a machine whose tick is 
+res-fleet-6              low     CONFIRMED the blast-radius brake counts removals from a snapshot the loop then does not use
+server-tools-1           high    CONFIRMED `ship.ps1 -EmitKindExtras` fails OPEN when the dashboard reports an empty rollout
+server-tools-2           high    CONFIRMED every customer's dashboard ships and serves this studio's entire internal docs tree
+server-tools-3           medium  PLAUSIBLE the OPS-3 `.zfs/snapshot` bind mount will very likely show the container empty snapshots
+server-tools-4           low     CONFIRMED `install_tree` re-walks the source tree after the upload, so a file that moves under it ab
+server-tools-5           low     CONFIRMED `tools/jobs.py` and `tools/publish_package.py` turn an unreachable dashboard into a traceb
+server-tools-6           low     CONFIRMED `check_deploy_drift.ps1 -Watch` retries an expired session for ever
+ytdl-web-1               medium  CONFIRMED a lost Projects mount reads as "the disk is full", and refuses every download
+ytdl-web-2               medium  CONFIRMED "Free some space and press DOWNLOAD again" does not work for 60 seconds
+ytdl-web-3               medium  CONFIRMED one editor's two computers can both download the same job after a lease expiry
+ytdl-web-4               low     CONFIRMED the free-space gate measures the wrong computer for a requester-first download
+ytdl-web-5               medium  CONFIRMED the server-side destination check is disabled by a flag the client sends
+ytdl-web-6               low     CONFIRMED `_free_cache` is never evicted
+ytdl-web-7               low     CONFIRMED the " -- " cleanup was applied to one string; six other editor-facing ones still carry it

@@ -457,7 +457,12 @@ project_acl = "shared"
 #      save" and nowhere else.
 #   3. `enabled = true`.
 # enabled = false
-# The checkout to ship. Overridden by $CARDS_SRC in the deploying shell.
+# The checkout this ships FROM. Since 2026-09-11 it is a pointer, not the
+# bytes: the deploy exports the `main` head of the git repo holding it with
+# `git archive` and ships that, so nothing untracked or half-finished in the
+# checkout can reach the NAS (`--cards-commit <ref>` pins another commit;
+# docs/CARDS_DEPLOY.md). $CARDS_SRC in the deploying shell is the explicit
+# "ship this directory as it stands" override and skips the snapshot.
 # src = "E:\Projects\Editing\Resolve\MulticamPipeline"
 # THE VAULT, mounted read-write at /vault: transcripts, plans, notes, the
 # translation caches and the reference WAVs. The whole vault rather than one

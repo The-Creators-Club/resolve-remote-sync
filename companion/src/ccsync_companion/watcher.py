@@ -38,6 +38,19 @@ log = logging.getLogger("ccsync.watcher")
 # last_counts["missing"] and is exact; this list is evidence, and a project
 # whose media has not arrived yet has thousands of them.
 MAX_MISSING_REPORTED = 50
+# comp-sync-13 (2026-09-11): the shortest gap between two offers of the SAME
+# non-canonical path after a failed relink. Matched to
+# resolve_journal.allow_automatic's 900 s window, which is what refuses the
+# burst: an offer the limiter cannot act on is an entry on a pending list
+# nobody drains.
+REARM_COOLDOWN_SECONDS = 900.0
+# ...and the re-arm book itself is bounded, like every other set in here.
+MAX_REARM_TRACKED = 2000
+# comp-app-4 (2026-09-11): how many refused relinks are remembered. Deliberately
+# above the report's own cap of 50 (a surface may want more than it sends) and
+# far below a media pool, which is what this dict could reach on the one
+# machine that produces refusals in bulk.
+MAX_NON_CANONICAL_REFUSED = 200
 
 
 def _norm_key(path: str) -> str:
@@ -200,6 +213,15 @@ class TimelineWatcher:
         #    can name it.
         self._missing_items: list[dict[str, str]] = []
         self._non_canonical_refused: dict[str, dict[str, str]] = {}
+        # comp-sync-13 (2026-09-11): when a re-armed path may be offered
+        # again. RES-19's rearm is unconditional, so on a machine whose
+        # canonical_prefix is wrong every 3 s poll re-offered all of them and
+        # app._handle_non_canonical's unprompted branch appended them to its
+        # pending list again, while resolve_journal.allow_automatic (900 s)
+        # refused the burst that would have drained it. The cooldown is that
+        # window: re-offering sooner cannot be acted on anyway.
+        self._rearm_due: dict[str, float] = {}
+        self._rearm_clock = time.monotonic
 
     def poll_once(self) -> dict[str, Any]:
         """Run one poll cycle. Returns a small summary dict; never raises."""
@@ -315,8 +337,11 @@ class TimelineWatcher:
                 item["resolve_project_name"] = resolve_project_name
                 new_out_of_tree.append(item)
             elif cls == NON_CANONICAL:
-                if key in self._offered_non_canonical:
+                # comp-sync-13: offered once, then only when a re-arm has
+                # come due.
+                if key in self._offered_non_canonical and not self._rearm_is_due(key):
                     continue
+                self._rearm_due.pop(key, None)
                 self._offered_non_canonical.add(key)
                 item = dict(item)
                 item["resolve_project_name"] = resolve_project_name
@@ -472,11 +497,38 @@ class TimelineWatcher:
         if not text:
             return
         key = _norm_key(text)
-        self._offered_non_canonical.discard(key)
+        # comp-sync-13: RE-ARMED, not re-offered. Discarding the key outright
+        # put the path back in the next 3 s poll, and the caller appends every
+        # offer to a pending list a 15-minute limiter was refusing to drain:
+        # ~300 appends of the same 158 clips per window, every failure
+        # re-arming the cycle. The key stays latched and the cooldown is what
+        # lifts it.
+        self._rearm_due[key] = self._rearm_clock() + REARM_COOLDOWN_SECONDS
+        if len(self._rearm_due) > MAX_REARM_TRACKED:
+            self._rearm_due.pop(next(iter(self._rearm_due)), None)
+        # comp-app-4 (2026-09-11): capped AT THE SOURCE. The report truncates
+        # this list to 50 on its way out, but the dict itself was unbounded,
+        # and the one machine that produces refusals in bulk is the machine
+        # with a wrong canonical_prefix and a media pool full of them - so the
+        # memory the cap was meant to save was already held here. Oldest out
+        # first (insertion order): the newest refusals are the ones a surface
+        # is about to name.
+        self._non_canonical_refused.pop(key, None)
         self._non_canonical_refused[key] = {
             "name": str(name or os.path.basename(text) or text),
             "path": text,
         }
+        while len(self._non_canonical_refused) > MAX_NON_CANONICAL_REFUSED:
+            self._non_canonical_refused.pop(
+                next(iter(self._non_canonical_refused)), None)
+
+    def _rearm_is_due(self, key: str) -> bool:
+        """Has this path's re-arm cooldown elapsed (comp-sync-13)?"""
+        due = self._rearm_due.get(key)
+        try:
+            return due is not None and self._rearm_clock() >= float(due)
+        except (TypeError, ValueError):
+            return True
 
     def clear_non_canonical_refusal(self, path: str) -> None:
         """This path relinked. Drop any refusal recorded against it."""

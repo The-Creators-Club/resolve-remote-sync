@@ -160,7 +160,7 @@ TARGETS = [
         venvs=[REPO / "dashboard" / ".venv",
                REPO / "music" / "web" / ".venv",
                REPO / "ytdl" / "web" / ".venv",
-               Path("E:/Projects/broll-platform/web/.venv")],
+               REPO / "broll" / "web" / ".venv"],
         why="installed into the container venv by dashboard/deploy/run.sh, or "
             "baked in by dashboard/deploy/Dockerfile, and run on the customer's NAS",
     ),

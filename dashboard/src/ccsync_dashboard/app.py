@@ -902,10 +902,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         or none at all (some browsers omit it for same-origin form posts),
         which is why an ABSENT header is not a refusal."""
         origin = (request.headers.get("origin") or "").strip()
-        if not origin or origin.lower() == "null":
+        # dash-core-4 (2026-09-11): `null` is an OPAQUE origin and means the
+        # opposite of same-origin - it is what a sandboxed iframe, a
+        # data:/blob: document or some cross-origin redirect chains send. It
+        # used to fall into the absent-header branch and pass, which inverted
+        # the meaning of the one value that is unambiguous. Absent still
+        # passes (the documented carve-out for same-origin form posts); a
+        # literal `null` is a refusal unless a Referer says otherwise.
+        opaque = origin.lower() == "null"
+        if not origin or opaque:
             origin = (request.headers.get("referer") or "").strip()
             if not origin:
-                return False
+                return opaque
         host = (request.headers.get("host") or "").strip().lower()
         if not host:
             return False
@@ -1283,10 +1291,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # morning. Deduped per (path, exception class), and NOTHING derived
         # from the exception's message is stored -- the same rule the response
         # body follows, for the same reason.
+        # dash-collector-alerts-6 (2026-09-11): hand over the matched route's
+        # PATH TEMPLATE when there is one, so the notice is deduped per route
+        # rather than per concrete path - "/api/v1/jobs/{id}/why" is one row,
+        # not one per job id. A Mount (the /broll, /music, /cards apps) has no
+        # `.path` attribute worth using, and neither has an unmatched request:
+        # both fall back to "", which is notices.redact_path's own behaviour
+        # (first two segments) rather than something new.
+        route_obj = request.scope.get("route")
+        route_path = getattr(route_obj, "path", "") if route_obj is not None else ""
         try:
             conn = db.connect(settings.db_path)
             try:
-                notices.record_server_error(conn, request.url.path, exc)
+                notices.record_server_error(conn, request.url.path, exc,
+                                            route=str(route_path or ""))
             finally:
                 conn.close()
         except Exception:  # noqa: BLE001 - never fail a request over its own record

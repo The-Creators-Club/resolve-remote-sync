@@ -373,6 +373,24 @@ def build_report(plan: dict[str, Any], reconcile: dict[str, Any]) -> str:
 
 # ------------------------------------------------------------ execution
 
+def count_copied(results: list[dict[str, Any]]) -> int:
+    """How many files were really copied in.
+
+    comp-resolve-2 (2026-09-11): `ok` alone is not that number. Since RES-15
+    `fixer.fix_clip`'s rehearsal arm answers `{"ok": True, "dry_run": True}`
+    -- it did what it was asked, which was nothing -- and every caller that
+    counts successes has to say so. popup.summarize_fix_results is the other
+    one; this pair is here so app.py's consolidate toast can share the answer
+    instead of re-deriving it from `ok` a third time.
+    """
+    return sum(1 for r in results if r.get("ok") and not r.get("dry_run"))
+
+
+def count_rehearsed(results: list[dict[str, Any]]) -> int:
+    """How many files a `fixer_dry_run` run only pretended to copy."""
+    return sum(1 for r in results if r.get("ok") and r.get("dry_run"))
+
+
 def run_consolidation(
     ops: list[dict[str, Any]],
     local_root: str,
@@ -464,8 +482,13 @@ def run_consolidation(
         outcome = dict(outcome)
         outcome["file_path"] = path
         results.append(outcome)
-        if outcome.get("ok"):
+        if outcome.get("ok") and not outcome.get("dry_run"):
             batch_done += size
+        # comp-resolve-2 (2026-09-11): `fixer_dry_run` returns ok=True since
+        # RES-15, so a REHEARSAL credited every file's bytes here -- the bar
+        # filled at full speed, the ETA was nonsense and the toast said
+        # "copied in" about a run that copied nothing. The rehearsal mode
+        # exists precisely so an admin can trust that screen.
         # else: nothing was copied that still exists -- fixer.fix_clip deletes
         # both artifacts of a failed or abandoned attempt before it returns,
         # so crediting `size` inflated the bar, the "X of Y done" text and
@@ -490,12 +513,17 @@ def run_consolidation(
                          path, len(results), total)
                 break
 
-    copied = sum(1 for r in results if r.get("ok"))
+    copied = count_copied(results)
+    rehearsed = count_rehearsed(results)
     skipped = sum(1 for r in results if r.get("aborted"))
     publish(index=len(results), total=total, name="", file_bytes_done=0,
             file_bytes_total=0, batch_bytes_done=batch_done,
             batch_bytes_total=batch_total, stopped=stopped,
             # ADDED alongside the existing keys, never replacing them.
-            fixed=copied, skipped=skipped, failed=len(results) - copied - skipped,
+            fixed=copied, skipped=skipped,
+            failed=len(results) - copied - rehearsed - skipped,
+            # comp-resolve-2 (2026-09-11): its own count, so a reader never
+            # has to re-derive "was anything actually copied" from `ok`.
+            rehearsal=rehearsed,
             cancelled=cancelled)
     return results

@@ -79,6 +79,12 @@ RELAUNCH_NOTE_FILENAME = "relaunched.json"
 # Relaunch timestamps, in the state directory, so a crash loop is recognised
 # across supervisor processes (each one lives for exactly one companion).
 HISTORY_FILENAME = "supervisor.json"
+# How many relaunch stamps are kept, in the file and on the child's argv.
+HISTORY_MAX_ENTRIES = 20
+# comp-ui-2 (2026-09-11): the flag that carries the relaunch history to the
+# NEXT supervisor in the chain, through the companion, so the ceiling does not
+# depend on a file that may not be writable. Comma-separated epoch seconds.
+PRIOR_FLAG = "--prior"
 # The supervisor's own log, beside the crash reports. Small and self-capping.
 LOG_FILENAME = "supervisor.log"
 LOG_MAX_BYTES = 256_000
@@ -135,7 +141,13 @@ def decide(exit_code: Optional[int], marker: Optional[dict[str, Any]],
                                "not fighting it")
     if not exe_exists:
         return Decision(False, "the companion exe is no longer on disk: nothing to relaunch")
-    recent = [t for t in history if 0 <= now - t <= RELAUNCH_WINDOW_SECONDS]
+    # comp-ui-2 / res-companion-4 (2026-09-11): the window test used to be
+    # `0 <= now - t`, i.e. a stamp in the FUTURE did not count. `clock` is the
+    # wall clock, so an NTP correction or a resume that steps it backwards
+    # forgave every relaunch this build had just made and the ceiling started
+    # again from zero -- on a codebase that treats clock skew as a first-class
+    # fault. abs() is symmetric: a stamp we cannot place is still a relaunch.
+    recent = [t for t in history if abs(now - t) <= RELAUNCH_WINDOW_SECONDS]
     if len(recent) >= MAX_RELAUNCHES:
         return Decision(False, f"already relaunched {len(recent)} times in the last "
                                f"{RELAUNCH_WINDOW_SECONDS / 60:.0f} minutes: this build "
@@ -172,13 +184,45 @@ def read_history(state_dir: Path) -> list[float]:
         return []
 
 
-def write_history(state_dir: Path, times: list[float]) -> None:
+def write_history(state_dir: Path, times: list[float]) -> bool:
+    """-> whether it was written.
+
+    comp-ui-2 / res-companion-4 (2026-09-11): this used to return None and
+    swallow every failure, and `decide`'s ceiling was computed ONLY from what
+    `read_history` could read back. A state directory that cannot be written
+    (an AV lock on this one file, an ACL, `supervisor.json` existing as a
+    directory) therefore handed every supervisor in the chain an empty
+    history, and a build that could not stay up was relaunched for ever. The
+    caller now says so in its log, and `merge_history` gives the ceiling a
+    second source that does not need a filesystem at all.
+    """
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / HISTORY_FILENAME).write_text(
-            json.dumps({"relaunches": times[-20:]}), encoding="utf-8")
+            json.dumps({"relaunches": times[-HISTORY_MAX_ENTRIES:]}), encoding="utf-8")
+        return True
     except Exception:  # noqa: BLE001 - a history that cannot be written is not a reason to stop
-        pass
+        return False
+
+
+def merge_history(*sources: Optional[list[float]]) -> list[float]:
+    """The union of every relaunch history we have, newest last, bounded.
+
+    comp-ui-2: the chain is supervisor -> companion -> supervisor, and the
+    file is only one of the two ways a count can travel along it; the other
+    is the relaunch note the companion hands back on argv (`--prior`). The
+    HIGHER count is the safe one here: a ceiling that under-counts relaunches
+    a build that cannot stay up, and a ceiling that over-counts leaves a
+    machine to its logon autostart, which is the failure a human notices.
+    """
+    seen: set[float] = set()
+    for source in sources:
+        for item in source or []:
+            try:
+                seen.add(float(item))
+            except (TypeError, ValueError):
+                continue
+    return sorted(seen)[-HISTORY_MAX_ENTRIES:]
 
 
 def write_relaunch_note(crash_dir: Path, note: dict[str, Any]) -> None:
@@ -307,15 +351,24 @@ def _detached_popen(argv: list[str], cwd: Path, env: dict[str, str]) -> Any:
     )
 
 
-def supervisor_argv(exe: Path, pid: int, crash_dir: Path, state_dir: Path) -> list[str]:
-    return [str(exe), FLAG, str(pid), "--exe", str(exe),
+def supervisor_argv(exe: Path, pid: int, crash_dir: Path, state_dir: Path,
+                    prior: Optional[list[float]] = None) -> list[str]:
+    argv = [str(exe), FLAG, str(pid), "--exe", str(exe),
             "--crash-dir", str(crash_dir), "--state-dir", str(state_dir)]
+    # comp-ui-2: omitted entirely when there is nothing to carry, so a
+    # companion one release older (which passes none) produces the argv this
+    # function always produced.
+    stamps = merge_history(prior)
+    if stamps:
+        argv += [PRIOR_FLAG, ",".join(f"{t:.3f}" for t in stamps)]
+    return argv
 
 
 def spawn_for(pid: int, exe: Path, crash_dir: Path, state_dir: Path, *,
               frozen: Optional[bool] = None, platform: Optional[str] = None,
               enabled: bool = True, environ: Optional[dict[str, str]] = None,
-              spawn: Optional[Callable[..., Any]] = None) -> Optional[Any]:
+              spawn: Optional[Callable[..., Any]] = None,
+              prior: Optional[list[float]] = None) -> Optional[Any]:
     """Companion side: start a supervisor for `pid`. Returns the Popen, or
     None with the reason logged by the caller: frozen win32 builds only, and a
     source run has nothing to relaunch.
@@ -339,15 +392,31 @@ def spawn_for(pid: int, exe: Path, crash_dir: Path, state_dir: Path, *,
     if not exe.is_file():
         return None
     run = spawn or _detached_popen
-    return run(supervisor_argv(exe, pid, crash_dir, state_dir), exe.parent, child_env(environ))
+    return run(supervisor_argv(exe, pid, crash_dir, state_dir, prior=prior),
+               exe.parent, child_env(environ))
 
 
 # -- the supervisor process --------------------------------------------------
 
 
+def _parse_prior(value: str) -> list[float]:
+    out: list[float] = []
+    for chunk in str(value or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            out.append(float(chunk))
+        except ValueError:
+            continue
+    return merge_history(out)
+
+
 def _parse(argv: list[str]) -> dict[str, Any]:
-    args: dict[str, Any] = {"pid": None, "exe": None, "crash_dir": None, "state_dir": None}
-    usage = f"usage: {FLAG} <pid> --exe <path> --crash-dir <dir> [--state-dir <dir>]"
+    args: dict[str, Any] = {"pid": None, "exe": None, "crash_dir": None,
+                            "state_dir": None, "prior": []}
+    usage = (f"usage: {FLAG} <pid> --exe <path> --crash-dir <dir> "
+             f"[--state-dir <dir>] [{PRIOR_FLAG} <t,t,t>]")
     it = iter(argv)
     try:
         for item in it:
@@ -359,6 +428,11 @@ def _parse(argv: list[str]) -> dict[str, Any]:
                 args["crash_dir"] = Path(next(it))
             elif item == "--state-dir":
                 args["state_dir"] = Path(next(it))
+            elif item == PRIOR_FLAG:
+                # comp-ui-2: never a SystemExit. A malformed value is a
+                # supervisor that falls back to the file, not one that
+                # refuses to watch the companion at all.
+                args["prior"] = _parse_prior(next(it))
     except (StopIteration, ValueError):
         raise SystemExit(usage) from None
     if args["pid"] is None or args["exe"] is None or args["crash_dir"] is None:
@@ -394,7 +468,10 @@ def main(argv: list[str], *,
         log(f"could not wait on pid {pid}: {exc!r}; standing down")
         return 0
     marker = read_marker(crash_dir)
-    history = read_history(state_dir)
+    # comp-ui-2 / res-companion-4: the file is one source, the count carried
+    # in on argv the other. Whichever is higher wins, so the ceiling holds
+    # even where <state>/supervisor.json cannot be read or written.
+    history = merge_history(read_history(state_dir), args.get("prior"))
     now = clock()
     decision = decide(code, marker, pid, history, now, exe_exists=exe.is_file())
     log(f"pid {pid} exited with code {_fmt_code(code)}: "
@@ -420,15 +497,25 @@ def main(argv: list[str], *,
             pass
 
     when = clock()
+    updated = merge_history(history, [when])
     note = {
         "when": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(when)),
         "previous_pid": pid,
         "exit_code": code,
         "reason": decision.reason,
-        "attempt": len([t for t in history if 0 <= when - t <= RELAUNCH_WINDOW_SECONDS]) + 1,
+        "attempt": len([t for t in history if abs(when - t) <= RELAUNCH_WINDOW_SECONDS]) + 1,
         "supervisor_pid": os.getpid(),
+        # comp-ui-2: what the relaunched companion hands to the supervisor it
+        # spawns for itself (crash_report.note_relaunch_history). Optional on
+        # read: a companion one release older ignores it and the chain is
+        # exactly as file-dependent as it was.
+        "history": updated,
     }
-    write_history(state_dir, history + [when])
+    if not write_history(state_dir, updated):
+        log(f"WARNING: could not record this relaunch in {state_dir / HISTORY_FILENAME} "
+            "-- the 'three relaunches an hour' ceiling now rests entirely on the "
+            "count carried to the relaunched companion. A state directory that "
+            "cannot be written needs a human.")
     write_relaunch_note(crash_dir, note)
     try:
         child = run([str(exe)], exe.parent, child_env())

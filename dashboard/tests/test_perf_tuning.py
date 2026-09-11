@@ -28,7 +28,14 @@ class FakeSession:
         self.responses = responses or {}
         self.calls = []
 
-    def request(self, method, url, params=None, json=None, headers=None, timeout=None):
+    def request(self, method, url, params=None, json=None, headers=None, timeout=None,
+                **kwargs):
+        # dash-core-2 (2026-09-11): the client passes allow_redirects=False on
+        # every call now - a custom header such as X-API-Key is re-sent
+        # verbatim across a host change, so the fleet's Syncthing key used to
+        # follow a 302. Asserted here rather than merely tolerated, because
+        # **kwargs is exactly how a fake stops noticing a wire change.
+        assert kwargs.get("allow_redirects") is False
         path = url.split("//", 1)[-1].split("/", 1)[-1]
         self.calls.append(
             {"method": method, "url": url, "params": params, "body": json}

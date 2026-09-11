@@ -47,7 +47,15 @@ log = logging.getLogger("ccsync.sync.shared_folders")
 # had no tray line, no lane state, no report field and (for `not-offered`)
 # not even a log line at the default level. They are KEPT now, with the
 # reason, until a reconcile succeeds.
-PROBLEM_OUTCOMES = ("not-offered", "unfiltered", "error")
+# comp-sync-10 (2026-09-11): "not-offered" used to be three situations
+# wearing one sentence -- the server genuinely has not offered the folder, the
+# local Syncthing could not be asked, and (in the borrowed manager) a halt is
+# deliberately holding the offer. Only the first is "ask your admin". A read
+# failure gets its own sentence, and a halt records no problem at all, which
+# is why `halted` is NOT in this tuple.
+PROBLEM_OUTCOMES = ("not-offered", "unfiltered", "error", "ask-failed")
+OUTCOME_HALTED = "halted"
+OUTCOME_ASK_FAILED = "ask-failed"
 # A folder in a problem state is retried on a backoff rather than every
 # pass: `not-offered` on a machine the server has not shared the library
 # with is permanent, and a pending-folders GET per pass forever buys
@@ -103,7 +111,15 @@ class FolderProblems:
         # Doubling from a minute, capped: the folder is retried while the
         # editor is still at their desk waiting for it, and roughly twice an
         # hour once it is clear nobody is about to approve anything.
-        wait = min(PROBLEM_RETRY_FIRST_SECONDS * (2 ** (attempts - 1)),
+        # comp-sync-2 (2026-09-11): CLAMP THE EXPONENT, not the product.
+        # PROBLEM_RETRY_FIRST_SECONDS is a float, so at attempts >= 1025 the
+        # multiplication raised OverflowError ("int too large to convert to
+        # float") -- inside a method documented as never raising, called from
+        # reconcile's try AND from its except arm, which re-entered it and
+        # raised straight out of both managers' reconcile for the rest of the
+        # process. A folder retried twice an hour reaches that in ~21 days of
+        # tray uptime. 2**20 already exceeds every cap here.
+        wait = min(PROBLEM_RETRY_FIRST_SECONDS * (2 ** min(attempts - 1, 20)),
                    PROBLEM_RETRY_MAX_SECONDS)
         entry = {
             "id": folder_id,
@@ -151,6 +167,9 @@ def problem_sentence(entry: dict[str, Any]) -> str:
     if outcome == "not-offered":
         return (f"{name} has not been shared with this computer yet. "
                 f"Ask your admin to approve it.")
+    if outcome == OUTCOME_ASK_FAILED:
+        return (f"{name} is not set up yet: CC Sync could not ask the sync engine "
+                f"about it. It keeps trying.")
     if outcome == "unfiltered":
         return (f"{name} is not syncing yet: CC Sync could not confirm its filter "
                 f"list, and a folder without one must not go online. It keeps trying.")
@@ -310,8 +329,16 @@ class SharedFolderManager:
                     self._problems.clear(folder_id)
             except Exception as exc:
                 results[folder_id] = "error"
-                log_persistent_problem(
-                    self._problems.note(folder_id, label, "error", str(exc)))
+                # comp-sync-2: the handler must not re-enter the thing that
+                # just threw. `note` is the one call in here that can, and a
+                # reconcile documented as never raising must keep that promise
+                # even when its own bookkeeping is the failure.
+                try:
+                    log_persistent_problem(
+                        self._problems.note(folder_id, label, "error", str(exc)))
+                except Exception:
+                    log.debug("shared folder %s: could not record the problem",
+                              folder_id, exc_info=True)
                 if folder_id not in self._error_logged:
                     self._error_logged.add(folder_id)
                     log.warning("shared folder %s: reconcile failed: %s", folder_id, exc)
@@ -438,7 +465,7 @@ class SharedFolderManager:
             pending = self.admin.pending_folders() or {}
         except Exception as exc:
             log.debug("shared folder %s: could not read pending folders: %s", folder_id, exc)
-            return "not-offered"
+            return OUTCOME_ASK_FAILED  # comp-sync-10
         entry = pending.get(folder_id) if isinstance(pending, dict) else None
         offered_by = list((entry or {}).get("offeredBy", {}) or {})
         if not offered_by:

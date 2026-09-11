@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ from ccsync_companion import canon, paths
 from ccsync_companion.fixer import IgnoreTracker
 from ccsync_companion.resolve_bridge import NO_SCRIPTING_MESSAGE as NO_SCRIPTING
 from ccsync_companion.resolve_bridge import NOT_RUNNING_MESSAGE as NOT_RUNNING
-from ccsync_companion.watcher import TimelineWatcher
+from ccsync_companion.watcher import REARM_COOLDOWN_SECONDS, TimelineWatcher
 
 from conftest import make_timeline_item
 
@@ -1308,6 +1309,12 @@ def test_a_refused_non_canonical_relink_is_offered_again(tmp_path):
     watcher.rearm_non_canonical(str(clip), "a.mov")
     assert watcher.non_canonical_refused() == [
         {"name": "a.mov", "path": str(clip)}]
+    # comp-sync-13 (2026-09-11): the re-arm now waits out a cooldown rather
+    # than re-offering on the next 3 s poll. The retry itself is RES-19's
+    # point and is unchanged; only its cadence is.
+    watcher.poll_once()
+    assert len(offered) == 1, "not on the very next poll"
+    watcher._rearm_clock = lambda: time.monotonic() + REARM_COOLDOWN_SECONDS + 1
     watcher.poll_once()
     assert len(offered) == 2
 

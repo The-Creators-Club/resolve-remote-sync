@@ -121,6 +121,16 @@ class Http:
         except urllib.error.HTTPError as exc:
             # A 3xx lands here too, because the redirect handler declined it.
             return Response(exc.code, dict(exc.headers.items()), exc.read() or b"")
+        except (urllib.error.URLError, OSError) as exc:
+            # server-tools-5 (2026-09-11): ship.cmd runs this against a
+            # dashboard that may be restarting mid-deploy, and an unreachable
+            # one used to escape as a urllib traceback -- the one failure in
+            # this script that did not name its next action. HTTPError is a
+            # URLError subclass, so it stays caught above this.
+            reason = getattr(exc, "reason", None) or exc
+            raise PublishError(
+                f"could not reach the dashboard at {url}: {reason}. Nothing was "
+                f"published. Check it is up, then re-run.", EXIT_PUBLISH)
 
 
 # ---------------------------------------------------------------- inputs

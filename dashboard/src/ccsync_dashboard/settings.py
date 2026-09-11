@@ -629,6 +629,32 @@ class Settings:
                 "an unauthenticated write path and is not a shipped configuration. Set "
                 "DASH_REPORT_TOKEN instead (a lab may set DASH_DEV_INSECURE=1 as well)."
             )
+        # dash-core-7 (2026-09-11): a non-positive session lifetime bricks
+        # sign-in silently. The two readers disagreed about what 0 means -
+        # auth.start_session takes `... or SESSION_TTL_SECONDS`, so the COOKIE
+        # got seven days, while SessionStore stored 0.0 literally and
+        # validate() deleted the row on the very next request, which reads as
+        # a revocation: /login succeeds and the next page is /login again,
+        # with nothing logged. An operator who writes 0 normally means "no
+        # limit", and that is not a posture this dashboard offers, so the
+        # value falls back to the shipped default and says so.
+        for field_name, default in (
+            ("session_idle_seconds", 12 * 3600),
+            ("session_absolute_seconds", 7 * 24 * 3600),
+        ):
+            given = getattr(self, field_name)
+            try:
+                value = float(given)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value <= 0:
+                object.__setattr__(self, field_name, float(default))
+                log.error(
+                    "DASH_%s=%r is not a positive number of seconds and would end every "
+                    "session the moment it was created; using the default %ds instead. "
+                    "There is no 'unlimited' setting: set a long value if that is what "
+                    "you want.", field_name.upper(), given, default,
+                )
         # See smb_host: the SMB probe target defaults to the NAS itself. A
         # deploy that ran before DASH_SMB_HOST existed in the compose env would
         # otherwise refuse every login the moment this code lands (found by the

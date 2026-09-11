@@ -38,6 +38,7 @@ one (token only, read only). Both call in here.
 """
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 import sqlite3
@@ -46,6 +47,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app import config
+
+log = logging.getLogger("broll.client_folders")
 
 SCHEMA_VERSION = 2
 
@@ -158,12 +161,30 @@ def ensure_schema(db_path: Path | None = None) -> None:
             version = SCHEMA_VERSION
         if version == 1:
             # v2 (broll-1, 2026-09-03): the content hash as a third identity.
-            conn.execute(
-                "ALTER TABLE client_folder_items ADD COLUMN hash TEXT NOT NULL DEFAULT ''")
-            _backfill_hashes(conn)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            #
+            # broll-2 (2026-09-11): THIS STEP RUNS MORE THAN ONCE, and it must
+            # survive that. CPython's sqlite3 runs DDL in autocommit, so the
+            # ALTER used to be durable the instant it executed while
+            # `user_version` was only written after the backfill: a container
+            # killed (or OOM-ed) inside the backfill left the column present
+            # at version 1, and every later entry here raised
+            # `duplicate column name: hash` -- a 500 on every client-folder
+            # route and on every public /broll/share/<token>/ link, for ever,
+            # curable only by hand-editing the PRAGMA on the NAS. So: one
+            # IMMEDIATE lock around the whole step (two threads cannot both
+            # enter it), the column is TESTED for rather than assumed absent,
+            # and the backfill is idempotent (it only ever writes rows whose
+            # hash is still blank) so a half-done one is simply finished.
+            conn.execute("BEGIN IMMEDIATE")
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version == 1:
+                if not _has_column(conn, "client_folder_items", "hash"):
+                    conn.execute("ALTER TABLE client_folder_items "
+                                 "ADD COLUMN hash TEXT NOT NULL DEFAULT ''")
+                _backfill_hashes(conn)
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                version = SCHEMA_VERSION
             conn.commit()
-            version = SCHEMA_VERSION
         if version > SCHEMA_VERSION:
             raise RuntimeError(
                 f"FATAL: {path} has user_version={version}, newer than this app "
@@ -172,6 +193,13 @@ def ensure_schema(db_path: Path | None = None) -> None:
             )
     finally:
         conn.close()
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """broll-2 (2026-09-11): what a re-runnable migration asks, instead of
+    trusting `user_version` to tell it what the file already has."""
+    return any(r[1] == column
+               for r in conn.execute(f"PRAGMA table_info({table})").fetchall())
 
 
 def _backfill_hashes(conn: sqlite3.Connection) -> None:
@@ -185,25 +213,41 @@ def _backfill_hashes(conn: sqlite3.Connection) -> None:
     behaviour, id then name, and picks its hash up the next time it is
     curated. A missing or unreadable broll.db must not stop the folder ledger
     from opening.
+
+    Sized by the FOLDERS, not by the archive (broll-6, 2026-09-11). It used to
+    read every hashed `videos` row and issue one UPDATE per row against a
+    `client_folder_items` that is indexed by (folder_id, ord) alone -- a full
+    table scan each, tens of thousands of them on a real archive, inside
+    whichever request first touched the ledger and holding its write lock the
+    whole time (which is also what made broll-2's window seconds wide). The
+    other direction is a few hundred lookups on `videos`' UNIQUE
+    (share, rel_path). Re-running it writes nothing extra: an item that
+    already has a hash is not re-read.
     """
     index_path = config.get_db_path()
     if not index_path.exists():
         return
+    wanted = conn.execute(
+        "SELECT id, share, rel_path FROM client_folder_items WHERE hash = ''"
+    ).fetchall()
+    if not wanted:
+        return
     try:
         index = sqlite3.connect(index_path)
         try:
-            rows = index.execute(
-                "SELECT share, rel_path, hash FROM videos "
-                "WHERE hash IS NOT NULL AND hash != ''").fetchall()
+            for row in wanted:
+                item_id, share, rel_path = row[0], row[1], row[2]
+                found = index.execute(
+                    "SELECT hash FROM videos WHERE share = ? AND rel_path = ?",
+                    (share, rel_path)).fetchone()
+                if found and found[0]:
+                    conn.execute(
+                        "UPDATE client_folder_items SET hash = ? WHERE id = ?",
+                        (found[0], item_id))
         finally:
             index.close()
     except sqlite3.Error:
         return
-    for share, rel_path, video_hash in rows:
-        conn.execute(
-            "UPDATE client_folder_items SET hash = ? "
-            "WHERE hash = '' AND share = ? AND rel_path = ?",
-            (video_hash, share, rel_path))
 
 
 def open_connection(db_path: Path | None = None) -> sqlite3.Connection:
@@ -219,8 +263,18 @@ def get_shares_db() -> Iterator[sqlite3.Connection]:
     ensure_schema on the way in, cheaply (one PRAGMA when the file exists):
     unlike broll.db this file is created by this feature alone, and a
     deployment whose lifespan shim predates it must not 500 on first use.
+
+    A sqlite failure HERE is not allowed to take the public share door out
+    (broll-2, 2026-09-11): the door is the one thing CLAUDE.md says must never
+    be at risk, and the connection below may well work for a read even when
+    the migration did not. The routes answer on their own merits after this.
+    The "newer user_version" RuntimeError is deliberately fatal and is NOT
+    caught: an older app half-reading a newer file is the worse outcome.
     """
-    ensure_schema()
+    try:
+        ensure_schema()
+    except sqlite3.Error:
+        log.exception("client_shares.db: ensure_schema failed, opening anyway")
     conn = open_connection()
     try:
         yield conn

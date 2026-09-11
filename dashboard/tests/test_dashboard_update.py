@@ -781,6 +781,47 @@ def test_a_restart_this_update_asked_for_survives_the_process(world):
     assert dashboard_update.read_state(settings)["in_progress"] is False
 
 
+def test_a_restart_request_left_by_a_DEAD_process_is_spent_not_honoured(world):
+    """dash-release-jobs-2 (2026-09-11): the container killed between
+    request_restart and the lifespan's shutdown.
+
+    The flag legitimately outlives its process for ONE boot. The process that
+    asked for the restart is gone (a new nonce is a new process), so the
+    restart it asked for has either happened or been lost, and holding
+    `in_progress` open for it wedged every apply and every rollback for the
+    life of the new process - with no shell on the appliance shape to delete
+    update_state.json with."""
+    settings = world["settings"]
+    dashboard_update.request_restart(settings)
+    raw = json.loads(dashboard_update.update_state_path(settings).read_text(encoding="utf-8"))
+    raw["owner_pid"] = 999999
+    raw["owner_nonce"] = "a-nonce-from-a-process-that-is-gone"
+    dashboard_update._write_json(dashboard_update.update_state_path(settings), raw)
+
+    state = dashboard_update.read_state(settings)
+    assert state["in_progress"] is False
+    assert state["restart_requested"] is False
+    assert state["step"] == "done"
+    # Written down, not just returned: the next reader must see it too.
+    on_disk = json.loads(
+        dashboard_update.update_state_path(settings).read_text(encoding="utf-8"))
+    assert on_disk["in_progress"] is False
+    assert on_disk["restart_requested"] is False
+    # ...and the two routes the latch used to wedge answer something other
+    # than "an update is in progress" again.
+    r = world["client"].post("/api/v1/admin/dashboard-update/rollback", json={})
+    # Whatever else this deployment says about a rollback, it no longer says
+    # "an update is in progress": that was the wedge.
+    assert "in progress" not in str(r.json().get("detail", ""))
+    r = world["client"].post("/api/v1/admin/dashboard-update/apply",
+                             json={"version": NEW_VERSION})
+    assert r.status_code != 409
+    # A shutdown of THIS process is an ordinary one: the re-exec is behind us,
+    # so exiting 75 would send run.sh round the loop for nothing.
+    assert dashboard_update.finish_restart(settings) is False
+    assert world["exits"] == []
+
+
 def test_rollback_is_possible_again_after_an_interrupted_apply(real_bundle_world):
     settings = real_bundle_world["settings"]
     dashboard_update.apply(settings, real_bundle_world["app"].state, version=NEW_VERSION)

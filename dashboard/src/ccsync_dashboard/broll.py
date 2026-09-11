@@ -49,7 +49,7 @@ from typing import Any, Callable
 
 from fastapi import FastAPI
 
-from . import auth
+from . import auth, mount_status
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -532,6 +532,10 @@ def _init_broll_storage() -> None:
     from app import config as broll_config  # type: ignore[import-not-found]
     from app.db import ensure_schema  # type: ignore[import-not-found]
 
+    # res-fleet-2 (2026-09-11): the root the collector re-probes every cycle.
+    # Recorded before the mkdir, so a root that later disappears is still the
+    # one this mount was serving.
+    mount_status.record_root("broll", str(broll_config.get_data_root()))
     for d in (
         broll_config.get_data_root(),
         broll_config.get_proxies_dir(),

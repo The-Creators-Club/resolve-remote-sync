@@ -839,6 +839,24 @@ def _proxy_state_note(state: str) -> str:
 # observed, with one addition: every restart is RECORDED and REPORTED, because
 # a machine that needs restarting three times an hour is a fault to see and
 # not a fault to quietly paper over.
+# comp-app-4 (2026-09-11): the ceiling on any per-clip list that rides the
+# report. Same number as watcher.MAX_MISSING_REPORTED, which is the cap its
+# sibling list has always had at the source: a list long enough to diagnose
+# with, short enough that a 30 s report cannot carry a media pool.
+MAX_REPORTED_LIST = 50
+
+# comp-sync-13 (2026-09-11): the ceiling on the non-canonical relink queue.
+# Generous on purpose - a real project can offer hundreds of clips in one
+# sweep and every one of them is wanted; what this stops is an unbounded list
+# on a machine whose relinks Resolve refuses for hours.
+MAX_CANON_RELINK_PENDING = 1000
+
+# comp-app-6: the loopback rebind's backoff. The floor is the caller's own
+# tick (never faster than it asks), the ceiling is half an hour - a port held
+# by another program is held for hours, and the retry is the expensive half.
+LOOPBACK_RETRY_MIN_SECONDS = 60.0
+LOOPBACK_RETRY_MAX_SECONDS = 30.0 * 60.0
+
 WATCHDOG_STATE_FILENAME = "watchdog.json"
 LANE_WATCHDOG_INTERVAL_SECONDS = 60.0
 # How long a thread may be inside one iteration before it counts as wedged.
@@ -852,6 +870,22 @@ LANE_WATCHDOG_ADVISORY_RESTARTS = 3
 _WATCHDOG_EVENTS_KEPT = 50
 _WATCHDOG_DAY_SECONDS = 24.0 * 3600.0
 _WATCHDOG_HOUR_SECONDS = 3600.0
+# comp-app-7 (2026-09-11): the ledger is a POLICY INPUT, not only a report.
+# `_events` was written for `sync_guard.restarts` and read back by nobody, so a
+# thread whose restart() raises, or whose loop dies again immediately, was
+# restarted every interval for ever: no growing wait, no ceiling, and one JSON
+# write per tick. A restart that has not worked six times in an hour is not
+# going to work on the seventh, and the fault the editor needs to see is the
+# one the spin hides.
+LANE_WATCHDOG_MAX_RESTARTS_PER_HOUR = 6
+# Wait between attempts on ONE thread: base x 2^(restarts already in the last
+# hour), capped. The first restart is still immediate.
+LANE_WATCHDOG_BACKOFF_SECONDS = 60.0
+LANE_WATCHDOG_BACKOFF_MAX_SECONDS = 30.0 * 60.0
+# A clock that steps BACKWARDS used to erase the crash-loop evidence the
+# record exists to survive (`0 < now - t` dropped every event stamped in what
+# is now the future). Tolerated symmetrically instead.
+_WATCHDOG_CLOCK_SKEW_SECONDS = 3600.0
 
 
 def _watchdog_iso(when: float) -> str:
@@ -953,10 +987,48 @@ class LaneWatchdog:
                           f"(the bound is {target.bound:.0f}s)")
             else:
                 continue
+            held = self._restart_held_off(target.name)
+            if held:
+                # comp-app-7: the thread is still down and still needs
+                # restarting; what is refused is trying again THIS tick.
+                log.warning("thread watchdog: NOT restarting the %s -- %s (%s)",
+                            target.name, held, reason)
+                continue
             log.error("thread watchdog: restarting the %s -- %s", target.name, reason)
             if self._restart(target):
                 restarted.append(target.name)
         return restarted
+
+    def _restart_held_off(self, name: str) -> str:
+        """"" when `name` may be restarted now, else why not (comp-app-7).
+
+        Two policies off the same ledger: a ceiling (a restart that has failed
+        LANE_WATCHDOG_MAX_RESTARTS_PER_HOUR times in an hour is refused until
+        those age out, because spinning on it hides the fault instead of
+        fixing it) and an exponential wait between attempts. Never raises: a
+        policy that cannot read its own record must not be the thing that
+        stops a legitimate restart, so it falls open."""
+        try:
+            now = float(self._now())
+            with self._lock:
+                events = list(self._events.get(name, []))
+            recent = [t for t in events if 0 <= now - t <= _WATCHDOG_HOUR_SECONDS]
+            if len(recent) >= LANE_WATCHDOG_MAX_RESTARTS_PER_HOUR:
+                return (f"{len(recent)} restarts in the last hour is the ceiling; "
+                        f"this needs a human, not another restart")
+            if not recent:
+                return ""
+            wait = min(LANE_WATCHDOG_BACKOFF_SECONDS * (2 ** len(recent)),
+                       LANE_WATCHDOG_BACKOFF_MAX_SECONDS)
+            since = now - max(recent)
+            if since < wait:
+                return (f"restarted {since:.0f}s ago and the wait after "
+                        f"{len(recent)} attempt(s) is {wait:.0f}s")
+            return ""
+        except Exception:  # noqa: BLE001
+            log.debug("thread watchdog: could not read the restart ledger",
+                      exc_info=True)
+            return ""
 
     def _must_not_restart(self) -> str:
         """"" when a restart is allowed, else why not.
@@ -1140,9 +1212,15 @@ class LaneWatchdog:
         for name, entry in threads.items():
             if not isinstance(name, str) or not isinstance(entry, dict):
                 continue
+            # comp-app-7: symmetric skew tolerance. `0 < now - t` dropped
+            # every event stamped after the current clock reading, so one step
+            # backwards (an NTP correction, a VM resume, a dual-boot RTC)
+            # erased exactly the crash-loop evidence this record is persisted
+            # to survive -- and the ceiling above reads these events.
             events = [float(t) for t in (entry.get("events") or [])
-                      if isinstance(t, (int, float))
-                      and 0 < now - float(t) <= _WATCHDOG_DAY_SECONDS]
+                      if isinstance(t, (int, float)) and not isinstance(t, bool)
+                      and -_WATCHDOG_CLOCK_SKEW_SECONDS <= now - float(t)
+                      <= _WATCHDOG_DAY_SECONDS]
             if events:
                 self._events[name] = sorted(events)[-_WATCHDOG_EVENTS_KEPT:]
             error = entry.get("last_error")
@@ -1608,6 +1686,17 @@ class CompanionApp:
         # sends them to restart something that is already running.
         self._loopback_state: dict[str, Any] = {
             "bound": False, "port": 0, "error": "", "since": ""}
+        # comp-app-6 (2026-09-11): when the next retry is allowed, and the
+        # error it is backing off from. The retry is not the "one bind
+        # attempt a minute" its docstring claimed - it re-runs the whole
+        # broll_server.start(), mounts and all, and its OSError arm writes a
+        # six-line WARNING, so an editor who never uninstalled the retired
+        # standalone companion got ~720 copies of that paragraph a day
+        # through a 5 MB rotating log. The state is the diagnostic
+        # (loopback.error/since); the log line is not.
+        self._loopback_retry_after: float = 0.0
+        self._loopback_retry_delay: float = 0.0
+        self._loopback_retry_error: str = ""
         # There are TWO doors to the bind now (start()'s "b-roll server" step
         # and the media-tree loop's retry), on two threads, and the media-tree
         # thread is started FIRST -- so on a slow box the retry took the port
@@ -2264,27 +2353,44 @@ class CompanionApp:
         would leave "Resume syncing" ticked with nobody having clicked
         anything -- and would then be un-resumed by the drive coming back."""
         try:
-            if str(state) != self._root_state:
+            state = str(state)
+            # comp-sync-9 (2026-09-11): the STATE changing is its own event.
+            # Everything below used to hang off `_root_absent_announced`
+            # alone, so an SMB mapping that dropped and came back as a stale
+            # session (absent -> not_answering, the common Windows shape)
+            # opened no episode at all: the editor got the calm "is
+            # disconnected" line for a drive that was plugged in and wedged,
+            # and then silence. The once-per-outage half stays once per
+            # outage - the `unfinished` judgement is CR-92's and is made at
+            # the moment the drive goes, not again on every transition.
+            state_changed = state != self._root_state
+            if state_changed:
                 self._root_state_since = datetime.now(timezone.utc).isoformat()
                 # SYNC-120: a state episode belongs to the state that opened
                 # it. A wedged drive that is then unplugged with nothing owed
                 # is back to the calm one-liner, and must not keep reminding
                 # about a state it is no longer in. An unfinished-work
                 # episode is untouched by this (end_state_episode refuses).
-                if str(state) != root_guard_mod.ROOT_NOT_ANSWERING:
+                if state != root_guard_mod.ROOT_NOT_ANSWERING:
                     self._drive_reminder.end_state_episode()
-            self._root_state = str(state)
+            self._root_state = state
+            first = not self._root_absent_announced
             # Judged before the pause below, and before _root_absent flips
             # (nothing here reads it, but the order is the point).
-            unfinished = (self._unfinished_before_pause()
-                          if not self._root_absent_announced else None)
+            unfinished = self._unfinished_before_pause() if first else None
             self._root_absent = True
-            if not self._root_absent_announced:
+            if first:
                 self._root_absent_announced = True
                 log.warning(
                     "sync paused: local_root %s is not available (%s)",
                     self.config.get("local_root"), state,
                 )
+            elif state_changed:
+                log.warning(
+                    "sync still paused: local_root %s is now %s",
+                    self.config.get("local_root"), state,
+                )
+            if first or state_changed:
                 # Three sentences for one event (CR-92): work was owed at
                 # the moment it went -> the warning that names it, and the
                 # half-hourly reminders after; nothing was owed but a
@@ -2293,7 +2399,12 @@ class CompanionApp:
                 # the common case and must stay calm.
                 if unfinished:
                     self._drive_reminder.begin(unfinished)
-                elif not self._drive_reminder.resume_remembered():
+                # comp-sync-8: the CURRENT state decides whether a remembered
+                # STATE episode may be replayed; without it a wedge recorded
+                # by the previous run is replayed at a drive now in a bag.
+                # Only on the first announcement: a remembered episode is
+                # last run's, and a transition inside this outage is ours.
+                elif not (first and self._drive_reminder.resume_remembered(state)):
                     # SYNC-2: a wedged filesystem gets its OWN sentence. The
                     # drive is plugged in, so "is disconnected" sends the
                     # editor to check a cable that is fine and leaves the one
@@ -2806,17 +2917,34 @@ class CompanionApp:
         ]
         with self._canon_relink_lock:
             if fresh:
-                if user_initiated:
-                    # The scan re-offers paths the watcher already handed over
-                    # (both producers latch once per process, this one does
-                    # not), so a path already waiting must not be queued twice.
-                    from .watcher import _norm_key
+                # comp-sync-13 (2026-09-11): de-duped on EVERY path, not only
+                # the scan's. The comment this replaces said both producers
+                # latch once per process; RES-19 made that untrue - the
+                # watcher re-offers a path it could not relink on a 15 minute
+                # cooldown - so a project Resolve keeps refusing queued the
+                # same clip again every quarter of an hour, for the life of
+                # the process, and the rate limiter's "holding N clip(s)"
+                # line counted each copy.
+                from .watcher import _norm_key
 
-                    waiting = {_norm_key(str(item.get("file_path") or ""))
-                               for item in self._canon_relink_pending}
-                    fresh = [item for item in fresh
-                             if _norm_key(str(item.get("file_path") or "")) not in waiting]
+                waiting = {_norm_key(str(item.get("file_path") or ""))
+                           for item in self._canon_relink_pending}
+                fresh = [item for item in fresh
+                         if _norm_key(str(item.get("file_path") or "")) not in waiting]
                 self._canon_relink_pending.extend(fresh)
+                if len(self._canon_relink_pending) > MAX_CANON_RELINK_PENDING:
+                    # A ceiling as well, because de-duping bounds the repeats
+                    # and not the size of a media pool. The OLDEST offers go:
+                    # a clip that has waited through this many others is one
+                    # the watcher will offer again, and dropping the NEW ones
+                    # would mean the queue that is full is also the queue
+                    # nothing new can enter.
+                    dropped = len(self._canon_relink_pending) - MAX_CANON_RELINK_PENDING
+                    del self._canon_relink_pending[:dropped]
+                    log.warning("non-canonical relink: the queue is at its %d-clip "
+                                "ceiling; dropped the %d oldest offer(s), which the "
+                                "watcher re-offers",
+                                MAX_CANON_RELINK_PENDING, dropped)
             if not self._canon_relink_pending:
                 return
             if self._canon_relink_busy:
@@ -2830,8 +2958,9 @@ class CompanionApp:
         # the start of a burst, rather than per batch: a batch arriving while
         # the worker is draining extends that same burst (the single-flight
         # design above), and splitting one burst in half would be arbitrary.
-        # The refused clips stay in _canon_relink_pending -- the watcher
-        # offers each path once per process, so dropping them strands them.
+        # The refused clips stay in _canon_relink_pending: dropping them
+        # would strand every clip the watcher does not happen to re-offer
+        # (RES-19's cooldown is 15 minutes, and it needs Resolve open).
         project = resolve_bridge.current_project_name()
         if not user_initiated and not resolve_journal.allow_automatic(project, "canon-relink"):
             with self._canon_relink_lock:
@@ -3547,6 +3676,18 @@ class CompanionApp:
                 ))
                 if should_stop():
                     return
+                if results and consolidate.count_copied(results) == 0:
+                    # comp-resolve-2 (2026-09-11): a REHEARSAL (fixer_dry_run)
+                    # answers {"ok": True, "dry_run": True} for every op and
+                    # copies nothing, so there is nothing here for lane A to
+                    # push - an upload pass on the back of it renders as work
+                    # that did not happen. A run where every copy FAILED lands
+                    # here too, and has as little to upload. The
+                    # uploads-already-in-the-tree case (no ops at all, results
+                    # empty) still runs: that is what `results and` is for.
+                    log.info("consolidate: nothing was actually copied in -- "
+                             "skipping the upload phase")
+                    return
                 self._consolidate_upload_phase(
                     subpath, reconcile, consolidate, publish, should_stop)
 
@@ -3564,10 +3705,17 @@ class CompanionApp:
         skipped = [r for r in results if r.get("aborted")]
         failures = [r for r in results if not r.get("ok") and not r.get("aborted")]
         skipped_part = f", {len(skipped)} skipped by you" if skipped else ""
+        # comp-resolve-2 (2026-09-11): `ok` is not "copied". Since RES-15 the
+        # fixer's rehearsal arm answers ok=True/dry_run=True - it did what it
+        # was asked, which was nothing - and this toast counted every one of
+        # them as a file brought in. One predicate for every caller
+        # (consolidate.count_copied), not a third derivation from `ok`.
+        copied = consolidate.count_copied(results)
+        rehearsed = consolidate.count_rehearsed(results)
         if failures:
             log.warning("consolidate: %d/%d copies failed", len(failures), len(results))
             self._notify_tray(
-                f"{len(results) - len(failures) - len(skipped)}/{len(results)} copied in"
+                f"{copied}/{len(results)} copied in"
                 f"{skipped_part}, {len(failures)} failed. "
                 f"{ui_copy.DIAGNOSTICS}.",
                 site_mod.notify_title())
@@ -3576,7 +3724,7 @@ class CompanionApp:
             # failure report and then, a beat later, an unqualified success.
             return
         elif window.should_stop():
-            done = len(results) - len(skipped)
+            done = copied
             # Same tolerance as `control` above: an older window double has
             # no cancelled() and must read as the graceful stop.
             verb = "Cancelled" if getattr(window, "cancelled", lambda: False)() else "Stopped"
@@ -3584,8 +3732,16 @@ class CompanionApp:
                 f"{verb}: {done} of {plan['count']} copied in{skipped_part}, the rest "
                 f"were left alone. Nothing was moved or deleted.", site_mod.notify_title())
             return
+        if rehearsed and not copied:
+            # A rehearsal that says "finished" is the wrong sentence twice
+            # over: nothing was copied and nothing was uploaded.
+            self._notify_tray(
+                f"Rehearsal finished: {rehearsed} file(s) were checked and "
+                "nothing was copied in or uploaded.",
+                site_mod.notify_title("consolidate"))
+            return
         self._notify_tray(
-            f"Copy & upload finished ({len(results) - len(failures) - len(skipped)} "
+            f"Copy & upload finished ({copied} "
             f"copied in{skipped_part})." if skipped else "Copy & upload finished.",
             site_mod.notify_title("consolidate"))
 
@@ -4370,7 +4526,13 @@ class CompanionApp:
             if not ok:
                 restored, restore_msg = drive_swap.swap_to_local(
                     str(self.config.get("local_root", "")), letter=letter)
-                suffix = " P: was restored to your local copy." if restored else f" AND {restore_msg}"
+                # comp-sync-21 (2026-09-11): the letter is site data
+                # (COMMERCIAL_READINESS 11) and it is already in hand three
+                # lines up. This sentence said "P:" to every customer whose
+                # canonical_prefix is not P:, about the drive it had just
+                # restored under a different letter.
+                suffix = (f" {letter} was restored to your local copy."
+                          if restored else f" AND {restore_msg}")
                 message = message + suffix
         finally:
             self._p_swap_busy = False
@@ -4542,9 +4704,20 @@ class CompanionApp:
             return {}
 
     def _watcher_list(self, name: str) -> list[dict[str, str]]:
+        """One of the watcher's reported lists, CAPPED (comp-app-4).
+
+        `missing_clips` is capped at its source (watcher.MAX_MISSING_REPORTED);
+        `non_canonical_refused` is a dict that only a SUCCESSFUL relink ever
+        removes from, so a project in the "Energy Transition" shape (200+
+        non-canonical clips) on a machine where Resolve refuses the relinks
+        grows it to the size of the media pool and puts every entry on every
+        30 s report. Every other reported list already slices
+        (`moved_project_dirs[:20]`, `repath_events[:10]`); this is the one
+        that did not, and the cap belongs here as well as at the source
+        because the report is what it costs."""
         try:
             getter = getattr(self.watcher, name, None)
-            return list(getter() or []) if getter is not None else []
+            return list(getter() or [])[:MAX_REPORTED_LIST] if getter is not None else []
         except Exception:
             log.exception("resolve_health: %s() failed", name)
             return []
@@ -4628,16 +4801,21 @@ class CompanionApp:
         still in the menu and still clickable, and in managed mode nothing
         said whether a pass started, was already running, or had nothing to
         run. `reason` is the sentence to show; `lanes` is what will run.
+
+        comp-app-1 (2026-09-11): the refusals are _lanes_refusal()'s, shared
+        with _start_lanes() rather than copied from it. This answered
+        "accepted" on five of that function's six gates, so the halted and
+        the licence-parked were toasted "Sync requested: lane_a_video_up,
+        ..." for a pass no sequencer was ever started to run.
         """
         lanes: list[str] = []
         try:
             lanes = [str(getattr(lane, "name", "") or "") for lane in self.lanes]
         except Exception:
             log.exception("sync_now: could not list the lanes")
-        if not self._sync_enabled:
-            return {"accepted": False, "lanes": [],
-                    "reason": "This computer works straight off the server, so "
-                              "there is nothing to sync."}
+        refusal = self._lanes_refusal()
+        if refusal is not None:
+            return {"accepted": False, "lanes": [], "reason": refusal[1]}
         if self._managed and self.sequencer is not None:
             entries = None
             try:
@@ -5598,12 +5776,68 @@ class CompanionApp:
             log.exception("could not start the sync lanes after the licence was accepted")
         self._notify_tray("Licence accepted, syncing is starting.", site_mod.notify_title())
 
+    # -- the ONE list of reasons the lanes do not run (comp-app-1) ---------
+    #
+    # 2026-09-11. _start_lanes() refuses on six conditions; sync_now_result()
+    # (APP-6) reproduced the LAST of them and answered {"accepted": True} for
+    # the other five, so a halted, paused, misconfigured, licence-parked or
+    # drive-absent machine was told in writing "Sync requested:
+    # lane_a_video_up, lane_b_proxy_down, lane_c_syncthing" while
+    # _start_lanes had deliberately never started a sequencer for any of
+    # them. The population that hits it is the CR-27 one, least able to
+    # recover on its own. So there is one predicate and both doors ask it: a
+    # gate added below cannot be missed by the door that explains it.
+    LANE_GATE_PAUSED = "paused"
+    LANE_GATE_HALT = "halt"
+    LANE_GATE_CONFIG = "config"
+    LANE_GATE_EULA = "eula"
+    LANE_GATE_ROOT_ABSENT = "root_absent"
+    LANE_GATE_SYNC_DISABLED = "sync_disabled"
+
+    def _lanes_refusal(self) -> Optional[tuple[str, str]]:
+        """The first gate standing between this machine and a sync pass, as
+        (gate, the sentence to show the editor), or None when nothing is in
+        the way. In _start_lanes()'s own order, which is the order of
+        precedence: the tray's own pause first, the fleet halt above every
+        automatic recovery below it.
+
+        Never raises: this is read by the menu as well as by the start path,
+        and a predicate that throws must not be what stops the lanes."""
+        try:
+            if self._paused:
+                return (self.LANE_GATE_PAUSED, "Syncing is paused from the tray.")
+            if self.halt.active:
+                return (self.LANE_GATE_HALT, self._halt_detail())
+            if self.config_problems:
+                return (self.LANE_GATE_CONFIG,
+                        self.config_problem_detail()
+                        or "This computer is not set up for syncing yet.")
+            eula_problem = self.eula_problem()
+            if eula_problem:
+                return (self.LANE_GATE_EULA, eula_problem)
+            if self._root_absent:
+                return (self.LANE_GATE_ROOT_ABSENT, _lane_root_absent_detail())
+            if not self._sync_enabled:
+                return (self.LANE_GATE_SYNC_DISABLED,
+                        "This computer works straight off the server, so there "
+                        "is nothing to sync.")
+        except Exception:
+            log.exception("could not read the sync-lane gates")
+        return None
+
     def _start_lanes(self) -> None:
         """Actually start the sync lanes/sequencer, per sync_enabled/managed
         mode. Extracted from start() so on_signed_in() can (re)run it once a
         require_login gate clears, without repeating the reporter/manifest/
-        watcher startup that only ever needs to happen once."""
-        if self._paused:
+        watcher startup that only ever needs to happen once.
+
+        The refusals are _lanes_refusal()'s (comp-app-1); what stays here is
+        what each refusal DOES - the lane detail it writes and the line it
+        logs. sync_enabled=false is the one gate that is not an early return:
+        it leaves the lanes down but still walks to _lanes_started."""
+        refusal = self._lanes_refusal()
+        gate = refusal[0] if refusal else ""
+        if gate == self.LANE_GATE_PAUSED:
             # SYNC-3 (2026-08-11): sign-in must not override the tray's Pause.
             # on_signed_in() gated on _lanes_started and the login gate only,
             # so signing in with "Pause syncing" ticked resumed the full
@@ -5613,7 +5847,7 @@ class CompanionApp:
             # to _start_lanes() itself so no future caller can miss it.
             log.info("sync lanes/sequencer NOT started: syncing is paused from the tray")
             return
-        if self.halt.active:
+        if gate == self.LANE_GATE_HALT:
             # Above every other refusal below except the tray's own pause:
             # a halt survives restarts precisely so it cannot be cleared by
             # the first thing anyone tries, and _start_lanes() is the ONE
@@ -5627,7 +5861,7 @@ class CompanionApp:
                     pass
             log.warning("sync lanes/sequencer NOT started: %s", self._halt_detail())
             return
-        if self.config_problems:
+        if gate == self.LANE_GATE_CONFIG:
             # validate_config()'s "errors that STOP syncing" used to stop
             # nothing: they were logged and then start() ran anyway. A typo'd
             # remote_root makes lane B's `rclone sync` delete every local
@@ -5642,8 +5876,8 @@ class CompanionApp:
                 len(self.config_problems), config_mod.CONFIG_PATH,
             )
             return
-        eula_problem = self.eula_problem()
-        if eula_problem:
+        if gate == self.LANE_GATE_EULA:
+            eula_problem = refusal[1] if refusal else ""
             # 2026-08-17, COMMERCIAL_READINESS.md item 3: nobody on this
             # machine has agreed to the licence (or agreed to an older
             # version of it), so the lanes do not run. Same shape as the
@@ -5658,7 +5892,7 @@ class CompanionApp:
             self._mark_lanes_eula_not_accepted(eula_problem)
             log.warning("sync lanes/sequencer NOT started: %s", eula_problem)
             return
-        if self._root_absent:
+        if gate == self.LANE_GATE_ROOT_ABSENT:
             # The tree is not there. Unlike a config problem this needs no
             # restart and no admin: _on_root_present() calls back in here the
             # moment the drive returns.
@@ -6161,6 +6395,29 @@ class CompanionApp:
                 guard["ingest_staging"] = staging
         except Exception:
             log.exception("ingest_staging_report() failed")
+        try:
+            # comp-sync-4 (2026-09-11): SYNC-101/SYNC-102's two readers had no
+            # caller anywhere - not the tray, not the report - so a shared
+            # library that is not working on this machine, and a project
+            # folder this machine MOVED because an admin renamed it on the
+            # server, were computed every pass and reached nobody. Absent
+            # when there is nothing to say, which is how "the shared folders
+            # are fine" and "nothing has been renamed" are spelled. Both
+            # producers cap themselves at 10.
+            problems = self.shared_folder_problems()
+            if problems:
+                guard["shared_folder_problems"] = problems
+        except Exception:
+            log.exception("shared_folder_problems report failed")
+        try:
+            # The successful repath's note: the editor's project directory
+            # moved under them, and every clip in the open Resolve project
+            # still points at the old canonical path until something says so.
+            events = self.repath_events()
+            if events:
+                guard["repath_events"] = events
+        except Exception:
+            log.exception("repath_events report failed")
         try:
             guard["halt"] = self.halt.report()
         except Exception:
@@ -7282,11 +7539,33 @@ class CompanionApp:
                             relink_pending=bool(done.get("relink_pending")))
                     continue
                 if not local_root or self._root_absent:
-                    # Not an answer: the drive may be back next report, and
+                    # Not a verdict: the drive may be back next report, and
                     # "nothing at the old path" would be a lie.
+                    #
+                    # comp-sync-20 (2026-09-11): but silence is not free
+                    # either. The dashboard stamps a delivery when it sends
+                    # the command and EXPIRES it after 7 days of "told and
+                    # never answered", so an editor away with the drive in
+                    # their bag had the move quietly dropped - and the shape
+                    # that says "still working on it, do not retire this"
+                    # (v36's `retrying`) was already on the wire and already
+                    # understood. `attempts` stays 0: waiting for a drive is
+                    # not an attempt, and it must not spend the retry budget
+                    # that a real failure needs.
                     log.info("file moves: #%s waits for the sync drive", move["id"])
+                    self._queue_file_move_answer(
+                        move["id"], False,
+                        f"waiting for the sync drive ({site_mod.drive_phrase()})",
+                        state="retrying", attempts=0)
                     continue
-                ok, detail, paths = file_moves_mod.apply_move(move, local_root)
+                # res-companion-1 (2026-09-11): the ledger goes IN, so
+                # apply_move can record `applying` before it touches the disk
+                # (docs/FILE_MOVES.md). Without it a crash between the rename
+                # and the record leaves a move whose file is at the new path
+                # and whose ledger says it never happened, and the redelivery
+                # answers "nothing at the old path".
+                ok, detail, paths = file_moves_mod.apply_move(
+                    move, local_root, ledger=self.file_moves)
                 relink_pending = False
                 if ok and paths is not None:
                     matched, relinked = self._relink_moved_result(
@@ -8686,16 +8965,46 @@ class CompanionApp:
         CMEDIA-3: the port was tried ONCE, at start, so quitting the program
         that held it (the retired standalone BRoll Companion is the usual
         one) did nothing until the editor restarted the tray -- and nothing
-        told them to. Cheap: one bind attempt a minute on a machine that has
-        no listener, and not called at all once it does."""
+        told them to.
+
+        BACKED OFF (comp-app-6, 2026-09-11): an attempt is not cheap - it
+        re-reads the config, re-resolves the media/music/ytdl mounts (which
+        probe /Volumes on macOS) and logs a paragraph naming the retired
+        standalone companion on every failure. A port held by another program
+        is held for hours, so the wait doubles from the caller's own interval
+        up to LOOPBACK_RETRY_MAX_SECONDS while the bind error is unchanged,
+        and resets the moment the error changes (a different program, or a
+        different fault, is new evidence and worth an immediate try)."""
         if self._broll_server is not None:
             return True
         if not broll_server_mod.is_enabled(self.config):
             return False
+        now = time.monotonic()
+        if self._loopback_retry_after and now < self._loopback_retry_after:
+            log.debug("broll: loopback rebind held off for another %.0fs",
+                      self._loopback_retry_after - now)
+            return False
         self._start_broll_server()
         if self._broll_server is not None:
+            self._loopback_retry_after = 0.0
+            self._loopback_retry_delay = 0.0
+            self._loopback_retry_error = ""
             log.info("broll: the loopback port is ours now (it was taken at start)")
-        return self._broll_server is not None
+            return True
+        try:
+            error = str(broll_server_mod.last_bind_error() or "")
+        except Exception:
+            error = ""
+        if error != self._loopback_retry_error:
+            self._loopback_retry_error = error
+            self._loopback_retry_delay = 0.0
+        base = max(float(getattr(self, "media_tree_refresh_interval", 0.0) or 0.0),
+                   LOOPBACK_RETRY_MIN_SECONDS)
+        self._loopback_retry_delay = (base if self._loopback_retry_delay <= 0
+                                      else min(self._loopback_retry_delay * 2,
+                                               LOOPBACK_RETRY_MAX_SECONDS))
+        self._loopback_retry_after = time.monotonic() + self._loopback_retry_delay
+        return False
 
     def _ytdl_deps(self) -> Any:
         """What the /ytdl download executor is allowed to know about this
@@ -9861,6 +10170,36 @@ class CompanionApp:
             log.exception("the crash-loop guard failed")
         return False
 
+    def _log_tray_state(self, icon: Any) -> None:
+        """Say which of the two things happened (comp-ui-1, 2026-09-11).
+
+        "The tray started" and "the tray is IN the notification area" are one
+        question on macOS and two on Windows: `_WindowsIcon.run` catches a
+        failed registration, logs once and returns, leaving a companion with
+        no icon, no pump to receive TaskbarCreated and every later toast
+        (breaker, halt, free space, drive pulled) dropped in silence. This
+        line said "tray icon started" for both, so the machine whose editor
+        was told nothing all day read identically to a healthy one in the log
+        the support workflow collects.
+
+        `registered` absent is a backend that does not answer the question
+        (macOS, a double, an older build) and is reported as it always was -
+        never as a failure. Never raises."""
+        try:
+            registered = getattr(icon, "registered", None)
+        except Exception:  # noqa: BLE001
+            registered = None
+        if registered is None:
+            log.info("tray icon started")
+        elif registered:
+            log.info("tray icon started and registered with the desktop")
+        else:
+            # Not an error yet: registration is retried on the pump thread,
+            # and tray._report_windows_icon_failure is what says so when the
+            # retries are spent.
+            log.warning("tray icon started but is NOT in the notification area yet "
+                        "-- registration is being retried")
+
     def run(self) -> None:
         try:
             setup_logging(self.config)
@@ -9961,7 +10300,7 @@ class CompanionApp:
                 from . import tray as tray_mod
 
                 self._tray_icon = tray_mod.start_tray(self)
-                log.info("tray icon started")
+                self._log_tray_state(self._tray_icon)
             except ImportError:
                 self._tray_icon = None
                 log.warning("pystray/Pillow not installed -- running headless (Ctrl+C to stop)")

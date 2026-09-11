@@ -95,6 +95,28 @@ def _find_eula() -> Path:
 
 
 EULA_PATH = _find_eula()
+_EULA_AT_IMPORT = EULA_PATH
+
+
+def eula_path() -> Path:
+    """`EULA_PATH`, re-resolved when the import-time answer does not exist.
+
+    dash-core-6 (2026-09-11): `_find_eula()` ran once at import, so an OTA
+    bundle or a bind-mount that puts docs/legal/EULA.md in place after boot
+    could not be seen without restarting the process. A path that something
+    set deliberately (a test's monkeypatch, DASH_EULA_DOC resolved at import)
+    is returned as it stands, missing or not: only the untouched import-time
+    default is looked up again.
+    """
+    path = EULA_PATH
+    if path is not _EULA_AT_IMPORT:
+        return path
+    try:
+        if path.is_file():
+            return path
+    except OSError:
+        return path
+    return _find_eula()
 
 
 def now_iso() -> str:
@@ -226,11 +248,28 @@ def list_states(conn: sqlite3.Connection) -> dict[str, TaskState]:
     return out
 
 
+# dash-core-6 (2026-09-11): a REQUIRED task whose only reachable end state is
+# `warn` is a wall, not a warning - it cannot be skipped (run_skip refuses a
+# non-optional task) and no [ DO IT ] clears it, so the badge never goes out.
+# `eula` is the one that can land there: REL-5 made both its check and its
+# accept report `warn` when the build carries no licence file, which is a
+# property of the BUILD, not something the admin can act on. The amber line
+# still says so; it just stops gating. Keep this set to ids whose warn means
+# "nothing here to do", never to ones an admin could fix.
+WARN_SATISFIES_IDS = frozenset({"eula"})
+
+
+def _gate_satisfied(task_id: str, state: TaskState) -> bool:
+    return state.status == "ok" or (
+        state.status == "warn" and task_id in WARN_SATISFIES_IDS)
+
+
 def outstanding_required(conn: sqlite3.Connection) -> list[str]:
     """Task ids that are NOT optional and NOT 'ok' -- what gates the wizard
     landing page (ui.py) and the "Setup" nav badge."""
     states = list_states(conn)
-    return [t.id for t in TASKS if not t.optional and states[t.id].status != "ok"]
+    return [t.id for t in TASKS
+            if not t.optional and not _gate_satisfied(t.id, states[t.id])]
 
 
 # One lock per task id, so a double-click on [ DO IT ] cannot run the same
@@ -354,7 +393,8 @@ def outstanding_for_done(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     states = list_states(conn)
     out: list[tuple[str, str]] = [
         (t.id, t.title) for t in TASKS
-        if not t.optional and t.id != "done" and states[t.id].status != "ok"
+        if not t.optional and t.id != "done"
+        and not _gate_satisfied(t.id, states[t.id])   # dash-core-6
     ]
     for task_id in GATE_TASK_IDS:
         task = get(task_id)
@@ -387,10 +427,11 @@ NO_EULA_DETAIL = ("no licence agreement is included in this build, so nothing "
 
 
 def _check_eula(ctx: SetupContext) -> TaskState:
-    if not EULA_PATH.is_file():
+    path = eula_path()
+    if not path.is_file():
         return TaskState(status="warn", detail=NO_EULA_DETAIL)
     try:
-        text = EULA_PATH.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         return TaskState(status="fail", detail=f"could not read EULA: {exc}")
     version = eula_marker_version(text) or "unversioned"
@@ -406,12 +447,15 @@ def _accept_eula(ctx: SetupContext) -> TaskState:
     """Called by POST /api/v1/setup/eula, not the generic [ DO IT ] button
     (accepting requires a checkbox the wizard's own form renders) -- but
     routed through run_do_it/run() too so the state machine has one writer."""
-    if not EULA_PATH.is_file():
+    path = eula_path()
+    if not path.is_file():
         # Nothing to accept, so nothing IS accepted (REL-5). The wizard is not
-        # blocked; the line stays amber and says why.
+        # blocked; the line stays amber and says why, and `outstanding_*`
+        # counts that warn as satisfied so it cannot wall the wizard in
+        # (dash-core-6).
         return TaskState(status="warn", detail=NO_EULA_DETAIL)
     try:
-        text = EULA_PATH.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         return TaskState(status="fail", detail=f"could not read EULA: {exc}")
     version = eula_marker_version(text) or "unversioned"

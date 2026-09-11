@@ -115,6 +115,66 @@ def test_python_string_literals_have_no_em_dash(path: Path) -> None:
     )
 
 
+# ------------------------------------------------- the other spelling of it
+
+# ' -- ' is an em dash typed on a keyboard, and the scan above does not catch
+# it (ytdl-web-7, 2026-09-11). YTWEB-7 reworded worker.DEGRADED_NOTE for
+# exactly this reason and left six other editor-facing strings carrying it,
+# with nothing to stop a seventh.
+#
+# Scoped to the modules whose non-docstring literals reach a PERSON: the
+# refusal details routes_api and routes_fleet raise, the ops-hint text
+# ai_backend composes, the attestation the browser paints, worker's notes and
+# the downloader's per-clip status lines. claude_cli.py and db.py are out -
+# prompt text is written for a model, and db.py's are deployment errors for
+# whoever is holding the shell. Log calls are subtracted the way docstrings
+# are: `log.info('... -- counted once')` is not product copy.
+DOUBLE_HYPHEN_MODULES = ('routes_api.py', 'routes_fleet.py', 'ai_backend.py',
+                         'attestation.py', 'worker.py', 'downloader.py')
+
+
+def _editor_facing_py() -> list[Path]:
+    return [p for p in _py_files() if p.name in DOUBLE_HYPHEN_MODULES]
+
+
+def _log_call_strings(tree: ast.AST) -> set[int]:
+    """The Constant nodes inside a `log.<level>(...)` call, by id()."""
+    out: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name) and func.value.id == 'log'):
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                out.add(id(child))
+    return out
+
+
+@pytest.mark.parametrize('path', _editor_facing_py(), ids=lambda p: p.name)
+def test_no_double_hyphen_in_editor_facing_strings(path: Path) -> None:
+    tree = ast.parse(path.read_text(encoding='utf-8'), filename=str(path))
+    skip = _docstring_nodes(tree) | _log_call_strings(tree)
+    bad = [
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        and id(node) not in skip and ' -- ' in node.value
+    ]
+    assert not bad, (
+        f"' -- ' reads as an em dash in {path.name} (house style 2026-08-18, "
+        f'ytdl-web-7 2026-09-11). Use a hyphen with spaces, a colon, or two '
+        f'sentences: {bad}'
+    )
+
+
+def test_the_double_hyphen_scan_covers_the_modules_it_names() -> None:
+    """A guard against a rename leaving the scan pointed at nothing."""
+    found = {p.name for p in _editor_facing_py()}
+    assert found == set(DOUBLE_HYPHEN_MODULES), found
+
+
 def test_the_scan_actually_covers_something() -> None:
     """A guard against the globs going quiet after a directory move."""
     assert [p.name for p in _html_files()] == ['index.html']

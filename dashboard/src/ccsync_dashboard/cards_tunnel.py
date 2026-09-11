@@ -244,7 +244,14 @@ def cards_agent_state(
     editor = _require_fleet_caller(request, conn)
     body = dict(payload or {})
     body.pop("token", None)
-    body["name"] = agent_name(editor, body.get("machine") or body.get("name") or "")
+    # dash-release-jobs-6 (2026-09-11): the declared `machine` or nothing.
+    # This used to fall back to the body's own `name`, which is the agent's
+    # socket.gethostname() string -- the very value rule 1 exists to distrust.
+    # The editor half stays verified, so the hole was display spoofing rather
+    # than auth bypass: anything holding a fleet token could make the cards
+    # page name a machine it was not calling from, exactly where "which
+    # computer is driving Resolve" is the question being asked.
+    body["name"] = agent_name(editor, body.get("machine") or "")
     body.pop("machine", None)
     engine = local_engine(request)
     if engine is not None:

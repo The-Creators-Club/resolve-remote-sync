@@ -17,9 +17,20 @@
 -- Stored per job for the reason shot_types, max_candidates, mode and
 -- term_scope are: what a later write is allowed to do must be decided by what
 -- the job was CREATED under, not by whatever the client asserts at download
--- time. That direction is the whole security property here -- a start_download
--- that trusted a client-supplied local=false would let any editor download
--- into any active project, which is the one thing this check exists to stop.
+-- time. That direction is the whole property here: a start_download that
+-- re-decided the widening from the second request would let a retry change
+-- the rules the job was accepted under.
+--
+-- WHAT THE WIDENING IS NOT (ytdl-web-5, 2026-09-11). The sentence this comment
+-- used to carry -- "any editor downloading into any active project is the one
+-- thing this check exists to stop" -- was never true of a SERVER job, and an
+-- owner reading it would believe destinations were constrained when CR-96
+-- deliberately unconstrained them: with the fleet flag off the SPA posts
+-- `local: false` for everyone, and every active project is a legal
+-- destination by design, because no machine's sync plan bears on a fetch no
+-- machine performs. The promise that came with that is enforced at the CLAIM
+-- door since 2026-09-11: db.claim_download refuses a job whose created_local
+-- is 0, so a widened job cannot be handed to a companion afterwards.
 --
 -- ADDITIVE AND INERT. The defaults are the PRE-WIDENING values
 -- (projects.resolve_project's own defaults: local true, no machine), so every

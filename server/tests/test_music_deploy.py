@@ -12,7 +12,7 @@ and the install-path test points the installer at a temp "host root" with a
 fake NAS behind it, so the real one is never touched.
 
 Run with:
-    cd E:\\Projects\\resolve-remote-sync\\server
+    cd E:\\Projects\\Editing\\ccsync\\server
     python -m pytest tests -q
 """
 import hashlib

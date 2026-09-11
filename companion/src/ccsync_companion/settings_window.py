@@ -173,9 +173,19 @@ def _lane_advisories(guard: dict, skip_blocked: bool = False) -> list[tuple[str,
     producers = (
         (BLOCKING, tray_mod._halt_line),
         (BLOCKING, tray_mod._breaker_line),
+        # comp-sync-1 (2026-09-11): BLOCKING, because the thing it warns
+        # about is a latch that will be gone at the next start -- i.e. a
+        # machine that quietly resumes doing what a safety latch stopped.
+        (BLOCKING, tray_mod._persist_failed_line),
         (WARNING, tray_mod._skipped_exists_line),
         (BLOCKING, tray_mod._unfiltered_line),
         (WARNING, tray_mod._conflicts_line),
+        # comp-sync-4 (2026-09-11): beside the other lane C advisory, which
+        # is where a shared folder and a renamed project folder belong.
+        # WARNING, not BLOCKING: syncing continues in both cases, and what
+        # the editor has lost is a shared library or a set of Resolve links.
+        (WARNING, tray_mod._shared_folders_line),
+        (WARNING, tray_mod._repath_line),
         (BLOCKING, tray_mod._reporter_line),
         (BLOCKING, tray_mod._clock_skew_line),
         (INFO, tray_mod._ignored_line),
@@ -820,13 +830,15 @@ def _resolve_section(app: "CompanionApp", guard: dict) -> list:
         items.append(Line("No project is open in Resolve"))
 
     scanned = age_phrase(health.get("last_scan_at"))
+    # comp-ui-4 (2026-09-11): {n} is ui_copy.count's real plural ("1 clip" /
+    # "4 clips"), so the verb has to agree too -- {is} carries it.
     counts = (
-        ("out_of_tree", "{n} clip(s) are stored outside your synced folder, so "
+        ("out_of_tree", "{n} {is} stored outside your synced folder, so "
                         "nothing is backing them up"),
-        ("missing", "{n} clip(s) in this project are offline"),
-        ("bad_prefix", "{n} clip(s) point at a drive letter this computer does "
+        ("missing", "{n} in this project {is} offline"),
+        ("bad_prefix", "{n} {point} at a drive letter this computer does "
                        "not have"),
-        ("non_canonical_refused", "{n} clip(s) were left alone: their path is "
+        ("non_canonical_refused", "{n} {was} left alone: their path is "
                                   "not one CCSync may rewrite"),
     )
     offered_scan = False
@@ -840,7 +852,11 @@ def _resolve_section(app: "CompanionApp", guard: dict) -> list:
         # counts are shown only alongside a scan time.
         if not count or not scanned:
             continue
-        items.append(Line(template.format(n=count), style="warning"))
+        items.append(Line(template.format(
+            n=ui_copy.count(count, "clip"),
+            **{"is": "is" if count == 1 else "are",
+               "was": "was" if count == 1 else "were",
+               "point": "points" if count == 1 else "point"}), style="warning"))
         if not offered_scan:
             items.append(Button("SCAN WHOLE PROJECT",
                                 lambda: tray_mod.action_scan_whole_project(app)))
@@ -1269,7 +1285,8 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
         # SYNC-10: reported, never deleted -- the same posture as the orphan
         # .partial scan. No button on purpose.
         lane_items.append(Line(
-            f"{strays['count']} project folder(s) on this computer are in no "
+            f"{ui_copy.count(strays['count'], 'project folder')} on this "
+            f"computer {'is' if int(strays['count']) == 1 else 'are'} in no "
             f"sync plan ({int(strays.get('bytes') or 0) / 1e9:.1f} GB). Nothing "
             "syncs them and CCSync will not delete them", style="warning"))
     staging = guard.get("ingest_staging") or {}
@@ -1359,6 +1376,12 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
         ytdlp_line = tray_mod.ytdlp_warning_line(snap.get("ytdlp_status"))
         if ytdlp_line:
             yt_items.append(Line(ytdlp_line, style="warning"))
+        # comp-ytdl-jobs-3 (2026-09-11): the ffmpeg sidecar, beside its
+        # sibling. A separate sentence because the two are separate installs
+        # and a machine can have lost both.
+        sidecar_line = tray_mod.ytdlp_sidecar_line(snap.get("ytdlp_status"))
+        if sidecar_line:
+            yt_items.append(Line(sidecar_line, style="warning"))
         if snap.get("ytdl_local_downloads"):
             yt_items.append(Button(
                 "Accept YouTube Terms ✓" if snap.get("ytdl_attested")
@@ -1521,8 +1544,25 @@ def show_settings(app: "CompanionApp") -> None:
         tray_mod._notify(app, "Another CCSync window is already open. Close it first.")
         return
 
+    # comp-ui-6 (2026-09-11): the closer the builder installs once its root
+    # exists, so a failure half way through widget construction destroys the
+    # window instead of abandoning it. See _build_settings_window.
+    closer: list = [None]
+
     def _build_and_show() -> None:
-        _build_settings_window(app, lock)
+        try:
+            _build_settings_window(app, lock, closer)
+        except Exception:
+            close = closer[0]
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    log.debug("settings window: the half-built root would not "
+                              "close", exc_info=True)
+            elif lock is not None and lock.locked():
+                lock.release()
+            raise
 
     try:
         from . import ui_dispatch
@@ -1534,7 +1574,24 @@ def show_settings(app: "CompanionApp") -> None:
             lock.release()
 
 
-def _build_settings_window(app: "CompanionApp", lock) -> None:
+def _build_settings_window(app: "CompanionApp", lock, closer: Optional[list] = None) -> None:
+    """comp-ui-6 (2026-09-11): everything from `root.title()` below to
+    run_dialog() builds widgets, and a TclError/OSError from any of it (a
+    display that went away, an RDP session change, a refresh timer armed on a
+    root Tk has torn down) used to propagate out through ui_dispatch into
+    show_settings, which released the lock and destroyed NOTHING. The result
+    was a mapped, unresponsive window with no mainloop that the editor cannot
+    close, an interpreter reclaim_mine pins for the life of the process
+    because winfo_exists() is still true (CR-93), and another one beside it
+    on every later Settings click. PopupDialog's failed-build path has always
+    done this; this one did not.
+
+    `closer` is show_settings' one-slot holder: the local _release_and_close
+    is put in it the moment the root exists, and show_settings calls it if
+    anything below raises. A holder rather than a wrapper function, because
+    the Tk root must be built in the function the dispatcher calls directly
+    (tests/test_tk_interpreter_hygiene.py).
+    """
     try:
         import tkinter as tk
         from tkinter import ttk
@@ -1569,6 +1626,11 @@ def _build_settings_window(app: "CompanionApp", lock) -> None:
         finally:
             if lock is not None and lock.locked():
                 lock.release()
+
+    # comp-ui-6: handed over the moment it exists, so a failure anywhere
+    # below closes the window instead of abandoning it on screen.
+    if closer is not None:
+        closer[0] = _release_and_close
 
     def _run(label: str, fn: Callable[[], None]) -> Callable[[], None]:
         # ONE rule for every button: close this window, release the lock,

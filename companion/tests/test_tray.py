@@ -2209,7 +2209,7 @@ def test_the_tooltip_omits_a_percentage_it_cannot_measure():
         {"name": "a.mp4", "percent": None, "eta_seconds": None},
     ])
     text = _tooltip_text(_tray_snapshot(app))
-    assert "making 214 proxy file(s)" in text and "next at" not in text
+    assert "making 214 proxy files" in text and "next at" not in text
 
 
 def test_the_percentage_never_reaches_the_menu_fingerprint():
@@ -2235,7 +2235,7 @@ def test_the_tooltip_carries_the_live_number():
     assert "1 needs a proxy" in _tooltip_text(_tray_snapshot(app))
 
     app = _proxy_app(missing=12, left=9, encoding=True)
-    assert "making 9 proxy file(s)" in _tooltip_text(_tray_snapshot(app))
+    assert "making 9 proxy files" in _tooltip_text(_tray_snapshot(app))
 
 
 def test_the_tooltip_suffix_yields_to_everything_louder():
@@ -3079,7 +3079,7 @@ def test_ignored_line_names_the_way_back():
 
     line = _ignored_line({"resolve_health": {"ignored_this_session": 14,
                                              "ignored_folders": 0}})
-    assert line.startswith("\u26a0 14 clip(s) skipped this session")
+    assert line.startswith("\u26a0 14 clips skipped this session")
     assert "SCAN WHOLE PROJECT" in line
     assert "\u2014" not in line
 
@@ -3089,7 +3089,8 @@ def test_ignored_line_mentions_the_folders_left_alone_on_purpose():
 
     line = _ignored_line({"resolve_health": {"ignored_this_session": 0,
                                              "ignored_folders": 2}})
-    assert "2 folder(s) are set to be left alone" in line
+    # comp-ui-4 (2026-09-11): "folder(s)" -> ui_copy.count, verb agreeing.
+    assert "2 folders are set to be left alone" in line
     assert "skipped this session" not in line
 
 

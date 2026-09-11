@@ -715,6 +715,67 @@ if ($AdminUser -and $DashboardUrl) {
     }
 }
 
+# --- TIMELINE CARDS --------------------------------------------------------
+#
+# cards snapshot deploy, 2026-09-11. /cards is ANOTHER REPO's code, shipped to
+# <host-root>/cards-web by server\install_dashboard_app.py as a `git archive`
+# export of one commit -- so "is the live page the code I am reading" is a
+# question about a COMMIT, and neither the dashboard version nor the companion
+# version answers it. The deploy writes DEPLOYED_COMMIT into the shipped tree
+# and the same facts into this record on the machine that shipped it; this
+# doctor is read-only and has no NAS shell, so the record is what it reads.
+# No record is "not checked", never OK: a check that cannot see is not a pass.
+
+Write-Head "TIMELINE CARDS (/cards, another repo's commit)"
+
+$CardsRecord = $env:CCSYNC_CARDS_RECORD
+if (-not $CardsRecord) { $CardsRecord = Join-Path $CcsyncHome "state\cards_deployed.json" }
+$cardsInfo = $null
+if (Test-Path -LiteralPath $CardsRecord) {
+    try { $cardsInfo = Get-Content -LiteralPath $CardsRecord -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { Write-Unknown "unreadable cards deploy record at $CardsRecord ($($_.Exception.Message))" }
+}
+if (-not $cardsInfo) {
+    Write-Unknown "no cards deploy record at $CardsRecord -- this machine has not shipped /cards since 2026-09-11 (docs\CARDS_DEPLOY.md). NOT CHECKED, not OK."
+}
+else {
+    $cardsCommit = "$($cardsInfo.commit)".Trim()
+    $cardsRef = "$($cardsInfo.ref)".Trim()
+    $cardsRepo = "$($cardsInfo.repo)".Trim()
+    Write-Row "deployed commit" "$($cardsInfo.short)  ($cardsRef)"
+    if ("$($cardsInfo.subject)".Trim()) { Write-Row "  subject" "$($cardsInfo.subject)" }
+    if ("$($cardsInfo.exported)".Trim()) { Write-Row "  shipped" "$($cardsInfo.exported)" }
+    Write-Row "  from repo" $cardsRepo
+    if (-not $cardsRepo -or -not (Test-Path -LiteralPath $cardsRepo)) {
+        Write-Unknown "the Timeline Cards repo '$cardsRepo' is not on this machine -- cannot say whether it has moved on"
+    }
+    else {
+        if (-not $cardsRef) { $cardsRef = "main" }
+        # Called through & rather than `cmd /c` like the git describe above:
+        # cmd eats the caret in `main^{commit}` (it is cmd's own escape
+        # character) and git then resolves a ref called "main{commit}",
+        # which never exists -- the check silently became "cannot compare".
+        $cardsHead = ""
+        try { $cardsHead = "$(& git -C $cardsRepo rev-parse --verify "$cardsRef^{commit}" 2>$null)".Trim() }
+        catch { $cardsHead = "" }
+        if (-not $cardsHead) {
+            Write-Unknown "cannot read $cardsRef in $cardsRepo -- cannot compare"
+        }
+        elseif ($cardsHead -eq $cardsCommit) {
+            Write-Ok "/cards was shipped from $cardsRef at $($cardsInfo.short), which is still its head"
+        }
+        else {
+            $ahead = ""
+            try { $ahead = "$(& git -C $cardsRepo rev-list --count "$cardsCommit..$cardsHead" 2>$null)".Trim() }
+            catch { $ahead = "" }
+            $count = ""
+            if ($ahead -and $ahead -ne "0") { $count = " ($ahead commits)" }
+            Write-Drift "$cardsRef in $cardsRepo is now $($cardsHead.Substring(0, [Math]::Min(12, $cardsHead.Length)))$count, ahead of the shipped $($cardsInfo.short)"
+            Write-Host "        => re-ship: dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py   (docs\CARDS_DEPLOY.md)" -ForegroundColor Yellow
+        }
+    }
+}
+
 # --- VERDICT ---------------------------------------------------------------
 
 Write-Head "VERDICT"
@@ -750,15 +811,36 @@ if ($Watch) {
     }
     else {
         Write-Head "ROLLOUT WATCH (every 60 s; Ctrl+C to stop)"
+        # server-tools-6 (2026-09-11): this loop used to retry for ever. The
+        # session is minted ONCE, before the report, and a rollout outlasts
+        # it: when it expired the watch printed the same "packages query
+        # failed" line once a minute until the operator gave up, and never
+        # reached the completion line it exists to print. A 401/403 is that
+        # case and ends the watch immediately; anything else (a dashboard
+        # restarting mid-ship, which is the normal case here) is retried, but
+        # not for ever.
+        $watchFailureCeiling = 5
+        $watchFailures = 0
         while ($true) {
             try {
                 $pkgs = Invoke-RestMethod -Method Get -Uri "$DashboardUrl/api/v1/admin/packages" `
                     -WebSession $dashSession -TimeoutSec 15
+                $watchFailures = 0
             }
             catch {
-                # A dashboard restarting mid-ship is the normal case here, not
-                # a reason to end the watch.
-                Write-Unknown "$(Get-Date -Format 'HH:mm:ss') packages query failed: $($_.Exception.Message)"
+                $status = 0
+                $resp = $_.Exception.Response
+                if ($resp -and $resp.StatusCode) { $status = [int]$resp.StatusCode }
+                if ($status -eq 401 -or $status -eq 403) {
+                    Write-Unknown "your admin session expired (HTTP $status). Re-run: .\tools\check_deploy_drift.ps1 -AdminUser <admin> -Watch"
+                    break
+                }
+                $watchFailures++
+                Write-Unknown "$(Get-Date -Format 'HH:mm:ss') packages query failed ($watchFailures/$watchFailureCeiling): $($_.Exception.Message)"
+                if ($watchFailures -ge $watchFailureCeiling) {
+                    Write-Unknown "giving up after $watchFailureCeiling failures in a row. The dashboard is unreachable, or your admin session expired. Re-run: .\tools\check_deploy_drift.ps1 -AdminUser <admin> -Watch"
+                    break
+                }
                 Start-Sleep -Seconds 60
                 continue
             }

@@ -126,9 +126,22 @@ class SyncthingClient:
                 method, url, params=params, json=json_body,
                 headers={"X-API-Key": self.api_key},
                 timeout=self.timeout if timeout is None else timeout,
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise SyncthingError(f"{method} {path}: {exc}") from exc
+        # dash-core-2 (2026-09-11): the `>= 300` line below reads like a
+        # redirect refusal but used to run AFTER `requests` had walked the
+        # chain, so it never saw a 3xx that resolved - and `requests` strips
+        # only Authorization/Proxy-Authorization/Cookie across a host change,
+        # never a custom header, so X-API-Key (the fleet's Syncthing key) went
+        # to the redirect target. Same invariant as CR-111 and dash-core-1.
+        if 300 <= resp.status_code < 400:
+            raise SyncthingError(
+                f"{method} {path}: HTTP {resp.status_code} redirecting to "
+                f"{resp.headers.get('Location', '(no Location)')!r}. Nothing was sent on. "
+                "Point SYNCTHING_GUI_URL at the address Syncthing's API serves"
+            )
         if resp.status_code >= 300:
             raise SyncthingError(f"{method} {path}: HTTP {resp.status_code}")
         try:

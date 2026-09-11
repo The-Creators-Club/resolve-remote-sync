@@ -241,6 +241,32 @@
            as far as the lanes are concerned there is nothing to move. Amber
            rather than red: nothing is broken, something is unprotected. #}
         {% if e.guard.resolve_out_of_tree %}<span class="chip amber" title="{{ chip_help('out_of_tree', n=e.guard.resolve_out_of_tree, bad_prefix=((", " ~ e.guard.resolve_bad_prefix ~ " of them under the wrong drive letter") if e.guard.resolve_bad_prefix else ""), at=e.guard.resolve_last_scan_at | ago) }}">[ {{ e.guard.resolve_out_of_tree }} CLIPS OUTSIDE THE TREE ]</span>{% endif %}
+        {# comp-app-2 (bug hunt 2026-09-11): the nine wave-3 `resolve_health`
+           fields. The companion has sent them since 2026-09-04 and the report
+           model threw every one away, so "Resolve has been wedged on this
+           call for 40 seconds" and "the attach pass refused 12 clips" arrived
+           and were dropped. Beside the v38 counters because it is the same
+           scan. NOTHING AT ALL for a machine that has not sent them (an older
+           companion): silence, never a reassuring "connected". #}
+        {% if e.resolve_detail %}{% set rd = e.resolve_detail %}
+          <div class="mono-sm muted">Resolve:
+            {% if rd.get('connected') is not none %}{{ "connected" if rd.get('connected') else "not connected" }}{% else %}not checked{% endif %}{% if rd.get('project_open') %} · project open: <span class="who">{{ rd.get('project_open') }}</span>{% endif %}{% if rd.get('wedged_seconds') %} · <span class="red">wedged {{ rd.get('wedged_seconds') | round | int }} s{% if rd.get('wedged_call') %} in {{ rd.get('wedged_call') }}{% endif %}</span>{% endif %}{% set pa = rd.get('proxy_attach') or {} %}{% if pa.get('attached') is not none or pa.get('failed') is not none %} · proxies attached {{ pa.get('attached') or 0 }}, failed {{ pa.get('failed') or 0 }}{% if pa.get('why') %} ({{ pa.get('why') }}){% endif %}{% endif %}{% set pg = rd.get('proxy_gaps') or {} %}{% if pg.get('capped') %} · proxy queue capped at {{ pg.get('capped') }}{% endif %}{% if pg.get('low_space') %} · {{ pg.get('low_space') }}{% endif %}{% set st = rd.get('stills') or {} %}{% if st.get('ok') is not none and not st.get('ok') %} · stills: {{ st.get('status') or "not ok" }}{% if st.get('instruction') %} ({{ st.get('instruction') }}){% endif %}{% endif %}
+          </div>
+          {# Behind a count, because either list can be fifty clips long and
+             the row is a grid cell. data-key so base.html keeps the choice
+             across the 15 s poll's swap. #}
+          {% for group in [('missing_clips', 'Resolve cannot find'), ('non_canonical_refused', 'refused: the path is not the canonical one')] %}
+            {% set clips = rd.get(group[0]) or [] %}
+            {% if clips %}
+            <details class="proj-group" data-key="rh:{{ group[0] }}:{{ e.editor_username }}:{{ e.machine }}">
+              <summary><span class="marker">&#9656;</span> {{ clips | length }} clip{{ "s" if clips | length != 1 }} {{ group[1] }}</summary>
+              <ul class="mono-sm">
+                {% for c in clips %}<li>{{ c.get('name') or c.get('path') or "?" }}{% if c.get('name') and c.get('path') %} <span class="muted">{{ c.get('path') }}</span>{% endif %}</li>{% endfor %}
+              </ul>
+            </details>
+            {% endif %}
+          {% endfor %}
+        {% endif %}
         {% if e.guard.stray_projects_count %}<span class="chip amber" title="{{ chip_help('stray_dirs', n=e.guard.stray_projects_count, bytes=e.guard.stray_projects_bytes | human_bytes) }}">[ {{ e.guard.stray_projects_count }} STRAY PROJECT DIRS ]</span>{% endif %}
         {% if e.guard.moved_project_dirs_count %}<span class="chip amber" title="{{ e.guard.moved_project_dirs_count }} project folder(s) on this computer are not where the tree expects them. Syncing for those projects looks busy and moves nothing. Move it back, or use MOVE ON THE SERVER AND ON EVERY MACHINE on the project page.">[ PROJECT FOLDER MOVED ]</span>{% endif %}
         {% if e.guard.ingest_staging_bytes %}<span class="chip amber" title="{{ e.guard.ingest_staging_bytes | human_bytes }} of footage is in this computer's drop folder and has not been filed into a project yet. It is on one disk.">[ INGEST STAGING {{ e.guard.ingest_staging_bytes | human_bytes }} ]</span>{% endif %}

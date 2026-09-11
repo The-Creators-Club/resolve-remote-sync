@@ -299,7 +299,7 @@ delete entries in it. Tightening it changes inheritance for everything under
 ## Local verification (already done for these scripts; re-run if you edit them)
 
 ```
-cd E:\Projects\resolve-remote-sync\server
+cd E:\Projects\Editing\ccsync\server
 python -m py_compile common.py setup_tree.py setup_editor_account.py install_syncthing_app.py install_dashboard_app.py setup_syncthing_folder.py accept_device.py write_marker.py check_health.py
 python -m pytest tests -v
 python setup_tree.py --year 2025 --series FF4 --project Nuclear --dry-run

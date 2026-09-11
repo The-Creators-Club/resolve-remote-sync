@@ -10,7 +10,7 @@ by an operator. `docker inspect` on the live container confirmed both absent.
 
 Offline, like the rest of this suite; run from GIT BASH (see CLAUDE.md).
 
-    cd E:\\Projects\\resolve-remote-sync\\server
+    cd E:\\Projects\\Editing\\ccsync\\server
     ../dashboard/.venv/Scripts/python.exe -m pytest tests/test_protection_datasets.py -q
 """
 import sys

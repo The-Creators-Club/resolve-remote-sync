@@ -217,8 +217,21 @@ def resolve_marker_includes(projects_dir: Path, borrower_rel: str,
     results: list[LinkResult] = []
     for i, declared in enumerate(kept):
         if i >= MAX_INCLUDES:
-            results.append(LinkResult(declared=declared, status=STATUS_INVALID,
-                                      detail=f"too many includes (limit {MAX_INCLUDES})"))
-            continue
+            # dash-db-3 (2026-09-11): STOP here, do not keep appending one
+            # refusal per remaining entry. The cap's comment promises a
+            # tampered marker cannot make this unbounded, but the loop used to
+            # `continue`, so a marker with 10,000 includes produced 10,000
+            # LinkResults and therefore up to 10,000 project_links rows (the
+            # key is (borrower_slug, declared_path), and the declared path is
+            # written by anyone who can write the share) - rewritten every
+            # provision cycle and rendered on the admin page. One row says the
+            # same thing and bounds the table by the constant.
+            log.warning("marker of %s: %d includes over the limit of %d were ignored",
+                        borrower_rel, len(kept) - MAX_INCLUDES, MAX_INCLUDES)
+            results.append(LinkResult(
+                declared=declared, status=STATUS_INVALID,
+                detail=f"too many includes (limit {MAX_INCLUDES}); "
+                       f"{len(kept) - MAX_INCLUDES} ignored"))
+            break
         results.append(resolve_include(projects_dir, borrower_rel, declared))
     return results

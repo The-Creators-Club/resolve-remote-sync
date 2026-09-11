@@ -46,14 +46,17 @@ def test_an_unwritable_home_reports_no_id_rather_than_raising(tmp_path):
     assert result == "" or (path.exists() and result)
 
 
-def test_a_corrupt_file_is_replaced_rather_than_fatal(tmp_path):
+def test_a_corrupt_file_is_not_fatal_and_is_not_replaced(tmp_path):
+    """comp-app-5 (2026-09-11) REVERSED the second half of this: a corrupt
+    file used to be overwritten with a freshly minted id, and a NEW id reads
+    on the dashboard as a different computer, losing the rename affordance
+    this id is the whole reason for. Unreadable is not absent - the run
+    reports no id and the bytes are left for a support session to look at."""
     path = tmp_path / "machine.json"
     path.write_text("{not json", encoding="utf-8")
 
-    minted = machine_mod.machine_id(path)
-
-    assert minted
-    assert json.loads(path.read_text(encoding="utf-8"))["machine_id"] == minted
+    assert machine_mod.machine_id(path) == ""
+    assert path.read_text(encoding="utf-8") == "{not json"
 
 
 def test_it_lives_beside_identity_not_under_state(tmp_path):

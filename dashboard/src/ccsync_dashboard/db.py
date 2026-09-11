@@ -1737,6 +1737,24 @@ ALTER TABLE alert_log ADD COLUMN batch_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS ix_alert_log_batch ON alert_log(batch_id, id);
 """
 
+# v52: WHICH WAY A PUSHED UPDATE POINTS (dash-api-3, bug hunt 2026-09-11).
+# `[ ROLL THE FLEET BACK ]` delivered nothing, on every fleet, since REL-16
+# widened it past recalls: the report handler retires a pending push when the
+# machine reports a version AT OR PAST the one asked for (the dash-core-6
+# widening), and a rollback by definition asks for a version BELOW what the
+# machine is running - so the request was cleared on the machine's very next
+# report, before `commands.upgrade` was ever emitted, and the admin got a
+# green toast for a fan-out nobody applied.
+#
+# The version the machine was ON when the push was made is what tells the two
+# directions apart. NULL is every row that predates this column and every
+# push made by a caller that does not say, and it reads as the OLD behaviour
+# ("at or past"), which is the safe direction for an upgrade: a fleet
+# mid-deploy must not suddenly start re-pushing builds it has already taken.
+SCHEMA_V52 = """
+ALTER TABLE machines ADD COLUMN update_requested_from TEXT;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1865,6 +1883,9 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # 51: the alert digest's batch id (CR-190, 2026-09-04). One column, and
     # gapless like every one before it.
     (51, SCHEMA_V51),
+    # 52: the pushed update's direction (dash-api-3, 2026-09-11). One
+    # nullable column, and gapless like every one before it.
+    (52, SCHEMA_V52),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -2062,6 +2083,25 @@ def add_pending_ssh_key(
     )
 
 
+def _schema_predates(exc: sqlite3.OperationalError) -> bool:
+    """True only for the "this database was built by an older dashboard"
+    shape: a missing table or column.
+
+    dash-db-2 (2026-09-11): several readers used to swallow EVERY
+    OperationalError and answer the empty value, justified in their
+    docstrings as tolerating a pre-v50 database. What a bare except actually
+    catches is `database is locked` and `disk I/O error`, and for the
+    suspension and archive readers an empty answer is a fail-OPEN of an admin
+    control: the enforce cycle filters its plan with them, so one exceeded
+    busy timeout re-shares every folder the admin just suspended or archived
+    and logs nothing. A lock is not an answer, so it is raised; the caller
+    that wants fail-open owns that decision explicitly, the way api.py's
+    suspension check already does.
+    """
+    text = str(exc).lower()
+    return "no such column" in text or "no such table" in text
+
+
 def fetch_pending_ssh_keys(
     conn: sqlite3.Connection, username: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -2073,7 +2113,9 @@ def fetch_pending_ssh_keys(
     q += " ORDER BY submitted_at DESC, username"
     try:
         rows = conn.execute(q, params).fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if not _schema_predates(exc):
+            raise                       # dash-db-2: a lock is not an answer
         return []
     return [dict(r) for r in rows]
 
@@ -2424,7 +2466,9 @@ def suspended_editors(conn: sqlite3.Connection) -> set[str]:
     try:
         rows = conn.execute(
             "SELECT editor_username FROM known_editors WHERE suspended_at IS NOT NULL")
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if not _schema_predates(exc):
+            raise                       # dash-db-2: never re-share on a lock
         return set()
     return {str(r[0] or "").strip().lower() for r in rows if r[0]}
 
@@ -2436,7 +2480,9 @@ def editor_suspension(conn: sqlite3.Connection, editor: str) -> dict[str, Any] |
         row = conn.execute(
             "SELECT suspended_at, suspended_by, suspended_reason FROM known_editors "
             "WHERE editor_username=?", (name,)).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if not _schema_predates(exc):
+            raise                       # dash-db-2: a lock is not "not suspended"
         return None
     if row is None or not row["suspended_at"]:
         return None
@@ -2552,7 +2598,9 @@ def archived_project_slugs(conn: sqlite3.Connection) -> set[str]:
     try:
         rows = conn.execute(
             "SELECT slug FROM projects WHERE archived_at IS NOT NULL")
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if not _schema_predates(exc):
+            raise                       # dash-db-2: a lock is not "nothing is archived"
         return set()
     return {str(r[0]) for r in rows if r[0]}
 
@@ -2570,7 +2618,9 @@ def fetch_archived_projects(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                         WHERE s.project_slug = p.slug) AS editors
                FROM projects p WHERE p.archived_at IS NOT NULL
                ORDER BY p.archived_at DESC, p.label""").fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if not _schema_predates(exc):
+            raise                       # dash-db-2: a lock is not an answer
         return []
     return [dict(r) for r in rows]
 
@@ -4649,22 +4699,33 @@ def pending_machine_request(
 
 def request_machine_update(
     conn: sqlite3.Connection, editor: str, machine: str, version: str,
-    requested_by: str, now: str,
+    requested_by: str, now: str, from_version: str = "",
 ) -> bool:
     """Ask one machine to take `version` on its next report (v25).
 
     False when there is no such machine: a request that names nothing must
-    read as a failure to the admin, not as a silent success."""
+    read as a failure to the admin, not as a silent success.
+
+    `from_version` is the version that machine was ON when the push was made
+    (v52, dash-api-3, 2026-09-11), and it exists for ONE reader: the report
+    handler's clear rule, which retires a push when the machine reports a
+    version at or past the one asked for. That is right for an upgrade and
+    fatal for a rollback, which asks for a LOWER version and was therefore
+    retired on the next report without ever being delivered. Empty (every row
+    written before this column, and every caller that does not know) keeps
+    exactly the old behaviour."""
     cur = conn.execute(
         """UPDATE machines
               SET update_requested_version=?, update_requested_at=?,
-                  update_requested_by=?
+                  update_requested_by=?, update_requested_from=?
             WHERE editor_username=? AND machine=?""",
-        (version, now, requested_by, editor, machine),
+        (version, now, requested_by, str(from_version or "") or None,
+         editor, machine),
     )
     if cur.rowcount > 0:
         audit(conn, requested_by, "machine.update_push", machine,
-              {"editor": editor, "machine": machine, "version": version}, now=now)
+              {"editor": editor, "machine": machine, "version": version,
+               "from_version": str(from_version or "")}, now=now)
     return cur.rowcount > 0
 
 
@@ -4677,7 +4738,7 @@ def clear_machine_update_request(
     conn.execute(
         """UPDATE machines
               SET update_requested_version=NULL, update_requested_at=NULL,
-                  update_requested_by=NULL
+                  update_requested_by=NULL, update_requested_from=NULL
             WHERE editor_username=? AND machine=?""",
         (editor, machine),
     )
@@ -4688,13 +4749,19 @@ def machine_update_request(
 ) -> dict[str, Any] | None:
     row = conn.execute(
         """SELECT update_requested_version AS version, update_requested_at AS at,
-                  update_requested_by AS by_user
+                  update_requested_by AS by_user,
+                  update_requested_from AS from_version
              FROM machines WHERE editor_username=? AND machine=?""",
         (editor, machine),
     ).fetchone()
     if row is None or not row["version"]:
         return None
-    return dict(row)
+    out = dict(row)
+    # "" and not None out here (dash-api-3): the clear rule asks "did the
+    # pusher say where this machine was", and "the column is NULL" and "the
+    # caller did not say" have to be the same answer - the old, safe one.
+    out["from_version"] = str(out.get("from_version") or "")
+    return out
 
 
 def request_lane_b_resume(
@@ -5030,7 +5097,7 @@ def expire_machine_update_requests(conn: sqlite3.Connection, now: str) -> int:
         conn.execute(
             """UPDATE machines
                   SET update_requested_version=NULL, update_requested_at=NULL,
-                      update_requested_by=NULL
+                      update_requested_by=NULL, update_requested_from=NULL
                 WHERE editor_username=? AND machine=?""",
             (row["editor_username"], row["machine"]),
         )
@@ -6219,6 +6286,13 @@ def audit_since(
 
 ALERT_MAX_AGE_DAYS = 120
 
+# The same window for a CLEARED notice row (dash-collector-alerts-6,
+# 2026-09-11). Deliberately the alert ledger's number and not the audit's:
+# what a cleared notice is worth keeping for is "was this machine shouting
+# about the same thing last month", which is the question alert_log answers
+# and on the same horizon.
+NOTICE_MAX_AGE_DAYS = 120
+
 # What the LAST alert scan found, so the topbar can show a count without
 # re-running forty checks on every page render. A meta row and not a table:
 # it is one small current picture with no history worth keeping (the history
@@ -6348,6 +6422,67 @@ def store_resolve_health(
          guard.get("moved_project_dirs_count"), guard.get("ingest_staging_bytes"),
          editor, machine),
     )
+    store_resolve_health_detail(conn, editor, machine, guard)
+
+
+# The `meta` key one computer's wave-3 Resolve detail is stored under, prefix
+# plus "<editor>/<machine>" (comp-app-2, 2026-09-11).
+RESOLVE_HEALTH_META_PREFIX = "resolve_health:"
+
+# The nine wave-3 fields `app.resolve_health()` has put on the wire since
+# 2026-09-04. Named here rather than taken wholesale so a companion that
+# starts sending a tenth cannot grow this row without somebody deciding to
+# keep it.
+RESOLVE_HEALTH_DETAIL_KEYS = (
+    "connected", "project_open", "wedged_seconds", "wedged_call",
+    "missing_clips", "non_canonical_refused", "proxy_attach", "proxy_gaps",
+    "stills",
+)
+
+
+def store_resolve_health_detail(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    guard: Mapping[str, Any] | None,
+) -> None:
+    """`sync_guard.resolve_health`'s wave-3 nine -> `meta` (comp-app-2,
+    2026-09-11).
+
+    Those nine rode every report for a week and were stored nowhere: the
+    model declared them and `store_resolve_health`'s fixed column list
+    carried only the v38 counters, so "Resolve is wedged on this call for 40
+    seconds" and "the proxy attach pass refused 12 clips" arrived and were
+    dropped. `meta` and not nine more machine_state columns, for the reason
+    api._store_ytdlp_state gives about itself: this is an opaque per-machine
+    verdict with no SQL reader, a schema number is a shared resource, and a
+    column per field is four migrations of guessing which fields matter.
+    Promote it the day something wants to ask about it in SQL.
+
+    THE LATCH RULE, as everywhere else in this group: written from any
+    guard-bearing report, and a section that says nothing DELETES the row.
+    A companion that has stopped sending one has stopped knowing, and a
+    wedged-call sentence from last Tuesday is worse than silence.
+    """
+    if guard is None or not guard.get("at"):
+        return
+    key = f"{RESOLVE_HEALTH_META_PREFIX}{editor}/{machine}"
+    raw = guard.get("resolve_health_detail")
+    detail = {
+        name: raw[name] for name in RESOLVE_HEALTH_DETAIL_KEYS
+        if isinstance(raw, Mapping) and raw.get(name) is not None
+    } if isinstance(raw, Mapping) else {}
+    if not detail:
+        meta_delete(conn, key)
+        return
+    meta_set_json(conn, key, detail)
+
+
+def resolve_health_detail(
+    conn: sqlite3.Connection, editor: str, machine: str,
+) -> dict[str, Any]:
+    """What that machine last said about Resolve beyond the v38 counters, or
+    {} when it has said nothing (comp-app-2)."""
+    value = meta_get_json(conn, f"{RESOLVE_HEALTH_META_PREFIX}{editor}/{machine}")
+    return value if isinstance(value, dict) else {}
 
 
 def store_loopback_state(
@@ -6571,6 +6706,7 @@ def fetch_all_selection_modes(conn: sqlite3.Connection) -> dict[str, dict[str, s
 
 def fetch_machine_selections(
     conn: sqlite3.Connection, sync_modes: tuple[str, ...] | None = None,
+    for_enforce: bool = False,
 ) -> dict[str, list[tuple[str, str]]]:
     """slug -> [(editor_username, machine)...], the unassigned bucket
     resolved against each editor's machines. This is what the enforce cycle
@@ -6586,7 +6722,21 @@ def fetch_machine_selections(
     CR-28 was enforced on every write path only, so a `machine=''` row was
     fanned out to a base rig here and the enforce cycle -- which reads exactly
     this map and applies no mode filter of its own -- offered a Syncthing
-    share to the computer whose tree root IS the NAS share."""
+    share to the computer whose tree root IS the NAS share.
+
+    `for_enforce=True` is the view for anyone deciding what SHOULD be
+    happening on a machine: it drops a wired machine's OWN rows as well
+    (dash-db-1, 2026-09-11). That fix went only half way in 2026-09-03 --
+    the bucket branch learned the rule, the `own` branch did not -- so an
+    ordinary editing machine that later flipped to wired in the tray kept
+    its rows and read as holding a full tick. The enforce cycle survives on
+    CR-110's belt in collector.py, but the two readers that decide what an
+    ADMIN is told (`notices._check_plan_without_share`,
+    `invariants._check_plan_has_share`) have no belt and raise a permanent
+    error notice about a correct configuration. It is a PARAMETER rather
+    than the new default because the admin tick grid (assignments.py) reads
+    the same map and must keep showing that stale tick: a cell filtered out
+    of the grid is a row in the table with no button left to clear it."""
     wanted = set(sync_modes) if sync_modes else None
     wired = base_machines(conn)
     by_editor_machines: dict[str, list[str]] = {}
@@ -6610,6 +6760,8 @@ def fetch_machine_selections(
             ).add(row["project_slug"])
     grouped: dict[str, list[tuple[str, str]]] = {}
     for (editor, machine), slugs in own.items():
+        if for_enforce and (editor, machine) in wired:
+            continue          # dash-db-1: a base rig holds no tick, by any route
         for slug in slugs:
             grouped.setdefault(slug, []).append((editor, machine))
     for editor, slugs in bucket.items():
@@ -7930,6 +8082,21 @@ def prune(conn: sqlite3.Connection, now: str, pin: bool = False) -> None:
     conn.execute(
         "DELETE FROM alert_log WHERE at < ?", (cutoff(days=ALERT_MAX_AGE_DAYS),),
     )
+    # The notices ledger (v37) had NO retention at all until
+    # dash-collector-alerts-6 (2026-09-11): one row per (kind, subject), so it
+    # is bounded in practice, but a subject is a machine or slug name and a
+    # cleared row for a computer nobody owns any more lived for ever. Same
+    # window as alert_log, on the same reasoning, and CLEARED ROWS ONLY: an
+    # open notice is a problem the server has found and is still telling
+    # somebody about, and no cleanup pass may take one off the home page
+    # because it is old. `last_seen` guards against a row cleared long ago and
+    # re-asserted since (notice() NULLs cleared_at, but a clock skew must not
+    # be able to delete a live subject).
+    conn.execute(
+        "DELETE FROM notices WHERE cleared_at IS NOT NULL AND cleared_at < ? "
+        "AND last_seen < ?",
+        (cutoff(days=NOTICE_MAX_AGE_DAYS), cutoff(days=NOTICE_MAX_AGE_DAYS)),
+    )
     # Diagnostics bundles (v33, SYS-7). Bounded at write time to the newest
     # DIAGNOSTICS_KEEP_PER_MACHINE per computer; this is the age bound, on the
     # SERVER's received_at rather than the companion's `at` -- a machine with a
@@ -8577,7 +8744,12 @@ def fetch_collector_status(
     run succeeded AND it finished recently. Without the staleness check, a
     collector thread that died before entering its guarded loop (nothing
     restarts it) left /api/v1/health reporting ok forever off a poll run from
-    hours ago -- see the syncthing_reachable staleness finding."""
+    hours ago -- see the syncthing_reachable staleness finding.
+
+    `collector_stale` asks a different question about the same rows: is the
+    THREAD turning. It is computed from the last cycle START of any kind
+    (dash-collector-alerts-3), so a collector whose cycles are failing is
+    still visibly alive and one that has stopped is visibly stopped."""
     now = now or utcnow_iso()
     kinds: dict[str, dict[str, Any]] = {}
     for row in conn.execute(
@@ -8594,14 +8766,33 @@ def fetch_collector_status(
         " ORDER BY id DESC LIMIT 1", SYNCTHING_FREE_KINDS
     ).fetchone()
     reachable = bool(latest["ok"]) if latest is not None else False
-    stale = False
+    finished_stale = False
     if reachable and latest["finished_at"]:
         try:
-            stale = age_seconds(latest["finished_at"], now) >= stale_after_seconds
+            finished_stale = age_seconds(latest["finished_at"], now) >= stale_after_seconds
         except ValueError:
-            stale = False
-        if stale:
+            finished_stale = False
+        if finished_stale:
             reachable = False
+    # dash-collector-alerts-3 (2026-09-11): `collector_stale` is about the
+    # THREAD, so it is computed from the START of the most recent cycle of ANY
+    # kind, not from the finish of a successful Syncthing-backed one. It used
+    # to live inside the `if reachable` above, which meant a collector whose
+    # last cycle FAILED, and a Syncthing-less deployment that never runs such
+    # a kind at all, could never be stale - the flag stopped being computed in
+    # exactly the two states worth computing it in, and the home page and
+    # /api/v1/health showed a dead collector as fresh. Same rule as
+    # alerts._collector_started_recently; anything starting proves the thread
+    # is turning, whatever the cycle then made of itself. No rows at all is a
+    # fresh container: "cannot tell", never "stopped".
+    started_row = conn.execute("SELECT MAX(started_at) AS at FROM poll_runs").fetchone()
+    started = str((started_row["at"] if started_row else "") or "")
+    stale = False
+    if started:
+        try:
+            stale = age_seconds(started, now) >= stale_after_seconds
+        except (ValueError, TypeError):
+            stale = False
     folder_errors = [
         dict(r) for r in conn.execute(
             """SELECT slug, label, folder_state, folder_error, folder_state_at
@@ -8886,8 +9077,16 @@ def queued_jobs(
 ) -> list[dict[str, Any]]:
     """The candidates, in the order a scheduler should consider them: highest
     priority first, then oldest -- so a job that has been waiting is not
-    starved by one submitted a second ago at the same priority."""
-    sql = "SELECT * FROM jobs WHERE state=?"
+    starved by one submitted a second ago at the same priority.
+
+    A row an admin has asked to stop is NOT a candidate (dash-api-2 /
+    dash-release-jobs-1, 2026-09-11). `cancel_requested_at` used to be
+    honoured by nothing but the holder's own report reply, so a cancelled job
+    whose machine was asleep came back on the queue when the lease expired
+    and was handed to the next capable computer. The belt to expire_leases's
+    braces: even a row that reaches `queued` carrying the flag is invisible
+    here."""
+    sql = "SELECT * FROM jobs WHERE state=? AND cancel_requested_at IS NULL"
     args: list[Any] = [JOB_QUEUED]
     kinds = list(kinds) if kinds is not None else None
     if kinds is not None:
@@ -8958,11 +9157,26 @@ def open_retry_of(conn: sqlite3.Connection, job_id: int) -> int | None:
     """The id of an unfinished job that is already a new attempt at this one.
 
     Read in Python and not with json_extract: the breadcrumb lives in a JSON
-    column whose shape this code owns, the open queue is bounded, and a SQL
-    function that is compiled out of some SQLite builds is not something to
-    make a refusal depend on.
+    column whose shape this code owns, and a SQL function that is compiled
+    out of some SQLite builds is not something to make a refusal depend on.
+
+    NARROWED IN SQL FIRST (dash-db-4, 2026-09-11). The scan used to be
+    `list_jobs(state="open", limit=1000)`, and queued jobs are never aged out
+    on purpose - so a fleet with a 1,200-deep backlog pushed the existing
+    retry past the cap and the refusal silently stopped being one: two clicks
+    on [ TRY AGAIN ] queued the same encode twice. The LIKE is a prefilter on
+    the serialised breadcrumb (`_job_json` sorts keys and uses no spaces, so
+    the spelling is this module's own), and the answer is still confirmed in
+    Python against the parsed value.
     """
-    for row in list_jobs(conn, state="open", limit=1000):
+    like = "%%%s%%" % json.dumps({JOB_RETRY_OF: int(job_id)},
+                                 separators=(",", ":"))[1:-1]
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE state NOT IN (%s) AND inputs_json LIKE ? "
+        " ORDER BY id DESC" % ",".join("?" * len(JOB_TERMINAL_STATES)),
+        (*JOB_TERMINAL_STATES, like)).fetchall()
+    for raw in rows:
+        row = job_row(raw) or {}
         try:
             origin = int((row.get("inputs") or {}).get(JOB_RETRY_OF) or 0)
         except (TypeError, ValueError):
@@ -9067,21 +9281,37 @@ def _job_lease_until(now: str, seconds: float) -> str:
 def claim_job(
     conn: sqlite3.Connection, job_id: int, editor: str, machine: str,
     now: str | None = None, lease_seconds: float = JOB_LEASE_SECONDS,
+    max_running: int | None = None,
 ) -> bool:
     """THE compare-and-set. -> did this caller get it.
 
-    The whole rule is in the WHERE clause: the job must still be QUEUED. Two
-    machines offered the same job both call this; SQLite serialises the
-    writes, the second matches no row, and it moves on to the next candidate
-    rather than being told a lie."""
+    The whole rule is in the WHERE clause: the job must still be QUEUED, and
+    nobody has asked for it to stop. Two machines offered the same job both
+    call this; SQLite serialises the writes, the second matches no row, and
+    it moves on to the next candidate rather than being told a lie.
+
+    `max_running` PUTS THE FLEET CAP IN THE SAME WHERE CLAUSE
+    (dash-release-jobs-3, 2026-09-11). The cap used to be counted at offer
+    time only, on the caller's own connection, so two claims arriving in the
+    same instant both read "three running" and both won: the overshoot was
+    the number of concurrent claims, which is exactly the SMB saturation the
+    cap exists to stop. The correlated count is evaluated inside this write's
+    transaction, so the loser simply matches no row - the same answer it
+    already gets for a contested id. None means no cap predicate, which is
+    what every caller with no fleet settings in hand can honestly ask for.
+    """
     now = now or utcnow_iso()
-    cur = conn.execute(
-        """UPDATE jobs SET state=?, claimed_by=?, claimed_machine=?,
-                           lease_expires_at=?, heartbeat_at=?, updated_at=?
-            WHERE id=? AND state=?""",
-        (JOB_CLAIMED, str(editor), str(machine),
-         _job_lease_until(now, lease_seconds), now, now, int(job_id), JOB_QUEUED),
-    )
+    sql = ("""UPDATE jobs SET state=?, claimed_by=?, claimed_machine=?,
+                              lease_expires_at=?, heartbeat_at=?, updated_at=?
+               WHERE id=? AND state=? AND cancel_requested_at IS NULL""")
+    args: list[Any] = [JOB_CLAIMED, str(editor), str(machine),
+                       _job_lease_until(now, lease_seconds), now, now,
+                       int(job_id), JOB_QUEUED]
+    if max_running is not None:
+        sql += (" AND (SELECT COUNT(*) FROM jobs AS held"
+                "       WHERE held.kind = jobs.kind AND held.state IN (?, ?)) < ?")
+        args.extend([*JOB_HELD_STATES, max(1, int(max_running))])
+    cur = conn.execute(sql, args)
     return bool(cur.rowcount)
 
 
@@ -9092,6 +9322,7 @@ def claim_next_job(
     allowed_ids: Iterable[int] | None = None,
     kinds: Iterable[str] | None = None,
     ids: Iterable[int] | None = None,
+    max_running: Mapping[str, int] | None = None,
 ) -> dict[str, Any] | None:
     """Claim the best queued job this machine can actually do, or None.
 
@@ -9109,10 +9340,17 @@ def claim_next_job(
     closed claims the forced jobs and only those, and the fact that it asked
     for a job must never be able to widen what the scheduler was willing to
     give it.
+
+    `max_running` is the per-kind FLEET CAP, carried into the compare-and-set
+    itself (dash-release-jobs-3, 2026-09-11). A kind the mapping does not
+    name takes JOB_MAX_RUNNING_DEFAULT, like every other reader of the cap;
+    None is no cap at all, which is what the pre-phase-4 callers and the
+    tests that are about the CAS alone ask for.
     """
     now = now or utcnow_iso()
     allowed = None if allowed_ids is None else {int(i) for i in allowed_ids}
     wanted = None if ids is None else {int(i) for i in ids}
+    caps = None if max_running is None else dict(max_running)
     for job in queued_jobs(conn, kinds=kinds):
         if allowed is not None and int(job["id"]) not in allowed:
             continue
@@ -9121,7 +9359,14 @@ def claim_next_job(
         ok, _why = job_requirements_met(job.get("requires"), capabilities)
         if not ok:
             continue
-        if claim_job(conn, int(job["id"]), editor, machine, now, lease_seconds):
+        cap = None
+        if caps is not None:
+            try:
+                cap = max(1, int(caps.get(str(job["kind"]), JOB_MAX_RUNNING_DEFAULT)))
+            except (TypeError, ValueError):
+                cap = JOB_MAX_RUNNING_DEFAULT
+        if claim_job(conn, int(job["id"]), editor, machine, now, lease_seconds,
+                     max_running=cap):
             return get_job(conn, int(job["id"]))
     return None
 
@@ -9253,7 +9498,17 @@ def expire_leases(
     -> the jobs that moved, so the caller can log WHICH machine dropped what.
     An expiry COUNTS AS AN ATTEMPT: a machine that claims a job and dies three
     times running is a machine that cannot do it, and without the attempt the
-    job would be re-offered to it for ever."""
+    job would be re-offered to it for ever.
+
+    A CANCELLED JOB DOES NOT COME BACK (dash-api-2 / dash-release-jobs-1,
+    2026-09-11). `cancel_requested_at` survived only as long as the lease: an
+    admin who stopped a job on a sleeping laptop had the row re-queued here,
+    the cancel discarded, and the work handed to the next capable machine -
+    one machine per retry until the budget was spent and a media kind was
+    pinned to this container's own worker. The holder is gone by definition
+    when the lease expires, so nothing is being lied about behind a live
+    child: the row goes terminal, which is what the click asked for.
+    """
     now = now or utcnow_iso()
     moved: list[dict[str, Any]] = []
     rows = conn.execute(
@@ -9261,16 +9516,23 @@ def expire_leases(
         " AND lease_expires_at <= ?", (JOB_CLAIMED, JOB_RUNNING, now)).fetchall()
     for row in rows:
         attempts = int(row["attempts"] or 0) + 1
+        cancelled = bool(_row_value(row, "cancel_requested_at"))
         spent = attempts >= job_retry_budget(row["kind"])
-        state = _spent_state(row["kind"], pin) if spent else JOB_QUEUED
+        if cancelled:
+            state = JOB_FAILED
+            why = (f"{JOB_CANCELLED_ERROR}: the lease held by {row['claimed_by']}/"
+                   f"{row['claimed_machine']} expired at {row['lease_expires_at']} "
+                   f"without an answer")
+        else:
+            state = _spent_state(row["kind"], pin) if spent else JOB_QUEUED
+            why = (f"the lease held by {row['claimed_by']}/{row['claimed_machine']} "
+                   f"expired at {row['lease_expires_at']}")
         cur = conn.execute(
             """UPDATE jobs SET state=?, attempts=?, claimed_by=NULL,
                                claimed_machine=NULL, lease_expires_at=NULL,
                                last_error=?, updated_at=?
                 WHERE id=? AND state IN (?, ?) AND lease_expires_at <= ?""",
-            (state, attempts,
-             f"the lease held by {row['claimed_by']}/{row['claimed_machine']} "
-             f"expired at {row['lease_expires_at']}", now,
+            (state, attempts, why, now,
              row["id"], JOB_CLAIMED, JOB_RUNNING, now),
         )
         if cur.rowcount:
@@ -9587,25 +9849,43 @@ def request_job_cancel(
 ) -> str | None:
     """-> what happened: "failed" (it was queued and is over), "requested"
     (a machine or the pinned worker has to stop it), or None for a job that
-    is already finished or does not exist."""
+    is already finished or does not exist.
+
+    THE READ IS UNLOCKED AND THE WRITE DECIDES (res-fleet-1, 2026-09-11).
+    `db.connect` leaves isolation_level at the legacy default, so the
+    `get_job` above runs in autocommit and opens no transaction: a
+    `POST /jobs/claim` committing in that window turned the queued UPDATE
+    into a no-op, and this function answered "failed" - a green toast over a
+    job that ran to completion with no cancel recorded anywhere. Every other
+    write in this state machine checks `cur.rowcount`; this one now does too,
+    and falls through to the held branch on the state that actually resulted.
+    """
     now = now or utcnow_iso()
     job = get_job(conn, int(job_id))
     if job is None or job["state"] in JOB_TERMINAL_STATES:
         return None
     who = str(by or "an admin")[:64]
     if job["state"] == JOB_QUEUED:
-        conn.execute(
+        cur = conn.execute(
             """UPDATE jobs SET state=?, last_error=?, cancel_requested_at=?,
                                cancel_requested_by=?, updated_at=?
                 WHERE id=? AND state=?""",
             (JOB_FAILED, f"{JOB_CANCELLED_ERROR} by {who}", now, who, now,
              int(job_id), JOB_QUEUED))
-        return JOB_FAILED
-    conn.execute(
+        if cur.rowcount:
+            return JOB_FAILED
+        job = get_job(conn, int(job_id))
+        if job is None or job["state"] in JOB_TERMINAL_STATES:
+            return None
+    cur = conn.execute(
         """UPDATE jobs SET cancel_requested_at=?, cancel_requested_by=?,
                            updated_at=?
             WHERE id=? AND state IN (?, ?, ?)""",
         (now, who, now, int(job_id), JOB_CLAIMED, JOB_RUNNING, JOB_PINNED))
+    if not cur.rowcount:
+        # It moved again between the re-read and this write: say nothing
+        # happened rather than report a request that is not in the row.
+        return None
     return "requested"
 
 
@@ -9736,7 +10016,13 @@ def store_machine_capabilities(
          # build cannot answer" from "it answered with nothing".
          (str((cards or {}).get("gate_state"))[:32]
           if (cards or {}).get("gate_state") else None),
-         (str((cards or {}).get("detail"))[:255]
+         # comp-resolve-3 (2026-09-11): 1000, not 255. The companion's gate
+         # detail names the other program holding the Resolve client and its
+         # path ("one machine, one Resolve client"), which is longer than 255
+         # on a real Windows path, and CardsAgentIn.detail now accepts 1000 -
+         # a reader that truncates below what the model accepts turns the one
+         # sentence that says WHY into a cut-off path.
+         (str((cards or {}).get("detail"))[:1000]
           if (cards or {}).get("detail") else None),
          (str((cards or {}).get("last_poll_at"))[:64]
           if (cards or {}).get("last_poll_at") else None),

@@ -258,8 +258,16 @@ def _write_sidecar_env_files(env: Mapping[str, str], secrets_dir: Path) -> None:
     # already remapped, and the value that matters here is the one written
     # into the OTHER services' compose entries, not this process's kernel
     # view of itself.
-    app_uid = env.get("APP_UID", "")
-    app_gid = env.get("APP_GID", "")
+    #
+    # dash-core-3 (2026-09-11): fall back to os.environ for these two. They are
+    # not secrets, so they are not in SECRET_ENV_VARS, and a caller is free to
+    # pass a narrow mapping: setup_engine._run_secrets deliberately passes a
+    # snapshot of the five secret names only, so that wizard task used to
+    # rewrite internal.env with the token line alone and silently drop the
+    # uid/gid pair that boot had written. The fallback lives here rather than
+    # in that one caller so no future narrow mapping can drop them again.
+    app_uid = env.get("APP_UID") or os.environ.get("APP_UID", "")
+    app_gid = env.get("APP_GID") or os.environ.get("APP_GID", "")
     try:
         if syncthing_key:
             _write_secret_file(secrets_dir / "syncthing.env",

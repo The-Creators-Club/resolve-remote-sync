@@ -529,7 +529,13 @@ def _check_plan_without_share(
     # FULL ticks only (docs/UPLOAD_ONLY_TICK.md): upload-only is lane A alone
     # and is never a Syncthing share by design, so it has nothing to check
     # here -- mirroring the filter _run_enforce applies to the same table.
-    by_slug = db.fetch_machine_selections(conn, sync_modes=(db.SYNC_MODE_FULL,))
+    # dash-db-1 (2026-09-11): `for_enforce=True` also drops a WIRED machine's
+    # own rows. A base rig holds no tick by any route (CR-28) and syncs
+    # nothing, so a stale row left on one that flipped to wired in the tray
+    # raised a permanent severity-error notice about a correct configuration,
+    # with the "untick and re-tick" fix text 409ing on the re-tick half.
+    by_slug = db.fetch_machine_selections(conn, sync_modes=(db.SYNC_MODE_FULL,),
+                                          for_enforce=True)
     device_by_machine: dict[tuple[str, str], str] = {}
     for row in db.fetch_machines(conn):
         device_id = row.get("syncthing_device_id")
@@ -674,10 +680,27 @@ def _check_feature_mounts(conn, settings, now: str) -> None:
     if not isinstance(statuses, dict):
         return
     open_names: list[str] = []
-    for name, value in statuses.items():
+    # dash-collector-alerts-8 (2026-09-11): walk the REGISTRY's names, not the
+    # entries that happen to have a verdict. `mount_status.NAMES` exists
+    # precisely so "not mounted" can be told from "never recorded", and this,
+    # its only reader, used to iterate the snapshot and then hand
+    # `clear_notices_of_kind` the survivors - so a mount that never recorded
+    # anything (a boot path that short-circuits, a `reset()` from a second
+    # create_app racing a cycle) had its open notice quietly CLOSED, which is
+    # the "the page vanished and nothing says why" this check was written for.
+    names = list(getattr(mount_status, "NAMES", ()) or ()) or list(statuses)
+    for name in names:
+        value = statuses.get(name)
+        if value is None:
+            # No verdict recorded for this page in this process. Not evidence
+            # that it is up, so nothing is written and, by staying in the
+            # keep-list, nothing already open about it is cleared either.
+            open_names.append(str(name))
+            continue
         try:
             status, detail = value
         except (TypeError, ValueError):
+            open_names.append(str(name))
             continue
         if str(status) == "mounted":
             continue
@@ -945,15 +968,54 @@ def check_settings(conn, settings, now: str | None = None) -> None:
 SERVER_ERROR_BODY_CHARS = 200
 
 
+# How many leading path segments a redacted subject keeps. TWO, and the
+# number is load-bearing: `/broll/share/<128-bit token>/...` puts a
+# CREDENTIAL in segment three (docs/CLIENT_FOLDERS.md), and this table is
+# rendered on the home page, quoted verbatim into an error alert body and
+# carried in every database backup.
+SERVER_ERROR_PATH_SEGMENTS = 2
+
+
+def redact_path(path: str, route: str = "") -> str:
+    """The request path as a notice may keep it (dash-collector-alerts-6).
+
+    `route` is the matched ROUTE TEMPLATE (`/api/v1/jobs/{id}/why`) when the
+    caller has one: it is bounded by the number of routes this server has and
+    carries no value anybody typed. It is absent for an exception raised
+    inside a MOUNTED SUB-APP, because the parent matched a Mount and not a
+    route, which is exactly the `/broll/share/<token>/` case - so the
+    fallback keeps the first two segments and nothing else.
+
+    Why it matters twice over: `notices` is upserted on (kind, subject), so a
+    raw path with an id in it is an unbounded row count in a table nothing
+    prunes, and a raw path under /broll/share is a client's live credential
+    written somewhere a page will show it.
+    """
+    if route:
+        return str(route)[:120]
+    parts = [p for p in str(path or "").split("/") if p]
+    kept = "/" + "/".join(parts[:SERVER_ERROR_PATH_SEGMENTS])
+    if len(parts) > SERVER_ERROR_PATH_SEGMENTS:
+        kept = kept + "/…"
+    return kept[:120]
+
+
 def record_server_error(
     conn, path: str, exc: BaseException, now: str | None = None,
+    route: str = "",
 ) -> None:
-    """One notice per (path, exception class), counted.
+    """One notice per (redacted path, exception class), counted.
 
     A 500 an editor met at 2 am is on the home page in the morning. Deduped by
     subject so a page failing every poll is one row with a rising count, not a
-    thousand."""
+    thousand.
+
+    `route` is optional so an older caller (app.py's handler, which passes the
+    concrete path) keeps working: with no template the path is redacted to its
+    first two segments. See `redact_path`.
+    """
     stamp = now or db.utcnow_iso()
+    path = redact_path(path, route)
     subject = f"{path} ({type(exc).__name__})"
     row = conn.execute(
         "SELECT body FROM notices WHERE kind='server_error' AND subject=?", (subject,),

@@ -384,7 +384,11 @@ class SyncthingSupervisor:
         self._logged_disabled = False
         state = self._read_state()
         self._since: float = _as_float(state.get("since"))
-        self._attempts: int = _as_int(state.get("attempts"))
+        # comp-sync-2: read off disk with _as_int, so a corrupt or
+        # hand-edited file can arrive at any value. Bounded on the way in --
+        # the backoff is capped long before this and the count is only ever
+        # shown to a human.
+        self._attempts: int = max(0, min(_as_int(state.get("attempts")), MAX_ATTEMPTS_TRACKED))
         self._last_error: str = str(state.get("last_error") or "")
         self._last_attempt: float = _as_float(state.get("last_attempt"))
         self._warned = bool(state.get("warned"))
@@ -735,12 +739,21 @@ class SyncthingSupervisor:
             log.debug("supervisor: tray notify failed")
 
 
+MAX_ATTEMPTS_TRACKED = 100000
+
+
 def backoff_seconds(attempts: int) -> float:
     """Delay before the attempt AFTER `attempts` failures: 30 s, 1 m, 2 m,
     4 m, 8 m, then 10 m forever."""
     if attempts <= 0:
         return 0.0
-    delay = BACKOFF_START_SECONDS * (2 ** (attempts - 1))
+    # comp-sync-2 (2026-09-11): clamp the EXPONENT. BACKOFF_START_SECONDS is a
+    # float, so at attempts >= 1025 this raised OverflowError inside
+    # _note_unreachable, `tick` swallowed it as "supervisor: tick failed" every
+    # 15 s, and no further start was ever attempted. The counter is PERSISTED
+    # and cleared only when the API answers, so a machine whose Syncthing
+    # cannot start accumulates it across restarts and reaches that in ~7 days.
+    delay = BACKOFF_START_SECONDS * (2 ** min(attempts - 1, 20))
     return float(min(delay, BACKOFF_CAP_SECONDS))
 
 

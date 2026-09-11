@@ -36,18 +36,32 @@ EVERY DOCUMENT, NOT ONE (Alex, 2026-09-04). The page started as a single
 rendered guide; the owner asked to see every markdown file the repository
 carries and to read them in this same viewer. So the three shipping routes
 (the image's COPY, the OTA bundle's TREES, install_dashboard_app's bind-mode
-copy) now carry the whole `docs/` tree plus the four top-level documents
+copy) carried the whole `docs/` tree plus the four top-level documents
 (README / KNOWN_BUGS / SPEC / CLAUDE) under `docs/_root/`, and this module
 grew an INDEX (`document_root`, `document_groups`) and a per-file route
 (`resolve_document`).
 
+...AND THEN AN AUDIENCE (dash-mounts-ui-1 / server-tools-2, 2026-09-11). The
+checks below were about the SHAPE of a path and never about who was asking,
+and `/help` is behind the login gate, not the admin one: so every editor on
+every customer's fleet could read this studio's engineering documentation -
+the defect ledger, CLAUDE.md, the secrets runbook, every plan and every
+bug-hunt report, documents that name our editors, their machines and our
+infrastructure. `published_docs.py` is now the one list of what is
+customer-facing, read here AND by all three shipping routes, so what a
+customer's server CONTAINS and what an editor may READ cannot drift apart.
+Everything outside that list is ADMIN ONLY and, on a customer's deployment,
+simply not present: what is left is the owner reading every document in this
+viewer on a dev checkout, which is what the 2026-09-04 ask was for.
+
 WHAT MAY BE SERVED, exactly: a `.md` file underneath the docs root this
 server found, reached by a relative path with no `..` segment, no drive
-letter, no leading slash, and whose realpath is still inside that root (a
-symlink pointing out is refused by the same test). The one deliberate
-exception is `_root/<NAME>` for the four allow-listed top-level documents,
-which in a dev checkout live beside `docs/` rather than inside it. Nothing
-here takes a path from the document tree itself, and nothing writes.
+letter, no leading slash, whose realpath is still inside that root (a symlink
+pointing out is refused by the same test), and which is either published or
+asked for by an admin. The one deliberate exception is `_root/<NAME>` for the
+four allow-listed top-level documents, which in a dev checkout live beside
+`docs/` rather than inside it and are admin-only. Nothing here takes a path
+from the document tree itself, and nothing writes.
 """
 from __future__ import annotations
 
@@ -59,13 +73,21 @@ import re
 from pathlib import Path
 from urllib.parse import quote
 
+from . import published_docs
+
 log = logging.getLogger("ccsync.dashboard.help")
 
 DOC_NAME = "HOW_IT_WORKS.md"
 
 # Where the repository's top-level documents land inside the shipped docs
-# tree, and which ones travel. An allow-list rather than "every .md beside
-# docs/", because on a deployed server that directory is the application root.
+# tree, and which ones may be read there. An allow-list rather than "every .md
+# beside docs/", because on a deployed server that directory is the
+# application root.
+#
+# dash-mounts-ui-1 (2026-09-11): none of these four SHIP any more
+# (published_docs.ROOT_DOCS is empty), and all four are admin-only here. They
+# stay listed because a dev checkout has them beside `docs/` and the base rig
+# reads them in this viewer.
 ROOT_DIR_NAME = "_root"
 ROOT_FILES = ("README.md", "SPEC.md", "KNOWN_BUGS.md", "CLAUDE.md")
 
@@ -213,20 +235,25 @@ def _iter_markdown(root: Path) -> list[str]:
     return sorted(out)
 
 
-def document_groups() -> list[dict]:
+def document_groups(is_admin: bool = False) -> list[dict]:
     """The index: [{label, entries: [{rel, name, title, note}]}].
 
     Grouped by the folder a document lives in, because 120 files in one list
     is not a browser. The guide comes first and is labelled, since it is the
     one document written for a customer rather than for us.
+
+    The index NEVER lists what the route would refuse this reader
+    (dash-mounts-ui-1, 2026-09-11): a list of titles is itself disclosure, and
+    a link that 404s is a worse page than one that is not there.
     """
     root = document_root()
     if root is None:
         return []
-    rels = _iter_markdown(root)
+    rels = [r for r in _iter_markdown(root)
+            if is_admin or published_docs.is_published(r)]
     for name in ROOT_FILES:
         rel = f"{ROOT_DIR_NAME}/{name}"
-        if rel not in rels and resolve_document(rel) is not None:
+        if rel not in rels and resolve_document(rel, is_admin) is not None:
             # The dev-checkout half: the top-level documents are beside the
             # tree, not in it, so the walk above never sees them.
             rels.append(rel)
@@ -235,7 +262,7 @@ def document_groups() -> list[dict]:
         folder = posixpath.dirname(rel)
         entry = {"rel": rel, "name": posixpath.basename(rel),
                  "title": "", "note": ""}
-        path = resolve_document(rel)
+        path = resolve_document(rel, is_admin)
         if path is None:
             continue
         entry["title"] = _title_of(path) or entry["name"]
@@ -269,18 +296,27 @@ def _group_label(folder: str) -> str:
     return f"docs/{folder}/"
 
 
-def resolve_document(rel: str) -> Path | None:
+def resolve_document(rel: str, is_admin: bool = False) -> Path | None:
     """The file `rel` names inside the docs tree, or None if it may not be
-    served. Every refusal is a None: the caller renders one sentence.
+    served TO THIS READER. Every refusal is a None: the caller renders one
+    sentence.
 
     THE RULES (Alex, 2026-09-04). A path from a URL reaches this function, so
     the checks are stated once, here, and the route has none of its own:
     markdown only, no absolute path, no drive letter, no `..` segment, and
     the realpath must still be inside the root - which is also what refuses a
     symlink that points out of the tree.
+
+    AND THE READER (dash-mounts-ui-1, 2026-09-11). `is_admin` defaults to
+    False so a caller that forgets it gets the customer-facing set: an
+    audience gate that fails open is not a gate. `published_docs` is the same
+    list the three shipping routes are built from, so on a customer's server
+    the admin branch has nothing extra to find.
     """
     root = document_root()
     if root is None:
+        return None
+    if not is_admin and not published_docs.is_published(rel):
         return None
     rel = (rel or "").strip().replace("\\", "/")
     if not rel or not rel.lower().endswith(".md"):
@@ -295,9 +331,12 @@ def resolve_document(rel: str) -> Path | None:
     except OSError:
         return None
     if parts[0] == ROOT_DIR_NAME:
-        # `_root/KNOWN_BUGS.md`: shipped INTO the tree by every deploy path,
-        # and beside it in a dev checkout. The allow-list is what keeps the
-        # second case from being "serve anything next to the application".
+        # `_root/KNOWN_BUGS.md`: beside the tree in a dev checkout, and
+        # nowhere at all on a deployed server since 2026-09-11 (nothing
+        # top-level ships). The shipped path stays because an older image
+        # still has one. The allow-list is what keeps the checkout case from
+        # being "serve anything next to the application"; the admin gate
+        # above is what keeps it off an editor's screen.
         if len(parts) != 2 or parts[1] not in ROOT_FILES:
             return None
         shipped = root_real / ROOT_DIR_NAME / parts[1]
@@ -321,8 +360,8 @@ def resolve_document(rel: str) -> Path | None:
     return real
 
 
-def read_rel(rel: str) -> str | None:
-    path = resolve_document(rel)
+def read_rel(rel: str, is_admin: bool = False) -> str | None:
+    path = resolve_document(rel, is_admin)
     if path is None:
         return None
     try:
@@ -611,7 +650,7 @@ def _paragraph(lines: list[str], i: int, out: list[str], base: str = "") -> int:
     return i
 
 
-def page_context(rel: str = "") -> dict:
+def page_context(rel: str = "", is_admin: bool = False) -> dict:
     """What the /help template needs: the index, one rendered document, or
     the refusal.
 
@@ -621,7 +660,7 @@ def page_context(rel: str = "") -> dict:
     page itself still renders, with the index, because the reader got here by
     following a link and a bare 404 tells them nothing.
     """
-    groups = document_groups()
+    groups = document_groups(is_admin)
     rel = (rel or "").strip("/") or DOC_NAME
     base = {"help_groups": groups, "help_current": rel, "help_doc_title": "",
             "help_html": "", "help_toc": [], "help_missing": "",
@@ -629,7 +668,7 @@ def page_context(rel: str = "") -> dict:
     if not groups and document_path() is None:
         base["help_missing"] = NOT_INSTALLED
         return base
-    text = read_rel(rel)
+    text = read_rel(rel, is_admin)
     if text is None and rel == DOC_NAME:
         # The pre-browser search order still answers on a server that got the
         # single document and not the tree (an older bundle, DASH_HELP_DOC).

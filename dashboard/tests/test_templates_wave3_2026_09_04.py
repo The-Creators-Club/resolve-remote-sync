@@ -162,7 +162,11 @@ def test_the_editor_is_told_whether_the_laptop_can_be_closed(env):
                     "bytes": 4_000_000}],
     }, "owen")
     assert not busy["safe"]
-    assert "4 file(s) still uploading from this computer" in busy["sentence"]
+    # No machine on either row (an older companion's report), so the sentence
+    # names none: it never claims to know which computer the browser is on
+    # (dash-mounts-ui-2, 2026-09-11).
+    assert "4 file(s) still uploading (" in busy["sentence"]
+    assert "this computer" not in busy["sentence"]
     # An ADMIN's view is the fleet's, which has no "this computer" in it.
     assert ui.safe_to_close({"transfers": [], "queues": []}, None) is None
     assert "Safe to close" not in page(client, "/transfers")

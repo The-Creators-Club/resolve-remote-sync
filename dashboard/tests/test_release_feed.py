@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import threading
 import urllib.error
 from urllib.parse import quote
 
@@ -1164,3 +1165,125 @@ def test_a_runtime_update_says_it_needs_the_image_manager(env, monkeypatch):
     assert rf.apply_dashboard_policy(conn, settings, client.app.state, "current",
                                      dbmod.utcnow_iso()) == ""
     assert "app manager" in dbmod.meta_get(conn, rf.AUTO_UPDATE_NOTE_KEY)
+
+
+# ------------------------------------------- bug hunt 2026-09-11 (CR-242)
+
+
+def test_a_feed_url_with_a_query_string_still_finds_its_signature(monkeypatch):
+    """dash-release-jobs-3: the detached signature is `.sig` on the PATH.
+
+    The threat model contemplates "an S3 bucket, whatever a customer's
+    outbound network reaches", and a pre-signed or CDN-token URL carries a
+    query. `<url>.sig` by concatenation asked for
+    `channel.json?X-Amz-Signature=...sig`, which is a URL that does not exist:
+    every check failed with a 404 naming a URL the operator never configured,
+    and the site quietly stopped receiving builds."""
+    signed_channel_url = f"{CHANNEL_URL}?X-Amz-Signature=deadbeef&Expires=99"
+    signed_sig_url = f"{FEED_BASE}/channel.json.sig?X-Amz-Signature=deadbeef&Expires=99"
+    record, _body = make_record()
+    channel, sig = make_channel([record])
+    opener = patch_opener(monkeypatch, {
+        signed_channel_url: json.dumps(channel).encode(),
+        signed_sig_url: sig.encode(),
+    })
+    got, err = release_feed.fetch_and_verify_channel(signed_channel_url, (TEST_PUBKEY,))
+    assert err is None
+    assert got["schema"] == 1
+    assert signed_sig_url in opener.requested
+
+
+def test_a_plain_feed_url_still_asks_for_the_same_signature_url(monkeypatch):
+    """The shape every site in the field uses is unchanged."""
+    record, _body = make_record()
+    channel, sig = make_channel([record])
+    opener = patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(),
+    })
+    got, err = release_feed.fetch_and_verify_channel(CHANNEL_URL, (TEST_PUBKEY,))
+    assert err is None and got is not None
+    assert opener.requested == [CHANNEL_URL, SIG_URL]
+
+
+def test_a_capitalised_platform_is_never_offered_as_available(env, monkeypatch):
+    """dash-release-jobs-7: one spelling, agreed by every consumer.
+
+    The admin [ PUBLISH ] button posts what the page rendered and the route
+    case-folds it, so a record published as `Windows` used to be listed as
+    available and then 404 with "run Check now first" for ever. It cannot be
+    published under the folded spelling either - the platform string is inside
+    the signature - so it is dropped at verification and named in the log.
+    """
+    client, conn, settings = env
+    record, body = make_record(platform="Windows")
+    channel, sig = make_channel([record])
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(),
+        record["url"]: body,
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    view = client.get("/api/v1/admin/feed").json()
+    assert [r["version"] for r in view["available"]] == []
+    # ...and the button that is no longer there does not half-work either.
+    r = client.post("/api/v1/admin/feed/publish",
+                    json={"platform": "windows", "version": "0.9.0"})
+    assert r.status_code == 404
+    assert dbmod.get_package(conn, "windows", "0.9.0") is None
+
+
+def test_the_lower_case_spelling_of_the_same_record_is_published_normally(env, monkeypatch):
+    client, conn, settings = env
+    record, body = make_record(platform="windows")
+    channel, sig = make_channel([record])
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(),
+        record["url"]: body,
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    assert [r["version"] for r in client.get("/api/v1/admin/feed").json()["available"]] == ["0.9.0"]
+    r = client.post("/api/v1/admin/feed/publish",
+                    json={"platform": "windows", "version": "0.9.0"})
+    assert r.status_code == 200, r.text
+    assert dbmod.get_package(conn, "windows", "0.9.0") is not None
+
+
+def test_a_record_key_speaks_one_spelling(monkeypatch):
+    """The lookup key every consumer shares: the view, the dedupe, the
+    channel pointer and the [ PUBLISH ] route."""
+    assert release_feed._record_key(
+        {"kind": " Companion ", "platform": "Windows", "version": " 0.9.0 "}
+    ) == ("companion", "windows", "0.9.0")
+
+
+def test_a_stopped_feed_poller_starts_again(tmp_path, monkeypatch):
+    """dash-release-jobs-4: stop() then start() has to poll again.
+
+    `start()` returned early on a `_thread` that `stop()` never cleared, so
+    the second start was a poller that reported itself started and never
+    checked the feed - green while dead. app.py builds a fresh poller per
+    lifespan today, which is why nothing in the field has hit it yet."""
+    db_path = tmp_path / "poller.db"
+    conn = dbmod.connect(db_path)
+    dbmod.migrate(conn)
+    conn.close()
+    settings = Settings(
+        db_path=str(db_path), session_secret=SECRET,
+        admin_users=frozenset({"owen"}), packages_dir=str(tmp_path / "pkgs"),
+        release_pubkeys=(TEST_PUBKEY,), release_feed_url=CHANNEL_URL,
+    )
+    monkeypatch.setattr(release_feed, "POLLER_FIRST_CHECK_DELAY", 0.0)
+    checked = threading.Event()
+    monkeypatch.setattr(release_feed, "check_now",
+                        lambda *a, **k: checked.set() or {"ok": True})
+
+    poller = release_feed.FeedPoller(settings, None)
+    poller.start()
+    assert checked.wait(5.0), "the first start never checked the feed"
+    poller.stop()
+
+    checked.clear()
+    poller.start()
+    try:
+        assert checked.wait(5.0), "a restarted poller never checked the feed"
+    finally:
+        poller.stop()

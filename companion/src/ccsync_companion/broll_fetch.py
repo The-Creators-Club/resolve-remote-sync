@@ -67,8 +67,14 @@ MAX_CONCURRENT_FETCHES = 2
 # (ytdl_server.build_fetch_response) still maps everything that is not
 # downloading-or-done onto `failed`, so this sentence has to be true under a
 # red toast as well as under a spinner.
-BUSY_MESSAGE = ("this computer is already downloading as much as it will at "
-                "once. This one starts as soon as a slot is free")
+# comp-broll-music-4 (2026-09-11): it has to open by saying the clip is NOT
+# in yet. A browser holding a cached pre-2026-09-04 app.js continues its poll
+# loop only on state == "downloading", so this body (ok:true, state:"busy")
+# falls through to a GREEN "sent" toast and the loop ends. The colour cannot
+# be fixed from here; the sentence can, and "already downloading" stays in it
+# because the current page's `busyOld` branch matches on that phrase.
+BUSY_MESSAGE = ("not sent yet: this computer is already downloading as much "
+                "as it will at once. This one starts as soon as a slot is free")
 # What a caller should wait before polling again. The page already polls every
 # 1.5 s; naming it here means a client that is not the page has the number too.
 BUSY_RETRY_AFTER_SECONDS = 1.5
@@ -396,13 +402,26 @@ def poll_fetch(
             job = FetchJob(dest, rel_path)
             cmd = build_fetch_command(ccsync_cfg, rel_path, dest, remote_rel)
             _JOBS[key] = job
-            if runner is not None:
-                runner(job, cmd)
-            else:
-                threading.Thread(
-                    target=_run_job, args=(job, cmd),
-                    name="ccsync-broll-fetch", daemon=True,
-                ).start()
+            try:
+                if runner is not None:
+                    runner(job, cmd)
+                else:
+                    threading.Thread(
+                        target=_run_job, args=(job, cmd),
+                        name="ccsync-broll-fetch", daemon=True,
+                    ).start()
+            except Exception as exc:  # noqa: BLE001
+                # comp-broll-music-6 (2026-09-11): the registry entry is
+                # written before the spawn, and a spawn that raises (a machine
+                # out of threads) used to leave it there in `downloading` for
+                # the life of the process: terminal states are popped on read,
+                # and this one could never become terminal. The clip syncs at
+                # 0 % for ever and one of the two download slots is gone.
+                _JOBS.pop(key, None)
+                log.warning("broll fetch: could not start the download of %s "
+                            "(%s)", rel_path, exc)
+                return {"state": STATE_FAILED,
+                        "message": f"this computer could not start the download ({exc})"}
             return {"state": STATE_DOWNLOADING, "progress": job.progress()}
 
     with job.lock:

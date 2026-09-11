@@ -321,8 +321,12 @@ def test_the_refusal_names_the_process_and_what_to_close(tmp_path):
         "4312\tpython.exe\tC:\\Python\\python.exe reorder_web.py --agent"])
     state, detail = role.refusal()
     assert state == role_mod.STATE_STANDALONE_AGENT
+    # comp-resolve-3 (2026-09-11): the process now LEADS, because the
+    # dashboard caps this field at 255 characters and what used to be cut was
+    # the only half an admin can act on.
     assert "python.exe (pid 4312)" in detail
-    assert "Close the standalone Timeline Cards agent window" in detail
+    assert detail.index("python.exe (pid 4312)") < detail.index("Close")
+    assert "Close the standalone Timeline Cards agent" in detail
     assert "CR-68" in detail
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse, json, os, sqlite3, sys, time
 from pathlib import Path
 
-REPO = Path(r"E:/Projects/resolve-remote-sync")
+REPO = Path(r"E:/Projects/Editing/ccsync")
 sys.path.insert(0, str(REPO / "broll" / "indexer"))
 from broll_index.claude_client import build_index_prompt, parse_claude_response  # noqa: E402
 

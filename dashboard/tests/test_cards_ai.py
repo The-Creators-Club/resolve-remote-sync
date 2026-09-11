@@ -822,3 +822,126 @@ def test_an_unrelated_cli_failure_keeps_its_own_words(cli, monkeypatch):
     assert out["ok"] is False
     assert out["error"] != cards_ai.SESSION_LOST
     assert "--model" in out["error"]
+
+
+# -- the cards the editor has selected (cards selection context, 2026-09-11) --
+# The edit chat's prompts like "the selected cards need to be moved after X"
+# only work if the model is TOLD which cards those are. The page sends them,
+# Timeline Cards' own CONTEXT renders them for its CLI door, and this runner
+# renders them for anyone who hands it the list instead of the prose.
+
+SELECTION = [
+    {"id": "cut:aaa111", "person": "Ada Chen", "tc": "01:00:04:10",
+     "text": "we were ready", "section": "Opening"},
+    {"id": "cut:bbb222", "person": "Lin Wu", "tc": "01:00:19:02"},
+    {"id": "cut:ccc333"},
+]
+
+
+def sent_prompt(calls):
+    """The text of the one user message a call carried, blocks or not."""
+    content = calls[-1]["messages"][-1]["content"]
+    if isinstance(content, str):
+        return content
+    return "\n".join(str(b.get("text") or "") for b in content)
+
+
+def test_a_selection_is_a_named_block_with_the_ids_in_order(sdk):
+    runner, calls = sdk
+
+    out = runner.run(MARKED, model="claude-fable-5-1", session=FakeSession(),
+                     selection=SELECTION)
+
+    assert out["ok"] is True
+    prompt = sent_prompt(calls)
+    assert cards_ai.SELECTION_HEADER in prompt
+    assert cards_ai.SELECTION_END in prompt
+    assert "3 cards selected" in prompt
+    # the ORDER the page selected them in, never sorted here: "move the
+    # selected cards after X" keeps it
+    where = [prompt.index("[cut:aaa111]"), prompt.index("[cut:bbb222]"),
+             prompt.index("[cut:ccc333]")]
+    assert where == sorted(where)
+    assert "Ada Chen" in prompt and "01:00:04:10" in prompt
+    assert "section: Opening" in prompt
+
+
+def test_the_block_is_in_the_uncached_half(sdk):
+    """A selection changes on every click and the corpus block is billed per
+    cache write; a block above the marker would re-write the whole prefix."""
+    runner, calls = sdk
+
+    runner.run(MARKED, session=FakeSession(), selection=SELECTION)
+
+    blocks = calls[-1]["messages"][-1]["content"]
+    assert isinstance(blocks, list) and len(blocks) == 2
+    assert "cache_control" in blocks[0]
+    assert cards_ai.SELECTION_HEADER not in blocks[0]["text"]
+    assert blocks[0]["text"] == CORPUS
+    assert cards_ai.SELECTION_HEADER in blocks[1]["text"]
+    assert "cache_control" not in blocks[1]
+
+
+def test_no_selection_is_todays_prompt_exactly(sdk):
+    """An older page sends none, and the three original features never will."""
+    runner, calls = sdk
+
+    runner.run("translate this", model="claude-haiku-4-5-20251001")
+    runner.run("translate this", model="claude-haiku-4-5-20251001",
+               selection=None)
+    runner.run("translate this", model="claude-haiku-4-5-20251001",
+               selection=[])
+
+    today = {"role": "user", "content": "translate this"}
+    assert [c["messages"] for c in calls] == [[today], [today], [today]]
+
+
+def test_a_prompt_that_already_has_the_block_is_left_alone(sdk):
+    """Timeline Cards renders the same block itself, because the standalone
+    server has no runner to render anything. Two of them in one turn is the
+    model reading the selection twice."""
+    runner, calls = sdk
+    already = ("do it\n" + cards_ai.SELECTION_HEADER
+               + "\n  1. [cut:zzz999]\n" + cards_ai.SELECTION_END)
+
+    runner.run(already, selection=SELECTION)
+
+    prompt = sent_prompt(calls)
+    assert prompt == already
+    # the END line carries the header's own words, so count the opening line
+    assert prompt.count("\n" + cards_ai.SELECTION_HEADER + "\n") == 1
+
+
+def test_a_selection_of_bare_ids_and_junk_still_renders(sdk):
+    """The page is another repo's: an entry this cannot read is dropped, and
+    a list of plain ids is a selection like any other."""
+    runner, calls = sdk
+
+    runner.run("do it", selection=["cut:aaa111", None, 7, {"uid": "cut:bbb222"},
+                                   {"label": "no id at all"}])
+
+    prompt = sent_prompt(calls)
+    assert "1. [cut:aaa111]" in prompt and "2. [cut:bbb222]" in prompt
+    assert "2 cards selected" in prompt
+    assert "no id at all" not in prompt
+
+
+def test_the_staged_shelf_selection_has_its_own_rows():
+    block = cards_ai.selection_block(
+        [{"id": "cut:aaa111"}], staged=[{"id": "alt:ddd444",
+                                         "person": "Ada Chen"}])
+    assert "Staged cards selected on the shelf (1)" in block
+    assert "[alt:ddd444]" in block
+
+
+def test_a_long_selection_keeps_every_id_and_stops_labelling(sdk):
+    runner, calls = sdk
+    many = [{"id": "cut:%04d" % n, "person": "Ada Chen"}
+            for n in range(cards_ai.MAX_SELECTION_ROWS + 3)]
+
+    runner.run("do it", selection=many)
+
+    prompt = sent_prompt(calls)
+    assert "...and 3 more" in prompt
+    for row in many:
+        assert "[%s]" % row["id"] in prompt

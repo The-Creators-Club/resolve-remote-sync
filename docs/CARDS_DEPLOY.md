@@ -63,14 +63,50 @@ On the TrueNAS host today (`site.toml`: `[apps] root =
 
 It is root-owned and world-readable, mounted read-only, and it is **not a git
 checkout** -- nothing on the NAS pulls, and there is no remote to pull from.
-It is a copy of the MulticamPipeline working tree on the base rig, which is
-what `[timeline_cards] src` names:
+
+Since 2026-09-11 it is **an export of one commit** (`git archive`), not a copy
+of anybody's working tree. `[timeline_cards] src` still names a checkout, but
+that path is now a POINTER: the deploy asks git which repository it is in,
+exports `<commit>:<subtree>` out of that repository into a fresh temp
+directory, and ships THAT.
 
 ```toml
 [timeline_cards]
 enabled = true
 src = 'E:\Projects\Editing\Resolve\MulticamPipeline'
 ```
+
+**Why the snapshot.** An archive of a commit holds the tracked files of that
+commit and nothing else: no untracked file, no uncommitted edit, no ignored
+`scratch/`, no `.git`. The everyday checkout is normally mid-something, and
+"what is live on /cards" used to be answerable only by diffing files. Now the
+deploy writes a marker into the tree it ships:
+
+```
+/mnt/tank/apps/ccsync-dashboard/cards-web/DEPLOYED_COMMIT
+```
+
+```
+commit=8cac87f0...            short=8cac87f0aa12
+ref=main                      repo=E:\Projects\Editing
+subtree=Resolve/MulticamPipeline
+subject=<the commit's first line>
+committed=...                 exported=...
+```
+
+Plain `key=value` lines, so a shell, PowerShell and a person all read it
+without a parser. The same facts are recorded on the machine that ran the
+deploy, at `~/.ccsync/state/cards_deployed.json`, because
+`tools\check_deploy_drift.ps1` reports them and has no NAS shell.
+
+**History (what this replaced).** Until 2026-09-11 the recipe used a second
+checkout beside the everyday one, `E:\Projects\Editing-ship`: a detached git
+worktree the operator moved to the commit being deployed and `git clean`ed by
+hand, purely so that unfinished edits could not ship. It worked when the
+discipline was followed, it silently shipped a working copy when it was not,
+and it left nothing on the NAS saying which commit was live. The snapshot has
+both properties by construction, so the worktree is retired and nothing in
+this repo points at it any more.
 
 
 ## What gets copied
@@ -88,7 +124,7 @@ ship_cards = bool(cards_src and (cards_src / "multicam_pipeline" / "cards"
                                  / "handler.py").is_file())
 ```
 
-**What is actually shipped is the whole checkout minus an exclude list**, and
+**What is actually shipped is the whole snapshot minus an exclude list**, and
 that is fine -- a read-only copy of a package tree, not an install:
 
 ```python
@@ -117,11 +153,37 @@ dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py --dry-run
 dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py
 ```
 
+That ships the **`main` head** of the Timeline Cards repo. Nothing else is
+needed for the ordinary case: commit and push in the Cards repo first, then
+run this. To pin another commit (a rollback, or a branch under test), name it:
+
+```powershell
+dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py --cards-commit 8cac87f
+dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py --cards-commit release/civil-defence
+```
+
+Any branch, tag or hash the repo holds; `CARDS_COMMIT` in the environment does
+the same. The run prints the snapshot before it moves anything:
+
+```
+Timeline Cards snapshot: 8cac87f0aa12 (main) of E:\Projects\Editing -- the cards page
+```
+
+and **refuses, before anything is touched**, if the ref does not exist, if that
+commit has no `Resolve/MulticamPipeline`, or if the export comes out empty.
+Each refusal is a sentence naming the ref and the repo.
+
+The escape hatch is `--cards-src-dir <path>` (or `CARDS_SRC` in the shell):
+ship that DIRECTORY as it stands, warts and all. It is for a tree that is not a
+git checkout, or for deliberately testing a working copy. The run says so in
+its own line, and no `DEPLOYED_COMMIT` is written, because there is no commit
+to name.
+
 Do the `--dry-run` first and read what it says about `cards-web`. What this
 does for Timeline Cards (step 2g in `install_dashboard_app.py`) is the same
 staged-verify-swap every code tree gets:
 
-1. upload the checkout (minus the excludes) into a fresh `mktemp` staging dir;
+1. upload the snapshot (minus the excludes) into a fresh `mktemp` staging dir;
 2. verify the staged copy by **file count AND total bytes** against the local
    manifest -- a transfer that wrote every file but truncated the last one
    passes a count-only check;
@@ -156,9 +218,18 @@ path in this repo.**
 # (verify) from the base rig, in Git Bash. The host key must already be
 # trusted for OpenSSH; the pin the toolchain uses is [nas] ssh_hostkey in
 # site.toml and it is an ed25519 key.
-SRC='/e/Projects/Editing/Resolve/MulticamPipeline'
+REPO='/e/Projects/Editing'
 NAS=truenas_admin@192.168.0.102
 ROOT=/mnt/tank/apps/ccsync-dashboard
+
+# Take the same snapshot the deploy takes -- a commit, never the working
+# copy (2026-09-11). SRC is then a throwaway export, not a checkout.
+SRC=$(mktemp -d)/tree; mkdir -p "$SRC"
+COMMIT=$(git -C "$REPO" rev-parse --verify 'main^{commit}')
+git -C "$REPO" archive --format=tar "$COMMIT:Resolve/MulticamPipeline" | tar -x -C "$SRC"
+test -f "$SRC/multicam_pipeline/cards/handler.py" || { echo "empty snapshot"; exit 1; }
+printf 'commit=%s\nshort=%s\nref=main\nrepo=%s\nsubtree=Resolve/MulticamPipeline\n' \
+  "$COMMIT" "${COMMIT:0:12}" "$REPO" > "$SRC/DEPLOYED_COMMIT"
 
 rsync -a --delete \
   --exclude .git --exclude .venv --exclude __pycache__ --exclude .pytest_cache \
@@ -229,6 +300,20 @@ comes back on the same episode root it was on.
 In this order. The first two are cheap and catch the two failure shapes that
 look like nothing.
 
+0. **The right commit is live.** `tools\check_deploy_drift.ps1` has a TIMELINE
+   CARDS section that reads the deploy's own record and says whether `main`
+   has moved past what was shipped:
+
+   ```
+   -- TIMELINE CARDS (/cards, another repo's commit)
+     deployed commit            8cac87f0aa12  (main)
+     OK    /cards was shipped from main at 8cac87f0aa12, which is still its head
+   ```
+
+   On the NAS the same fact is `cat
+   /mnt/tank/apps/ccsync-dashboard/cards-web/DEPLOYED_COMMIT`. A machine that
+   has not deployed since 2026-09-11 has no record and the doctor says NOT
+   CHECKED, which is not a pass.
 1. **The mount is up.** `GET /api/v1/health` reports
    `"/cards": {"status": "mounted"}`. `absent` means the tree is not there or
    is incomplete (an operator problem, and it logs at WARNING); `disabled`
@@ -270,6 +355,18 @@ ssh "$NAS" "sudo sh -c '
   mv $ROOT/cards-web.old.<timestamp> $ROOT/cards-web'"
 ssh "$NAS" 'sudo docker restart ix-ccsync-dashboard-dashboard-1'
 ```
+
+There is a second rollback since 2026-09-11, and it is the tidier one when the
+container is healthy: **re-deploy the previous commit**. The old tree's
+`DEPLOYED_COMMIT` (or the record at `~/.ccsync/state/cards_deployed.json`)
+names it, and
+
+```powershell
+dashboard\.venv\Scripts\python.exe server\install_dashboard_app.py --cards-commit <old sha>
+```
+
+puts exactly those bytes back, marker and all. Use the rename when the problem
+is that the deploy itself failed.
 
 By hand, the same with `cards-web.prev`. The prune step keeps the most recent
 backup and never one a container is still reading, so the copy you want is

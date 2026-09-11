@@ -356,8 +356,9 @@ def _tmp_path(path: Path) -> Path:
     bug-hunt-2026-09-03 comp-resolve-1: pid + thread id, because a fixed
     `<file>.json.tmp` is shared by every writer and on Windows the loser of
     that race gets a PermissionError out of os.replace rather than merely a
-    lost entry. Not swept: `SWEPT_SUFFIXES` matches `*.json`, and a tmp that
-    is left behind is unlinked by the writer that made it.
+    lost entry. `_write` unlinks its own tmp when the write raises, and
+    `SWEPT_SUFFIXES` carries `*.json.tmp.*` for the ones a kill leaves behind
+    (comp-resolve-5, 2026-09-11).
     """
     return path.with_name(f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
 
@@ -617,7 +618,15 @@ def describe_latest(project_name: Any = None) -> str:
 # of MB each) in the editor's home forever, while
 # docs/RESOLVE_EDIT_SAFETY.md's Housekeeping section told their admin that
 # "journals and exports older than 60 days are swept on the next write".
-SWEPT_SUFFIXES = ("*.json", "*.drp")
+#
+# comp-resolve-5 (2026-09-11): and the tmp files too. `_tmp_path`'s docstring
+# claimed "a tmp that is left behind is unlinked by the writer that made it",
+# which is only true when the WRITE raises: a process killed between open()
+# and os.replace() unlinks nothing, and on this codebase that is a routine
+# event (CR-93's Tcl_AsyncDelete abort, the 0.9.62 supervisor's relaunch).
+# Neither `*.json` nor `*.drp` matches `<name>.json.tmp.<pid>.<tid>`, so one
+# orphan per incident stayed in the editor's home for ever.
+SWEPT_SUFFIXES = ("*.json", "*.drp", "*.json.tmp.*")
 
 
 def _sweep(slug: str, now: float) -> None:

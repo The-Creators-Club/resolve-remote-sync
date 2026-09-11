@@ -7,7 +7,7 @@ DEVELOPER in three places (KNOWN_BUGS, RELEASE.md, a drift check) and for the
 EDITOR nowhere, while START_HERE.md explained the macOS quarantine equivalent
 in detail.
 
-    cd E:\\Projects\\resolve-remote-sync\\dashboard
+    cd E:\\Projects\\Editing\\ccsync\\dashboard
     .venv\\Scripts\\python.exe -m pytest tests/test_installer_page.py -q
 """
 from __future__ import annotations

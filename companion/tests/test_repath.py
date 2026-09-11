@@ -377,7 +377,10 @@ def test_a_rename_with_resolve_closed_stays_pending_and_is_retried(tmp_path):
     assert [e["slug"] for e in r.ledger.pending_relinks()] == ["s1"]
 
     # The next pass, with the project open in Resolve.
-    assert r.retry_pending_relinks() == 1
+    # force=True because the reconcile above just spent this pass's one walk
+    # (comp-sync-6, 2026-09-11): the throttle is what stops 1+N media-pool
+    # enumerations per sequencer pass.
+    assert r.retry_pending_relinks(force=True) == 1
     assert r.ledger.events()[0]["relinked"] is True
     assert r.ledger.pending_relinks() == []
 

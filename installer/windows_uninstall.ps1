@@ -148,6 +148,43 @@ function Unregister-UninstallEntry {
     catch { return $false }
 }
 
+function Get-BinDirLeftovers {
+    <#
+      .SYNOPSIS
+        The files still in the bin dir after the delete, excluding the two
+        that are EXPECTED to survive (install-onboard-3, 2026-09-11).
+      .DESCRIPTION
+        The delete is -ErrorAction SilentlyContinue and its result was never
+        re-read, so a locked companion exe (Stop-Process -Force does not wait
+        for the image handle), an AV scan or a file left open by anything
+        else went unreported while the script printed "removed program
+        binaries" -- and, until this hunt, after the Apps & features entry had
+        already been deleted, so the editor had no button left to retry with.
+
+        The running uninstaller and the drive_mapping.ps1 it dot-sources live
+        in that directory (OPS-17), and PowerShell may hold either open: a
+        check that counted them would warn on every healthy uninstall, which
+        teaches editors to ignore the warning. Only those two, only at the top
+        level. Never throws: the uninstall is over by the time this is asked.
+    #>
+    param(
+        [string]$BinDir,
+        [string]$SelfPath
+    )
+    if (-not $BinDir -or -not (Test-Path -LiteralPath $BinDir)) { return @() }
+    try {
+        $expected = @(
+            $SelfPath,
+            (Join-Path $BinDir "windows_uninstall.ps1"),
+            (Join-Path $BinDir "drive_mapping.ps1")
+        ) | Where-Object { $_ }
+        return @(Get-ChildItem -LiteralPath $BinDir -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $expected -notcontains $_.FullName } |
+            ForEach-Object { $_.FullName })
+    }
+    catch { return @() }
+}
+
 Write-Step "mode: $(if ($Full) { 'FULL (also removes your sign-in + Syncthing identity)' } else { 'keep sign-in + settings' })"
 Write-Step "your synced media is never touched by this script -- only the CCSync app itself."
 if ($DryRun) { Write-Step "DRY RUN -- nothing will be changed" }
@@ -419,10 +456,42 @@ if (Test-Path -LiteralPath $driveIconsKey) {
 }
 
 # --- 4. program binaries --------------------------------------------------
-# The Apps & features entry goes FIRST: it points at a script inside $BinDir,
-# and an entry outliving the file it names is a button that fails (OPS-17).
+# The binaries go FIRST and the Apps & features entry LAST (install-onboard-3,
+# 2026-09-11). The entry used to be removed first, because it points at a
+# script inside $BinDir and an entry outliving the file it names is a button
+# that fails (OPS-17) -- but an entry removed before a delete that did not
+# happen is worse: the app is still on the machine and the one button an
+# editor (or their IT) can find to retry with is gone. So it is removed only
+# when the directory is actually clear, and left in place, with an
+# explanation, when it is not.
+$binLeftovers = @()
+if (Test-Path -LiteralPath $BinDir) {
+    if ($DryRun) { Write-Step "[dry-run] would delete $BinDir (rclone, syncthing, companion exe)" }
+    else {
+        Remove-Item -LiteralPath $BinDir -Recurse -Force -ErrorAction SilentlyContinue
+        $binLeftovers = @(Get-BinDirLeftovers -BinDir $BinDir -SelfPath $PSCommandPath)
+        if ($binLeftovers.Count -eq 0) {
+            Write-Step "removed program binaries: $BinDir"
+        }
+        else {
+            Write-Warn2 "some program files are still there, most likely still open by a running app:"
+            foreach ($leftover in ($binLeftovers | Select-Object -First 8)) {
+                Write-Warn2 "    $leftover"
+            }
+            if ($binLeftovers.Count -gt 8) {
+                Write-Warn2 "    ...and $($binLeftovers.Count - 8) more"
+            }
+            Write-Warn2 "To finish: sign out and back in (or restart), then run this uninstaller again from Apps & features, or delete $BinDir by hand."
+        }
+    }
+}
+else { Write-Skip "no bin dir: $BinDir" }
+
 if ($DryRun) {
     Write-Step "[dry-run] would remove the Apps & features entry $UninstallKeyRoot\$UninstallKeyName"
+}
+elseif ($binLeftovers.Count -gt 0) {
+    Write-Warn2 "leaving CC Sync in Apps & features so you can run this again: the program files above are still on the machine."
 }
 elseif (Unregister-UninstallEntry -KeyRoot $UninstallKeyRoot -KeyName $UninstallKeyName) {
     Write-Step "removed the Apps & features entry"
@@ -430,15 +499,6 @@ elseif (Unregister-UninstallEntry -KeyRoot $UninstallKeyRoot -KeyName $Uninstall
 else {
     Write-Warn2 "could not remove the Apps & features entry at $UninstallKeyRoot\$UninstallKeyName -- delete that key by hand, or it will offer to uninstall something that is gone."
 }
-
-if (Test-Path -LiteralPath $BinDir) {
-    if ($DryRun) { Write-Step "[dry-run] would delete $BinDir (rclone, syncthing, companion exe)" }
-    else {
-        Remove-Item -LiteralPath $BinDir -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Step "removed program binaries: $BinDir"
-    }
-}
-else { Write-Skip "no bin dir: $BinDir" }
 
 # ...and the user PATH entry windows_bootstrap.ps1 added for it. Leaving a
 # dangling PATH entry behind is what makes "uninstall then reinstall" produce
@@ -547,7 +607,15 @@ else {
 
 Write-Host ""
 Write-Host "=================================================================="
-Write-Step "CCSync uninstall complete$(if ($DryRun) { ' (dry run -- nothing changed)' })."
+# install-onboard-3 (2026-09-11): the closing line said "complete" over a run
+# that had left the whole app on disk. It is only complete when the binaries
+# are gone.
+if ($binLeftovers.Count -gt 0) {
+    Write-Warn2 "CCSync uninstall NOT complete: $($binLeftovers.Count) program file(s) are still in $BinDir. Sign out and back in, then run this uninstaller again from Apps & features."
+}
+else {
+    Write-Step "CCSync uninstall complete$(if ($DryRun) { ' (dry run -- nothing changed)' })."
+}
 Write-Step "Tailscale / rclone / Syncthing installed as system packages were left alone; remove them from Apps & features if wanted."
 # This script is installed INTO $BinDir by windows_bootstrap.ps1 (OPS-17), and
 # Windows will not always let a running script delete itself. Say so rather

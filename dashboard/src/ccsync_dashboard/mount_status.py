@@ -23,7 +23,9 @@ block, which must never be able to stop the dashboard starting.
 
 from __future__ import annotations
 
+import os
 import threading
+from collections.abc import Callable
 
 # name -> (status, detail). The statuses are the mounts' own strings
 # (mounted / absent / degraded / disabled), NOT a fifth vocabulary invented
@@ -38,6 +40,27 @@ _STATE: dict[str, tuple[str, str]] = {}
 NAMES = ("broll", "music", "ytdl", "cards")
 
 
+# res-fleet-2 (2026-09-11): name -> the data root that mount is serving, as
+# the mount itself resolved it. Recorded so the collector can re-probe it
+# every cycle with one `os.path.isdir`, with no import, no database and no
+# app object: the tri-state used to be computed ONCE inside `create_app` and
+# then rendered for the life of the container as a statement about now, so a
+# NAS export that flapped at 03:00 left B-ROLL and MUSIC advertised, every
+# request under them failing, and nothing anywhere saying why.
+_ROOTS: dict[str, str] = {}
+
+# Names this process downgraded at runtime, with the verdict they held
+# before, so a root that comes back restores exactly what the boot recorded
+# rather than a sentence invented here.
+_RUNTIME_DEGRADED: dict[str, tuple[str, str]] = {}
+
+# The runtime verdict for a mount whose root has gone. DEGRADED, never
+# ABSENT: the ASGI sub-app IS mounted in this process and will answer, it is
+# the data underneath it that is not there.
+DEGRADED = "degraded"
+MOUNTED = "mounted"
+
+
 def record(name: str, status: str, detail: str) -> None:
     """Remember one mount's verdict. Never raises."""
     try:
@@ -45,6 +68,62 @@ def record(name: str, status: str, detail: str) -> None:
             _STATE[str(name)] = (str(status or ""), str(detail or ""))
     except Exception:  # noqa: BLE001 - a diagnostic must not break a boot
         pass
+
+
+def record_root(name: str, root: str) -> None:
+    """Remember the data root one mount is serving, for `recheck`. Never
+    raises: this is called from inside the boot block."""
+    try:
+        with _LOCK:
+            if str(root or ""):
+                _ROOTS[str(name)] = str(root)
+    except Exception:  # noqa: BLE001 - a diagnostic must not break a boot
+        pass
+
+
+def recheck(is_dir: Callable[[str], bool] | None = None) -> dict[str, tuple[str, str]]:
+    """Re-probe every recorded data root and fold the answer into the verdicts.
+
+    res-fleet-2 (2026-09-11). Called once per collector cycle, BEFORE the
+    notice writer reads the snapshot. Cheap by contract: one `is_dir` per
+    mount, nothing imported, nothing opened, no database - it runs on the
+    collector's single thread beside enforce.
+
+    A root that has gone downgrades a MOUNTED verdict to degraded with the
+    reason. A root that comes back restores the boot verdict, and ONLY for a
+    mount this function itself downgraded: a mount that failed at boot was
+    never mounted into this process's ASGI app, so "the directory is there
+    again" is not "the page works again", and saying so would hide the one
+    thing the admin has to do (restart the dashboard). A probe that cannot
+    answer changes nothing - "could not read" is never "it is gone".
+
+    Returns the names it changed, name -> the new (status, detail).
+    """
+    probe = is_dir or os.path.isdir
+    changed: dict[str, tuple[str, str]] = {}
+    with _LOCK:
+        for name, root in list(_ROOTS.items()):
+            entry = _STATE.get(name)
+            if entry is None:
+                continue
+            status, detail = entry
+            try:
+                present = bool(probe(root))
+            except Exception:  # noqa: BLE001 - cannot tell is not gone
+                continue
+            if not present and status == MOUNTED:
+                _RUNTIME_DEGRADED[name] = (status, detail)
+                new = (DEGRADED,
+                       f"the folder it serves is not there any more ({root}). "
+                       f"Every request to that page will fail until the "
+                       f"server's bind mount is back.")
+                _STATE[name] = new
+                changed[name] = new
+            elif present and name in _RUNTIME_DEGRADED:
+                new = _RUNTIME_DEGRADED.pop(name)
+                _STATE[name] = new
+                changed[name] = new
+    return changed
 
 
 def snapshot() -> dict[str, tuple[str, str]]:
@@ -69,3 +148,5 @@ def reset() -> None:
     process -- otherwise the previous app's verdicts outlive it."""
     with _LOCK:
         _STATE.clear()
+        _ROOTS.clear()
+        _RUNTIME_DEGRADED.clear()

@@ -53,6 +53,7 @@ function Get-Function {
 }
 
 Invoke-Expression (Get-Function (Join-Path $InstallerDir "windows_bootstrap.ps1") "Register-UninstallEntry")
+Invoke-Expression (Get-Function (Join-Path $InstallerDir "windows_bootstrap.ps1") "Set-UninstallEntryIcon")
 Invoke-Expression (Get-Function (Join-Path $InstallerDir "windows_uninstall.ps1") "Unregister-UninstallEntry")
 
 $fail = 0
@@ -126,6 +127,30 @@ try {
     Check "a missing icon is not recorded" $null `
         ((Get-ItemProperty -LiteralPath $Key).DisplayIcon)
 
+    # --- install-onboard-4: the icon is written when the exe exists --------
+    # Section 1a registers the entry ~1250 lines before section 9 copies the
+    # companion exe, so on a FIRST install the guard above always skipped
+    # DisplayIcon and the row in Settings > Apps stayed blank forever: the
+    # shape an unwanted or unsigned program has. Section 9 sets it once the
+    # exe is on disk.
+    $CompanionExe = Join-Path $BinDir "ccsync-companion.exe"
+    Check "no icon is invented for an exe that is not there" $false `
+        (Set-UninstallEntryIcon -KeyRoot $Root -KeyName $Name -IconPath $CompanionExe)
+    Check "and nothing was written" $null `
+        ((Get-ItemProperty -LiteralPath $Key).DisplayIcon)
+    Set-Content -LiteralPath $CompanionExe -Value "MZ" -Encoding UTF8
+    Check "the icon is written once the exe exists" $true `
+        (Set-UninstallEntryIcon -KeyRoot $Root -KeyName $Name -IconPath $CompanionExe)
+    Check "DisplayIcon is the companion exe" $CompanionExe `
+        ((Get-ItemProperty -LiteralPath $Key).DisplayIcon)
+    # An entry that was never registered (a bootstrap run out of the package,
+    # with no uninstaller to point at) must not be created by the icon write.
+    Check "a missing entry is not created" $false `
+        (Set-UninstallEntryIcon -KeyRoot "HKCU:\Software\ccsync-test\nope" `
+            -KeyName $Name -IconPath $CompanionExe)
+    Check "and no key appeared" $false `
+        (Test-Path -LiteralPath "HKCU:\Software\ccsync-test\nope\$Name")
+
     # --- the uninstaller half ---------------------------------------------
     Check "the entry is removed" $true (Unregister-UninstallEntry -KeyRoot $Root -KeyName $Name)
     Check "the key is gone" $false (Test-Path -LiteralPath $Key)
@@ -144,6 +169,26 @@ finally {
     if (Test-Path -LiteralPath $BinDir) {
         Remove-Item -LiteralPath $BinDir -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+# install-onboard-4: and it is CALLED from where the exe is known to exist.
+# The order of the two line numbers is the whole fix.
+$bootstrapText = Get-Content -LiteralPath (Join-Path $InstallerDir "windows_bootstrap.ps1") -Raw -Encoding UTF8
+$bootstrapLines = $bootstrapText -split "`r?`n"
+$copyLine = 0
+$iconLine = 0
+for ($i = 0; $i -lt $bootstrapLines.Count; $i++) {
+    if (-not $copyLine -and $bootstrapLines[$i] -match "Copy-Item -LiteralPath \`$CompanionExeSource") { $copyLine = $i + 1 }
+    if (-not $iconLine -and $bootstrapLines[$i] -match "^\s*Set-UninstallEntryIcon -KeyRoot") { $iconLine = $i + 1 }
+}
+if (-not $copyLine -or -not $iconLine) {
+    Bad "could not find the companion copy ($copyLine) and the Set-UninstallEntryIcon call ($iconLine)"
+}
+elseif ($iconLine -gt $copyLine) {
+    Ok "the icon is set after the companion exe is installed"
+}
+else {
+    Bad "Set-UninstallEntryIcon (line $iconLine) runs before the exe is copied (line $copyLine): every first install gets a blank icon"
 }
 
 Write-Host ""

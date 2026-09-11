@@ -241,7 +241,10 @@ def docs(tmp_path, monkeypatch):
 
 
 def test_the_index_lists_the_shipped_tree_grouped_and_titled(docs):
-    groups = help_page.document_groups()
+    # As an ADMIN on a dev checkout (dash-mounts-ui-1, 2026-09-11): an editor
+    # is shown the customer-facing set only, which
+    # test_bug_hunt_2026_09_11_dash_mounts_ui.py pins.
+    groups = help_page.document_groups(True)
     labels = [g["label"] for g in groups]
     assert labels == ["docs/", "top level", "docs/legal/", "docs/spikes/"]
     first = groups[0]["entries"][0]
@@ -267,7 +270,7 @@ def test_a_document_from_the_tree_renders_in_the_same_viewer(docs):
 
 
 def test_a_heading_in_any_document_keeps_the_stable_anchor_ids(docs):
-    context = help_page.page_context("GOTCHAS.md")
+    context = help_page.page_context("GOTCHAS.md", True)
     assert '<h2 id="resolve">' in context["help_html"]
 
 
@@ -286,7 +289,7 @@ def test_a_link_between_two_documents_becomes_a_help_route(docs):
 
 
 def test_a_link_from_a_top_level_document_resolves_the_other_way(docs):
-    body = help_page.page_context("_root/KNOWN_BUGS.md")["help_html"]
+    body = help_page.page_context("_root/KNOWN_BUGS.md", True)["help_html"]
     assert '<a href="/help/HOW_IT_WORKS.md">the guide</a>' in body
 
 
@@ -324,9 +327,12 @@ def test_a_symlink_out_of_the_tree_is_refused(docs, tmp_path):
 
 
 def test_a_top_level_document_is_only_reachable_by_the_allow_list(docs):
-    assert help_page.resolve_document("_root/KNOWN_BUGS.md") is not None
+    """Admin, because the four top-level documents are admin-only and ship
+    nowhere since 2026-09-11 (dash-mounts-ui-1): the allow-list is still what
+    keeps `_root/` from meaning "anything beside the application"."""
+    assert help_page.resolve_document("_root/KNOWN_BUGS.md", True) is not None
     (docs / "_root" / "notes.md").write_text("# Notes\n", encoding="utf-8")
-    assert help_page.resolve_document("_root/notes.md") is None
+    assert help_page.resolve_document("_root/notes.md", True) is None
 
 
 def test_a_server_with_no_docs_tree_says_so_rather_than_500ing(monkeypatch):
@@ -337,7 +343,7 @@ def test_a_server_with_no_docs_tree_says_so_rather_than_500ing(monkeypatch):
 
 
 def test_a_document_this_server_does_not_carry_says_so_with_the_index(docs):
-    context = help_page.page_context("NOPE.md")
+    context = help_page.page_context("NOPE.md", True)
     assert context["help_not_found"] is True
     assert "not on this server" in context["help_missing"]
     # ...and the list is still there, because the reader followed a link.
@@ -359,7 +365,7 @@ def test_a_thirteen_thousand_line_document_renders_in_reasonable_time(docs):
     assert text.count("\n") >= 13000
     (docs / "_root" / "KNOWN_BUGS.md").write_text(text, encoding="utf-8")
     started = time.perf_counter()
-    context = help_page.page_context("_root/KNOWN_BUGS.md")
+    context = help_page.page_context("_root/KNOWN_BUGS.md", True)
     elapsed = time.perf_counter() - started
     assert 'id="cr-0-a-defect-fixed"' in context["help_html"]
     assert elapsed < 2.0, f"rendering took {elapsed:.2f}s"
@@ -380,7 +386,9 @@ def test_the_bare_help_url_is_still_the_guide(client):
 
 
 def test_the_page_lists_the_documents_and_lights_the_current_one(client, docs):
-    page = as_user(client).get("/help/GOTCHAS.md")
+    # `owen` is the admin in this suite: GOTCHAS.md is not a customer-facing
+    # document, and an editor asking for it gets the index and a 404.
+    page = as_user(client, "owen").get("/help/GOTCHAS.md")
     assert page.status_code == 200
     assert "[ DOCUMENTS ]" in page.text
     assert 'href="/help/legal/EULA.md"' in page.text

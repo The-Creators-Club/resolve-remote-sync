@@ -235,21 +235,13 @@ function Write-Step { param([string]$m) Write-Host "[ship] $m" }
 # two gates that read this.
 $KindExtrasFloor = "0.9.55"
 
-function Test-VersionAtLeast {
-    param([string]$Have, [string]$Want)
-    if (-not $Have -or -not $Want) { return $false }
-    $a = @(); $b = @()
-    foreach ($part in ($Have -split '\.')) { if ($part -notmatch '^\d+$') { return $false }; $a += [int]$part }
-    foreach ($part in ($Want -split '\.')) { if ($part -notmatch '^\d+$') { return $false }; $b += [int]$part }
-    for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count); $i++) {
-        $x = 0; $y = 0
-        if ($i -lt $a.Count) { $x = $a[$i] }
-        if ($i -lt $b.Count) { $y = $b[$i] }
-        if ($x -gt $y) { return $true }
-        if ($x -lt $y) { return $false }
-    }
-    return $true
-}
+# Test-VersionAtLeast and the -EmitKindExtras verdict live in ship_gates.ps1
+# since server-tools-1 (2026-09-11): the defect that hunt found was in the
+# PowerShell semantics of one comparison inside the gate, and while the gate
+# was inline here the only thing any test could assert about it was its source
+# text. Dot-sourced, never invoked: the file defines functions and nothing
+# else.
+. (Join-Path $PSScriptRoot "ship_gates.ps1")
 
 function Write-Fail { param([string]$m) Write-Host "[ship] FAILED: $m" -ForegroundColor Red }
 
@@ -533,24 +525,24 @@ if (-not $DashboardOnly) {
     # why, and it is right: who is behind is an admin question. So this refuses
     # on "any computer is behind the current build", which is the strongest
     # answer this credential can give, and names the command that names them.
+    #
+    # server-tools-1 (2026-09-11): the verdict is Get-KindExtrasVerdict's, in
+    # ship_gates.ps1, where it can be tested against real health bodies. It
+    # used to be inline, and it read an EMPTY rollout array as an all-clear
+    # ($null -eq @() is $false in PowerShell) and counted channels rather than
+    # computers. Unreadable is a refusal here, always.
     if ($EmitKindExtras) {
-        if ($null -eq $health -or $null -eq $health.rollout) {
+        $kindVerdict = Get-KindExtrasVerdict -Health $health -Floor $KindExtrasFloor
+        if (-not $kindVerdict.Readable) {
             Write-Fail "-EmitKindExtras: could not read the fleet's versions from $DashboardUrl."
+            Write-Step "  $($kindVerdict.Reason)."
             Write-Step "That flag permanently strands any computer below ${KindExtrasFloor}: it refuses"
             Write-Step "the signed record outright, and the only fix is a reinstall at that desk."
-            Write-Step "Check the dashboard is up, then re-run. Do not guess this one."
+            Write-Step "Check the dashboard is up and current (.\tools\ship.cmd -DashboardOnly), then"
+            Write-Step "re-run. Do not guess this one."
             exit 1
         }
-        $stragglers = @()
-        foreach ($c in @($health.rollout)) {
-            $cur = "$($c.current_version)"
-            if (-not (Test-VersionAtLeast $cur $KindExtrasFloor)) {
-                $stragglers += "$($c.platform) computers are offered $cur, which is below $KindExtrasFloor"
-            }
-            elseif ([int]$c.behind -gt 0) {
-                $stragglers += "$([int]$c.behind) $($c.platform) computer(s) are behind $cur and could be below $KindExtrasFloor"
-            }
-        }
+        $stragglers = @($kindVerdict.Stragglers)
         if ($stragglers.Count -gt 0) {
             Write-Fail "-EmitKindExtras is refused: the fleet is not all on $KindExtrasFloor or newer."
             foreach ($sline in $stragglers) { Write-Step "  $sline" }

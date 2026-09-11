@@ -12,7 +12,9 @@ built 2026-09-04.
     fleet routes, every one keyed by a uid the caller must already hold, and a
     companion that never polls: the batch sat in `queued` for ever holding name
     reservations and permanently-`ingesting` rows, under a notice claiming
-    another of the editor's machines could take it.
+    another of the editor's machines could take it. The answer is the panel's
+    [ take over on this computer ] button; the discovery route that shipped
+    beside it never had a caller and is gone (broll-3, 2026-09-11).
   * **`done_with_errors - 12 failed` was the end of the road.** The only
     affordance was `clips`, i.e. twelve names to transcribe by hand and
     re-drop, which the first attempt's `videos` rows then read as duplicates.
@@ -75,8 +77,8 @@ def test_a_finished_batch_with_failures_can_be_queued_again(client, conn):
     answer = client.post(f"/api/ingest-batches/{uid}/retry-failed").json()
     assert answer["retried"] == 1
     assert answer["items"] == [failed_uid], (
-        "the uids that moved, in batch order: that is the body the companion's "
-        "/broll/ingest/retry takes")
+        "the uids that moved, in batch order, for the page to show - NOT a "
+        "body any companion route takes (broll-1, 2026-09-11)")
     assert answer["state"] == "queued"
     assert ingest_batches.get_item(conn, uid, failed_uid)["state"] == "pending"
 
@@ -138,62 +140,14 @@ def test_a_retried_batch_can_be_claimed_and_finished(client, conn):
     assert _claim(client, uid, machine="EDIT-02").status_code == 200
 
 
-# --- BROLL-8: discovery --------------------------------------------------------
-
-def test_a_companion_can_ask_which_of_its_editors_batches_are_unfinished(client, conn):
-    live = _queue(client)
-    over = _queue(client)
-    _claim(client, over)
-    client.post(f"{BASE}/{over}/release", headers=fleet_headers(),
-                json={"state": "done"})
-
-    body = client.get(BASE, headers=fleet_headers()).json()
-    uids = [b["uid"] for b in body["batches"]]
-    assert live in uids and over not in uids
-    assert body["editor"] == "jsmith"
-
-
-def test_discovery_carries_the_heartbeat_and_the_words(client, conn):
-    uid = _queue(client)
-    _claim(client, uid)
-    batch = client.get(BASE, headers=fleet_headers()).json()["batches"][0]
-    assert batch["uid"] == uid
-    assert batch["machine"] == "EDIT-01"
-    assert batch["last_heartbeat_at"]
-    assert batch["state_text"] == "starting on EDIT-01"
-
-
-def test_discovery_is_scoped_to_the_verified_identity(client, conn):
-    """The fleet token is held by every companion and is not an identity (H5),
-    so a name in the query string must not be a way to read another editor's
-    machines."""
-    mine = _queue(client, editor="jsmith")
-    theirs = _queue(client, editor="other")
-
-    body = client.get(BASE, headers=fleet_headers("jsmith")).json()
-    assert [b["uid"] for b in body["batches"]] == [mine]
-    assert client.get(f"{BASE}?editor=other",
-                      headers=fleet_headers("jsmith")).status_code == 403
-    assert client.get(f"{BASE}?editor=jsmith",
-                      headers=fleet_headers("jsmith")).status_code == 200
-
-
-def test_discovery_needs_the_fleet_token(client, conn):
-    _queue(client)
-    assert client.get(BASE).status_code == 403
-
-
-def test_discovery_hands_back_a_batch_whose_machine_stopped_answering(client, conn):
-    """A lease nobody renewed is what this route exists to surface: the batch
-    is back in `queued` with its machine name still on it."""
-    uid = _queue(client)
-    _claim(client, uid)
-    conn.execute("UPDATE ingest_batches SET lease_expires_at = '2000-01-01T00:00:00+00:00' "
-                 "WHERE uid = ?", (uid,))
-    conn.commit()
-    batch = client.get(BASE, headers=fleet_headers()).json()["batches"][0]
-    assert batch["state"] == "queued"
-    assert batch["machine"] == "EDIT-01", "the name is what the sentence needs"
+# --- BROLL-8: a batch whose machine went away ----------------------------------
+#
+# The discovery route that landed with BROLL-8 (`GET /api/fleet/ingest/batches`)
+# was deleted on 2026-09-11 (broll-3): no FleetClient method ever issued it, and
+# a companion that discovered and claimed its own work would take the decision
+# about what a machine works on off the page. What answers the finding is the
+# panel's [ take over on this computer ] button, pinned below and in
+# test_bug_hunt_2026_09_11_broll.py.
 
 
 # --- the page ------------------------------------------------------------------
@@ -262,7 +216,9 @@ def test_the_batch_card_offers_the_failed_ones_again():
     again = INGEST_JS[INGEST_JS.index("async function ingestRetryFailedBatch"):]
     again = again[:again.index("\n}\n")]
     assert "retry-failed" in again, "the durable half first"
-    assert '"/broll/ingest/retry"' in again
-    assert "e.status === 404" in again, (
-        "an older companion has no retry route: the run call reaches the same "
-        "place through the claim")
+    assert '"/broll/ingest/retry"' not in again, (
+        "broll-1, 2026-09-11: that route matches its `items` against the "
+        "browser's staging local ids, which these server-minted uids are not")
+    assert '"/broll/ingest/run"' in again and "batch_uid: uid" in again, (
+        "the take-over dispatch is what actually starts the work again, on "
+        "every build in the fleet")

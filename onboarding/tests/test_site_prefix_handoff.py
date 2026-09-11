@@ -134,9 +134,21 @@ class TestTheBootstrapIsToldTheLetterTheWizardUsed:
         assert env["CCSYNC_CANONICAL_PREFIX"] == "Q:\\"
         assert env["CCSYNC_TREE_NAME"] == "Creators_Club"
 
-    def test_nothing_is_invented_when_the_wizard_has_no_manifest(self, tmp_path):
+    def test_the_cache_answers_when_this_runs_fetch_failed(self, tmp_path, monkeypatch):
+        """install-onboard-2 again (2026-09-11): site=None is the failed-fetch
+        case the flags exist for, and reading the passed dict alone passed
+        nothing in exactly it while ensure_config wrote the CACHED prefix into
+        config.toml."""
+        monkeypatch.setattr(site_mod, "cached_site", lambda: dict(Q_CACHE))
+        cmd = _run_bootstrap(tmp_path, "win32", None, "windows_bootstrap.ps1")["cmd"]
+        assert cmd[cmd.index("-CanonicalPrefix") + 1] == "Q:\\"
+        assert cmd[cmd.index("-TreeName") + 1] == "Creators_Club"
+
+    def test_nothing_is_invented_when_the_wizard_has_no_manifest(
+            self, tmp_path, monkeypatch):
         """The 404 case: the scripts' own fetch-then-fall-back must decide.
         Passing OUR fallback would beat their fetch and defeat the point."""
+        monkeypatch.setattr(site_mod, "cached_site", lambda: {})
         captured = _run_bootstrap(tmp_path, "win32", None, "windows_bootstrap.ps1")
         assert "-CanonicalPrefix" not in captured["cmd"]
         assert "-TreeName" not in captured["cmd"]
@@ -168,7 +180,12 @@ class TestEveryManifestKeyRunBootstrapHoldsCanBePassedOn:
         return source[start:end]
 
     def test_the_table_is_the_whole_set_of_keys_it_reads(self):
-        keys = set(re.findall(r'site\.get\("([a-z_]+)"', self._run_bootstrap_source()))
+        body = self._run_bootstrap_source()
+        # Two readers since 2026-09-11: site.get for the keys the script
+        # re-fetches harmlessly, site_manifest_value for the two that must
+        # survive a failed fetch (install-onboard-2).
+        keys = set(re.findall(r'site\.get\("([a-z_]+)"', body))
+        keys |= set(re.findall(r'site_manifest_value\(site, "([a-z_]+)"\)', body))
         assert keys == set(self.HANDOFF), (
             "a manifest key run_bootstrap reads with no way to hand it to the "
             "bootstrap is install-onboard-2 again")
@@ -184,12 +201,19 @@ class TestEveryManifestKeyRunBootstrapHoldsCanBePassedOn:
         for key, (_win, mac) in self.HANDOFF.items():
             assert mac in text, f"{key}: macos_bootstrap.sh never reads {mac}"
 
-    def test_the_wizard_passes_the_manifest_and_not_config_toml(self):
+    def test_the_wizard_passes_the_manifest_and_not_config_toml(self, monkeypatch):
         """A base rig stores its LOCAL ROOT in canonical_prefix, which both
-        bootstraps refuse as not-a-drive-letter. Only the fetched manifest may
-        reach the flag."""
+        bootstraps refuse as not-a-drive-letter. Only a MANIFEST value - this
+        run's or the cached one - may reach the flag, and never the normalised
+        P:\\ default site_canonical_prefix hands back (install-onboard-2,
+        2026-09-11: that default would force P: onto a Q: site's bootstrap,
+        which is the same bug pointing the other way)."""
         body = self._run_bootstrap_source()
-        assert 'canonical_prefix = str(site.get("canonical_prefix")' in body
+        assert "site_canonical_prefix(" not in body
+        monkeypatch.setattr(site_mod, "cached_site", lambda: {"remote_root": "/mnt/pool"})
+        assert steps.site_manifest_value(None, "canonical_prefix") == ""
+        assert steps.site_manifest_value({"canonical_prefix": "R:\\"},
+                                         "canonical_prefix") == "R:\\"
 
 
 # -- install-onboard-4: the guard exists on macOS too --------------------------
@@ -199,37 +223,57 @@ class TestForbiddenDriveOnMacOS:
     def _frozen(self, monkeypatch):
         monkeypatch.setattr(steps.sys, "frozen", True, raising=False)
 
+    # install-onboard-1 (2026-09-11) replaced the walk-up-to-a-mount-point
+    # rule with the volume's identity: /Users IS a mount point on every macOS
+    # 10.15+ machine, so the walk refused the home folder. `stat_dev` maps a
+    # path to its device; the firmlink shape is exercised against the REAL
+    # default in tests/test_bug_hunt_2026_09_11_install_onboard.py.
+    BOOT = {"/": 1, "/System/Volumes/Data": 2}
+
+    def _dev(self, extra=None):
+        table = dict(self.BOOT)
+        table.update(extra or {})
+
+        def stat_dev(path):
+            # Longest prefix wins: "/" is a prefix of everything.
+            for prefix in sorted(table, key=len, reverse=True):
+                if path == prefix or path.startswith(prefix.rstrip("/") + "/"):
+                    return table[prefix]
+            return table["/"]
+        return stat_dev
+
     def test_running_from_a_mounted_volume_is_refused(self, monkeypatch):
         monkeypatch.setattr(
             steps.sys, "executable",
             "/Volumes/TheCreatorsPool/Assets/Software/onboard.app/Contents/MacOS/onboard")
         assert steps.installer_on_forbidden_drive(
-            platform="darwin", is_mount=lambda p: False) is True
+            platform="darwin", stat_dev=self._dev({"/Volumes": 9})) is True
 
-    def test_any_other_mount_point_is_refused_too(self, monkeypatch):
+    def test_a_foreign_volume_outside_volumes_is_refused_too(self, monkeypatch):
         # An external SSD mounted somewhere other than /Volumes: the install
         # is about to write a whole tree onto it.
         monkeypatch.setattr(steps.sys, "executable", "/mnt/t7/software/onboard")
         assert steps.installer_on_forbidden_drive(
-            platform="darwin", is_mount=lambda p: p == "/mnt/t7") is True
+            platform="darwin", stat_dev=self._dev({"/mnt/t7": 9})) is True
 
     def test_the_boot_volume_is_fine(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/Users/leso")
         monkeypatch.setattr(steps.sys, "executable", "/Users/leso/Desktop/onboard")
         assert steps.installer_on_forbidden_drive(
-            platform="darwin", is_mount=lambda p: False) is False
+            platform="darwin", stat_dev=self._dev({"/Users": 2})) is False
 
-    def test_an_unreadable_mount_table_never_refuses(self, monkeypatch):
+    def test_an_unreadable_volume_never_refuses(self, monkeypatch):
         def boom(path):
             raise OSError("no")
         monkeypatch.setattr(steps.sys, "executable", "/Users/leso/Desktop/onboard")
         assert steps.installer_on_forbidden_drive(
-            platform="darwin", is_mount=boom) is False
+            platform="darwin", stat_dev=boom) is False
 
     def test_an_unfrozen_wizard_is_never_refused(self, monkeypatch):
         monkeypatch.setattr(steps.sys, "frozen", False, raising=False)
         monkeypatch.setattr(steps.sys, "executable", "/Volumes/Pool/onboard")
         assert steps.installer_on_forbidden_drive(
-            platform="darwin", is_mount=lambda p: True) is False
+            platform="darwin", stat_dev=self._dev({"/Volumes": 9})) is False
 
     def test_the_windows_rule_is_unchanged(self, monkeypatch):
         monkeypatch.setattr(steps.sys, "executable", r"Q:\Assets\Software\onboard.exe")

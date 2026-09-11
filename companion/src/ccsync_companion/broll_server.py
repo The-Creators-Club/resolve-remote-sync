@@ -51,7 +51,8 @@ PLAN.md §4.1):
   GET  /broll/ingest/thumb
   POST /broll/ingest/run
   POST /broll/ingest/control
-and, since the same day, the MUSIC ingest group -- the same eight routes,
+  POST /broll/ingest/retry
+and, since the same day, the MUSIC ingest group -- the same nine routes,
 parameterised by kind, because the pipeline behind them is the same object
 (docs/MUSIC_INGEST_PLAN.md §2):
   GET  /music/ingest/capabilities
@@ -62,6 +63,7 @@ parameterised by kind, because the pipeline behind them is the same object
   GET  /music/ingest/thumb
   POST /music/ingest/run
   POST /music/ingest/control
+  POST /music/ingest/retry
 That group brings the first PUT and the first non-JSON body this listener has
 ever accepted, so it brings its own two rules with it (see do_PUT): the body
 cap is the DECLARED size of that one file rather than MAX_BODY_BYTES, and
@@ -766,9 +768,13 @@ def build_insert_response(
             # ok TRUE, deliberately (CMEDIA-7, 2026-09-04): nothing has gone
             # wrong, the clip is simply behind this machine's other download,
             # and the page's poll loop must keep polling rather than toast a
-            # red failure and stop. `state` is what a page acts on; the older
-            # pages that only understand ok:false/true see a success with
-            # nothing inserted yet and poll on, which is the same behaviour.
+            # red failure and stop. `state` is what a page acts on.
+            # comp-broll-music-4 (2026-09-11): the older pages do NOT poll on
+            # -- the pre-2026-09-04 loop continues only on
+            # state == "downloading", so this body ends the attempt with a
+            # green toast of `message`. That is why BUSY_MESSAGE opens with
+            # "not sent yet": the sentence is the only part of this answer an
+            # old page will read correctly.
             return 200, {"ok": True, "state": "busy",
                          "retry_after": broll_fetch.BUSY_RETRY_AFTER_SECONDS,
                          "message": fetch.get("message")
@@ -1805,6 +1811,25 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
                 # companion has always been safe to re-send to. `items` is a
                 # list of local ids from THIS drop and nothing else is read.
                 status, result = ingestor.retry(body)
+                # music-2 (2026-09-11): a body carrying a `batch_uid` is the
+                # OTHER retry - the server's `retry-failed` has put the failed
+                # items back to `pending` and the page is asking this machine
+                # to run the batch again from the audio still staged here.
+                # Re-arming the staging ledger alone would leave the batch
+                # `queued` with no machine holding it (comp-broll-music-3 is
+                # exactly that mistake on the b-roll side), so the claim is
+                # what this answers with. A body with no `batch_uid` is the
+                # BROLL-5 shape and behaves exactly as it always has.
+                batch_uid = str(body.get("batch_uid") or "").strip()
+                if status == 200 and batch_uid:
+                    retried = (result or {}).get("retried", 0)
+                    run_mode = str(body.get("run_mode") or "").strip().lower()
+                    if not run_mode and body.get("start_now"):
+                        run_mode = "foreground"
+                    status, result = ingestor.run(
+                        batch_uid, str(body.get("staging_id") or ""), run_mode)
+                    result = dict(result or {})
+                    result.setdefault("retried", retried)
             elif suffix == "/prepare":
                 status, result = ingestor.prepare(body)
             elif suffix == "/run":
@@ -2160,7 +2185,12 @@ def configured_port(ccsync_cfg: dict[str, Any]) -> int:
         port = int(raw)
     except (TypeError, ValueError):
         port = -1
-    if not (0 <= port <= 65535):
+    # comp-broll-music-5 (2026-09-11): 1, not 0. bind() reads 0 as "any free
+    # port", so the listener came up somewhere nothing could reach it -- every
+    # web UI hardcodes 127.0.0.1:8899 -- while the tray and the log reported
+    # the ephemeral number as if all were well. An operator typing 0 to switch
+    # the feature off means broll_server_enabled = false.
+    if not (1 <= port <= 65535):
         log.warning(
             "broll: broll_server_port=%r is not a port number -- using %d", raw, PORT
         )
@@ -2216,8 +2246,18 @@ def start(ccsync_cfg: dict[str, Any],
                              ytdl_deps=ytdl_deps, ingest_deps=ingest_deps,
                              music_ingest_deps=music_ingest_deps)
     except OSError as exc:
-        _LAST_BIND_ERROR = f"{type(exc).__name__}: {exc}"
-        log.warning(
+        # comp-app-6 (2026-09-11): the app retries this bind with a backoff
+        # now, and six lines of the same WARNING every attempt is how a log an
+        # editor is asked to send becomes unreadable. Latched on the error
+        # TEXT, not on a counter: "address already in use" becoming
+        # "permission denied" is a different fault and deserves saying again,
+        # and a successful bind clears _LAST_BIND_ERROR below, so the next
+        # failure after a good start is loud too.
+        text = f"{type(exc).__name__}: {exc}"
+        repeat = text == _LAST_BIND_ERROR
+        _LAST_BIND_ERROR = text
+        log.log(
+            logging.DEBUG if repeat else logging.WARNING,
             "broll: could not listen on %s:%d (%s) -- \"Send to Resolve\" in the "
             "b-roll web UI will not work on this machine. The usual cause is the "
             "OLD standalone BRoll Companion still running (it is retired and its "

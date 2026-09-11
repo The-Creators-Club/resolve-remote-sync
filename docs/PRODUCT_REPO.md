@@ -11,7 +11,7 @@ squashed commit, a neutral author, no tenant identity. It is produced from this
 one, by one command, and it is thrown away and rebuilt rather than maintained.
 
 ```powershell
-.\tools\make_product_repo.ps1 -Destination E:\Projects\ccsync-product -WhatIf
+.\tools\make_product_repo.ps1 -Destination E:\Projects\Editing\ccsync-product -WhatIf
 ```
 
 Background: [`COMMERCIAL_READINESS.md`](COMMERCIAL_READINESS.md) item 10
@@ -58,11 +58,11 @@ full tenant-marker table — and creates nothing.
 
 ```powershell
 # 1. rehearse
-.\tools\make_product_repo.ps1 -Destination E:\Projects\ccsync-product -WhatIf
+.\tools\make_product_repo.ps1 -Destination E:\Projects\Editing\ccsync-product -WhatIf
 
 # 2. for real, from a tag (a tag, not HEAD: the product repo's single commit
 #    records no provenance otherwise)
-.\tools\make_product_repo.ps1 -Destination E:\Projects\ccsync-product -SourceRef v1.0.0
+.\tools\make_product_repo.ps1 -Destination E:\Projects\Editing\ccsync-product -SourceRef v1.0.0
 ```
 
 Exit codes: `0` clean, `2` refused before anything moved, `1` the export ran
@@ -205,7 +205,7 @@ Re-run them yourself against the destination; each should produce the output in
 the right-hand column.
 
 ```powershell
-$P = "E:\Projects\ccsync-product"
+$P = "E:\Projects\Editing\ccsync-product"
 ```
 
 | # | Command | Expected |

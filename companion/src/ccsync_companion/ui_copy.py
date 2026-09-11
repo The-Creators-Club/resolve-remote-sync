@@ -28,6 +28,12 @@ SETTINGS = "Tray > Settings"
 # In the menu only while the licence gate is up, which is the only time
 # anything points at it.
 ACCEPT_LICENCE = "Tray > Accept the licence agreement"
+# The same click inside the Settings window. comp-app-3 (2026-09-11): the
+# licence refusal said "in Settings, THIS COMPUTER" and the button is in the
+# SYNCING section, so a machine parked by a new EULA version sent the editor
+# to a part of the window the button is not in - and because the sentence was
+# spelled by hand in eula.py rather than here, neither copy scan could see it.
+ACCEPT_LICENCE_SETTINGS = "Tray > Settings > READ AND ACCEPT THE LICENCE"
 
 # [ HELP ] in the Settings window. The label is quoted in CAPS because that
 # is exactly what is painted on the button (settings_window.build_settings_model).
@@ -115,6 +121,7 @@ def help_url(cfg: Any = None) -> Any:
 ROUTE_ROWS: dict[str, str] = {
     QUIT: "Quit CCSync",
     ACCEPT_LICENCE: "Accept the licence agreement",
+    ACCEPT_LICENCE_SETTINGS: "READ AND ACCEPT THE LICENCE",
     SIGN_IN_SETTINGS: "SIGN IN",
     SIGN_IN: "Sign in",
     SETTINGS: "Settings",

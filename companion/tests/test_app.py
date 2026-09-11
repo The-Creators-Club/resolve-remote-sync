@@ -7342,7 +7342,14 @@ def test_the_bind_is_retried_until_it_succeeds(tmp_path, monkeypatch):
 
     monkeypatch.setattr(broll_server_mod, "start", _start)
     assert app.retry_loopback_bind() is False
+    # comp-app-6 (2026-09-11): the retries are BACKED OFF now (an attempt
+    # re-resolves every mount and logs a six-line warning), so the wait the
+    # last failure set has to elapse before the next attempt. Clearing the
+    # deadline is this suite's stand-in for that wait; what is pinned here is
+    # unchanged - the port is retried until it is ours, and never after.
+    app._loopback_retry_after = 0.0
     assert app.retry_loopback_bind() is False
+    app._loopback_retry_after = 0.0
     assert app.retry_loopback_bind() is True
     # ...and once it is ours, nothing binds again.
     assert app.retry_loopback_bind() is True

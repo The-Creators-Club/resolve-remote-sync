@@ -16,7 +16,7 @@ in (the same rule MulticamPipeline's `tests/test_looks.js` follows).
 Two terminals, two lines:
 
 ```
-E:\Projects\resolve-remote-sync\dashboard\.venv\Scripts\python.exe tools/mobile_sweep_seed.py --port 8499
+E:\Projects\Editing\ccsync\dashboard\.venv\Scripts\python.exe tools/mobile_sweep_seed.py --port 8499
 node tools/mobile_sweep.js --url http://127.0.0.1:8499 --user owen --password <the one it printed>
 ```
 

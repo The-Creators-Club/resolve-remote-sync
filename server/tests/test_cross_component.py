@@ -10,7 +10,7 @@ or by neither (KNOWN_BUGS §3 minors). B12 added a `.partial` exclusion to all
 three builders; this is the test that keeps them together.
 
 Run with:
-    cd E:\\Projects\\resolve-remote-sync\\server
+    cd E:\\Projects\\Editing\\ccsync\\server
     python -m pytest tests -v
 """
 import fnmatch

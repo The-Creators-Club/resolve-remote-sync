@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse, base64, glob, json, os, sqlite3, subprocess, sys, time, urllib.request
 from pathlib import Path
 
-REPO = Path(r"E:/Projects/resolve-remote-sync")
+REPO = Path(r"E:/Projects/Editing/ccsync")
 sys.path.insert(0, str(REPO / "broll" / "indexer"))
 from broll_index.claude_client import build_index_prompt, parse_claude_response, QUALITY_FLAG_VOCAB  # noqa: E402
 

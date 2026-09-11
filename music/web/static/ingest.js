@@ -400,7 +400,7 @@ async function miLoadLimits() {
 
 /** Every 8899 call goes through here so exactly one place knows that a
  *  rejected fetch is ambiguous. */
-async function miLoopback(method, path, body) {
+async function miLoopback(method, path, body, withStatus) {
   const opts = {method: method};
   if (body !== undefined) {
     opts.headers = {'Content-Type': 'application/json'};
@@ -416,7 +416,10 @@ async function miLoopback(method, path, body) {
     err.body = parsed;
     throw err;
   }
-  return parsed;
+  // `withStatus` because one caller has to tell two SUCCESSES apart: a 202
+  // from a companion that claimed the work, and a 200 from one too old to
+  // (music-2, 2026-09-11). Every other caller wants the body and nothing else.
+  return withStatus ? {status: res.status, body: parsed} : parsed;
 }
 
 async function miCapabilities(loud) {
@@ -1235,6 +1238,16 @@ function miRenderBatches() {
       stop.addEventListener('click', () => miCancelUid(batch.uid));
       actions.appendChild(stop);
     }
+    // music-2 (2026-09-11): the way back from "done with errors, 3 failed".
+    // A momentary refusal (a bind mount that blipped, a name race) used to end
+    // those tracks for good, with their audio still staged on the machine and
+    // no button anywhere - b-roll grew this in BROLL-18 and music never did.
+    if (batch.n_failed > 0) {
+      const again = el('button', 'text-btn', 'try the failed tracks again');
+      again.type = 'button';
+      again.addEventListener('click', () => miRetryFailed(batch.uid));
+      actions.appendChild(again);
+    }
     card.appendChild(actions);
 
     if (mi.expanded === batch.uid) {
@@ -1246,6 +1259,51 @@ function miRenderBatches() {
     }
     box.appendChild(card);
   }
+}
+
+/** Put a batch's failed tracks back in the queue (music-2, 2026-09-11).
+ *
+ * The server re-queues; nothing is dispatched from here except to THIS
+ * computer, and only when this page is the one that staged the batch - the
+ * audio lives in that machine's staging directory and no other machine can
+ * read it.
+ */
+async function miRetryFailed(uid) {
+  let answer;
+  try {
+    answer = await miApi(`api/ingest-batches/${encodeURIComponent(uid)}/retry-failed`,
+                         {method: 'POST'});
+  } catch (e) {
+    toast(el('div', 'row bad', e.message));
+    return;
+  }
+  const n = (answer && answer.retried) || 0;
+  if (!n) {
+    toast(el('div', 'row', 'Nothing in that batch had failed.'));
+    miLoadBatches();
+    return;
+  }
+  let started = false;
+  if (uid === mi.batchUid && mi.stagingId) {
+    try {
+      // music-2 (2026-09-11): 202 is a companion that re-armed the batch AND
+      // CLAIMED it here. One published before this route existed answers
+      // 200 and claims nothing, leaving the batch queued with no machine, so
+      // any other success is "queued again" and never "running" - an editor
+      // told that work is running on a computer nothing claimed it on waits
+      // for ever.
+      const taken = await miLoopback('POST', '/music/ingest/retry',
+                                     {batch_uid: uid, staging_id: mi.stagingId},
+                                     true);
+      started = taken.status === 202;
+    } catch { /* the batch is queued on the server either way */ }
+  }
+  toast(el('div', 'row', started
+    ? `${n} track${n === 1 ? '' : 's'} back in the queue on this computer.`
+    : `${n} track${n === 1 ? '' : 's'} back in the queue. Open this page on ` +
+      `the computer that staged them and press Run.`));
+  miLoadBatches();
+  miPollServer();
 }
 
 async function miExpand(uid) {

@@ -187,8 +187,26 @@ def _job_or_404(c, job_id):
     return job
 
 
-def _leaseholder_or_410(c, job_id, editor):
-    """The job, if the VERIFIED `editor` still holds its lease.
+def _machine_of(body=None, query=None, header=None):
+    """WHICH COMPUTER is calling, or None for a caller that does not say.
+
+    Three ways in because the three doors are three shapes (ytdl-web-3,
+    2026-09-11): a body field on the two POSTs, a query parameter on the
+    manifest GET, and the `X-CCSync-Machine` header as the shape-independent
+    fallback, so whichever spelling a companion build uses is understood. None
+    is an OLDER COMPANION and keeps the per-editor answer; this must never
+    become a required field, or every machine below the build that adds it
+    starts getting 410s in the middle of a download.
+    """
+    for value in (getattr(body, 'machine_id', None), query, header):
+        text = str(value or '').strip()
+        if text:
+            return text
+    return None
+
+
+def _leaseholder_or_410(c, job_id, editor, machine=None):
+    """The job, if the VERIFIED `editor` still holds its lease, ON `machine`.
 
     410 GONE and not 403: "your claim is over" is the answer to every way this
     can fail -- the lease expired and the server reclaimed the job (§3, one-way,
@@ -207,7 +225,11 @@ def _leaseholder_or_410(c, job_id, editor):
             'detail': 'this job has been cancelled', 'job_id': job_id,
             'download_mode': job['download_mode'], 'phase': job['phase'],
             'reason': 'cancelled'})
-    if not db.is_leaseholder(job, editor):
+    # `machine` is what stops one editor's OTHER computer being answered as the
+    # holder after a lease expiry (ytdl-web-3, 2026-09-11): the stale executor
+    # used to re-extend the new holder's lease, fetch the manifest and post
+    # terminal statuses for somebody else's run, and was never told to stop.
+    if not db.is_leaseholder(job, editor, machine=machine):
         raise HTTPException(410, {
             'detail': 'this job is no longer yours to download',
             'job_id': job_id, 'download_mode': job['download_mode'],
@@ -434,6 +456,19 @@ def claim(job_id: int, body: ClaimIn,
         raise HTTPException(410, {
             'detail': 'this job has been cancelled',
             'phase': job['phase'], 'reason': 'cancelled'})
+    if not db.created_widening_of(job)[1]:
+        # The job was created with `local:false`, which WIDENED its destination
+        # to every active project (CR-96) on the reasoning that no machine's
+        # sync plan constrains a fetch no machine performs. Claiming it here is
+        # the other half of that bargain coming undone: forty clips into a
+        # project this computer does not sync, which is the one outcome CR-96's
+        # argument excluded (ytdl-web-5, 2026-09-11). db.claim_download refuses
+        # it at the CAS as well; this is here for the reason, which the
+        # companion logs, and it is not an error the editor ever sees - the
+        # server worker downloads the job exactly as it was created to.
+        raise HTTPException(410, {
+            'detail': 'this job was created to download on the server',
+            'phase': job['phase'], 'reason': 'created_widened'})
     if job['mode_lock'] == db.MODE_SERVER:
         # Either the editor asked for it (plan §9) or the server already
         # reclaimed this job once. Reclaim is one-way (§3): no ping-pong.
@@ -517,13 +552,19 @@ def claim(job_id: int, body: ClaimIn,
 
 class HeartbeatIn(BaseModel):
     editor: str = ''
+    # WHICH COMPUTER is still downloading (ytdl-web-3, 2026-09-11). OPTIONAL,
+    # like the claim's: empty is a companion older than this field and the
+    # lease answers per editor exactly as it did before, which is what lets the
+    # server half ship before the companion half.
+    machine_id: str = ''
 
 
 @router.post('/api/jobs/{job_id}/heartbeat')
 def heartbeat(job_id: int, body: HeartbeatIn,
               x_ccsync_token: str | None = Header(default=None),
               x_ccsync_identity: str | None = Header(default=None),
-              x_ccsync_fleet_auth: str | None = Header(default=None)):
+              x_ccsync_fleet_auth: str | None = Header(default=None),
+              x_ccsync_machine: str | None = Header(default=None)):
     """Keep the lease alive. Every YTDL_HEARTBEAT_SECONDS while downloading.
 
     410 means the lease is gone and the server has (or is about to have) the
@@ -533,8 +574,10 @@ def heartbeat(job_id: int, body: HeartbeatIn,
     editor = require_fleet_caller(x_ccsync_token, x_ccsync_identity,
                                   x_ccsync_fleet_auth)
     c = con()
-    job = _leaseholder_or_410(c, job_id, editor)
-    if not db.heartbeat_download(c, job_id, job['claimed_by'], config.LEASE_SECONDS):
+    machine = _machine_of(body=body, header=x_ccsync_machine)
+    job = _leaseholder_or_410(c, job_id, editor, machine)
+    if not db.heartbeat_download(c, job_id, job['claimed_by'],
+                                 config.LEASE_SECONDS, machine=machine):
         # Lost between the read and the write -- the expiry landed in that
         # window. Same answer as any other lost lease.
         raise HTTPException(410, {'detail': 'this job is no longer yours to '
@@ -548,9 +591,11 @@ def heartbeat(job_id: int, body: HeartbeatIn,
 
 @router.get('/api/jobs/{job_id}/download-manifest')
 def download_manifest(job_id: int,
+                      machine_id: str = '',
                       x_ccsync_token: str | None = Header(default=None),
                       x_ccsync_identity: str | None = Header(default=None),
-                      x_ccsync_fleet_auth: str | None = Header(default=None)):
+                      x_ccsync_fleet_auth: str | None = Header(default=None),
+                      x_ccsync_machine: str | None = Header(default=None)):
     """The work order: what to download, where it goes, under which contract.
 
     Leaseholder only. Everything the local executor acts on is in here and
@@ -580,8 +625,11 @@ def download_manifest(job_id: int,
     clips are 3 s apart anyway) it has the whole list in hand at once.
     """
     c = con()
+    # A GET has no body, so the machine rides as a query parameter here
+    # (ytdl-web-3, 2026-09-11). Optional, like the field on the two POSTs.
     job = _leaseholder_or_410(c, job_id, require_fleet_caller(
-        x_ccsync_token, x_ccsync_identity, x_ccsync_fleet_auth))
+        x_ccsync_token, x_ccsync_identity, x_ccsync_fleet_auth),
+        _machine_of(query=machine_id, header=x_ccsync_machine))
     rel_dir = '/'.join(p for p in (job['project_label'], db.YOUTUBE_DIR,
                                    job['term_dir']) if p)
     clips = _still_owed(c, job)
@@ -656,13 +704,18 @@ class ClipStatusIn(BaseModel):
     # composes the rel_path itself (below), because the ledger's shape is the
     # server's business and a machine-supplied path is not something to store.
     filepath_rel: str | None = None
+    # WHICH COMPUTER is reporting (ytdl-web-3, 2026-09-11). Optional for the
+    # reason the heartbeat's is: absent is an older companion and the lease
+    # answers per editor, exactly as it did before this field existed.
+    machine_id: str = ''
 
 
 @router.post('/api/jobs/{job_id}/clips/{video_id}/status')
 def clip_status(job_id: int, video_id: str, body: ClipStatusIn,
                 x_ccsync_token: str | None = Header(default=None),
                 x_ccsync_identity: str | None = Header(default=None),
-                x_ccsync_fleet_auth: str | None = Header(default=None)):
+                x_ccsync_fleet_auth: str | None = Header(default=None),
+                x_ccsync_machine: str | None = Header(default=None)):
     """Mirror one clip's outcome into the job rows.
 
     THE POINT OF THIS ENDPOINT IS THAT THE SPA CANNOT TELL THE MODES APART
@@ -674,7 +727,8 @@ def clip_status(job_id: int, video_id: str, body: ClipStatusIn,
     """
     c = con()
     job = _leaseholder_or_410(c, job_id, require_fleet_caller(
-        x_ccsync_token, x_ccsync_identity, x_ccsync_fleet_auth))
+        x_ccsync_token, x_ccsync_identity, x_ccsync_fleet_auth),
+        _machine_of(body=body, header=x_ccsync_machine))
     row = db.get_video(c, job_id, video_id)
     if row is None:
         raise HTTPException(404, 'no such video on this job')

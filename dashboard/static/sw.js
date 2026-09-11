@@ -12,8 +12,9 @@
 // cached /partials/ fragment served after a fleet halt, would be the dashboard
 // lying about whether footage is syncing -- which outranks every offline
 // nicety. So: pages are network-first (the offline page only when the network
-// genuinely fails), /static/ is cache-first (it is versioned by release and
-// carries no session), and everything under PASS_THROUGH is handed to the
+// genuinely fails), /static/ is stale-while-revalidate (it carries no session,
+// and a same-version redeploy must not strand a phone on the old bytes --
+// dash-mounts-ui-5), and everything under PASS_THROUGH is handed to the
 // network untouched, with no respondWith at all.
 const VERSION = '__VERSION__';
 const CACHE = 'ccsync-' + VERSION;
@@ -112,19 +113,36 @@ self.addEventListener('fetch', function (event) {
     return;
   }
 
-  // Static assets: cache first, and fill the cache on the way past. They are
-  // replaced by a release, which changes VERSION, which drops the old cache.
+  // Static assets: the cached copy first (so a phone paints instantly and an
+  // offline one paints at all), AND a background fetch that replaces it.
+  //
+  // STALE WHILE REVALIDATE, not plain cache-first (dash-mounts-ui-5,
+  // 2026-09-11). The whole invalidation story used to be "a release changes
+  // VERSION, which changes this worker's bytes, which drops the old cache" --
+  // but the asset URLs carry no version, this branch never revalidated, and a
+  // redeploy of the SAME dashboard version with changed static (a CSS or JS
+  // hotfix, an OTA code bundle, --allow-replace) produces a byte-identical
+  // sw.js. The new worker is never installed, the cache name never changes,
+  // and an installed phone keeps the broken asset for ever, with a hard
+  // reload no help because the worker answers before the network. Now a
+  // changed asset costs one stale load instead.
   if (url.pathname.indexOf('/static/') === 0) {
     event.respondWith(
       caches.match(req).then(function (hit) {
-        if (hit) return hit;
-        return fetch(req).then(function (res) {
+        var network = fetch(req).then(function (res) {
           if (res && res.ok && res.type === 'basic') {
             var copy = res.clone();
             caches.open(CACHE).then(function (cache) { cache.put(req, copy); });
           }
           return res;
         });
+        // A revalidation that fails must never turn a cached asset into an
+        // error: offline is exactly when the cached copy matters most.
+        if (hit) {
+          network.catch(function () { });
+          return hit;
+        }
+        return network;
       })
     );
     return;

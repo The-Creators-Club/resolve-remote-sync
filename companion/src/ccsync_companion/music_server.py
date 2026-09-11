@@ -499,6 +499,9 @@ def build_send_response(
             # is "message" and not "error" BECAUSE nothing failed -- an error
             # key here is what made the music page toast red and stop polling
             # while two b-roll originals were in flight.
+            # comp-broll-music-4 (2026-09-11): an older page prints this
+            # message as a SUCCESS and stops, which is why BUSY_MESSAGE opens
+            # with "not sent yet".
             return 200, {"ok": True, "state": "busy",
                          "retry_after": broll_fetch.BUSY_RETRY_AFTER_SECONDS,
                          "message": fetch.get("message")

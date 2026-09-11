@@ -113,10 +113,16 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- re-validates the destination on every write (YTDL-30) and used to re-run
     -- it with the narrow defaults -- answering "no longer a project you sync"
     -- for a project that was never ticked and never had to be.
-    -- Read from the JOB and never from the request that presses DOWNLOAD: a
-    -- client-supplied local=0 there would be any editor writing into any
-    -- active project. The defaults are resolve_project's own pre-widening
+    -- Read from the JOB and never from the request that presses DOWNLOAD: the
+    -- widening is a property of the job, and re-deciding it from whatever the
+    -- second request happens to say is how a retry changes the rules a job was
+    -- accepted under. The defaults are resolve_project's own pre-widening
     -- values, so a row from migrations/013 re-validates as it always has.
+    -- What `created_local=0` DOES mean, said plainly because three comments
+    -- used to imply otherwise (ytdl-web-5, 2026-09-11): this job's destination
+    -- was not constrained by anybody's sync plan, so any active project was a
+    -- legal answer, and by the same reasoning NO MACHINE MAY CLAIM IT -
+    -- db.claim_download refuses a claim on a row with this column 0.
     created_local    INTEGER NOT NULL DEFAULT 1,
     created_machine  TEXT,
     -- Carries a machine-readable prefix the SPA maps to ops hint text:

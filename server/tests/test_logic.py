@@ -1,7 +1,7 @@
 """Pure-logic unit tests -- no network, no SSH, no NAS required.
 
 Run with:
-    cd E:\\Projects\\resolve-remote-sync\\server
+    cd E:\\Projects\\Editing\\ccsync\\server
     python -m pytest tests -v
 """
 import sys

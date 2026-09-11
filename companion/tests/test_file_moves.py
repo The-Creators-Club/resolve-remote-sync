@@ -348,11 +348,21 @@ def test_a_move_applied_with_no_project_open_stays_a_pending_relink(tmp_path):
     assert answer["ok"] is True and "relinked" in answer["detail"]
 
 
-def test_a_missing_drive_defers_rather_than_answers(tmp_path):
+def test_a_missing_drive_answers_retrying_and_decides_nothing(tmp_path):
+    """comp-sync-20 (2026-09-11) changed the first half of this: the answer
+    used to be SILENCE, and the dashboard expires a command after 7 days of
+    "told and never answered" - so an editor away with the drive in their bag
+    had the move quietly dropped. `retrying` is the v36 shape for "still
+    working on it, do not retire this". The second half is unchanged and is
+    the point: nothing is decided, nothing is recorded, the file is not
+    touched, and `attempts` is not spent."""
     stub = _Stub(tmp_path)
     stub._root_absent = True
     stub.apply({"commands": {"file_moves": [_cmd()]}})
-    assert stub._file_move_results() == []
+    (answer,) = stub._file_move_results()
+    assert answer["ok"] is False and answer["state"] == "retrying"
+    assert "sync drive" in answer["detail"]
+    assert "attempts" not in answer
     assert stub.file_moves.entry(1) is None
     assert (stub.root / "Projects" / DRONE / "B-roll" / "A001_0512.braw").exists()
 

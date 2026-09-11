@@ -4,7 +4,7 @@ NOT a pytest -- it needs a running Resolve with a project open, and it calls
 the REAL resolve_bridge.poll_timeline_items() / get_media_pool_items(), so it
 can only be run by hand on a rig.
 
-    E:\\Projects\\resolve-remote-sync\\companion\\.venv\\Scripts\\python.exe ^
+    E:\\Projects\\Editing\\ccsync\\companion\\.venv\\Scripts\\python.exe ^
         tools\\library_walk_timing.py
 
 Strictly read-only, like tools/library_walk_check.py beside it: no playhead

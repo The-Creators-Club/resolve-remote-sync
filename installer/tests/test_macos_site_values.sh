@@ -271,6 +271,29 @@ case "$UNINSTALL_TEXT" in
     *) ok "print_uninstall_step has no em dash" ;;
 esac
 
+# install-onboard-6 (bug hunt 2026-09-11): the legacy com.creatorsclub.*
+# companion agent was retired only on the happy path. On a run with no
+# companion binary (no DASHBOARD_TOKEN, no --companion-file, a failed
+# download) the script deleted OUR agent and left the pre-2026-08-17 one
+# loaded, so an old companion kept running, kept reporting, and kept loopback
+# 8899 against the next successful install. Structural, not behavioural: the
+# branch itself needs launchctl. The call must be ABOVE the if.
+COMPANION_IF_LINE="$(grep -n '^if \[ "\$COMPANION_MISSING" = 1 \]; then' "$SCRIPT" | head -1 | cut -d: -f1)"
+LEGACY_LINE="$(grep -n 'retire_legacy_agent "\$COMPANION_PLIST_LEGACY"' "$SCRIPT" | head -1 | cut -d: -f1)"
+LEGACY_COUNT="$(grep -c 'retire_legacy_agent "\$COMPANION_PLIST_LEGACY"' "$SCRIPT")"
+if [ -z "$COMPANION_IF_LINE" ] || [ -z "$LEGACY_LINE" ]; then
+    bad "could not find the companion LaunchAgent branch ($COMPANION_IF_LINE) or the legacy retirement ($LEGACY_LINE)"
+elif [ "$LEGACY_LINE" -lt "$COMPANION_IF_LINE" ]; then
+    ok "the legacy companion agent is retired on every path, not just the happy one"
+else
+    bad "retire_legacy_agent (line $LEGACY_LINE) is inside the COMPANION_MISSING branch (line $COMPANION_IF_LINE): a run with no companion leaves the legacy agent loaded"
+fi
+if [ "$LEGACY_COUNT" = "1" ]; then
+    ok "the legacy companion agent is retired exactly once"
+else
+    bad "retire_legacy_agent is called $LEGACY_COUNT times for the companion: it must be hoisted, not duplicated"
+fi
+
 echo ""
 if [ "$fail" -gt 0 ]; then
     echo "$fail FAILED"

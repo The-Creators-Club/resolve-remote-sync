@@ -15,7 +15,7 @@ search index: ~8,700 row writes and a full matrix read per ingested track, so a
 container's single SQLite writer. The rescore is now coalesced and forced once
 at `release`, and a library whose tags are behind SAYS so (`/api/stats`).
 
-    cd E:\\Projects\\resolve-remote-sync\\music\\web
+    cd E:\\Projects\\Editing\\ccsync\\music\\web
     .venv\\Scripts\\python.exe -m pytest tests/test_rescore_transaction.py -q
 """
 import numpy as np
@@ -179,7 +179,10 @@ def test_the_first_drop_after_a_restart_is_always_scored(tmp_path, encoder):
     assert not rescore.apply_for_track(con, 1, encoder).get('deferred')
 
 
-def test_force_is_what_release_uses(tmp_path, encoder):
+def test_force_skips_the_coalescing_window(tmp_path, encoder):
+    """Named for what `force` does, not for a caller it never had: `release`
+    settles a batch through routes_fleet._settle_scores, which rescores the
+    library when the marker is set (music-4, 2026-09-11)."""
     con = _library(tmp_path / 'lib.db')
     rescore.apply_for_track(con, 1, encoder)
     assert rescore.apply_for_track(con, 2, encoder)['deferred'] is True

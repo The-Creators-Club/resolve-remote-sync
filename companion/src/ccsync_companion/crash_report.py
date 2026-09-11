@@ -607,6 +607,26 @@ def _report_unclean_exit(marker: dict[str, Any],
     return path
 
 
+# comp-ui-2 / res-companion-4 (2026-09-11): the relaunch stamps this
+# companion was brought back with, read off the supervisor's note by
+# install_native and handed to the supervisor we spawn for ourselves. The
+# chain is supervisor -> companion -> supervisor, so this process is the only
+# place a count can be carried across it without a file; <state>/supervisor.json
+# swallows every write failure and used to be the ONLY memory the "three
+# relaunches an hour" ceiling had.
+_relaunch_history: list[float] = []
+
+
+def note_relaunch_history(stamps: Any) -> list[float]:
+    """Remember what the supervisor's note said. Never raises."""
+    global _relaunch_history
+    try:
+        _relaunch_history = supervisor.merge_history(list(stamps or []))
+    except Exception:  # noqa: BLE001
+        _relaunch_history = []
+    return list(_relaunch_history)
+
+
 def install_native(cfg: Optional[dict[str, Any]] = None) -> None:
     """faulthandler + the run marker. Call ONCE, after the single-instance
     lock is held: the marker is one file for the machine, and a second
@@ -628,6 +648,7 @@ def install_native(cfg: Optional[dict[str, Any]] = None) -> None:
         if marker is not None:
             _report_unclean_exit(marker, cfg, relaunch)
         if relaunch:
+            note_relaunch_history(relaunch.get("history"))
             log.warning(
                 "this companion was RELAUNCHED by its supervisor: pid %s died with "
                 "exit code %s at %s and never started a shutdown (%s). It was down "
@@ -679,7 +700,8 @@ def start_supervisor(cfg: Optional[dict[str, Any]] = None,
     try:
         state_dir = config_mod.resolved_log_path(cfg).parent / "state"
         child = supervisor.spawn_for(
-            os.getpid(), Path(sys.executable), crash_dir(cfg), state_dir, spawn=spawn)
+            os.getpid(), Path(sys.executable), crash_dir(cfg), state_dir, spawn=spawn,
+            prior=list(_relaunch_history))
     except Exception:  # noqa: BLE001
         log.warning("supervisor: could not start one -- a crash leaves this "
                     "machine without a companion until the next logon", exc_info=True)
@@ -707,9 +729,10 @@ def start_supervisor(cfg: Optional[dict[str, Any]] = None,
 def _reset_for_tests() -> None:
     """The module-level `_installed`/`_sentry` latches are process-global; the
     suite installs hooks many times over. Not part of the public surface."""
-    global _installed, _sentry, _native_handle
+    global _installed, _sentry, _native_handle, _relaunch_history
     _installed = False
     _sentry = None
+    _relaunch_history = []
     handle, _native_handle = _native_handle, None
     if handle is not None:
         try:

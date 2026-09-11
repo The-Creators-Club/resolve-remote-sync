@@ -187,12 +187,36 @@ jobs:
         working-directory: bench
         run: .venv/Scripts/python -m pytest tests -q --junitxml=../junit-bench.xml
 
-      # The drive-map parser is the piece that decides whether P: gets torn down
-      # and remounted on an editor's machine, and it has no Python test.
-      - name: installer -- drive-map parser
+      # The installer's PowerShell suites: the drive-map parser (which decides
+      # whether P: gets torn down and remounted on an editor's machine), the
+      # licence gate, the previous-install rollback, the console-user probe,
+      # the SMB-share-gone path, the foreign-drive miss and the uninstall
+      # entry. None of them has a Python test.
+      #
+      # ENUMERATED, never named (dash-mounts-ui-4, 2026-09-11): this step ran
+      # Test-DriveMapParser.ps1 alone while `ls installer/tests/*.ps1` was
+      # seven files, and tools/publish_latest.py publishes "the newest GREEN
+      # CI run on main" -- so a green run was evidence about one of seven
+      # covered behaviours, the licence gate and the rollback among the six
+      # that never ran. The glob is what run_all_tests.ps1's own comment asks
+      # for ("this comment has now been wrong twice"), and $LASTEXITCODE is
+      # checked per script because a bare foreach in pwsh fails nothing.
+      - name: installer -- powershell suites
         if: ${{ !cancelled() }}
         shell: pwsh
-        run: pwsh -NoProfile -ExecutionPolicy Bypass -File installer/tests/Test-DriveMapParser.ps1
+        run: |
+          $scripts = Get-ChildItem installer/tests/*.ps1 | Sort-Object Name
+          if (-not $scripts) { throw "no installer/tests/*.ps1 found" }
+          $failed = @()
+          # Seeded, because $LASTEXITCODE is $null until something in this
+          # shell has exited and `$null -ne 0` reads as a failure.
+          $global:LASTEXITCODE = 0
+          foreach ($s in $scripts) {
+            Write-Host "== $($s.Name)"
+            pwsh -NoProfile -ExecutionPolicy Bypass -File $s.FullName
+            if ($LASTEXITCODE -ne 0) { $failed += "$($s.Name) (exit $LASTEXITCODE)" }
+          }
+          if ($failed) { throw "installer suites failed: $($failed -join ', ')" }
 
       - name: upload junit
         if: ${{ !cancelled() }}

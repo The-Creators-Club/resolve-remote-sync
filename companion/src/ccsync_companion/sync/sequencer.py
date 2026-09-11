@@ -426,6 +426,20 @@ class Sequencer:
         self._loop_failures = 0
         self._lock = threading.Lock()
 
+        # comp-sync-7 (2026-09-11): the subpath lane B is meant to be on right
+        # now, and the subpath of a lane B pass the rotation WALKED AWAY from.
+        # The second is the latch: while it is set no new lane B thread is
+        # started, because every one of them would block on RcloneLane's
+        # _run_lock and then, when the wedge clears, run `rclone sync` against
+        # a subpath the repath may since have moved. One blocked daemon thread
+        # per project turn, unbounded, was the other half.
+        self._lane_b_subpath: Optional[str] = None
+        self._lane_b_abandoned: Optional[str] = None
+        try:
+            self.lane_b.subpath_still_current = self._subpath_is_current
+        except Exception:
+            log.debug("sequencer: lane B takes no current-subpath check", exc_info=True)
+
         self._state = STATE_STARTUP
         self._current_slug: Optional[str] = None
         self._current_position = 0
@@ -1907,7 +1921,15 @@ class Sequencer:
         # Editors get the same bin layout the NAS has from the moment they
         # tick, not only once files exist. Now CONDITIONAL: it is a full
         # remote listing and it is redundant in steady state (AUDIT_2 C-3).
-        self._maybe_clone_structure(subpath, slug, forced=bool(repathed))
+        # ...except for an upload-only tick (comp-sync-22, 2026-09-11):
+        # docs/UPLOAD_ONLY_TICK.md says that is lane A alone, and the clone is
+        # an `rclone lsf --dirs-only -R` over SFTP plus a local mkdir loop. An
+        # editor who ticked a finished project upload-only to get their
+        # originals onto the server was having the NAS's whole bin skeleton
+        # created inside their local folder, one SSH handshake at a time, for
+        # a project whose whole point is that nothing comes down.
+        if not upload_only:
+            self._maybe_clone_structure(subpath, slug, forced=bool(repathed))
         if self._stop_event.is_set() or not self._resume_event.is_set():
             return
 
@@ -1968,6 +1990,25 @@ class Sequencer:
         tick downloads no proxies. A lone lane A failure is then not
         offline evidence either (_note_transport)."""
         run_b = self.lane_b_enabled and not upload_only
+        # comp-sync-7: a lane B the rotation walked away from still holds
+        # RcloneLane's _run_lock. Starting another thread here only queues it
+        # behind that one, for as long as the wedge lasts, and every project
+        # turn adds one more. Report the lane as stalled and carry on with
+        # lane A, which is the same containment the join was written for.
+        abandoned = self._lane_b_abandoned
+        if run_b and abandoned is not None:
+            log.warning(
+                "sequencer: not starting lane B for %s -- an earlier pass on %s was "
+                "abandoned and is still running", subpath, abandoned)
+            note = getattr(self.lane_b, "note_abandoned", None)
+            if note is not None:
+                try:
+                    note(f"stalled on {abandoned}: waiting for an earlier pass to end")
+                except Exception:
+                    log.debug("sequencer: could not mark lane B stalled", exc_info=True)
+            run_b = False
+        with self._lock:
+            self._lane_b_subpath = subpath if run_b else None
         outcomes: dict[str, Any] = {}
 
         def _a() -> None:
@@ -1985,6 +2026,11 @@ class Sequencer:
                 log.exception("sequencer: lane B run_once failed for %s", subpath)
             finally:
                 self._note_lane_moved(self.lane_b)
+                # comp-sync-7: cleared from the ABANDONED thread's own
+                # finally, which is the only place that knows the wedge is
+                # over. Nothing else may clear it: a restart is otherwise the
+                # only thing that drains the queue.
+                self._clear_lane_b_abandoned()
 
         if not (self.concurrent_lanes and run_b):
             _a()
@@ -2040,6 +2086,12 @@ class Sequencer:
                 # _run_lock is still held by it.
                 thread.join(timeout=LANE_B_ABORT_JOIN_SECONDS)
                 if thread.is_alive():
+                    # comp-sync-7: LATCHED, not merely logged. The comment
+                    # below used to claim the held _run_lock contained this;
+                    # it contains the abandoned thread only, and every later
+                    # turn queued another one behind it.
+                    with self._lock:
+                        self._lane_b_abandoned = subpath
                     log.error(
                         "sequencer: lane B is STILL running after the abort "
                         "(%s) -- continuing without it; the next project's "
@@ -2047,6 +2099,36 @@ class Sequencer:
                         "child killed" if aborted else "no child to kill",
                     )
         self._note_transport(outcomes, run_b)
+
+    # -- comp-sync-7: the abandoned lane B latch --------------------------
+    def _subpath_is_current(self, subpath: str) -> bool:
+        """Is this the subpath lane B is meant to be running on right now?
+
+        Handed to RcloneLane so a pass that waited on _run_lock through a
+        wedge can drop itself rather than sync a project the rotation has
+        left behind. Never raises, and "cannot tell" is TRUE: a lane that
+        refused its own passes on a bookkeeping slip would be worse than the
+        rare stale one."""
+        try:
+            with self._lock:
+                current = self._lane_b_subpath
+            return current is None or str(current) == str(subpath)
+        except Exception:
+            return True
+
+    def _clear_lane_b_abandoned(self) -> None:
+        with self._lock:
+            was, self._lane_b_abandoned = self._lane_b_abandoned, None
+        if was is not None:
+            log.warning("sequencer: the abandoned lane B pass on %s has ended -- "
+                        "proxy download is back in the rotation", was)
+
+    def lane_b_abandoned_subpath(self) -> Optional[str]:
+        """The subpath of a lane B pass the rotation walked away from, or
+        None. Read by the tests and by anything that wants to say why proxy
+        download is not running."""
+        with self._lock:
+            return self._lane_b_abandoned
 
     # -- pass economics (ops-efficiency-2 / -4, 2026-08-21) ---------------
     def _note_lane_moved(self, lane: Any) -> None:

@@ -25,8 +25,23 @@ VENV=/venv
 # means editors browsing those shares over SMB see files they cannot open. DSM
 # assigns uids >= 1026 rather than letting you pick 3000, so this is exactly the
 # knob a second site gets wrong (2026-08-17, COMMERCIAL_READINESS.md item 12).
-if [ -n "${APP_UID:-}" ] && [ "$(id -u)" != "$APP_UID" ]; then
-    echo "run.sh: WARNING: running as uid $(id -u), but APP_UID says $APP_UID." >&2
+#
+# dash-mounts-ui-6 (2026-09-11): APP_UID is in the container's environment in
+# IMAGE mode only (compose.image.yaml). In bind-mount mode - the default, the
+# one the live sites run, and the one a second customer is most likely to
+# deploy - neither variable is set, so this check never fired on the very
+# deployments it was written for. The fallback is the deploy's own evidence:
+# install_dashboard_app chowns /data to APP_UID, so an owner that is not us
+# means everything this process writes lands under the wrong one. No gid
+# fallback: /data is chowned to the app's PRIVATE gid, not to APP_GID
+# (`editors`), so comparing them would warn on every healthy boot.
+expected_uid="${APP_UID:-}"
+if [ -z "$expected_uid" ]; then
+    expected_uid="$(stat -c %u /data 2>/dev/null || true)"
+fi
+if [ -n "$expected_uid" ] && [ "$(id -u)" != "$expected_uid" ]; then
+    echo "run.sh: WARNING: running as uid $(id -u), but this deployment's own" >&2
+    echo "run.sh: WARNING: files are owned by uid $expected_uid (APP_UID)." >&2
     echo "run.sh: WARNING: files written into the tree will have the WRONG owner." >&2
     echo "run.sh: WARNING: fix compose's \`user:\` line (site.toml [stack] uid/gid)." >&2
 fi
@@ -239,15 +254,41 @@ except OSError:
     pass
 PYMARKER
     }
+    # IS THE PLUGIN ACTUALLY THERE (dash-mounts-ui-3, 2026-09-11). The stamp
+    # and the artefact are two different paths, and until now only the stamp
+    # was consulted: a wiped `unblock-site` under a surviving stamp meant no
+    # install ran, and the marker backfill below then wrote `ok: true,
+    # attempts: 0` for an install this script had never performed and never
+    # probed -- SELF_DIAGNOSIS.md's forbidden shape, "an unverified check is
+    # NOT CHECKED, never OK", with /ytdl's health route reporting the PO-token
+    # provider installed while every server download crawled the throttled HLS
+    # ladder (CR-73/CR-75's symptom, behind a green route this time).
+    #
+    # yt-dlp finds a plugin by walking sys.path for a `yt_dlp_plugins`
+    # package, so that directory IS the artefact in both layouts.
+    unblock_artefact_present() {
+        if [ -n "$IMAGE_MODE" ]; then
+            [ -d "$UNBLOCK_SITE/yt_dlp_plugins" ]
+        else
+            for candidate in "$VENV"/lib/python*/site-packages/yt_dlp_plugins \
+                             "$VENV"/lib/site-packages/yt_dlp_plugins; do
+                [ -d "$candidate" ] && return 0
+            done
+            return 1
+        fi
+    }
     want_unblock="$(md5sum "$REQS_UNBLOCK" | cut -d' ' -f1)"
     have_unblock="$(cat "$STAMP_UNBLOCK" 2>/dev/null || true)"
-    if [ "$want_unblock" = "$have_unblock" ] && [ ! -f "$UNBLOCK_MARKER" ]; then
-        # Nothing to install and no marker: this container was first booted by
-        # a run.sh from before the marker existed. Record the state we are in
-        # rather than leaving the health route to report NOT CHECKED forever.
+    if [ "$want_unblock" = "$have_unblock" ] && unblock_artefact_present \
+            && [ ! -f "$UNBLOCK_MARKER" ]; then
+        # The stamp matches AND the plugin is on disk, and there is no marker:
+        # this container was first booted by a run.sh from before the marker
+        # existed. Recording that is a check we have actually made. With the
+        # artefact MISSING we write nothing and reinstall instead, so the
+        # health route says NOT CHECKED until an install reports for itself.
         write_unblock_marker 1 0 ""
     fi
-    if [ "$want_unblock" != "$have_unblock" ]; then
+    if [ "$want_unblock" != "$have_unblock" ] || ! unblock_artefact_present; then
         echo "run.sh: youtube_unblock is on -- installing $REQS_UNBLOCK"
         # RETRIED with short sleeps (CR-73, 2026-08-24): the only failure seen
         # in the field was this install running in the container's first

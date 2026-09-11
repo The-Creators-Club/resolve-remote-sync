@@ -66,6 +66,20 @@ LIBRARY_REMOTE_REL = "Assets/Music"
 # KIND_ORIGINAL because a transcoded .ogg is not the original.
 KIND_AUDIO = "audio"
 
+# music-2 (2026-09-11): how many times a `result` the server asked us to retry
+# may be re-POSTed before the track is called failed. Six with the backoff
+# below is about twenty minutes, which covers a NAS reboot, an SMB reconnect
+# and a dataset remount -- and still ENDS, because a wait with no end is the
+# wedge this same bug hunt is fixing everywhere else.
+MAX_RESULT_RETRIES = 6
+# Seconds to wait before try N. Across drain passes, not inside one: the tick
+# thread does other work in between, and a track that failed to reach a NAS
+# that is rebooting must not spin on it.
+RESULT_RETRY_BACKOFF_S = (5.0, 15.0, 30.0, 60.0, 120.0, 300.0)
+# The statuses that mean "the library cannot answer right now". 429/502/504 are
+# a proxy in front of the dashboard saying the same thing.
+RETRYABLE_RESULT_STATUSES = frozenset({429, 502, 503, 504})
+
 
 class MusicIngestor(broll_ingest.BrollIngestor):
     """One machine's music ingest. See the module docstring for what it adds.
@@ -82,6 +96,12 @@ class MusicIngestor(broll_ingest.BrollIngestor):
         # queue, so the digest is a wire contract (`musicweb.db.content_hash`).
         kwargs.setdefault("hash_fn", music_clap_sidecar.content_hash)
         super().__init__(cfg, state_dir, **kwargs)
+        # music-2 (2026-09-11): the analysis of an item whose `result` the
+        # server asked us to retry, kept OUT of the state file for the reason
+        # _wire_analysis gives (25 kB of base64 per track, rewritten at every
+        # checkpoint of every item). In memory only: a companion restarted
+        # mid-wait re-embeds, which costs seconds.
+        self._deferred_analysis: dict[str, dict] = {}
 
     # -- the model ---------------------------------------------------------
     def _tier(self) -> str:
@@ -309,27 +329,34 @@ class MusicIngestor(broll_ingest.BrollIngestor):
             if self._should_stop():
                 return
             self._stage(item, ITEM_EMBEDDING, 40)
-            try:
-                analysis = self.sidecar.embed_file(
-                    outputs["audio"], ffmpeg_path=self.ffmpeg_path,
-                    stop_event=self._stop_event,
-                    child_sink=self._publish_child)
-            except music_clap_sidecar.ModelUnavailable as exc:
-                # The MODEL, not the file: this machine cannot embed anything,
-                # so the track is uploaded and left for the base rig rather
-                # than failed (module docstring). The distinction is the
-                # sidecar's own exception class precisely because both arrive
-                # here and they deserve opposite endings.
-                self._queue_for_base_rig(item, str(exc))
-                return
-            except music_clap_sidecar.SidecarError as exc:
-                # THIS file: a decode that failed here would fail on the base
-                # rig too, so queueing it would only move the failure.
-                self._fail_item(item, f"this track could not be analysed: {exc}")
-                return
-            except Exception as exc:  # noqa: BLE001
-                self._fail_item(item, f"this track could not be analysed: {exc}")
-                return
+            # music-2 (2026-09-11): a `result` the server asked us to retry
+            # left the analysis here. Re-POSTing it is the retry; re-embedding
+            # a track this process has already embedded is minutes of an
+            # editor's CPU for nothing.
+            analysis = self._deferred_analysis.get(str(item.get("uid") or ""))
+            if analysis is None:
+                try:
+                    analysis = self.sidecar.embed_file(
+                        outputs["audio"], ffmpeg_path=self.ffmpeg_path,
+                        stop_event=self._stop_event,
+                        child_sink=self._publish_child)
+                except music_clap_sidecar.ModelUnavailable as exc:
+                    # The MODEL, not the file: this machine cannot embed
+                    # anything, so the track is uploaded and left for the base
+                    # rig rather than failed (module docstring). The
+                    # distinction is the sidecar's own exception class
+                    # precisely because both arrive here and they deserve
+                    # opposite endings.
+                    self._queue_for_base_rig(item, str(exc))
+                    return
+                except music_clap_sidecar.SidecarError as exc:
+                    # THIS file: a decode that failed here would fail on the
+                    # base rig too, so queueing it would only move the failure.
+                    self._fail_item(item, f"this track could not be analysed: {exc}")
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    self._fail_item(item, f"this track could not be analysed: {exc}")
+                    return
             # `embedded` is cleared again if the row is refused, so a retry
             # re-embeds rather than arriving at the upload stage with no name.
             # The vectors are deliberately not kept in the state file (see
@@ -370,6 +397,45 @@ class MusicIngestor(broll_ingest.BrollIngestor):
         self._stage(item, ITEM_QUEUED_FOR_BASE_RIG, 100)
         self.log.warning("%s stays on this machine for the base rig - %s",
                          item.get("name"), why)
+
+    def _result_retry_wait(self, status: int, parsed: Any,
+                           item: dict) -> Optional[float]:
+        """How long to wait before asking the library again, or None for a
+        refusal that will never change (music-2, 2026-09-11).
+
+        The SERVER names the reason, so this branches on that and not on the
+        status alone: `name_race` is a collision two batches raced into and
+        the server's own comment promises the companion re-allocates around
+        it. A budget that is spent is not retryable any more -- a wait with no
+        end never releases the batch, which is the failure mode this whole
+        pass is about.
+        """
+        if int(item.get("result_retries") or 0) >= MAX_RESULT_RETRIES:
+            return None
+        reason, text, flagged = "", "", False
+        detail = parsed.get("detail") if isinstance(parsed, dict) else None
+        if isinstance(parsed, dict):
+            # music-2 (2026-09-11): `retry: true` is the SERVER's own word for
+            # it (musicweb's new shape for the 503 and for 409 name_race), and
+            # it outranks anything guessed from the status. Read at both
+            # levels: FastAPI wraps a raised HTTPException's payload in
+            # `detail`, and a route that returns the body plainly does not.
+            flagged = bool(parsed.get("retry"))
+        if isinstance(detail, dict):
+            reason = str(detail.get("reason") or "").strip().lower()
+            text = str(detail.get("detail") or "")
+            flagged = flagged or bool(detail.get("retry"))
+        elif isinstance(detail, str):
+            text = detail
+        retryable = (flagged
+                     or status in RETRYABLE_RESULT_STATUSES
+                     or (status == 409 and reason == "name_race")
+                     or (status == 409 and "retry" in text.lower()))
+        if not retryable:
+            return None
+        index = min(int(item.get("result_retries") or 0),
+                    len(RESULT_RETRY_BACKOFF_S) - 1)
+        return RESULT_RETRY_BACKOFF_S[index]
 
     def _post_result(self, item: dict, analysis: dict) -> bool:
         """The embedding, the waveform and the probe -> a `tracks` row.
@@ -416,12 +482,40 @@ class MusicIngestor(broll_ingest.BrollIngestor):
             detail = broll_ingest._detail_of(parsed) or "no detail"
             self.log.warning("the server refused the result for %s (HTTP %s: %s)",
                              item.get("name"), status, detail)
+            # music-2 (2026-09-11): a refusal is not always a verdict. The
+            # server's 503 (the library bind mount is not there: musicweb's
+            # `share_root_ready` via `allocate_name`) and its 409 `name_race`
+            # both mean TRY AGAIN, and both used to end the track for good --
+            # a thirty-second mount blip during a fifteen-track album drop
+            # killed the whole drop, with no retry route anywhere in
+            # music/web to get it back. 409 model_mismatch and 422 stay
+            # terminal: those refusals repeat.
+            wait = self._result_retry_wait(status, parsed, item)
+            if wait is not None:
+                tries = int(item.get("result_retries") or 0) + 1
+                item["result_retries"] = tries
+                # The vectors are not in the state file (see _wire_analysis),
+                # so `embedded` goes back to False and a companion restarted
+                # in the meantime re-embeds. Within this process the analysis
+                # is kept in memory instead, and the retry is a re-POST.
+                item["embedded"] = False
+                self._deferred_analysis[str(item.get("uid") or "")] = analysis
+                item["result_retry_at"] = self._clock() + wait
+                item["error"] = f"the library is not ready yet: {detail}"
+                self.log.info("%s waits %.0f s before asking the library again "
+                              "(try %d of %d)", item.get("name"), wait, tries,
+                              MAX_RESULT_RETRIES)
+                self._save()
+                return False
             # 409 model_mismatch is not a transient: this companion's artefact
             # is a different embedding space from the library's, and retrying
             # produces the identical refusal.
             item["embedded"] = False
+            self._deferred_analysis.pop(str(item.get("uid") or ""), None)
             self._fail_item(item, f"the library would not take this track: {detail}")
             return False
+        self._deferred_analysis.pop(str(item.get("uid") or ""), None)
+        item.pop("result_retry_at", None)
         if isinstance(parsed, dict):
             item["dest_name"] = str(parsed.get("rel_path") or item.get("dest_name") or "")
             item["track_id"] = parsed.get("track_id")
@@ -481,17 +575,31 @@ class MusicIngestor(broll_ingest.BrollIngestor):
                                   "could not be uploaded")
             return
         rel = PurePosixPath(dest).name
-        item["uploads"] = {rel: KIND_AUDIO}
         # What `_pump_uploads` posts once the bytes are there. Set BEFORE the
         # enqueue so a fast upload cannot be reported under the wrong state.
         item["final_state"] = final_state or ITEM_LIVE
-        if local and os.path.isfile(local):
-            try:
-                self._queue().enqueue(local, rel, KIND_AUDIO,
-                                      item_uid=item["uid"],
-                                      size_bytes=os.path.getsize(local))
-            except Exception:
-                self.log.exception("could not queue %s", rel)
+        if not local or not os.path.isfile(local):
+            # comp-broll-music-1 (2026-09-11): declared but never queued was
+            # an item that could neither land nor fail, so it sat in
+            # `uploading` for ever and the batch was never released. A track
+            # owns exactly one file: if it is gone (an external drive pulled
+            # mid-drop), there is nothing to upload and the honest answer is
+            # an ending.
+            item["uploads"] = {}
+            self._fail_item(item, "the audio file is not on this computer any "
+                                  "more, so it could not be uploaded")
+            return
+        try:
+            self._queue().enqueue(local, rel, KIND_AUDIO,
+                                  item_uid=item["uid"],
+                                  size_bytes=os.path.getsize(local))
+        except Exception:
+            self.log.exception("could not queue %s", rel)
+            item["uploads"] = {}
+            self._fail_item(item, "this computer could not queue the track for "
+                                  "upload")
+            return
+        item["uploads"] = {rel: KIND_AUDIO}
         item["stage"] = ITEM_UPLOADING
         self._stage(item, ITEM_UPLOADING, 90)
 

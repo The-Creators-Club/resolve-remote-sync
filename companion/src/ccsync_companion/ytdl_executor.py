@@ -1147,10 +1147,36 @@ class FleetClient:
         return None
 
     def heartbeat(self, job_id: int) -> None:
-        self._call("POST", f"/jobs/{job_id}/heartbeat", {"editor": self.editor})
+        # ytdl-web-3 (2026-09-11): the lease is keyed (editor, machine_id) at
+        # the CLAIM door only, and every door above it asked "is this the
+        # editor?". So a laptop that stalled past LEASE_SECONDS, lost the job
+        # to the editor's desktop and then woke up kept re-extending a lease
+        # that belonged to the other computer, kept fetching the manifest, and
+        # kept posting clip results against it - two trees, two copies, lane A
+        # carrying both up. The id is OPTIONAL on the wire (absent means
+        # today's per-editor answer), so an older server ignores it and a
+        # newer server does not 410 an older companion.
+        self._call("POST", f"/jobs/{job_id}/heartbeat",
+                   self._with_machine({"editor": self.editor}))
+
+    def _with_machine(self, body: dict) -> dict:
+        """`body` plus this computer's id, when it has one (ytdl-web-3)."""
+        machine = _this_machine_id()
+        if machine:
+            body["machine_id"] = machine
+        return body
+
+    def _machine_query(self) -> str:
+        """`?machine_id=...` for the GET that has no body, or "" (ytdl-web-3).
+        A server that does not read it sees an unknown query parameter, which
+        FastAPI ignores."""
+        machine = _this_machine_id()
+        return (f"?machine_id={urllib.parse.quote(machine, safe='')}"
+                if machine else "")
 
     def manifest(self, job_id: int) -> Optional[dict]:
-        status, parsed = self._call("GET", f"/jobs/{job_id}/download-manifest")
+        status, parsed = self._call(
+            "GET", f"/jobs/{job_id}/download-manifest{self._machine_query()}")
         if status != 200 or not isinstance(parsed, dict):
             log.warning("ytdl: job %s did not answer a manifest (HTTP %s)",
                         job_id, status)
@@ -1177,8 +1203,8 @@ class FleetClient:
         channel until a download reports one -- must not be overwritten with a
         None by the executor that could not read an info json.
         """
-        body = {"state": state, "error": error, "note": note,
-                "filepath_rel": filepath_rel}
+        body = self._with_machine({"state": state, "error": error, "note": note,
+                                   "filepath_rel": filepath_rel})
         if title:
             body["title"] = title
         if channel:

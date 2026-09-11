@@ -139,9 +139,14 @@ def test_eula_warns_when_no_eula_shipped(conn, monkeypatch, tmp_path):
     assert state.detail == setup_engine.NO_EULA_DETAIL
     accepted = setup_engine.run_do_it(ctx(conn, Settings()), "eula")
     assert accepted.status == "warn"
-    # ...and it holds `done`, because there is nothing here to be done with.
-    assert "eula" in dict(
+    # ...and since dash-core-6 (2026-09-11) it does NOT hold `done`. It used
+    # to: `eula` is required, so it cannot be skipped, and both the check and
+    # the accept answer warn -- a wall with no button anywhere that clears it,
+    # over a property of the BUILD that no admin can act on. The amber line
+    # still says so; it just stops gating.
+    assert "eula" not in dict(
         (tid, title) for tid, title in setup_engine.outstanding_for_done(conn))
+    assert "eula" not in setup_engine.outstanding_required(conn)
 
 
 def test_eula_path_prefers_the_copy_beside_the_code(monkeypatch, tmp_path):

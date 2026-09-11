@@ -204,6 +204,12 @@ MAX_BODY_CHARS = 60000
 # every machine still sends a bounded number of messages per cycle.
 MAX_FINDINGS_PER_KIND = 40
 
+# The subject the overflow finding is filed under when a kind hits that cap
+# (dash-collector-alerts-4). A constant, and deliberately not a count: the
+# alert ledger is keyed (kind, subject), so "and 7 more" would open a fresh
+# row and a fresh mail every time the number moved.
+TRUNCATED_SUBJECT = "and more of the same"
+
 # The env var that overrides the stored SMTP password, on the same
 # "ENV ALWAYS WINS" rule ai_providers.read_key applies to a customer's API
 # keys: a deployment that already carries the secret in its compose file must
@@ -578,8 +584,18 @@ def sink_deliverable(conn: sqlite3.Connection, now: str = "") -> tuple[bool, str
     if sink == SINK_NONE:
         return False, ("no mail server and no webhook is set, so nothing this "
                        "server finds is ever sent to anybody")
+    # dash-collector-alerts-2 (2026-09-11): `sent_to <> ''` is what makes
+    # this a DELIVERY and not a record. `run_cycle` files the weekly report of
+    # a site with no sink as ok=1 / "generated, not sent", with an empty
+    # `sent_to` - so without this filter the first thing an admin saw after
+    # typing an SMTP host with a typo in it was "the smtp channel delivered
+    # something 3 hour(s) ago", off a message that has never left the
+    # container. Keyed on the empty `sent_to` rather than on the detail
+    # prose, which is user-facing text somebody will reword. No `kind` filter:
+    # a heartbeat is evidence about the channel exactly as an alert is.
     ok_row = conn.execute(
-        "SELECT at FROM alert_log WHERE ok = 1 ORDER BY id DESC LIMIT 1"
+        "SELECT at FROM alert_log WHERE ok = 1 AND sent_to <> '' "
+        "ORDER BY id DESC LIMIT 1"
     ).fetchone()
     last_ok = str(ok_row["at"]) if ok_row else ""
     bad_row = conn.execute(
@@ -682,6 +698,43 @@ def previous_weekly_slot(now: dt.datetime, zone) -> dt.datetime:
     return slot.astimezone(dt.timezone.utc)
 
 
+# How many times one scheduled message (the weekly report, the daily
+# heartbeat) may be ATTEMPTED inside its own slot. res-fleet-4: the schedules
+# now retire on a SUCCESSFUL send, so a sink that is refusing would otherwise
+# be tried once per collector cycle for the rest of the week, each attempt
+# blocking that thread for an SMTP timeout. Three is enough to ride out the
+# outages that lose a slot (DNS not up at boot, a relay blip) and small
+# enough that a dead sink costs three timeouts, not a thousand.
+MAX_SEND_ATTEMPTS_PER_SLOT = 3
+
+
+def _attempts_since(conn: sqlite3.Connection, kind: str, since_iso: str) -> int:
+    """How many `alert_log` rows this kind has since `since_iso`, ok or not.
+
+    res-fleet-4 (2026-09-11). The attempt ceiling on a schedule that no longer
+    counts a failure as done. Bounded read: a slot holds a handful of rows and
+    anything past 50 is already far over the ceiling.
+    """
+    try:
+        floor = db.parse_iso(since_iso)
+    except (ValueError, TypeError):
+        return 0
+    if floor.tzinfo is None:
+        floor = floor.replace(tzinfo=dt.timezone.utc)
+    count = 0
+    for row in _rows(conn, "SELECT at FROM alert_log WHERE kind=? "
+                           "ORDER BY id DESC LIMIT 50", (str(kind),)):
+        try:
+            at = db.parse_iso(str(row["at"] or ""))
+        except (ValueError, TypeError):
+            continue
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=dt.timezone.utc)
+        if at >= floor:
+            count += 1
+    return count
+
+
 def weekly_due(conn: sqlite3.Connection, now: str) -> bool:
     """Whether this week's report is owed.
 
@@ -701,7 +754,16 @@ def weekly_due(conn: sqlite3.Connection, now: str) -> bool:
     if now_dt.tzinfo is None:
         now_dt = now_dt.replace(tzinfo=dt.timezone.utc)
     slot = previous_weekly_slot(now_dt, zone)
-    last = db.last_alert_at(conn, KIND_WEEKLY, ok_only=False)
+    # res-fleet-4 (2026-09-11): `ok_only=True`, because a send that FAILED has
+    # told nobody - `db.last_alert_at`'s own docstring says so. An ok=0 row
+    # used to retire the slot exactly as a success did, so a ten-minute SMTP
+    # outage over Monday's slot did not delay the week's report, it deleted
+    # it. The no-sink case is recorded ok=1 directly by `run_cycle` and is
+    # unaffected. Bounded by `_attempts_since`: a sink that is down costs one
+    # send per cycle for a few cycles, never one per cycle until Tuesday.
+    last = db.last_alert_at(conn, KIND_WEEKLY, ok_only=True)
+    if _attempts_since(conn, KIND_WEEKLY, slot.isoformat()) >= MAX_SEND_ATTEMPTS_PER_SLOT:
+        return False
     if not last:
         return True
     try:
@@ -736,7 +798,15 @@ def heartbeat_due(conn: sqlite3.Connection, now: str) -> bool:
         today = db.parse_iso(now).astimezone(zone).date()
     except (ValueError, TypeError):
         return False
-    last = db.last_alert_at(conn, KIND_HEARTBEAT, ok_only=False)
+    # res-fleet-4 (2026-09-11): ok_only, and bounded, for `weekly_due`'s
+    # reason. A dead man's switch that retires the day on one refused send is
+    # a dead man's switch that a ten-minute outage turns off.
+    day_start = dt.datetime.combine(today, dt.time(0, 0), tzinfo=zone)
+    if _attempts_since(conn, KIND_HEARTBEAT,
+                       day_start.astimezone(dt.timezone.utc).isoformat()
+                       ) >= MAX_SEND_ATTEMPTS_PER_SLOT:
+        return False
+    last = db.last_alert_at(conn, KIND_HEARTBEAT, ok_only=True)
     if not last:
         return True
     try:
@@ -860,7 +930,7 @@ Finding = dict            # {"subject", "diagnosis", "fix", "detail"}
 
 
 def _f(subject: str, diagnosis: str, fix: str, detail: str = "",
-       *, repeat: bool = True, title: str = "") -> Finding:
+       *, repeat: bool = True, title: str = "", quiet: bool = False) -> Finding:
     """One finding. `repeat=False` (DDIAG-3, 2026-09-04) says "still true,
     still worth showing, but do not mail it again while it stays true" - the
     warn repeat rule on a finding an error kind produced. It is NOT the same
@@ -873,11 +943,21 @@ def _f(subject: str, diagnosis: str, fix: str, detail: str = "",
     subject because the subject is the ledger's identity: "footage is
     outside the tree in 'Ruskin Pangolins' - ruskin/DESKTOP-LQQ41TC". Left
     empty every other kind reads its own registry title exactly as before.
+
+    `quiet` (dash-collector-alerts-1 / res-fleet-3, 2026-09-11) is the third
+    volume, below `repeat=False`: SAY NOTHING about this subject, in either
+    direction, and hold the ledger exactly where it is. It is for a check
+    that has stopped being able to judge a subject it has already raised -
+    not for one that judged it fine, which is what a recovery means. A quiet
+    finding is never a new mail and never a recovery; if it was open it stays
+    open and is counted in the digest's "still open from before".
     """
     finding: Finding = {"subject": subject, "diagnosis": diagnosis, "fix": fix,
                         "detail": detail, "repeat": repeat}
     if title:
         finding["title"] = title
+    if quiet:
+        finding["quiet"] = True
     return finding
 
 
@@ -1014,9 +1094,29 @@ class Ctx:
         # Machines a more specific kind has already named, so the catch-all
         # ("red for an hour and we cannot say why") does not repeat them.
         self.named: set[str] = set()
+        self._open_alert_subjects: dict[str, set[str]] = {}
 
     def guard(self, entry: Mapping[str, Any]) -> Mapping[str, Any]:
         return entry.get("guard") or {}
+
+    def open_alert_subjects(self, kind: str) -> set[str]:
+        """Which subjects of one kind the ledger currently holds OPEN.
+
+        dash-collector-alerts-1 / res-fleet-3 (2026-09-11). A check that
+        wants to say NOTHING about a subject has to know whether it has
+        already said something: silence about a subject that was never raised
+        is silence, silence about one that was raised is a RECOVERED message
+        ("this has cleared, no action is needed") about a fault nobody
+        touched. One grouped query per kind per scan, cached, on the Ctx rule
+        that no check may ask per machine. A read that raises is left to
+        raise: the kind is then `check_failed`, which is what keeps
+        `deliver`'s recovery pass off its subjects entirely.
+        """
+        cached = self._open_alert_subjects.get(kind)
+        if cached is None:
+            cached = {s for _k, s in _open_subjects(self.conn, {kind})}
+            self._open_alert_subjects[kind] = cached
+        return cached
 
     def name(self, subject: str) -> str:
         self.named.add(subject)
@@ -1335,6 +1435,13 @@ def _check_engine_down(ctx: Ctx) -> list[Finding]:
 
 
 def _check_nas_engine(ctx: Ctx) -> list[Finding]:
+    # dash-collector-alerts-3 (2026-09-11): a deployment with no
+    # `syncthing_url` runs the Syncthing-free kinds only (collector.py's
+    # SYNCTHING_FREE_KINDS gate), so `syncthing_reachable` is False for ever
+    # there - and this kind is an ERROR, re-mailed daily. A site that has no
+    # sync engine BY CONFIGURATION is not a site whose sync engine is down.
+    if not getattr(ctx.settings, "syncthing_url", ""):
+        return []
     if ctx.collector.get("syncthing_reachable") is not False:
         return []
     return [_f(
@@ -1515,9 +1622,40 @@ def _check_collector_kinds(ctx: Ctx) -> list[Finding]:
     return out
 
 
+def _collector_started_recently(ctx: Ctx) -> bool | None:
+    """Whether ANY collector kind has STARTED a run inside the stale window.
+
+    dash-collector-alerts-3 (2026-09-11). `db.fetch_collector_status`'s
+    `collector_stale` is only ever computed inside `if reachable and
+    finished_at`, and `reachable` is the `ok` of the newest non-Syncthing-free
+    run: a collector whose last act was a FAILED cycle, and a Syncthing-less
+    deployment which never runs such a kind at all, can therefore never be
+    stale, so the one question the flag exists to answer stops being asked in
+    exactly the two states worth asking it in. Liveness is the START of a
+    cycle, regardless of what the cycle then made of itself, and regardless of
+    kind - anything starting proves the thread is turning.
+
+    None means the ledger could not be read or holds no run at all, which is
+    "cannot tell" and never "stopped": a fresh container has no rows.
+    """
+    rows = _rows(ctx.conn, "SELECT MAX(started_at) AS at FROM poll_runs")
+    started = str(rows[0]["at"] or "") if rows else ""
+    if not started:
+        return None
+    try:
+        return db.age_seconds(started, ctx.now) < db.COLLECTOR_STALE_SECONDS
+    except (ValueError, TypeError):
+        return None
+
+
 def _check_collector_stale(ctx: Ctx) -> list[Finding]:
     if not ctx.collector.get("collector_stale"):
-        return []
+        # dash-collector-alerts-3: the stored flag is one of two ways in. It
+        # answers False for a collector whose last cycle failed, so the START
+        # of the last cycle is asked as well, and only a positive "nothing has
+        # started for three minutes" raises the finding.
+        if _collector_started_recently(ctx) is not False:
+            return []
     return [_f(
         "the server",
         "The server's background collector has not completed a cycle "
@@ -1700,7 +1838,16 @@ def _check_notices(ctx: Ctx) -> list[Finding]:
     rows = _rows(ctx.conn,
                  "SELECT kind, severity, subject, body, fix, first_seen FROM notices "
                  "WHERE cleared_at IS NULL AND severity='error' "
-                 "ORDER BY last_seen DESC LIMIT 40")
+                 # dash-collector-alerts-4 (2026-09-11): `id DESC` is the
+                 # tiebreaker `db.open_notices` next door already has.
+                 # `last_seen` is re-stamped every pass, so without it the
+                 # order among ties is whatever SQLite returns and the 40
+                 # this LIMIT keeps differ from pass to pass on a fleet with
+                 # more than 40 open errors.
+                 # The window is wider than MAX_FINDINGS_PER_KIND on purpose:
+                 # `scan` is the one place that caps a kind, and it can only
+                 # say "and 7 more" about an overflow it can see.
+                 "ORDER BY last_seen DESC, id DESC LIMIT 200")
     return [_f(
         f"{r['kind']}: {r['subject']}",
         f"{(r['body'] or r['subject'] or '').strip()} "
@@ -1776,8 +1923,22 @@ def _check_out_of_tree(ctx: Ctx) -> list[Finding]:
         who = _who(e)
         project = ctx.open_projects.get(who, "")
         slug = _synced_project(ctx, project) if project else None
+        quiet = False
         if project and not slug:
-            continue
+            # dash-collector-alerts-1 / res-fleet-3 (2026-09-11). CR-232 spelt
+            # this silence as `continue`, and the subject is `editor/machine`
+            # while the predicate swings with whichever project happens to be
+            # open at scan time: a subject that leaves the scan is declared
+            # RECOVERED by `deliver`, so an editor opening a personal project
+            # for an hour CLOSED the ledger row about the fleet project's 40
+            # clips and mailed the owner "no action is needed". Silence for a
+            # subject nothing has ever said anything about; for one already
+            # raised, the finding stays in the scan and goes QUIET - no mail,
+            # no recovery, the row left open for the next scan that can see
+            # the tree project again.
+            if ctx.name(who) not in ctx.open_alert_subjects("out_of_tree"):
+                continue
+            quiet = True
         who = ctx.name(who)
         ticked = slug in (ctx.plan_slugs.get(
             (e.get("editor_username") or "", e.get("machine") or "")) or set())
@@ -1800,7 +1961,7 @@ def _check_out_of_tree(ctx: Ctx) -> list[Finding]:
             f"ticked={'yes' if ticked else 'no'} "
             f"bad prefix={g.get('resolve_bad_prefix')} missing={g.get('resolve_missing')} "
             f"scanned {_age_words(g.get('resolve_last_scan_at'), ctx.now)}",
-            title=title))
+            title=title, quiet=quiet))
     return out
 
 
@@ -2029,11 +2190,20 @@ def _check_weekly_send(ctx: Ctx) -> list[Finding]:
     `ok=1` ("generated, not sent") directly rather than through `send`, so
     this only fires when a CONFIGURED sink actually failed (finding 2,
     resilience sweep 2026-08-28 fix pass)."""
-    weekly = [r for r in db.fetch_alerts(ctx.conn, limit=200)
-              if r.get("kind") == KIND_WEEKLY]
-    if not weekly or weekly[0].get("ok"):
+    # dash-collector-alerts-7 (2026-09-11): the LAST weekly row, asked for by
+    # kind, not the newest weekly row inside a 200-row recency window. This is
+    # the cliff bug-hunt-2026-09-03 dash-collector-4 fixed for
+    # `_open_subjects`: on a fleet with thirty open conditions the ledger
+    # writes a row per finding per cycle, so a few hours of that pushed the
+    # weekly row out of the window, the check returned [], the subject left
+    # the scan and `deliver` mailed "cleared" about the very channel that was
+    # still refusing. Raising the window would only move the cliff.
+    weekly = _rows(ctx.conn,
+                   "SELECT at, ok, detail FROM alert_log WHERE kind=? "
+                   "ORDER BY id DESC LIMIT 1", (KIND_WEEKLY,))
+    if not weekly or weekly[0]["ok"]:
         return []
-    row = weekly[0]
+    row = dict(weekly[0])
     return [_f(
         "the weekly report",
         f"The weekly fleet report could not be delivered "
@@ -2965,6 +3135,31 @@ def scan(conn: sqlite3.Connection, settings: Any, now: str,
                 "kind": kind.kind, "severity": kind.severity, "title": kind.title,
                 **finding,
             })
+        if len(results) > MAX_FINDINGS_PER_KIND:
+            # dash-collector-alerts-4 (2026-09-11): the cap used to be silent,
+            # and silence about a subject is how `deliver` spells RECOVERED.
+            # A kind whose finding set reorders between passes (every LIMITed
+            # query over a column re-stamped each cycle) then mailed "this has
+            # cleared" about whichever real problems fell out of the top 40,
+            # and re-raised them next pass. Now the overflow SAYS it exists,
+            # under a subject of its own (never a real one's, which would
+            # dedup against it), and `deliver` reads the flag as "this kind
+            # has said nothing about the subjects it could not carry".
+            over = len(results) - MAX_FINDINGS_PER_KIND
+            findings.append({
+                "kind": kind.kind, "severity": kind.severity,
+                "title": kind.title, "subject": TRUNCATED_SUBJECT,
+                "truncated": True,
+                "diagnosis": (
+                    f"There are {len(results)} of these and this server shows "
+                    f"the first {MAX_FINDINGS_PER_KIND}. The other {over} are "
+                    f"real and are not listed here."),
+                "fix": ("Open the dashboard and work through the list: "
+                        "something fleet-wide is usually behind this many at "
+                        "once."),
+                "detail": f"{len(results)} finding(s), capped at "
+                          f"{MAX_FINDINGS_PER_KIND}",
+            })
     return findings
 
 
@@ -3688,6 +3883,13 @@ def deliver(
         seen.add((kind, subject))
         severity = finding.get("severity", SEV_WARN)
         was_open = _is_open(conn, kind, subject)
+        # dash-collector-alerts-1 (2026-09-11): a QUIET finding is here only
+        # to hold its ledger row where it is. Nothing is sent about it and
+        # the recovery pass below skips it because it is in `seen`.
+        if finding.get("quiet"):
+            if was_open:
+                still_open += 1
+            continue
         # DDIAG-3: a finding may opt OUT of its kind's daily repeat while
         # staying open. Nothing may opt in: the repeat rule is the severity's.
         if was_open and (severity != SEV_ERROR or not finding.get("repeat", True)):
@@ -3729,8 +3931,14 @@ def deliver(
     # check FAILED this cycle has told us nothing about its subjects, so
     # declaring them recovered would be the "could not check rendered as fine"
     # mistake in its purest form.
+    #
+    # dash-collector-alerts-4 (2026-09-11): a kind TRUNCATED at
+    # MAX_FINDINGS_PER_KIND is in the same position. It reported 40 of 45
+    # subjects and said nothing whatever about the other 5, so its silence
+    # about them is the cap, not a cure.
     checked_kinds = {k.kind for k in ALERT_KINDS} - {
-        f["subject"] for f in findings if f["kind"] == CHECK_FAILED.kind}
+        f["subject"] for f in findings if f["kind"] == CHECK_FAILED.kind
+    } - {str(f["kind"]) for f in findings if f.get("truncated")}
     for kind, subject in _open_subjects(conn, checked_kinds):
         if (kind, subject) in seen:
             continue

@@ -1051,8 +1051,8 @@ def lease_held_by(job, editor, machine=None):
     return machine is None or held is None or held == str(machine).strip()
 
 
-def is_leaseholder(job, editor, at=None):
-    """Is `editor` the live leaseholder of this job?
+def is_leaseholder(job, editor, at=None, machine=None):
+    """Is `(editor, machine)` the live leaseholder of this job?
 
     `editor` IS REQUIRED (H5, 2026-08-17). It used to accept None as "somebody
     holds it and the caller did not say who", because the identity a companion
@@ -1062,12 +1062,20 @@ def is_leaseholder(job, editor, at=None):
     a blank name here is a caller bug, and answering True to it would hand any
     token-holding machine somebody else's job.
 
-    Per-EDITOR on purpose, unlike a claim (data-model-7, CR-66, 2026-08-21):
-    the manifest and the per-clip status posts carry no machine_id, and the
-    machine that could not claim never gets a job id to post about, so the
-    (editor, machine) key is enforced at the one door that hands the lease out.
+    Per-EDITOR when the caller does not say which machine it is, and that is
+    the OLDER COMPANION's answer, not the rule (ytdl-web-3, 2026-09-11).
+    CR-66 narrowed the key to (editor, machine_id) at the claim door and
+    justified leaving the rest per-editor with "the machine that could not
+    claim never gets a job id to post about" -- which does not cover the
+    machine that DID claim and then lost the lease by EXPIRY. Laptop A stalls
+    past the lease, desktop B claims it legitimately, A wakes up: per-editor,
+    A's heartbeat re-extended B's lease, A's manifest fetch was served and A's
+    per-clip `done` posts were recorded against B's run. Two trees, two sets of
+    clips, lane A carrying both up - the outcome CR-66 was written to end.
+    `machine` None keeps the old answer because the field is optional on the
+    wire; a companion below that build must not start getting 410s mid-job.
     """
-    return lease_active(job, at) and lease_held_by(job, editor)
+    return lease_active(job, at) and lease_held_by(job, editor, machine)
 
 
 def claim_download(c, job_id, editor, lease_seconds, at=None, machine=None,
@@ -1081,6 +1089,16 @@ def claim_download(c, job_id, editor, lease_seconds, at=None, machine=None,
         not been asked for yet;
       - mode_lock='server' pins it to the NAS worker -- set by the editor (plan
         §9) or by a reclaim, which is what makes a reclaim one-way (§3);
+      - the job must have been CREATED LOCAL (ytdl-web-5, 2026-09-11). CR-96
+        widens the destination to every active project whenever the download
+        will run on the server, on the stated reasoning that no machine's sync
+        plan constrains a fetch no machine performs -- and nothing enforced the
+        second half of that bargain, so a client could post `local:false` to
+        reach a project it does not sync and then hand the job id to its own
+        companion on 127.0.0.1:8899. `created_local=0` is the job saying the
+        NAS fetches this one; a machine claiming it is the one outcome CR-96's
+        argument excluded. COALESCE because a row from before migration 013 has
+        no opinion and must claim exactly as it always did;
       - a pending cancel means nobody downloads it, here or on the NAS
         (YTDL-WEB-1, 2026-08-14): the flag is honoured by run_job, which the
         worker cannot reach while a companion holds the lease, so a job handed
@@ -1130,6 +1148,7 @@ def claim_download(c, job_id, editor, lease_seconds, at=None, machine=None,
         'lease_expires_at=?, updated_at=? '
         "WHERE id=? AND phase='downloading' "
         f"AND (mode_lock IS NULL OR mode_lock<>'{MODE_SERVER}') "
+        'AND COALESCE(created_local,1)=1 '
         'AND COALESCE(cancel_requested,0)=0 '
         f"AND (download_mode<>'{MODE_LOCAL}' OR {refresh} "
         '     OR lease_expires_at IS NULL OR lease_expires_at<=?)',
@@ -1139,19 +1158,32 @@ def claim_download(c, job_id, editor, lease_seconds, at=None, machine=None,
     return bool(cur.rowcount)
 
 
-def heartbeat_download(c, job_id, editor, lease_seconds, at=None):
+def heartbeat_download(c, job_id, editor, lease_seconds, at=None, machine=None):
     """Extend a live lease. -> did it happen.
 
     Deliberately NOT a re-claim: an expired lease is not extended here, because
     by then the worker may already have taken the job back and started
     downloading it (§3, no ping-pong). The companion is told 410 and stops.
+
+    `machine` narrows the WHERE from a PERSON to a COMPUTER (ytdl-web-3,
+    2026-09-11). The route's leaseholder check is not enough on its own: the
+    two are separate statements, and this is the compare-and-set that decides.
+    Its two Nones mean what claim_download's mean - a caller that does not say
+    (an older companion) keeps the per-editor rule, and a NULL claimed_machine
+    is a holder that did not say, which is not the same as another machine.
     """
     at = at or now()
+    machine = str(machine or '').strip() or None
+    if machine is None:
+        held, held_args = '', []
+    else:
+        held = 'AND (claimed_machine IS NULL OR claimed_machine=?) '
+        held_args = [machine]
     cur = c.execute(
         'UPDATE jobs SET lease_expires_at=?, updated_at=? '
-        f"WHERE id=? AND download_mode='{MODE_LOCAL}' AND claimed_by=? "
+        f"WHERE id=? AND download_mode='{MODE_LOCAL}' AND claimed_by=? {held}"
         'AND lease_expires_at>?',
-        (_future(lease_seconds), at, job_id, editor, at))
+        (_future(lease_seconds), at, job_id, editor, *held_args, at))
     c.commit()
     return bool(cur.rowcount)
 

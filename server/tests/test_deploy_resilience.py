@@ -22,7 +22,7 @@ temp directories, and the install-path tests drive main() in --dry-run with a
 recording fake in place of run_ssh, so no NAS is touched.
 
 Run with:
-    cd E:\\Projects\\resolve-remote-sync\\server
+    cd E:\\Projects\\Editing\\ccsync\\server
     python -m pytest tests -q
 """
 import os
@@ -835,7 +835,10 @@ def test_install_tree_records_the_tree_it_renamed_aside(monkeypatch, tmp_path):
     monkeypatch.setattr(ida, "backend", lambda: _FakeBackend())
     monkeypatch.setattr(ida, "make_staging_dir", lambda *a, **k: "/tmp/staging")
     monkeypatch.setattr(ida, "upload_tree", lambda *a, **k: 1)
-    monkeypatch.setattr(ida, "local_manifest", lambda *a, **k: (1, 10))
+    # A REAL file, not a stubbed local_manifest: since server-tools-4
+    # (2026-09-11) install_tree walks the source once, itself, and the walk it
+    # ships is the walk it verifies.
+    (tmp_path / "a.bin").write_bytes(b"x" * 10)
     monkeypatch.setattr(ida, "run_ssh_guarded",
                         lambda *a, **k: (0, "1\n10\n", ""))
     ida._LAST_OLD_DIRS.pop("app", None)

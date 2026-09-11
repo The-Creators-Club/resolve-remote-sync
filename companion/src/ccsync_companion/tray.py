@@ -771,7 +771,9 @@ def _format_lane_line_from(
     if status.state == STATE_PAUSED:
         return f"{label}: PAUSED"
     if status.queued:
-        return f"{label}: {status.queued} item(s) to go{stale}"
+        # comp-ui-4 (2026-09-11): UX-10 retired "(s)" from editor-facing copy
+        # and the scan that pins it read app.py and popup.py only.
+        return f"{label}: {ui_copy.count(status.queued, 'item')} to go{stale}"
     # SYNC-110: "up to date" against a plan nobody has been able to refresh
     # for a day is the sentence this whole line exists to stop being told.
     return f"{label}: up to date" + (f" ({detail})" if detail else "") + stale
@@ -986,6 +988,55 @@ def _report_icon_placement(app: "CompanionApp", icon) -> None:
     )
     _notify(app, "CCSync is running, but the menu bar is full so its icon can't be "
                  "shown. Free a menu bar slot and restart CCSync.")
+
+
+def _report_windows_icon_failure(app: "CompanionApp", icon, detail: str) -> None:
+    """The Windows half of MAC-7 (comp-ui-1, 2026-09-11).
+
+    A Windows icon that never registers used to log one line inside
+    tray_native and stop there: `_stopped` had no reader, app.run() logged
+    "tray icon started" on the next line regardless, and from then on the
+    companion ran headless -- no icon, no menu, no Quit, no Settings -- with
+    every toast silently discarded, the four safety latches included.
+
+    Three things happen here and all three matter. The log gets an ERROR line
+    that says what an editor can do about it. A crash report is written, which
+    is the channel that already reaches the dashboard on every tick
+    (`sync_guard.crashes`) and build_diagnostics: no new wire field, so a
+    dashboard one release behind is unaffected. And `_ccsync_stop` is set,
+    because the refresh and pulse loops otherwise snapshot and assign on a
+    dead icon for the life of the process.
+
+    Never raises: this runs on the tray's own thread.
+    """
+    log.error(
+        "THE CCSYNC TRAY ICON IS NOT IN THE NOTIFICATION AREA: %s. Everything "
+        "else is running normally - your files still sync - but the icon, its "
+        "menu, Settings and Quit are all unreachable, and every notification "
+        "CCSync would have shown you (including 'sync has stopped itself') is "
+        "being discarded. Sign out and back in, or restart CCSync, to get it "
+        "back.", detail)
+    try:
+        icon._ccsync_stop = True
+    except Exception:
+        log.debug("could not stop the tray refresh loops", exc_info=True)
+    try:
+        from . import crash_report
+
+        crash_report.write_report({
+            "schema": 1,
+            "when": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "version": getattr(config_mod, "VERSION", "?"),
+            "thread": "tray",
+            "frozen": bool(getattr(sys, "frozen", False)),
+            "exception": {
+                "type": "TrayIconUnavailable",
+                "message": crash_report.redact(str(detail)),
+                "traceback": "",
+            },
+        }, getattr(app, "config", None))
+    except Exception:
+        log.debug("could not record the tray icon failure", exc_info=True)
 
 
 def _schedule_icon_placement_check(app: "CompanionApp", icon, delay: float = 3.0) -> None:
@@ -1388,6 +1439,24 @@ def ytdlp_warning_line(status: Optional[dict]) -> str:
         return ("⚠ YouTube downloads on this computer are running on the "
                 "server: the downloader could not be installed here")
     return ""
+
+
+def ytdlp_sidecar_line(status: Optional[dict]) -> str:
+    """The ffmpeg-sidecar half of the same status block (comp-ytdl-jobs-3,
+    2026-09-11), or "".
+
+    A sidecar install that keeps failing reached nobody: the machine simply
+    stopped making proxies and stopped being offered fleet media work, with
+    the reason in companion.log and nowhere an editor looks. It is rendered
+    NEXT TO the yt-dlp line in Settings and in the tray menu's state block,
+    not folded into ytdlp_warning_line, because the two say different things
+    and a machine can be in both states at once.
+    """
+    try:
+        return ytdlp_manager.sidecar_warning_line(status or {}) or ""
+    except Exception:
+        log.debug("tray: the ffmpeg sidecar line failed", exc_info=True)
+        return ""
 
 
 def _maybe_warn_youtube_session(app: "CompanionApp", snap: dict) -> None:
@@ -2176,9 +2245,12 @@ def quit_confirm_text(copying: dict) -> str:
     so both platforms say the same thing."""
     index = int(copying.get("index") or 0)
     total = int(copying.get("total") or 0)
-    where = "of {0} file(s) into your synced folder".format(total) if total else "files in"
-    counted = f"CCSync is copying file {index} {where}." if index else \
-        f"CCSync is copying {total or 'some'} file(s) into your synced folder."
+    # comp-ui-4 (2026-09-11): real plurals, via ui_copy.count.
+    where = (f"of {ui_copy.count(total, 'file')} into your synced folder"
+             if total else "files in")
+    counted = f"CCSync is copying file {index} {where}." if index else (
+        f"CCSync is copying {ui_copy.count(total, 'file')} into your synced folder."
+        if total else "CCSync is copying files into your synced folder.")
     return (counted + "\n\n"
             "Quitting now abandons the file it is on. The rest of the batch is not "
             "copied and Resolve is not repointed at it.\n\n"
@@ -2235,6 +2307,41 @@ def _confirm_quit_while_copying(app: "CompanionApp") -> bool:
         log.exception("quit: could not ask about the copy in flight")
         return True
     return True
+
+
+def quit_from_menu(app: "CompanionApp", icon) -> None:
+    """The Quit item, from wherever the backend calls it.
+
+    comp-ui-5 (2026-09-11): on macOS a menu action runs on the MAIN thread
+    (CCSyncTrayTarget.invoke_ does no hop), and the main thread is also
+    ui_dispatch's pump -- a `root.after` timer that cannot fire while this
+    frame is on the stack. The confirmation below is an osascript alert with
+    a 120 s timeout, so an editor who left the alert up while a FIX ALL copy
+    ran froze the progress window and every dispatch() a worker thread made,
+    for as long as they read it. _darwin_on_main_thread's own docstring
+    states the rule ("a tray refresh thread must never be able to wait on an
+    open window"); the main thread is not exempt from it.
+
+    So on macOS the whole thing moves to a worker thread. _DarwinIcon.stop()
+    and the toasts underneath already hop to the main thread themselves, and
+    app.shutdown() was never main-thread work. On Windows the caller is the
+    tray pump thread, not a UI runloop, and it stays inline: that is the
+    thread Quit is supposed to end.
+    """
+    def _ask_and_quit() -> None:
+        # RES-8 (2026-09-04): ask BEFORE icon.stop(), which is the point of no
+        # return -- it ends the message loop and the shutdown that follows
+        # kills the copy thread inside write().
+        if not _confirm_quit_while_copying(app):
+            log.info("quit: the editor chose to let the copy finish")
+            return
+        icon.stop()
+        _guarded(app, "Quit", app.shutdown)
+
+    if ui_dispatch.uses_main_thread():
+        _spawn(app, "Quit", _ask_and_quit)
+        return
+    _ask_and_quit()
 
 
 def _guarded(app: "CompanionApp", label: str, fn) -> None:
@@ -2706,6 +2813,26 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # in-memory objects, the trash summary is whatever lane B's last prune
     # cycle measured -- so none of them may stall the render path.
     _get("sync_guard", lambda: (getattr(app, "sync_guard", None) or (lambda: {}))() or {}, {})
+    # comp-sync-4 (2026-09-11): SYNC-101's and SYNC-102's readers had NO
+    # CALLER anywhere - not here, not the report - so a shared library that
+    # is not working on this machine, and a project folder this machine moved
+    # because an admin renamed it on the server, were computed every pass and
+    # reached nobody. Both are lock-guarded reads off the sequencer with no
+    # I/O, which is the only kind allowed on this path (COMP-CORE-6), and
+    # both cap themselves at 10.
+    _get("shared_folder_problems",
+         lambda: list((getattr(app, "shared_folder_problems", None)
+                       or (lambda: []))() or []), [])
+    _get("repath_events",
+         lambda: list((getattr(app, "repath_events", None)
+                       or (lambda: []))() or []), [])
+    # ...and into the guard the advisory producers read, so the two lines
+    # appear on a companion whose app.sync_guard() predates the sections too.
+    # Never overwritten: where sync_guard() carries them it is the same data
+    # from the same getter, one tick fresher.
+    for _key in ("shared_folder_problems", "repath_events"):
+        if snap.get(_key) and not (snap.get("sync_guard") or {}).get(_key):
+            snap.setdefault("sync_guard", {})[_key] = snap[_key]
     # APP-5: the sentence validate_config wrote, so the lane lines can name
     # the setting instead of saying "isn't set up yet" three times.
     _get("problem_detail", lambda: _config_problem_detail(app), "")
@@ -2823,6 +2950,39 @@ def _breaker_line(guard: dict) -> Optional[str]:
     if not breaker.get("tripped"):
         return None
     return f"⛔ PROXY DOWNLOAD STOPPED (safety): {breaker_editor_reason(breaker)}"
+
+
+_PERSIST_LATCHES = ("lane_b_breaker", "disk_floor", "halt")
+
+
+def _persist_failed_line(guard: dict) -> Optional[str]:
+    """A safety latch that could not write its own state file (comp-sync-1,
+    2026-09-11), or None when the disk is fine.
+
+    The three latches (lane B's breaker, the free-space park, a fleet halt)
+    are all "never in-memory only" by rule, precisely so a human is the only
+    thing that clears them. A latch whose file will not write is therefore a
+    latch the next restart silently drops, and nothing said so where an
+    editor would see it. `persist_failed` is ABSENT on the happy path, which
+    is how the report spells "nothing to say" to a reader one release older.
+    """
+    guard = guard or {}
+    errors: list[str] = []
+    for key in _PERSIST_LATCHES:
+        block = guard.get(key)
+        if not isinstance(block, dict) or not block.get("persist_failed"):
+            continue
+        detail = str(block.get("persist_error") or "").strip()
+        if detail and detail not in errors:
+            errors.append(detail)
+        elif not detail and "a failed write" not in errors:
+            errors.append("a failed write")
+    if not errors:
+        return None
+    # One sentence however many latches are stuck: they share a directory, so
+    # they are one fault with up to three symptoms.
+    return (f"⚠ CCSync cannot save its safety state on this computer "
+            f"({'; '.join(errors)}). Restarting CCSync would clear it.")
 
 
 def _disk_line(guard: dict) -> Optional[str]:
@@ -3152,8 +3312,60 @@ def _unfiltered_line(guard: dict) -> Optional[str]:
     shown = ", ".join(slugs[:3])
     if len(slugs) > 3:
         shown += f", +{len(slugs) - 3} more"
-    return (f"⚠ {len(slugs)} project(s) are not sharing yet - waiting for their "
-            f"filter list: {shown}")
+    # comp-ui-4 (2026-09-11): this is one of the exact sentences UX-10's scan
+    # test pins as retired, and it has been shipping from here the whole time
+    # because that scan reads app.py and popup.py only.
+    verb = "is" if len(slugs) == 1 else "are"
+    return (f"⚠ {ui_copy.count(len(slugs), 'project')} {verb} not sharing yet - "
+            f"waiting for their filter list: {shown}")
+
+
+def _shared_folders_line(guard: dict) -> Optional[str]:
+    """A shared/borrowed folder that is not working on this machine
+    (comp-sync-4, 2026-09-11), or None.
+
+    SYNC-101's producer was computed on every sequencer pass and read by
+    nothing at all - not the tray, not the report - so the LUT library being
+    unreachable here was a fact only companion.log ever held. The sentences
+    come from the sequencer already written for an editor, so they are shown
+    as they are; only the first is, with a count for the rest, because this
+    is a lane advisory and not a list.
+    """
+    problems = [str(p).strip() for p in ((guard or {}).get("shared_folder_problems") or [])
+                if str(p).strip()]
+    if not problems:
+        return None
+    line = f"⚠ {problems[0]}"
+    if len(problems) > 1:
+        line += f" (and {ui_copy.count(len(problems) - 1, 'other shared folder')})"
+    return line
+
+
+def _repath_line(guard: dict) -> Optional[str]:
+    """A project folder this machine MOVED because an admin renamed it on the
+    server (comp-sync-4 / SYNC-102, 2026-09-11), or None.
+
+    The largest un-announced event in the product: the editor's project
+    directory moves under them while Resolve is open, and every clip in the
+    open project still points at the old canonical path. An event whose clips
+    were relinked needs no sentence - there is nothing left for the editor to
+    do - which is also why this cannot be driven off a count alone.
+    """
+    events = [e for e in ((guard or {}).get("repath_events") or [])
+              if isinstance(e, dict) and not e.get("relinked")]
+    if not events:
+        return None
+    event = events[0]
+    old = str(event.get("old") or "").strip() or "a project folder"
+    new = str(event.get("new") or "").strip() or "a new name"
+    line = (f"⚠ A project was renamed on the server and this computer moved its "
+            f"folder to match: '{old}' is now '{new}'. Clips in Resolve may still "
+            f"point at the old path - {ui_copy.SCAN_WHOLE_PROJECT} relinks them")
+    more = len(events) - 1
+    if more:
+        line += (" (1 more project was renamed too)" if more == 1
+                 else f" ({more} more projects were renamed too)")
+    return line
 
 
 def _conflicts_line(guard: dict) -> Optional[str]:
@@ -3268,13 +3480,15 @@ def _ignored_line(guard: dict) -> Optional[str]:
         return None
     parts: list[str] = []
     if session:
+        # comp-ui-4 (2026-09-11): real plurals here too.
         parts.append(
-            f"⚠ {session} clip(s) skipped this session and still not syncing - "
-            "Settings > SCAN WHOLE PROJECT offers them again")
+            f"⚠ {ui_copy.count(session, 'clip')} skipped this session and still "
+            "not syncing - Settings > SCAN WHOLE PROJECT offers them again")
     if folders:
         parts.append(
-            f"{folders} folder(s) are set to be left alone on this computer - "
-            "Settings can undo that")
+            f"{ui_copy.count(folders, 'folder')} "
+            f"{'is' if folders == 1 else 'are'} set to be left alone on this "
+            "computer - Settings can undo that")
     return ". ".join(parts) if parts else None
 
 
@@ -3436,6 +3650,10 @@ def _menu_fingerprint(snap: dict) -> tuple:
         # keeps offering the wrong one until something unrelated changes --
         # the same bug UI-3 was (item 9).
         _guard_fingerprint(snap.get("sync_guard")),
+        # comp-ytdl-jobs-3 (2026-09-11): the sidecar line is a MENU line, so
+        # without it here it would not appear until something unrelated moved
+        # the fingerprint, and would linger after the install finally worked.
+        ytdlp_sidecar_line(snap.get("ytdlp_status")),
         # Same rule as the latch above: accepting the licence is the only
         # thing that changes on a machine parked behind that gate, so
         # without it here the accept item would still be in the menu after
@@ -3500,6 +3718,23 @@ def _guard_fingerprint(guard: Optional[dict]) -> tuple:
         # to rebuild the menu or the item never appears.
         bool((guard.get("disk_floor") or {}).get("parked")),
         str((guard.get("blocked") or {}).get("reason") or ""),
+        # comp-sync-1 (2026-09-11): a latch that cannot write its state file
+        # adds a LINE, so without it here the line would not appear until
+        # something unrelated moved the menu, and would linger after the
+        # retry finally wrote -- UI-3's shape again. Booleans, not the error
+        # text: the error is one string per fault and does not move on its
+        # own, and a path in a fingerprint is a rebuild per machine.
+        tuple(bool((guard.get(key) or {}).get("persist_failed"))
+              for key in _PERSIST_LATCHES),
+        # comp-sync-4 (2026-09-11): both add a LINE, so both have to move the
+        # fingerprint. A COUNT and the repath IDS, never the sentences: those
+        # carry absolute paths and a machine-specific reason, and putting
+        # them here would rebuild the menu for a string that never changes.
+        len((guard.get("shared_folder_problems") or [])),
+        tuple((str(e.get("old") or ""), str(e.get("new") or ""),
+               bool(e.get("relinked")))
+              for e in (guard.get("repath_events") or [])
+              if isinstance(e, dict)),
     )
 
 
@@ -3647,7 +3882,8 @@ def _ingest_lines(ingest: Optional[dict], label: str = "b-roll",
     if ingest.get("upload_paused") and upload_left:
         lines.append(f"Uploading indexed {label} is paused: {upload_left} left")
     elif upload_left:
-        lines.append(f"Uploading indexed {label}… {upload_left} {unit}(s) left")
+        # comp-ui-4 (2026-09-11): `unit` is "clip" or "track", both regular.
+        lines.append(f"Uploading indexed {label}… {ui_copy.count(upload_left, unit)} left")
     if failed and total:
         # CMEDIA-10 (sweep 2026-09-03): the orchestrator knows exactly why
         # each clip failed and puts it on the item; both local surfaces
@@ -3662,14 +3898,16 @@ def _ingest_lines(ingest: Optional[dict], label: str = "b-roll",
 
 def _ingest_failure_line(failed: int, label: str, unit: str,
                          failures: Optional[list]) -> str:
-    """"3 b-roll clip(s) could not be indexed: A001.mov (the source file is
+    """"3 b-roll clips could not be indexed: A001.mov (the source file is
     not on this machine any more), and 2 more" (CMEDIA-10).
 
     Falls back to the count-and-the-log sentence when nothing carried the
     reasons: a build whose orchestrator predates `failures` still says what
     it always said."""
     items = [item for item in list(failures or []) if isinstance(item, dict)]
-    head = f"{failed} {label} {unit}(s) could not be indexed"
+    # comp-ui-4 (2026-09-11): "3 b-roll clips", never "3 b-roll clip(s)". Not
+    # ui_copy.count, because the label sits between the number and the noun.
+    head = f"{failed} {label} {unit if failed == 1 else unit + 's'} could not be indexed"
     if not items:
         return f"{head}. See the log"
     first = items[0]
@@ -3859,7 +4097,9 @@ def _with_proxy_suffix(text: str, snap: dict) -> str:
         return text
     if gap.get("encoding"):
         count = int(gap.get("left") or 0)
-        suffix = f" · making {count} proxy file(s)" if count else " · making proxies"
+        # comp-ui-4 (2026-09-11): real plural.
+        suffix = (f" · making {ui_copy.count(count, 'proxy file')}" if count
+                  else " · making proxies")
         # The percentage of the clip that is FURTHEST ALONG. One number, not
         # four: the drain runs up to 4 wide and the tooltip has ~120
         # characters for everything, and "the next one lands soon" is what an
@@ -4339,14 +4579,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         _spawn(app, "Settings", lambda: settings_window.show_settings(app))
 
     def on_quit(icon, item):
-        # RES-8 (2026-09-04): ask BEFORE icon.stop(), which is the point of no
-        # return -- it ends the message loop and the shutdown that follows
-        # kills the copy thread inside write().
-        if not _confirm_quit_while_copying(app):
-            log.info("quit: the editor chose to let the copy finish")
-            return
-        icon.stop()
-        _guarded(app, "Quit", app.shutdown)
+        quit_from_menu(app, icon)
 
     def on_sign_in(icon, item):
         action_sign_in(app)
@@ -4529,6 +4762,12 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
                      snap.get("resolve_line"),
                      snap.get("ytdl_line"), snap.get("ytdl_login_line"),
                      jobs_forced_line(snap.get("jobs_status")),
+                     # comp-ytdl-jobs-3 (2026-09-11): here and not only in
+                     # Settings > YOUTUBE, because "this computer cannot
+                     # install ffmpeg" is about proxies and fleet media work
+                     # and that section is absent on a machine with the
+                     # YouTube features off.
+                     ytdlp_sidecar_line(snap.get("ytdlp_status")),
                      *ingest_failure_lines)
         if line
     ]
@@ -4748,6 +4987,15 @@ def start_tray(
         # rather than logging "tray icon started" over an invisible icon.
         _schedule_icon_placement_check(app, icon)
     else:
+        # comp-ui-1 (2026-09-11): Windows' answer to the macOS placement
+        # check above. Set BEFORE run() starts: the registration retries can
+        # take two and a half minutes, but they can also fail on the first
+        # pass if Explorer is gone entirely.
+        try:
+            icon.on_register_failure = (
+                lambda detail: _report_windows_icon_failure(app, icon, detail))
+        except Exception:
+            log.debug("tray backend takes no failure hook", exc_info=True)
         icon_thread = threading.Thread(target=icon.run, daemon=True)
         icon_thread.start()
     return icon

@@ -5,7 +5,7 @@ only ever be run by hand on a rig. Run it before trusting the library walk
 on a new library, a new Resolve version, or a machine whose paths are
 spelled differently (a Mac reading a Windows-authored library).
 
-    E:\\Projects\\resolve-remote-sync\\companion\\.venv\\Scripts\\python.exe ^
+    E:\\Projects\\Editing\\ccsync\\companion\\.venv\\Scripts\\python.exe ^
         tools\\library_walk_check.py
 
 Strictly read-only. It never moves the playhead, never opens or closes a

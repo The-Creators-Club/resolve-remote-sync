@@ -13,7 +13,7 @@ YTDL-5 fixed the mirror image (one transient timeout must not pin the pip red)
 and is pinned in test_claude_cli.py; this file is the other direction, and the
 last test here is the pair of them: red, then green again, with no restart.
 
-    cd E:\\Projects\\resolve-remote-sync\\ytdl\\web
+    cd E:\\Projects\\Editing\\ccsync\\ytdl\\web
     ..\\..\\dashboard\\.venv\\Scripts\\python.exe -m pytest tests/test_health_recovery.py -q
 """
 import pytest

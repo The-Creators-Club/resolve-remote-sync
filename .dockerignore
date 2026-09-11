@@ -28,21 +28,26 @@ installer
 tools
 server
 docs
-# ...EXCEPT the MARKDOWN under it, which is what the running dashboard serves
-# (REL-5, usability sweep 2026-09-04; widened from two documents to the tree
-# the same day, at the owner's request): the licence agreement the first-run
-# wizard makes an admin accept, and every document /help browses. ~4 MB of
-# text. Without it an image-mode container shows an empty licence box with a
-# disabled [ ACCEPT ], ticks the wizard's `eula` task green, and says help is
-# not installed.
+# ...EXCEPT the CUSTOMER-FACING documents, which are what the running
+# dashboard serves (REL-5, usability sweep 2026-09-04): the licence agreement
+# the first-run wizard makes an admin accept, the guide /help opens on, and
+# the editor's own setup notes. Without them an image-mode container shows an
+# empty licence box with a disabled [ ACCEPT ], ticks the wizard's `eula` task
+# green, and says help is not installed.
 #
-# `*.md` and nothing else on purpose: docs/mobile alone is a directory of
-# screenshots, and an image is not made of documentation. Both patterns are
-# needed - `**` matches zero directories here, but stating the top level
-# explicitly is cheaper than trusting that. A re-inclusion has to come AFTER
-# the directory that excludes it: the last matching pattern wins.
-!docs/*.md
-!docs/**/*.md
+# NAMED, not `!docs/**/*.md` (dash-mounts-ui-1 / server-tools-2, 2026-09-11).
+# The glob form shipped this studio's defect ledger, its plans and its
+# bug-hunt reports - which name our editors, their machines and our
+# infrastructure - to every customer, and /help served them to any signed-in
+# editor. The list lives ONCE, in
+# dashboard/src/ccsync_dashboard/published_docs.py; these lines and the
+# Dockerfile's COPY lines restate it, and
+# dashboard/tests/test_bug_hunt_2026_09_11_dash_mounts_ui.py fails when they
+# disagree. A re-inclusion has to come AFTER the directory that excludes it:
+# the last matching pattern wins.
+!docs/HOW_IT_WORKS.md
+!docs/EDITOR_SETUP.md
+!docs/legal/*.md
 broll/indexer
 music/indexer
 

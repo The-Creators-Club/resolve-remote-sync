@@ -249,6 +249,15 @@ class DriveReminder:
         # to go", and a state has nothing to go.
         self._sentence: Optional[str] = None
         self._kind = ""
+        # comp-sync-16 (2026-09-11): episode identity was `_since`, a
+        # time.time() float -- and Windows' clock ticks at 15.6 ms, so two
+        # reads in one tick are byte-identical (99,996 of 100,000 measured).
+        # A new episode that began in the same tick as the muted one ended
+        # inherited its mute: Settings said "reminders about this drive are
+        # off" and hid both buttons while begin()'s thread was in fact still
+        # ballooning. A counter cannot collide with itself.
+        self._episode_id = 0
+        self._muted_episode: Optional[int] = None
         self.reminders_sent = 0
 
     # -- what the tray asks --------------------------------------------------
@@ -284,6 +293,7 @@ class DriveReminder:
                 self._sentence = reminder(self._drive_phrase(), summary)
                 self._kind = "unfinished"
                 self._since = self._clock()
+                self._episode_id += 1  # comp-sync-16
             self._write_record()
             if announce:
                 self._say(first_warning(self._drive_phrase(), summary))
@@ -291,9 +301,23 @@ class DriveReminder:
         except Exception:
             log.exception("drive reminder: could not begin")
 
-    def resume_remembered(self) -> bool:
+    def resume_remembered(self, state: Optional[str] = None) -> bool:
         """At startup with the drive already out: pick up the episode the
-        previous run recorded, if any. Returns whether one was."""
+        previous run recorded, if any. Returns whether one was.
+
+        `state` is what the root guard is reporting RIGHT NOW (comp-sync-8,
+        2026-09-11). A STATE episode belongs to its state -- SYNC-120 says so
+        and `end_state_episode` enforces it, except at startup, where that
+        guard runs before the record has been read and is a no-op. So a drive
+        that wedged with nothing owed and was then quit and unplugged came
+        back reminding "your drive is still not answering, reconnect it or
+        restart this computer" every 30 minutes about a drive in the editor's
+        bag, and only plugging it in ever ended it. A restored state episode
+        is therefore kept only when the drive is in that state now; with no
+        `state` given there is no basis for the claim, and the caller's own
+        first announcement re-opens the right episode a moment later. The
+        unfinished-work branch is untouched: work owed outlives every state
+        change, which is the whole of CR-92."""
         try:
             record = self._read_record()
             if not record:
@@ -307,7 +331,13 @@ class DriveReminder:
                 sentence = str(record.get("sentence") or "").strip()
                 if not sentence:
                     return False
-                self.begin_state(str(record.get("kind") or "state"), sentence)
+                kind = str(record.get("kind") or "state")
+                if str(state or "") != kind:
+                    log.info("drive reminder: dropping the remembered %r episode -- "
+                             "the drive is %s now", kind, state or "in an unknown state")
+                    self._delete_record()
+                    return False
+                self.begin_state(kind, sentence)
                 if self.active:
                     self.remind_now()
                 return self.active
@@ -346,6 +376,7 @@ class DriveReminder:
                 self._sentence = text
                 self._kind = str(state or "state")
                 self._since = self._clock()
+                self._episode_id += 1  # comp-sync-16
             log.info("drive reminder: %s and nothing was owed -- reminding every "
                      "%.0f min until it answers", self._kind, self._interval / 60.0)
             self._write_record()
@@ -371,6 +402,9 @@ class DriveReminder:
                 self._sentence = None
                 self._kind = ""
                 self._since = None
+                # comp-sync-16: the mute belongs to the episode that is
+                # ending. Leaving it set was the other half of the collision.
+                self._muted_episode = None
             self._stop_thread()
             self._delete_record()
             if had:
@@ -508,7 +542,7 @@ class DriveReminder:
             with self._lock:
                 if self._sentence is None:
                     return False
-                since = self._since
+                episode = self._episode_id
             self._stop_thread()
             try:
                 wait_seconds = max(0.0, float(minutes)) * 60.0
@@ -517,7 +551,7 @@ class DriveReminder:
             # A SNOOZE is not a mute: the reminders are coming back, so the
             # window keeps offering both buttons rather than saying they are
             # off.
-            self._muted_since = since if wait_seconds <= 0 else None
+            self._muted_episode = episode if wait_seconds <= 0 else None
             if wait_seconds <= 0:
                 log.info("drive reminder: reminders muted for this episode by the "
                          "editor; the warning line stays and the drive coming back "
@@ -553,6 +587,6 @@ class DriveReminder:
         """Whether THIS episode is the one that was muted. Compared against
         the episode's own start time rather than a bare flag: an episode that
         ended and a new one that began must not inherit the answer."""
-        muted_since = getattr(self, "_muted_since", None)
-        return (self._sentence is not None and muted_since is not None
-                and muted_since == self._since)
+        muted = getattr(self, "_muted_episode", None)
+        return (self._sentence is not None and muted is not None
+                and muted == self._episode_id)

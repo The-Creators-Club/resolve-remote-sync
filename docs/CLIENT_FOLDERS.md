@@ -14,7 +14,7 @@ original.
 Contents: [1. Using it](#1-using-it) · [2. What the client sees](#2-what-the-client-sees-and-what-they-never-see)
 · [3. Making the link reach outside the tailnet](#3-making-the-link-reach-outside-the-tailnet-tailscale-funnel)
 · [4. Security posture](#4-security-posture) · [5. Data and backup](#5-data-and-backup)
-· [6. Limits and what is not built](#6-limits-and-what-is-deliberately-not-built) · [7. Files](#7-files)
+· [6. Limits and what is not built](#6-limits-and-what-is-deliberately-not-built) · [6a. Staging a project folder](#6a-staging-a-project-folder-that-is-not-in-the-archive-yet) · [7. Files](#7-files)
 
 ---
 
@@ -302,6 +302,63 @@ other). `publish_db.py` does not touch it and must not learn to.
 - **URLs carry the port** (`:8443`). Cosmetic; a nicer hostname in front is a
   DNS CNAME + certificate question for later, and it must not become a
   reverse proxy that re-opens the 08-17 decision.
+
+## 6a. Staging a project folder that is not in the archive yet
+
+*Done once by hand, 2026-09-10: `P:\Projects\2026\Base Drone\Interviewees\Taichung
+Drone Basic Camp` (142 clips) to a client link in about fifteen minutes. The
+owner's ask was "stage these clips in the b-roll dash and give me a link",
+with indexing skipped so the link went out first.*
+
+A client folder can only hold clips the b-roll index knows, and a shoot
+sitting under `Projects/` is not in it. There is no button for this yet (the
+owner has asked for one: "share only a single folder going forward"). Until
+there is, the operator path on the base rig is:
+
+1. **Register the shoot as a share** in `private/broll/indexer/config.queue.yaml`,
+   rooted at the PROJECT (`docs/BACKCATALOGUE_INGEST.md`, the ff3/ff4 shape),
+   `source: proxies`, `archive_name` the name an editor should read, and an
+   `exclude` for every sibling folder you are not staging. `index: false`
+   when the link matters more than the descriptions; no `max_duration_s` for
+   an interview folder, or the long takes are dropped at probe. Every clip
+   needs a file under `Proxy/`; `tools/make_own_proxies.py` makes the missing
+   ones (a `.mov` beside a `.mp4` counts).
+2. **Scan and run the local stages** for that share only:
+   `python -m broll_index.cli --config <queue> scan --share <s> --root <root>`,
+   then probe -> 540p preview -> stills. `parallel_local.py` takes no share
+   filter and would also pick up every half-finished clip in the queue (on
+   2026-09-10 that was 1,300 FF2/Disinformation clips waiting for the frames
+   stage), so drive `_process_one` over `SELECT id ... WHERE share = ?`.
+3. **Place the files** with `build_archive.py --dest "P:/Assets/B-roll Archive"
+   --apply`, again narrowed to the share (wrap `eligible`): it puts the shoot's
+   own proxy in the folder, the generated 540p H.264 under `Proxy/` beside it
+   (that is `archive_path`, what the client's browser plays, so a 10-bit HEVC
+   shoot proxy is never what goes out), and the poster/sprite pairs. Unfiltered
+   it copies whatever else the queue owes the archive (14,000 files that day).
+4. **Put the rows in the live index.** Do NOT reach for `publish_db.py` on
+   reflex: it publishes the whole queue DB, and the live `broll.db` may be far
+   behind it (2026-09-10: live = the 2026-08-18 publish; the queue held 9,300
+   back-catalogue rows the archive had never been given). Export the share's
+   `videos` rows (both `organised` and `excluded`) plus a `share_roots` row
+   (`source = 'proxies'` is what files it under Creators_Club) to JSON on the
+   archive share, and insert them through the dashboard container's own
+   python (`docker exec ix-ccsync-dashboard-dashboard-1 python3 ...`): refuse
+   on any id clash, one `BEGIN IMMEDIATE`, bump `meta.search_generation` in the
+   same transaction. The queue's ids are far above the live ones, so a later
+   whole-index publish carries the same rows unchanged.
+5. **Create the folder through the API** on a minted admin session
+   (`auth.make_session_cookie` + an `auth_sessions` row, deleted afterwards):
+   `POST /broll/api/client-folders`, `POST .../{id}/items` with the ids in
+   `rel_path` order, `GET .../{id}` for the token. The public link is the
+   panel's `public_base_url` + `/broll/share/<token>/`; check it answers 200,
+   that `/login` on `:8443` is still a 404, and that `tailscale funnel status`
+   in the `tailscale` container still lists the mount.
+
+What a button would need: steps 2-5 already exist as code (the ingest batch
+pipeline makes previews and rows for dropped files; the jobs queue has a
+`proxy-480p` kind; the folder API is complete). The missing piece is a
+dashboard action that takes a folder under the tree, runs those against the
+files where they already are, and hands back the link. A day or two.
 
 ## 7. Files
 

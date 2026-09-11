@@ -696,6 +696,8 @@ def _init_ytdl_storage() -> None:
     # the mount.
     root = getattr(ytdl_config, "DATA_ROOT", "") or os.environ.get(
         "YTDL_DATA_ROOT", "./data")
+    # res-fleet-2 (2026-09-11): the root the collector re-probes every cycle.
+    mount_status.record_root("ytdl", str(root))
     Path(root).mkdir(parents=True, exist_ok=True)
 
     con = ytdl_db.connect()

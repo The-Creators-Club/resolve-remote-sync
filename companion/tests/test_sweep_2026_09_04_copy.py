@@ -340,16 +340,27 @@ def test_the_sentences_ux10_named_no_longer_say_lane_a_or_s() -> None:
         "timeline clip(s) live outside",
         "file(s) in. Your originals",
     )
-    # The two files the finding named. Deliberately not the whole package:
-    # `self.log.info("%d clip(s)")` in broll_ingest is a log line that the
-    # log-argument filter cannot see (it is `self.log`, not `log`), and a
-    # scan that fails on it would be a scan people learn to work around.
-    for name in ("app.py", "popup.py"):
+    # comp-ui-4 (bug hunt 2026-09-11): tray.py and settings_window.py were
+    # NOT scanned, and one of the exact phrases above -- "project(s) are not
+    # sharing yet" -- was being rendered from tray.py the whole time this
+    # test asserted it was retired. They hold most of the companion's visible
+    # copy, so they are the two files this scan most needed. Still not the
+    # whole package: `self.log.info("%d clip(s)")` in broll_ingest is a log
+    # line the log-argument filter cannot see (it is `self.log`, not `log`),
+    # and a scan that fails on it would be a scan people learn to work
+    # around.
+    for name in ("app.py", "popup.py", "tray.py", "settings_window.py"):
         for text in _visible_strings(SRC / name):
             for phrase in retired:
                 assert phrase not in text, (
                     f"{name} still says {phrase!r} to an editor: "
                     f"ui_copy.count(n, 'file') writes a real plural.")
+    # comp-ui-4: and no NEW "(s)" may appear in the two copy-heavy files,
+    # which is the check that would have caught the six that were shipping.
+    for name in ("tray.py", "settings_window.py"):
+        bad = [t for t in _visible_strings(SRC / name) if "(s)" in t]
+        assert not bad, (f"{name} says {bad} to an editor: ui_copy.count(n, "
+                         f"noun) writes a real plural.")
     # ...and the lane's letter, which is a source shape rather than a phrase.
     assert 'f"Lane {stalled.get(' not in (SRC / "app.py").read_text(encoding="utf-8")
 

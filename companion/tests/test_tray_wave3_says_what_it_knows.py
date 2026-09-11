@@ -457,7 +457,8 @@ def test_a_failed_clip_names_itself_and_its_reason():
                           failures=[{"name": "A001_C003.mov",
                                      "error": "the source file is not on this "
                                               "machine any more"}])
-    assert lines == ["3 b-roll clip(s) could not be indexed: A001_C003.mov "
+    # comp-ui-4 (2026-09-11): "clip(s)" retired here too.
+    assert lines == ["3 b-roll clips could not be indexed: A001_C003.mov "
                      "(the source file is not on this machine any more), and 2 more"]
 
 
@@ -466,14 +467,14 @@ def test_one_failure_says_no_and_n_more():
 
     lines = _ingest_lines({"total": 4, "done": 3, "failed": 1},
                           failures=[{"name": "b.mov", "error": "a tier refusal"}])
-    assert lines == ["1 b-roll clip(s) could not be indexed: b.mov (a tier refusal)"]
+    assert lines == ["1 b-roll clip could not be indexed: b.mov (a tier refusal)"]
 
 
 def test_without_the_reasons_the_old_sentence_stands():
     from ccsync_companion.tray import _ingest_lines
 
     assert _ingest_lines({"total": 4, "done": 3, "failed": 1}) == [
-        "1 b-roll clip(s) could not be indexed. See the log"]
+        "1 b-roll clip could not be indexed. See the log"]
 
 
 def test_the_failure_line_reaches_the_menu():

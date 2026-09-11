@@ -18,7 +18,7 @@ you if they broke:
      hourly task on a customer's pool.
 
 Everything is offline. Run with:
-    cd E:\\Projects\\resolve-remote-sync\\server
+    cd E:\\Projects\\Editing\\ccsync\\server
     python -m pytest tests -q          # from GIT BASH -- see CLAUDE.md
 """
 import sqlite3

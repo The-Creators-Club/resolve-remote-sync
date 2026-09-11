@@ -303,7 +303,10 @@ def test_a_state_episode_survives_a_restart(tmp_path):
     reminder.begin_state("not_answering", "still not answering")
 
     later, notes = _reminder(tmp_path)
-    assert later.resume_remembered() is True
+    # The drive is STILL not answering, which is what makes the remembered
+    # episode still true (comp-sync-8, 2026-09-11: an episode is restored only
+    # for the state the drive is in now).
+    assert later.resume_remembered("not_answering") is True
     assert later.active is True
     assert notes.sent, "the editor who just restarted is told before anything else"
     assert "not answering" in notes.sent[0][0]

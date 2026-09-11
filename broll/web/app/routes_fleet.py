@@ -45,7 +45,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from app import ingest_batches
 from app.db import get_db
@@ -60,6 +60,17 @@ log = logging.getLogger("broll.fleet")
 # means changing that regex in the same commit -- otherwise every one of these
 # calls is answered with a 303 to an HTML login page that no companion can
 # follow, and b-roll ingest stops fleet-wide with nothing in this app's log.
+#
+# EVERY ROUTE HERE IS A POST, KEYED BY A BATCH UID THE CALLER WAS HANDED.
+# `GET /api/fleet/ingest/batches` (BROLL-8, 2026-09-04) lived here for a week
+# with no caller: no `FleetClient` method ever issued it, and the gate's
+# GET-only `_broll_fleet_list_re` carve-out existed for nobody. It went on
+# 2026-09-11 (broll-3) rather than growing a poller, because a companion that
+# discovered and claimed its own work would move the decision about what a
+# machine works on off the page, and the plan's rule is that possession is won
+# by a claim the PAGE dispatches. The affordance for a batch whose machine was
+# wiped is the panel's [ take over on this computer ] button, which is on
+# every queued batch in the editor's own scope.
 router = APIRouter(prefix="/api/fleet/ingest")
 
 
@@ -115,46 +126,6 @@ def _item_or_404(conn: sqlite3.Connection, batch_uid: str, item_uid: str) -> sql
     if item is None:
         raise HTTPException(404, "no such item in this batch")
     return item
-
-
-@router.get("/batches")
-def discover(editor_q: str | None = Query(default=None, alias="editor"),
-             editor: str = Depends(require_fleet_caller),
-             conn: sqlite3.Connection = Depends(get_db)) -> dict:
-    """This editor's unfinished batches: the one route here NOT keyed by a uid.
-
-    BROLL-8, 2026-09-04. Every other route needs a uid the caller was handed by
-    the page, so a batch whose machine was wiped or reinstalled could be picked
-    up by NOTHING - it sat in `queued` for ever holding name reservations and
-    permanently-`ingesting` rows, while the panel's own copy said "another of
-    your machines can pick it up".
-
-    Read-only, and it claims nothing: possession is still won by POSTing the
-    claim, which is where the one-machine-at-a-time rule lives. Stale leases
-    are expired on the way past for the same reason the list route does it -
-    this app has no timer, so the calls that happen are where it happens.
-
-    Scoped to the VERIFIED identity, never to a `?editor=` the caller names:
-    the fleet token is held by every companion and is not an identity (H5), so
-    a name in the query string would be a way to enumerate another editor's
-    machines. The parameter is accepted and must MATCH, so a companion that
-    sends it gets a refusal rather than another editor's work.
-
-    NOTE for the deployed mount: the dashboard's login_gate carve-out
-    (`app.py` `_broll_fleet_re`) only covers `.../batches/<32 hex>/...` today,
-    so this route needs that regex widened before a companion behind the
-    dashboard can reach it - otherwise it is answered with a 303 to a login
-    page no companion can follow. The page's own take-over path does not go
-    through here (it lists batches on the session route and dispatches to its
-    own loopback), so nothing an editor sees waits on that change.
-    """
-    if editor_q is not None and editor_q != editor:
-        raise HTTPException(403, {"detail": "this token is not that editor",
-                                  "reason": "identity"})
-    ingest_batches.expire_stale_leases(conn)
-    batches = [b for b in ingest_batches.list_batches(conn, editor=editor)
-               if b["state"] not in ingest_batches.BATCH_TERMINAL]
-    return {"editor": editor, "batches": batches}
 
 
 @router.post("/batches/{uid}/claim")

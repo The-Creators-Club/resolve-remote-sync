@@ -38,6 +38,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .shared_folders import (
+    OUTCOME_ASK_FAILED,
+    OUTCOME_HALTED,
     PROBLEM_OUTCOMES,
     FolderProblems,
     log_persistent_problem,
@@ -187,8 +189,12 @@ class BorrowedFolderManager:
                     self._problems.clear(str(slug))
             except Exception as exc:
                 results[slug] = "error"
-                log_persistent_problem(
-                    self._problems.note(str(slug), name, "error", str(exc)))
+                try:  # comp-sync-2: never re-enter note() from its own handler
+                    log_persistent_problem(
+                        self._problems.note(str(slug), name, "error", str(exc)))
+                except Exception:
+                    log.debug("borrowed folder %s: could not record the problem",
+                              slug, exc_info=True)
                 if slug not in self._error_logged:
                     self._error_logged.add(slug)
                     log.warning("borrowed folder %s: reconcile failed: %s", slug, exc)
@@ -344,7 +350,7 @@ class BorrowedFolderManager:
             pending = self.admin.pending_folders() or {}
         except Exception as exc:
             log.debug("borrowed folder %s: could not read pending folders: %s", slug, exc)
-            return "not-offered"
+            return OUTCOME_ASK_FAILED  # comp-sync-10
         entry = pending.get(slug) if isinstance(pending, dict) else None
         offered_by = list((entry or {}).get("offeredBy", {}) or {})
         if not offered_by:
@@ -356,8 +362,13 @@ class BorrowedFolderManager:
         if self.halted():
             # accept_folder ends in an unpause; during a halt that would put
             # a new folder online mid-stop. The offer keeps.
+            # comp-sync-10: the editor's own pause or an admin's fleet halt is
+            # holding this, so telling them to chase their admin about a share
+            # that is fine is exactly the wrong sentence. Not a problem at
+            # all: the offer keeps, and the next reconcile after the halt
+            # accepts it.
             log.info("borrowed folder %s: offer left pending, syncing is stopped here", slug)
-            return "not-offered"
+            return OUTCOME_HALTED
         log.info("accepting borrowed folder %s (%s) from %s at %s, restricted to %d "
                  "subtree(s)", slug, rel, device_id, want_path,
                  sum(1 for l in want_ignores if l.startswith("!") and not l.endswith("/**")))

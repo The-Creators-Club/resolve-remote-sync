@@ -300,15 +300,50 @@ LOCAL_DOCS_DIR = Path(__file__).resolve().parents[1] / "docs"
 LOCAL_REPO_DIR = Path(__file__).resolve().parents[1]
 SHIPPED_DOCS = ("HOW_IT_WORKS.md",)
 SHIPPED_DOC_TREES = ("legal",)
-# The WHOLE docs tree since 2026-09-04 (Alex): /help is a browser now, so a
-# bind-mode server that got two documents would show a two-entry list. Only
-# `.md` travels - docs/mobile is a directory of screenshots - and the four
-# top-level documents go into `_root/`, the name help.py browses them by
-# (help.ROOT_DIR_NAME). SHIPPED_DOCS/SHIPPED_DOC_TREES stay the REQUIRED set:
-# the deploy still refuses to claim it shipped docs without the EULA and the
-# guide, and a missing runbook is not a reason to say so.
-SHIPPED_ROOT_DOCS = ("README.md", "SPEC.md", "KNOWN_BUGS.md", "CLAUDE.md")
+# The WHOLE docs tree travelled here from 2026-09-04 (Alex: /help is a browser
+# now), and the four top-level documents with it under `_root/`. NOT ANY MORE
+# (server-tools-2 / dash-mounts-ui-1, 2026-09-11): that put this studio's
+# defect ledger, CLAUDE.md, the secrets runbook, every plan and every bug-hunt
+# report - which name our editors, their machines and our infrastructure - on
+# a customer's server, where /help served them to any signed-in EDITOR.
+#
+# What travels is `published_docs.py`'s list, which the image
+# (dashboard/deploy/Dockerfile + .dockerignore), the OTA bundle
+# (tools/build_dashboard_bundle.py) and the dashboard's own read side
+# (help.resolve_document) are all built from: one list, so what a customer's
+# server CONTAINS and what an editor may READ cannot drift apart.
+# SHIPPED_DOCS/SHIPPED_DOC_TREES stay the REQUIRED set - the deploy refuses to
+# claim it shipped docs without the EULA and the guide.
+SHIPPED_ROOT_DOCS: tuple = ()
 SHIPPED_DOC_SUFFIX = ".md"
+
+
+# Loaded BY PATH, for the reason expected_runtime_id() states: server/ does
+# not import the dashboard package (its own venv, its own dependencies), and
+# published_docs.py is stdlib-only precisely so this loader can exist.
+def published_docs_module():
+    """`ccsync_dashboard.published_docs`, or None if it cannot be read.
+
+    None means SHIP NOTHING BUT THE REQUIRED SET (see _stage_docs_tree): a
+    docs list we cannot read is not a licence to fall back on "everything".
+    """
+    import importlib.util  # noqa: PLC0415 - only the docs staging needs it
+
+    # This script's own checkout, not LOCAL_REPO_DIR: the list is CODE and
+    # travels with this file, while LOCAL_REPO_DIR is the docs source a test
+    # (or an operator) may point elsewhere.
+    module_path = (Path(__file__).resolve().parents[1] / "dashboard" / "src"
+                   / "ccsync_dashboard" / "published_docs.py")
+    try:
+        spec = importlib.util.spec_from_file_location("_ccsync_published_docs",
+                                                      module_path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:  # noqa: BLE001 - see the docstring
+        return None
 
 # --------------------------------------------------------------------------
 # The music app (music/web), mounted in-process at /music
@@ -526,13 +561,288 @@ CARDS_APP_MOUNT = "/cards-app"
 
 
 def cards_web_source():
-    """The MulticamPipeline checkout to ship, or None.
+    """The MulticamPipeline checkout named by this site, or None.
 
     None is the ordinary answer: nothing in THIS repo is Timeline Cards, so a
     site that has not named a checkout gets no /cards and no complaint.
+
+    cards snapshot deploy, 2026-09-11: since today this path is normally a
+    POINTER, not the bytes that ship -- what ships is an export of one COMMIT
+    of the repo it lives in (see export_cards_snapshot). CARDS_SRC in the
+    environment is the explicit "ship this directory as it stands" override
+    and keeps the old meaning, which is why it is read here and the site value
+    is not the only source.
     """
     raw = (os.environ.get("CARDS_SRC", "").strip() or SITE_CARDS_SRC).strip()
     return Path(raw) if raw else None
+
+
+# --------------------------------------------------------------------------
+# The Timeline Cards SNAPSHOT (cards snapshot deploy, 2026-09-11)
+# --------------------------------------------------------------------------
+# What ships is an EXPORT OF A COMMIT, not a working copy. Until today the
+# operator kept a second checkout beside the everyday one (a detached worktree
+# they moved to the commit being deployed and `git clean`ed by hand) purely so
+# that half-finished edits could not reach the NAS. One forgotten clean was
+# all it took for them to, and nothing on the NAS said which commit was live.
+# `git archive <commit>:<subtree>` has both properties by construction: an
+# archive holds the TRACKED files of that commit and nothing else -- no
+# untracked, no dirty, no ignored, no .git -- and the commit is a fact worth
+# writing down, which is what DEPLOYED_COMMIT in the shipped tree is for.
+CARDS_DEFAULT_REF = "main"
+CARDS_MARKER_NAME = "DEPLOYED_COMMIT"
+
+
+def git_out(args, cwd=None):
+    """Run `git <args>` and return (ok, stdout, stderr), never raising.
+
+    A missing git is an ordinary refusal here, not a traceback: this runs
+    before anything on the NAS has moved.
+    """
+    import subprocess
+    try:
+        proc = subprocess.run(["git", *args],
+                              cwd=(str(cwd) if cwd else None),
+                              capture_output=True, text=True)
+    except OSError as exc:
+        return False, "", f"git could not be run ({exc})"
+    return proc.returncode == 0, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+
+
+def cards_repo_for(src: Path):
+    """(repo root, subtree prefix, error) for the checkout at `src`.
+
+    The prefix is what `git archive` is asked for -- `Resolve/MulticamPipeline`
+    for this studio -- and it is DERIVED, never hardcoded: the same script
+    deploys a site whose Timeline Cards checkout is the repo root itself.
+    """
+    if not src.is_dir():
+        return None, "", (f"{src} is not a directory, so there is no Timeline "
+                          f"Cards repository to take a snapshot of.")
+    ok_, top, err = git_out(["rev-parse", "--show-toplevel"], cwd=src)
+    if not ok_ or not top:
+        return None, "", (f"{src} is not inside a git repository "
+                          f"({err or 'git rev-parse --show-toplevel failed'}).")
+    root = Path(top)
+    try:
+        prefix = src.resolve().relative_to(root.resolve()).as_posix()
+    except (ValueError, OSError):
+        prefix = ""
+    return root, prefix, ""
+
+
+def export_cards_snapshot(src: Path, ref: str, dest_parent=None):
+    """Export `<ref>:<subtree>` out of the repo holding `src`.
+
+    Returns (directory, info, error). The directory is a fresh temp tree that
+    the caller ships and then forgets; `info` is what went into the marker and
+    what the deploy's summary reports.
+
+    Every refusal is a whole sentence naming the ref, because the operator
+    reading it is mid-deploy and the next thing they will do is retype it.
+    """
+    import tarfile
+    import tempfile
+
+    ref = (ref or "").strip() or CARDS_DEFAULT_REF
+    root, prefix, err = cards_repo_for(src)
+    if err:
+        return None, None, err
+
+    ok_, sha, git_err = git_out(["rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=root)
+    if not ok_ or not sha:
+        return None, None, (f"no commit '{ref}' in the Timeline Cards repository "
+                            f"at {root} ({git_err or 'git rev-parse failed'}). "
+                            f"Pass --cards-commit with a branch, tag or hash "
+                            f"that exists there.")
+
+    spec = f"{sha}:{prefix}" if prefix else sha
+    if prefix:
+        ok_, kind, git_err = git_out(["cat-file", "-t", spec], cwd=root)
+        if not ok_ or kind != "tree":
+            return None, None, (f"commit {sha[:12]} ({ref}) of {root} has no "
+                                f"'{prefix}' directory, so there is no Timeline "
+                                f"Cards tree to ship from it.")
+
+    dest = Path(tempfile.mkdtemp(prefix="ccsync-cards-snapshot-",
+                                 dir=(str(dest_parent) if dest_parent else None)))
+    tar_path = dest / "_snapshot.tar"
+    out = dest / "tree"
+    out.mkdir()
+    ok_, _, git_err = git_out(["archive", "--format=tar", "-o", str(tar_path), spec],
+                              cwd=root)
+    if not ok_:
+        shutil.rmtree(dest, ignore_errors=True)
+        return None, None, (f"git archive of {spec} in {root} failed "
+                            f"({git_err or 'no output'}).")
+    try:
+        with tarfile.open(tar_path) as tf:
+            # filter="data" is the 3.12+ default-to-be and refuses absolute
+            # paths, .. and device nodes; older Pythons reject the keyword, and
+            # the tar here is one we produced from a git tree seconds ago.
+            try:
+                tf.extractall(out, filter="data")
+            except TypeError:
+                tf.extractall(out)
+    except (tarfile.TarError, OSError) as exc:
+        shutil.rmtree(dest, ignore_errors=True)
+        return None, None, (f"the snapshot of {spec} could not be unpacked "
+                            f"({exc}).")
+    tar_path.unlink(missing_ok=True)
+
+    if not any(out.iterdir()):
+        shutil.rmtree(dest, ignore_errors=True)
+        return None, None, (f"the snapshot of {spec} is EMPTY. Shipping it "
+                            f"would leave the NAS with an absent /cards behind "
+                            f"a green healthcheck, so nothing was shipped.")
+
+    _, subject, _ = git_out(["log", "-1", "--format=%s", sha], cwd=root)
+    _, committed, _ = git_out(["log", "-1", "--format=%cI", sha], cwd=root)
+    info = {
+        "commit": sha,
+        "short": sha[:12],
+        "ref": ref,
+        "repo": str(root),
+        "subtree": prefix,
+        "subject": subject,
+        "committed": committed,
+        "exported": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    write_cards_marker(out, info)
+    return out, info, ""
+
+
+def write_cards_marker(tree: Path, info: dict) -> Path:
+    """Write DEPLOYED_COMMIT into the shipped tree.
+
+    The NAS copy is not a git checkout and never was (nothing there pulls), so
+    without this file "which commit is live on /cards" is answerable only by
+    diffing files. Plain `key=value` lines: a shell, PowerShell's regex and
+    a person all read it without a parser.
+    """
+    marker = tree / CARDS_MARKER_NAME
+    lines = [
+        "# Timeline Cards, shipped by server/install_dashboard_app.py.",
+        "# cards snapshot deploy, 2026-09-11: this tree is a `git archive`",
+        "# export of one commit, not a checkout and not a working copy --",
+        "# nothing untracked, dirty or ignored can be in it.",
+    ]
+    for key in ("commit", "short", "ref", "repo", "subtree", "subject",
+                "committed", "exported"):
+        value = str(info.get(key, "")).replace("\n", " ")
+        lines.append(f"{key}={value}")
+    marker.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return marker
+
+
+def read_cards_marker(path: Path) -> dict:
+    """Parse a DEPLOYED_COMMIT file. Missing or unreadable is {}."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    out = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def cards_deploy_record_path() -> Path:
+    """Where THIS machine records what it last shipped to /cards.
+
+    The drift doctor runs on the base rig with no NAS shell, so the marker it
+    reports has to exist locally too. Beside ~/.ccsync/snapshot_log.jsonl,
+    which is the same kind of fact about the same kind of operation.
+    """
+    override = os.environ.get("CCSYNC_CARDS_RECORD", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".ccsync" / "state" / "cards_deployed.json"
+
+
+def write_cards_deploy_record(info: dict) -> None:
+    """Record the shipped commit locally. BEST EFFORT, like the snapshot log:
+    an unwritable ~/.ccsync must never be why a deploy fails."""
+    import json
+    try:
+        path = cards_deploy_record_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(info), indent=2) + "\n", encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def cards_head_moved_on(info: dict) -> str:
+    """"and <ref> has moved since" -- or "" when it has not, or cannot tell.
+
+    Advisory only. A deploy pinned with --cards-commit is a deliberate act,
+    not drift, so this says what is true rather than complaining.
+    """
+    repo = (info or {}).get("repo", "")
+    commit = (info or {}).get("commit", "")
+    ref = (info or {}).get("ref") or CARDS_DEFAULT_REF
+    if not repo or not commit:
+        return ""
+    ok_, head, _ = git_out(["rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=Path(repo))
+    if not ok_ or not head:
+        return ""
+    if head == commit:
+        return ""
+    ok_, count, _ = git_out(["rev-list", "--count", f"{commit}..{head}"], cwd=Path(repo))
+    ahead = f" ({count} commits)" if ok_ and count and count != "0" else ""
+    return (f"{ref} in {repo} is now {head[:12]}{ahead}, ahead of the shipped "
+            f"{commit[:12]}")
+
+
+def resolve_cards_tree(args=None):
+    """What to ship as Timeline Cards: (tree, info, error).
+
+    cards snapshot deploy, 2026-09-11. Three answers, in this order:
+
+      * an EXPLICIT directory (--cards-src-dir, or CARDS_SRC in the
+        environment) ships as it stands, which is what the flag is for;
+      * otherwise [timeline_cards] src is read as a pointer into a git repo
+        and a commit is exported out of it -- the default and the documented
+        recipe;
+      * a named src that is not in a git repo ships as a directory with a
+        NOTE, because a site whose Timeline Cards tree is a plain copy must
+        still get a /cards.
+
+    An error here is fatal to the deploy ON PURPOSE and is raised before
+    anything has moved: the operator asked for a specific commit, and
+    silently shipping a different tree is the failure this whole change
+    exists to prevent.
+    """
+    explicit = ((getattr(args, "cards_src_dir", "") or "").strip()
+                or os.environ.get("CARDS_SRC", "").strip())
+    if explicit:
+        print(f"Timeline Cards: shipping the DIRECTORY {explicit} as it stands "
+              f"(explicit override), not a commit snapshot.")
+        return Path(explicit), None, ""
+    src = cards_web_source()
+    if src is None:
+        return None, None, ""
+    ref = (getattr(args, "cards_commit", "") or "").strip() or CARDS_DEFAULT_REF
+    _root, _prefix, repo_err = cards_repo_for(src)
+    if repo_err:
+        if src.is_dir():
+            print(f"NOTE: {repo_err} Shipping the directory as it stands. "
+                  f"Snapshot deploys need [timeline_cards] src to point inside "
+                  f"a checkout of the Timeline Cards repository.",
+                  file=sys.stderr)
+        return src, None, ""
+    tree, info, err = export_cards_snapshot(src, ref)
+    if err:
+        return None, None, err
+    # The export is a temp tree the deploy ships and forgets. Cleaned up at
+    # exit rather than in a finally: main() returns from a dozen places.
+    import atexit
+    atexit.register(shutil.rmtree, str(tree.parent), True)
+    return tree, info, ""
 
 
 def cards_enabled_for_site(ship_cards: bool) -> str:
@@ -757,9 +1067,54 @@ def snapshot_volumes(source: tuple[str, str] | None = None) -> list:
 
     ro is not decoration: `.zfs/snapshot` is the one directory on the NAS
     where a write is a rollback of somebody's footage.
+
+    `rslave` is the other half, and it is load-bearing (server-tools-3,
+    2026-09-11). `.zfs/snapshot` is ZFS's control directory: listing it shows
+    the snapshot NAMES, but each name is an AUTOMOUNT the kernel performs in
+    the host's mount namespace the first time it is traversed, and unmounts
+    again after inactivity. A docker bind is `rprivate` by default, so a
+    mount that appears under the source AFTER the container started does not
+    propagate into it -- the container keeps seeing the empty trigger
+    directory, and the recovery page answers "the snapshot X holds no folder
+    for <project>", blaming a rename that never happened. Worse, it is
+    intermittent: a snapshot already mounted when the container started IS
+    visible.
+    `rslave` in the short syntax (a comma-separated option, exactly like the
+    docker run -v form) makes the container's copy follow the host's. It is
+    not sufficient on its own: the HOST mount has to carry `shared`
+    propagation, which is a change to the NAS's own mount namespace that a
+    deploy may not make silently. snapshot_propagation_note() prints the two
+    commands that check and set it.
     """
     host = (source or ("", ""))[0]
-    return [f"{host}:{SNAPSHOT_MOUNT}:ro"] if host else []
+    return [f"{host}:{SNAPSHOT_MOUNT}:ro,rslave"] if host else []
+
+
+def snapshot_propagation_note(source: tuple[str, str] | None = None) -> list:
+    """What the operator has to check on the NAS for the mount above to carry
+    anything (server-tools-3, 2026-09-11). Advisory lines, never a refusal:
+    this has to be verified on a live NAS, and a recovery page that cannot
+    read a snapshot is still a dashboard that must install."""
+    host = (source or ("", ""))[0]
+    if not host:
+        return []
+    mountpoint = host[:-len("/.zfs/snapshot")] if host.endswith("/.zfs/snapshot") else host
+    try:
+        container = backend().dashboard_container
+    except Exception:                                                # noqa: BLE001
+        container = "<dashboard container>"
+    return [
+        "NOTE: ZFS mounts each snapshot on first access, in the HOST's mount",
+        "      namespace. The container follows those mounts only if the host",
+        "      mount is shared. Check it, and fix it for this boot, with:",
+        f"        findmnt -no PROPAGATION {mountpoint}",
+        f"        mount --make-rshared {mountpoint}",
+        "      Then prove it end to end (a snapshot nobody has touched for an",
+        "      hour, not one you have just listed):",
+        f"        docker exec {container} ls {SNAPSHOT_MOUNT}/<snapshot>/",
+        "      An empty listing there means Settings -> RECOVERY will report",
+        "      every project as missing from that snapshot.",
+    ]
 
 
 def snapshot_schedule_warning(tree_root: str = "", host_root: str = "",
@@ -3764,8 +4119,25 @@ def local_manifest(base: Path = LOCAL_DASHBOARD_DIR,
 
 
 def upload_tree(staging_dir: str, dry_run: bool, base: Path = LOCAL_DASHBOARD_DIR,
-                excludes: set = EXCLUDE_DIRS) -> int:
+                excludes: set = EXCLUDE_DIRS, files: list | None = None,
+                sent: dict | None = None) -> int:
     """SFTP `base` into `staging_dir`. File count, or -1 if the transfer broke.
+
+    `files` is the caller's already-walked [(local, rel)] list, and `sent` is
+    a dict this fills in with {"count", "bytes"}: WHAT WAS ACTUALLY SENT
+    (server-tools-4, 2026-09-11). install_tree used to walk the source a
+    second time after the upload and verify the staged copy against that
+    later snapshot, so anything that added or removed a file under
+    dashboard/ mid-transfer -- an editor saving, a build, a stray tool --
+    aborted a finished transfer with "internal manifest mismatch", or shifted
+    the byte total so the staged-tree check failed instead. Both refusals are
+    safe (nothing is swapped) but both are a wasted transfer explained by a
+    message about an internal disagreement. The suite caught it first: two
+    test_music_deploy tests failed with "(297 vs 296)" on one run of the full
+    server suite and passed on the next.
+    The byte total is the size the SFTP server confirmed per file, not a
+    local stat taken at some other moment, so a file rewritten under us is
+    compared as the bytes that arrived.
 
     SERVER-1 (2026-08-14): this loop is the longest-lived operation in the whole
     script -- 906 MB of proxies, 482 MB of encoder -- and so the likeliest place
@@ -3779,10 +4151,14 @@ def upload_tree(staging_dir: str, dry_run: bool, base: Path = LOCAL_DASHBOARD_DI
     not finish; nothing live has been touched yet -- so it gets the same answer
     as a failed verify: an error RESULT the caller already knows how to route.
     """
-    files = list(iter_local_files(base, excludes))
+    if files is None:
+        files = list(iter_local_files(base, excludes))
     if dry_run:
         print(f"[dry-run] would SFTP {len(files)} files from {base} "
               f"to {staging_dir} on the NAS")
+        if sent is not None:
+            sent["count"] = len(files)
+            sent["bytes"] = sum(_file_size(p) for p, _ in files)
         return len(files)
 
     host, user, pw = truenas_conn_params()
@@ -3797,6 +4173,7 @@ def upload_tree(staging_dir: str, dry_run: bool, base: Path = LOCAL_DASHBOARD_DI
         try:
             sftp = client.open_sftp()
             made: set[str] = set()
+            total_bytes = 0
             for local, rel in files:
                 remote = posixpath.join(sftp_root, rel)
                 parent = posixpath.dirname(remote)
@@ -3809,7 +4186,11 @@ def upload_tree(staging_dir: str, dry_run: bool, base: Path = LOCAL_DASHBOARD_DI
                         except FileNotFoundError:
                             sftp.mkdir(d)
                         made.add(d)
-                sftp.put(str(local), remote)
+                attrs = sftp.put(str(local), remote)
+                # paramiko confirms the remote size by default; a fake in the
+                # suite returns None, and there the local stat is the answer.
+                size = getattr(attrs, "st_size", None)
+                total_bytes += int(size) if size is not None else _file_size(local)
             sftp.close()
         finally:
             client.close()
@@ -3819,8 +4200,19 @@ def upload_tree(staging_dir: str, dry_run: bool, base: Path = LOCAL_DASHBOARD_DI
               f"been moved (staging left at {staging_dir} for inspection).",
               file=sys.stderr)
         return -1
+    if sent is not None:
+        sent["count"] = len(files)
+        sent["bytes"] = total_bytes
     print(f"uploaded {len(files)} files to staging {staging_dir}")
     return len(files)
+
+
+def _file_size(path: Path) -> int:
+    """st_size, or 0 for a file that vanished under us (server-tools-4)."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def count_and_size_cmd(path: str) -> str:
@@ -3952,24 +4344,47 @@ def ship_dashboard_docs(root: str, dry_run: bool, staging_parent: str) -> bool:
 
 
 def _stage_docs_tree(staging: Path) -> None:
-    """Copy every `.md` under docs/ into `staging`, plus the top-level ones.
+    """Copy the CUSTOMER-FACING documents under docs/ into `staging`.
 
     `.md` only, and symlinks are not followed: the container serves whatever
     lands here, so a link into the checkout would be a path outside the tree
     on the server (help.resolve_document refuses those on the read side too,
     which is belt and braces on purpose).
+
+    server-tools-2 (2026-09-11): WHICH documents is published_docs.py's list
+    and nothing else. An unreadable list ships the required set (the guide and
+    docs/legal) rather than the tree - the failure direction that cannot
+    disclose anything.
     """
-    for path in sorted(LOCAL_DOCS_DIR.rglob("*")):
+    published = published_docs_module()
+    files = list(SHIPPED_DOCS)
+    trees = list(SHIPPED_DOC_TREES)
+    if published is not None:
+        files += [n for n in published.PUBLISHED_DOCS if n not in files]
+        trees += [n for n in published.PUBLISHED_TREES if n not in trees]
+
+    def _copy(path: Path, rel: Path) -> None:
         if path.is_symlink() or not path.is_file():
-            continue
+            return
         if path.suffix.lower() != SHIPPED_DOC_SUFFIX:
-            continue
-        rel = path.relative_to(LOCAL_DOCS_DIR)
+            return
         target = staging / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
+
+    for name in files:
+        _copy(LOCAL_DOCS_DIR / name, Path(name))
+    for tree in trees:
+        source = LOCAL_DOCS_DIR / tree
+        if not source.is_dir():
+            continue
+        for path in sorted(source.rglob("*")):
+            _copy(path, path.relative_to(LOCAL_DOCS_DIR))
     root_dir = staging / "_root"
     for name in SHIPPED_ROOT_DOCS:
+        # Empty since 2026-09-11 (see SHIPPED_ROOT_DOCS): KNOWN_BUGS.md and
+        # CLAUDE.md were the two worst documents in the repository to put on a
+        # customer's server. The loop stays so re-publishing one is one entry.
         source = LOCAL_REPO_DIR / name
         if not source.is_file():
             continue
@@ -3992,9 +4407,11 @@ def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
         back to. Now the only destructive-looking step is `mv app app.old.<ts>`,
         which is a rename: the previous code is still there, and the swap rolls
         back if the second mv fails.
-      - Verification is count AND total bytes against the local manifest: a
+      - Verification is count AND total bytes against ONE walk of the source,
+        taken before the upload and sent verbatim (server-tools-4): a
         transfer that wrote every file but truncated the last one passes a
-        count-only check.
+        count-only check, and a second walk afterwards is a manifest of a
+        tree that was never uploaded.
       - Staging comes from mktemp (see make_staging_dir) so no other local
         account can pre-plant content that ends up root-copied into /app.
       - The swap changes the directory's inode, and the container bind-mounts
@@ -4018,8 +4435,19 @@ def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
         print(f"FAILED: no staging dir on the NAS -- {target} is untouched",
               file=sys.stderr)
         return False
-    expected = upload_tree(staging, dry_run, source, excludes)
-    expected_count, expected_bytes = local_manifest(source, excludes)
+    # ONE walk of the source, and the upload sends exactly it (server-tools-4,
+    # 2026-09-11). The second walk that used to happen AFTER the transfer made
+    # the deploy verify the uploaded copy against a manifest of a tree it had
+    # not uploaded, so a file created or removed under `dashboard/` mid-deploy
+    # aborted a finished SFTP with "internal manifest mismatch".
+    files = list(iter_local_files(source, excludes))
+    expected_count = len(files)
+    sent: dict = {}
+    expected = upload_tree(staging, dry_run, source, excludes, files=files, sent=sent)
+    # The bytes the NAS confirmed, falling back to the sizes from THAT SAME
+    # walk (never a fresh one) when the sender did not report them.
+    expected_bytes = int(sent["bytes"]) if "bytes" in sent else sum(
+        _file_size(p) for p, _ in files)
     if expected_count == 0:
         print(f"FAILED: {source} contains no files to ship -- refusing to install an "
               f"empty {target}", file=sys.stderr)
@@ -4050,7 +4478,10 @@ def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
                   file=sys.stderr)
             return False
         print(f"staged tree verified: {staged_count} files, {staged_bytes} bytes")
-    if expected != expected_count:  # upload_tree and the manifest must agree
+    # Both numbers come from the SAME walk now (server-tools-4), so this can
+    # only fire on a code bug in upload_tree, never on a source tree that
+    # changed under a running deploy. Kept as the assertion it always was.
+    if expected != expected_count:
         print(f"FAILED: internal manifest mismatch ({expected} vs {expected_count})",
               file=sys.stderr)
         return False
@@ -4323,6 +4754,21 @@ def main():
                          f"{'/'.join(MUSIC_DATA_COMPONENTS)}. They total ~1.4 GB, so "
                          "they are deliberately not part of every dashboard deploy; "
                          "'all' is how you publish a re-index (or MUSIC_DATA_PUSH).")
+    # cards snapshot deploy, 2026-09-11. The default is the snapshot: what
+    # ships to /cards is an export of one COMMIT of the Timeline Cards repo,
+    # never somebody's working copy.
+    ap.add_argument("--cards-commit", default=os.environ.get("CARDS_COMMIT", ""),
+                    help="which Timeline Cards commit to ship: a branch, tag or "
+                         f"hash in the repo holding [timeline_cards] src "
+                         f"(default '{CARDS_DEFAULT_REF}'; CARDS_COMMIT also "
+                         f"works). The deploy exports exactly that commit with "
+                         f"`git archive`, so nothing untracked or half-finished "
+                         f"in the everyday checkout can reach the NAS.")
+    ap.add_argument("--cards-src-dir", default="",
+                    help="ship this DIRECTORY as Timeline Cards instead of a "
+                         "commit snapshot, warts and all (CARDS_SRC does the "
+                         "same). For a tree that is not a git checkout, or for "
+                         "testing a working copy on purpose.")
     ap.add_argument("--no-ffmpeg", action="store_true",
                     help="skip provisioning static ffmpeg/ffprobe onto the host. "
                          "Only /music's queued ingest uses them, and it answers 503 "
@@ -4569,7 +5015,20 @@ def main():
     # not use it, and only a site that NAMED a checkout gets told when the
     # name is wrong. Image mode changes nothing here: the vendor image cannot
     # carry another repo's code, so this tree is always a mount.
-    cards_src = cards_web_source()
+    #
+    # cards snapshot deploy, 2026-09-11: cards_src is now normally a fresh
+    # `git archive` export of one commit, and a bad --cards-commit stops the
+    # deploy here, before anything has moved.
+    cards_src, cards_info, cards_err = resolve_cards_tree(args)
+    if cards_err:
+        print(f"FAILED: {cards_err}", file=sys.stderr)
+        return 1
+    if cards_info:
+        moved = cards_head_moved_on(cards_info)
+        print(f"Timeline Cards snapshot: {cards_info['short']} "
+              f"({cards_info['ref']}) of {cards_info['repo']}"
+              + (f" -- {cards_info['subject']}" if cards_info.get("subject") else "")
+              + (f"; {moved}" if moved else ""))
     ship_cards = bool(cards_src and (cards_src / "multicam_pipeline" / "cards"
                                      / "handler.py").is_file())
     if cards_src and not ship_cards:
@@ -4579,7 +5038,10 @@ def main():
               f"deploying WITHOUT the /cards UI; the dashboard will report the "
               f"mount 'absent' and hide the nav link. That tree is the "
               f"MulticamPipeline repo, not this one: point CARDS_SRC (or "
-              f"site.toml's [timeline_cards] src) at a checkout of it.",
+              f"site.toml's [timeline_cards] src) at a checkout of it."
+              + (f" This tree is the snapshot of commit {cards_info['short']}, "
+                 f"so the package is missing AT THAT COMMIT, not on disk."
+                 if cards_info else ""),
               file=sys.stderr)
     cards_enabled = cards_enabled_for_site(ship_cards)
     if SITE_CARDS_ENABLED and not SITE_CARDS_VAULT_HOST:
@@ -5268,6 +5730,16 @@ def main():
                             staging_slug="ccsync-cardsweb-upload",
                             staging_parent=code_staging_parent):
             return fail_after_app_swap(args.dry_run)
+        # cards snapshot deploy, 2026-09-11. DEPLOYED_COMMIT went to the NAS
+        # inside the tree; this is the same fact where the drift doctor can
+        # read it, since that runs on the base rig with no NAS shell.
+        if cards_info and not args.dry_run:
+            write_cards_deploy_record(cards_info)
+            moved = cards_head_moved_on(cards_info)
+            print(f"installed Timeline Cards: commit {cards_info['short']} "
+                  f"({cards_info['ref']}), marker {CARDS_MARKER_NAME} in "
+                  f"{root}/cards-web"
+                  + (f"; {moved}" if moved else ""))
 
     # Step 2h (image mode): get the image onto the NAS before the app is
     # created, so a create job that pulls has nothing left to fetch and a
@@ -5357,7 +5829,10 @@ def main():
     snapshot = snapshot_source(DEFAULT_CC_ROOT, probe=True, dry_run=args.dry_run)
     if snapshot[0]:
         print(f"snapshots for the recovery page: {snapshot[0]} -> "
-              f"{SNAPSHOT_MOUNT} (ro)")
+              f"{SNAPSHOT_MOUNT} (ro,rslave)")
+        # server-tools-3: the mount option is only our half of it.
+        for line in snapshot_propagation_note(snapshot):
+            print(line)
     elif not args.dry_run:
         print("NOTE: this deploy found no snapshot directory it could mount, so "
               "Settings -> RECOVERY can only print commands. Name one with "

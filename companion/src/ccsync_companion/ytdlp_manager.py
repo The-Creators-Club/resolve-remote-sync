@@ -377,7 +377,7 @@ def status_report(status: Any, now_ts: Optional[float] = None) -> dict[str, Any]
     action = str(status.get("action") or "").strip()
     version_str = str(status.get("version") or "").strip() or None
     checked = status.get("checked_at")
-    return {
+    block = {
         "version": version_str,
         "action": action or None,
         "ok": bool(status.get("ok")),
@@ -389,6 +389,69 @@ def status_report(status: Any, now_ts: Optional[float] = None) -> dict[str, Any]
         "message": str(status.get("message") or "")[:300] or None,
         "checked_at": _iso_utc(checked),
     }
+    # comp-ytdl-jobs-3 (2026-09-11): the sidecar's verdict rides the block
+    # that already exists, as an OPTIONAL key. A dashboard that does not read
+    # it is unchanged, and the companion needs no new report section to say
+    # "this machine has no ffmpeg, and here is why" -- which is the difference
+    # between a machine nobody set up and a machine that cannot reach GitHub.
+    sidecar = sidecar_report(status.get("sidecar"))
+    if sidecar:
+        block["sidecar"] = sidecar
+    return block
+
+
+def sidecar_report(status: Any) -> dict[str, Any]:
+    """`sync_guard.ytdlp.sidecar`: the ffmpeg/ffprobe/deno check's verdict.
+
+    {} for a check that never ran -- "we have not looked" and "it is fine"
+    must not render the same, which is status_report()'s own rule. Never
+    raises."""
+    if not isinstance(status, dict) or not status:
+        return {}
+    action = str(status.get("action") or "").strip()
+    failed = [str(name) for name in (status.get("failed") or [])
+              if str(name)][:4]
+    try:
+        failures = int(status.get("consecutive_failures") or 0)
+    except (TypeError, ValueError):
+        failures = 0
+    return {
+        "ok": bool(status.get("ok")),
+        "action": action or None,
+        "failed": failed,
+        "cause": str(status.get("cause") or "")[:200] or None,
+        "consecutive_failures": failures,
+        "message": str(status.get("message") or "")[:300] or None,
+        "checked_at": _iso_utc(status.get("checked_at")),
+    }
+
+
+def sidecar_warning_line(status: Any) -> str:
+    """The Settings > YOUTUBE line for a sidecar install that keeps failing,
+    or "" when there is nothing to say (comp-ytdl-jobs-3, 2026-09-11).
+
+    `status` is the same dict tray._ytdlp_status() already holds: this reads
+    its optional `sidecar` key, so nothing new has to be plumbed to the tray.
+    Advisory, and deliberately quiet on the FIRST failed pass: GitHub blips,
+    and a machine that retries tomorrow and succeeds needs no sentence. It is
+    worth saying at all because the consequence is invisible otherwise - the
+    machine simply stops being offered proxy, audio and peaks work.
+    """
+    record = status.get("sidecar") if isinstance(status, dict) else None
+    if not isinstance(record, dict) or not record:
+        return ""
+    if str(record.get("action") or "") != ACTION_FAILED:
+        return ""
+    try:
+        failures = int(record.get("consecutive_failures") or 0)
+    except (TypeError, ValueError):
+        failures = 0
+    if failures < 2:
+        return ""
+    cause = str(record.get("cause") or "").strip()
+    line = ("⚠ This computer cannot install ffmpeg, so it will not make "
+            "proxies or take fleet media work")
+    return f"{line}: {cause}" if cause else line
 
 
 def _iso_utc(stamp: Any) -> Optional[str]:
@@ -628,6 +691,12 @@ class YtDlpManager:
             "action": None,
             "message": "not checked yet",
         }
+        # comp-ytdl-jobs-3 (2026-09-11): the SIDECAR's last verdict, kept
+        # beside yt-dlp's for the same reason CYT-7 kept yt-dlp's -- the daily
+        # ffmpeg check wrote to a log line nobody opens (DEBUG, on the vendor
+        # default) and the only fleet-visible trace was a machine that stopped
+        # being offered proxy, audio and peaks work. {} until the first pass.
+        self._sidecar_status: dict[str, Any] = {}
 
     # -- config-derived, zero-I/O ----------------------------------------
     @property
@@ -647,9 +716,32 @@ class YtDlpManager:
     def status(self) -> dict[str, Any]:
         """The last ensure() result. Lock-guarded and does NO I/O -- the rule
         youtube_import.status() and proxy_gen.gap() obey, because the tray's
-        refresh thread reads these and must never block on a subprocess."""
+        refresh thread reads these and must never block on a subprocess.
+
+        Carries `sidecar` once that check has run (comp-ytdl-jobs-3): the
+        callers that matter -- the tray snapshot and app.ytdlp_report() --
+        already read this one dict, and a second getter threaded through both
+        would have been a second thing to forget."""
         with self._lock:
-            return dict(self._status)
+            record = dict(self._status)
+            if self._sidecar_status:
+                record["sidecar"] = dict(self._sidecar_status)
+            return record
+
+    def sidecar_status(self) -> dict[str, Any]:
+        """The last sidecar (ffmpeg/ffprobe/deno) check, or {} before the
+        first one (comp-ytdl-jobs-3). Lock-guarded, no I/O -- status()'s
+        rule, for the same tray thread."""
+        with self._lock:
+            return dict(self._sidecar_status)
+
+    def _publish_sidecar(self, status: Any) -> dict[str, Any]:
+        record = dict(status) if isinstance(status, dict) else {}
+        if record:
+            record.setdefault("checked_at", self._clock())
+        with self._lock:
+            self._sidecar_status = dict(record)
+        return record
 
     def _publish(self, ok: bool, version_str: Optional[str], action: str,
                  message: str) -> dict[str, Any]:
@@ -1146,7 +1238,16 @@ class YtDlpManager:
                 else:
                     status = sidecar_tools.ensure_ffmpeg_pair(
                         self.cfg, github_open=self._github_open)
-                log.log(logging.INFO if enabled else logging.DEBUG,
+                self._publish_sidecar(status)
+                # comp-ytdl-jobs-3 (2026-09-11): a FAILED sidecar pass is a
+                # WARNING whatever the YouTube flag says. The ffmpeg pair
+                # stopped being a YouTube entitlement in comp-ytdl-2, and
+                # demoting its failure to DEBUG on the vendor default meant a
+                # Mac that cannot verify GitHub's certificate retried once a
+                # day for ever with nothing at the shipped log level.
+                failed_pass = str(status.get("action") or "") == ACTION_FAILED
+                log.log(logging.WARNING if failed_pass
+                        else logging.INFO if enabled else logging.DEBUG,
                         "sidecar: %s", status.get("message"))
             except Exception:
                 log.exception("sidecar: the daily check failed")

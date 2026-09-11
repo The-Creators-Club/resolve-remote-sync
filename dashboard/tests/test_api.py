@@ -113,6 +113,13 @@ def test_a_dead_collector_shows_up_in_ok_while_the_status_stays_200(tmp_path):
 
         old = (dt.datetime.now(dt.timezone.utc)
                - dt.timedelta(seconds=dbmod.COLLECTOR_STALE_SECONDS + 60)).isoformat()
+        # The fresh run above goes FIRST: since dash-collector-alerts-3
+        # (2026-09-11) `collector_stale` is the age of the last cycle START of
+        # any kind, not of the newest row's finish, and a ledger still holding
+        # a cycle that started a second ago is a collector that is turning.
+        # "It stopped advancing poll_runs" is spelled by there being no recent
+        # start, which is what this deletion makes true.
+        conn.execute("DELETE FROM poll_runs")
         dbmod.record_poll_run(conn, "completion", old, old, True, None)
         conn.commit()
 

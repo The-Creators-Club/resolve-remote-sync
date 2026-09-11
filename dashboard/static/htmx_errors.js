@@ -195,22 +195,42 @@
 (function () {
   "use strict";
 
-  var lastPath = null;
+  // THE PATH BELONGS TO THE REQUEST, NOT TO THE PAGE (dash-mounts-ui-7,
+  // 2026-09-11). This was one module-level slot, set on every write's
+  // beforeRequest and consumed by the NEXT afterSwap whichever element that
+  // swap belonged to - and the fleet grid polls every 15 s, with notices and
+  // transfers on their own timers. Any of those settling between the click
+  // and the write's own swap stole the slot, and the refusal stayed two
+  // thousand pixels above the viewport: the DUI-6 symptom back again,
+  // intermittently. The swap event carries its own requestConfig.elt, so the
+  // path is read off the request that produced THIS swap; the WeakMap keyed
+  // on the xhr is the fallback for an htmx that does not carry one, and it is
+  // weak so an abandoned request is collected with its xhr.
+  var pathFor = (typeof WeakMap === "function") ? new WeakMap() : null;
 
-  document.addEventListener("htmx:beforeRequest", function (evt) {
-    var elt = evt.detail && evt.detail.elt;
-    var path = elt && elt.getAttribute && (elt.getAttribute("hx-post")
-      || elt.getAttribute("hx-delete") || elt.getAttribute("hx-put"));
+  function writePath(elt) {
     // Only a WRITE has a button behind it worth going back to; a poll's
     // hx-get must never claim the next error.
-    lastPath = path || null;
+    if (!elt || !elt.getAttribute) return null;
+    return elt.getAttribute("hx-post") || elt.getAttribute("hx-delete")
+      || elt.getAttribute("hx-put") || null;
+  }
+
+  document.addEventListener("htmx:beforeRequest", function (evt) {
+    var detail = evt.detail || {};
+    var path = writePath(detail.elt);
+    if (path && pathFor && detail.xhr) pathFor.set(detail.xhr, path);
   });
 
   document.addEventListener("htmx:afterSwap", function (evt) {
-    var root = evt.detail && evt.detail.target;
-    if (!root || !root.querySelector || !lastPath) return;
-    var path = lastPath;
-    lastPath = null;
+    var detail = evt.detail || {};
+    var root = detail.target;
+    var path = writePath(detail.requestConfig && detail.requestConfig.elt);
+    if (!path && pathFor && detail.xhr && pathFor.has(detail.xhr)) {
+      path = pathFor.get(detail.xhr);
+      pathFor.delete(detail.xhr);
+    }
+    if (!root || !root.querySelector || !path) return;
     var banner = root.querySelector(".error-banner");
     if (!banner) return;
     // Matched by reading the attributes rather than by building a selector

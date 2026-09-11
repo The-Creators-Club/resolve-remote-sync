@@ -290,7 +290,7 @@ change at all.
 
 | what | where it comes from | mount |
 |---|---|---|
-| the code (another repo's checkout) | `CARDS_SRC` / `[timeline_cards] src` → `<host-root>/cards-web` | `/cards-app:ro` |
+| the code (another repo's commit) | `[timeline_cards] src` names the checkout, the deploy ships a `git archive` export of one commit of it → `<host-root>/cards-web` (`CARDS_SRC` overrides with a directory as it stands) | `/cards-app:ro` |
 | the vault | `[timeline_cards] vault_host` | `/vault:rw` |
 | the footage share | `[timeline_cards] media_host` | `/media:ro` |
 

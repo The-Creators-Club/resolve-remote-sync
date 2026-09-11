@@ -38,6 +38,30 @@ def _machine_name() -> str:
     return platform.node()
 from .sync.repath import normalized_safe_rel
 
+
+def _parse_iso(stamp: Optional[str]) -> Optional[datetime]:
+    """An ISO-8601 stamp as an aware datetime, or None (comp-sync-14). Never
+    raises: an unreadable stamp is "cannot tell", which callers already
+    handle."""
+    if not stamp:
+        return None
+    try:
+        when = datetime.fromisoformat(str(stamp))
+    except Exception:
+        return None
+    return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+
+
+def _newer(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    """Whichever of two ISO stamps is later, tolerating either being absent
+    or unparseable (comp-sync-14)."""
+    when_a, when_b = _parse_iso(a), _parse_iso(b)
+    if when_a is None:
+        return b if when_b is not None else a
+    if when_b is None:
+        return a
+    return b if when_b > when_a else a
+
 log = logging.getLogger("ccsync.selection")
 
 HttpGetFn = Callable[[str, dict, float], Any]
@@ -52,6 +76,17 @@ HttpGetFn = Callable[[str, dict, float], Any]
 GetIdentityTokenFn = Callable[[], Optional[str]]
 
 CACHE_FILENAME = "selection.json"
+# comp-sync-14 (2026-09-11): the stamp of the last SUCCESSFUL fetch, in its own
+# tiny file. `selection.json` is only rewritten when the plan CHANGES (AUDIT_2
+# P11's write storm), so its `fetched_at` froze at the first fetch of a process
+# and the tray then told an editor "sync plan from 10 days ago: the dashboard
+# has not answered since" about a plan that was live a minute before the
+# restart. Separate rather than a byte in selection.json, so that file stays
+# stable and this one can be written on its own cadence.
+STAMP_FILENAME = "selection_fetched.json"
+# ...and at most this often. One write an hour is nothing; one per poll is the
+# storm the early return exists to stop.
+STAMP_MIN_INTERVAL_SECONDS = 3600.0
 
 
 def default_http_get(url: str, headers: dict, timeout: float) -> Any:
@@ -106,6 +141,8 @@ class SelectionClient:
         self._editor_name_fn = editor_name_fn or (lambda: cfg.get("editor_name", ""))
 
         self._cache_path = self.state_dir / CACHE_FILENAME
+        self._stamp_path = self.state_dir / STAMP_FILENAME
+        self._stamp_written: Optional[datetime] = None  # comp-sync-14
 
         # Fault-isolation logging state: WARNING on the first failure of a
         # streak, DEBUG for repeats -- mirrors reporter.py's pattern.
@@ -276,7 +313,43 @@ class SelectionClient:
                 headers["X-CCSync-Identity"] = str(identity_token)
         return headers
 
+    def _note_fetch_stamp(self) -> None:
+        """Record that the dashboard answered JUST NOW (comp-sync-14).
+
+        Throttled on the STORED stamp, not on the response: testing the
+        response is what froze the cache's own stamp in the first place.
+        Never raises -- a stamp that cannot be written costs a parenthetical
+        on a tray line, and nothing else reads it."""
+        try:
+            now = datetime.now(timezone.utc)
+            last = self._stamp_written
+            if last is None:
+                last = _parse_iso(self._read_stamp_file())
+            if last is not None and (now - last).total_seconds() < STAMP_MIN_INTERVAL_SECONDS:
+                return
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self._stamp_path.with_name(self._stamp_path.name + ".tmp")
+            tmp.write_text(json.dumps({"fetched_at": now.isoformat()}), encoding="utf-8")
+            tmp.replace(self._stamp_path)
+            self._stamp_written = now
+        except Exception:
+            log.debug("failed to write the selection stamp to %s", self._stamp_path,
+                      exc_info=True)
+
+    def _read_stamp_file(self) -> Optional[str]:
+        try:
+            data = json.loads(self._stamp_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        stamp = data.get("fetched_at")
+        return str(stamp) if stamp else None
+
     def _write_cache(self, response: dict[str, Any]) -> None:
+        # comp-sync-14: BEFORE the write-on-change early return -- the point
+        # is that a fetch that changed nothing still happened.
+        self._note_fetch_stamp()
         # WRITE ONLY ON CHANGE. This was rewritten on every successful
         # fetch, and fetch() is reached from the sequencer's poll loop --
         # 120 disk writes per project per pass per editor while waiting out a
@@ -336,14 +409,19 @@ class SelectionClient:
         fresh."""
         if self._fetched_at:
             return self._fetched_at
+        cached = None
         try:
             data = json.loads(self._cache_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("fetched_at"):
+                cached = str(data["fetched_at"])
         except Exception:
-            return None
-        if not isinstance(data, dict):
-            return None
-        stamp = data.get("fetched_at")
-        return str(stamp) if stamp else None
+            cached = None
+        # comp-sync-14: the newer of the two. The cache's own stamp is as old
+        # as the last CHANGE to the plan; the stamp file is as old as the last
+        # time the dashboard answered at all.
+        stamp = self._read_stamp_file()
+        best = _newer(cached, stamp)
+        return best
 
     def plan_age_seconds(self, now: Optional[float] = None) -> Optional[float]:
         """How old the plan being acted on is, in seconds, or None when that

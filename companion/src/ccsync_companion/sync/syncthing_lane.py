@@ -414,6 +414,45 @@ class SyncthingLane(LaneAdapter):
             log.debug("shared_folder_problems_fn failed", exc_info=True)
             return []
 
+    def shared_folder_problem_detail(self) -> str:
+        """The one sentence a status carries about the shared/borrowed
+        folders, with a count when there is more than one (comp-sync-19,
+        2026-09-11). "" when there is nothing wrong.
+
+        Only the first was ever shown and the rest were dropped on the floor,
+        so two libraries failing looked exactly like one: the editor fixed the
+        one named, the detail then named the second, and nothing anywhere
+        had said there were two."""
+        problems = self.shared_folder_problems()
+        if not problems:
+            return ""
+        text = str(problems[0])
+        if len(problems) > 1:
+            text += f" (+{len(problems) - 1} more)"
+        return text
+
+    def _with_problems(self, status: LaneStatus) -> LaneStatus:
+        """Fold the folder problems into whatever status this poll built
+        (comp-sync-3, 2026-09-11).
+
+        The SYNC-101 block used to be the LAST thing check_once did, so every
+        early return above it skipped it -- including the "no project folders
+        to check yet" branch, which is exactly the state shared_folders.py's
+        docstring names ("an editor with zero projects ticked"), and the
+        unreachable/bad-key/config-failure branches. The one delivery path
+        for these sentences dropped them in the states they were written for.
+        Additive and in `detail`, never the state: a LUT library nobody
+        shared is not a reason to call the lane that IS syncing the editor's
+        projects broken."""
+        try:
+            problem = self.shared_folder_problem_detail()
+            if problem:
+                status.detail = self._with_path_detail(problem, status.detail or "")
+        except Exception:
+            log.debug("could not add the folder problems to the lane detail",
+                      exc_info=True)
+        return status
+
     @staticmethod
     def _with_path_detail(detail: str, path_detail: str) -> str:
         if not path_detail:
@@ -524,8 +563,8 @@ class SyncthingLane(LaneAdapter):
                 state=STATE_ERROR,
                 last_error=f"no Syncthing API key (checked {self.config_xml_path})",
             )
-            self._set_status(status)
-            return status
+            self._set_status(self._with_problems(status))  # comp-sync-3
+            return self.status()
 
         try:
             self._get("/rest/system/ping")
@@ -546,12 +585,12 @@ class SyncthingLane(LaneAdapter):
                 )
             else:
                 status = self._unreachable_status()
-            self._set_status(status)
-            return status
+            self._set_status(self._with_problems(status))  # comp-sync-3
+            return self.status()
         except Exception:
             status = self._unreachable_status()
-            self._set_status(status)
-            return status
+            self._set_status(self._with_problems(status))  # comp-sync-3
+            return self.status()
         self._note_supervisor(True)
 
         # Path diagnostics BEFORE the folder verdict, so every branch below
@@ -572,8 +611,8 @@ class SyncthingLane(LaneAdapter):
                 last_sync=self.status().last_sync,
                 detail=self._with_path_detail("no project folders to check yet", path_detail),
             )
-            self._set_status(status)
-            return status
+            self._set_status(self._with_problems(status))  # comp-sync-3
+            return self.status()
 
         missing_folders: list[str] = []
         paused_folders: list[str] = []
@@ -596,8 +635,8 @@ class SyncthingLane(LaneAdapter):
             status = LaneStatus(
                 name=self.name, state=STATE_ERROR, last_error=f"failed to read Syncthing config: {exc}"
             )
-            self._set_status(status)
-            return status
+            self._set_status(self._with_problems(status))  # comp-sync-3
+            return self.status()
 
         if missing_folders:
             # A folder the server has OFFERED but the sequencer hasn't
@@ -620,15 +659,15 @@ class SyncthingLane(LaneAdapter):
                         path_detail,
                     ),
                 )
-                self._set_status(status)
-                return status
+                self._set_status(self._with_problems(status))  # comp-sync-3
+                return self.status()
             status = LaneStatus(
                 name=self.name,
                 state=STATE_ERROR,
                 last_error="folder(s) not configured/shared: " + ", ".join(missing_folders),
             )
-            self._set_status(status)
-            return status
+            self._set_status(self._with_problems(status))  # comp-sync-3
+            return self.status()
 
         queued = 0
         errored: list[str] = []
@@ -727,14 +766,8 @@ class SyncthingLane(LaneAdapter):
                 name=self.name, state=STATE_IDLE, queued=0,
                 last_sync=datetime.now(timezone.utc), detail=path_detail,
             )
-        # SYNC-101: additive, and deliberately in `detail` rather than in
-        # the state -- a LUT library nobody shared is not a reason to call
-        # the lane that IS syncing the editor's projects broken.
-        problems = self.shared_folder_problems()
-        if problems:
-            status.detail = self._with_path_detail(problems[0], status.detail)
-        self._set_status(status)
-        return status
+        self._set_status(self._with_problems(status))
+        return self.status()
 
     # -- LaneAdapter ---------------------------------------------------
     def start(self) -> None:

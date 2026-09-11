@@ -192,7 +192,7 @@ M1 adds `<link rel="stylesheet" href="/static/mobile.css">` after
   secret or a session-specific value.
 * Tests run with the main checkout's venv from the worktree's component
   dir (`tests/conftest.py` puts the worktree's `src` first):
-  `cd <worktree>\dashboard && E:\Projects\resolve-remote-sync\dashboard\.venv\Scripts\python.exe -m pytest tests -q`.
+  `cd <worktree>\dashboard && E:\Projects\Editing\ccsync\dashboard\.venv\Scripts\python.exe -m pytest tests -q`.
   The whole dashboard suite must stay green.
 * Commit on the package's branch with exact paths; do not push; do not
   merge; do not touch `docs/MOBILE_PLAN.md` (the orchestrator appends §9).

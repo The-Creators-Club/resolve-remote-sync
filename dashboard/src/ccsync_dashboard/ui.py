@@ -405,6 +405,16 @@ def safe_to_close(transfers_view: dict | None, editor: str | None) -> dict | Non
     UPLOADS are what decides it: a download interrupted by a closed lid
     resumes, an upload that has not happened yet leaves that footage on one
     disk. `None` for an admin's fleet-wide view, which has no "this computer".
+
+    IT NAMES THE MACHINES (dash-mounts-ui-2, 2026-09-11). The view is scoped
+    by EDITOR, never by machine - the dashboard cannot know which computer the
+    browser is on - so the copy said "this computer" about an upload its own
+    row tagged DESKTOP. An editor with two machines (the shape
+    MULTI_MACHINE_PLAN.md exists for) read "still uploading from this
+    computer" on the laptop that owed nothing and left the wrong one running.
+    The error was always the conservative way round (the safe answer needs
+    NO machine of theirs to owe an upload), so this is a copy fix: the honest
+    sentence names the computers the work is on.
     """
     if not transfers_view or not editor:
         return None
@@ -428,7 +438,7 @@ def safe_to_close(transfers_view: dict | None, editor: str | None) -> dict | Non
     seconds = int(up_bytes / speed) if speed > 1 and up_bytes else None
     if not up_files:
         if down_files:
-            sentence = (f"Safe to close: nothing from this computer is waiting to go to "
+            sentence = (f"Safe to close: nothing of yours is waiting to go to "
                         f"the server. {down_files} file(s) are still coming down and "
                         f"carry on where they left off next time.")
         else:
@@ -436,8 +446,21 @@ def safe_to_close(transfers_view: dict | None, editor: str | None) -> dict | Non
         return {"safe": True, "sentence": sentence, "up_files": 0,
                 "up_bytes": 0, "eta_seconds": None}
     about = f", about {eta(seconds)}" if seconds else ""
-    sentence = (f"Not yet: {up_files} file(s) still uploading from this computer"
-                f" ({human_bytes(up_bytes)}){about}. Leave it running.")
+    machines = sorted({str(t.get("machine") or "").strip() for t in up_live}
+                      | {str(q.get("machine") or "").strip() for q in queues
+                         if q.get("direction") == "up"})
+    named = [m for m in machines if m]
+    # A machine the report did not name (an older companion, the unassigned
+    # bucket) leaves the sentence unqualified rather than inventing a name.
+    where = f" from {', '.join(named)}" if named and len(named) == len(machines) else ""
+    if not where:
+        leave = "Leave it running."
+    elif len(named) > 1:
+        leave = "Leave those computers running."
+    else:
+        leave = "Leave that computer running."
+    sentence = (f"Not yet: {up_files} file(s) still uploading{where}"
+                f" ({human_bytes(up_bytes)}){about}. {leave}")
     return {"safe": False, "sentence": sentence, "up_files": up_files,
             "up_bytes": up_bytes, "eta_seconds": seconds}
 
@@ -585,6 +608,26 @@ def _as_qs(request: Request, editor: str | None) -> str:
     return ""
 
 
+def _fleet_view(conn: sqlite3.Connection, scope: auth.Scope) -> dict:
+    """The grid's fleet view, with each machine's stored Resolve detail on it.
+
+    comp-app-2 (bug hunt 2026-09-11): the nine wave-3 `resolve_health` fields
+    rode every report for a week and were dropped at the model boundary. They
+    are persisted now (`db.store_resolve_health_detail` -> `meta`), and this
+    is the one place the grid picks them up: one read per machine, beside the
+    per-fleet maps `build_editors_view` already does, and absent for a
+    companion too old to send them - which the template renders as NOTHING,
+    never as a reassuring zero.
+    """
+    fleet = api_scope_editors_view(build_editors_view(conn), scope)
+    for entry in fleet.get("editors") or []:
+        detail = db.resolve_health_detail(
+            conn, str(entry.get("editor_username") or ""),
+            str(entry.get("machine") or ""))
+        entry["resolve_detail"] = detail or None
+    return fleet
+
+
 @router.get("/")
 def page_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     settings = request.app.state.settings
@@ -602,7 +645,7 @@ def page_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
         **_sidebar_context(request, conn, None, projects_view=projects_view),
         # Scoped: an editor sees their own machines plus the summary counts,
         # an admin sees the fleet (COMMERCIAL_READINESS.md L1, 2026-08-17).
-        "fleet": api_scope_editors_view(build_editors_view(conn), scope),
+        "fleet": _fleet_view(conn, scope),
         "queue": build_queue_view(conn, queue_editor, projects_view=projects_view)
                  if queue_editor else None,
         # First paint for the windowed live-transfers panel (2026-08-18). The
@@ -2174,7 +2217,7 @@ def partial_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)
     scope = auth.scope_for(request)
     return _render(request, "partials/fleet_grid.html", {
         "view": api_scope_projects_view(build_projects_view(conn), scope),
-        "fleet": api_scope_editors_view(build_editors_view(conn), scope),
+        "fleet": _fleet_view(conn, scope),
     })
 
 
@@ -3594,7 +3637,14 @@ async def partial_admin_roll_fleet_back(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ):
     """[ ROLL THE FLEET BACK TO x ] (REL-3, 2026-08-28): every machine still
-    running the recalled build is asked to take the named one instead."""
+    running the recalled build is asked to take the named one instead.
+
+    Straight through `api.roll_fleet_back`, which is where every rule lives
+    (dash-api-3, bug hunt 2026-09-11): the same-version refusal, the push's
+    DIRECTION so the report handler does not retire a downward push before it
+    is delivered, and re-pointing `current` at the target when the build
+    being rolled off is the one this dashboard is still handing out. A guard
+    that lived in the JSON route covered one of the two buttons."""
     admin = _require_admin_page(request)
     form = await _form(request)
     platform = form.get("platform", "").strip().lower()
@@ -3668,7 +3718,7 @@ async def partial_admin_resume_lane_b(
     scope = auth.scope_for(request)
     return _render(request, "partials/fleet_grid.html", {
         "view": api_scope_projects_view(build_projects_view(conn), scope),
-        "fleet": api_scope_editors_view(build_editors_view(conn), scope),
+        "fleet": _fleet_view(conn, scope),
         "error": None if resumed else (
             "That computer is no longer in the fleet, so nothing was resumed. "
             "Reload the page."),
@@ -3700,7 +3750,7 @@ async def partial_admin_ask_why(
     scope = auth.scope_for(request)
     return _render(request, "partials/fleet_grid.html", {
         "view": api_scope_projects_view(build_projects_view(conn), scope),
-        "fleet": api_scope_editors_view(build_editors_view(conn), scope),
+        "fleet": _fleet_view(conn, scope),
     })
 
 
@@ -3781,7 +3831,7 @@ async def partial_admin_forget_lost_machine(
     scope = auth.scope_for(request)
     return _render(request, "partials/fleet_grid.html", {
         "view": api_scope_projects_view(build_projects_view(conn), scope),
-        "fleet": api_scope_editors_view(build_editors_view(conn), scope),
+        "fleet": _fleet_view(conn, scope),
     })
 
 
@@ -4162,13 +4212,22 @@ def page_help_document(doc_path: str, request: Request):
     """One document from the shipped docs tree, in the same viewer.
 
     Every check on `doc_path` lives in help.resolve_document, not here: a
-    path from a URL is checked in ONE place or in none of them.
+    path from a URL is checked in ONE place or in none of them. That now
+    includes WHO is asking (dash-mounts-ui-1, 2026-09-11), which is why the
+    session's admin flag is passed down rather than the route growing a gate
+    of its own.
     """
     return _help_response(request, doc_path)
 
 
 def _help_response(request: Request, doc_path: str):
-    context = help_page.page_context(doc_path)
+    # dash-mounts-ui-1 (2026-09-11): an editor gets the customer-facing set,
+    # an admin gets whatever this server actually carries. On a customer's
+    # deployment those are the same documents - the shipping routes carry
+    # nothing else - so this only widens the base rig's own checkout.
+    is_admin = bool(auth.is_admin(request.app.state.settings,
+                                  auth.get_session_user(request)))
+    context = help_page.page_context(doc_path, is_admin)
     context["nav_current"] = "help"
     response = _render(request, "help.html", context)
     if context.get("help_not_found"):

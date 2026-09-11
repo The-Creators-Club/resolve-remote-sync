@@ -29,7 +29,10 @@ What this is NOT:
 
 Losing the file is not a failure that needs handling beyond re-minting: the
 machine arrives under its hostname, which is what the plan is keyed on
-anyway, and the dashboard's only loss is the rename affordance.
+anyway, and the dashboard's only loss is the rename affordance. A file that
+EXISTS but cannot be read is a different fact and is NOT re-minted
+(comp-app-5, 2026-09-11): the id it holds may still be recoverable, and a
+second id written over the first is a loss that no later run can undo.
 
 Never-raise ethos, as in identity.py/eula.py: a machine that cannot write
 this file still reports, still syncs, and simply has no id.
@@ -65,16 +68,35 @@ def machine_path(state_dir: Optional[Path] = None) -> Path:
     return base / MACHINE_FILENAME
 
 
-def read(path: Optional[Path] = None) -> Optional[dict[str, Any]]:
+def read_record(path: Optional[Path] = None) -> tuple[Optional[dict[str, Any]], bool]:
+    """(record, readable). comp-app-5 (2026-09-11).
+
+    "The file is not there" and "the file is there and I could not read it"
+    are different facts and only the first of them may be answered with a new
+    id. read() collapsed both to None -- so a truncated write, a BOM-mangled
+    restore, a 0-byte file after a power loss or an antivirus holding the
+    handle minted a SECOND id and wrote it over the first, which the
+    dashboard's `machines` registry reads as another computer and which
+    silently costs the rename affordance this id exists for.
+    """
     target = path or machine_path()
     try:
         data = json.loads(target.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
-        return None
+        return None, True
     except Exception:
-        log.warning("could not read %s -- treating this machine as unidentified", target)
-        return None
-    return data if isinstance(data, dict) else None
+        log.warning("could not read %s -- this machine reports no id this run "
+                    "(NOT re-minting: a new id reads as a new computer)", target)
+        return None, False
+    if not isinstance(data, dict):
+        log.warning("%s does not hold a record -- this machine reports no id "
+                    "this run (NOT re-minting)", target)
+        return None, False
+    return data, True
+
+
+def read(path: Optional[Path] = None) -> Optional[dict[str, Any]]:
+    return read_record(path)[0]
 
 
 def machine_id(path: Optional[Path] = None, create: bool = True) -> str:
@@ -83,10 +105,15 @@ def machine_id(path: Optional[Path] = None, create: bool = True) -> str:
     persisted: an id that changes every run is worse than none, because the
     dashboard would read each one as another new computer."""
     target = path or machine_path()
-    record = read(target)
+    record, readable = read_record(target)
     existing = str((record or {}).get("machine_id") or "").strip()
     if existing:
         return existing
+    if not readable:
+        # comp-app-5: an UNREADABLE file is not an absent one. Reporting no id
+        # costs the rename affordance for this run; overwriting the file with
+        # a fresh one costs it permanently, and takes the old id with it.
+        return ""
     if not create:
         return ""
     minted = uuid.uuid4().hex

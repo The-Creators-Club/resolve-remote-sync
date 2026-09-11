@@ -36,6 +36,13 @@ log = logging.getLogger(__name__)
 # Bump on ANY change to the three text blocks below. Date-plus-serial rather
 # than an integer so an operator reading a database row can see when the
 # wording they are looking at was written.
+#
+# DELIBERATELY NOT BUMPED on 2026-09-11 (ytdl-web-7): that edit replaced two
+# ' -- ' pairs with a colon and two commas and changed not one word of what is
+# being agreed to, and a bump sends every editor in every fleet back through
+# the dialog before they can download anything. Keep the exemption to
+# punctuation: a bump is the cost of any edit that changes the MEANING, and it
+# is the right cost.
 TEXT_VERSION = '2026-08-17.1'
 
 NOTICE_TITLE = 'Before you download: your responsibilities'
@@ -48,7 +55,7 @@ This tool downloads video from YouTube at your request. Before you use it:
 
 1. YOU CONFIRM YOU HAVE THE RIGHT TO USE THIS MATERIAL. You are the person
    choosing each clip, and you are stating that your intended use of it is
-   permitted -- because you own it, because you have a licence or written
+   permitted: because you own it, because you have a licence or written
    permission, because it is public domain or openly licensed, or because
    your use is covered by an exception in your jurisdiction (for example
    fair dealing or fair use). If you are not sure, ask before you download.
@@ -64,8 +71,8 @@ This tool downloads video from YouTube at your request. Before you use it:
    representation that any download is lawful.
 
 4. WHAT IS RECORDED. Your username, this machine's name, the clip and the time
-   are written to your organisation's own records, so that what was downloaded
-   -- and on whose say-so -- can be answered later. Downloads are attributed to
+   are written to your organisation's own records, so that what was downloaded,
+   and on whose say-so, can be answered later. Downloads are attributed to
    you.
 
 If you cannot make these statements about the material you are about to fetch,

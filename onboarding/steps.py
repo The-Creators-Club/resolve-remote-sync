@@ -132,7 +132,7 @@ from ccsync_companion import site as site_mod
 # CCSYNC_CANONICAL_PREFIX/CCSYNC_TREE_NAME) so one failed fetch cannot map
 # one letter while config.toml names another. Both bootstraps changed, so
 # the shared number moves.
-INSTALLER_VERSION = "1.0.41"
+INSTALLER_VERSION = "1.0.42"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every
@@ -225,6 +225,31 @@ def site_drive_letter(site: Optional[dict] = None) -> str:
         prefix = str(site.get("canonical_prefix") or "").strip()
     m = _CANONICAL_PREFIX_RE.match(prefix)
     return m.group(1).upper() if m else DEFAULT_DRIVE_LETTER
+
+
+def site_manifest_value(site: Optional[dict], key: str) -> str:
+    """A manifest key exactly as the site published it, from the passed
+    manifest when there is one and from the CACHE when there is not, and ""
+    when neither says.
+
+    The raw value, deliberately: site_canonical_prefix normalises and defaults
+    to P:\\, which is the right answer for config.toml and the WRONG one to
+    hand a bootstrap script (install-onboard-2, 2026-09-11). A wizard with no
+    cache must let the script do its own fetch rather than force our fallback
+    onto a site whose tree is Q:\\.
+    """
+    value = ""
+    if isinstance(site, dict):
+        value = str(site.get(key) or "").strip()
+    if value:
+        return value
+    try:
+        cached = site_mod.cached_site()
+    except Exception:
+        return ""
+    if isinstance(cached, dict):
+        return str(cached.get(key) or "").strip()
+    return ""
 
 
 def site_canonical_prefix(site: Optional[dict] = None) -> str:
@@ -912,12 +937,22 @@ def normalise_dashboard_url(dashboard_url: str) -> str:
     host = host.lower()
     numeric = bool(_IPV4_RE.match(host)) or ":" in host
     local = host in ("localhost", "127.0.0.1", "::1") or host.endswith(".local")
-    if port and port != "443":
+    # install-onboard-5 (2026-09-11): ANY explicit port other than 443 used to
+    # mean http, and this deployment's Tailscale Serve/Funnel publishes TLS on
+    # 8443 too (the client-share port). An admin who said
+    # "nas.tail26290e.ts.net:8443" got http:// written into the field, into
+    # config.toml and into the companion's loopback origin allow-list, none of
+    # which can connect. A tailnet name is TLS on every port Serve fronts, and
+    # 8443 is the conventional second TLS port; an address or a local name has
+    # no certificate whatever the port, and a bare container port on somebody
+    # else's deployment is still the plain one.
+    tailnet = host.endswith(".ts.net")
+    if numeric or local:
         scheme = "http"
-    elif numeric or local:
-        scheme = "http"
-    else:
+    elif tailnet or not port or port in ("443", "8443"):
         scheme = "https"
+    else:
+        scheme = "http"
     return f"{scheme}://{text}"
 
 
@@ -1430,8 +1465,15 @@ def run_bootstrap(
     # companion and the uninstaller all disagree with. Only ever the
     # MANIFEST's values: config.toml's canonical_prefix is the local root on
     # a base rig, which the bootstrap refuses as not-a-drive-letter.
-    canonical_prefix = str(site.get("canonical_prefix") or "").strip()
-    tree_name = str(site.get("tree_name") or "").strip()
+    #
+    # Through the CACHE when this run's fetch failed (install-onboard-2,
+    # 2026-09-11): that is the only case the flags were added for, and
+    # reading `site` alone passed nothing in exactly it, while ensure_config
+    # wrote the cached answer into config.toml a minute later. The raw cached
+    # key, never site_canonical_prefix's P:\\ default -- an env var or a flag
+    # carrying OUR fallback would beat the script's own fetch.
+    canonical_prefix = site_manifest_value(site, "canonical_prefix")
+    tree_name = site_manifest_value(site, "tree_name")
 
     if _is_mac(platform):
         cmd = [
@@ -2127,6 +2169,13 @@ def current_user() -> str:
 
 def _default_is_mount(path: str) -> bool:
     return os.path.ismount(path)
+
+
+def _default_stat_dev(path: str) -> int:
+    """The device a path lives on. Separate from _default_is_mount because a
+    mount boundary and a foreign volume are not the same question on macOS
+    (install-onboard-1, 2026-09-11)."""
+    return os.stat(path).st_dev
 
 
 def _validate_local_root_macos(
@@ -3285,7 +3334,7 @@ def launch_companion(
 def installer_on_forbidden_drive(site: Optional[dict] = None,
                                  drive_letter: Optional[str] = None,
                                  platform: Optional[str] = None,
-                                 is_mount: Optional[Callable[[str], bool]] = None) -> bool:
+                                 stat_dev: Optional[Callable[[str], int]] = None) -> bool:
     """True when the running installer lives on the tree drive or a UNC share
     -- running it from there locks the file server-side for as long as the
     wizard is open (seen live 2026-07-25: an editor ran onboard.exe off the
@@ -3296,38 +3345,70 @@ def installer_on_forbidden_drive(site: Optional[dict] = None,
     historical P is still refused on every site, because that is where the
     package folder sat on every machine provisioned before it was.
 
-    On darwin the same refusal is a MOUNT test (bug-hunt-2026-09-03
+    On darwin the same refusal is a VOLUME test (bug-hunt-2026-09-03
     install-onboard-4): there is no drive letter and no UNC, the tree is
     normally /Volumes/<share> over SMB, and the two Windows tests could never
     fire -- so the platform where the tree is most often a network mount was
-    the one with no guard at all. Anything outside the root filesystem counts:
-    an external SSD is a removable volume the install is about to write a
-    whole tree onto."""
+    the one with no guard at all. An external SSD is a removable volume the
+    install is about to write a whole tree onto, so it counts as well."""
     if not getattr(sys, "frozen", False):
         return False
     exe = str(sys.executable)
     if _is_mac(platform):
-        # posixpath, not os.path: the darwin branch has to be exercisable
+        # install-onboard-1 (2026-09-11): this walked UP from the exe and
+        # refused at the first os.path.ismount() hit, which on macOS 10.15+
+        # is /Users itself. A volume group puts everything a person can write
+        # on a separate APFS Data volume reached through firmlinks, so
+        # lstat("/Users").st_dev is the Data volume's while lstat("/").st_dev
+        # is the sealed System volume's -- exactly what ismount compares. The
+        # frozen wizard was therefore refused from Downloads, the Desktop and
+        # /Applications alike, and there was nowhere left to copy it to.
+        #
+        # The question is the VOLUME'S IDENTITY, never whether a mount
+        # boundary was crossed: /Volumes/<name> is where the SMB tree and
+        # every removable disk land, and past that a device that is neither
+        # half of the boot volume group nor the home folder's is a foreign
+        # one. posixpath, not os.path, so the darwin branch stays exercisable
         # from the Windows dev box like every other one in this module.
-        mount = is_mount or _default_is_mount
         if exe.startswith("/Volumes/"):
             return True
-        # Walk up to the volume this path is on. Reading the mount table can
-        # fail (a dead automount hangs statfs); "cannot tell" must not refuse
-        # an install.
+        stat_of = stat_dev or _default_stat_dev
+        # Reading a device can fail (a dead automount hangs statfs);
+        # "cannot tell" must not refuse an install.
         try:
-            path = posixpath.dirname(exe)
-            while path and path != "/":
-                if mount(path):
-                    return True
-                parent = posixpath.dirname(path)
-                if parent == path:
-                    break
-                path = parent
+            own = stat_of(exe)
+            local: set = set()
+            for path in ("/", "/System/Volumes/Data", posixpath.expanduser("~")):
+                try:
+                    local.add(stat_of(path))
+                except Exception:
+                    continue
+            if not local:
+                return False
+            return own not in local
         except Exception:
             return False
-        return False
     exe = exe.upper()
     letter = (drive_letter or site_drive_letter(site)).upper()
     return (exe.startswith(f"{letter}:") or exe.startswith(f"{DEFAULT_DRIVE_LETTER}:")
             or exe.startswith("\\\\"))
+
+
+def forbidden_installer_message(drive_letter: str,
+                                platform: Optional[str] = None) -> str:
+    """What the editor is told when installer_on_forbidden_drive refuses.
+
+    Its own sentence per platform (install-onboard-1, 2026-09-11): the one
+    text named a drive letter, a network share and onboard.exe, none of which
+    exist on a Mac, and it was the only thing a Mac editor ever saw of the
+    install."""
+    if _is_mac(platform):
+        return ("this installer is running from a volume under /Volumes (an external "
+                "disk or the NAS share): the install is about to unmount it out from "
+                "under itself, and running it off the NAS locks the file for everyone "
+                "else. Copy the app into your home folder (Downloads or Desktop) and "
+                "run it from there.")
+    return (f"this installer is running from {drive_letter}: or a network share - the "
+            "install is about to unmount that drive out from under itself "
+            "(and running it off the NAS locks the file for everyone). "
+            "Copy onboard.exe to your Desktop and run it from there.")

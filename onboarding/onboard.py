@@ -1135,12 +1135,11 @@ class OnboardWizard:
     def _worker_editor(self) -> None:
         try:
             if steps.installer_on_forbidden_drive(self._site()):
+                # install-onboard-1 (2026-09-11): the wording is the
+                # platform's own. A Mac editor was being told to move
+                # onboard.exe off a drive letter.
                 self._append_log(
-                    f"this installer is running from {self._drive_letter()}: or a network share -- the "
-                    "install is about to unmount that drive out from under itself "
-                    "(and running it off the NAS locks the file for everyone). "
-                    "Copy onboard.exe to your Desktop and run it from there."
-                )
+                    steps.forbidden_installer_message(self._drive_letter()))
                 self._safe_after(lambda: self._install_failed())
                 return
 

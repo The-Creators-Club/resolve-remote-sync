@@ -97,25 +97,24 @@ COPY dashboard/deploy /app/deploy
 COPY dashboard/templates /app/templates
 COPY dashboard/static /app/static
 # The documents the RUNNING dashboard serves (REL-5, usability sweep
-# 2026-09-04; widened to the whole tree the same day at the owner's request).
-# `docs/` is excluded wholesale by .dockerignore, which re-includes the
-# MARKDOWN under it and nothing else: without these lines setup_engine's EULA
-# task falls back to "no licence agreement is included in this build" and
-# /help says it is not installed. ~4 MB of text against a ~10 MB context, and
-# no screenshot, no PDF, no binary -- the .dockerignore rule is what keeps
-# docs/mobile's PNGs out.
+# 2026-09-04). Without them setup_engine's EULA task falls back to "no licence
+# agreement is included in this build" and /help says it is not installed.
+#
+# THE CUSTOMER-FACING SET AND NOTHING ELSE (dash-mounts-ui-1 /
+# server-tools-2, 2026-09-11). This was `COPY docs /app/docs` plus
+# `COPY *.md /app/docs/_root/` from 2026-09-04 to 2026-09-11, which put this
+# studio's defect ledger, CLAUDE.md, the secrets runbook, every plan and every
+# bug-hunt report into every customer's image for any signed-in EDITOR to read
+# at /help. The list lives ONCE, in
+# dashboard/src/ccsync_dashboard/published_docs.py; a Dockerfile cannot import
+# it, so these lines restate it and
+# dashboard/tests/test_bug_hunt_2026_09_11_dash_mounts_ui.py fails the moment
+# the two disagree. .dockerignore re-includes exactly these paths.
 #
 # /app/docs, because every reader resolves it from its own __file__ the way
 # ui.py resolves /app/templates (help.document_root, setup_engine._find_eula).
-COPY docs /app/docs
-# The top-level documents (KNOWN_BUGS.md, SPEC.md, CLAUDE.md, and a
-# README.md if one is ever added), under the name help.py browses them by
-# (help.ROOT_DIR_NAME). They are not in docs/, and /app is the application
-# root here, so they get a directory of their own rather than being dropped
-# beside the code. A glob rather than four names because a COPY that names a
-# file the checkout does not have fails the BUILD, and the browser
-# allow-lists what it will serve anyway (help.ROOT_FILES).
-COPY *.md /app/docs/_root/
+COPY docs/HOW_IT_WORKS.md docs/EDITOR_SETUP.md /app/docs/
+COPY docs/legal /app/docs/legal
 COPY broll/web /broll-app
 COPY music/web /music-app
 COPY ytdl/web /ytdl-app

@@ -8,7 +8,9 @@ piano" — not by remembering a filename. Roughly a third of the library is name
 numeric library ID or a UUID, so name-based search is useless for those.
 
 Folded in from the standalone `music-tagger` repo on **2026-08-10**, mirroring the b-roll
-fold of the same day; the pre-fold git history stays in `E:\Projects\music-tagger`.
+fold of the same day. The pre-fold git history was NOT preserved: `E:\Projects\music-tagger`
+has no `.git` directory and no copy exists on GitHub (checked 2026-09-11); this tree is the
+only history the music tagger has.
 `PORT_PLAN.md` there is the fold plan; **step 1 (fold only) is what has landed.** Steps 2–8
 are listed under "Still to port" at the bottom and are each marked with a
 `TODO(port step N)` comment at the place they touch.

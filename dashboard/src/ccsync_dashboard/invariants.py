@@ -129,6 +129,11 @@ class Outcome:
     state: str
     detail: str = ""
     subjects: list[tuple[str, str]] = field(default_factory=list)
+    # Whether `subjects` is the WHOLE verdict or the first MAX_SUBJECTS of it
+    # (dash-collector-alerts-4, 2026-09-11). A truncated broken verdict has
+    # said nothing about subject 21 onward, and `run_cycle`'s keep-list reads
+    # this so those subjects' notices are not closed by the cap.
+    truncated: bool = False
 
 
 def ok(detail: str = "") -> Outcome:
@@ -137,7 +142,8 @@ def ok(detail: str = "") -> Outcome:
 
 def broken(subjects: Iterable[tuple[str, str]], detail: str = "") -> Outcome:
     rows = list(subjects)
-    return Outcome(BROKEN, detail or f"{len(rows)} subject(s)", rows[:MAX_SUBJECTS])
+    return Outcome(BROKEN, detail or f"{len(rows)} subject(s)", rows[:MAX_SUBJECTS],
+                   truncated=len(rows) > MAX_SUBJECTS)
 
 
 def not_checked(reason: str) -> Outcome:
@@ -267,7 +273,10 @@ def _check_plan_has_share(ctx: Ctx) -> Outcome:
         return not_checked(
             "the server has not read its sync engine's folder list yet in this "
             "session, so it cannot say which computers a project is shared with")
-    by_slug = db.fetch_machine_selections(ctx.conn, sync_modes=(db.SYNC_MODE_FULL,))
+    # dash-db-1 (2026-09-11): the wired machines' own rows go too - see
+    # `notices._check_plan_without_share`, the same fact said the other way.
+    by_slug = db.fetch_machine_selections(ctx.conn, sync_modes=(db.SYNC_MODE_FULL,),
+                                          for_enforce=True)
     device_by_machine: dict[tuple[str, str], str] = {}
     for row in ctx.machines():
         device = row.get("syncthing_device_id")
@@ -563,7 +572,10 @@ def _check_companion_floor(ctx: Ctx) -> Outcome:
             versions[(row["editor_username"], row["machine"])] = str(row["companion_version"])
     upload_only: set[tuple[str, str]] = set()
     for slug, pairs in db.fetch_machine_selections(
-            ctx.conn, sync_modes=(db.SYNC_MODE_UPLOAD_ONLY,)).items():
+            ctx.conn, sync_modes=(db.SYNC_MODE_UPLOAD_ONLY,),
+            # dash-db-1: a wired machine runs no lane at all, so its stale
+            # upload-only row is not a computer this floor is about.
+            for_enforce=True).items():
         upload_only.update(pairs)
     bad: list[tuple[str, str]] = []
     checked = 0
@@ -1157,6 +1169,7 @@ def evaluate(ctx: Ctx) -> list[dict[str, Any]]:
             "consequence": inv.consequence, "fix": inv.fix,
             "severity": inv.severity, "state": outcome.state,
             "detail": outcome.detail, "subjects": list(outcome.subjects),
+            "truncated": bool(outcome.truncated),
         })
     return results
 
@@ -1197,6 +1210,14 @@ def run_cycle(
             log.exception("invariants: could not record %s", result["key"])
         inv = BY_KEY[result["key"]]
         if result["state"] == db.INVARIANT_BROKEN:
+            if result.get("truncated"):
+                # dash-collector-alerts-4 (2026-09-11): a verdict capped at
+                # MAX_SUBJECTS carries the first 20 of (say) 45. The other 25
+                # are still broken and this pass has said nothing about them,
+                # so they stay in the keep-list below rather than having their
+                # `invariant_broken` notice closed by the truncation.
+                for subject in stored_broken.get(inv.key, ()):
+                    broken_subjects.append(f"{inv.key}: {subject}")
             for subject, detail in result["subjects"]:
                 key = f"{inv.key}: {subject}"
                 broken_subjects.append(key)

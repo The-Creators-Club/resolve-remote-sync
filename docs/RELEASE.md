@@ -386,7 +386,7 @@ The base rig is not part of the tray upgrade flow if you are testing a build
 you have not published. Install it directly:
 
 ```powershell
-.\installer\windows_upgrade.ps1 -CompanionExe "E:\Projects\resolve-remote-sync\companion\dist\ccsync-companion.exe"
+.\installer\windows_upgrade.ps1 -CompanionExe "E:\Projects\Editing\ccsync\companion\dist\ccsync-companion.exe"
 ```
 
 It stops `ccsync-companion.exe` (and any source-mode `pythonw launcher.py`),

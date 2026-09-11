@@ -612,7 +612,8 @@ def test_stray_project_folders_are_reported_with_no_delete_button():
     app.sync_guard = lambda: {"stray_projects": {
         "count": 3, "bytes": 40 * 10 ** 9, "paths": [], "slugs": []}}
     lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
-    assert any("3 project folder(s) on this computer are in no sync plan" in l
+    # comp-ui-4 (2026-09-11): "project folder(s)" -> ui_copy.count.
+    assert any("3 project folders on this computer are in no sync plan" in l
                for l in lines)
     assert not any("DELETE" in l for l in lines)
 
@@ -660,7 +661,8 @@ def _resolve_app(**health):
 def test_the_skipped_clip_line_appears_in_sync_lanes():
     app = _resolve_app(ignored_this_session=14, ignored_folders=0)
     lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNCING"))
-    assert any("14 clip(s) skipped this session" in l for l in lines)
+    # comp-ui-4 (2026-09-11): "clip(s)" -> ui_copy.count.
+    assert any("14 clips skipped this session" in l for l in lines)
 
 
 def test_each_leave_alone_folder_gets_a_forget_button(monkeypatch):
@@ -908,12 +910,29 @@ def test_more_than_six_advisories_are_capped_with_a_show_all():
     assert len(shown) == 9 and hidden_all == 0
 
 
-def test_the_lanes_section_ranks_a_halt_above_the_trash_size():
+def _real_trash_block(tmp_path, bytes_: int, count: int) -> dict:
+    """comp-sync-15 (2026-09-11): the shape RcloneLane.trash_report() really
+    emits, from the real producer.
+
+    This was hand-built here with `path` and `max_age_days` -- a shape no
+    producer emitted until comp-sync-15 added them, so the test pinned a
+    phantom while every editor read the bare folder name and a hardcoded
+    default. Driving the lane's own prune is what stops that recurring.
+    """
+    from ccsync_companion.sync.rclone_lane import RcloneLane
+
+    lane = RcloneLane("down", str(tmp_path), "nas", "/tree",
+                      state_dir=tmp_path / "state")
+    lane._maybe_prune_trash()
+    block = lane.trash_report() or {}
+    return {**block, "bytes": bytes_, "count": count}
+
+
+def test_the_lanes_section_ranks_a_halt_above_the_trash_size(tmp_path):
     app = _plain_app()
     guard = {
         "halt": {"active": True, "scope": "local", "reason": "an admin asked"},
-        "trash": {"bytes": 12 << 30, "count": 40, "path": ".ccsync-trash",
-                  "max_age_days": 30},
+        "trash": _real_trash_block(tmp_path, 12 << 30, 40),
     }
     items = _section(build_settings_model(_snap(app, sync_guard=guard), app),
                      "SYNCING").items
@@ -960,8 +979,9 @@ def test_resolve_section_names_the_counts_and_offers_the_scan():
     lines = [i.text for i in items if isinstance(i, Line)]
     assert any("Connected to Resolve" in l for l in lines)
     assert any("Project open: FF5 ROUGH" in l for l in lines)
-    assert any("40 clip(s) are stored outside your synced folder" in l for l in lines)
-    assert any("3 clip(s) in this project are offline" in l for l in lines)
+    # comp-ui-4 (2026-09-11): "clip(s)" -> ui_copy.count, with the verb agreeing.
+    assert any("40 clips are stored outside your synced folder" in l for l in lines)
+    assert any("3 clips in this project are offline" in l for l in lines)
     assert any("Checked 10 min ago" in l for l in lines)
     assert "SCAN WHOLE PROJECT" in [i.label for i in items if isinstance(i, Button)]
 

@@ -250,7 +250,9 @@ def test_the_client_takes_a_per_call_timeout(monkeypatch):
 
     class Session:
         def request(self, method, url, params=None, json=None, headers=None,
-                    timeout=None):
+                    timeout=None, **kwargs):
+            # dash-core-2 (2026-09-11): every call carries allow_redirects=False.
+            assert kwargs.get("allow_redirects") is False
             seen.append(timeout)
             return type("R", (), {"status_code": 200, "content": b"{}",
                                   "json": staticmethod(lambda: {})})()

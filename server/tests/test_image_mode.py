@@ -463,19 +463,25 @@ def test_the_rollback_command_is_the_same_command_with_the_other_mode(monkeypatc
     assert "'image': 'python:3.12.7-slim'" in transcript
 
 
-def test_bind_mode_ships_the_whole_docs_tree_as_markdown(tmp_path, monkeypatch):
-    """Alex, 2026-09-04: /help is a browser, so the server needs every
-    document, not the guide and the EULA. `.md` only (docs/mobile is a
-    directory of screenshots), symlinks are not followed, and the four
-    top-level documents go into `_root/` -- the name help.py browses them by.
+def test_bind_mode_ships_the_customer_facing_documents_only(tmp_path, monkeypatch):
+    """server-tools-2 / dash-mounts-ui-1 (2026-09-11). This shipped the WHOLE
+    docs tree from 2026-09-04 (Alex: /help is a browser now) plus the four
+    top-level documents under `_root/` -- which put this studio's defect
+    ledger, CLAUDE.md, the secrets runbook and every plan and bug-hunt report
+    on a customer's server, where /help served them to any signed-in EDITOR.
+    What travels is published_docs.py's list, the same one the image and the
+    OTA bundle are built from; `.md` only, and symlinks are not followed.
     """
     repo = tmp_path / "repo"
     docs = repo / "docs"
     (docs / "legal").mkdir(parents=True)
     (docs / "spikes").mkdir()
     (docs / "HOW_IT_WORKS.md").write_text("# Guide\n", encoding="utf-8")
+    (docs / "EDITOR_SETUP.md").write_text("# Editor setup\n", encoding="utf-8")
     (docs / "GOTCHAS.md").write_text("# Gotchas\n", encoding="utf-8")
+    (docs / "SECRETS.md").write_text("# Secrets\n", encoding="utf-8")
     (docs / "legal" / "EULA.md").write_text("# Licence\n", encoding="utf-8")
+    (docs / "legal" / "logo.png").write_bytes(b"not-a-document")
     (docs / "spikes" / "s1.md").write_text("# S1\n", encoding="utf-8")
     (docs / "screenshot.png").write_bytes(b"not-a-document")
     (repo / "KNOWN_BUGS.md").write_text("# Known bugs\n", encoding="utf-8")
@@ -490,13 +496,42 @@ def test_bind_mode_ships_the_whole_docs_tree_as_markdown(tmp_path, monkeypatch):
     got = sorted(p.relative_to(staging).as_posix()
                  for p in staging.rglob("*") if p.is_file())
     assert got == [
-        "GOTCHAS.md",
+        "EDITOR_SETUP.md",
         "HOW_IT_WORKS.md",
-        "_root/KNOWN_BUGS.md",
-        "_root/SPEC.md",
         "legal/EULA.md",
-        "spikes/s1.md",
     ]
+
+
+def test_bind_mode_ships_the_required_set_when_the_list_cannot_be_read(tmp_path,
+                                                                      monkeypatch):
+    """A docs list we cannot read is not a licence to fall back on
+    "everything": the guide and the legal paperwork are what the wizard and
+    /help refuse to work without, and nothing else goes."""
+    repo = tmp_path / "repo"
+    docs = repo / "docs"
+    (docs / "legal").mkdir(parents=True)
+    (docs / "HOW_IT_WORKS.md").write_text("# Guide\n", encoding="utf-8")
+    (docs / "KNOWN_BUGS.md").write_text("# Known bugs\n", encoding="utf-8")
+    (docs / "legal" / "EULA.md").write_text("# Licence\n", encoding="utf-8")
+    monkeypatch.setattr(ida, "LOCAL_DOCS_DIR", docs)
+    monkeypatch.setattr(ida, "LOCAL_REPO_DIR", repo)
+    monkeypatch.setattr(ida, "published_docs_module", lambda: None)
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    ida._stage_docs_tree(staging)
+    got = sorted(p.relative_to(staging).as_posix()
+                 for p in staging.rglob("*") if p.is_file())
+    assert got == ["HOW_IT_WORKS.md", "legal/EULA.md"]
+
+
+def test_the_published_list_is_the_dashboard_s_own(tmp_path):
+    """Loaded by path, because server/ does not import the dashboard package.
+    A copy of the list here would be the drift the fix exists to remove."""
+    module = ida.published_docs_module()
+    assert module is not None
+    assert "HOW_IT_WORKS.md" in module.PUBLISHED_DOCS
+    assert module.ROOT_DOCS == () and ida.SHIPPED_ROOT_DOCS == ()
 
 
 def test_image_mode_still_provisions_ffmpeg_because_the_image_does_not_carry_it(

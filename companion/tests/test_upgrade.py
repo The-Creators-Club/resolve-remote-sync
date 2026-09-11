@@ -1762,13 +1762,30 @@ def test_a_refused_offer_is_remembered_with_its_reason(tmp_path):
 
 
 def test_a_build_below_the_floor_is_a_refusal_too(tmp_path):
+    """comp-ytdl-jobs-1 (2026-09-11): the refused version must be OLDER than
+    the running one, which is the only shape a real downgrade-floor refusal
+    has. This test used to refuse 9.9.8 -- newer than every shipped VERSION --
+    so it asserted the property using the one case that could not break, while
+    `refusal()` was throwing away every OLDER refusal it was written for."""
     floor_file = tmp_path / "floor.json"
     mgr = UpgradeManager(_cfg(), floor_file=floor_file)
     mgr.note_report_response({"upgrade": _info(version="9.9.9", min_version="9.9.9")})
-    mgr.note_report_response({"upgrade": _info(version="9.9.8", min_version="0.0.0")})
+    mgr.note_report_response({"upgrade": _info(version="0.0.1", min_version="0.0.0")})
     refusal = mgr.refusal()
-    assert refusal["version"] == "9.9.8"
+    assert refusal["version"] == "0.0.1"
     assert "downgrade floor" in refusal["reason"]
+
+
+def test_a_rollback_below_the_floor_keeps_being_reported(tmp_path):
+    """comp-ytdl-jobs-1. An admin republishing an OLDER build as a rollback
+    (a first-class operation) is refused by every machine whose floor is
+    above it, and that refusal is exactly what REL-3 exists to put on the
+    Packages page. Read TWICE here on purpose: the report re-reads it every
+    heavy tick, and the old self-clear retired it on the first read."""
+    mgr = UpgradeManager(_cfg(), floor_file=tmp_path / "floor.json")
+    mgr._note_refusal("0.0.1", "v0.0.1 is below the downgrade floor v9.9.9")
+    assert mgr.refusal()["version"] == "0.0.1"
+    assert mgr.refusal()["version"] == "0.0.1"
 
 
 def test_an_accepted_offer_clears_the_refusal(tmp_path):

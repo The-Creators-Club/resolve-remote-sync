@@ -775,6 +775,16 @@ def _set_copy_state(info: Optional[dict[str, Any]]) -> None:
             _copy_state.update(info)
 
 
+# comp-ui-3 (2026-09-11): the wave-4 copy pass replaced the hand-written menu
+# route with ui_copy.DIAGNOSTICS and left the tail of the old literal behind,
+# so the one sentence explaining that "always leave this folder alone" did not
+# stick read "... COPY DIAGNOSTICS FOR YOUR ADMINFOR YOUR ADMIN." A module
+# constant, so the suite can assert on it without building a dialog.
+IGNORE_FOLDER_FAILED = (
+    "CCSync could not save that choice, so these clips are only skipped until "
+    f"you restart. {ui_copy.DIAGNOSTICS}.")
+
+
 class PopupDialog:
     """tkinter Toplevel wrapper. Only imported/instantiated at call time (see
     show_popup below) so a headless environment (no display) degrades to a
@@ -1513,10 +1523,7 @@ class PopupDialog:
             # half did not stick rather than discovering it next Monday.
             log.error("could not persist the folder ignore for: %s", ", ".join(failed))
             try:
-                self.status_label.config(
-                    text="CCSync could not save that choice, so these clips are only "
-                         f"skipped until you restart. {ui_copy.DIAGNOSTICS}"
-                         "FOR YOUR ADMIN.")
+                self.status_label.config(text=IGNORE_FOLDER_FAILED)
             except Exception:
                 log.debug("could not update the popup status line", exc_info=True)
             return

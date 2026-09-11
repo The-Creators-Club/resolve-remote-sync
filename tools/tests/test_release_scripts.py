@@ -508,3 +508,27 @@ class TestTheKeyBackupIsAskedAbout:
         assert r".ccsync-release\backup.json" in SHIP
         assert "no fleet can ever be updated again" in SHIP
         assert "release_key.py backup" in SHIP
+
+
+class TestTheDriftDoctorReportsTheCardsCommit:
+    """cards snapshot deploy, 2026-09-11. /cards is another repo's code, so
+    neither the companion version nor the dashboard version says whether the
+    live page is the code the operator is reading. The deploy writes the
+    commit into DEPLOYED_COMMIT and into a local record; the doctor reads the
+    record, because it has no NAS shell."""
+
+    def test_it_reads_the_local_deploy_record(self):
+        assert "cards_deployed.json" in DRIFT
+        assert "CCSYNC_CARDS_RECORD" in DRIFT
+
+    def test_a_missing_record_is_not_checked_rather_than_ok(self):
+        # wave 4's rule: an unverified check is NOT CHECKED, never OK.
+        assert "NOT CHECKED, not OK" in DRIFT
+
+    def test_it_says_whether_the_repo_has_moved_past_the_shipped_commit(self):
+        assert "rev-list --count" in DRIFT
+        assert "ahead of the shipped" in DRIFT
+        assert "install_dashboard_app.py" in DRIFT
+
+    def test_nothing_names_the_retired_ship_worktree(self):
+        assert "Editing-ship" not in DRIFT

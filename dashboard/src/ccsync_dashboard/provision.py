@@ -42,9 +42,18 @@ def _site_list(env_var: str, default: list) -> list:
     machine that runs the installers); its site facts arrive as DASH_SITE_*
     env vars in the compose file, which is where the installer renders
     site.toml's values (2026-08-17, COMMERCIAL_READINESS.md item 11).
+
+    `..` segments are DROPPED (dash-core-5, 2026-09-11), for the reason
+    shared_asset_folders_for already drops them: every value that comes
+    through this door is mkdir'd under a project or the tree root
+    (api.create_tree_project does `(target / sub).mkdir(parents=True)`), and
+    the environment is the one door site_store's CSV validator never sees.
+    A typo in a rendered site.toml must not make project creation write
+    outside the project.
     """
     raw = os.environ.get(env_var, "")
     items = [p.strip().replace("\\", "/").strip("/") for p in raw.split(",")]
+    items = ["/".join(s for s in p.split("/") if s and s != "..") for p in items]
     items = [p for p in items if p]
     return items or list(default)
 

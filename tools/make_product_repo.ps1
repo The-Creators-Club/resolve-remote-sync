@@ -86,12 +86,12 @@
     Empty a non-empty destination first.
 
 .EXAMPLE
-    .\tools\make_product_repo.ps1 -Destination E:\Projects\ccsync-product -WhatIf
+    .\tools\make_product_repo.ps1 -Destination E:\Projects\Editing\ccsync-product -WhatIf
 
     Always do this first. Runs phases 1-2 and prints the plan; creates nothing.
 
 .EXAMPLE
-    .\tools\make_product_repo.ps1 -Destination E:\Projects\ccsync-product -SourceRef v1.0.0
+    .\tools\make_product_repo.ps1 -Destination E:\Projects\Editing\ccsync-product -SourceRef v1.0.0
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -285,8 +285,8 @@ if ($isRepo) {
 }
 
 # Destination containment, both directions. Compare canonical full paths with a
-# trailing separator on each side, so E:\Projects\resolve-remote-sync-product is
-# not mistaken for a child of E:\Projects\resolve-remote-sync.
+# trailing separator on each side, so E:\Projects\Editing\ccsync-product is
+# not mistaken for a child of E:\Projects\Editing\ccsync.
 $destFull = [System.IO.Path]::GetFullPath(
     [System.IO.Path]::Combine((Get-Location).ProviderPath, $Destination))
 $srcFull = [System.IO.Path]::GetFullPath($RepoRoot)

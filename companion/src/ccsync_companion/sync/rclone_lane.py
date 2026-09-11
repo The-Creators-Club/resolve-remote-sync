@@ -2463,6 +2463,10 @@ class RcloneLane(LaneAdapter):
         # scan -- an absent section is "we have not looked", never "there are
         # none".
         self._stray_projects: Optional[dict] = None
+        # comp-sync-7: "is this subpath still the one the sequencer is on?",
+        # wired by the sequencer. None means nobody is asking, which is what
+        # every unmanaged lane and every test double gets.
+        self.subpath_still_current: Optional[Callable[[str], bool]] = None
 
         # ONE EVENT PER THREAD GENERATION. A single long-lived event that
         # start() cleared and stop() set could only ever be right for one of
@@ -3369,6 +3373,29 @@ class RcloneLane(LaneAdapter):
             log.debug("%s: run skipped -- the lane is stopping", self.name)
             return self.status()
 
+        # comp-sync-7 (2026-09-11): ...and neither may a pass that queued on
+        # _run_lock behind a wedged one and woke up an hour later. The
+        # sequencer's rotation has moved on by then, and running
+        # `rclone sync NAS:<old subpath> -> local/<old subpath>` now is the
+        # very hazard the bounded join exists to prevent: lane B writing into
+        # a project directory the next project's repath is moving. Optional
+        # and duck-typed -- a lane with no such question to ask behaves
+        # exactly as it did.
+        current = self.subpath_still_current
+        if current is not None and subpath:
+            try:
+                still = bool(current(subpath))
+            except Exception:
+                log.debug("%s: could not check whether %s is still current",
+                          self.name, subpath, exc_info=True)
+                still = True
+            if not still:
+                log.warning(
+                    "%s: dropping a queued pass for %s -- the rotation has moved on "
+                    "since it was started", self.name, subpath)
+                return self._stand_down_status(
+                    "skipped a queued pass: the rotation had moved on")
+
         # The circuit breaker, ahead of rclone_available() and the command
         # build so a tripped lane B costs nothing at all per pass
         # (COMMERCIAL_READINESS.md item 9, 2026-08-17). PAUSED, not ERROR:
@@ -4044,6 +4071,16 @@ class RcloneLane(LaneAdapter):
             trash = scan_trash_dir(self.local_root)
             if trash is not None:
                 summary = {**summary, **trash}
+            # comp-sync-15 (2026-09-11): the tray's recovery-folder line reads
+            # `path` and `max_age_days` off this block, and NEITHER producer
+            # emitted them -- so every editor was told the bare folder name
+            # and the hardcoded 14 day default, on a site that had configured
+            # something else. SYNC-112 claims to have fixed exactly that.
+            summary = {
+                **summary,
+                "path": str(Path(self.local_root) / lane_guard.TRASH_DIR_NAME),
+                "max_age_days": self._trash_max_age_days,
+            }
             with self._lock:
                 self._trash_summary = summary
         except Exception:
@@ -4297,6 +4334,19 @@ class RcloneLane(LaneAdapter):
         out = {key: record.get(key) for key in ("lane", "seconds", "killed", "at")}
         return out if out.get("at") else None
 
+    def note_abandoned(self, why: str) -> None:
+        """The sequencer walked away from a pass of this lane (comp-sync-7).
+
+        Detail only, never the state: the lane is not broken and painting it
+        red would put a wedged SMB mapping on the fleet grid as a failed
+        lane. What this buys is that the tray stops saying `idle` about a
+        lane whose thread is still blocked on a child nothing could kill."""
+        try:
+            with self._lock:
+                self._status.detail = str(why or "")[:200]
+        except Exception:
+            log.debug("%s: could not record the abandoned pass", self.name, exc_info=True)
+
     def abort_run(self, why: str, seconds: int = 0) -> bool:
         """End the rclone child of the run in flight, without latching the
         lane off. Returns True when there was one. Never raises.
@@ -4438,6 +4488,12 @@ class RcloneLane(LaneAdapter):
         stats = record.get("stats")
         if not isinstance(stats, dict):
             return
+        # res-companion-5 (2026-09-11): credit what this pass has ALREADY
+        # trashed, on the --stats tick the lane is parsing anyway. The
+        # breaker's cumulative account used to be written only after rclone
+        # exited, so a hard kill mid-pass erased every deletion that pass had
+        # made and the machine came back with a fresh budget.
+        self._credit_deletes_in_flight(tally)
         # The project this run is for, read and released before resolving the
         # slug: that can touch the disk (the marker), and _lock is on the
         # tray's and the reporter's read path.
@@ -4458,6 +4514,19 @@ class RcloneLane(LaneAdapter):
             # because this is the one place real movement is observed.
             self._status.progress_token = progress_token(
                 stats.get("bytes"), moved, subpath)
+
+    def _credit_deletes_in_flight(self, tally: Optional[RcloneRunTally]) -> None:
+        """Lane B only, and never raises: the accounting is a safety device,
+        and a safety device that can fail the run it guards is worse than
+        none (res-companion-5)."""
+        if tally is None or self.direction != DIRECTION_DOWN or self.breaker is None:
+            return
+        try:
+            deleted = int(getattr(tally, "deleted", 0) or 0)
+            if deleted > 0:
+                self.breaker.note_deletes_in_flight(deleted)
+        except Exception:
+            log.debug("%s: could not credit in-flight deletions", self.name, exc_info=True)
 
     def _project_slug_for_subpath(self, subpath: Optional[str]) -> Optional[str]:
         """The marker slug for this run's project, or None.

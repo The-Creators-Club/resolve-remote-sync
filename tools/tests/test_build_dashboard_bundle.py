@@ -124,33 +124,43 @@ def test_a_checkout_with_no_licence_agreement_is_refused(repo, tmp_path):
     assert "HOW_IT_WORKS" in str(exc.value)
 
 
-def test_the_whole_docs_tree_travels_but_only_its_markdown(repo, tmp_path):
-    """Alex, 2026-09-04: /help is a browser, so an over-the-air dashboard has
-    to arrive with every document, not just the guide. Markdown only --
-    docs/mobile is a directory of screenshots and a code bundle is not a
-    photo album -- and the repository's top-level documents land under
-    `docs/_root/`, which is the name help.py browses them by."""
+def test_only_the_customer_facing_documents_travel(repo, tmp_path):
+    """server-tools-2 / dash-mounts-ui-1 (2026-09-11). The whole docs tree
+    travelled here from 2026-09-04, and the four top-level documents with it
+    under `docs/_root/` -- so an OTA bundle carried this studio's defect
+    ledger, CLAUDE.md and every plan and bug-hunt report to a customer's
+    dashboard, where /help served them to any signed-in editor. What travels
+    is published_docs.py's list, the same one the image and the bind-mode
+    deploy are built from."""
     (repo / "docs" / "spikes").mkdir()
     (repo / "docs" / "spikes" / "s1.md").write_text("# S1\n")
     (repo / "docs" / "GOTCHAS.md").write_text("# Gotchas\n")
+    (repo / "docs" / "EDITOR_SETUP.md").write_text("# Editor setup\n")
     (repo / "docs" / "mobile.png").write_bytes(b"not-a-document")
     (repo / "KNOWN_BUGS.md").write_text("# Known bugs\n")
     (repo / "SPEC.md").write_text("# Spec\n")
     result = bdb.build(repo, tmp_path / "out", allow_dirty=True, version="9.9.9")
     manifest, names = read_bundle(result["path"])
-    assert "docs/GOTCHAS.md" in names
-    assert "docs/spikes/s1.md" in names
-    assert "docs/_root/KNOWN_BUGS.md" in names
-    assert "docs/_root/SPEC.md" in names
-    assert "docs/mobile.png" not in names
-    # No README.md at the root of this repository today, and a missing one of
-    # OUR documents is not a reason to refuse to build a dashboard.
-    assert "docs/_root/README.md" not in names
-    # docs/legal is listed twice (once as a required tree, once inside the
-    # docs tree) and must still be packed once.
+    assert "docs/EDITOR_SETUP.md" in names
+    for absent in ("docs/GOTCHAS.md", "docs/spikes/s1.md",
+                   "docs/_root/KNOWN_BUGS.md", "docs/_root/SPEC.md",
+                   "docs/mobile.png"):
+        assert absent not in names, absent
+    # docs/legal is the required tree and a published one, and must still be
+    # packed once.
     assert names.count("docs/legal/EULA.md") == 1
     assert names.count("docs/HOW_IT_WORKS.md") == 1
     assert set(manifest["files_sha256"]) == set(names)
+
+
+def test_a_published_document_a_checkout_lacks_is_not_fatal(repo, tmp_path):
+    """The guide and the legal tree are REQUIRED (the test below); the rest of
+    the list is best effort, because a missing document is a thinner /help,
+    not a broken dashboard."""
+    result = bdb.build(repo, tmp_path / "out", allow_dirty=True, version="9.9.9")
+    _manifest, names = read_bundle(result["path"])
+    assert "docs/EDITOR_SETUP.md" not in names
+    assert "docs/HOW_IT_WORKS.md" in names
 
 
 def test_templates_and_static_are_in_the_bundle(repo, tmp_path):

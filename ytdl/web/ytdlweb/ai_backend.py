@@ -306,7 +306,7 @@ def _no_provider_detail():
     return ('this deployment has no working AI provider. An admin must add a '
             'key (or enable a CLI provider) on the dashboard\'s Settings -> AI '
             'providers page, or set ANTHROPIC_API_KEY / OPENAI_API_KEY / '
-            'DEEPSEEK_API_KEY in the container -- until then no job can '
+            'DEEPSEEK_API_KEY in the container. Until then no job can '
             'generate search terms. See ytdl/web/DEPLOY.md.')
 
 
@@ -339,7 +339,7 @@ def auth_detail(raw, provider=None):
              'fix it on the dashboard\'s Settings -> AI providers page (a CLI '
              'provider must be signed in ON THE DASHBOARD HOST)')
     return (f'this deployment has no working credential for {label}. An admin '
-            f'must {where} (ytdl/web/DEPLOY.md) -- until then no job can '
+            f'must {where} (ytdl/web/DEPLOY.md). Until then no job can '
             f'generate search terms. [' + ' '.join(str(raw).split())[:160] + ']')
 
 
@@ -757,7 +757,7 @@ def _complete_cli(system, user, provider, timeout):
             raise ClaudeError(ERR_AUTH,
                               f'{provider.label} is installed but not signed in '
                               f'on the dashboard host. An admin must run the '
-                              f'login command ON THAT HOST -- Settings -> AI '
+                              f'login command ON THAT HOST: Settings -> AI '
                               f'providers shows it. [{detail}]', provider.name)
         raise ClaudeError(ERR_OUTPUT,
                           f'{provider.label} exited {proc.returncode}: {detail}',

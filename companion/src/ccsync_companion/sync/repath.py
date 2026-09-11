@@ -32,6 +32,7 @@ import os
 import re
 import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -50,6 +51,15 @@ EVENTS_MAX = 20
 # file_moves.RELINK_WINDOW_SECONDS: the editor may not open that project for
 # weeks, and every clip in it is offline until they do.
 RELINK_WINDOW_SECONDS = 30 * 24 * 3600
+# comp-sync-6 (2026-09-11): the shortest gap between two media-pool walks for
+# the SAME pending relinks. `reconcile` is called once for the whole selection
+# and again inside every project turn, so "once per sequencer pass" (what the
+# docstring claimed) was really 1+N times, each costing a full
+# get_media_pool_items() per pending event while holding resolve_bridge's
+# _API_LOCK -- 21 enumerations a pass on a six-project plan with three pending
+# renames, for the whole 30 day window. The editor opens a renamed project on
+# human timescales; five minutes loses nothing.
+RELINK_RETRY_MIN_SECONDS = 300.0
 
 # "C:", "c:", "Z:" -- a drive letter as a path SEGMENT, which pathlib and
 # ntpath both treat as re-rooting the join.
@@ -220,7 +230,13 @@ class RepathLedger:
     def record(self, slug: str, old: str, new: str, note: str,
                relinked: Optional[bool], moved: bool = True) -> dict[str, Any]:
         event = {
-            "id": int(float(self._now()) * 1000),
+            # comp-sync-17 (2026-09-11): unique, not a millisecond wall-clock
+            # stamp. Two projects repathed in one pass can land in the same
+            # millisecond (measured: 6 distinct ids from 10 back-to-back
+            # records), and `mark_relinked` retires the FIRST event carrying
+            # an id -- so the twin stayed pending and was re-walked at the
+            # head of every pass for 30 days.
+            "id": uuid.uuid4().hex,
             "slug": str(slug),
             "old": str(old),
             "new": str(new),
@@ -242,6 +258,32 @@ class RepathLedger:
         self._save()
         return event
 
+    def blocked(self, slug: str) -> bool:
+        """Is there a live blocked event for this project (comp-sync-5)?"""
+        return any(str(e.get("slug") or "") == str(slug) and not e.get("moved")
+                   for e in self._events)
+
+    def clear_blocked(self, slug: str) -> bool:
+        """Drop the blocked event for `slug` (comp-sync-5, 2026-09-11).
+
+        A blocked repath writes `moved=False` and `_repath_blocked_by_slug`
+        renders its sentence until a `moved=True` event for the same slug
+        replaces it -- which only a pass that actually finds and moves a
+        mismatch writes. When the mismatch stops existing by any other route
+        (the admin undoes the rename, the editor unticks and re-ticks so the
+        folder is accepted fresh at the right path) the reconcile `continue`s
+        and nothing ever clears it, so a project that is syncing normally
+        says "not syncing because CC Sync could not move its folder" for
+        ever. Returns whether anything was dropped."""
+        before = len(self._events)
+        self._events = [e for e in self._events
+                        if not (str(e.get("slug") or "") == str(slug)
+                                and not e.get("moved"))]
+        if len(self._events) == before:
+            return False
+        self._save()
+        return True
+
     def events(self) -> list[dict[str, Any]]:
         """Newest last, the order they happened in."""
         return [dict(e) for e in self._events]
@@ -256,14 +298,24 @@ class RepathLedger:
                 and e.get("old") and e.get("new")
                 and float(e.get("at") or 0) >= cutoff]
 
-    def mark_relinked(self, event_id: Any, relinked: bool, note: str = "") -> None:
+    def mark_relinked(self, event_id: Any, relinked: bool, note: str = "",
+                      slug: Optional[str] = None, old: Optional[str] = None) -> None:
+        """Retire one event. `slug`/`old` are checked when given: an id
+        written by a build before comp-sync-17 is a millisecond stamp that a
+        sibling event may share, and retiring the wrong one strands the other
+        for the rest of the relink window."""
         for event in self._events:
-            if event.get("id") == event_id:
-                event["relinked"] = bool(relinked)
-                if note:
-                    event["note"] = str(note)[:512]
-                self._save()
-                return
+            if event.get("id") != event_id:
+                continue
+            if slug is not None and str(event.get("slug") or "") != str(slug):
+                continue
+            if old is not None and str(event.get("old") or "") != str(old):
+                continue
+            event["relinked"] = bool(relinked)
+            if note:
+                event["note"] = str(note)[:512]
+            self._save()
+            return
 
 
 def moved_note(name: str, relinked: Optional[bool]) -> str:
@@ -307,6 +359,10 @@ class ProjectRepather:
         # resolve_bridge.replace_clip).
         self.ledger = RepathLedger(state_dir, now=now)
         self._relink_fn = relink_fn
+        # comp-sync-6: monotonic, and in the repather rather than in the
+        # sequencer because reconcile is also called from the per-project
+        # path, which a sequencer-side guard would miss.
+        self._last_relink_retry: Optional[float] = None
 
     def reconcile(self, selection: list[dict]) -> list[str]:
         """Repath every selected project whose local folder points somewhere
@@ -337,6 +393,24 @@ class ProjectRepather:
             actual = str(folder.get("path", ""))
             expected = str(Path(self.local_root) / "Projects" / Path(*rel.split("/")))
             if not actual or _norm(actual) == _norm(expected):
+                # comp-sync-5 (2026-09-11): the folder is where it should be,
+                # so any blocked event for it is describing a state that has
+                # stopped existing. Unpause FIRST and only clear the sentence
+                # if that worked: the blocked branch below deliberately leaves
+                # the folder paused (AUDIT_2 DEL-5/L-8), so clearing the
+                # sentence alone would turn "says blocked, is blocked" into
+                # "says fine, syncs nothing", which is strictly worse.
+                if folder.get("paused") and self.ledger.blocked(slug):
+                    try:
+                        self.admin.set_folder_paused(slug, False)
+                    except Exception:
+                        log.exception(
+                            "repath: %s is back at the right path but could not be "
+                            "unpaused -- keeping its blocked sentence", slug)
+                        continue
+                    log.warning("repath: %s is at the expected path again -- unpaused "
+                                "and its blocked sentence cleared", slug)
+                self.ledger.clear_blocked(slug)
                 continue
             if not self._is_contained(expected):
                 log.error(
@@ -416,21 +490,37 @@ class ProjectRepather:
             return None, ""
         return (True if matched else None), str(text or "")
 
-    def retry_pending_relinks(self) -> int:
+    def retry_pending_relinks(self, force: bool = False) -> int:
         """Try again for every applied repath Resolve has not answered for.
 
-        Called at the head of each reconcile, i.e. once per sequencer pass:
-        the editor opens the renamed project some time AFTER the move, and
-        that is the only moment the media pool can be walked. Returns how
-        many were retired. Never raises."""
+        Called at the head of each reconcile. THROTTLED (comp-sync-6,
+        2026-09-11): reconcile is called once for the whole selection and
+        once more inside every project turn, so this ran 1+N times a pass,
+        each time walking Resolve's whole media pool once per pending event.
+        `force` is for the tests and for a caller that knows something just
+        changed. Returns how many were retired. Never raises."""
+        now = time.monotonic()
+        if not force:
+            last = self._last_relink_retry
+            if last is not None and (now - last) < RELINK_RETRY_MIN_SECONDS:
+                return 0
+        self._last_relink_retry = now
         done = 0
         try:
+            # One walk per DESTINATION, not per event: two events that moved
+            # the same directory ask Resolve the same question.
+            seen: set[tuple[str, str]] = set()
             for event in self.ledger.pending_relinks():
+                pair = (str(event.get("old") or ""), str(event.get("new") or ""))
+                if pair in seen:
+                    continue
+                seen.add(pair)
                 relinked, detail = self._relink(event.get("old", ""), event.get("new", ""))
                 if relinked:
                     self.ledger.mark_relinked(
                         event.get("id"), True,
-                        moved_note(str(event.get("slug") or ""), True))
+                        moved_note(str(event.get("slug") or ""), True),
+                        slug=event.get("slug"), old=event.get("old"))
                     done += 1
                     log.info("repath: %s relinked in Resolve after the project changed%s",
                              event.get("slug"), f" ({detail})" if detail else "")

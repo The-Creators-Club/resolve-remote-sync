@@ -169,3 +169,33 @@ deferral, pending relinks, the report), `companion/tests/test_watcher.py`
   one-click relink, because the new path is known exactly. The relink itself
   is still `resolve_bridge.replace_clip`, the one door every media pool write
   goes through.
+
+## 7. The companion's crash window (2026-09-11, res-companion-1 / comp-sync-20)
+
+- **`applying` is a fourth ledger state.** The move on this machine is not
+  crash-atomic with the record of it: the rename returns in milliseconds, and
+  then the proxies follow and the media pool is walked, which is seconds to
+  tens of seconds - and "died without a shutdown" is routine here (CR-93, and
+  the supervisor that restarts after one). A process killed in that window
+  left the file at the NEW path, no ledger row at all, and a redelivered
+  command that found nothing at the old path and answered `ok` with
+  `relink_pending=False`: the clip was offline in Resolve for ever, and the
+  popup fixer's answer to an in-tree missing clip is to copy it back to the
+  path the admin had just cleared. So `file_moves.apply_move` now takes the
+  ledger (`apply_move(move, local_root, ledger=self.file_moves)`, passed from
+  `app._apply_file_moves`) and writes an INTENT row - state `applying`,
+  carrying both paths - BEFORE the first filesystem call. A redelivery
+  resumes from it only on the exact evidence the verdict names: our own
+  `applying` row, the source gone AND the destination present. Anything else
+  is treated as it always was. The parameter is optional so an older caller
+  behaves exactly as before, and an `applying` row counts as unresolved for
+  pruning, so it is never garbage-collected out from under a resume.
+- **A machine whose drive is out ANSWERS.** A move delivered while the sync
+  drive is missing cannot be applied and must not be guessed at, but silence
+  cost it the move: the dashboard stamps a delivery when it sends the command
+  and expires it after 7 days of "told and never answered", so an editor away
+  with the drive in their bag had it quietly dropped. The companion now
+  answers `state="retrying"` with "waiting for the sync drive" - the v36
+  shape the dashboard already understands as "still working on it, do not
+  retire this" - with `attempts` left at 0, because waiting for a drive is
+  not an attempt and must not spend the retry budget a real failure needs.

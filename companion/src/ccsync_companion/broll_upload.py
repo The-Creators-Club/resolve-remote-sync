@@ -383,6 +383,21 @@ class UploadQueue:
             return [{"rel": j.remote_rel, "kind": j.kind, "item_uid": j.item_uid,
                      "error": j.error or "the upload failed"} for j in self._failed]
 
+    def tracks(self, rels: Any) -> list[str]:
+        """Which of these rels this queue still has: queued, active, or in
+        either ledger. Zero I/O.
+
+        comp-broll-music-1 (2026-09-11): the orchestrator waits on a declared
+        rel until it lands or fails, so it needs a way to ask whether anything
+        is ever going to happen to it. A rel this answers for is not lost; one
+        it does not is a job that went nowhere.
+        """
+        wanted = {str(rel) for rel in (rels or [])}
+        with self._lock:
+            held = ([self._active] if self._active is not None else []) \
+                + list(self._queue) + list(self._done) + list(self._failed)
+        return [job.remote_rel for job in held if job.remote_rel in wanted]
+
     def uploaded(self) -> list[dict[str, Any]]:
         """What landed, as the fleet route's `files:[{rel,size}]` wants it."""
         with self._lock:
@@ -456,15 +471,31 @@ class UploadQueue:
                 self._wake.wait(timeout=5.0)
                 self._wake.clear()
                 continue
-            cmd = build_upload_command(cfg, job.local_path, job.remote_rel,
-                                       self._archive_rel)
-            if self._runner is not None:
-                self._runner(self, job, cmd)
-                continue
-            ok, error = run_upload(job, cmd)
-            if ok:
-                ok, error = verify_upload(cfg, job, archive_rel=self._archive_rel)
-            self._finish(job, ok, error)
+            # comp-broll-music-7 (2026-09-11): everything from here down is
+            # under a supervisor. `run_upload` and `verify_upload` are written
+            # never to raise, but `build_upload_command` (RcloneTuning.from_cfg
+            # on a hand-edited config) and `_finish` are not -- and an escape
+            # killed this thread with `self._active` still set, so `_next_job`
+            # refused every later job for ever and nothing on the machine
+            # uploaded again. The job is failed rather than retried: an
+            # exception here repeats, and a failure is what the orchestrator's
+            # retry ledger is for.
+            try:
+                cmd = build_upload_command(cfg, job.local_path, job.remote_rel,
+                                           self._archive_rel)
+                if self._runner is not None:
+                    self._runner(self, job, cmd)
+                    continue
+                ok, error = run_upload(job, cmd)
+                if ok:
+                    ok, error = verify_upload(cfg, job, archive_rel=self._archive_rel)
+                self._finish(job, ok, error)
+            except Exception as exc:  # noqa: BLE001 - one job, not the queue
+                log.exception("broll upload: %s failed unexpectedly", job.remote_rel)
+                with self._lock:
+                    still_active = self._active is job
+                if still_active:
+                    self._finish(job, False, f"the upload failed ({exc})")
 
 
 # ---------------------------------------------------------------------------

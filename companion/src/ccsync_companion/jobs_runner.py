@@ -262,6 +262,17 @@ class JobRunner:
         # lets this loop stop asking a fleet that has nothing to give.
         self._queue: dict[str, Any] = {}
         self._cancel: list[int] = []
+        # THE IDS THE PERSON AT THIS MACHINE ASKED TO STOP (comp-ytdl-jobs-2,
+        # 2026-09-11). Kept apart from `_cancel` because `note_report_reply`
+        # REPLACES that list with whatever the dashboard sent, and the
+        # dashboard can never carry a local stop: nothing tells it about one,
+        # and the common reply carries no `jobs` block at all. So the tray's
+        # [ STOP ] used to be erased by the next report -- the child was never
+        # terminated, the heartbeat kept renewing the lease, and the job ran to
+        # completion on a machine whose owner had asked for it back. Pruned in
+        # _post_result, so a number the dashboard reuses later is not cancelled
+        # by a stop somebody asked for last week.
+        self._local_cancel: set[int] = set()
         # THE IDS AN ADMIN SUBMITTED WITH `--now` (§10). An offer this machine
         # may claim even with somebody at the keyboard -- and only those ids,
         # which is why `_claim_ids` exists: a forced claim must not be able to
@@ -327,7 +338,12 @@ class JobRunner:
         with self._lock:
             self._offered = ids[:16]
             self._queue = depth
-            self._cancel = stops[:16]
+            # comp-ytdl-jobs-2: MERGE, never replace. The admin's list is the
+            # dashboard's to own; the local stop is this machine's, and only
+            # a posted result retires it.
+            merged = list(dict.fromkeys(
+                sorted(self._local_cancel) + stops))
+            self._cancel = merged[:16]
             self._forced = urgent[:16]
         if ids or urgent:
             # Work to claim: wake the loop now rather than at the end of a
@@ -449,6 +465,8 @@ class JobRunner:
             if job_id not in self._cancel:
                 self._cancel.append(job_id)
                 del self._cancel[:-16]
+            # comp-ytdl-jobs-2: and in the list a report reply cannot wipe.
+            self._local_cancel.add(job_id)
         log.warning("jobs: the person at this machine stopped job #%s", job_id)
         return True
 
@@ -590,6 +608,13 @@ class JobRunner:
         """Why this machine is or is not taking work, in priority order --
         proxy_gen._gate's shape, and the order an editor would ask the
         questions in."""
+        # comp-ytdl-jobs-5 (2026-09-11): cleared HERE, not on the one path
+        # that reaches the bottom. Four states return early, and the note the
+        # previous tick left was still appended by status() -- so a machine
+        # that was indexing b-roll and is then halted read "Your admin has
+        # stopped syncing for the whole fleet ... Indexing b-roll": two
+        # explanations glued together, one of them no longer true.
+        self._gate_note = ""
         if not self.enabled:
             return STATE_DISABLED
         if not self._dashboard_url or not self._token:
@@ -623,7 +648,6 @@ class JobRunner:
         if local:
             self._gate_note = local
             return STATE_LOCAL_WORK
-        self._gate_note = ""
         # THE TWO GATES A PERSON CAN OPEN (§10, 2026-08-30), and only these
         # two: what comes above is capability and safety, and neither a
         # volunteer nor an admin's `--now` is allowed past those.
@@ -744,6 +768,11 @@ class JobRunner:
 
     def _post_result(self, job_id: int, ok: bool, error: str = "",
                      result: Optional[dict] = None, retryable: bool = True) -> None:
+        # comp-ytdl-jobs-2: the local stop is spent once this job has an
+        # answer. Held until here rather than dropped at the kill, because the
+        # id has to survive every report reply in between.
+        with self._lock:
+            self._local_cancel.discard(int(job_id))
         # RECORDED BEFORE IT IS SENT (CMEDIA-2): a result the dashboard never
         # received is exactly the case where the editor's own machine is the
         # only place that can say what happened.

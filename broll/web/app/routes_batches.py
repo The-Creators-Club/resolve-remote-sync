@@ -205,8 +205,24 @@ def retry_failed(uid: str, user: str = Depends(require_user),
     it: the batch goes back to `queued` and the next claim resumes it. Nothing
     is dispatched from this route - the page tells its OWN companion to pick
     the batch up, because only the editor's machine holds the staged bytes.
+
+    A batch a machine is STILL HOLDING is refused (broll-5, 2026-09-11). The
+    reset nulls `lease_expires_at` and puts the batch back to `queued`, which
+    underneath a live leaseholder is possession taken away without telling it:
+    a second machine can win a claim beside it and both index the same clips
+    until the first one's next per-item POST is 410'd. The button is only ever
+    drawn for a finished batch, but the route is the contract, not the button,
+    and possession is settled server-side here as everywhere else. A lease
+    nobody renewed has already been expired by the list/claim paths, so the
+    orphaned-batch case this exists for is unaffected.
     """
     batch = _visible_or_404(conn, uid, user, admin)
+    if ingest_batches.lease_live(batch):
+        raise HTTPException(409, {
+            "detail": f"{batch['machine'] or 'another computer'} is still working "
+                      "on this batch. Stop it first, then try the failed clips again.",
+            "batch_uid": uid, "reason": "held", "machine": batch["machine"],
+            "state": batch["state"]})
     return ingest_batches.retry_failed(conn, batch)
 
 

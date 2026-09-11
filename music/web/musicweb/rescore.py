@@ -30,6 +30,7 @@ percentiles across every track; `compute_directions` needs the whole embedding
 matrix. That is why one new track re-scores all of them, and why there is no
 "just tag this one" entry point -- there is no such thing.
 """
+import logging
 import os
 import re
 import threading
@@ -40,6 +41,8 @@ import numpy as np
 
 from musicweb import db, vocab
 from musicweb.projection import l2norm
+
+log = logging.getLogger(__name__)
 
 # Below this many members a source group is noise, not a catalogue (the
 # constant `music_index.debias` carried).
@@ -324,6 +327,32 @@ def scores_stale(con):
     return db.get_meta(con, SCORES_STALE)
 
 
+def _snapshot_token(con):
+    """What library a rescore is about to cover: (marker, highest track id).
+
+    music-3 (2026-09-11). `scores_stale` is a LIBRARY-WIDE fact but a rescore
+    only covers the rows `load_matrix` read, and the numpy pass between them
+    takes seconds during which another threadpool thread can write a track and
+    mark the library stale. Comparing this token before clearing the marker is
+    what stops that track's marker being deleted by a pass that never saw it -
+    and `_settle_scores` is gated on exactly that marker, so losing it left a
+    track in the library with no tags, no axes and no facets, and /api/stats
+    reporting nothing to catch up on.
+
+    The id and the marker together, not the marker alone: the marker is an ISO
+    timestamp to the second, so two marks inside one second compare equal.
+    """
+    try:
+        row = con.execute('SELECT MAX(id) FROM tracks').fetchone()
+        top = row[0] if row else None
+    except Exception:                                           # noqa: BLE001
+        # Unreadable is not evidence that nothing changed: a token that can
+        # never compare equal leaves the marker standing, which costs one
+        # extra rescore and loses nothing.
+        return object()
+    return (scores_stale(con), top)
+
+
 def rescore_library(con, encoder=None):
     """Recompute the source-bias axes, the tags and the axes. -> a summary.
 
@@ -337,6 +366,7 @@ def rescore_library(con, encoder=None):
     inside an open write transaction, and a rescore that did not happen has to
     be visible to somebody other than the log.
     """
+    token = _snapshot_token(con)
     ids, mat = db.load_matrix(con)
     if not ids:
         return {'tracks': 0, 'labels': 0, 'axes': 0, 'debias': 0}
@@ -357,7 +387,14 @@ def rescore_library(con, encoder=None):
         with con:
             db.set_meta(con, 'vocab_hash', vocab.vocab_hash())
             db.set_meta(con, 'tagged_at', _now())
-            con.execute('DELETE FROM meta WHERE key=?', (SCORES_STALE,))
+            # music-3: compare and clear. The marker belongs to whatever the
+            # library was when this pass started; a track written since is not
+            # covered by it and its marker has to survive for _settle_scores.
+            if _snapshot_token(con) == token:
+                con.execute('DELETE FROM meta WHERE key=?', (SCORES_STALE,))
+            else:
+                log.info('music rescore: the library changed during the pass, '
+                         'so scores_stale stands and the next settle rescores')
     except BaseException:
         # Nothing above may leave a half-applied score set on a shared
         # connection. rollback() on a connection with no transaction open is a
@@ -381,9 +418,16 @@ def apply_for_track(con, track_id, encoder=None, force=False):
 
     There IS a cheaper frequency (MUSIC-5, 2026-09-04). Inside
     RESCORE_MIN_SECONDS of the last one this returns `deferred` instead,
-    marking the library stale; `release` passes force=True, so a batch is
-    always fully tagged by the time it finishes, and the editor is told the
-    tags are catching up rather than shown a track with none.
+    marking the library stale, and the editor is told the tags are catching up
+    rather than shown a track with none.
+
+    What settles the deferred tracks is `routes_fleet._settle_scores`, which
+    rescores the whole library once at RELEASE when the marker is set - not a
+    `force=True` call from `release`, which is what this docstring claimed
+    until music-4 (2026-09-11) and what a reader reconciling the two would
+    have trusted. The difference is not cosmetic: the settle has a gate to
+    lose, which is the marker music-3 was erasing. `force` itself is the
+    parameter that skips the coalescing window; only the tests use it today.
 
     Returns the summary plus this track's own tags/axes, which the route hands
     back so the SPA can show what the drop was labelled without re-querying.

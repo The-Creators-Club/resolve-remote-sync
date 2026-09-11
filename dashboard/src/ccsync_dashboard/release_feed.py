@@ -57,7 +57,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from fastapi import APIRouter, Depends, HTTPException, Request as FastAPIRequest
@@ -336,6 +336,23 @@ def fetch_artifact_to(url: str, part: Path, *, expected_sha256: str,
     return sha, size
 
 
+def _signature_url(url: str) -> str:
+    """The detached signature's URL: `.sig` on the PATH, query intact.
+
+    dash-release-jobs-3 (2026-09-11): this used to be `url + ".sig"`, which is
+    a different file only when the feed URL is a bare path. The threat model
+    contemplates "an S3 bucket, whatever a customer's outbound network
+    reaches", and a pre-signed or CDN-token URL carries a query string --
+    `.../channel.json?X-Amz-Signature=...sig` is a URL that does not exist, so
+    every check failed with a 404 naming a URL the operator never configured
+    and the site quietly stopped receiving builds (REL-11's shape).
+
+    A fragment is dropped: it is a client-side construct that never reaches
+    the server anyway, and carrying it would only put it in the log lines."""
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path + ".sig", parts.query, ""))
+
+
 def fetch_and_verify_channel(
     url: str, pubkeys: tuple[str, ...]
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -353,7 +370,7 @@ def fetch_and_verify_channel(
     if not isinstance(channel, dict) or channel.get("schema") != 1:
         return None, "channel.json is not a schema=1 object"
     try:
-        sig_raw = _fetch_bytes(url + ".sig", cap=8192)
+        sig_raw = _fetch_bytes(_signature_url(url), cap=8192)
     except FeedError as exc:
         return None, str(exc)
     signature = sig_raw.decode("utf-8", errors="replace").strip()
@@ -364,7 +381,20 @@ def fetch_and_verify_channel(
 
 
 def _record_key(record: dict[str, Any]) -> tuple[str, str, str]:
-    return (str(record.get("kind", "")), str(record.get("platform", "")), str(record.get("version", "")))
+    """(kind, platform, version), NORMALISED the way every consumer spells it.
+
+    dash-release-jobs-7 (2026-09-11): kind and platform are case-folded here
+    because the admin [ PUBLISH ] route case-folds what the page posts
+    (api_admin_feed_publish) and `companion_packages` holds them folded too.
+    A record published as `Windows` used to be listed as available and then
+    404 on the button with "no verified feed record ... run Check now first",
+    because the lookup compared the admin's `windows` against the record's own
+    spelling. `_valid_records` already folded platform for the recall key; one
+    place decides now.
+    """
+    return (str(record.get("kind", "")).strip().lower(),
+            str(record.get("platform", "")).strip().lower(),
+            str(record.get("version", "")).strip())
 
 
 def channel_retractions(channel: Any) -> list[dict[str, str]]:
@@ -458,6 +488,27 @@ def _valid_records(channel: dict[str, Any], pubkeys: tuple[str, ...]) -> list[di
         if key in recalled:
             log.warning("release feed: %s/%s %s is in the channel's `retracted` list "
                         "-- not offering it", *key)
+            continue
+        # dash-release-jobs-7 (2026-09-11): a record's kind and platform have
+        # to arrive in the spelling everything else uses. The admin
+        # [ PUBLISH ] button posts what this page rendered and the route
+        # case-folds it, so a record published as `Windows` was listed as
+        # available and then answered "no verified feed record ... run Check
+        # now first" for ever. Folding it here instead would be worse: the
+        # platform string is inside the record's SIGNATURE, so a folded copy
+        # would fail store_verified_package's re-verification with "no
+        # configured release public key verifies this record" -- a sentence
+        # about trust for what is really a spelling. Dropped, named, and the
+        # answer is a feed that publishes the canonical spelling.
+        odd = [f for f in ("kind", "platform")
+               if str(rec.get(f, "")) != str(rec.get(f, "")).strip().lower()]
+        if odd:
+            log.warning("release feed: ignoring %s/%s %s -- its %s is not in the "
+                        "lower-case spelling every other surface uses, and the "
+                        "signature covers that string, so it could not be published "
+                        "under either one",
+                        rec.get("kind"), rec.get("platform"), rec.get("version"),
+                        " and ".join(odd))
             continue
         # A validly signed record can still be a typo that would brick the
         # channel: min_version above the version it describes raises every
@@ -1210,15 +1261,23 @@ class FeedPoller:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
+        # dash-release-jobs-4 (2026-09-11): clear the event and drop the dead
+        # thread, so stop() then start() on the SAME poller really polls again.
+        # It used to return early on a `_thread` stop() never cleared, leaving
+        # a poller that reported itself started and never checked the feed --
+        # green while dead. cards_exec.PinnedExecutor has always had this
+        # shape; the two threads in this territory now agree.
         if self._thread is not None:
             return
+        self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="release-feed-poller", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=5.0)
 
     def _run(self) -> None:
         # A short initial delay, not an immediate check at import time: a

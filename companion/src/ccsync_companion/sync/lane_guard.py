@@ -103,6 +103,10 @@ DISK_FLOOR_CLEAR_MULTIPLE = 2.0
 BREAKER_STATE_FILENAME = "lane_b_breaker.json"
 HALT_STATE_FILENAME = "sync_halt.json"
 DISK_FLOOR_STATE_FILENAME = "lane_b_disk_floor.json"
+# res-companion-5: how often a pass in flight is allowed to write its running
+# deletion count. A pass trashing thousands of files must not write the latch
+# per file, and a crash can cost at most this many seconds of account.
+PERSIST_IN_FLIGHT_SECONDS = 20.0
 
 
 def adopt_legacy_latch(new_path: Path, legacy_path: Path) -> Path:
@@ -193,7 +197,11 @@ def _write_json(path: Path, data: dict) -> bool:
     os.replace is atomic on NTFS and APFS, so there is no reason to accept
     either."""
     target = Path(path)
-    tmp = target.with_name(target.name + ".tmp")
+    # comp-sync-1 (2026-09-11): process-unique, as root_guard.write_volume_record
+    # already does. Two companions overlapping across a self-upgrade otherwise
+    # write the same `<name>.tmp` and one can replace the other's half-written
+    # bytes into a live latch.
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
@@ -206,6 +214,86 @@ def _write_json(path: Path, data: dict) -> bool:
         except OSError:
             pass
         return False
+
+
+class _PersistedLatch:
+    """The half of a safety latch that has to survive a restart, and what to
+    do when the disk refuses it (comp-sync-1, 2026-09-11).
+
+    `_write_json` returned a bool nobody read: every `_persist_locked` in this
+    module discarded it, there was no retry and no field anywhere said so, so
+    a latch whose write failed (a full or read-only home volume, EACCES, an AV
+    lock -- the state dir is `~/.ccsync`, not the sync tree, so ENOSPC on the
+    sync drive is not one of them) was IN MEMORY ONLY. The tray restart an
+    editor tries first then cleared it. CLAUDE.md: "Never make a safety latch
+    in-memory-only."
+
+    Three things, all small: the last payload is kept so it can be written
+    again; every read of `report()` retries a failed one on a slow cadence,
+    which is enough because report() is on the report loop and the tray's
+    render path; and the failure itself is reported, so the fleet grid and
+    the tray can say "this machine cannot write its safety state".
+
+    Subclasses call `self._write_state(payload)` from their `_persist_locked`
+    with the lock held, and fold `self._persist_report()` into `report()`.
+    """
+
+    # Long enough that a disk that is genuinely full is not hammered, short
+    # enough that the window in which the latch is memory-only is minutes.
+    PERSIST_RETRY_SECONDS = 60.0
+
+    _persist_failed = False
+    _persist_error = ""
+    _persist_failed_at = ""
+    _persist_payload: Optional[dict] = None
+    _persist_last_try = 0.0
+
+    def _write_state(self, payload: dict) -> bool:
+        """Caller holds the latch's lock."""
+        self._persist_payload = dict(payload)
+        self._persist_last_try = time.monotonic()
+        ok = _write_json(self.state_path, payload)
+        if ok:
+            if self._persist_failed:
+                log.warning("%s: written again after %s -- the latch is on disk",
+                            self.state_path, self._persist_error or "a failed write")
+            self._persist_failed = False
+            self._persist_error = ""
+            self._persist_failed_at = ""
+            return True
+        if not self._persist_failed:
+            self._persist_failed = True
+            self._persist_failed_at = _now_iso()
+            self._persist_error = f"could not write {self.state_path}"
+            log.error(
+                "SAFETY STATE NOT SAVED: %s could not be written. Whatever is "
+                "latched here is remembered in memory only, so restarting CC Sync "
+                "would clear it. It is retried every %.0fs.",
+                self.state_path, self.PERSIST_RETRY_SECONDS,
+            )
+        return False
+
+    def _retry_persist_locked(self) -> None:
+        """Caller holds the latch's lock. Cheap on the happy path."""
+        if not self._persist_failed or self._persist_payload is None:
+            return
+        if (time.monotonic() - self._persist_last_try) < self.PERSIST_RETRY_SECONDS:
+            return
+        self._write_state(self._persist_payload)
+
+    def _persist_report(self) -> dict[str, Any]:
+        """The keys a failed persist adds to this latch's report block.
+
+        EMPTY on the happy path, deliberately: an absent key is how "the disk
+        is fine" is spelled on a wire whose other end may be a dashboard one
+        release older (brief rule 8)."""
+        if not self._persist_failed:
+            return {}
+        return {
+            "persist_failed": True,
+            "persist_error": self._persist_error or None,
+            "persist_failed_at": self._persist_failed_at or None,
+        }
 
 
 # -- how much of the local proxy set is at stake ---------------------------
@@ -316,7 +404,7 @@ def breaker_editor_reason(reason: Any, cause: Any = "") -> str:
     return text or "Proxy download stopped itself as a safety measure. " + _BREAKER_TAIL
 
 
-class LaneBBreaker:
+class LaneBBreaker(_PersistedLatch):
     """Trips lane B off and keeps it off until an operator says otherwise.
 
     Three independent triggers, in the order they can fire:
@@ -389,6 +477,12 @@ class LaneBBreaker:
         self._remote_counts: dict[str, int] = (
             {str(k): int(v) for k, v in remote.items()} if isinstance(remote, dict) else {}
         )
+        # res-companion-5: how much of the RUNNING pass's deletion count has
+        # already been credited to `_deletes`. In memory on purpose -- a
+        # process that died mid-pass has no pass in flight when it comes
+        # back, and the deletions it made are already on disk in `_deletes`.
+        self._in_flight_credited = 0
+        self._in_flight_persisted_at = 0.0
 
     # -- state ---------------------------------------------------------
     @property
@@ -405,7 +499,12 @@ class LaneBBreaker:
         """The `sync_guard.lane_b_breaker` block of the report payload, and
         the tray's source for the same sentence. Cheap; never raises."""
         with self._lock:
+            # comp-sync-1: the retry rides the report, which is the report
+            # loop's and the tray's own cadence -- no new timer thread for a
+            # failure that is rare and self-announcing.
+            self._retry_persist_locked()
             return {
+                **self._persist_report(),
                 "tripped": self._tripped,
                 "reason": self._reason or None,
                 # SYNC-106: `reason` is the admin's sentence (it names the
@@ -424,7 +523,7 @@ class LaneBBreaker:
             }
 
     def _persist_locked(self) -> None:
-        _write_json(self.state_path, {
+        self._write_state({
             "tripped": self._tripped,
             "reason": self._reason,
             "cause": self._cause,
@@ -502,6 +601,7 @@ class LaneBBreaker:
             self._bytes = 0
             self._last_pass_deletes = 0
             self._remote_counts.clear()
+            self._in_flight_credited = 0  # res-companion-5
             self._resumed_at = _now_iso()
             self._persist_locked()
         log.warning("lane B breaker RESUMED by %s (was: %s)", by, reason)
@@ -568,6 +668,39 @@ class LaneBBreaker:
         self.trip(reason, cause)
         return reason
 
+    def note_deletes_in_flight(self, deleted_so_far: int) -> None:
+        """Credit what the pass RUNNING RIGHT NOW has already trashed
+        (res-companion-5, 2026-09-11).
+
+        The cumulative account used to be written once per pass, from the
+        parsed result, after rclone had exited -- so a SIGKILL or a power cut
+        halfway through a pass that was emptying a scope erased every
+        deletion it had already made. The files are in `.ccsync-trash`, but
+        the counter that would have tripped the breaker on the NEXT pass never
+        saw them, and the machine came back with a full fresh budget. The
+        per-pass `--max-delete` cap is what keeps this low rather than
+        serious; it is still the wrong direction for a safety device to fail.
+
+        `deleted_so_far` is the run's running total, not a delta: the lane
+        reads it off the same tally the live --stats parse already keeps.
+        Persists at most once every PERSIST_IN_FLIGHT_SECONDS -- a pass
+        trashing thousands of files must not write this file per file."""
+        try:
+            total = max(0, int(deleted_so_far or 0))
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            delta = total - self._in_flight_credited
+            if delta <= 0:
+                return
+            self._in_flight_credited = total
+            self._deletes += delta
+            now = time.monotonic()
+            if (now - self._in_flight_persisted_at) < PERSIST_IN_FLIGHT_SECONDS:
+                return
+            self._in_flight_persisted_at = now
+            self._persist_locked()
+
     # -- triggers 2 and 3: what a pass actually did ---------------------
     def note_pass(
         self, scope: str, deleted: int, moved_bytes: int, local_proxies: int = 0,
@@ -594,7 +727,10 @@ class LaneBBreaker:
         moved_bytes = max(0, int(moved_bytes or 0))
         with self._lock:
             self._last_pass_deletes = deleted
-            self._deletes += deleted
+            # res-companion-5 (2026-09-11): whatever this pass already
+            # credited while it was running is not credited twice.
+            credited, self._in_flight_credited = self._in_flight_credited, 0
+            self._deletes += max(0, deleted - credited)
             self._bytes += moved_bytes
             cumulative = self._deletes
             self._persist_locked()
@@ -758,7 +894,7 @@ def _gb(value: Any) -> str:
         return "?"
 
 
-class DiskFloorLatch:
+class DiskFloorLatch(_PersistedLatch):
     """Lane B stands down when the sync drive is nearly full.
 
     Deliberately the BREAKER's shape and not an error (SYS-5 / SYNC-7,
@@ -812,7 +948,9 @@ class DiskFloorLatch:
 
     def report(self) -> dict[str, Any]:
         with self._lock:
+            self._retry_persist_locked()  # comp-sync-1
             return {
+                **self._persist_report(),
                 "parked": self._parked,
                 "reason": self._reason or None,
                 "at": self._at or None,
@@ -821,7 +959,7 @@ class DiskFloorLatch:
             }
 
     def _persist_locked(self) -> None:
-        _write_json(self.state_path, {
+        self._write_state({
             "parked": self._parked,
             "reason": self._reason,
             "at": self._at,
@@ -1151,7 +1289,7 @@ def _remove_tree(path: Path, size: int, why: str) -> bool:
 
 
 # -- the halt --------------------------------------------------------------
-class HaltState:
+class HaltState(_PersistedLatch):
     """"Stop all sync" -- the thing "Pause syncing" is not.
 
     Pause stops the rclone rotation and the express upload; lane C (Syncthing)
@@ -1193,7 +1331,9 @@ class HaltState:
 
     def report(self) -> dict[str, Any]:
         with self._lock:
+            self._retry_persist_locked()  # comp-sync-1
             return {
+                **self._persist_report(),
                 "active": self._active,
                 "scope": self._scope if self._active else None,
                 "reason": self._reason or None,
@@ -1201,7 +1341,7 @@ class HaltState:
             }
 
     def _persist_locked(self) -> None:
-        _write_json(self.state_path, {
+        self._write_state({
             "active": self._active, "scope": self._scope,
             "reason": self._reason, "at": self._at,
         })

@@ -156,6 +156,17 @@ ACTION_UNSUPPORTED = "unsupported"   # no pinned asset for this platform/arch
 # first pass and take the tray's tools maintenance with it.
 _work_lock = threading.RLock()
 
+# comp-ytdl-jobs-3 (2026-09-11): WHY the last install failed, per tool, and how
+# many passes in a row have failed. Until this existed the cause ("certificate
+# verify failed" on a Mac whose Python has no CA bundle -- a live field
+# problem) went into one log line, at DEBUG on the vendor default, and the only
+# fleet-visible consequence was capabilities.ffmpeg=false: a machine silently
+# ineligible for every media job kind, reading as "never set up" rather than
+# "cannot reach GitHub". In memory: the disk is not the problem here, and the
+# count only has to survive the daily thread, not a restart.
+_failure_causes: dict[str, str] = {}
+_consecutive_failures = 0
+
 
 # ---------------------------------------------------------------------------
 # where it lives
@@ -313,11 +324,17 @@ def install_tool(tool: str, url: str, expected_sha256: str, kind: str, directory
                     fh.write(chunk)
                     digest.update(chunk)
     except Exception as exc:
+        # comp-ytdl-jobs-3: the cause is kept, not just logged. It is the
+        # difference between "this machine cannot reach GitHub" and "this
+        # machine was never set up", and only one of them has an action.
+        _note_cause(tool, str(exc))
         log.info("sidecar: %s download failed (%s)", asset, exc)
         _unlink_quietly(archive_tmp)
         return False
 
     if digest.hexdigest() != expected_sha256.lower():
+        _note_cause(tool, f"sha256 mismatch on {asset} (got "
+                          f"{digest.hexdigest()[:12]}, pinned {expected_sha256[:12]})")
         log.warning(
             "sidecar: sha256 mismatch on the downloaded %s (got %s, pinned %s) -- "
             "discarding it, nothing installed", asset, digest.hexdigest()[:12],
@@ -329,6 +346,7 @@ def install_tool(tool: str, url: str, expected_sha256: str, kind: str, directory
     try:
         _unpack(kind, archive_tmp, binary_name(tool), bin_tmp)
     except Exception as exc:
+        _note_cause(tool, f"could not unpack {asset}: {exc}")
         log.warning("sidecar: could not unpack %s (%s)", asset, exc)
         _unlink_quietly(archive_tmp)
         _unlink_quietly(bin_tmp)
@@ -339,11 +357,66 @@ def install_tool(tool: str, url: str, expected_sha256: str, kind: str, directory
     try:
         os.replace(bin_tmp, directory / binary_name(tool))
     except Exception as exc:
+        _note_cause(tool, f"could not move the verified {tool} into place: {exc}")
         log.warning("sidecar: could not move the verified %s into place (%s)", tool, exc)
         _unlink_quietly(bin_tmp)
         return False
+    _failure_causes.pop(tool, None)
     log.info("sidecar: installed %s", directory / binary_name(tool))
     return True
+
+
+def _note_cause(tool: str, cause: str) -> None:
+    """Remember WHY `tool` could not be installed (comp-ytdl-jobs-3). Never
+    raises: it is bookkeeping on a best-effort path."""
+    try:
+        _failure_causes[str(tool)] = str(cause or "").strip()[:200]
+    except Exception:                                           # pragma: no cover
+        pass
+
+
+def failure_cause(tools: Optional[list[str]] = None) -> str:
+    """The last recorded cause across `tools` (or all of them), or ""."""
+    names = list(tools) if tools else list(_failure_causes)
+    for name in names:
+        cause = _failure_causes.get(str(name))
+        if cause:
+            return cause
+    return ""
+
+
+def consecutive_failures() -> int:
+    """How many install passes in a row have failed (comp-ytdl-jobs-3)."""
+    return _consecutive_failures
+
+
+def reset_failures() -> None:
+    """Test hook and the clean-pass reset."""
+    global _consecutive_failures
+    _consecutive_failures = 0
+    _failure_causes.clear()
+
+
+def _note_pass(failed: bool, failed_tools: Optional[list[str]] = None) -> int:
+    """Count one install pass and log a REPEAT at WARNING (comp-ytdl-jobs-3).
+
+    WARNING here rather than in ytdlp_manager._loop's log.log, because that
+    line is demoted to DEBUG when the YouTube downloader is off -- the vendor
+    default -- and the ffmpeg pair stopped being a YouTube entitlement in
+    comp-ytdl-2. The first failure is allowed to be quiet: GitHub blips.
+    """
+    global _consecutive_failures
+    if not failed:
+        reset_failures()
+        return 0
+    _consecutive_failures += 1
+    if _consecutive_failures >= 2:
+        log.warning("sidecar: %s could not be installed on %s consecutive "
+                    "passes (%s) -- this machine will not be offered proxy, "
+                    "audio or peaks work",
+                    ", ".join(failed_tools or ["ffmpeg"]), _consecutive_failures,
+                    failure_cause(failed_tools) or "no cause recorded")
+    return _consecutive_failures
 
 
 def ensure_ffmpeg_pair(cfg: Optional[dict[str, Any]] = None,
@@ -384,20 +457,26 @@ def ensure_ffmpeg_pair(cfg: Optional[dict[str, Any]] = None,
             log.debug("sidecar: own-ffmpeg check failed; continuing", exc_info=True)
             own_ffmpeg = False
         if own_ffmpeg:
+            _note_pass(False)
             return {"ok": True, "action": ACTION_NONE, "own_ffmpeg": True,
                     "installed": [], "failed": [],
                     "message": "using the ffmpeg already on this machine"}
 
         missing = [tool for tool in ("ffmpeg", "ffprobe") if not is_installed(tool)]
         if not missing:
+            _note_pass(False)
             return {"ok": True, "action": ACTION_NONE, "own_ffmpeg": False,
                     "installed": [], "failed": [],
                     "message": f"ffmpeg {FFMPEG_RELEASE_TAG} is installed"}
 
         directory = ytdlp_manager.ensure_tools_dir()
         if directory is None or not _free_space_ok(directory):
+            _note_cause("ffmpeg", "no tools dir, or not enough free space for it")
+            failures = _note_pass(True, list(missing))
             return {"ok": False, "action": ACTION_FAILED, "own_ffmpeg": False,
                     "installed": [], "failed": list(missing), "no_room": True,
+                    "cause": failure_cause(list(missing)),
+                    "consecutive_failures": failures,
                     "message": "ffmpeg could not be installed (tools dir or free space)"}
 
         installed, failed = [], []
@@ -408,9 +487,17 @@ def ensure_ffmpeg_pair(cfg: Optional[dict[str, Any]] = None,
             else:
                 failed.append(tool)
         if failed:
+            # comp-ytdl-jobs-3: the CAUSE rides the message. "could not
+            # install ffmpeg" with no reason is the line that reached an
+            # admin for a year and told them nothing they could act on.
+            cause = failure_cause(failed)
+            failures = _note_pass(True, failed)
             return {"ok": False, "action": ACTION_FAILED, "own_ffmpeg": False,
                     "installed": installed, "failed": failed,
-                    "message": f"could not install {', '.join(failed)}"}
+                    "cause": cause, "consecutive_failures": failures,
+                    "message": (f"could not install {', '.join(failed)}"
+                                + (f": {cause}" if cause else ""))}
+        _note_pass(False)
         return {"ok": True, "action": ACTION_INSTALLED, "own_ffmpeg": False,
                 "installed": installed, "failed": [],
                 "message": f"installed {', '.join(installed)} into {directory}"}
@@ -501,11 +588,15 @@ def ensure(cfg: Optional[dict[str, Any]] = None,
                     "message": "sidecar tools could not be installed (tools dir or free space) "
                                "-- YouTube downloads stay on the server"}
         if failed:
+            cause = failure_cause(failed)
             return {"ok": False, "action": ACTION_FAILED,
+                    "failed": list(failed), "cause": cause,
+                    "consecutive_failures": consecutive_failures(),
                     "message": f"could not install {', '.join(failed)} -- "
                                + ("YouTube downloads stay on the server"
                                   if "ffmpeg" in failed else
-                                  "signed-in YouTube downloads stay off on this machine")}
+                                  "signed-in YouTube downloads stay off on this machine")
+                               + (f" ({cause})" if cause else "")}
         if installed:
             return {"ok": True, "action": ACTION_INSTALLED,
                     "message": f"installed {', '.join(installed)} into "

@@ -278,13 +278,22 @@ def main() -> int:
         if not version:
             print(image_pythonpath())
             return 0
-    attempts = bump_boot_attempts(version)
-
     pythonpath, reason = check_tree(version, runtime_id)
     if reason:
+        # NOT COUNTED (dash-mounts-ui-8, 2026-09-11). The bump used to happen
+        # here, before the tree was checked, so a boot that refused the tree
+        # and ran the IMAGE still counted against it -- and check_tree's
+        # environment-shaped refusals ("DASH_RELEASE_PUBKEYS is not set",
+        # "this image has no /venv/.runtime-id") are indistinguishable from
+        # tree-shaped ones to a counter. Two restarts with the keys missing
+        # from the deploy command (the documented redeploy recipe notes they
+        # must be there) reverted a perfectly good OTA update and blamed the
+        # bundle. boot_attempts' docstring says a non-zero count always means
+        # the last boot OF THIS TREE did not work; now it does.
         say(f"WARNING: booting the image's own code instead of {version}: {reason}")
         print(image_pythonpath())
         return 0
+    attempts = bump_boot_attempts(version)
     say(f"booting the installed code tree {version} (attempt {attempts})")
     print(pythonpath)
     return 0

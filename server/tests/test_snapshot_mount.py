@@ -16,7 +16,7 @@ a green transcript. The deploy asks the same question now and says so.
 
 Offline, like the rest of this suite; run from GIT BASH (see CLAUDE.md).
 
-    cd E:\\Projects\\resolve-remote-sync\\server
+    cd E:\\Projects\\Editing\\ccsync\\server
     ../dashboard/.venv/Scripts/python.exe -m pytest tests/test_snapshot_mount.py -q
 """
 import sys
@@ -127,8 +127,9 @@ def test_the_compose_body_carries_the_mount_and_both_variables():
     assert body["environment"]["DASH_SNAPSHOT_PROJECTS_SUBPATH"] == \
         "Creators_Club/Projects"
     # READ-ONLY: `.zfs/snapshot` is the one directory on the NAS where a write
-    # is a rollback of somebody's footage.
-    assert f"/mnt/tank/.zfs/snapshot:{ida.SNAPSHOT_MOUNT}:ro" in body["volumes"]
+    # is a rollback of somebody's footage. rslave since server-tools-3
+    # (2026-09-11) -- see test_bug_hunt_2026_09_11_server_tools.py.
+    assert f"/mnt/tank/.zfs/snapshot:{ida.SNAPSHOT_MOUNT}:ro,rslave" in body["volumes"]
 
 
 def test_without_a_snapshot_source_the_page_is_told_nothing_rather_than_a_lie():

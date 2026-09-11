@@ -65,6 +65,7 @@ REPO_ROOT = TOOLS_DIR.parent
 sys.path.insert(0, str(REPO_ROOT / "dashboard" / "src"))
 
 from ccsync_dashboard import VERSION as DASHBOARD_VERSION  # noqa: E402
+from ccsync_dashboard import published_docs  # noqa: E402
 from ccsync_dashboard import runtime_id as runtime_id_mod  # noqa: E402
 
 EXIT_OK = 0
@@ -95,34 +96,48 @@ TREES: tuple[tuple[str, str], ...] = (
     # THIRD_PARTY_NOTICES.md (in this same directory) has the same problem.
     # ~124 KB of markdown against a ~10 MB bundle. The bundle root IS the code
     # root, so this lands where setup_engine._find_eula looks: <root>/docs/legal.
-    ("docs/legal", "docs/legal"),
-    # ...and the rest of the documentation with it (Alex, 2026-09-04): /help
-    # is a BROWSER now, so an over-the-air dashboard that carried only the
-    # guide would show a one-entry list. MARKDOWN ONLY (MD_ONLY_TREES below):
-    # docs/mobile is a directory of screenshots and a code bundle is not a
-    # photo album. ~4 MB of text against a ~10 MB bundle. `docs/legal` above
-    # stays a line of its own because it is REQUIRED - the EULA is not
-    # optional the way a runbook is - and packing a file twice is harmless
-    # here (collect_files de-duplicates on the bundle path).
-    ("docs", "docs"),
-)
+    # It comes from published_docs.PUBLISHED_TREES with the rest of the
+    # customer-facing documents (appended below), and a checkout without it
+    # still fails the build: collect_files refuses a TREES entry that is not a
+    # directory.
+    #
+    # The rest of `docs/` used to be a tree line here as well (Alex,
+    # 2026-09-04, "/help is a BROWSER now"). It is NOT any more
+    # (dash-mounts-ui-1 / server-tools-2, 2026-09-11): it put this studio's
+    # defect ledger, its plans and its bug-hunt reports - which name our
+    # editors, their machines and our infrastructure - into every customer's
+    # bundle, for any signed-in editor to read at /help. The customer-facing
+    # documents come from PUBLISHED_TREES/PUBLISHED_FILES below, which is
+    # dashboard/src/ccsync_dashboard/published_docs.py: ONE list, shared with
+    # the image (Dockerfile + .dockerignore) and with bind mode
+    # (install_dashboard_app._stage_docs_tree), so the three routes cannot
+    # disagree about what leaves this repository.
+) + tuple((src, src) for src in published_docs.published_sources()[1])
 
 # Trees packed for their markdown and nothing else.
-MD_ONLY_TREES = frozenset({"docs"})
+MD_ONLY_TREES = frozenset(published_docs.published_sources()[1])
 
 # FILES is the guide, named explicitly so a checkout without it is REFUSED
 # rather than quietly shipping a dashboard whose /help says it is not
 # installed (REL-5).
-FILES: tuple[tuple[str, str], ...] = (
-    ("docs/HOW_IT_WORKS.md", "docs/HOW_IT_WORKS.md"),
+FILES: tuple[tuple[str, str], ...] = tuple(
+    (src, src) for src in published_docs.published_sources(required_only=True)[0]
 )
 
-# The repository's top-level documents, shipped where help.py browses them
-# (help.ROOT_DIR_NAME). BEST EFFORT, unlike FILES: these are our own working
-# documents, one of them may not exist in a given checkout (there is no
-# README.md at the root of this one today), and a missing bug ledger is not a
-# reason to refuse to build a dashboard.
-ROOT_DOCS: tuple[str, ...] = ("README.md", "SPEC.md", "KNOWN_BUGS.md", "CLAUDE.md")
+# The rest of the customer-facing documents: BEST EFFORT, because a checkout
+# without one of them is a thinner /help, not a broken dashboard.
+OPTIONAL_FILES: tuple[tuple[str, str], ...] = tuple(
+    (src, src) for src in published_docs.published_sources()[0]
+    if src not in {f for f, _ in FILES}
+)
+
+# The repository's top-level documents used to travel under `docs/_root/`
+# (README / SPEC / KNOWN_BUGS / CLAUDE). EMPTY since 2026-09-11
+# (dash-mounts-ui-1): KNOWN_BUGS.md and CLAUDE.md are the two worst documents
+# in this repository to hand a customer, and a bundle is a customer's
+# dashboard. The loop below stays, so re-publishing one is one tuple entry in
+# published_docs.
+ROOT_DOCS: tuple[str, ...] = published_docs.ROOT_DOCS
 
 # Directory names dropped wherever they appear. `data` is in here because each
 # sub-app's data root is a MOUNT at runtime (/broll-data, /music-data,
@@ -233,6 +248,12 @@ def collect_files(repo_root: Path) -> list[tuple[str, Path]]:
             continue
         seen.add(f"docs/_root/{name}")
         collected.append((f"docs/_root/{name}", source))
+    for source_rel, bundle_name in OPTIONAL_FILES:
+        source = repo_root / source_rel
+        if not source.is_file() or bundle_name in seen:
+            continue
+        seen.add(bundle_name)
+        collected.append((bundle_name, source))
     for source_rel, bundle_name in FILES:
         source = repo_root / source_rel
         if not source.is_file():

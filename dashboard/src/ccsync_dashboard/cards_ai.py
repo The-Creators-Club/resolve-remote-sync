@@ -129,6 +129,44 @@ _JSON_BLOCK = re.compile(r"\{.*\}", re.S)
 INSTRUCTIONS_MARKER = "---INSTRUCTIONS---"
 _MARKER_RE = re.compile(r"^" + re.escape(INSTRUCTIONS_MARKER) + r"[ \t]*$", re.M)
 
+# -- the cards the editor has selected (cards selection context, 2026-09-11) -
+#
+# Alex' ask: "the selected cards should be adjusted", "the selected cards need
+# to be moved after X", "make the current card selection a new group called
+# Interviews" must work without naming a card. The page knows the selection,
+# the model has to be TOLD it, and the ids in the block are the ids the edit
+# ops act on -- a label alone would have the model guessing which card a
+# person's name meant.
+#
+# THREE PROPERTIES, each of them a bug otherwise:
+#
+#  1. THE BLOCK IS DELIMITED AND NAMED. `SELECTED CARDS` ... `END SELECTED
+#     CARDS` so the model can tell the selection from the cut list digest
+#     above it, and so THIS side can tell whether a prompt already carries
+#     one: Timeline Cards renders the same block itself (its `Where.block`,
+#     one renderer for both doors, because the standalone server has no
+#     runner to render anything). A prompt that already has the header is
+#     passed through untouched -- the block must never appear twice.
+#  2. IT GOES IN THE UNCACHED HALF. The selection changes turn to turn and
+#     the corpus block is billed per cache write; a selection above the
+#     marker would invalidate an episode's whole cached prefix on every
+#     click.
+#  3. ORDER IS THE PAGE'S ORDER. "move the selected cards after X" keeps the
+#     order they were selected in, so the rows are numbered and never sorted
+#     here.
+#
+# Version skew both ways: an older page (or any of the three original
+# features) passes nothing and the prompt is byte for byte today's; a newer
+# page against an older dashboard loses the block and nothing else, because
+# the selection also reaches the model through Timeline Cards' own CONTEXT.
+SELECTION_HEADER = "SELECTED CARDS"
+SELECTION_END = "END SELECTED CARDS"
+
+# A marquee over a long cut list can be hundreds of cards. The ids are what
+# the ops need, and a hundred labelled rows is a page of prompt nobody reads:
+# past this the block says how many more there are and lists the ids alone.
+MAX_SELECTION_ROWS = 40
+
 # The one error string every caller matches on (§12.2). Never a sentence: the
 # CALLER decides what to say and whether to re-open with the corpus.
 SESSION_LOST = "session_lost"
@@ -205,7 +243,7 @@ class Runner:
 
     def run(self, prompt: str, model: str = "", timeout: float = DEFAULT_TIMEOUT,
             think: bool = True, json_out: str = "",
-            session: Any = None) -> dict[str, Any]:
+            session: Any = None, selection: Any = None) -> dict[str, Any]:
         """One call. -> {ok, text, data, provider, error}.
 
         `think` is accepted and ignored on the API path (the SDK call is made
@@ -223,6 +261,12 @@ class Runner:
         `session.id`, `turns > 0` appends to it, and an id this store does not
         have is `{"ok": False, "error": "session_lost"}` -- see decision 5.
         The caller owns `turns`; nothing here writes back to the object.
+
+        `selection` is the cards the editor has selected on the page right
+        now (cards selection context, 2026-09-11): an ordered list of ids
+        with a short label each, rendered into the instruction half as its
+        own delimited block. None, absent or empty is byte for byte the call
+        every caller before today makes.
         """
         try:
             choice, conn_detail = self._choice()
@@ -239,6 +283,12 @@ class Runner:
                 f"providers), or pin Claude.")
         text = ""
         usage: dict[str, int] = {}
+        # cards selection context, 2026-09-11: BEFORE the JSON note and
+        # before the session message is built, so the block is part of the
+        # prompt every path sends -- and always in the UNCACHED half, so a
+        # selection that changes between two turns never invalidates the
+        # corpus breakpoint the conversation was opened under (decision 7).
+        prompt = _with_selection(prompt, selection)
         if json_out:
             prompt = prompt + JSON_REPLY_NOTE.format(path=json_out)
         convo = None
@@ -734,6 +784,110 @@ def split_prompt(prompt: str) -> tuple[str, str]:
     if not corpus.strip() or not instruction.strip():
         return "", prompt or ""
     return corpus, instruction
+
+
+def _selection_rows(selection: Any) -> list[dict[str, Any]]:
+    """The entries that carry an id, in the order they arrived.
+
+    Tolerant on purpose (cards selection context, 2026-09-11): the page is
+    another repo's, it may send a bare list of ids, and an entry this cannot
+    read is dropped rather than raised on. A selection is context; nothing
+    about a turn should fail because one row was malformed.
+    """
+    rows: list[dict[str, Any]] = []
+    if isinstance(selection, dict):          # {"cards": [...]} from a page
+        selection = selection.get("cards") or selection.get("selection")
+    if not isinstance(selection, (list, tuple)):
+        return rows
+    for entry in selection:
+        if isinstance(entry, str):
+            entry = {"id": entry}
+        if not isinstance(entry, dict):
+            continue
+        cid = str(entry.get("id") or entry.get("uid") or "").strip()
+        if not cid:
+            continue
+        rows.append({**entry, "id": cid})
+    return rows
+
+
+def _selection_line(n: int, row: dict[str, Any], labelled: bool = True) -> str:
+    """One numbered row: the id first, because the id is what an op names."""
+    out = "  %d. [%s]" % (n, row["id"])
+    if not labelled:
+        return out
+    bits = []
+    for key in ("label", "person", "tc", "text"):
+        value = str(row.get(key) or "").strip().replace("\n", " ")
+        if value:
+            bits.append(value if len(value) <= 120 else value[:117] + "...")
+    if bits:
+        out += " " + " - ".join(bits)
+    where = []
+    for key, word in (("section", "section"), ("group", "group"),
+                      ("lane", "lane")):
+        value = str(row.get(key) or "").strip().replace("\n", " ")
+        if value:
+            where.append("%s: %s" % (word, value[:80]))
+    if where:
+        out += " (%s)" % ", ".join(where)
+    return out
+
+
+def selection_block(selection: Any, staged: Any = None) -> str:
+    """The SELECTED CARDS block, or "" when nothing is selected.
+
+    Public because both the tests and the mount read it, and because the
+    header is the contract with Timeline Cards' own renderer (see the
+    constants above).
+    """
+    rows = _selection_rows(selection)
+    shelf = _selection_rows(staged)
+    if not rows and not shelf:
+        return ""
+    lines = [SELECTION_HEADER]
+    if rows:
+        lines.append(
+            "The user currently has %d card%s selected on the page, in the "
+            "order they were selected. Use these ids in ops; \"@selected\" "
+            "means exactly these cards."
+            % (len(rows), "" if len(rows) == 1 else "s"))
+        for n, row in enumerate(rows[:MAX_SELECTION_ROWS], 1):
+            lines.append(_selection_line(n, row))
+        rest = rows[MAX_SELECTION_ROWS:]
+        if rest:
+            lines.append("  ...and %d more, by id alone: %s"
+                         % (len(rest), " ".join("[%s]" % r["id"]
+                                                for r in rest)))
+    if shelf:
+        lines.append("Staged cards selected on the shelf (%d), which are in "
+                     "the file but not in the cut:" % (len(shelf),))
+        for n, row in enumerate(shelf[:MAX_SELECTION_ROWS], 1):
+            lines.append(_selection_line(n, row))
+    lines.append(SELECTION_END)
+    return "\n".join(lines) + "\n"
+
+
+def _with_selection(prompt: str, selection: Any) -> str:
+    """`prompt` with the selection block in its instruction half.
+
+    A prompt that already carries the header is returned UNCHANGED: the fork
+    renders the same block for its own CLI door, and two of them in one turn
+    is the model reading the selection twice, once possibly stale.
+    """
+    prompt = prompt or ""
+    if not selection:
+        return prompt
+    staged = None
+    if isinstance(selection, dict):
+        staged = selection.get("staged")
+    block = selection_block(selection, staged)
+    if not block or SELECTION_HEADER in prompt:
+        return prompt
+    corpus, instruction = split_prompt(prompt)
+    if not corpus:
+        return block + "\n" + prompt
+    return "%s\n%s\n%s\n%s" % (corpus, INSTRUCTIONS_MARKER, block, instruction)
 
 
 def _trimmed(messages: list[Any]) -> list[Any]:

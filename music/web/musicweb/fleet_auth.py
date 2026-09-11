@@ -61,17 +61,26 @@ FLEET_AUTH_HEADER = 'X-CCSync-Fleet-Auth'
 _STAMP_RE = re.compile(r'^(shared|editor:[^\s]{1,64})$')
 
 
-def stamp_ok(presented):
-    """True if `presented` is a fleet-auth stamp this app may act on.
+def gate_stamp(presented):
+    """-> (kind, editor): ('editor', name), ('shared', None) or (None, None).
 
-    Shape only, and deliberately narrow: the value is never parsed into an
-    identity here. WHO the caller is still comes from the signed
-    `X-CCSync-Identity` (require_identity) exactly as before -- two sources for
-    one fact is how the wrong one ends up winning.
+    Shape only: this never becomes WHO the caller is on its own. The name it
+    yields is used for ONE thing, comparing it against the signed identity
+    (require_fleet_caller, CR-55) -- two sources for one fact is how the wrong
+    one ends up winning, so the identity stays the source and this is the
+    check on it.
+
+    Anything unparseable is (None, None) and falls through to the shared-token
+    comparison, so a stamp this build does not understand is never an opening.
     """
     if not config.login_gated():
-        return False
-    return bool(_STAMP_RE.match(str(presented or '').strip()))
+        return None, None
+    raw = str(presented or '').strip()
+    if not _STAMP_RE.match(raw):
+        return None, None
+    if raw == 'shared':
+        return 'shared', None
+    return 'editor', raw[len('editor:'):].strip()
 
 
 def token_ok(configured, presented):
@@ -95,8 +104,11 @@ def token_ok(configured, presented):
 
 
 def require_fleet_token(x_ccsync_token: str = Header(default=None),
-                        x_ccsync_fleet_auth: str = Header(default=None)) -> None:
+                        x_ccsync_fleet_auth: str = Header(default=None)):
     """FAIL CLOSED. An unconfigured token means 403, never "open in dev".
+
+    -> the editor a per-editor token is BOUND to, or None for the shared one
+    (which identifies nobody, which is why X-CCSync-Identity exists beside it).
 
     Stricter than `/api/ingest`, which lets a login-gated mount stand on the
     session: nothing gates these, because no browser is involved. A deployment
@@ -111,12 +123,16 @@ def require_fleet_token(x_ccsync_token: str = Header(default=None),
     shared comparison below is the whole story. The shared comparison runs
     either way, so an older dashboard that stamps nothing still works.
     """
-    if stamp_ok(x_ccsync_fleet_auth):
-        return
+    kind, editor = gate_stamp(x_ccsync_fleet_auth)
+    if kind == 'editor':
+        return editor
+    if kind == 'shared':
+        return None
     if not token_ok(config.fleet_token(), x_ccsync_token or ''):
         log.warning('music ingest fleet call refused: missing or invalid '
                     'X-CCSync-Token')
         raise HTTPException(403, 'missing or invalid X-CCSync-Token')
+    return None
 
 
 def require_identity(x_ccsync_identity: str = Header(default=None)) -> str:
@@ -143,4 +159,35 @@ def require_identity(x_ccsync_identity: str = Header(default=None)) -> str:
             'detail': (f'a valid {identity.HEADER} is required: sign in again '
                        'from the CC Sync tray'),
             'reason': 'identity'})
+    return editor
+
+
+def require_fleet_caller(x_ccsync_token: str = Header(default=None),
+                         x_ccsync_fleet_auth: str = Header(default=None),
+                         x_ccsync_identity: str = Header(default=None)) -> str:
+    """Both gates, in the order they fail closed. -> the VERIFIED editor.
+
+    CR-55, 2026-08-21, and the bug hunt of 2026-09-11 (comp-broll-music,
+    out of territory): ytdl and b-roll bind the two credentials to each other
+    and music never did. A per-editor `cce1.` token proves WHICH editor's
+    machine is calling and the signed identity header proves whose name the
+    call acts under; when both are present they must AGREE, or the migration
+    to bound tokens is a weaker check than the shared-token-plus-identity one
+    it replaced. The shared migration token is bound to nobody and keeps
+    today's behaviour exactly: it identifies no editor, which is why the
+    identity header exists beside it.
+
+    One dependency rather than the two the routes used to declare, so the
+    order cannot drift: the machine credential is still checked before the
+    identity, and the mismatch can only be tested where both answers are in
+    hand.
+    """
+    bound = require_fleet_token(x_ccsync_token, x_ccsync_fleet_auth)
+    editor = require_identity(x_ccsync_identity)
+    if bound is not None and bound != editor:
+        log.warning('music ingest fleet call refused: the report token is bound '
+                    'to %r but the identity header says %r', bound, editor)
+        raise HTTPException(403, {
+            'detail': 'this report token belongs to a different editor',
+            'reason': 'identity_mismatch'})
     return editor

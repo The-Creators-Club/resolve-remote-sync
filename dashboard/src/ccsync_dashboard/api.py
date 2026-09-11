@@ -226,6 +226,29 @@ def _account_refusal(settings, conn: sqlite3.Connection, editor: str) -> str | N
     return None
 
 
+def _refuse_barred_account(settings, conn: sqlite3.Connection | None,
+                           editor: str) -> None:
+    """403 if this editor's account is suspended or disabled. (dash-api-6,
+    bug hunt 2026-09-11.)
+
+    DCORE-4 deliberately revokes no session and no `cce1.` token, so until
+    now "suspended" meant one door only: /report. Every other companion-facing
+    route kept working for a suspended freelancer's laptop - it could still
+    read the whole sync plan with its project roots, still post diagnostics,
+    still claim, heartbeat and finish fleet jobs into the shared vault. One
+    line per gate makes the word mean the same thing everywhere.
+
+    Safe to call on any door: `_account_refusal` FAILS OPEN on a database
+    error, so a read that cannot answer never locks the fleet out.
+    """
+    if conn is None:
+        return
+    refusal = _account_refusal(settings, conn, editor)
+    if refusal:
+        raise HTTPException(status_code=403,
+                            detail=_ACCOUNT_REFUSAL_DETAIL[refusal])
+
+
 def companion_token_ok(settings, conn: sqlite3.Connection | None, token: str) -> bool:
     """Either credential, without caring which. For the routes that pair it
     with a separate identity check of their own."""
@@ -1379,6 +1402,10 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
         # fleet". Counts only, no names -- see _rollout_block. Best-effort,
         # like the two blocks above it.
         "rollout": _rollout_block(conn),
+        # server-tools-1: MACHINES per platform, so the ship gate stops
+        # reading "no macOS channel" as "no Macs in this fleet". Optional for
+        # an older reader, and null when it could not be counted.
+        "rollout_platforms": _rollout_platforms_block(conn),
         # REL-11 / REL-5 (resilience sweep 2026-08-28). A feed that has been
         # unreachable for six weeks was visible on exactly one admin page, and
         # nothing anywhere measured the volume the SQLite database lives on --
@@ -1496,7 +1523,35 @@ def _feed_and_space_block(request: Request, conn: sqlite3.Connection) -> dict[st
     return out
 
 
-def _rollout_block(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def _rollout_platforms_block(conn: sqlite3.Connection) -> dict[str, int] | None:
+    """How many MACHINES this dashboard has seen per platform (server-tools-1,
+    bug hunt 2026-09-11).
+
+    The ship gate counted channels: a fleet with no macOS channel published
+    and three Macs reporting looked exactly like a fleet with no Macs. It
+    counts machines now, and this is the only door it has (fleet credential,
+    no admin session). Counts only, no names, for the same reason
+    `_rollout_block` carries none.
+
+    None, never {}, when it cannot be computed: "could not tell" and "nothing
+    to report" are the two answers a gate must not confuse, which is the
+    whole of server-tools-1.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT platform, COUNT(DISTINCT editor_username || '/' || machine) AS n "
+            "  FROM machine_state GROUP BY platform").fetchall()
+    except Exception:  # noqa: BLE001 - a health route always answers
+        log.exception("could not count the fleet's machines per platform")
+        return None
+    out: dict[str, int] = {}
+    for row in rows:
+        name = str(row["platform"] or "").strip().lower() or "unknown"
+        out[name] = out.get(name, 0) + int(row["n"] or 0)
+    return out
+
+
+def _rollout_block(conn: sqlite3.Connection) -> list[dict[str, Any]] | None:
     """The adoption COUNTS per platform, for a caller holding the fleet
     credential rather than an admin session (REL-6, usability sweep
     2026-09-04).
@@ -1512,8 +1567,12 @@ def _rollout_block(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     try:
         rollout = db.rollout_status(conn)
     except Exception:  # noqa: BLE001
+        # null, NOT [] (server-tools-1, bug hunt 2026-09-11): an empty list
+        # reads as "no channels, nothing is rolling out" and the ship gate
+        # passed on it. A gate that cannot compute the thing it gates must
+        # say so, and refuse.
         log.exception("could not compute the rollout status")
-        return []
+        return None
     return [
         {"platform": c["platform"], "current_version": c["current_version"],
          "made_current_at": c["made_current_at"],
@@ -1872,9 +1931,22 @@ def build_queue_view(conn: sqlite3.Connection, editor: str, now: str | None = No
     def label_of(slug):
         return projects[slug]["label"] if slug in projects else slug
 
-    machine = db.latest_machine_state(conn, editor)
-    resolve_project = machine["resolve_project"] if machine else None
-    root_slug = machine["detected_project_root"] if machine else None
+    # THE COMPUTER THE PAGE IS ABOUT (dash-api-4, bug hunt 2026-09-11). This
+    # used to rebind `machine` to db.latest_machine_state(editor) -- the
+    # PERSON's most recently reporting computer, whatever it is -- so the
+    # per-machine queue page for leso's MacBook named whatever project was
+    # open on the iMac, and the destination root that machine had detected.
+    # A named machine reads its own row; with no machine named the view is
+    # the person's, and the newest row is the honest answer.
+    state = None
+    if machine:
+        state = conn.execute(
+            """SELECT * FROM machine_state WHERE editor_username=? AND machine=?
+               ORDER BY reported_at DESC LIMIT 1""", (editor, machine)).fetchone()
+    else:
+        state = db.latest_machine_state(conn, editor)
+    resolve_project = state["resolve_project"] if state else None
+    root_slug = state["detected_project_root"] if state else None
     root_source = None
     if resolve_project:
         mapping = conn.execute(
@@ -2244,6 +2316,12 @@ def _require_selection_read(request: Request, editor: str,
     settings = request.app.state.settings
     token = request.headers.get("x-ccsync-token", "")
     auth_kind, token_editor = resolve_companion_credential(settings, conn, token)
+    if auth_kind != AUTH_NONE:
+        # dash-api-6: the COMPANION doors only. An admin (or the person
+        # themselves, signed in) must still be able to read a suspended
+        # editor's plan - [ RESUME ] has to put back exactly what was there,
+        # and a page that cannot show it is a page nobody can check.
+        _refuse_barred_account(settings, conn, editor)
     if auth_kind == AUTH_EDITOR:
         # A per-editor token IS the identity, so it stands on its own -- and it
         # binds: it can only read the selection of the editor it was minted for
@@ -2311,6 +2389,8 @@ def _require_selection_untick(request: Request, editor: str,
     settings = request.app.state.settings
     token = request.headers.get("x-ccsync-token", "")
     auth_kind, token_editor = resolve_companion_credential(settings, conn, token)
+    if auth_kind != AUTH_NONE:
+        _refuse_barred_account(settings, conn, editor)   # dash-api-6
     if auth_kind == AUTH_EDITOR:
         if token_editor == editor:
             return f"companion:{editor}"
@@ -2710,7 +2790,14 @@ def move_project_files(settings, conn: sqlite3.Connection, from_slug: str,
     # the old path), plus any computer whose manifest says it holds the file
     # even though its plan no longer does.
     targets: set[tuple[str, str]] = set()
-    for editor, machine in db.fetch_machine_selections(conn).get(from_slug, []):
+    # for_enforce=True (dash-db-1, 2026-09-11): this reader decides what a
+    # COMPUTER is told to do with its own copy, not what an admin is shown.
+    # A wired machine's tree root IS the NAS share, so the rename the
+    # dashboard has already made is the only one there is, and a `move your
+    # copy` command to it is the same file moved twice. A wired machine that
+    # really does hold the file is still picked up below, off its manifest.
+    for editor, machine in db.fetch_machine_selections(
+            conn, for_enforce=True).get(from_slug, []):
         if machine:
             targets.add((editor, machine))
     # bug-hunt-2026-09-03 dash-api-6: THIS query only. editor_media.rel_path is
@@ -5354,6 +5441,19 @@ def _trash_package_file(settings, row) -> tuple[str, str | None]:
         trash.mkdir(parents=True, exist_ok=True)
         target = trash / f"{db.utcnow_iso().replace(':', '')}-{source.name}"
         source.replace(target)
+        # THE RETENTION CLOCK STARTS NOW (dash-api-1, bug hunt 2026-09-11).
+        # A rename preserves mtime, and a package's mtime is its PUBLISH
+        # time, so _prune_package_trash on the next line unlinked anything
+        # published more than PACKAGE_TRASH_DAYS ago inside the same call
+        # that reported it trashed: the route answered `trashed_to: <path>`
+        # for a file that no longer existed, which is worse than the silent
+        # unlink UX-9 replaced. Best effort: a stamp that cannot be written
+        # must not fail a delete whose bytes have already moved.
+        try:
+            target.touch()
+        except OSError:
+            log.warning("could not stamp %s with its deletion time: it will be "
+                        "pruned on its publish date instead", target.name)
         _prune_package_trash(packages)
         return str(target), None
     except OSError as exc:
@@ -5415,12 +5515,23 @@ def _version_tuple(text: str) -> tuple[int, ...]:
     might report that is not one (a "+dirty" dev build, an empty string),
     which compares lower than every real version. Numeric per part on
     purpose: after 0.9.9 comes 0.10.0, never 1.0 (owner's rule 2026-08-18),
-    and a string compare puts 0.10.0 BELOW 0.9.9."""
+    and a string compare puts 0.10.0 BELOW 0.9.9.
+
+    THE NUMERIC PREFIX, not the whole string (dash-api-5, bug hunt
+    2026-09-11). `ship.cmd -AllowDirty` builds `0.9.70+dirty`, which the base
+    rig runs after every hotfix, and the old all-or-nothing test made it
+    unparsable: a push of 0.9.70 to a machine already running a dirty 0.9.70
+    could never be cleared, so `commands.upgrade` rode every 30 s report for
+    ever - exactly the state dash-core-6 was raised to end, for a version
+    shape that fix did not consider. A string with no numeric prefix at all
+    still returns (), and the exact-match fallback still covers it.
+    """
     raw = str(text or "").strip()
-    if not raw or any(ch not in "0123456789." for ch in raw):
+    head = re.match(r"^[0-9]+(?:\.[0-9]+)*", raw)
+    if not head:
         return ()
     try:
-        return tuple(int(p) for p in raw.split(".") if p != "")
+        return tuple(int(p) for p in head.group(0).split(".") if p != "")
     except ValueError:
         return ()
 
@@ -5435,6 +5546,34 @@ def _version_at_least(running: str, wanted: str) -> bool:
         return True
     a, b = _version_tuple(running), _version_tuple(wanted)
     return bool(a and b and a >= b)
+
+
+def _update_push_done(request_row: Mapping[str, Any], running: str) -> bool:
+    """Has this machine honoured the pushed update? (dash-api-3, 2026-09-11.)
+
+    An UPGRADE is done at or past the version asked for (dash-core-6): a
+    machine that was off when the push was made and then took a newer build
+    never reports the requested string again, and a request that could never
+    clear rode every 30 s report for ever.
+
+    A ROLLBACK is done only on the version asked for, exactly. It asks for a
+    version BELOW the one the machine is running, so the upgrade rule retired
+    it on the machine's next report and the companion was never told anything
+    - which is why [ ROLL THE FLEET BACK ] delivered nothing on any fleet.
+    A DOWNGRADE IS ONLY EVER KNOWN FROM `from_version`: a push whose row does
+    not carry one (every row written before v52) keeps the upgrade rule.
+    """
+    wanted = str(request_row.get("version") or "")
+    came_from = str(request_row.get("from_version") or "")
+    down = bool(came_from and _version_tuple(wanted) and _version_tuple(came_from)
+                and _version_tuple(wanted) < _version_tuple(came_from))
+    if down:
+        # "0.9.64+dirty" is 0.9.64 here for the same reason it is everywhere
+        # else: the tuple is the numeric prefix, and the companion that took
+        # the rollback is running those bytes.
+        a, b = _version_tuple(running), _version_tuple(wanted)
+        return running == wanted or bool(a and b and a == b)
+    return _version_at_least(running, wanted)
 
 
 def _arch_matches(record_arch: str, machine_arch: str) -> bool:
@@ -6146,6 +6285,14 @@ def roll_fleet_back(
                     f"reports which {kind} it was set up with, so there is nobody to ask. "
                     f"Make the older {kind} current instead, and it is what new "
                     f"installs download."))
+    if to_version == from_version:
+        # Checked HERE and not only in the JSON route (dash-api-3): the htmx
+        # door calls this function directly, so a guard that lives upstairs
+        # covers one of the two buttons.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{from_version} is what those computers are already running. Pick the "
+                   f"build to put them BACK on.")
     target = db.get_package(conn, platform, to_version, kind)
     if target is None:
         raise HTTPException(
@@ -6155,20 +6302,46 @@ def roll_fleet_back(
         raise HTTPException(
             status_code=409,
             detail=f"{to_version} was recalled too -- pick a build that was not")
+    # THE CHANNEL MOVES WITH THE FLEET (dash-api-3, bug hunt 2026-09-11).
+    # Rolling machines off a build that is still CURRENT is a fan-out the
+    # channel then argues with: each machine takes the older build, reports
+    # it, the push clears, and `_upgrade_info` offers the rolled-off build
+    # again on the next report - unattended where `auto_update` is on. So
+    # when `from_version` is what this dashboard is currently handing out,
+    # the rollback re-points `current` at the target first. Nothing new is
+    # bypassed: the soak gate exists to prove a build the fleet has never run
+    # actually runs, and `ever_current` is the evidence this one already
+    # earned (db.set_current_package), while a retracted target was refused
+    # above.
+    current = db.get_current_package(conn, platform, kind=kind)
+    uncurrented = ""
+    if current is not None and str(current["version"]) == str(from_version):
+        if db.set_current_package(conn, platform, to_version, kind, now):
+            uncurrented = from_version
+            log.warning("%s is no longer the current %s %s package: %s rolled the "
+                        "fleet back to %s", from_version, platform, kind, admin,
+                        to_version)
     machines = db.machines_running_version(conn, platform, from_version)
     asked: list[str] = []
     for m in machines:
+        # `from_version` on the push (v52): WHICH WAY it points is the one
+        # thing the report handler's clear rule cannot work out for itself,
+        # and without it a downward push is retired on the machine's next
+        # report before `commands.upgrade` is ever emitted.
         if db.request_machine_update(conn, m["editor_username"], m["machine"],
-                                     to_version, admin, now):
+                                     to_version, admin, now,
+                                     from_version=from_version):
             asked.append(f"{m['editor_username']}/{m['machine']}")
     db.audit(conn, admin, "package.roll_fleet_back", to_version,
              {"platform": platform, "from_version": from_version,
-              "to_version": to_version, "machines": asked}, now=now)
+              "to_version": to_version, "machines": asked,
+              "uncurrented": uncurrented}, now=now)
     conn.commit()
     log.warning("%s rolled %d machine(s) back from %s to %s on %s",
                 admin, len(asked), from_version, to_version, platform)
     return {"ok": True, "platform": platform, "from_version": from_version,
-            "to_version": to_version, "machines": asked}
+            "to_version": to_version, "machines": asked,
+            "uncurrented": uncurrented}
 
 
 @router.post("/admin/packages/{platform}/{version}/roll-fleet-back")
@@ -6793,8 +6966,19 @@ class _BoundedSectionIn(BaseModel):
     supervisor `last_error` carrying a 4 KB traceback must not be able to
     take the machine off the fleet grid it is trying to raise an alarm on
     (SYS-3, resilience sweep 2026-08-28).
+
+    extra='allow', not 'ignore' (comp-app-2, bug hunt 2026-09-11). SYS-3's
+    fourth recurrence was INSIDE one of these sub-models: nine wave-3
+    `resolve_health` fields rode every report for a week and were dropped
+    here, silently, and the banner could not see it because a model with
+    extra='ignore' has an empty `model_extra` by construction. Accepting an
+    undeclared sub-key is what lets `undeclared_report_sections` NAME it, on
+    the same terms ReportIn and SyncGuardIn already do; nothing reads
+    `model_extra` except that reporting, so an undeclared key is still not
+    stored, still not rendered as data, and still cannot reach a table. Its
+    only ceiling is the request-size limit, which is ReportIn's answer too.
     """
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
     @model_validator(mode="before")
     @classmethod
@@ -6813,6 +6997,20 @@ class BreakerIn(BaseModel):
     bytes: int | None = Field(default=None, ge=0)
     last_pass_deletes: int | None = Field(default=None, ge=0)
     resumed_at: str | None = Field(default=None, max_length=64)
+    # SYNC-106: `reason` is the admin's sentence and `editor_reason` is what
+    # the tray says; `cause` is the machine-readable half. Sent by the
+    # companion and dropped here until 2026-09-11 (comp-app-2's lesson, one
+    # model along).
+    cause: str | None = Field(default=None, max_length=64)
+    editor_reason: str | None = Field(default=None, max_length=1000)
+    # comp-sync-1 (2026-09-11): THE LATCH COULD NOT BE WRITTEN TO DISK. A
+    # breaker that is memory-only is one restart away from resuming the lane
+    # it tripped, which is the failure the latch exists to prevent, and the
+    # only record was one line in that editor's log. Absent on the happy
+    # path, deliberately, so an older dashboard reads nothing at all.
+    persist_failed: bool | None = None
+    persist_error: str | None = Field(default=None, max_length=500)
+    persist_failed_at: str | None = Field(default=None, max_length=64)
 
 
 class TrashIn(BaseModel):
@@ -6821,6 +7019,19 @@ class TrashIn(BaseModel):
     bytes: int | None = Field(default=None, ge=0)
     removed: int | None = Field(default=None, ge=0)
     removed_bytes: int | None = Field(default=None, ge=0)
+    # comp-sync-15 (2026-09-11): WHERE the recovery folder is and how long a
+    # copy lives there, both of which the tray's line reads and neither of
+    # which any model declared. `retention_days` is trash_summary's spelling
+    # and `max_age_days` the prune's; the companion sends whichever ran last,
+    # so both are declared rather than one being guessed at.
+    path: str | None = Field(default=None, max_length=1000)
+    max_age_days: float | None = Field(default=None, ge=0)
+    retention_days: float | None = Field(default=None, ge=0)
+    oldest: float | None = Field(default=None, ge=0)
+    kept: int | None = Field(default=None, ge=0)
+    kept_bytes: int | None = Field(default=None, ge=0)
+    truncated: bool | None = None
+    at: str | None = Field(default=None, max_length=64)
 
 
 class HaltIn(BaseModel):
@@ -6829,6 +7040,12 @@ class HaltIn(BaseModel):
     scope: str | None = Field(default=None, max_length=16)   # 'local' | 'fleet'
     reason: str | None = Field(default=None, max_length=500)
     at: str | None = Field(default=None, max_length=64)
+    # comp-sync-1 (2026-09-11): the same three keys every persisted latch
+    # adds when its state file could not be written. A halt that is
+    # memory-only is one restart away from every lane starting again.
+    persist_failed: bool | None = None
+    persist_error: str | None = Field(default=None, max_length=500)
+    persist_failed_at: str | None = Field(default=None, max_length=64)
 
 
 class SkippedExistsIn(BaseModel):
@@ -7031,6 +7248,57 @@ class DiskFloorIn(_BoundedSectionIn):
     at: str | None = Field(default=None, max_length=64)
     free_bytes: int | None = Field(default=None, ge=0)
     floor_bytes: int | None = Field(default=None, ge=0)
+    # comp-sync-1 (2026-09-11), as on BreakerIn and HaltIn.
+    persist_failed: bool | None = None
+    persist_error: str | None = Field(default=None, max_length=500)
+    persist_failed_at: str | None = Field(default=None, max_length=64)
+
+
+class RepathEventIn(_BoundedSectionIn):
+    """One project folder this machine MOVED because an admin renamed it on
+    the server (SYNC-102, reported since comp-sync-4, 2026-09-11).
+
+    `relinked` is whether the open Resolve project's clips were repointed:
+    False is the interesting one, because every clip in it still points at
+    the old canonical path.
+    """
+    old: str | None = Field(default=None, max_length=1000)
+    new: str | None = Field(default=None, max_length=1000)
+    at: str | None = Field(default=None, max_length=64)
+    relinked: bool | None = None
+
+
+class ResolveClipIn(_BoundedSectionIn):
+    """One clip the companion's media scan has something to say about
+    ({"name", "path"} - watcher.missing_clips / non_canonical_refused)."""
+    name: str | None = Field(default=None, max_length=255)
+    path: str | None = Field(default=None, max_length=1000)
+
+
+class ProxyAttachIn(_BoundedSectionIn):
+    """app._proxy_attach - what Resolve did with the last proxy attach pass
+    (RES-3). Empty until a pass has run, which is not the same as zero."""
+    attached: int | None = Field(default=None, ge=0)
+    failed: int | None = Field(default=None, ge=0)
+    why: str | None = Field(default=None, max_length=500)
+    at: str | None = Field(default=None, max_length=64)
+
+
+class ProxyGapsIn(_BoundedSectionIn):
+    """app.proxy_gaps() - the three facts a machine that has quietly stopped
+    making proxies knows and could not say (RES-11)."""
+    capped: int | None = Field(default=None, ge=0)
+    low_space: str | None = Field(default=None, max_length=255)
+    truncated: bool | None = None
+
+
+class StillsIn(_BoundedSectionIn):
+    """app.stills_state() - the last stills check (RES-17). `instruction` is
+    the one an editor has to carry out by hand."""
+    ok: bool | None = None
+    status: str | None = Field(default=None, max_length=64)
+    instruction: str | None = Field(default=None, max_length=500)
+    path: str | None = Field(default=None, max_length=1000)
 
 
 class ResolveHealthIn(_BoundedSectionIn):
@@ -7051,6 +7319,31 @@ class ResolveHealthIn(_BoundedSectionIn):
     ignored_folders: int | None = Field(default=None, ge=0)
     last_scan_at: str | None = Field(default=None, max_length=64)
     open_project: str | None = Field(default=None, max_length=400)
+    # WAVE 3's NINE (comp-app-2, bug hunt 2026-09-11). app.resolve_health()
+    # has put these on the wire since 2026-09-04 and this model's
+    # extra="ignore" threw every one of them away: no error, no warning, and
+    # the SYS-3 banner could not see it either, because the drop happens
+    # INSIDE a sub-model whose model_extra is empty by construction. Declared
+    # here first, which is this file's own rule for the direction where the
+    # sender is newer than the reader. `connected` and `project_open` are
+    # None until the first poll and `proxy_attach`/`stills` are empty until a
+    # pass has run: none of them is a reassuring zero.
+    connected: bool | None = None
+    project_open: str | None = Field(default=None, max_length=400)
+    wedged_seconds: float | None = Field(default=None, ge=0)
+    wedged_call: str | None = Field(default=None, max_length=128)
+    missing_clips: list[ResolveClipIn] | None = Field(default=None, max_length=50)
+    non_canonical_refused: list[ResolveClipIn] | None = Field(default=None,
+                                                              max_length=50)
+    proxy_attach: ProxyAttachIn | None = None
+    proxy_gaps: ProxyGapsIn | None = None
+    stills: StillsIn | None = None
+    # Sent, and the companion's comment says it is the tray's own line rather
+    # than part of the reported contract. Declared anyway: an undeclared key
+    # is a daily WARNING and a banner line now that the walker below can see
+    # one level down, and "we know about this and do not store it" is better
+    # said in the model than in a log nobody can silence.
+    skipped_ever: int | None = Field(default=None, ge=0)
 
 
 class StrayProjectsIn(_BoundedSectionIn):
@@ -7101,6 +7394,23 @@ class LoopbackIn(_BoundedSectionIn):
     since: str | None = Field(default=None, max_length=64)
 
 
+class YtdlpSidecarIn(_BoundedSectionIn):
+    """`sync_guard.ytdlp.sidecar` (comp-ytdl-jobs-3, 2026-09-11).
+
+    {} on a companion whose check never ran, which must never read as "it is
+    fine" -- the same rule YtdlpIn states about itself. `action` is a plain
+    string for the BlockedIn.reason reason: a newer companion knowing an
+    action this build does not must not 422 a whole report.
+    """
+    ok: bool | None = None
+    action: str | None = Field(default=None, max_length=32)
+    failed: list[str] | None = Field(default=None, max_length=8)
+    cause: str | None = Field(default=None, max_length=300)
+    consecutive_failures: int | None = Field(default=None, ge=0)
+    message: str | None = Field(default=None, max_length=500)
+    checked_at: str | None = Field(default=None, max_length=64)
+
+
 class YtdlpIn(_BoundedSectionIn):
     """`sync_guard.ytdlp`: that computer's yt-dlp sidecar (CYT-7, 2026-09-04).
 
@@ -7127,6 +7437,12 @@ class YtdlpIn(_BoundedSectionIn):
     age_days: int | None = Field(default=None, ge=0)
     message: str | None = Field(default=None, max_length=500)
     checked_at: str | None = Field(default=None, max_length=64)
+    # comp-ytdl-jobs-3 (2026-09-11): the ffmpeg/ffprobe/deno sidecar's own
+    # verdict, riding this block rather than a new section. A machine with no
+    # ffmpeg makes no proxies and is offered no fleet media work, and the
+    # difference between "nobody set it up" and "it cannot reach GitHub" was
+    # in one editor's log.
+    sidecar: YtdlpSidecarIn | None = None
 
 
 class YoutubeImportGuardIn(_BoundedSectionIn):
@@ -7213,6 +7529,17 @@ class SyncGuardIn(BaseModel):
     # v38 (wave 4's ingest contract, resilience sweep 2026-08-28): the four
     # sections that answer "is this editor's footage anywhere but their own
     # disk", none of which any lane state can see.
+    # comp-sync-4 (bug hunt 2026-09-11). SYNC-101 and SYNC-102's two readers
+    # had no caller anywhere - not the tray, not the report - so "the shared
+    # LUT library is not working on this machine" and "an admin renamed this
+    # project on the server and this computer moved its folder to match" were
+    # computed every pass and reached nobody. Both absent when there is
+    # nothing to say, which is how "the shared folders are fine" and "nothing
+    # has been renamed" are spelled. The companion caps both at 10; the caps
+    # here are looser so a companion that raises its own cap cannot 422 a
+    # whole report against this build.
+    shared_folder_problems: list[str] | None = Field(default=None, max_length=20)
+    repath_events: list[RepathEventIn] | None = Field(default=None, max_length=20)
     resolve_health: ResolveHealthIn | None = None
     stray_projects: StrayProjectsIn | None = None
     moved_project_dirs: list[MovedProjectDirIn] | None = Field(
@@ -7389,6 +7716,15 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
             or (rh.ignored_this_session is None and rh.ignored_folders is None)
             else int(rh.ignored_this_session or 0) + int(rh.ignored_folders or 0)),
         "resolve_last_scan_at": rh.last_scan_at if rh is not None else None,
+        # comp-app-2 (bug hunt 2026-09-11): the wave-3 nine, whole, for
+        # db.store_resolve_health_detail to put in `meta`. Not flattened into
+        # columns here - two of them are LISTS of clips and three are little
+        # dicts, a schema number is a shared resource, and nothing asks about
+        # any of this in SQL yet. `exclude_none=False` on purpose: the latch
+        # rule is the storer's, and it has to be able to see that a field
+        # this machine used to answer is None now.
+        "resolve_health_detail": (
+            None if rh is None else rh.model_dump(exclude_none=False)),
         "stray_projects_count": stray.count if stray is not None else None,
         "stray_projects_bytes": stray.bytes if stray is not None else None,
         # A LIST is flattened to its length: an absent list is "nothing moved",
@@ -7713,7 +8049,14 @@ class CardsAgentIn(_ReportSectionIn):
     # a healthy one here. All optional and all absent on a companion too old
     # to send them, which reads as UNKNOWN and never as OK.
     gate_state: str = Field(default="", max_length=32)
-    detail: str = Field(default="", max_length=255)
+    # 1000, not 255 (comp-resolve-3, bug hunt 2026-09-11). The standalone-agent
+    # refusal is 247 characters BEFORE `describe_process(found)` is appended,
+    # and this cap truncates rather than 422s - so RES-7's whole reason for
+    # adding the process description ("the refusal used to name a command line
+    # and nothing else") was cut off after eight characters, every time. The
+    # companion still truncates deliberately on its own side: a sentence cut
+    # by a wire cap is cut at whatever character the cap lands on.
+    detail: str = Field(default="", max_length=1000)
     last_poll_at: str | None = Field(default=None, max_length=64)
     last_http_status: int | None = Field(default=None, ge=0, le=1000)
 
@@ -8095,6 +8438,31 @@ def _ignored_sections_to_log(machine: str, keys: list[str], day: str) -> list[st
     return fresh
 
 
+def _nested_extra_keys(prefix: str, model: Any, depth: int = 1) -> list[str]:
+    """Undeclared keys on the sub-models of `model`, dotted from `prefix`.
+
+    comp-app-2 (bug hunt 2026-09-11): the walker used to stop at
+    `sync_guard`, and SYS-3's fourth recurrence was one level below it - nine
+    fields dropped by `ResolveHealthIn` with nothing in the log and nothing
+    on the banner. Depth-limited because this runs on every report of every
+    machine, and one level is where the report's sections actually live.
+    """
+    keys: list[str] = []
+    for name, value in sorted(vars(model).items()):
+        items = value if isinstance(value, list) else [value]
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, BaseModel):
+                continue
+            for key in sorted(item.model_extra or {}):
+                if key not in seen:
+                    seen.add(key)
+                    keys.append(f"{prefix}{name}.{key}")
+            if depth > 1:
+                keys += _nested_extra_keys(f"{prefix}{name}.", item, depth - 1)
+    return keys
+
+
 def undeclared_report_sections(payload: "ReportIn") -> list[str]:
     """Top-level and sync_guard keys this dashboard accepted but does not read.
 
@@ -8102,11 +8470,16 @@ def undeclared_report_sections(payload: "ReportIn") -> list[str]:
     the record or the banner. `truncated` is excluded: the validator writes it
     onto the raw dict itself, so a client that also sent it is not telling us
     anything (and B6 already reports truncation loudly on its own).
+
+    A SECTION'S OWN SUB-KEYS COUNT TOO (comp-app-2): a field dropped inside
+    `sync_guard.resolve_health` is exactly as invisible as a whole section
+    dropped at the top, and was exactly as silent.
     """
     keys = [k for k in sorted(payload.model_extra or {}) if k != "truncated"]
     guard = payload.sync_guard
     if guard is not None:
         keys += [f"sync_guard.{k}" for k in sorted(guard.model_extra or {})]
+        keys += _nested_extra_keys("sync_guard.", guard)
     return keys
 
 
@@ -8578,6 +8951,13 @@ def api_report(
     # their own disk. Same shape and the same reasoning as the two above.
     db.store_resolve_health(
         conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
+    # comp-app-2 (bug hunt 2026-09-11): the nine wave-3 fields beside those
+    # counters, which the model declares and no column carries. Same latch
+    # rule as everything else in this group - a section that says nothing
+    # DELETES the row, because a wedged-call sentence from last Tuesday is
+    # worse than silence.
+    db.store_resolve_health_detail(
+        conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
     # CMEDIA-3 (usability sweep 2026-09-04): whether the 8899 loopback is
     # actually held on that machine. Same shape and the same latch rule as
     # the three above -- a Send-to-Resolve button that cannot work must not
@@ -8796,7 +9176,17 @@ def api_report(
         # -- never reports the requested string again, so the request rode
         # every 30 s report for ever, the companion logged "IGNORED" once,
         # and the packages page showed a push that could never complete.
-        if running and _version_at_least(running, update_request["version"]):
+        #
+        # ...EXCEPT WHEN THE PUSH POINTS DOWNWARDS (dash-api-3, bug hunt
+        # 2026-09-11). A rollback asks for a version BELOW what the machine
+        # is running, so "at or past" was true on its very next report and
+        # the request was retired before `commands.upgrade` was ever emitted:
+        # [ ROLL THE FLEET BACK ] was a no-op with a green toast on every
+        # fleet. v52's `update_requested_from` is what tells the two
+        # directions apart; empty (an old row, or a caller that did not say)
+        # keeps the dash-core-6 rule, which is the safe default for an
+        # upgrade.
+        if running and _update_push_done(update_request, running):
             db.clear_machine_update_request(conn, editor, machine)
             # Committed HERE: the report's own commit is above us, and an
             # uncommitted clear would re-offer the same update on the next
@@ -9112,6 +9502,10 @@ def api_diagnostics(
     elif identity and id_user is not None and id_user != editor:
         raise HTTPException(
             status_code=401, detail="X-CCSync-Identity does not match editor_name")
+    # dash-api-6: the same account gate /report applies, on the same
+    # reasoning - a suspended person's computers are not writing rows under
+    # their name while the Users page says SUSPENDED.
+    _refuse_barred_account(settings, conn, editor)
 
     trigger = (payload.trigger or "").strip().lower()
     if trigger not in DIAGNOSTICS_TRIGGERS:
@@ -9529,7 +9923,12 @@ def _require_fleet_caller(request: Request, conn: sqlite3.Connection) -> str:
         raise HTTPException(
             status_code=403,
             detail="this report token belongs to a different editor")
-    return str(editor).strip().lower()
+    name = str(editor).strip().lower()
+    # dash-api-6: a suspended editor's machines are turned away from /report
+    # and were turned away from nothing else - including claiming fleet jobs
+    # that write into the shared vault under roots they still have mounted.
+    _refuse_barred_account(request.app.state.settings, conn, name)
+    return name
 
 
 def _require_jobs_reader(request: Request, conn: sqlite3.Connection) -> str:
@@ -9918,7 +10317,14 @@ def api_claim_job(
         caps=jobs_mod.fleet_caps(request.app.state.settings))
     job = db.claim_next_job(
         conn, editor, machine, payload.capabilities, now=now,
-        allowed_ids=offers["offered"], kinds=payload.kinds, ids=payload.ids)
+        allowed_ids=offers["offered"], kinds=payload.kinds, ids=payload.ids,
+        # THE FLEET CAP IN THE COMPARE-AND-SET (dash-release-jobs-3, bug hunt
+        # 2026-09-11). It was counted at offer time on this connection only,
+        # so two claims arriving together both read the same "three running"
+        # and both won: the overshoot was the number of concurrent claims,
+        # which is the SMB saturation the cap exists to stop. The same table
+        # the offer used, evaluated inside the write.
+        max_running=jobs_mod.fleet_caps(settings))
     conn.commit()
     if job is None:
         return {"job": None, "offered": offers["offered"]}

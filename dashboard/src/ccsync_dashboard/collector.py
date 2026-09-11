@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from pathlib import Path
 
-from . import db, links, notices, provision
+from . import db, links, mount_status, notices, provision
 from .settings import Settings
 from .syncthing_client import SyncthingClient, SyncthingError
 
@@ -164,6 +164,10 @@ class Collector:
         # ...and the same warn-once for a machine whose reported Syncthing
         # device this server has not approved (dash-admin-6, 2026-08-21).
         self._warned_unapproved_device: set[str] = set()
+        # ...and for a device receiving a PERSON-level share because no
+        # machine row claims it (res-fleet-5, 2026-09-11). Warn-once per
+        # (editor, device) per process, on the two above's rule.
+        self._warned_person_share: set[tuple[str, str]] = set()
         # Where the last completion cycle ran out of its wall-clock budget, so
         # the next one starts there instead of re-polling the same head of the
         # list for ever (ops-efficiency-5, 2026-08-21).
@@ -400,6 +404,19 @@ class Collector:
         # wrapped: it exists to SAY what this cycle found, and a diagnosis
         # that could fail the cycle it describes would be a bad trade.
         try:
+            # res-fleet-2 (2026-09-11): re-probe the four optional mounts
+            # BEFORE the notice writer reads their verdicts. They used to be
+            # judged once inside create_app and rendered for the life of the
+            # container as a statement about now, so a bind mount that went
+            # away at 03:00 left the page advertising links to features that
+            # could not answer, with nothing on PROBLEMS THE SERVER FOUND.
+            # One `is_dir` per mount, on this thread, never fatal.
+            try:
+                for name, (status, detail) in mount_status.recheck().items():
+                    log.warning("feature mount %s is now %s: %s",
+                                name, status, detail)
+            except Exception:  # noqa: BLE001 - a diagnostic, not a cycle
+                log.exception("could not re-probe the feature mounts")
             pending = None
             if self.settings.syncthing_url:
                 try:
@@ -1429,10 +1446,31 @@ class Collector:
                 # a working editor the moment they upgraded the dashboard
                 # ahead of their companion (the B16 failure shape again).
                 for editor in plan_editors:
-                    desired |= {
-                        d for d in editor_devices.get(editor, set())
-                        if d not in mapped_device_ids
-                    }
+                    unmapped = {d for d in editor_devices.get(editor, set())
+                                if d not in mapped_device_ids}
+                    for device_id in sorted(unmapped):
+                        # res-fleet-5 (2026-09-11): this share is decided by
+                        # the PERSON, so it carries every FULL-ticked project
+                        # of theirs whatever that computer's own tick mode or
+                        # wired flag says - an upload-only tick on a machine
+                        # whose Syncthing identity the registry cannot place
+                        # still receives. No per-machine predicate can reach
+                        # an unattributable device, so the fix is that the
+                        # state stops being SILENT: the fallback is for a
+                        # companion older than the machine registry, and a
+                        # fleet that has been there for weeks is a
+                        # configuration nobody has looked at.
+                        if (editor, device_id) in self._warned_person_share:
+                            continue
+                        self._warned_person_share.add((editor, device_id))
+                        log.warning(
+                            "device %s is being shared %s's projects BY PERSON: no machine "
+                            "row claims it, so this server cannot tell which computer it "
+                            "is or what that computer's own tick says (upload-only and "
+                            "wired ticks are decided per machine). Check that computer's "
+                            "row on SYNC STATUS has a Syncthing device id.",
+                            device_id, editor)
+                    desired |= unmapped
             # devices outside the config snapshot entirely (shouldn't happen) stay put
             desired |= actual - set(id_to_editor) - {my_id}
             desired |= actual & frozen_devices.get(slug, frozenset())  # see above
@@ -1517,9 +1555,29 @@ class Collector:
                 if desired == actual:
                     continue
             attempted += 1
+            unplanned: set[str] = set()
             try:
                 live = self.client.get_folder(slug)
                 existing = {d["deviceID"]: d for d in live.get("devices", [])}
+                # res-fleet-6 (2026-09-11): a device that entered this folder
+                # BETWEEN the config snapshot the plan was made from and this
+                # fresh read (an admin approving and sharing by hand,
+                # `_ensure_shared_folders` creating a folder) was never in
+                # `actual`, so the blast-radius brake never counted it, the
+                # refusal never named it and `record_enforce_plan` never
+                # described it - and the comprehension below would drop it
+                # anyway. An unshare this pass did not plan and did not count
+                # is exactly what the brake exists to prevent, so those
+                # devices are KEPT and the next cycle plans the folder against
+                # a snapshot that has them.
+                unplanned = set(existing) - actual
+                if unplanned:
+                    log.warning(
+                        "folder %s has %d device(s) that were not in this cycle's "
+                        "snapshot (%s): keeping them. They are counted and decided "
+                        "next cycle, never unshared uncounted.",
+                        slug, len(unplanned), ", ".join(sorted(unplanned)))
+                    desired = desired | unplanned
                 live["devices"] = (
                     [entry for device_id, entry in existing.items() if device_id in desired]
                     + [{"deviceID": device_id, "introducedBy": ""}
@@ -1532,7 +1590,7 @@ class Collector:
                           "this cycle still ran", slug, exc)
                 continue
             applied += 1
-            added = sorted(desired - actual)
+            added = sorted(desired - actual - unplanned)
             removed = sorted(actual - desired)
             log.info("enforced shares on %s: +%s -%s", slug, added or "[]", removed or "[]")
         if failures:

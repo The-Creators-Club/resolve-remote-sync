@@ -286,7 +286,7 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
-$InstallerVersion = "1.0.41"
+$InstallerVersion = "1.0.42"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see
@@ -903,6 +903,39 @@ function Register-UninstallEntry {
         New-ItemProperty -Path $key -Name "NoModify" -Value 1 -PropertyType DWord -Force | Out-Null
         New-ItemProperty -Path $key -Name "NoRepair" -Value 1 -PropertyType DWord -Force | Out-Null
         return (Test-Path -LiteralPath $key)
+    }
+    catch { return $false }
+}
+
+function Set-UninstallEntryIcon {
+    <#
+      .SYNOPSIS
+        Point the Apps & features entry at the companion exe, once that exe
+        exists (install-onboard-4, 2026-09-11).
+      .DESCRIPTION
+        Section 1a registers the entry about 1250 lines before section 9
+        copies the companion in, so on a FIRST install Register-UninstallEntry
+        always found no icon and skipped DisplayIcon - permanently, since only
+        a second bootstrap run would rewrite the key. Every first-time editor
+        got a blank-icon row in Settings > Apps, which is the shape an
+        unwanted or unsigned program has.
+
+        Writes nothing, and creates nothing, when either the entry or the icon
+        is absent: a key invented here would be an uninstall button pointing
+        at no uninstaller. Returns $true only when the value was written.
+        Never throws: an install that works is not failed by a registry value.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$KeyRoot,
+        [Parameter(Mandatory)][string]$KeyName,
+        [Parameter(Mandatory)][string]$IconPath
+    )
+    $key = Join-Path $KeyRoot $KeyName
+    try {
+        if (-not (Test-Path -LiteralPath $key)) { return $false }
+        if (-not $IconPath -or -not (Test-Path -LiteralPath $IconPath)) { return $false }
+        New-ItemProperty -Path $key -Name "DisplayIcon" -Value $IconPath -PropertyType String -Force | Out-Null
+        return $true
     }
     catch { return $false }
 }
@@ -2252,6 +2285,13 @@ if ($CompanionExeSource) {
 }
 
 Write-Step "checking companion app at $CompanionExePath..."
+# install-onboard-4 (2026-09-11): the Apps & features entry was registered in
+# section 1a, long before the exe existed, so its icon could only ever be set
+# on a re-run. Here the exe either exists or never will.
+if (-not $DryRun -and $UninstallScriptPath -and (Test-Path -LiteralPath $CompanionExePath)) {
+    Set-UninstallEntryIcon -KeyRoot $UninstallKeyRoot -KeyName $UninstallKeyName `
+        -IconPath $CompanionExePath | Out-Null
+}
 if (-not (Test-Path -LiteralPath $CompanionExePath)) {
     Write-Warn2 "companion exe not found at $CompanionExePath -- skipping autostart registration and launch. Install the companion app (or pass -CompanionExeSource) and re-run this script."
 }

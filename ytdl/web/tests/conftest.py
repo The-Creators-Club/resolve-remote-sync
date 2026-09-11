@@ -266,9 +266,17 @@ def clean_projects(tmp_roots):
     Not tidiness: the dedupe reads the DESTINATION FOLDER for `[id]` filenames,
     so a file left behind by an earlier test would make the next one's videos
     duplicates and every download would be skipped.
+
+    The project FOLDERS are then re-created empty (2026-09-11): a ticked
+    project is a folder in the tree, and since ytdl-web-1 a destination whose
+    project folder is absent is read as "the share is gone" rather than as a
+    full disk. A root with no folders in it is not a tree, and a suite running
+    against one would be exercising the vanished-mount path everywhere.
     """
     shutil.rmtree(_PROJECTS, ignore_errors=True)
     _PROJECTS.mkdir(parents=True, exist_ok=True)
+    for label in [p[1] for p in PROJECTS] + [OTHER_PROJECT[1], '2024/Old']:
+        (_PROJECTS / label).mkdir(parents=True, exist_ok=True)
     yield
 
 

@@ -369,7 +369,14 @@ def connect():
             # yet. scriptapp() here would sit in a ~4 s retry loop and greet
             # the server the moment it appears -- the 0.9.45 failure. Quiet:
             # this is the normal state for hours at a time.
-            _note_starting(None)
+            #
+            # comp-resolve-6 (2026-09-11): NOT the same event as the READY
+            # arm below. A window that ends in ABSENT is Resolve quitting or
+            # dying mid-launch, and logging it as "script server has its host
+            # now - connecting" told whoever was reading a bundle that
+            # scripting had recovered at the exact second it went away. CR-68
+            # diagnoses are read out of this line.
+            _note_starting(None, ready=False)
             return None
         _note_starting(None)
         try:
@@ -406,15 +413,29 @@ _starting_lock = threading.Lock()
 _starting_since: Optional[float] = None
 
 
-def _note_starting(why: Optional[str]) -> None:
+def _note_starting(why: Optional[str], ready: bool = True) -> None:
+    """A sentence OPENS the launch window; None closes it.
+
+    Three outcomes, not two (comp-resolve-6, 2026-09-11): the window opens,
+    the window ends with Resolve registered, and the window ends with Resolve
+    gone. The third used to be logged as the second.
+    """
     global _starting_since
     with _starting_lock:
         if why is None:
             if _starting_since is not None:
-                log.info(
-                    "resolve: script server has its host now -- connecting "
-                    "(held off for %.1fs)", time.monotonic() - _starting_since,
-                )
+                held = time.monotonic() - _starting_since
+                if ready:
+                    log.info(
+                        "resolve: script server has its host now -- connecting "
+                        "(held off for %.1fs)", held,
+                    )
+                else:
+                    log.info(
+                        "resolve: Resolve went away during its launch window "
+                        "after %.1fs -- there is no script server now and "
+                        "nothing has connected (CR-68)", held,
+                    )
             _starting_since = None
             return
         if _starting_since is None:

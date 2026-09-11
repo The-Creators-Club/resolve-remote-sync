@@ -196,6 +196,25 @@ def cancel(uid: str, x_ccsync_user: str = Header(default=None),
     return {'ok': True, 'state': batch['state'], 'cancel_requested': True}
 
 
+@router.post('/{uid}/retry-failed')
+def retry_failed(uid: str, x_ccsync_user: str = Header(default=None),
+                 x_ccsync_admin: str = Header(default=None)):
+    """Put the failed tracks of this batch back in the queue. Owner or admin.
+
+    music-2 (2026-09-11), the music half of BROLL-18. A terminal batch is
+    exactly the case this exists for, so `done_with_errors` is not refused
+    here the way the fleet routes refuse it: the batch goes back to `queued`
+    and the next claim resumes it. Nothing is dispatched from this route - the
+    page tells its OWN companion to pick the batch up, because only the
+    editor's machine holds the staged audio.
+    """
+    user = require_user(x_ccsync_user)
+    admin = is_admin(x_ccsync_admin)
+    conn = con()
+    batch = _visible_or_404(conn, uid, user, admin)
+    return ingest_batches.retry_failed(conn, batch)
+
+
 @router.post('/{uid}/upload-paused')
 def upload_paused(uid: str, body: UploadPausedIn,
                   x_ccsync_user: str = Header(default=None),

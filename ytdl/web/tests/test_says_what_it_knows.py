@@ -202,8 +202,14 @@ def test_an_unsizeable_selection_still_needs_two_gigabytes(
 
 def test_free_space_is_read_from_the_nearest_real_directory_and_cached(tmp_path):
     """The destination is created by the download phase, so at the moment of
-    the check it usually does not exist yet -- and the filesystem being asked
-    about is the same one either way."""
+    the check it usually does not exist yet -- and with the tree MOUNTED the
+    filesystem being asked about is the same one either way.
+
+    That last clause is the whole of it, and it used to be missing: the walk-up
+    answers just as happily for the leftover mount point of a share that has
+    gone away, which is why the refusal (not the measurement) now asks whether
+    the destination's project folder is there -- ytdl-web-1, 2026-09-11, and
+    tests/test_bug_hunt_2026_09_11_ytdl_web.py pins that half."""
     routes_api._free_cache.clear()
     missing = tmp_path / 'Youtube' / 'algal reef'
     free = routes_api.free_bytes_at(missing)

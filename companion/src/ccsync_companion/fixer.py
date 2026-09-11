@@ -526,6 +526,11 @@ COPY_CHUNK_BYTES = 8 * 1024 * 1024
 POLL_CHUNK_BYTES = 1024 * 1024
 POLL_MAX_SECONDS = 0.5
 MIN_CHUNK_BYTES = 64 * 1024
+# How many CONSECUTIVE reads well inside the budget buy the size back
+# (comp-resolve-1, 2026-09-11). Several, never one: the shrink is about
+# answering the cancel button, and a link hovering at the budget must not be
+# talked back up to a read the editor then waits a second for.
+GROW_AFTER_FAST_READS = 4
 
 # Windows file attributes meaning "this file is not really on this disk".
 # Cloud filesystems (Google Drive File Stream, OneDrive Files On-Demand,
@@ -673,6 +678,15 @@ def copy_with_progress(
         read_size = min(POLL_CHUNK_BYTES, max(1, int(chunk_size)))
     except (TypeError, ValueError):
         read_size = POLL_CHUNK_BYTES
+    # comp-resolve-1 (2026-09-11): the halving below used to be the only
+    # writer of read_size, so it was monotonically non-increasing for the
+    # whole file. The realistic trigger is the case RES-14 was written for:
+    # the FIRST read of a Google Drive / OneDrive placeholder blocks while
+    # the file hydrates, so a 40 GB original was ratcheted on read #1 and
+    # then copied to the end at the smaller size long after the source had
+    # become fast.
+    full_read_size = read_size
+    fast_reads = 0
     with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
         while True:
             if aborting():
@@ -695,8 +709,21 @@ def copy_with_progress(
             # hydrating or the share is stalling; ask for less next time so the
             # cancel the editor already pressed is honoured, not so the copy
             # goes faster.
-            if clock() - started > POLL_MAX_SECONDS and read_size > MIN_CHUNK_BYTES:
-                read_size = max(MIN_CHUNK_BYTES, read_size // 2)
+            elapsed = clock() - started
+            if elapsed > POLL_MAX_SECONDS:
+                if read_size > MIN_CHUNK_BYTES:
+                    read_size = max(MIN_CHUNK_BYTES, read_size // 2)
+                fast_reads = 0
+            elif elapsed < (POLL_MAX_SECONDS / 4.0):
+                # Back up, but never on ONE fast read: a link sitting either
+                # side of the budget would oscillate, and the cancel latency
+                # this whole ladder exists for is the thing that would pay.
+                fast_reads += 1
+                if fast_reads >= GROW_AFTER_FAST_READS and read_size < full_read_size:
+                    read_size = min(full_read_size, read_size * 2)
+                    fast_reads = 0
+            else:
+                fast_reads = 0
     if aborted:
         # Handles are closed by now (see above) -- the caller can unlink.
         raise CopyAborted(f"copy of {src} abandoned by the user after {copied} bytes")

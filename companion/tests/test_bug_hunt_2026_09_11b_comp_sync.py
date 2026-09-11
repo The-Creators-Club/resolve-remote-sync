@@ -19,6 +19,19 @@ import pytest
 
 from ccsync_companion import file_moves
 from ccsync_companion.sync import lane_guard, rclone_lane as rclone_mod
+
+
+@pytest.fixture(autouse=True)
+def _stub_rclone_available(monkeypatch):
+    """The two run_once tests here exercise the lane's own gates and the
+    spawn seam, not rclone_available()'s "a real binary is on PATH" check -
+    which is exactly what took release-macos and release-windows red on
+    34a3c8f (the runners have no rclone; this dev box does, so the tests were
+    green here). Same stub as test_rclone_lane.py, for the same reason."""
+    monkeypatch.setattr(
+        "ccsync_companion.sync.rclone_lane.rclone_available",
+        lambda rclone_path: (True, rclone_path),
+    )
 from ccsync_companion.sync import shared_folders as shared_mod
 from ccsync_companion.sync import syncthing_admin as admin_mod
 from ccsync_companion.sync import syncthing_lane as lane_c_mod

@@ -609,7 +609,12 @@ def git_out(args, cwd=None):
     try:
         proc = subprocess.run(["git", *args],
                               cwd=(str(cwd) if cwd else None),
-                              capture_output=True, text=True)
+                              # utf-8, never the console's codec: a commit
+                              # subject with a Chinese clip name in it took
+                              # the deploy down between the snapshot and
+                              # the app step (2026-09-12, cp1252 on Windows)
+                              capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
     except OSError as exc:
         return False, "", f"git could not be run ({exc})"
     return proc.returncode == 0, (proc.stdout or "").strip(), (proc.stderr or "").strip()

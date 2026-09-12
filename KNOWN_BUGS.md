@@ -24141,6 +24141,126 @@ equal) is RETIRED - current.json cleared with `retired_from` /
 unparseable version keeps the exact-match rule). The live record on the
 NAS was retired by hand the same day, in the shape the new boot writes.
 
+## Timeline Cards, 2026-09-12 evening (CR-271 .. CR-275): the offline session on the laptop
+
+Alex, on the laptop with no network, 14:22-14:35: "Offline mode didn't really
+work at all just now, things were jumping all over, blade cuts wouldn't take,
+it kept asking me to save a json file every few minutes and it was getting
+larger all the time." The evidence was pulled off the laptop over SSH: the
+17 automatic rescue copies Chrome wrote to D:\Downloads (each the copy's
+state + the queue at that minute), Chrome's own download history (one
+prompt per minute, two cancelled), and the NAS `.history` for the cut list
+(rev 101 at the start of the session, nothing landed after it: the 71-edit
+queue is still in the laptop's IndexedDB). The queue told the story op by
+op: 36 identical `api/split` refused locally as "the blade is at the edge of
+the cut", 6 `api/reorder` refused as "not a re-order of this cut list", 3
+`api/insert` refused as "not in the offline copy", all queued with
+`local:false` and nothing on the screen. The morning's four files told a
+second story: 17 edits parked for an hour on a conflict whose reason was
+`'base'`. All in the MulticamPipeline repo (cards checkout); the fixes are
+one commit there.
+
+### CR-271 - the offline copy names every split tail `<uid>~b`, so the second split of one card makes two cards with one uid: the blade lands on the wrong one and is refused "at the edge", a reorder of the page's list never matches, the list jumps - FIXED (15-offline.js oflMint)
+
+The server names a cut `cut:<sha1 of clip|in|out>` with an occurrence
+suffix (project_engine.cut_uid), so a split renames BOTH halves. The copy
+kept the head's uid and appended `~b` to the tail; splitting the same head
+twice minted `cfd0dc6df6~b` twice. `oflFind` returns the first match, so
+every blade on the newer tail was judged against the older one, where the
+point clamps to its head: "at the edge". The reorder branch's uid map lost
+a duplicate, so the page's 525-uid target never matched the copy's 526.
+Now `oflMint(cards, wbase, in, out)` names a piece `<wbase>~<in>-<out>` in
+clip frames with `#n` on collision: unique in the copy, deterministic (the
+offline undo rebuilds the queue from the base and mints the same names),
+and legible (the stem is the server uid the piece descends from). The
+trim middle bite, `api/insert` (`ofl:ins:<mp>~<in>-<out>`, was
+`Date.now()`) and `api/unstage` (collided on unstage-restage-unstage) mint
+the same way. A trim of the whole cut is now the engine's own refusal
+instead of a local delete the replay would never make.
+
+### CR-272 - a refused local apply answered `ok:true` and was queued invisibly; the copy answered `unchanged` to a page that had drifted from it, so the two lists never met again - FIXED (15-offline.js oflQueuedAnswer, OFLNOQ, oflSeedFromPage guard)
+
+`oflQueueEdit` answered every unapplied op `{ok:true, queued_offline,
+local:false, note}`: `note` is drawn nowhere and `ok:true` with no
+`apply_seq` takes sendEdit's "the server queued it" road, a poll of
+`api/state?v=<V>` that the copy answers `unchanged` because the VERSION
+matched however far the LISTS had drifted. So a refused reorder left the
+shadow prediction standing, PENDING never clearing, the page drawing its
+own list and the copy answering polls with another. Now an op the server
+would refuse as an EditError (the blade at the edge, an empty selection,
+the whole cut, a re-order of the wrong list) answers `{ok:false, error}`
+and is NOT queued: sendEdit's error road drops the shadow, sets `V=-1`,
+and the next poll is the copy's full list, so the page is put back on the
+copy and the sentence is on screen. An op the copy genuinely cannot derive
+is still queued pending, but its answer now carries the sentence and a
+duplicate of one already waiting unsent is not queued twice
+(`oflBodyKey`: route + body minus `version`/`base`). `oflSeedFromPage`
+(30f7a8f) refuses to seed the copy from LAST_D while unsent local edits
+are queued, and refuses a page list carrying duplicate uids: seeding was
+one way the divergence was made.
+
+### CR-273 - the replay: `'base'` (a KeyError repr) parked 17 edits for an hour; a refusal the server put on the state was counted as SYNCED and the edit thrown away; a uid the copy minted was never resolved on the server, so nothing after the first split could ever replay - FIXED (offline.py resolve_spans/error_kind, handler.py, oflSync)
+
+Three defects in one road. (1) `oflSend` deletes `base` from a replayed
+body on purpose (the copy's own replay moved the order; `_order_check` is
+a no-op on None), but delete/stage/split-trim/extend/reorder in handler.py
+read `body["base"]`: KeyError, `str(exc)` = `'base'`, straight into the
+conflict panel, and 16 edits parked behind it. `body.get("base")` now, and
+every route answers a sentence (`offline.error_sentence`, never a repr).
+(2) A project file refuses ON THE STATE (`last_apply.ok=false`, HTTP 200)
+and `oflSync` looked only at `answer.error`, so a refused edit counted as
+landed and was dropped silently while `apply_seq` still moved and the
+next op hit "the timeline changed". `oflVerdict` reads both. (3) The
+server resolves a cut strictly by name and renames both halves of every
+split, so every queued op naming a copy-minted uid (or the renamed head)
+answered "that cut is no longer in the cut list". `oflQueueEdit` stamps
+`uid_spans` (mp_uid, src_in, src_out in clip frames) on each entry at
+queue time and the server (`offline.resolve_spans`, one seam at the top
+of the edit routes) resolves an unknown name by span; the page also
+follows `state.renamed` through the replay for a queue that predates the
+stamp (the laptop's). The replay now DROPS a refused op with its reason
+and continues (only a moved file parks the rest), collapses consecutive
+identical ops (the 36 blades are one send), counts parked and dropped
+apart, and lists the dropped ones in the panel in words. [ KEEP ALL MINE ]
+past an impossible edit drains the rest without a second click. The
+service worker's replay recognises the state refusal too.
+`docs/OFFLINE-PLAN.md` 6b/6c.
+
+### CR-274 - the rescue copy was one file a minute through the browser's save dialog, 1.0 to 1.7 MB and growing 10 KB per edit - FIXED (15-offline.js one file through the File System Access API; pack)
+
+CR-211's floor was one file a minute, so an editor editing continuously got
+Chrome's save prompt once a minute (13 in 13 minutes; his profile asks
+where to save). Each file was the whole copy (`state` 690 KB) plus a queue
+whose every entry carried `base`, the full 515-uid order, plus `readable`
+and `order`. Now, where `showSaveFilePicker` exists (Chrome/Edge on
+Windows/macOS), the editor chooses a file ONCE from the offline panel
+(`[ CHOOSE WHERE THE RESCUE COPY GOES ]`; a picker needs a click, so the
+first automatic write asks and writes one anchor copy so nothing is
+unprotected) and every later automatic write overwrites that one file
+silently through the stored handle (`queryPermission` /
+`requestPermission` on reload). Without the API (Firefox, Safari, Android,
+iOS) the anchor road stays, at most one file per ten minutes, plus one on
+the flip to offline and one when the tab is hidden with a write pending.
+The file is version 2: the queue's repeated uid lists are held once
+(`lists`, `{$l:i}` per body) and expanded on restore so the in-memory
+queue is byte-identical; `order` dropped, the readable listing capped at
+40 cuts; version 1 files still restore. Measured on the incident's last
+file: 1,681,207 to 960,729 bytes.
+
+### CR-275 - an insert of a downloaded transcript's paragraph was refused "those paragraphs are not in the offline copy" three times, when the copy held the transcript - FIXED (15-offline.js oflSpanNear)
+
+`text.word_index` skips a block whose line is not found exactly in the
+token stream, so a paragraph the panel draws can own zero timed words; the
+copy's insert filtered by refs and found nothing, while the server places
+the same selection with a fuzzy `stream.locate(text, 0.75)`. The copy now
+finds the selection in the transcript's flat text and bounds it with the
+nearest timed words either side (marked approximate, said in a warn
+line), refusing only when it cannot bound both. A second latent cause:
+`OFLDOCS` is memory-only and cleared at boot, so an insert after a reload
+was refused although the store held the transcript; the queue now reads
+the doc back out of IndexedDB first.
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

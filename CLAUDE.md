@@ -67,6 +67,23 @@ run alongside the tray app — it would hold port 8899.
   it re-execs the process, and here that process is the dashboard.
   Its three Claude features go through `ai_providers` (`cards_ai.py`), never a
   bundled CLI.
+- **One engine per EPISODE, and the URL is the key** (2026-09-14,
+  `docs/CARDS_TWO_PROJECTS.md` phase 1): `/cards` is a LANDING page that needs
+  no engine to draw (which is why it answers when every engine is busy), and
+  the page itself is `/cards/p/<slug>/`, where the slug is minted from the
+  NFC-normalised, case-folded episode root (CR-90 — a path is not a key).
+  `cards_pool.py` builds each engine in a thread on first entry, caps them at
+  `DASH_CARDS_ENGINES` (2) and **REFUSES the third rather than evicting**:
+  `stop()` upstream sets a flag the library, tokens and translator threads do
+  not read, so an eviction leaks three threads per episode. Each engine gets
+  its own `<data>/cards/<slug>` (they shared one, and `project_pick.doc_save`
+  is a read-merge-write through a fixed `.tmp`), `POST /api/root` is blocked
+  at the gate (it would move engine A onto root B), and `/cards/sw.js` is now
+  a KILL SWITCH — the old installed worker's scope covers the new URLs and
+  would serve the old page over them. **An agent's push goes to the engine
+  its own editor is in** (`cards_tunnel._routed`): a signed-in user drives
+  only the companions signed in to their own account, so nobody holds Resolve
+  fleet-wide and nobody has to hand it over.
 - **The music web package is `musicweb`, deliberately NOT `app`.** `broll/web`
   is deployed by putting its tree on PYTHONPATH and importing it as top-level
   `app`; a second package of that name would collide in `sys.modules` and one

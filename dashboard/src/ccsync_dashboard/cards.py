@@ -34,6 +34,20 @@ way it is:
     re-execs the process; in this one `restart_server` would `os._exit(0)`
     the DASHBOARD. It is refused by the gate, with a sentence the page can
     show, and `self.server` is an object whose `shutdown()` refuses as well.
+  * **`/api/root` IS BLOCKED TOO** (2026-09-14, docs/CARDS_TWO_PROJECTS.md).
+    It is a live route inside the page -- the drawer's root menu -- and it
+    calls `engine.set_root()`, which moves THE ENGINE onto another episode.
+    With one engine that was the feature; with an engine per episode it
+    would move engine A onto root B, which may already have an engine of its
+    own, and make the pool's own key a lie. The refusal names the landing
+    page, which is where that click means to go now.
+
+SINCE 2026-09-14 THERE IS AN ENGINE PER EPISODE, not one for the container
+(docs/CARDS_TWO_PROJECTS.md phase 1). `/cards` is a landing page served by
+this module -- it needs no engine to draw, so it answers when every engine is
+busy, failed or absent -- and the page itself lives under `/cards/p/<slug>/`,
+byte for byte as it was, with one engine behind it. `cards_pool.py` is the
+pool; this module is what the pool builds and what routes into it.
 
 The engine's settings are the dashboard's own (`DASH_CARDS_*`, CONFIG.md
 §3), one variable for each `CARDS_*` the standalone container takes -- so
@@ -53,7 +67,7 @@ from typing import Any, Callable
 
 from fastapi import FastAPI
 
-from . import mount_status
+from . import cards_pool, mount_status
 from .settings import Settings
 
 log = logging.getLogger("ccsync.dashboard.cards")
@@ -70,9 +84,22 @@ MOUNTED = "mounted"
 ABSENT = "absent"
 DISABLED = "disabled"
 
-# Routes the mounted page must never reach. `/api/restart` re-execs the
-# server process, which here is the dashboard (see the module docstring).
-BLOCKED_PATHS = frozenset({"/api/restart"})
+# Routes the mounted page must never reach, and the sentence each is refused
+# with. Both are live routes in the page, so both answer 200 with an `error`
+# the page already knows how to show: a 403 from a fetch() the page does not
+# expect to fail is a silence.
+BLOCKED_PATHS = {
+    "/api/restart": ("this Timeline Cards is part of the dashboard and cannot "
+                     "restart itself -- redeploy the dashboard to pick up "
+                     "page changes"),
+    # docs/CARDS_TWO_PROJECTS.md phase 1: see the module docstring.
+    "/api/root": ("this Timeline Cards has one engine per episode -- go back "
+                  "to the Timeline Cards page to open another episode, and "
+                  "this one stays open behind you"),
+}
+
+# Where one episode's page lives under the mount: /cards/p/<slug>/...
+PROJECT_PREFIX = "/p/"
 
 # The page's own `/agent/*` protocol. It is served by cards_tunnel's three
 # routes, which are registered BEFORE this mount and therefore shadow it --
@@ -185,40 +212,55 @@ class _NoServer:
         self.shutdown()
 
 
+def data_dir_for(settings: Settings, slug: str = "") -> str | None:
+    """`<data>/cards/<slug>`, made if it is not there. None if it cannot be.
+
+    ONE DIRECTORY PER ENGINE (2026-09-14). Every engine used to share
+    `<data>/cards`, which holds `cards_mirror.json`, `cards_pick.json`,
+    `cards_lane_keys.json`, `library_backups`, the EN-index cache and
+    `cards_ui.json` -- and `project_pick.doc_save` is a read-merge-write
+    through a fixed `path + ".tmp"` with no cross-process lock, so two
+    engines calling `remember()` at the same moment truncate each other's
+    file. They are per-ROOT stores wearing a per-container path.
+    """
+    from pathlib import Path as _Path
+
+    data = _Path(settings.db_path).parent / "cards"
+    if slug:
+        data = data / slug
+    try:
+        os.makedirs(data, exist_ok=True)
+    except OSError:
+        return None
+    return str(data)
+
+
 def build_engine(project_agent_mod: Any, settings: Settings,
-                 claude_runner: Callable | None = None) -> Any:
+                 claude_runner: Callable | None = None,
+                 root: str = "", data_dir: str | None = None) -> Any:
     """The engine `server.main` builds for a NAS, from dashboard settings.
 
     `ProjectAgentEngine` with no project file is "an ordinary agent server in
     every respect, and one that can be pointed at a .cut.md from the page
     without a restart" (server.py) -- which is what the container runs today,
     so it is what this builds.
+
+    `root` is the EPISODE, handed in by the pool, and `data_dir` is that
+    episode's own state directory. Neither is read out of `cards_ui.json` any
+    more: that file recorded "the root the UI last picked" for a container
+    with one engine in it, and with a pool it is at best meaningless and at
+    worst a second engine on a root that already has one. The pool's key is
+    the root, and the URL carries it.
     """
     allow = [s.strip() for s in str(settings.cards_db_write_allow or "").split(",")
              if s.strip()]
-    # The engine's own state -- the mirror, the picker's memory, the
-    # last-picked ROOT -- lives on /data (the persistent volume), not in
-    # the container layer: a recreate used to forget the open project and
-    # the episode, and every refresh landed back on the deploy defaults
-    # (Alex, 2026-08-31).
-    import json as _json
-    import os as _os
-    from pathlib import Path as _Path
-    data = str(_Path(settings.db_path).parent / "cards")
-    try:
-        _os.makedirs(data, exist_ok=True)
-    except OSError:
-        data = None
-    root = (str(settings.cards_root or "").strip() or vault_root(settings))
-    if data:
-        try:
-            with open(_os.path.join(data, "cards_ui.json"),
-                      encoding="utf-8-sig") as fh:
-                was = _json.load(fh).get("root")
-            if was and _os.path.isdir(was):
-                root = was
-        except (OSError, ValueError):
-            pass
+    # The engine's own state -- the mirror, the picker's memory -- lives on
+    # /data (the persistent volume), not in the container layer: a recreate
+    # used to forget the open project, and every refresh landed back on the
+    # deploy defaults (Alex, 2026-08-31).
+    data = data_dir if data_dir is not None else data_dir_for(settings)
+    root = (str(root or "").strip()
+            or str(settings.cards_root or "").strip() or vault_root(settings))
     engine = project_agent_mod.ProjectAgentEngine(
         str(settings.cards_project or "").strip() or None,
         root,
@@ -244,22 +286,52 @@ def build_engine(project_agent_mod: Any, settings: Settings,
 
 
 def stop_engine(app: FastAPI) -> None:
-    """Let the engine's threads go, at app shutdown. Never raises.
+    """Let every engine's threads go, at app shutdown. Never raises.
 
     They are all daemons, so this is not what stops the process -- it is what
     stops a SWEEP from running against a database the next process is opening,
     and what makes a reload in a dev run quiet instead of noisy.
+
+    Still the one shutdown hook a mounted app gets, and it now drains the
+    whole pool. `app.state.cards_engine` is kept as "an engine, if there is
+    one" for the health line and for anything that asked before the pool
+    existed.
     """
+    pool = getattr(app.state, "cards_pool", None)
+    if pool is not None:
+        try:
+            pool.stop_all()
+        except Exception:  # noqa: BLE001 - shutdown is not the place to raise
+            log.exception("the Timeline Cards pool did not stop cleanly")
     engine = getattr(app.state, "cards_engine", None)
-    if engine is None:
-        return
-    try:
-        stop = getattr(engine, "stop", None)
-        if callable(stop):
-            stop()
-    except Exception:  # noqa: BLE001 - shutdown is not the place to raise
-        log.exception("the Timeline Cards engine did not stop cleanly")
+    if engine is not None:
+        try:
+            stop = getattr(engine, "stop", None)
+            if callable(stop):
+                stop()
+        except Exception:  # noqa: BLE001
+            log.exception("the Timeline Cards engine did not stop cleanly")
     app.state.cards_engine = None
+
+
+def engine_provider(app: FastAPI) -> Callable[[], Any]:
+    """"An engine, if there is one" -- asked when it is needed, not at boot.
+
+    `cards_exec.PinnedExecutor` used to be handed `app.state.cards_engine` at
+    boot and ask `available()` there. With a lazily built pool there is no
+    engine at boot, so there would be no executor for the life of the
+    container, and every media job that spent its fleet retry budget would go
+    `abandoned` -- a silent regression of the port plan's phase 4 rule 5.
+    """
+    def provider() -> Any:
+        pool = getattr(app.state, "cards_pool", None)
+        if pool is not None:
+            engine = pool.any_engine()
+            if engine is not None:
+                return engine
+        return getattr(app.state, "cards_engine", None)
+
+    return provider
 
 
 # ------------------------------------------------------------------ the gate
@@ -286,11 +358,9 @@ class CardsGate:
                 # exact-membership test into a handler that may normalise the
                 # trailing slash itself. The gate is the first of two locks
                 # and it must not be the thinner one.
-                if (path.rstrip("/") or "/") in BLOCKED_PATHS:
-                    await _json_response(send, 200, {
-                        "error": "this Timeline Cards is part of the dashboard "
-                                 "and cannot restart itself -- redeploy the "
-                                 "dashboard to pick up page changes"})
+                refusal = BLOCKED_PATHS.get(path.rstrip("/") or "/")
+                if refusal is not None:
+                    await _json_response(send, 200, {"error": refusal})
                     return
                 if path.startswith(AGENT_PREFIX):
                     await _json_response(send, 404, {
@@ -315,6 +385,161 @@ def sub_paths(scope: dict) -> tuple[str, ...]:
     if path.startswith(MOUNT_PATH):
         candidates.append(path[len(MOUNT_PATH):] or "/")
     return tuple(dict.fromkeys(candidates))
+
+
+class CardsDispatch:
+    """`/cards/p/<slug>/...` -> that episode's engine. Everything else says why.
+
+    The pool's front door, and deliberately the only thing in the request path
+    that knows about slugs. Three rules:
+
+      * **IT NEVER BUILDS AN ENGINE.** Construction reads an episode off a
+        network share and this runs on the event loop. An episode that is not
+        open is a redirect to the landing page (for a navigation) or a
+        sentence in JSON (for a fetch), and the landing page is what opens it,
+        in a thread, with a state a person can watch.
+      * **THE PREFIX IS REWRITTEN, NOT STRIPPED IN PLACE.** The sub-app is
+        handed `path` without the prefix and `root_path` with it, so
+        `a2wsgi.build_environ` computes the same PATH_INFO it did when the
+        mount was flat -- whichever way the Starlette of the day hands a mount
+        its path (`sub_paths` exists for that same churn).
+      * **THE FLAT PATHS STILL ANSWER.** A phone with the page installed at
+        `/cards/api/...` from before this change, or an old service worker
+        replaying a queued edit there, gets a sentence and a redirect rather
+        than a 404 nobody can read.
+    """
+
+    def __init__(self, pool: Any, make_gate: Callable[[Any], Any]) -> None:
+        self.pool = pool
+        self.make_gate = make_gate
+        # slug -> (the app it was built around, the gate). See __call__.
+        self._gates: dict[str, tuple[Any, Any]] = {}
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") != "http":
+            await _json_response(send, 404, {"error": "not found"})
+            return
+        rel = _relative_path(scope)
+        if rel.startswith(AGENT_PREFIX):
+            # The belt to cards_tunnel's brace, kept at the OUTER door now
+            # that the gate only stands behind `/p/<slug>/`: a fourth agent
+            # path added upstream must never appear on the session-gated
+            # prefix without being noticed.
+            await _json_response(send, 404, {
+                "error": "the agent protocol is served by the dashboard "
+                         "at /cards/agent/{state,pending,result}"})
+            return
+        if not rel.startswith(PROJECT_PREFIX):
+            # `/cards/` itself and its siblings are FastAPI routes registered
+            # before this mount (the landing page, sw.js, the manifest), so
+            # anything arriving here is a flat page URL from before the pool.
+            await self._not_here(scope, send, rel)
+            return
+        rest = rel[len(PROJECT_PREFIX):]
+        slug, _, tail = rest.partition("/")
+        if not cards_pool.is_slug(slug):
+            await self._not_here(scope, send, rel)
+            return
+        if not rel.endswith("/") and not tail:
+            # The bare project URL. The page's own URLs are document-relative
+            # on purpose (the sibling mounts pin that in their own tests), and
+            # document-relative from `/cards/p/<slug>` resolves against
+            # `/cards/p/` -- every asset, every fetch, one directory too high.
+            await _redirect(send, f"{MOUNT_PATH}{PROJECT_PREFIX}{slug}/")
+            return
+        asgi = self.pool.ready_asgi(slug)
+        if asgi is None:
+            await self._not_open(scope, send, slug)
+            return
+        self._note(scope, slug)
+        # KEYED ON THE APP, NOT JUST THE SLUG. An episode that is closed and
+        # opened again is a NEW engine behind the same slug, and a gate cached
+        # by slug alone would go on serving the dead one -- with its stopped
+        # threads and its own idea of the cut -- for the life of the container.
+        was, gate = self._gates.get(slug, (None, None))
+        if gate is None or was is not asgi:
+            gate = self.make_gate(asgi)
+            self._gates[slug] = (asgi, gate)
+        await gate(self._child(scope, rel, slug, tail), receive, send)
+
+    def _note(self, scope: dict, slug: str) -> None:
+        """Who is in this episode -- for the cap's sentence, and for phase 1a.
+
+        `login_gate` has already resolved the session by the time a request
+        reaches a mount, and it leaves the answer in the request state, which
+        is this scope's own dict. Read, never re-resolved: a SQLite session
+        read per media range request would be a read per second per open page.
+        """
+        try:
+            session = (scope.get("state") or {}).get("ccsync_session")
+            user = session[0] if session else ""
+        except Exception:  # noqa: BLE001 - a visit note is never worth a 500
+            return
+        if user:
+            self.pool.note_visit(slug, user)
+
+    @staticmethod
+    def _child(scope: dict, rel: str, slug: str, tail: str) -> dict:
+        prefix = PROJECT_PREFIX + slug
+        path = scope.get("path", "")
+        cut = path.rfind(rel)
+        outer = path[:cut] if cut >= 0 else scope.get("root_path", "")
+        child = dict(scope)
+        child["path"] = "/" + tail
+        child["root_path"] = outer + prefix
+        return child
+
+    async def _not_open(self, scope, send, slug: str) -> None:
+        entry = self.pool.get(slug)
+        if _wants_html(scope):
+            await _redirect(send, f"{MOUNT_PATH}/?want={slug}")
+            return
+        state = getattr(entry, "state", "") or "not open"
+        await _json_response(send, 409, {
+            "error": f"this episode is {state} -- the Timeline Cards page is "
+                     f"where it opens",
+            "state": state, "slug": slug, "landing": MOUNT_PATH + "/"})
+
+    async def _not_here(self, scope, send, rel: str) -> None:
+        if _wants_html(scope):
+            await _redirect(send, MOUNT_PATH + "/")
+            return
+        await _json_response(send, 404, {
+            "error": "Timeline Cards is one page per episode now -- this "
+                     "address has moved under /cards/p/<episode>/",
+            "landing": MOUNT_PATH + "/"})
+
+
+def _relative_path(scope: dict) -> str:
+    """The path within the cards app, on `sub_paths`' terms: strictest wins."""
+    best = ""
+    for path in sub_paths(scope):
+        if not best or len(path) < len(best):
+            best = path
+    return best or "/"
+
+
+def _wants_html(scope: dict) -> bool:
+    """Is this a navigation? A redirect answers one and breaks the other.
+
+    A `fetch()` or an `<audio src=>` handed a 303 to a page is the CR-100
+    shape: the SPA parses HTML as JSON, or the clip reads as having no audio.
+    """
+    if scope.get("method", "GET").upper() not in ("GET", "HEAD"):
+        return False
+    for name, value in scope.get("headers", []):
+        if name == b"sec-fetch-mode":
+            return value == b"navigate"
+        if name == b"accept":
+            return b"text/html" in value
+    return False
+
+
+async def _redirect(send: Callable, location: str) -> None:
+    await send({"type": "http.response.start", "status": 303,
+                "headers": [(b"location", location.encode()),
+                            (b"content-length", b"0")]})
+    await send({"type": "http.response.body", "body": b""})
 
 
 async def _json_response(send: Callable, status: int, body: dict) -> None:
@@ -365,44 +590,63 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
                     "continues without it", type(e).__name__, e)
         return _detail(ABSENT, f"the checkout did not import ({type(e).__name__}: {e})")
 
-    from . import cards_ai, cards_wsgi
-
-    try:
-        runner = cards_ai.make_runner(settings)
-        engine = build_engine(project_agent_mod, settings, claude_runner=runner)
-        engine.start()
-        # bug-hunt-2026-09-03 dash-release-jobs-1: published BEFORE anything
-        # else can fail, because `stop_engine` is the only shutdown path and
-        # it finds the engine here. Assigned after the wrap, a wrap that
-        # raised left the sweep and the ffmpeg worker running for the life of
-        # the container with nothing holding a reference to them.
-        app.state.cards_engine = engine
-    except Exception as e:  # noqa: BLE001
-        log.warning("the Timeline Cards engine did not start (%s: %s); the "
-                    "dashboard continues without /cards", type(e).__name__, e)
-        return _detail(ABSENT, f"the engine did not start ({type(e).__name__}: {e})")
+    from . import cards_ai, cards_landing, cards_wsgi
 
     try:
         from a2wsgi import WSGIMiddleware
-
-        wsgi = cards_wsgi.handler_wsgi(handler_mod.make_handler(engine), _NoServer())
-        # More workers than a2wsgi's default ten: one open page holds a poll
-        # and a media stream at once, and a phone on the sofa is a second
-        # pair. Ten is not a queue, it is a stall with no error message.
-        asgi = WSGIMiddleware(wsgi, workers=24)
     except Exception as e:  # noqa: BLE001
-        log.warning("the Timeline Cards handler did not wrap (%s: %s)",
+        log.warning("the Timeline Cards shim is not installed (%s: %s)",
                     type(e).__name__, e)
-        stop_engine(app)
-        return _detail(ABSENT, f"the WSGI shim did not build "
-                               f"({type(e).__name__}: {e})")
+        return _detail(ABSENT, f"a2wsgi is not installed ({type(e).__name__}: {e})")
+
+    runner = cards_ai.make_runner(settings)
+
+    def build(episode_root: str) -> tuple[Any, Any]:
+        """One episode -> (engine, asgi). Raises; the pool holds the failure.
+
+        Runs in the pool's builder THREAD, never in a request: an engine
+        reads an episode off the vault share as it comes up.
+        """
+        slug = cards_pool.slug_for(episode_root)
+        engine = build_engine(project_agent_mod, settings, claude_runner=runner,
+                              root=episode_root,
+                              data_dir=data_dir_for(settings, slug))
+        engine.start()
+        try:
+            wsgi = cards_wsgi.handler_wsgi(handler_mod.make_handler(engine),
+                                           _NoServer())
+            # More workers than a2wsgi's default ten: one open page holds a
+            # poll and a media stream at once, and a phone on the sofa is a
+            # second pair. Ten is not a queue, it is a stall with no error
+            # message.
+            return engine, WSGIMiddleware(wsgi, workers=24)
+        except Exception:
+            # bug-hunt-2026-09-03 dash-release-jobs-1, in its new home. The
+            # engine is STARTED by the line above, and a wrap that raises
+            # leaves the sweep and the ffmpeg worker running with nothing
+            # holding a reference to them -- the pool only ever sees the
+            # exception. Stopped here, where the reference still exists.
+            try:
+                engine.stop()
+            except Exception:  # noqa: BLE001 - the original failure wins
+                log.exception("could not stop the engine whose wrap failed")
+            raise
+
+    pool = cards_pool.EnginePool(build, cap=int(
+        getattr(settings, "cards_engines", 0) or cards_pool.DEFAULT_CAP))
+    app.state.cards_pool = pool
 
     # res-fleet-2 (2026-09-11): the vault root the collector re-probes every
     # cycle. A Timeline Cards page with no vault under it answers nothing.
     mount_status.record_root("cards", str(root))
-    app.mount(MOUNT_PATH, CardsGate(asgi))
-    log.info("Timeline Cards mounted at %s (root %s, from %s)",
-             MOUNT_PATH, root, src)
+    # BEFORE the mount, so the landing page, the kill-switch worker and the
+    # manifest win over it: Starlette matches routes in the order they were
+    # added, which is the same reason cards_tunnel's router is registered
+    # ahead of this (app.py).
+    app.include_router(cards_landing.router)
+    app.mount(MOUNT_PATH, CardsDispatch(pool, CardsGate))
+    log.info("Timeline Cards mounted at %s (vault %s, from %s, up to %d "
+             "episode(s) at once)", MOUNT_PATH, root, src, pool.cap)
     return _detail(MOUNTED, f"serving {root}")
 
 
@@ -422,14 +666,33 @@ def health_block(app: FastAPI) -> dict[str, Any]:
         "status": status,
         "detail": getattr(app.state, "cards_detail", ""),
     }
+    pool = getattr(app.state, "cards_pool", None)
+    if pool is not None:
+        # ONE LINE PER EPISODE (2026-09-14). The old block named "the" root
+        # and "the" agent, which with a pool would be whichever engine came
+        # back first -- a health line that is right by luck. `open` is a list
+        # so an admin reading /api/v1/health can see the cap being spent.
+        try:
+            out["cap"] = pool.cap
+            out["open"] = [{"slug": e.slug, "root": e.root, "state": e.state,
+                            "agent": bool(getattr(e.engine, "agent_name", None)),
+                            "occupants": e.occupants()}
+                           for e in pool.entries()]
+            ready = [e for e in pool.entries() if e.state == cards_pool.READY]
+            if ready:
+                out["root"] = ready[0].root
+                out["agent"] = any(r["agent"] for r in out["open"])
+        except Exception:  # noqa: BLE001
+            pass
     engine = getattr(app.state, "cards_engine", None)
-    if engine is None:
+    if engine is not None:
+        try:
+            out.setdefault("root", str(getattr(engine, "root", "") or ""))
+            out.setdefault("agent", bool(getattr(engine, "agent_name", None)))
+        except Exception:  # noqa: BLE001
+            pass
+    if pool is None and engine is None:
         return out
-    try:
-        out["root"] = str(getattr(engine, "root", "") or "")
-        out["agent"] = bool(getattr(engine, "agent_name", None))
-    except Exception:  # noqa: BLE001
-        pass
     try:
         from . import cards_ai
 

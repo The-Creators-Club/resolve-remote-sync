@@ -125,6 +125,28 @@ _OPEN_EXACT = {
     "/cards/sw.js",
 }
 
+# ...and the same three under ONE EPISODE's prefix (2026-09-14,
+# docs/CARDS_TWO_PROJECTS.md phase 1b). The page moved to
+# `/cards/p/<slug>/`, its manifest and worker registration are
+# document-relative, and the reasoning above does not change one word under a
+# deeper prefix: a manifest fetch carries no cookie, so behind the gate
+# Chrome gets a 303 to /login, calls the page not installable, and the
+# worker's periodic update fetch installs the login page as its own script.
+# That is CR-100 and its 2026-09-04 sibling exactly. A PATTERN rather than
+# three more literals, because there is one prefix per episode and they are
+# not enumerable here. GET only, no secret in any of the three, and the slug
+# shape is pinned so this can never widen to anything else under /cards/p/.
+_OPEN_PATTERN = re.compile(
+    r"^/cards/p/[a-z0-9][a-z0-9-]{0,47}/"
+    r"(sw\.js|manifest\.webmanifest|icon\.svg)$")
+
+
+def _open_path(path: str) -> bool:
+    """Reachable with no session at the MIDDLEWARE level. One question, two
+    shapes: the literal set above and the one pattern beside it."""
+    return path in _OPEN_EXACT or _OPEN_PATTERN.match(path) is not None
+
+
 # The setup API prefix (ZERO_TOUCH_PLAN.md WP D). A prefix, not exact paths,
 # because /api/v1/setup/tasks/{id}/{action} is not enumerable here -- every
 # route under it gates itself via setup_routes.require_setup_access, which
@@ -709,7 +731,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # exactly as it was in phase 1. Started before the collector because
         # the collector's prune cycle asks it whether pinning is possible.
         executor = cards_exec.PinnedExecutor(
-            settings, getattr(app.state, "cards_engine", None))
+            settings, cards.engine_provider(app))
         app.state.pinned_executor = executor
         if executor.available():
             conn = db.connect(settings.db_path)
@@ -1132,12 +1154,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # documentary and stays fully session-gated. Widening this to the prefix
     # would publish it to anything holding a fleet token.
     _cards_fleet_re = re.compile(r"^/cards/agent/(state|pending|result)$")
+    # The mounted page's JSON and media, per episode: `/cards/p/<slug>/api/…`,
+    # `…/audio`, `…/video`, `…/peaks`. A regex rather than four more literal
+    # prefixes because the slug sits in the middle of each of them.
+    _cards_json_re = re.compile(
+        r"^/cards/p/[a-z0-9][a-z0-9-]{0,47}/(api/|audio|video|peaks)")
 
     @app.middleware("http")
     async def login_gate(request, call_next):
         path = request.url.path
         if (
-            path in _OPEN_EXACT
+            _open_path(path)
             or path.startswith("/static/")
             # internal_sftp.py's own routes: no cookie jar on the other end (a
             # sidecar container), gated on a bearer token instead -- see
@@ -1247,10 +1274,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     {"detail": "Your sign-in has expired. Sign in again.",
                      "login": "/login"},
                     status_code=401)
-            if path.startswith(("/broll/api/", "/broll/media/",
-                                "/music/api/", "/ytdl/api/", "/cards/agent/",
-                                "/cards/api/", "/cards/audio", "/cards/video",
-                                "/cards/peaks")):
+            if (path.startswith(("/broll/api/", "/broll/media/",
+                                 "/music/api/", "/ytdl/api/", "/cards/agent/",
+                                 "/cards/api/", "/cards/audio", "/cards/video",
+                                 "/cards/peaks"))
+                    # ...and all four of the cards prefixes again under ONE
+                    # EPISODE (2026-09-14). Same sentence, same reason: under
+                    # `/cards/p/<slug>/` an expired session would hand an
+                    # `<audio>` element a login DOCUMENT, which on that page
+                    # reads as "this clip has no audio", and the poll would
+                    # json.loads an HTML page every tick.
+                    or _cards_json_re.match(path) is not None):
                 return JSONResponse({"detail": "login required"}, status_code=401)
             # Preserve the destination through login (e.g. the companion's
             # /project-setup deep link) -- ui.py's _safe_next re-validates it.

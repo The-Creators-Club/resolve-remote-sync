@@ -1,6 +1,10 @@
 # Two people, two projects: a landing page and an engine each
 
-**Status: PLAN, nothing built.** Written 2026-09-14 after Alex asked
+**Status: PHASE 1 (with 1a and 1b) BUILT 2026-09-14, in the dashboard only.**
+Section 11 is what was built, what was left out, and what has not been run
+against a real engine. Phase 2 is untouched and still a plan.
+
+Originally written 2026-09-14 after Alex asked
 "right now is it possible for two users signed into different accounts to
 work on two different cards projects at the same time", and then chose the
 shape: *"at the landing page you just select a project and then go in to
@@ -375,3 +379,75 @@ Cards repo (`tests/`):
 4. Landing page: should it show that another editor is live on their own
    machine (information, nothing to press), or show nothing? The plan
    assumes the first.
+
+---
+
+## 11. What was built (2026-09-14)
+
+Phase 1, 1a and 1b, **entirely in the ccsync repo**: the other repo needed no
+change at all, and that is a finding rather than a saving. The page registers
+its service worker document-relative (`navigator.serviceWorker.register('sw.js')`
+in `15-offline.js`) and its manifest is relative too, so under
+`/cards/p/<slug>/` both already land in the right scope. Only the OLD worker
+at `/cards/` had to be dealt with, and that is a dashboard route.
+
+### The pieces
+
+| File | What it does |
+|---|---|
+| `dashboard/src/ccsync_dashboard/cards_pool.py` | NEW. The slug (`root_key` -> NFC + case-fold + separators, then a sha256 prefix with a readable label), the vault scan (`episodes()`), and `EnginePool`: `{slug: Entry}`, a cap, a background builder thread per episode, `note_visit` / `engine_for` for phase 1a, `drop` and `stop_all`. |
+| `cards_landing.py` | NEW. `/cards/` (the landing page), `/cards/state.json`, `POST /cards/open`, `POST /cards/close` (admin), and the three flat PWA surfaces -- with `/cards/sw.js` now a KILL SWITCH. |
+| `templates/cards_landing.html` | NEW. The episode list with its four states, who is in each (information, nothing to press), the cap refusal, and a self-refresh only while something is opening. |
+| `cards.py` | `build_engine` takes `root` and `data_dir`; `data_dir_for(settings, slug)` is `<data>/cards/<slug>`; the `cards_ui.json` boot root is GONE; `CardsDispatch` routes `/cards/p/<slug>/...`; `/api/root` joins `/api/restart` in `BLOCKED_PATHS`; `stop_engine` drains the pool; `engine_provider(app)`; the health line is one row per episode. |
+| `cards_tunnel.py` | `local_engine(request, editor)` and `_routed`: a push goes to the engine that editor is in, and an editor in no episode gets a sentence (an empty answer on the long poll, which is what "no edit for you" already looks like). |
+| `cards_exec.py` | `PinnedExecutor` takes an engine OR a callable that answers with one, asked per call; `start()` no longer refuses to start when there is no engine yet; the seam is bound once per job. |
+| `app.py` | `_open_path()` = the literal set plus ONE pattern for `/cards/p/<slug>/{sw.js,manifest.webmanifest,icon.svg}`; the JSON-401 list gains `_cards_json_re` for the four prefixes under a slug; the executor is built from `cards.engine_provider(app)`. |
+| `settings.py` | `cards_engines` / `DASH_CARDS_ENGINES`, default 2. |
+
+### The decisions, as taken
+
+* **Slug**: a hash of the normalised root with a readable label
+  (`civil-defence-9f2a1c04`), no registry table. Stable across restarts and
+  machines, so an installed phone app keeps working, and CR-90 is handled at
+  the point of minting.
+* **Cap 2**, refusal not eviction, admin close on the landing page. The
+  memory measurement in §5 has NOT been taken - two is the default until it
+  is, and the refusal is what keeps that honest.
+* **Resolve is the account's**: the routing half of 1a is built. See below
+  for the half that is not.
+* **The landing page names who is live**, with nothing to press.
+
+### What was deliberately left out
+
+* **Per-viewer agent filtering inside the page.** 1a routes each editor's
+  pushes to their own episode's engine, which is what stops a sweep landing
+  in somebody else's timeline. But two editors in the SAME episode still
+  share one engine, and `agent.py:348` is last-push-wins, so the second
+  agent's name overwrites the first on that page. Making the page show each
+  viewer only their own agent is a change in the other repo (the engine holds
+  one agent, not a map), and it belongs with phase 2's per-root work.
+* **A real `stop()`.** Unchanged upstream, so `drop()` frees the SEAT and not
+  the threads, and says so in its own docstring. Eviction still waits on it.
+* **Phase 2** (two cut files of one episode): untouched.
+
+### What has not been proved
+
+Everything here ran against the fake checkout in `dashboard/tests`. **No real
+`ProjectAgentEngine` has been built twice in one process**, which is where
+the per-root stores of §4's phase 2 list would bite if any of them turn out
+to be process-global rather than per-engine (`project_pick._CANVAS_CACHE` and
+`_CANVAS_WORK` are known to be, and that is performance, not correctness).
+The first live run should be two episodes on FF5lab, watching RSS, before
+anybody edits a real cut on it.
+
+### Tests
+
+`dashboard/tests/test_cards_pool.py` is new (30 tests: the slug's NFC/NFD and
+CJK cases, the cap sentence, a failed episode holding no seat, per-engine
+data dirs, the landing page with no engine, `/api/root` blocked, the kill
+switch, the open-path pattern refusing to widen, and the two races the build
+found in itself - a gate cached by slug serving a reopened episode's dead
+engine, and an episode closed while its builder thread still held it).
+`test_cards_mount.py` was rewritten onto the prefix and gained the two phase
+1a routing tests. Both suites pass, and so does the rest of the dashboard
+suite.

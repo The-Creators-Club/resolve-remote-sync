@@ -122,7 +122,22 @@ class PinnedExecutor:
                  connect: Callable[[], Any] | None = None,
                  poll_seconds: float = POLL_SECONDS) -> None:
         self.settings = settings
-        self.engine = engine
+        # AN ENGINE, OR SOMETHING THAT ANSWERS WITH ONE (2026-09-14,
+        # docs/CARDS_TWO_PROJECTS.md phase 1). This used to be handed
+        # `app.state.cards_engine` at boot, and `available()` was decided
+        # there. With an engine per episode, built lazily when somebody opens
+        # one, there is no engine at boot at all -- so that binding would
+        # leave the container with no executor for its whole life, and every
+        # media job that spent its fleet retry budget would be `abandoned`
+        # instead of pinned. A silent regression of phase 4 rule 5, visible
+        # only as jobs quietly not happening.
+        #
+        # Which engine it is does not matter: a job's paths are (root name,
+        # relative path) pairs resolved against THIS CONTAINER's mounts
+        # (`vault` / `media` / `tree`), never against an episode root, and
+        # `fleet_execute` takes absolute paths. Any engine's ffmpeg worker
+        # can run any pinned job.
+        self._engine_src = engine
         self.poll_seconds = float(poll_seconds)
         self._connect = connect or (lambda: db.connect(settings.db_path))
         self._stop = threading.Event()
@@ -130,6 +145,24 @@ class PinnedExecutor:
         self.roots = container_roots(settings)
 
     # -- is there an executor at all ------------------------------------
+    @property
+    def engine(self) -> Any:
+        """The engine to hand work to right now, or None.
+
+        Asked per call, never cached: an episode opened five minutes after
+        boot is an executor five minutes after boot.
+        """
+        src = self._engine_src
+        if src is None or hasattr(src, ENGINE_METHOD):
+            return src
+        if callable(src):
+            try:
+                return src()
+            except Exception:  # noqa: BLE001 - no executor is an answer
+                log.exception("could not ask for a Timeline Cards engine")
+                return None
+        return src
+
     def available(self) -> bool:
         """What `jobs.can_pin` asks. An engine that is not mounted, or one
         from a checkout that does not implement the seam yet, is NO executor:
@@ -160,7 +193,12 @@ class PinnedExecutor:
                             "a second one")
                 return
             self._thread = None
-        if not self.available():
+        # NOT gated on `available()` any more: with a lazily built pool the
+        # answer at boot is no, and it becomes yes the moment somebody opens
+        # an episode. The loop asks per tick instead (`tick` returns at once
+        # when there is no engine), which costs one wakeup every POLL_SECONDS
+        # on a container where Timeline Cards is mounted and nobody is in it.
+        if not self.available() and not callable(self._engine_src):
             return
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="ccsync-pinned",
@@ -258,8 +296,16 @@ class PinnedExecutor:
 
         log.info("pinned job #%s: %s of %s -> %s (nothing in the fleet would "
                  "finish it)", job_id, kind, source, out_dir)
+        # Bound ONCE for this job (2026-09-14): `self.engine` is now a live
+        # question, and an episode closed between the claim and the call must
+        # read as "no executor", not as an AttributeError wearing a failed
+        # job's error message.
+        execute = getattr(self.engine, ENGINE_METHOD, None)
         try:
-            outcome = dict(getattr(self.engine, ENGINE_METHOD)(
+            if not callable(execute):
+                raise ExecutorError(self.why_not() or
+                                    "Timeline Cards is not mounted here")
+            outcome = dict(execute(
                 kind, str(source), str(out_dir), stem,
                 on_progress=on_progress, should_stop=should_stop) or {})
         except Exception as exc:  # noqa: BLE001 - the engine is another repo

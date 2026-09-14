@@ -33,11 +33,12 @@ from __future__ import annotations
 import json
 import sys
 import textwrap
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
-from ccsync_dashboard import auth, cards
+from ccsync_dashboard import auth, cards, cards_pool
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
@@ -174,6 +175,7 @@ class ProjectAgentEngine:
         self.posts = []
         self.audio_path = ""
         self.handed_back = []
+        self.agent_pushes = []
 
     # -- lifecycle
     def start(self):
@@ -191,6 +193,7 @@ class ProjectAgentEngine:
 
     # -- the agent protocol
     def agent_state(self, body):
+        self.agent_pushes.append(body.get("name"))
         return {"ok": True, "saw": body}
 
     def agent_pending(self, wait):
@@ -235,14 +238,69 @@ def make_settings(tmp_path, **kw):
         report_token=TOKEN, **kw)
 
 
+def make_vault(tmp_path, *names):
+    """A vault with one episode folder per name, and a clip in the first.
+
+    An episode is a folder with `Interviewees` or `Clips` in it -- the rule
+    `cards_pool.has_transcripts` applies, and the one the other repo's
+    roots.py has always applied. The shape is the real one:
+    `<vault>/<show>/<episode>`.
+    """
+    vault = tmp_path / "vault"
+    made = []
+    for name in names or ("Civil Defence",):
+        root = vault / "FF5" / name
+        (root / "Interviewees").mkdir(parents=True)
+        (root / "Script Docs").mkdir(parents=True, exist_ok=True)
+        made.append(root)
+    audio = made[0] / "Script Docs" / "clip.opus"
+    audio.write_bytes(AUDIO_BYTES)
+    return vault, made, audio
+
+
+def open_episode(app, root, timeout=5.0):
+    """Open one episode and WAIT for it. -> the entry.
+
+    The pool builds in a thread on purpose (a real engine reads an episode
+    off a network share as it comes up, and no request may wait on that), so
+    a test that wants a page behind a URL waits here.
+    """
+    entry, refusal = app.state.cards_pool.open(str(root))
+    assert entry is not None, refusal
+    end = time.monotonic() + timeout
+    while entry.state == cards_pool.LOADING and time.monotonic() < end:
+        time.sleep(0.01)
+    assert entry.state == cards_pool.READY, entry.detail
+    return entry
+
+
+def engine_of(app, slug=""):
+    """The engine behind one open episode -- the only one, unless named."""
+    entries = [e for e in app.state.cards_pool.entries()
+               if not slug or e.slug == slug]
+    assert entries, "no episode is open"
+    return entries[0].engine
+
+
+def U(app, path="/", slug=""):
+    """The URL of a path inside an open episode's page."""
+    entries = [e for e in app.state.cards_pool.entries()
+               if not slug or e.slug == slug]
+    assert entries, "no episode is open"
+    return f"/cards/p/{entries[0].slug}{path}"
+
+
 @pytest.fixture
 def mounted(tmp_path, fake_src, monkeypatch):
-    """A dashboard with the page mounted, plus a real file at /audio."""
+    """A dashboard with ONE episode open, plus a real file at /audio.
+
+    Since 2026-09-14 the mount carries a POOL rather than an engine: `/cards/`
+    is a landing page that needs no engine at all, and the page itself lives
+    under `/cards/p/<slug>/`. A suite that wants the page opens an episode
+    first, exactly as a person does.
+    """
     monkeypatch.delenv("CARDS_SRC", raising=False)
-    vault = tmp_path / "vault"
-    (vault / "Script Docs").mkdir(parents=True)
-    audio = vault / "Script Docs" / "clip.opus"
-    audio.write_bytes(AUDIO_BYTES)
+    vault, roots, audio = make_vault(tmp_path, "Civil Defence", "Framing Formosa")
     settings = make_settings(
         tmp_path, cards_enabled=True, cards_src=fake_src,
         cards_vault_root=str(vault), cards_db_host="192.168.0.102",
@@ -251,7 +309,8 @@ def mounted(tmp_path, fake_src, monkeypatch):
         cards_token="cards-token-not-a-real-one")
     app = create_app(settings)
     assert app.state.cards_status == cards.MOUNTED, app.state.cards_detail
-    app.state.cards_engine.audio_path = str(audio)
+    entry = open_episode(app, roots[0])
+    entry.engine.audio_path = str(audio)
     with TestClient(app) as client:
         client.cookies.set(auth.COOKIE_NAME,
                            auth.make_session_cookie(SECRET, "owen"))
@@ -334,18 +393,40 @@ def test_cards_src_in_the_environment_is_taken_as_consent(tmp_path, fake_src, mo
     assert app.state.cards_status == cards.MOUNTED
 
 
-def test_the_mount_is_the_last_thing_and_never_raises(tmp_path, fake_src, monkeypatch):
+def test_an_engine_that_will_not_build_is_a_failed_episode(tmp_path, fake_src,
+                                                           monkeypatch):
     """Anything the engine's constructor throws is a state, not a boot
     failure: the fleet dashboard is what tells everyone whether their footage
-    is syncing."""
+    is syncing.
+
+    It is now a state of ONE EPISODE rather than of the mount: nothing is
+    built until somebody opens one, so the dashboard boots MOUNTED with a
+    landing page, and the episode that will not open says why on it. The
+    other episode still opens.
+    """
     monkeypatch.delenv("CARDS_SRC", raising=False)
     monkeypatch.setattr(cards, "build_engine",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no postgres")))
+    vault, roots, _ = make_vault(tmp_path)
     app = create_app(make_settings(
         tmp_path, cards_enabled=True, cards_src=fake_src,
-        cards_vault_root=str(tmp_path)))
-    assert app.state.cards_status == cards.ABSENT
-    assert "no postgres" in app.state.cards_detail
+        cards_vault_root=str(vault)))
+    assert app.state.cards_status == cards.MOUNTED
+    entry, refusal = app.state.cards_pool.open(str(roots[0]))
+    assert refusal == ""
+    end = time.monotonic() + 5.0
+    while entry.state == cards_pool.LOADING and time.monotonic() < end:
+        time.sleep(0.01)
+    assert entry.state == cards_pool.FAILED
+    assert "no postgres" in entry.detail
+    with TestClient(app) as client:
+        client.cookies.set(auth.COOKIE_NAME,
+                           auth.make_session_cookie(SECRET, "owen"))
+        # The landing page still draws, which is the whole point of it not
+        # needing an engine.
+        page = client.get("/cards/")
+        assert page.status_code == 200
+        assert "FAILED" in page.text
 
 
 def test_a_wrap_that_fails_stops_the_engine_it_already_started(
@@ -371,24 +452,27 @@ def test_a_wrap_that_fails_stops_the_engine_it_already_started(
     monkeypatch.setattr(cards, "build_engine", spy)
     monkeypatch.setattr(cards_wsgi, "handler_wsgi",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
-    vault = tmp_path / "vault"
-    vault.mkdir()
+    vault, roots, _ = make_vault(tmp_path)
     app = create_app(make_settings(
         tmp_path, cards_enabled=True, cards_src=fake_src,
         cards_vault_root=str(vault)))
-    assert app.state.cards_status == cards.ABSENT
-    assert "boom" in app.state.cards_detail
+    entry, _refusal = app.state.cards_pool.open(str(roots[0]))
+    end = time.monotonic() + 5.0
+    while entry.state == cards_pool.LOADING and time.monotonic() < end:
+        time.sleep(0.01)
+    assert entry.state == cards_pool.FAILED
+    assert "boom" in entry.detail
     assert len(built) == 1
     assert built[0].started is True
     assert built[0].stopped is True
-    assert app.state.cards_engine is None
+    assert entry.engine is None
 
 
 # ------------------------------------------------------------ what it is built with
 
 def test_the_engine_is_built_the_way_server_main_builds_it(mounted):
     _, app = mounted
-    engine = app.state.cards_engine
+    engine = engine_of(app)
     assert engine.started is True
     assert engine.built["path"] is None                # no --project
     assert engine.built["db_host"] == "192.168.0.102"
@@ -415,39 +499,49 @@ def test_the_media_map_parses_the_way_the_other_side_does():
 # ------------------------------------------------------------------ the gate
 
 def test_login_is_required_for_the_whole_prefix(tmp_path, fake_src, monkeypatch):
+    """The landing page AND one episode's page, under the deeper prefix.
+
+    The episode prefix is where this is easy to get wrong: the JSON-401 list
+    in app.py was four literal prefixes with no slug in them, so an expired
+    session would have handed an `<audio>` element a login DOCUMENT, which on
+    that page reads as "this clip has no audio".
+    """
     monkeypatch.delenv("CARDS_SRC", raising=False)
-    vault = tmp_path / "vault"
-    vault.mkdir()
+    vault, roots, _ = make_vault(tmp_path)
     app = create_app(make_settings(
         tmp_path, cards_enabled=True, cards_src=fake_src,
         cards_vault_root=str(vault)))
+    open_episode(app, roots[0])
     with TestClient(app) as client:
-        page = client.get("/cards/", follow_redirects=False)
+        landing = client.get("/cards/", follow_redirects=False)
+        assert landing.status_code == 303 and "/login" in landing.headers["location"]
+        page = client.get(U(app, "/"), follow_redirects=False)
         assert page.status_code == 303 and "/login" in page.headers["location"]
         # ...and the page's own fetches get JSON, not a login document to
         # JSON.parse.
-        api = client.get("/cards/api/state?v=-1", follow_redirects=False)
+        api = client.get(U(app, "/api/state?v=-1"), follow_redirects=False)
         assert api.status_code == 401
         assert api.json()["detail"] == "login required"
-        audio = client.get("/cards/audio?mp=x", follow_redirects=False)
-        assert audio.status_code == 401
+        for media in ("/audio?mp=x", "/video?mp=x", "/peaks?mp=x"):
+            answer = client.get(U(app, media), follow_redirects=False)
+            assert answer.status_code == 401, media
 
 
 def test_a_fleet_token_does_not_open_the_page(mounted):
     """Phase 2's rule, now that there is something behind the prefix."""
-    client, _ = mounted
+    client, app = mounted
     client.cookies.clear()
-    resp = client.get("/cards/api/state?v=-1", headers=fleet_headers(),
+    resp = client.get(U(app, "/api/state?v=-1"), headers=fleet_headers(),
                       follow_redirects=False)
     assert resp.status_code == 401
 
 
 def test_restart_never_reaches_the_handler(mounted):
     client, app = mounted
-    resp = client.post("/cards/api/restart", json={})
+    resp = client.post(U(app, "/api/restart"), json={})
     assert resp.status_code == 200
     assert "cannot restart itself" in resp.json()["error"]
-    assert app.state.cards_engine.restarted is False
+    assert engine_of(app).restarted is False
 
 
 def test_restart_with_a_trailing_slash_is_refused_too(mounted):
@@ -455,16 +549,16 @@ def test_restart_with_a_trailing_slash_is_refused_too(mounted):
     exactly, so `/api/restart/` walked past it into a handler that may
     normalise the slash itself."""
     client, app = mounted
-    resp = client.post("/cards/api/restart/", json={}, follow_redirects=False)
+    resp = client.post(U(app, "/api/restart/"), json={}, follow_redirects=False)
     assert resp.status_code == 200
     assert "cannot restart itself" in resp.json()["error"]
-    assert app.state.cards_engine.restarted is False
+    assert engine_of(app).restarted is False
 
 
 def test_the_agent_protocol_is_not_served_by_the_mount(mounted):
     """The three routes belong to cards_tunnel, which is registered first. A
     fourth one added upstream must not appear on the session-gated prefix."""
-    client, _ = mounted
+    client, app = mounted
     resp = client.get("/cards/agent/anything-else")
     assert resp.status_code == 404
     assert "the agent protocol" in resp.json()["error"]
@@ -474,11 +568,11 @@ def test_a_cross_site_post_is_refused(mounted):
     """The page sends no CSRF token (like /broll and /ytdl), so the ORIGIN
     check is what stands between a logged-in editor and somebody else's page
     deleting clips out of their timeline."""
-    client, _ = mounted
-    resp = client.post("/cards/api/delete", json={"uids": ["x"]},
+    client, app = mounted
+    resp = client.post(U(app, "/api/delete"), json={"uids": ["x"]},
                        headers={"Origin": "http://evil.example"})
     assert resp.status_code == 403
-    same = client.post("/cards/api/delete", json={"uids": ["x"]},
+    same = client.post(U(app, "/api/delete"), json={"uids": ["x"]},
                        headers={"Origin": "http://testserver"})
     assert same.status_code == 200
 
@@ -487,11 +581,11 @@ def test_a_cross_site_post_is_refused(mounted):
 
 def test_a_json_get_is_the_engines_own_json(mounted):
     client, app = mounted
-    resp = client.get("/cards/api/state?v=-1")
+    resp = client.get(U(app, "/api/state?v=-1"))
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/json")
     assert resp.json() == {"version": 7, "query": "v=-1",
-                           "root": app.state.cards_engine.root}
+                           "root": engine_of(app).root}
     # ONE Date and ONE Server header, whatever the handler emitted.
     assert len(resp.headers.get_list("date")) <= 1
     assert len(resp.headers.get_list("server")) <= 1
@@ -500,22 +594,22 @@ def test_a_json_get_is_the_engines_own_json(mounted):
 def test_the_path_under_the_mount_is_what_the_handler_dispatches_on(mounted):
     """a2wsgi strips the prefix into SCRIPT_NAME, which is the whole reason
     the handler keeps its absolute `/api/...` dispatch."""
-    client, _ = mounted
-    assert client.get("/cards/api/state").status_code == 200
-    assert client.get("/cards/does-not-exist").status_code == 404
+    client, app = mounted
+    assert client.get(U(app, "/api/state")).status_code == 200
+    assert client.get(U(app, "/does-not-exist")).status_code == 404
 
 
 def test_a_post_body_reaches_the_handler(mounted):
     client, app = mounted
-    resp = client.post("/cards/api/plan", json={"rev": 3})
+    resp = client.post(U(app, "/api/plan"), json={"rev": 3})
     assert resp.json() == {"ok": True, "path": "/api/plan"}
-    path, raw = app.state.cards_engine.posts[0]
+    path, raw = engine_of(app).posts[0]
     assert (path, json.loads(raw)) == ("/api/plan", {"rev": 3})
 
 
 def test_a_range_request_passes_through_as_a_206(mounted):
-    client, _ = mounted
-    resp = client.get("/cards/audio?mp=x", headers={"Range": "bytes=10-19"})
+    client, app = mounted
+    resp = client.get(U(app, "/audio?mp=x"), headers={"Range": "bytes=10-19"})
     assert resp.status_code == 206
     assert resp.headers["Content-Range"] == f"bytes 10-19/{len(AUDIO_BYTES)}"
     assert resp.headers["Content-Length"] == "10"
@@ -524,12 +618,12 @@ def test_a_range_request_passes_through_as_a_206(mounted):
 
 
 def test_the_whole_file_is_a_200_with_the_same_validators(mounted):
-    client, _ = mounted
-    resp = client.get("/cards/audio?mp=x")
+    client, app = mounted
+    resp = client.get(U(app, "/audio?mp=x"))
     assert resp.status_code == 200
     assert resp.content == AUDIO_BYTES
     etag = resp.headers["ETag"]
-    again = client.get("/cards/audio?mp=x", headers={"Range": "bytes=0-3",
+    again = client.get(U(app, "/audio?mp=x"), headers={"Range": "bytes=0-3",
                                                      "If-Range": etag})
     assert again.status_code == 206
     assert again.content == AUDIO_BYTES[:4]
@@ -540,30 +634,30 @@ def test_the_handlers_own_gzip_survives_the_shim(mounted):
     shim must pass both through untouched. uvicorn does not re-encode, so a
     header dropped here would be 660 KB of gzip served as text/plain -- which
     the browser renders as binary and nobody reads as a header bug."""
-    client, _ = mounted
-    resp = client.get("/cards/big", headers={"Accept-Encoding": "gzip"})
+    client, app = mounted
+    resp = client.get(U(app, "/big"), headers={"Accept-Encoding": "gzip"})
     assert resp.status_code == 200
     # httpx decodes it, so the proof it WAS compressed is the raw length
     # against the decoded one.
     assert resp.json()["pad"] == "x" * 8000
     assert int(resp.headers["content-length"]) < 8000
     assert resp.headers["Vary"] == "Accept-Encoding"
-    plain = client.get("/cards/big", headers={"Accept-Encoding": "identity"})
+    plain = client.get(U(app, "/big"), headers={"Accept-Encoding": "identity"})
     assert "content-encoding" not in plain.headers
     assert int(plain.headers["content-length"]) > 8000
 
 
 def test_a_route_that_raises_is_a_500_and_not_a_dead_mount(mounted):
-    client, _ = mounted
-    assert client.get("/cards/boom").status_code == 500
-    assert client.get("/cards/api/state").status_code == 200
+    client, app = mounted
+    assert client.get(U(app, "/boom")).status_code == 500
+    assert client.get(U(app, "/api/state")).status_code == 200
 
 
 def test_a_route_that_answers_nothing_is_a_502(mounted):
     """It cannot happen, and "cannot happen" still needs an answer -- the
     alternative is a browser waiting for a response nobody will write."""
-    client, _ = mounted
-    resp = client.get("/cards/silent")
+    client, app = mounted
+    resp = client.get(U(app, "/silent"))
     assert resp.status_code == 502
     assert "answered nothing" in resp.json()["error"]
 
@@ -571,17 +665,41 @@ def test_a_route_that_answers_nothing_is_a_502(mounted):
 def test_the_bare_prefix_redirects_to_the_slash(mounted):
     """EVERY fetch in the page is document-relative (`api/state?v=-1`), so at
     /cards with no slash they would resolve against the dashboard root."""
-    client, _ = mounted
+    client, app = mounted
     resp = client.get("/cards", follow_redirects=False)
-    assert resp.status_code in (307, 308)
+    assert resp.status_code in (303, 307, 308)
     assert resp.headers["location"].endswith("/cards/")
+
+
+def test_the_bare_project_url_redirects_to_the_slash_too(mounted):
+    """The same rule one level deeper, and it bites harder: document-relative
+    from `/cards/p/<slug>` resolves against `/cards/p/`, so every asset and
+    every fetch would be one directory too high."""
+    client, app = mounted
+    bare = U(app, "")
+    resp = client.get(bare, follow_redirects=False)
+    assert resp.status_code in (303, 307, 308)
+    assert resp.headers["location"].endswith(bare + "/")
 
 
 # ------------------------------------------------------------------ the tunnel
 
+def in_episode(app, editor, slug=""):
+    """That editor has the episode's page open. -> phase 1a.
+
+    What the dispatcher records off a real request, done directly here: the
+    agent tunnel routes a push to the engine ITS OWN EDITOR is in, and the
+    fleet identity in these tests (`jsmith`) is not the browser session's.
+    """
+    entries = [e for e in app.state.cards_pool.entries()
+               if not slug or e.slug == slug]
+    app.state.cards_pool.note_visit(entries[0].slug, editor)
+
+
 def test_the_tunnel_calls_the_engine_in_process(mounted, monkeypatch):
     client, app = mounted
     client.cookies.clear()
+    in_episode(app, "jsmith")
     from ccsync_dashboard import cards_tunnel
 
     def no_http(*a, **k):  # pragma: no cover - the point is that it is not called
@@ -603,7 +721,7 @@ def test_the_tunnel_calls_the_engine_in_process(mounted, monkeypatch):
     result = client.post("/cards/agent/result", json={"id": 1, "ok": True},
                          headers=fleet_headers())
     assert result.json()["result"]["id"] == 1
-    assert app.state.cards_engine.ticks >= 3
+    assert engine_of(app).ticks >= 3
 
 
 def test_an_engine_that_raises_answers_the_agent_a_sentence(mounted):
@@ -611,14 +729,92 @@ def test_an_engine_that_raises_answers_the_agent_a_sentence(mounted):
     agent's five-retry loop must not repeat a request that cannot succeed."""
     client, app = mounted
     client.cookies.clear()
+    in_episode(app, "jsmith")
 
     def boom(body):
         raise RuntimeError("the mirror file is unreadable")
 
-    app.state.cards_engine.agent_state = boom
+    engine_of(app).agent_state = boom
     resp = client.post("/cards/agent/state", json={}, headers=fleet_headers())
     assert resp.status_code == 200
     assert resp.json()["error"] == "the mirror file is unreadable"
+
+
+def test_a_push_goes_to_the_engine_that_editor_is_in(mounted, monkeypatch):
+    """Phase 1a: Resolve belongs to the ACCOUNT, not to the server.
+
+    Two episodes open, two editors, one in each. A state push carries a
+    verified identity and nothing else that could decide where it lands -- so
+    the identity is what decides, or Alex's sweep arrives in Ruskin's episode
+    and the cards on his screen become somebody else's.
+    """
+    client, app = mounted
+    client.cookies.clear()
+    from ccsync_dashboard import cards_tunnel
+
+    monkeypatch.setattr(cards_tunnel, "_forward", _no_http)
+    second = open_episode(app, _second_episode(app))
+    first = engine_of(app)
+    in_episode(app, "jsmith", slug=_slug_of(app, first))
+    in_episode(app, "ruskin", slug=second.slug)
+
+    client.post("/cards/agent/state",
+                json={"name": "CREATOR-1", "machine": "CREATOR-1"},
+                headers=fleet_headers("jsmith"))
+    client.post("/cards/agent/state",
+                json={"name": "RUSKIN-PC", "machine": "RUSKIN-PC"},
+                headers=fleet_headers("ruskin"))
+    assert first.agent_pushes == ["jsmith/CREATOR-1"]
+    assert second.engine.agent_pushes == ["ruskin/RUSKIN-PC"]
+
+
+def test_an_editor_in_no_episode_is_told_so_and_lands_nowhere(mounted, monkeypatch):
+    """The other half of the same rule, and the one that must not guess.
+
+    An agent whose owner has no page open used to be attached to "the"
+    engine, because there was only one. With a pool that would be whichever
+    episode happened to be first -- somebody else's timeline, driven by a
+    machine its owner cannot see.
+    """
+    client, app = mounted
+    client.cookies.clear()
+    from ccsync_dashboard import cards_tunnel
+
+    monkeypatch.setattr(cards_tunnel, "_forward", _no_http)
+    resp = client.post("/cards/agent/state", json={"name": "CREATOR-1"},
+                       headers=fleet_headers("nobody"))
+    assert resp.status_code == 200
+    assert "not in a Timeline Cards episode" in resp.json()["error"]
+    assert engine_of(app).agent_pushes == []
+    # The long poll is not an action: an empty answer, not an error a
+    # companion would log once a second for an owner who is simply not there.
+    poll = client.get("/cards/agent/pending?wait=0",
+                      headers=fleet_headers("nobody"))
+    assert poll.status_code == 200
+    assert "req" not in poll.json()
+
+
+def _no_http(*a, **k):  # pragma: no cover - the point is that it is not called
+    raise AssertionError("the tunnel made an HTTP hop with the page mounted")
+
+
+def _second_episode(app):
+    """The root of an episode in the vault that is not open yet."""
+    from ccsync_dashboard import cards, cards_pool as pool_mod
+
+    vault = cards.vault_root(app.state.settings)
+    open_slugs = {e.slug for e in app.state.cards_pool.entries()}
+    for row in pool_mod.episodes(vault):
+        if row["slug"] not in open_slugs:
+            return row["root"]
+    raise AssertionError("the vault has only one episode in it")
+
+
+def _slug_of(app, engine):
+    for entry in app.state.cards_pool.entries():
+        if entry.engine is engine:
+            return entry.slug
+    raise AssertionError("that engine is not in the pool")
 
 
 def test_with_no_mount_the_tunnel_is_exactly_phase_two(tmp_path, monkeypatch):
@@ -646,18 +842,25 @@ def test_with_no_mount_the_tunnel_is_exactly_phase_two(tmp_path, monkeypatch):
 
 # ------------------------------------------------------------------ shutdown
 
-def test_the_engine_stops_with_the_app(tmp_path, fake_src, monkeypatch):
+def test_every_open_episode_stops_with_the_app(tmp_path, fake_src, monkeypatch):
+    """One shutdown hook, and it drains the WHOLE pool.
+
+    Starlette runs no lifespan for a mounted app, so this is the only thing
+    that will ever stop those threads -- and with a pool "the engine" is a
+    list. An engine left running here is a sweep against a database the next
+    process is opening.
+    """
     monkeypatch.delenv("CARDS_SRC", raising=False)
-    vault = tmp_path / "vault"
-    vault.mkdir()
+    vault, roots, _ = make_vault(tmp_path, "Civil Defence", "Framing Formosa")
     app = create_app(make_settings(
         tmp_path, cards_enabled=True, cards_src=fake_src,
         cards_vault_root=str(vault)))
-    engine = app.state.cards_engine
+    engines = [open_episode(app, root).engine for root in roots]
+    assert len(engines) == 2
     with TestClient(app):
-        assert engine.stopped is False
-    assert engine.stopped is True
-    assert app.state.cards_engine is None
+        assert [e.stopped for e in engines] == [False, False]
+    assert [e.stopped for e in engines] == [True, True]
+    assert app.state.cards_pool.entries() == []
 
 
 def test_stop_engine_survives_an_engine_that_will_not_stop(mounted):
@@ -666,9 +869,10 @@ def test_stop_engine_survives_an_engine_that_will_not_stop(mounted):
     def boom():
         raise RuntimeError("a thread that is not listening")
 
-    app.state.cards_engine.stop = boom
+    engine_of(app).stop = boom
     cards.stop_engine(app)                      # must not raise
     assert app.state.cards_engine is None
+    assert app.state.cards_pool.entries() == []
 
 
 # -------------------------------------------------------------- the health line
@@ -678,7 +882,11 @@ def test_the_health_line_says_which_state_and_why(mounted):
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     block = client.get("/api/v1/health").json()["cards"]
     assert block["status"] == cards.MOUNTED
-    assert block["root"] == app.state.cards_engine.root
+    assert block["root"] == engine_of(app).root
+    # ONE LINE PER EPISODE: "the" root used to be whichever engine answered.
+    assert [(e["state"], e["root"]) for e in block["open"]] == [
+        ("ready", engine_of(app).root)]
+    assert block["cap"] == 2
     # No credential is configured in this suite, so the honest answer is no.
     assert block["claude"]["ok"] is False
     assert block["claude"]["why"]

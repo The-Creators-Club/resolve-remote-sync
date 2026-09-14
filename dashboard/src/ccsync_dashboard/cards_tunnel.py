@@ -54,6 +54,16 @@ and no `DASH_CARDS_SERVER_URL` to configure. With no mount the module is
 exactly what phase 2 shipped: a credential swap and a proxy to the separate
 container. The routes, the credential and the name rule do not change either
 way, which is what §7.4's "both origins during the transition" needs.
+
+PHASE 1a OF THE TWO-PROJECTS PLAN (2026-09-14) made the engine a CHOICE.
+There is one per episode now, so "the in-process engine" is no longer a
+thing: a push goes to the engine ITS OWN EDITOR is in, resolved from the
+identity this module already verifies. That is the mechanism behind Alex's
+rule -- *a signed-in user may drive only the companions signed in to their
+own account* -- and it needs no new credential, no holder lock and no
+hand-over: nobody holds Resolve fleet-wide, so nobody has to give it up, and
+the second person is never blocked by the first. An editor in no episode is
+told so in a sentence instead of being attached to somebody else's timeline.
 """
 from __future__ import annotations
 
@@ -105,14 +115,55 @@ def configured(settings: Any) -> bool:
     return bool(str(getattr(settings, "cards_server_url", "") or "").strip())
 
 
-def local_engine(request: Request) -> Any:
-    """The in-process engine, or None. -> phase 3.
+def local_engine(request: Request, editor: str = "") -> Any:
+    """The in-process engine THIS EDITOR is in, or None. -> phase 3, 1a.
 
     None is the ordinary state on a dashboard that has not mounted the page
     (no checkout, no vault, or the feature off), and it is the state this
     module was written for.
+
+    `editor` is the identity `_require_fleet_caller` verified -- the only
+    name allowed to decide anything here -- and since 2026-09-14 it decides
+    WHICH engine, because there is one per episode. A push with no editor, or
+    from an editor who is not in any episode, falls back to the single engine
+    if this dashboard still has one and otherwise answers None: an agent's
+    sweep must never land in somebody else's episode, which is the whole of
+    "Resolve belongs to the account" (docs/CARDS_TWO_PROJECTS.md phase 1a).
     """
+    pool = getattr(request.app.state, "cards_pool", None)
+    if pool is not None and editor:
+        engine = pool.engine_for(editor)
+        if engine is not None:
+            return engine
     return getattr(request.app.state, "cards_engine", None)
+
+
+def _no_engine(editor: str) -> dict:
+    """What an agent is told when its editor is in no episode.
+
+    `{"error": ...}` with a 200, which is `handler.py`'s own contract for the
+    agent routes (see `_local`): the companion's five-retry loop must not be
+    made to repeat a request that cannot succeed until a person opens a page.
+    """
+    return {"error": f"{editor or 'this machine'} is not in a Timeline Cards "
+                     f"episode on this dashboard -- open one at /cards/ and "
+                     f"this agent attaches to it"}
+
+
+def _routed(request: Request, editor: str) -> tuple[Any, Any]:
+    """(engine, answer). Exactly one is set, and both may be None.
+
+    Both None is "this dashboard does not host the page" -- the phase 2
+    shape, where the call is forwarded to the separate cards container. An
+    answer with no engine is "it does host it, and this editor is not in any
+    episode", which is a sentence rather than somebody else's timeline.
+    """
+    engine = local_engine(request, editor)
+    if engine is not None:
+        return engine, None
+    if getattr(request.app.state, "cards_pool", None) is not None:
+        return None, _no_engine(editor)
+    return None, None
 
 
 def _local(engine: Any, what: str, *args: Any) -> Any:
@@ -283,7 +334,9 @@ def cards_agent_state(
     body["name"] = agent_name(editor, body.get("machine") or "",
                               declared=body.get("name") or "")
     body.pop("machine", None)
-    engine = local_engine(request)
+    engine, answer = _routed(request, editor)
+    if answer is not None:
+        return answer
     if engine is not None:
         return _clean(_local(engine, "agent_state", body))
     return _clean(_forward(request, "POST", "/agent/state", body))
@@ -302,9 +355,16 @@ def cards_agent_pending(
     fleet page dead. One worker per connected agent, and there is one agent
     per machine.
     """
-    _require_fleet_caller(request, conn)
+    editor = _require_fleet_caller(request, conn)
     seconds = max(0.0, min(float(wait or 0.0), MAX_WAIT_SECONDS))
-    engine = local_engine(request)
+    engine, answer = _routed(request, editor)
+    if answer is not None:
+        # The poll, not an action: an EMPTY answer, which is what "no edit for
+        # you" already looks like (`agent_pending` answers `{}`), plus a note
+        # for whoever reads the companion log. An `error` here would put a
+        # line a second in that log for an agent whose owner simply has no
+        # page open.
+        return {"note": answer.get("error", "")}
     if engine is not None:
         # `agent_pending` takes the RAW query value and parses it itself
         # (handler.py hands it `parse_qs(...)["wait"][0]`), so it is handed a
@@ -336,10 +396,12 @@ def cards_agent_result(
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> Any:
     """How the edit went. Forwarded verbatim, minus the token."""
-    _require_fleet_caller(request, conn)
+    editor = _require_fleet_caller(request, conn)
     body = dict(payload or {})
     body.pop("token", None)
-    engine = local_engine(request)
+    engine, answer = _routed(request, editor)
+    if answer is not None:
+        return answer
     if engine is not None:
         return _clean(_local(engine, "agent_result", body))
     return _clean(_forward(request, "POST", "/agent/result", body))

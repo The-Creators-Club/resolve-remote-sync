@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}{{ brand_org | upper }}: TIMELINE CARDS{% endblock %}
+{# The landing page (docs/CARDS_TWO_PROJECTS.md phase 1, 2026-09-14): which
+   episode, then the cut list inside it. It is drawn with NO ENGINE on
+   purpose -- the episodes come from a scandir of the vault and the states
+   from the pool -- because the moment a person most needs this page is the
+   moment every engine is busy, loading or broken.
+
+   It refreshes itself only while something is OPENING (the meta refresh is
+   emitted by the state below, not always): a page that reloads every few
+   seconds under somebody choosing an episode is a page that scrolls away
+   from them. #}
+{% block layout %}
+  <main class="main">
+    <div class="detail-head"><h1>[ TIMELINE CARDS ]</h1></div>
+
+    {% if refusal %}
+      <p class="muted" style="max-width:70ch"><strong>[ NOT OPENED ]</strong> {{ refusal }}</p>
+    {% endif %}
+
+    <p class="muted" style="max-width:70ch">
+      One episode at a time per person, up to {{ cap }} at once on this server.
+      Two people in the SAME episode is fine and always was - the cut list
+      takes one edit at a time and both browsers see the same cards.
+    </p>
+
+    {% if carry_on and carry_on.state == 'ready' %}
+      <p><a class="btn tap" href="{{ carry_on.href }}">[ CARRY ON WITH {{ carry_on.name | upper }} ]</a></p>
+    {% endif %}
+
+    {% set opening = episodes | selectattr('state', 'equalto', 'loading') | list %}
+    {% if opening %}
+      {# Only while something is opening. `state.json` is the same answer for
+         anything that would rather poll than reload. #}
+      <meta http-equiv="refresh" content="3">
+      <p class="muted">[ OPENING {{ opening | map(attribute='name') | join(', ') | upper }} ]
+        This reads the episode off the vault: it takes a moment, and the page
+        refreshes itself until it is ready.</p>
+    {% endif %}
+
+    <div class="side-head">[ EPISODES ]</div>
+    {% if not episodes %}
+      <p class="muted" style="max-width:70ch">No episodes under the vault. An
+        episode is a folder with an <code>Interviewees</code> or
+        <code>Clips</code> folder in it.</p>
+    {% endif %}
+    <table class="grid">
+      <thead>
+        <tr><th>Episode</th><th>Show</th><th>State</th><th>Who</th><th></th></tr>
+      </thead>
+      <tbody>
+      {% for ep in episodes %}
+        <tr>
+          <td>{{ ep.name }}</td>
+          <td class="muted">{{ ep.show }}</td>
+          <td>
+            {% if ep.state == 'ready' %}[ OPEN ]
+            {% elif ep.state == 'loading' %}[ OPENING ]
+            {% elif ep.state == 'failed' %}[ FAILED ]
+            {% else %}<span class="muted">not open</span>{% endif %}
+            {% if ep.state == 'failed' and ep.detail %}
+              <div class="muted">{{ ep.detail }}</div>
+            {% endif %}
+          </td>
+          <td class="muted">
+            {# Information, nothing to press (Alex, 2026-09-14): an editor
+               drives their OWN account's companions, so another person being
+               live here is something to know, never something to take. #}
+            {{ ep.occupants | join(', ') }}
+          </td>
+          <td>
+            {% if ep.state == 'ready' %}
+              <a class="btn tap" href="{{ ep.href }}">[ OPEN ]</a>
+              {% if session_is_admin %}
+                <form method="post" action="/cards/close" style="display:inline">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="slug" value="{{ ep.slug }}">
+                  <button class="btn tap" type="submit">[ CLOSE ]</button>
+                </form>
+              {% endif %}
+            {% elif ep.state == 'loading' %}
+              <span class="muted">opening</span>
+            {% else %}
+              <form method="post" action="/cards/open" style="display:inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="slug" value="{{ ep.slug }}">
+                <button class="btn tap" type="submit">[ OPEN ]</button>
+              </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
+    <p class="muted" style="max-width:70ch; margin-top:1rem">
+      An episode stays open behind you once it is open, so switching back is
+      instant. Closing one is an admin act because it takes the episode away
+      from whoever is in it.
+    </p>
+  </main>
+{% endblock %}

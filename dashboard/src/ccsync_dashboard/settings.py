@@ -512,6 +512,13 @@ class Settings:
     cards_src: str = ""
     cards_vault_root: str = ""
     cards_root: str = ""
+    # How many EPISODES may have an engine at once (2026-09-14,
+    # docs/CARDS_TWO_PROJECTS.md). Two is the fleet: one person in one
+    # episode and one in another. Raise it only against a memory
+    # measurement -- an engine holds an episode's clip resolutions,
+    # transcripts, token caches and peaks, and the dashboard is what tells
+    # everyone whether their footage is syncing.
+    cards_engines: int = 2
     cards_project: str = ""
     cards_db_host: str = ""
     cards_db_name: str = ""
@@ -854,6 +861,7 @@ class Settings:
             cards_src=env.get("DASH_CARDS_SRC", "").strip(),
             cards_vault_root=env.get("DASH_CARDS_VAULT_ROOT", "").strip(),
             cards_root=env.get("DASH_CARDS_ROOT", "").strip(),
+            cards_engines=max(1, int(num("DASH_CARDS_ENGINES", 2))),
             cards_project=env.get("DASH_CARDS_PROJECT", "").strip(),
             cards_db_host=env.get("DASH_CARDS_DB_HOST", "").strip(),
             cards_db_name=env.get("DASH_CARDS_DB_NAME", "").strip(),

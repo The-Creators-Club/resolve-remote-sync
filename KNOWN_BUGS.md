@@ -24261,6 +24261,36 @@ was refused although the store held the transcript; the queue now reads
 the doc back out of IndexedDB first.
 
 
+## CR-276 - the /cards landing page would have listed no episodes at all on the real vault - FIXED before it shipped (cards_pool.episodes depth)
+
+Found 2026-09-14 by the two-engine run docs/CARDS_TWO_PROJECTS.md section 5
+asked for, in code committed an hour earlier and not yet deployed.
+
+`cards_pool.episodes()` walked `depth=3` from the vault root. The container's
+vault root is `/vault` - the whole `vault_host` share
+(`install_dashboard_app.py:CARDS_VAULT_MOUNT`) - and the episode `site.toml`
+has named since go-live is `/vault/Vault/2026/FF5/Civil Defence`: `Vault`,
+`2026`, `FF5`, then the episode. FOUR levels. Every episode sits one level
+below where the walk stopped, so on the real share the scan answered an empty
+list: a landing page that draws perfectly, lists nothing, and has no error to
+explain itself - with the pool, the routing and the cap all working behind it
+and nothing able to reach them.
+
+Two things are worth keeping from how it was missed. The tests built their
+vault as `<tmp>/vault/FF5/<episode>` - the shape the plan document describes,
+two levels, true of a dev checkout and of nothing that is deployed - so 30
+green tests said the scan worked. And nothing in the feature FAILS when the
+scan is empty: the landing page is deliberately drawable with no engines, and
+"no episodes" is a legitimate state for it (an unmounted share), so there was
+no error to notice either.
+
+Fixed by making the default 4 and pinning the DEPLOYED shape in a test of its
+own (`test_the_scan_reaches_the_live_tree_which_is_four_deep`), which builds
+`<tmp>/vault/Vault/2026/FF5/Civil Defence` because that is what is out there.
+`has_transcripts` still prunes at the episode, so the extra level costs one
+`scandir` per show once every `SCAN_TTL_SECONDS`.
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

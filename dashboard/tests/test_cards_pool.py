@@ -89,6 +89,23 @@ def test_the_vault_scan_finds_episodes_and_not_their_insides(tmp_path):
     assert all("Interviewees" not in r["root"] for r in found)
 
 
+def test_the_scan_reaches_the_live_tree_which_is_four_deep(tmp_path):
+    """The default depth is the DEPLOYED shape, not a guess (2026-09-14).
+
+    `DASH_CARDS_VAULT_ROOT` is `/vault` -- the whole `vault_host` share -- and
+    the episode `site.toml` names is `/vault/Vault/2026/FF5/Civil Defence`:
+    Vault, 2026, FF5, episode. A three-level walk answers an empty list
+    there, which is a landing page with nothing on it and nothing to explain
+    why. Found before this page was ever deployed; keep it found.
+    """
+    vault = tmp_path / "vault"
+    root = vault / "Vault" / "2026" / "FF5" / "Civil Defence"
+    (root / "Interviewees").mkdir(parents=True)
+    found = cards_pool.episodes(str(vault))
+    assert [r["name"] for r in found] == ["Civil Defence"]
+    assert found[0]["show"] == "FF5"
+
+
 def test_a_vault_that_is_not_there_is_an_empty_list_not_a_raise(tmp_path):
     assert cards_pool.episodes(str(tmp_path / "gone")) == []
     assert cards_pool.episodes("") == []

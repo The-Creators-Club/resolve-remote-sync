@@ -138,14 +138,23 @@ def has_transcripts(path: str) -> bool:
                for d in ("Interviewees", "Clips"))
 
 
-def episodes(vault: str, depth: int = 3) -> list[dict]:
+def episodes(vault: str, depth: int = 4) -> list[dict]:
     """Every episode root under the vault: [{root, name, show, slug}, ...].
 
-    Walks at most `depth` levels down (`<vault>/<year>/<show>/<episode>` is
-    the shape, and the vault root may be the year itself), stopping at any
-    folder that IS an episode rather than descending into its Interviewees.
-    Every OSError is a folder skipped, never a raise: an offline share must
-    leave the landing page drawable.
+    Walks at most `depth` levels down, stopping at any folder that IS an
+    episode rather than descending into its Interviewees. Every OSError is a
+    folder skipped, never a raise: an offline share must leave the landing
+    page drawable.
+
+    FOUR, BECAUSE THE LIVE TREE IS FOUR DEEP (2026-09-14, before the first
+    deploy of this page). `DASH_CARDS_VAULT_ROOT` is `/vault` in the
+    container -- `install_dashboard_app.py:CARDS_VAULT_MOUNT`, the whole
+    `vault_host` share -- and the episode `site.toml` already names is
+    `/vault/Vault/2026/FF5/Civil Defence`: `Vault`, `2026`, `FF5`, then the
+    episode. At three this scan answered an EMPTY LIST on the real share,
+    which is a landing page with nothing on it and no error to explain why.
+    `has_transcripts` prunes at the episode, so the extra level costs one
+    scandir per show, once every `SCAN_TTL_SECONDS`.
     """
     found: dict[str, dict] = {}
 

@@ -1,8 +1,9 @@
 # Two people, two projects: a landing page and an engine each
 
-**Status: PHASE 1 (with 1a and 1b) BUILT 2026-09-14, in the dashboard only.**
-Section 11 is what was built, what was left out, and what has not been run
-against a real engine. Phase 2 is untouched and still a plan.
+**Status: PHASE 1 (with 1a and 1b) BUILT AND MEASURED 2026-09-14, in the
+dashboard only.** Section 11 is what was built and what was left out;
+section 12 is the two-engine run against the real vault, which the cap was
+waiting on. Phase 2 is untouched and still a plan.
 
 Originally written 2026-09-14 after Alex asked
 "right now is it possible for two users signed into different accounts to
@@ -451,3 +452,82 @@ engine, and an episode closed while its builder thread still held it).
 `test_cards_mount.py` was rewritten onto the prefix and gained the two phase
 1a routing tests. Both suites pass, and so does the rest of the dashboard
 suite.
+
+
+---
+
+## 12. The two-engine run (2026-09-14)
+
+Two REAL `ProjectAgentEngine`s, in one process, against the real vault
+(`X:\Vault\2026`) and the real Resolve project library on 192.168.0.102
+-- what section 11 said had never been done. The harness was the
+dashboard itself (`create_app` + `TestClient`), driven through the landing
+page's own routes, so what is measured is the shipped path and not a
+stand-in.
+
+Two findings came out of it before a single number did, and the first one
+would have shipped a blank page.
+
+### THE SCAN WAS ONE LEVEL TOO SHALLOW
+
+`episodes()` walked `depth=3`. The container's vault root is `/vault` -- the
+whole `vault_host` share, `install_dashboard_app.py:CARDS_VAULT_MOUNT` -- and
+the episode `site.toml` already names inside it is
+`/vault/Vault/2026/FF5/Civil Defence`: `Vault`, `2026`, `FF5`, then the
+episode. **Four.** On the real share the scan answered an empty list, which
+is a landing page with no episodes on it and nothing to explain why: the pool
+would have been perfect and unreachable. The default is 4 now, pinned by
+`test_the_scan_reaches_the_live_tree_which_is_four_deep`, and `has_transcripts`
+still prunes at the episode so the extra level is one scandir per show every
+`SCAN_TTL_SECONDS`.
+
+### AN EPISODE IS A FOLDER SHAPE, AND THE VAULT HAS ODD ONES
+
+9 episodes found in 0.09 s, and one of them is called `1`
+(`FF5/Super-aged society/1`, which has an `Interviewees` in it while its
+parent does not). That is the rule working, not failing -- the landing page
+draws it as its show plus its name, so it reads `Super-aged society / 1` --
+and it is the vault's to tidy, not the scan's. Worth knowing before someone
+reports the row as a bug.
+
+### The numbers
+
+`WorkingSetSize` of the whole process, cold data dirs, Reproductive Rights
+(583-card cut, 9 transcripts) then Animals (30-card cut, 21 clips):
+
+| | RSS | over the dashboard | threads |
+|---|---|---|---|
+| dashboard alone | 83.2 MB | -- | 4 |
+| landing page drawn, NO engine | 87.5 MB | +4.3 MB | 5 |
+| engine 1 built (Reproductive Rights) | 106.3 MB | +23.1 MB | 9 |
+| engine 1 with its 583-card cut loaded | 179.7 MB | +96.5 MB | 10 |
+| engine 2 built (Animals) | 183.0 MB | +99.8 MB | 14 |
+| engine 2 with its cut loaded | 211.4 MB | +128.2 MB | 16 |
+| after 60 s of sweeps, library reads and the translator | 211.5 MB | +128.3 MB | 15 |
+
+So: **an episode costs 20-25 MB to have an engine and 70-75 MB more to have
+its cut open**, and two of them cost ~130 MB over the dashboard. The NAS has
+64 GB. **The cap stays at 2**, and not for memory -- 130 MB is nothing there
+-- but because the thread count is the real price: 4 threads at boot, 15-16
+with two engines, which is five or six per engine that `stop()` does not
+stop. That is the same arithmetic section 11 refuses eviction over, now
+measured rather than read off the source.
+
+RSS was flat across the settle (211.4 -> 211.5 MB): nothing in the two
+engines grows while idle.
+
+### What the run also proved, and what it did not
+
+Proved: two engines exist in one process and neither disturbs the other's
+root; each got its own `<data>/cards/<slug>` and its own library backups
+directory; each opened its own Postgres connection and its own writer against
+the `FF5lab` allow-list; the cap refusal names who is where
+(`2 episodes are already open: Reproductive Rights (alex) and Animals (alex)`)
+and the third engine was never built; and `/cards/` draws in 16 KB with no
+engine at all.
+
+Not proved: **two people**. One account opened both, which is the shape that
+matters for memory and threads but not for `cards_tunnel._routed`, whose
+whole point is two identities. And no agent was connected, so the
+release/reload handshake is still the thing that has never run live (CLAUDE.md
+says FF5lab first, and it still means it).

@@ -20,11 +20,15 @@ is on and `cli_tools` has fetched one.
 FIVE DECISIONS, each of which is a whole class of bug or a policy:
 
 1. **Claude, or nothing.** The chain can resolve to Codex, OpenAI or
-   DeepSeek. Timeline Cards passes MODEL NAMES (`claude-haiku-4-5-20251001`,
-   `claude-sonnet-5`) and prompts written against them, so a resolved
-   provider that is not one of the two Claude ones is refused with a sentence
-   naming what the site chose -- not silently answered by a model nobody
-   picked for this.
+   DeepSeek. Timeline Cards passes MODEL NAMES (`claude-haiku-4-5-20251001`
+   for the translations, and since 2026-09-14 whichever of `claude-sonnet-5`
+   / `claude-opus-5` / `claude-fable-5-1` the editor picked on the page) and
+   prompts written against them, so a resolved provider that is not one of
+   the two Claude ones is refused with a sentence naming what the site chose
+   -- not silently answered by a model nobody picked for this. THE NAME IS
+   THE CALLER'S: nothing here keeps a list of models, because a list here is
+   a list that has to be redeployed before the other repo may offer a
+   fourth.
 2. **THE MODEL NEVER GETS FILE TOOLS.** `_run_claude_json` on the other side
    is an "agentic run expected to write JSON to `out`". Here the JSON comes
    back as the REPLY and THIS process writes the file. An agent binary with
@@ -966,9 +970,10 @@ def _text_of(response: Any) -> str:
 def _sdk_detail(exc: Exception, model: str) -> str:
     """One sentence an admin can act on, with the MODEL in it.
 
-    Timeline Cards names its own models (`claude-haiku-4-5-20251001`,
-    `claude-sonnet-5`); a key that may not call one of them, or a name this
-    API does not know, is otherwise a bare `NotFoundError` in a worker thread.
+    Timeline Cards names its own models (`claude-haiku-4-5-20251001`, and
+    the sonnet/opus/fable an editor picks on the page); a key that may not
+    call one of them, or a name this API does not know, is otherwise a bare
+    `NotFoundError` in a worker thread.
     """
     name = type(exc).__name__
     body = str(exc)[:300]

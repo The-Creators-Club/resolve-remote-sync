@@ -130,15 +130,62 @@ case by a wide margin (Reproductive Rights and Framing Formosa, say).
 * The session carries `cards_key`; `CardsGate` resolves it to the engine and
   routes. A request for a key with no engine and no room gets the refusal
   above, not a 500.
-* **Exactly one engine may hold Resolve.** CR-68's rule is one scriptapp
-  client per machine, and the agent role is one companion
-  (`timeline_cards_role.py`). So one engine is the LIVE one and the others
-  are file-only: they read, edit and save the cut file and refuse conform
-  with a sentence naming which project holds Resolve. The landing page shows
-  that chip, and handing it over is an explicit act.
+* **You drive your own Resolve, and only your own** (Alex, 2026-09-14:
+  "users can only use companions which are also signed in to their own
+  account"). See Phase 1a below: this replaces the global "who holds Resolve" lock,
+  and it is both safer and simpler.
 * `cards_exec.py` (the pinned-media executor) targets the engine that owns
   the root the job names, which it already knows - the job's paths are (root
   name, relative path) pairs by design (§4 of the port plan).
+
+### Phase 1a - Resolve belongs to the account, not to the server
+
+**The rule: a signed-in user may drive only the companions signed in to
+their own account.** Alex's page drives Alex's Creator-1 and Razer;
+Ruskin's page drives Ruskin's machine and nothing else. Nobody "holds"
+Resolve fleet-wide, so nobody has to hand it over, and the second person is
+never blocked by the first.
+
+This is not new machinery - it is using the identity the tunnel already
+verifies:
+
+* `cards_tunnel.py` already overwrites the agent's self-asserted
+  `socket.gethostname()` with the identity it verified, and names the agent
+  `editor/MACHINE`: *"THE VERIFIED IDENTITY IS THE AGENT'S NAME ... the
+  verified name, never `body.editor`"*. The editor half is already
+  trustworthy: `api._require_fleet_caller` takes it from **the dashboard's
+  own signed identity token**, not from the report token - *"the only name
+  allowed to decide anything"*.
+* So an engine's live seam filters agents by that editor half against the
+  session's user. What changes is a comparison and a scope, not a protocol.
+
+What it means concretely:
+
+* An agent whose editor is not you **does not appear** on your page - not
+  greyed, not refused on click. A conform button that exists and always says
+  no is a worse answer than one that is not there. The landing page may say
+  "Ruskin is live on his own machine" as information, with nothing to press.
+* **No admin override**, deliberately. An admin driving another editor's
+  Resolve is a synthetic keystroke into a timeline they cannot see, which is
+  the same objection §4.2 of the port plan makes to scheduling `conform` on
+  another machine. If that is ever wanted it is a separate, explicit act
+  with its own audit line, not a property of being an admin.
+* **CR-68 still binds per machine**: one scriptapp client per machine. So one
+  person with one editing machine is live in at most ONE project at a time -
+  a second project they open is file-only, and says so naming their own other
+  project rather than another person. That refusal is now about their own
+  machine, which is a sentence that can actually be acted on.
+* An editor with two machines (Alex: Creator-1 and Razer) can be live in two
+  projects at once, one per machine. The engine pool makes that possible;
+  this rule makes it legible.
+* **Hardening that goes with it, not a blocker:** four machines still
+  authenticate with the SHARED fleet report token (the dashboard says so at
+  boot: *"0 use per-editor tokens"*). The identity binding above rests on the
+  signed identity token and holds either way, but per-editor `cce1.` tokens
+  are what make a stolen companion credential useless for one editor's
+  machines. Mint them on Admin > Users and set
+  `DASH_SHARED_REPORT_TOKEN_ENABLED=0` before this ships, so "your own
+  account" means one thing at both ends.
 
 ### Phase 2 - two cut files of the SAME episode
 
@@ -179,8 +226,10 @@ this one. Phase 1 makes it optional rather than urgent.
 * Two people in one project: unchanged, still safe, still the normal way to
   work together.
 * The agent/Resolve seam: still one machine, one client, one Resolve
-  (CR-68). Nothing here makes conform concurrent, and §4.2 of the port plan
-  still stands - `conform` and `resolve-edit` must never become schedulable.
+  (CR-68). Nothing here makes conform concurrent ON ONE MACHINE, and §4.2 of
+  the port plan still stands - `conform` and `resolve-edit` must never become
+  schedulable. Two people conforming at once is two machines, each its
+  owner's own (Phase 1a).
 * `POST /cards/api/restart` stays refused at the gate.
 * The mount stays tri-state and never fatal: a broken pool must not stop the
   dashboard booting.
@@ -192,6 +241,8 @@ this one. Phase 1 makes it optional rather than urgent.
    the other repo's core.
 2. **How many engines?** 2 is the honest default for one NAS container. 3 if
    the memory measurement says so.
-3. **Who gets Resolve?** First in holds it until they leave, or an explicit
-   [ TAKE RESOLVE ] on the landing page. (Recommendation: explicit, because
-   "first in" is invisible to the second person.)
+3. ~~Who gets Resolve?~~ **Decided 2026-09-14**: nobody "gets" it. You
+   drive the companions signed in to your own account and no others (Phase 1a).
+   The remaining sub-question, if you want it: should an editor's page show
+   that someone ELSE is live on their own machine (information, nothing to
+   press), or show nothing at all? The plan assumes the first.

@@ -24291,6 +24291,45 @@ own (`test_the_scan_reaches_the_live_tree_which_is_four_deep`), which builds
 `scandir` per show once every `SCAN_TTL_SECONDS`.
 
 
+
+## CR-277 - three Timeline Cards captions carried a passage 35 s further down the interview, in confident English - FIXED (library_engine.start_translation)
+
+Reported by Alex 2026-09-15 off the lane of `Reproductive Rights - Ordered
+V7`: cards 219-221 (陳昭姿) read "Physically, biologically, sperm, egg and
+uterus are three indispensable parts..." and "in the advanced countries, over
+the 30-plus years I have been at this..." while the Mandarin under them was
+the surrogacy-bill definition and the DNA passage before it. Not a slice that
+drifted: `card_translations.json` held those three keys as EXACT translations,
+written 2026-09-12 04:27 by haiku, with the right `zh` beside the wrong `en`.
+
+`start_translation` sends one STACK to the model as one passage, with
+`paragraph_en` - "a human-approved translation of the surrounding paragraph:
+reuse its terminology, names and register" - as context. It built that from
+each member's `en_para`, deduplicated with `if pe not in paras`. But
+`en_para` is ALREADY a join of every paragraph the cut overlaps
+(`_slice_en`), and consecutive cuts of one statement overlap the same
+paragraphs, so no two members' strings were ever equal and nothing was ever
+deduplicated. The context came out as a sliding window that repeated itself:
+for this stack, six paragraphs arrived as 2,641 characters with two of them
+three times over, stepping forward as it went. The model answered from the
+END of that stutter, and the three parts came back holding the last three
+paragraphs instead of their own.
+
+The fix is to deduplicate the PARAGRAPHS, not the joined strings:
+`_slice_en` now also returns them unjoined, `_card_body` carries the list
+into `_card_cache` (nothing on the wire changes - the page never reads
+`en_para`), and `start_translation` walks those. A card the cache has not
+seen - an agent's push, a state read back off disk - still falls back to the
+joined string, which is what it always had. `tests/test_claude_seam.py` pins
+it: the old code renders the fixture as `A B A B C B C D`.
+
+The three bad entries were deleted from the episode's
+`card_translations.json` (backup beside it), which drops those cards back to
+the correct paragraph slice until the next translate run. Nothing else in
+that 19-part batch, and nothing else in the episode's 728 entries, was
+mis-sourced - audited by matching every stored English against the paragraph
+index of its own clip.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

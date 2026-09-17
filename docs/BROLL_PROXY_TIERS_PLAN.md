@@ -1,8 +1,11 @@
 # B-roll proxy tiers: a better browser preview, an editing proxy, and "Send to Resolve" that downloads only a proxy
 
-Written 2026-09-17 against HEAD `3643f7b`. Status: **PLAN, phase 1 and 2
-building (2026-09-17 evening).** Phase 0 is a spike whose answer decides
-phase 3's shape. Revised the same day after
+Written 2026-09-17 against HEAD `3643f7b`. Status: **phases 0-3 BUILT the
+same evening (waves A `142e2cf`, B `7008e65`, phase 3 `11b81e1`), gated,
+UNSHIPPED: no version bump, no KNOWN_BUGS entry yet, and the live checks
+in §7 (a stand-in-born clip opened on a wired rig; the preview to
+editing-proxy swap on a clip already in a timeline) still to run.** Phase 0
+is the spike whose answer decided phase 3's shape (§3). Revised the same day after
 [`BROLL_PROXY_TIERS_PLAN_AUDIT.md`](BROLL_PROXY_TIERS_PLAN_AUDIT.md): every
 change the audit forced is marked **(audit Fn)** below, so the two documents
 can be read against each other.

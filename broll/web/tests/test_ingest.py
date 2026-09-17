@@ -326,6 +326,27 @@ def test_the_facts_other_indexer_passes_push_are_not_dropped_either(client, conn
     assert row["hash"] == "abc", "the re-scan's own fields still land"
 
 
+def test_the_probes_geometry_columns_are_carried_and_not_blanked(client, conn, caplog):
+    """frames/start_tc/bitrate (migration 012, 2026-09-17). Declared on VideoIn
+    in the same change as the column, because an undeclared field is dropped
+    with a log line and nothing else -- broll-5's exact shape. COALESCEd like
+    the sprite geometry: only the probe stage sends them, and a later scan must
+    not blank what it measured."""
+    ident = {"share": "broll", "rel_path": "military/naval/clip_9103.mov"}
+    with caplog.at_level("WARNING", logger="broll.ingest"):
+        vid = client.post("/api/ingest/video", json={
+            **ident, "frames": 1674, "start_tc": "12:05:55:26",
+            "bitrate": 1200000000}).json()["id"]
+    assert not [r for r in caplog.records if "frames" in r.getMessage()]
+
+    client.post("/api/ingest/video", json={**ident, "hash": "abc"})
+
+    row = conn.execute("SELECT * FROM videos WHERE id = ?", (vid,)).fetchone()
+    assert row["frames"] == 1674
+    assert row["start_tc"] == "12:05:55:26"
+    assert row["bitrate"] == 1200000000
+
+
 def test_a_field_the_ingest_contract_does_not_carry_is_logged_not_swallowed(client, caplog):
     """Loud, not fatal: set_error reaches this endpoint while the indexer is
     already handling a failure, so a 422 would replace a lost message with a

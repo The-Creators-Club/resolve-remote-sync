@@ -39,7 +39,11 @@ Migration steps (PRAGMA user_version):
     10 -> 11 apply migrations/011_ingest_batches.sql (the dashboard b-roll
              ingest work orders: `ingest_batches` + `ingest_items`, and
              `share_roots.collection` -- docs/BROLL_INGEST_PLAN.md §2)
-    11 -> 11 no-op, already current
+    11 -> 12 apply migrations/012_geometry.sql (`videos.frames`,
+             `videos.start_tc`, `videos.bitrate` -- what the detail route's
+             `insert` object needs and cannot ffprobe off the NAS per
+             request, docs/BROLL_PROXY_TIERS_PLAN.md §5)
+    12 -> 12 no-op, already current
 
 A DB is stepped through every migration in this chain in one ensure_schema()
 call regardless of its starting version -- e.g. a real v1 production DB goes
@@ -56,7 +60,7 @@ from pathlib import Path
 from app import config
 
 # Highest schema version this codebase knows how to run against.
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 
 # Maps "user_version found" -> migration filename that advances it to the
 # next version. Resolved via find_migration_path() (repo-root-first, then
@@ -79,6 +83,7 @@ _MIGRATIONS: dict[int, str] = {
     8: "009_sprite_geometry.sql",
     9: "010_search_generation.sql",
     10: "011_ingest_batches.sql",
+    11: "012_geometry.sql",
 }
 
 # The `meta` key holding the search-cache generation counter (migration 010).

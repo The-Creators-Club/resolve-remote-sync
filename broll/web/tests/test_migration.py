@@ -284,7 +284,8 @@ def test_migration_011_adds_the_ingest_tables_on_both_paths(tmp_path):
     for db_path in (migrated, scratch):
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 11, db_path
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == \
+                CURRENT_SCHEMA_VERSION, db_path
             tables = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'")}
             assert "ingest_batches" in tables, db_path
@@ -305,6 +306,41 @@ def test_migration_011_adds_the_ingest_tables_on_both_paths(tmp_path):
     assert shapes[0] == shapes[1], (
         "the stepped chain and schema.sql describe different databases -- "
         "migrations/011_ingest_batches.sql and schema.sql have drifted")
+
+
+def test_migration_012_adds_the_geometry_columns_on_both_paths(tmp_path):
+    """v11 -> v12 (migrations/012_geometry.sql) and the schema.sql twin.
+
+    Three columns the proxy-tiers work needs (2026-09-17, audit F3): the
+    detail route decides `original_is_edit_weight` on `bitrate`, and phase 3
+    writes `frames`/`start_tc` into the file that creates an offline clip at
+    the original's canonical path. NULL has to stay tellable from a
+    measurement -- a row probed before this migration answers null rather than
+    "small", which would send a remote editor a multi-GB camera master.
+    """
+    migrated = tmp_path / "migrated.db"
+    _build_v1_db(migrated)
+    ensure_schema(migrated)
+
+    scratch = tmp_path / "scratch.db"
+    ensure_schema(scratch)
+
+    for db_path in (migrated, scratch):
+        conn = sqlite3.connect(db_path)
+        try:
+            columns = {r[1]: r[2].upper()
+                       for r in conn.execute("PRAGMA table_info(videos)")}
+            assert columns.get("frames") == "INTEGER", db_path
+            assert columns.get("start_tc") == "TEXT", db_path
+            assert columns.get("bitrate") == "INTEGER", db_path
+            # A row that predates the migration reads NULL on all three, which
+            # is what `original_is_edit_weight: null` is derived from.
+            conn.execute("INSERT INTO videos (share, rel_path) VALUES ('s', 'a.mov')")
+            assert conn.execute(
+                "SELECT frames, start_tc, bitrate FROM videos WHERE rel_path = 'a.mov'"
+            ).fetchone() == (None, None, None), db_path
+        finally:
+            conn.close()
 
 
 def test_the_ingest_state_checks_are_enforced_by_the_database(tmp_path):

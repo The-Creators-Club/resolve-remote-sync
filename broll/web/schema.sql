@@ -44,6 +44,17 @@ CREATE TABLE videos (
     sprite_cols INTEGER,
     sprite_cells INTEGER,
     sprite_interval_s REAL,
+    -- What the file IS, beyond its dimensions (see migrations/012). `bitrate`
+    -- decides `original_is_edit_weight` on the detail route; `frames` and
+    -- `start_tc` are what creates an OFFLINE clip at the original's canonical
+    -- path on a machine that does not hold the original. NULL = probed before
+    -- these columns existed, and that stays tellable from a measurement: a
+    -- missing bitrate answers null, never "small".
+    -- `start_tc` is the timecode as the FILE prints it, not drop-frame
+    -- normalised -- the normalisation belongs to a proxy written against it.
+    frames INTEGER,
+    start_tc TEXT,
+    bitrate INTEGER,
     UNIQUE (share, rel_path)
 );
 
@@ -285,4 +296,4 @@ CREATE TABLE ingest_items (
 CREATE INDEX idx_ingest_items_batch ON ingest_items(batch_uid, ord);
 CREATE INDEX idx_ingest_items_video ON ingest_items(video_id);
 
-PRAGMA user_version = 11;
+PRAGMA user_version = 12;

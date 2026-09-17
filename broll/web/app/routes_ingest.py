@@ -75,10 +75,11 @@ def ingest_video(body: VideoIn, conn: sqlite3.Connection = Depends(get_db)) -> d
                  error, full_hash, duplicate_of, archive_path, original_path,
                  original_size_bytes, original_verified_at,
                  sprite_cell_w, sprite_cell_h, sprite_cols, sprite_cells,
-                 sprite_interval_s)
+                 sprite_interval_s, frames, start_tc, bitrate)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'discovered'),
                     ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?,
+                    ?, ?, ?)
             ON CONFLICT(share, rel_path) DO UPDATE SET
                 hash = excluded.hash,
                 size_bytes = excluded.size_bytes,
@@ -115,7 +116,15 @@ def ingest_video(body: VideoIn, conn: sqlite3.Connection = Depends(get_db)) -> d
                 sprite_cols = COALESCE(excluded.sprite_cols, videos.sprite_cols),
                 sprite_cells = COALESCE(excluded.sprite_cells, videos.sprite_cells),
                 sprite_interval_s = COALESCE(excluded.sprite_interval_s,
-                                             videos.sprite_interval_s)
+                                             videos.sprite_interval_s),
+                -- COALESCE for the same reason (migration 012, 2026-09-17):
+                -- only the PROBE stage knows these, and a later scan or an
+                -- error upsert sends none of them. Blanked, the detail route
+                -- would answer `original_is_edit_weight: null` for a clip it
+                -- had already measured.
+                frames = COALESCE(excluded.frames, videos.frames),
+                start_tc = COALESCE(excluded.start_tc, videos.start_tc),
+                bitrate = COALESCE(excluded.bitrate, videos.bitrate)
             """,
             (
                 body.share,
@@ -144,6 +153,9 @@ def ingest_video(body: VideoIn, conn: sqlite3.Connection = Depends(get_db)) -> d
                 body.sprite_cols,
                 body.sprite_cells,
                 body.sprite_interval_s,
+                body.frames,
+                body.start_tc,
+                body.bitrate,
             ),
         )
     row = conn.execute(

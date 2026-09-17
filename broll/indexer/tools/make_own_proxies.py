@@ -252,9 +252,12 @@ def encode_one(src: Path, cap_s: float, nvenc: bool, dry: bool) -> dict:
 
     timecode = None
     try:
-        timecode = ffmpeg_tools.read_timecode(long_path(src))
+        # The tmcd flag travels with the value: a colon a tmcd track printed
+        # is a real non-drop timecode (audit F6, 2026-09-17).
+        timecode, tc_from_tmcd = ffmpeg_tools.read_timecode_source(long_path(src))
         if timecode:
-            timecode = ffmpeg_tools.dropframe_normalized(timecode, info.get("fps"))
+            timecode = ffmpeg_tools.dropframe_normalized(
+                timecode, info.get("fps"), tc_from_tmcd)
     except Exception:  # noqa: BLE001 -- a proxy without timecode still beats no proxy
         timecode = None
 

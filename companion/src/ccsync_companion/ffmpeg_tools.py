@@ -31,10 +31,12 @@ changed in the move:
     proxy_relink.py:35-37) plus audio facts, and lost `shot_date`, which only
     the search index cares about.
 
-The 540p preview spec below is deliberately IDENTICAL to the b-roll one, so a
-proxy generated for a YouTube download doubles as its b-roll preview. If the
+The browser-preview spec below is deliberately IDENTICAL to the b-roll one, so
+a proxy generated for a YouTube download doubles as its b-roll preview. If the
 b-roll side ever changes, this file has to change with it -- test_ffmpeg_tools
-asserts the whole preview flag subsequence literally so that drift is loud.
+asserts the whole preview flag subsequence literally AND compares it against
+the indexer's own build_proxy by importing that module (audit F8, 2026-09-17:
+the literal alone failed nothing when the other side moved).
 """
 
 from __future__ import annotations
@@ -336,6 +338,13 @@ def _float_or_none(value) -> Optional[float]:
         return None
 
 
+def _int_or_none(value) -> Optional[int]:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _tags(obj) -> dict:
     """`tags` off a format/stream dict, tolerating both a missing key and an
     explicit JSON null (ffprobe emits both, depending on version)."""
@@ -345,47 +354,69 @@ def _tags(obj) -> dict:
     return tags if isinstance(tags, dict) else {}
 
 
-def _timecode_from(info: dict) -> Optional[str]:
-    """The source timecode, or None.
+def timecode_from_probe(info: dict) -> tuple[Optional[str], bool]:
+    """(the source timecode, did a tmcd stream produce it).
 
     Order matters and is not arbitrary. Container-level (`format.tags.timecode`)
     is what QuickTime/MP4 recordings carry and what ffmpeg's own `-timecode`
     writes back, so a round trip through us is stable. MXF and many camera
     formats instead carry a dedicated `tmcd` timecode TRACK, which surfaces as
-    a data stream with the same tag; that is the fallback.
+    a data stream with the same tag; that is the fallback, and a tag on any
+    other stream is the last resort.
+
+    The second half of the tuple is what dropframe_normalized needs and
+    nothing downstream can recover (audit F6, 2026-09-17): a `tmcd` track
+    carries the drop-frame BIT and ffprobe prints that bit AS THE SEPARATOR,
+    so a colon from such a file is a genuine non-drop timecode; a Sony body's
+    `rtmd` data stream prints colons whatever the camera counted. Presence of
+    a tmcd stream anywhere decides it rather than which tag the string came
+    from, because the mov demuxer copies the tmcd track's value up into
+    `format.tags.timecode`. Verified on both real cases 2026-09-17:
+    Johnny_Harris cam-1-050.mov (data/tmcd, 13:53:30:02 at 30000/1001,
+    genuinely non-drop) and an FX3 original (data/rtmd, colon, no tmcd).
 
     None is a legitimate answer (screen recordings, YouTube downloads have no
     timecode at all) and must not be confused with failure -- the generator
     simply omits `-timecode`, and Resolve's LinkProxyMedia is happy as long as
     neither side claims one.
+
+    Indexer parity: broll_index/ffmpeg_tools.timecode_from_probe, pinned by
+    companion/tests/test_broll_ingest_media.py.
     """
+    streams = [s for s in (info.get("streams") or []) if isinstance(s, dict)]
+    has_tmcd = any(s.get("codec_tag_string") == "tmcd" for s in streams)
+
     container = _tags(info.get("format")).get("timecode")
     if container:
-        return str(container)
-    for stream in info.get("streams", []) or []:
-        if not isinstance(stream, dict):
-            continue
-        is_tmcd = (
-            stream.get("codec_tag_string") == "tmcd"
-            or stream.get("codec_type") == "data"
-        )
-        if not is_tmcd:
-            continue
+        return str(container), has_tmcd
+    for stream in streams:
+        if stream.get("codec_tag_string") == "tmcd":
+            value = _tags(stream).get("timecode")
+            if value:
+                return str(value), True
+    for stream in streams:
         value = _tags(stream).get("timecode")
         if value:
-            return str(value)
-    return None
+            return str(value), has_tmcd
+    return None, False
+
+
+def _timecode_from(info: dict) -> Optional[str]:
+    """timecode_from_probe's first half, for callers that do not decide
+    drop-frame themselves."""
+    return timecode_from_probe(info)[0]
 
 
 # The only rates drop-frame timecode exists at. 23.976 is fractional too but
 # has no DF variant; integer rates never drop. Copied from
 # broll/indexer/broll_index/ffmpeg_tools.py:97-99 with dropframe_normalized
-# below -- the two modules already keep the 540p preview spec identical by
-# hand, and this is the same kind of shared fact.
+# below -- the two modules already keep the browser-preview spec identical,
+# and this is the same kind of shared fact.
 NTSC_DF_RATES = (29.97, 59.94)
 
 
-def dropframe_normalized(tc: Optional[str], fps: Optional[float]) -> Optional[str]:
+def dropframe_normalized(tc: Optional[str], fps: Optional[float],
+                         from_tmcd: bool = False) -> Optional[str]:
     """The timecode string as Resolve will count it against an NTSC source.
 
     Sony bodies store the start TC in an rtmd data stream whose tag prints
@@ -399,13 +430,22 @@ def dropframe_normalized(tc: Optional[str], fps: Optional[float]) -> Optional[st
     would be refused -- which is the status quo for it, never a wrong pairing:
     Resolve validates every attach.
 
+    `from_tmcd` is the 2026-09-17 half of the rule (audit F6,
+    docs/BROLL_PROXY_TIERS_PLAN.md section 4): a tmcd track carries the
+    drop-frame bit itself and ffprobe prints it as the separator, so THAT
+    colon is a genuine non-drop timecode and rewriting it is what makes
+    Resolve refuse the proxy. KNOWN_BUGS R17's tenth case is exactly this --
+    231 of the Johnny Harris shoot's 377 proxies are 29.97 NDF with a tmcd
+    track. Normalise only what came from a file with no tmcd stream, i.e. the
+    rtmd/format-tag case the 2026-08-12 measurement was made on.
+
     Ported verbatim from the indexer (COMP-MEDIA-1, 2026-08-14): R10's second
     half landed only on the b-roll preview pipeline, so the companion -- which
     makes the fleet's EDITING proxies -- kept writing the colon form.
     test_ffmpeg_tools carries the indexer's own regression test so the two
     copies cannot drift again.
     """
-    if not tc or ";" in tc or fps is None:
+    if not tc or ";" in tc or fps is None or from_tmcd:
         return tc
     if not any(abs(fps - rate) < 0.01 for rate in NTSC_DF_RATES):
         return tc
@@ -493,6 +533,17 @@ def probe_video(ffmpeg_path: str, path: str | Path) -> dict:
     # broll_index/ffmpeg_tools.probe_video, so an ingested clip's shot_date
     # matches a base-rig-indexed one's.
     creation_time = _tags(fmt).get("creation_time") or _tags(video_stream).get("creation_time")
+
+    start_tc, tc_from_tmcd = timecode_from_probe(info)
+
+    # The stream's own rate first: `format.bit_rate` is the whole container,
+    # so a 1080p H.264 original with a PCM audio track reads 1.5 Mbps heavier
+    # than its picture and the detail API would call it "not edit-weight" on
+    # the strength of its sound.
+    bitrate = _int_or_none(video_stream.get("bit_rate"))
+    if bitrate is None:
+        bitrate = _int_or_none(fmt.get("bit_rate"))
+
     return {
         "duration_s": duration_s,
         "fps": fps,
@@ -504,8 +555,18 @@ def probe_video(ffmpeg_path: str, path: str | Path) -> dict:
         "shot_date": str(creation_time)[:10] if creation_time else None,
         # Normalized HERE rather than in the argv builder: the tag is only
         # wrong relative to the source's frame rate, and this is the one place
-        # that holds both (COMP-MEDIA-1, 2026-08-14).
-        "timecode": dropframe_normalized(_timecode_from(info), fps),
+        # that holds both (COMP-MEDIA-1, 2026-08-14) -- and, since 2026-09-17,
+        # relative to whether a tmcd track printed it (audit F6).
+        "timecode": dropframe_normalized(start_tc, fps, tc_from_tmcd),
+        # The three columns migration 012 added to `videos` (2026-09-17, plan
+        # section 5 / audit F3). `start_tc` is the timecode AS THE FILE PRINTS
+        # IT: the column describes the SOURCE, and the normalisation above is
+        # a property of a proxy written against it. They travel to the server
+        # in the ingest checkpoint's `probe` dict, so the indexer's
+        # probe_video and this one have to agree on all three.
+        "frames": _int_or_none(video_stream.get("nb_frames")),
+        "start_tc": start_tc,
+        "bitrate": bitrate,
     }
 
 
@@ -676,23 +737,31 @@ def own_proxy_cmd(
 
 # -- YouTube downloads: the b-roll preview spec, verbatim ------------------
 #
-# Proxy encoding defaults, copied unchanged from
-# broll/indexer/broll_index/ffmpeg_tools.py:125-139 -- the justification is the
-# reason to keep them identical:
+# Browser-preview encoding defaults, copied unchanged from
+# broll/indexer/broll_index/ffmpeg_tools.py -- the justification is the reason
+# to keep them identical, and test_broll_ingest_media.py now compares the two
+# argvs by IMPORTING that module rather than by a hand copy (audit F8).
 #
-# Measured on real archive footage: at 720p/cq26 the proxy came out at ~95% of
-# source size, because these archives are YouTube downloads that are ALREADY
-# compressed -- re-encoding 1080p->720p at high quality saves almost nothing.
-# On a 1 TB queue that is ~991 GB of proxies, more than the free disk.
+# The history, because it is the argument for the numbers rather than against
+# them. Measured 2026-08-11 on real archive footage: at 720p/cq26 the proxy
+# came out at ~95% of source size, because that archive was YouTube downloads
+# that were ALREADY compressed -- re-encoding 1080p->720p at high quality
+# saved almost nothing, and on the 1 TB queue of the day that was ~991 GB of
+# proxies, more than the free disk. 540p/cq34 measured ~3.7x smaller
+# (~4.5 MB/min vs ~17 MB/min) across three sample files, and the quality cost
+# was acceptable because the preview was ONLY ever browsed.
 #
-# 540p/cq34 measured ~3.7x smaller (~4.5 MB/min vs ~17 MB/min) across three
-# sample files. The quality cost is acceptable because proxies exist only for
-# browsing and choosing shots in the web player: "Send to Resolve" inserts the
-# ORIGINAL media, so nothing downstream is degraded by a small proxy.
-PROXY_HEIGHT = 540
-PROXY_CQ = 34          # h264_nvenc constant-quality
-PROXY_CRF = 30         # libx264 equivalent, used when NVENC is unavailable
-PROXY_AUDIO_BITRATE = "96k"
+# Both halves of that justification stopped holding on 2026-09-17
+# (docs/BROLL_PROXY_TIERS_PLAN.md section 4, owner's complaint 3): the editors
+# cannot judge a clip at 540p, and in phase 3 this file becomes the FIRST
+# PROXY RESOLVE LINKS on a remote machine, so it is cut on, not just browsed.
+# 1080p at cq25/crf23 is roughly 3-5 Mbps, about 10x today's files; the
+# archive's own originals are 6.5-8.3 Mbps, so it is still a saving, and it
+# applies to NEW CLIPS ONLY -- nothing re-encodes what is already there.
+PROXY_HEIGHT = 1080
+PROXY_CQ = 25          # h264_nvenc constant-quality
+PROXY_CRF = 23         # libx264 equivalent, used when NVENC is unavailable
+PROXY_AUDIO_BITRATE = "128k"
 
 
 def preview_proxy_cmd(
@@ -705,9 +774,10 @@ def preview_proxy_cmd(
     cq: int = PROXY_CQ,
     crf: int = PROXY_CRF,
     timecode: Optional[str] = None,
+    fps: Optional[float] = None,
     container: str = PROXY_CONTAINER,
 ) -> list[str]:
-    """argv for a 540p browsing proxy -- byte-for-byte the b-roll spec.
+    """argv for a 1080p browsing proxy -- byte-for-byte the b-roll spec.
 
     `timecode` is None for the YouTube tier (a download has none to preserve)
     and carries the source's for b-roll INGEST (2026-08-18): the indexer's own
@@ -716,9 +786,17 @@ def preview_proxy_cmd(
     (R10). Omitted entirely when there is none -- writing a zero timecode onto
     a source that claims none is a mismatch of its own. Pass the DROP-FRAME
     NORMALIZED value probe_video already returns.
+
+    `fps` is the SOURCE's rate and buys one keyframe per second, so scrubbing
+    the b-roll page lands close to the pointer (2026-09-17, plan section 4).
+    It stays optional and is omitted rather than guessed when the caller does
+    not know it: ffmpeg's own default beats a made-up number, and this builder
+    is PURE -- it will not probe to find out.
     """
-    video_codec = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", str(cq)] if nvenc else [
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+    video_codec = [
+        "-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", str(cq),
+    ] if nvenc else [
+        "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
     ]
     cmd = [
         ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
@@ -733,6 +811,10 @@ def preview_proxy_cmd(
         # indexer's version does not encode at all.
         "-vf", f"scale=-2:'trunc(min({height},ih)/2)*2'",
         *video_codec,
+        # One second of frames. round(), not int(): 29.97 is 30 keyframes'
+        # worth of interval, and 29 would drift a frame per second against
+        # every other reader of this file.
+        *(["-g", str(round(fps))] if fps and round(fps) >= 1 else []),
         # 8-bit 4:2:0, ALWAYS. Copied from the indexer's build_proxy
         # (:261-267), where it was added after every Creators_Club preview
         # from a 10-bit source came back as a black rectangle in the editors'
@@ -774,6 +856,66 @@ def verify_decodes_cmd(ffmpeg_path: str, path: str | Path) -> list[str]:
     unit size") while reporting the right duration and resolution.
     """
     return [ffmpeg_path, "-v", "error", "-i", str(path), "-f", "null", "-"]
+
+
+def count_frames_cmd(ffprobe_path: str, path: str | Path) -> list[str]:
+    """argv that COUNTS the video packets in a file.
+
+    `nb_frames` is a container field and is absent or a lie in exactly the
+    cases that matter (an mp4 a killed encoder left behind still carries the
+    count it intended), so the check that decides whether a proxy is short
+    counts packets instead. Parity: broll_index/ffmpeg_tools.py, same name,
+    same flags -- one pipeline passing a proxy the other would reject is the
+    whole reason both carry one spec.
+    """
+    return [
+        ffprobe_path, "-v", "error",
+        "-count_packets",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=nb_read_packets",
+        "-print_format", "json",
+        str(path),
+    ]
+
+
+def parse_frame_count(stdout_text: Optional[str]) -> Optional[int]:
+    """The packet count out of a count_frames_cmd run, or None.
+
+    None means "could not tell", never zero: the caller's answer to an
+    unreadable count is to SKIP the comparison, and a 0 would fail every proxy
+    on a machine whose ffprobe printed something unexpected.
+    """
+    try:
+        payload = json.loads(stdout_text or "")
+        streams = payload.get("streams") or []
+        return _int_or_none((streams[0] or {}).get("nb_read_packets"))
+    except (ValueError, AttributeError, IndexError, TypeError):
+        return None
+
+
+def count_frames(ffmpeg_path: str, path: str | Path) -> Optional[int]:
+    """How many video frames a file actually contains, or None.
+
+    The Reproductive Rights lesson (2026-09-17): seven proxies were 1-18
+    frames short of their originals, Resolve refused every one as a proxy, and
+    nothing said so -- the editor saw "sync is stuck" for a day. A preview is
+    the first proxy Resolve links in phase 3, so a short one has to fail its
+    item visibly. Never raises: an unreadable count is None and the comparison
+    is skipped, because a check that cannot run must not condemn good media.
+    """
+    try:
+        result = subprocess.run(
+            count_frames_cmd(ffprobe_for(ffmpeg_path), path),
+            capture_output=True,
+            timeout=PROBE_TIMEOUT_SECONDS,
+            creationflags=_win_creationflags(),
+            **TEXT_UTF8,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return parse_frame_count(result.stdout)
 
 
 def count_decode_errors(stderr_text: Optional[str]) -> int:

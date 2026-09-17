@@ -51,6 +51,14 @@ class VideoIn(BaseModel):
     # machine's local shadow DB (broll-5). COALESCEd on the upsert, like
     # category and the sprite geometry.
     error: str | None = None
+    # What the file IS, beyond its dimensions (migration 012, 2026-09-17): the
+    # indexer's probe_video sends all three and HttpBackend.update_video
+    # forwards them here. Undeclared, they would be logged as "fields the
+    # contract does not carry" and dropped -- broll-5's exact shape, which is
+    # why they land in the same change as the column.
+    frames: int | None = None
+    start_tc: str | None = None
+    bitrate: int | None = None
     # Written by `broll-index duplicates --apply` and `origins`, which reach
     # the web DB through this one endpoint too. Same silent drop, same fix.
     full_hash: str | None = None
@@ -183,7 +191,10 @@ class ItemStatusIn(BaseModel):
     attempts: int | None = Field(default=None, ge=0)
     hash: str | None = Field(default=None, max_length=64)
     # ffprobe's answers, once the companion has them: duration_s, fps, width,
-    # height, codec, shot_date.
+    # height, codec, shot_date, and since 2026-09-17 frames, start_tc and
+    # bitrate (migration 012). A free-form dict on purpose: a companion older
+    # than the migration simply sends fewer keys, and _apply_probe writes what
+    # it was given.
     probe: dict | None = None
 
 

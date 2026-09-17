@@ -908,6 +908,12 @@ def set_item_state(conn: sqlite3.Connection, batch: sqlite3.Row, item: sqlite3.R
 
 _PROBE_COLUMNS = ("duration_s", "fps", "width", "height", "codec", "shot_date")
 
+# The three `videos` gained in migration 012 (2026-09-17). Deliberately NOT in
+# _PROBE_COLUMNS: `ingest_items` does not carry them and does not need to (the
+# SPA shows a clip's duration and size while a batch runs, never its frame
+# count), and one list for two tables would be a SQL error on every checkpoint.
+_PROBE_VIDEO_ONLY_COLUMNS = ("frames", "start_tc", "bitrate")
+
 
 def _apply_probe(conn: sqlite3.Connection, item_uid: str, video_id: int | None,
                  probe: dict) -> None:
@@ -917,15 +923,21 @@ def _apply_probe(conn: sqlite3.Connection, item_uid: str, video_id: int | None,
     video because that row is what search filters and the player sizes itself
     from. COALESCE-free on purpose: the probe is authoritative and re-probing a
     clip is how a wrong duration gets corrected.
+
+    A companion older than migration 012 simply sends no frames/start_tc/
+    bitrate, and COALESCE leaves those columns as they were -- which is the
+    same skew rule the whole ingest contract follows.
     """
     values = [probe.get(c) for c in _PROBE_COLUMNS]
     conn.execute(
         "UPDATE ingest_items SET " + ", ".join(f"{c} = COALESCE(?, {c})" for c in _PROBE_COLUMNS)
         + " WHERE uid = ?", [*values, item_uid])
     if video_id:
+        video_columns = (*_PROBE_COLUMNS, *_PROBE_VIDEO_ONLY_COLUMNS)
         conn.execute(
-            "UPDATE videos SET " + ", ".join(f"{c} = COALESCE(?, {c})" for c in _PROBE_COLUMNS)
-            + " WHERE id = ?", [*values, video_id])
+            "UPDATE videos SET " + ", ".join(f"{c} = COALESCE(?, {c})" for c in video_columns)
+            + " WHERE id = ?",
+            [*[probe.get(c) for c in video_columns], video_id])
 
 
 def segment_search_text(seg: dict[str, Any]) -> str:

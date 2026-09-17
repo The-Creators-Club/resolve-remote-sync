@@ -96,6 +96,14 @@ On top of those:
   It takes the same body as `/ytdl/reveal` (a `rel_path` under the projects root
   and nothing else — the caller never names a destination) and answers the same
   three states the b-roll insert does: `done`, `downloading`, `failed`.
+- **`POST /insert` takes an optional `insert` object** (2026-09-17,
+  `BROLL_PROXY_TIERS_PLAN.md` section 5): the detail API's
+  `{share, original_rel, preview_rel, edit_proxy_rel, original_is_edit_weight,
+  geometry}`, forwarded by the page because the companion never fetches that
+  API. It is advisory: every rel path in it passes the same traversal test as
+  `rel_path`, a malformed field is ignored (never a 400), and when the object
+  is absent the companion derives both proxy paths from the `Proxy/<stem>`
+  convention. Today it is parsed and logged; phase 3 is what acts on it.
 - **The ingest upload route is the one PUT, and it has its own two rules**
   (2026-08-18). Every other route on this listener caps a body at 256 KiB and
   insists on `application/json`; a camera original is 40 GB and is not JSON, so

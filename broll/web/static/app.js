@@ -1694,6 +1694,13 @@ async function sendToResolve(mode = "append") {
     out_frame: outFrame,
     fps: fps,
     mode: mode,
+    // The proxy-tiers object (plan §5, audit F2): the companion never fetches
+    // the detail API, so the page is the only thing that can carry which file
+    // is the original, which is the preview, whether an editing proxy exists
+    // and the clip's geometry. undefined when this dashboard is older than the
+    // field, which is exactly what a companion that has never seen it expects
+    // - it falls back to the stem convention and behaves as it does today.
+    insert: video.insert || undefined,
   };
 
   // The active button carries the SYNCING label; both are disabled, because

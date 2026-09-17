@@ -123,7 +123,10 @@ def test_migrate_upgrades_v1_to_latest_preserving_rows(v1_db):
 
     conn = sqlite3.connect(str(v1_db))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == LATEST_VERSION == 11
+        # 12 since 2026-09-17 (012_geometry.sql). The literal is spelled out
+        # so that bumping LATEST_VERSION without registering a step in
+        # _MIGRATION_STEPS fails HERE rather than on a customer's database.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == LATEST_VERSION == 12
 
         cols = {r[1] for r in conn.execute("PRAGMA table_info(segments)").fetchall()}
         assert "onscreen_text" in cols

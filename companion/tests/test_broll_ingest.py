@@ -90,8 +90,16 @@ class FakeMedia:
     def hash_partial(self, path):
         return "cafebabe"
 
-    def preview_proxy_cmd(self, ffmpeg, src, dest, *, nvenc, timecode=None):
+    def preview_proxy_cmd(self, ffmpeg, src, dest, *, nvenc, timecode=None,
+                          fps=None):
         return ["proxy", str(dest), "nvenc" if nvenc else "cpu"]
+
+    def count_frames(self, ffmpeg, path):
+        """The post-encode frame check's counter (2026-09-17). None is
+        "could not tell", which is what a double with no real media can
+        honestly answer -- and it makes the check skip, exactly as it does on
+        a machine whose ffprobe cannot read the file."""
+        return None
 
     def poster_cmd(self, ffmpeg, src, dest, duration_s, width=640):
         return ["poster", str(dest)]
@@ -760,6 +768,49 @@ def test_a_proxy_that_will_not_decode_fails_the_clip_not_the_batch(tmp_path):
 
     assert "failed" in server.states()
     assert server.released()[0]["summary"]["failed"] == 1
+
+
+def test_a_proxy_a_few_frames_short_fails_the_clip_and_names_both_counts(tmp_path):
+    """The Reproductive Rights lesson, 2026-09-17: seven proxies were 1-18
+    frames short of their originals, Resolve refused every one of them as a
+    proxy, and the editor was told "sync is stuck" for a day. The preview is
+    the first proxy Resolve links from phase 3 on, so a short one is a failed
+    item -- and the error says both numbers, because "the proxy is broken"
+    sends the operator looking at the wrong thing."""
+    server = FakeServer()
+
+    class ShortByOne(FakeMedia):
+        def count_frames(self, ffmpeg, path):
+            return 1673 if str(path).endswith(".partial") else 1674
+
+    ing = make_ingestor(tmp_path, server=server, media=ShortByOne())
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+
+    ing.tick()
+
+    failures = [c["body"] for c in server.calls
+                if c["url"].endswith("/status") and c["body"]["state"] == "failed"]
+    assert failures, server.states()
+    assert "1673" in failures[0]["error"] and "1674" in failures[0]["error"]
+
+
+def test_a_proxy_whose_frames_cannot_be_counted_is_still_published(tmp_path):
+    """A check that cannot run must not condemn good media: None is "could
+    not tell", and the duration check above it still applies."""
+    server = FakeServer()
+
+    class Uncountable(FakeMedia):
+        def count_frames(self, ffmpeg, path):
+            return None
+
+    ing = make_ingestor(tmp_path, server=server, media=Uncountable())
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+
+    ing.tick()
+
+    assert "failed" not in server.states()
 
 
 def test_a_clip_whose_source_vanished_is_failed_with_a_sentence(tmp_path):

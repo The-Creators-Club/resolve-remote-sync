@@ -43,25 +43,134 @@ def _insert_target(video: dict) -> tuple[str, str]:
     degraded but present on every machine, unlike the ingest-share path.
     Un-archived clips keep the ingest identity, exactly as before.
     """
+    target = insert_target_detail(video)
+    return target["share"], target["rel_path"]
+
+
+# The editing proxy's extension. `proxy_relink.PROXY_EXTENSIONS` prefers
+# `.mov` and `proxy_gen` writes `.mov`, so the editing proxy and the `.mp4`
+# preview can share one `Proxy/` folder and every existing reader picks the
+# editing proxy when both are there (plan section 2).
+EDIT_PROXY_EXT = ".mov"
+
+# Where "edit-weight" sits (plan section 5 item 1, question 4): at or below
+# 1080 lines, at or below about 12 Mbps, in a codec Resolve decodes cheaply.
+# A file like that IS its own editing proxy -- downloading it is correct and
+# making a second one would waste the space twice.
+EDIT_WEIGHT_MAX_HEIGHT = 1080
+EDIT_WEIGHT_MAX_BITRATE = 12_000_000
+EDIT_WEIGHT_CODECS = ("h264", "hevc")
+
+
+def _is_edit_weight(video: dict) -> bool | None:
+    """Is this clip's own file already an editing proxy? None = cannot tell.
+
+    None is the answer for a row indexed before migration 012 added `bitrate`
+    (2026-09-17). It must stay distinguishable from False: a missing bitrate
+    read as 0 would say "tiny, definitely edit-weight" and send a remote
+    editor a multi-GB camera master.
+    """
+    bitrate = video.get("bitrate")
+    if bitrate is None:
+        return None
+    codec = str(video.get("codec") or "").lower()
+    # Any ProRes flavour counts. The archive holds Proxy and LT, which are
+    # cheap; a 6K ProRes 422 master is excluded by the height and bitrate
+    # tests above it, not by its codec name.
+    cheap_codec = codec in EDIT_WEIGHT_CODECS or codec.startswith("prores")
+    height = video.get("height")
+    return bool(
+        cheap_codec
+        and height is not None
+        and int(height) <= EDIT_WEIGHT_MAX_HEIGHT
+        and int(bitrate) <= EDIT_WEIGHT_MAX_BITRATE
+    )
+
+
+def insert_target_detail(video: dict) -> dict:
+    """Everything "Send to Resolve" may need about this clip, as rel paths.
+
+    `share` and `rel_path` are _insert_target's answer unchanged -- the page
+    keeps POSTing them and an old companion keeps acting on them alone. The
+    rest is the proxy-tiers `insert` object (plan section 5): which file is
+    the ORIGINAL, which is the browser preview, whether an editing proxy
+    exists beside them, and whether the original is already light enough to be
+    its own. The companion cannot fetch the detail API (audit F2), so the page
+    forwards this object in the POST body and a companion that does not
+    understand it falls back to the stem convention.
+
+    `original_rel` is None when there was no unique sibling and the preview
+    itself is what gets inserted -- the archive task #23 clips. A caller must
+    not read "no original" as "use the preview and pretend": that is what the
+    flag is for.
+    """
     rel = str(video.get("archive_path") or "")
     if not rel:
-        return video["share"], video["rel_path"]
+        # Un-archived: the INGEST identity, which only a machine with a
+        # hand-written mount for that share can translate. Unchanged since
+        # 2026-08-12, and there is no archive geometry to describe.
+        return {"share": video["share"], "rel_path": video["rel_path"],
+                "original_rel": video["rel_path"], "preview_rel": None,
+                "edit_proxy_rel": None}
+
     preview = PurePosixPath(rel)
-    if preview.parent.name == "Proxy":
-        top_dir = preview.parent.parent
-        top_dir_fs = config.get_data_root() / str(top_dir)
-        try:
-            entries = os.listdir(top_dir_fs)
-        except OSError:
-            entries = []
-        matches = [
-            e for e in entries
-            if os.path.splitext(e)[0] == preview.stem
-            and (top_dir_fs / e).is_file()
-        ]
-        if len(matches) == 1:
-            return ARCHIVE_SHARE, str(top_dir / matches[0])
-    return ARCHIVE_SHARE, rel
+    if preview.parent.name != "Proxy":
+        return {"share": ARCHIVE_SHARE, "rel_path": rel,
+                "original_rel": None, "preview_rel": rel, "edit_proxy_rel": None}
+
+    top_dir = preview.parent.parent
+    top_dir_fs = config.get_data_root() / str(top_dir)
+    try:
+        entries = os.listdir(top_dir_fs)
+    except OSError:
+        entries = []
+    matches = [
+        e for e in entries
+        if os.path.splitext(e)[0] == preview.stem
+        and (top_dir_fs / e).is_file()
+    ]
+    original_rel = str(top_dir / matches[0]) if len(matches) == 1 else None
+
+    # Found by stem beside the preview, the same way the top slot is: nothing
+    # records it, and an editing proxy that arrives later must show up without
+    # a re-index.
+    edit_proxy = preview.parent / (preview.stem + EDIT_PROXY_EXT)
+    edit_proxy_rel = None
+    try:
+        if (config.get_data_root() / str(edit_proxy)).is_file():
+            edit_proxy_rel = str(edit_proxy)
+    except OSError:
+        edit_proxy_rel = None
+
+    return {
+        "share": ARCHIVE_SHARE,
+        "rel_path": original_rel or rel,
+        "original_rel": original_rel,
+        "preview_rel": rel,
+        "edit_proxy_rel": edit_proxy_rel,
+    }
+
+
+def _insert_object(video: dict) -> dict:
+    """The detail response's `insert` object. Older pages ignore it."""
+    target = insert_target_detail(video)
+    return {
+        "share": target["share"],
+        "original_rel": target["original_rel"],
+        "preview_rel": target["preview_rel"],
+        "edit_proxy_rel": target["edit_proxy_rel"],
+        "original_is_edit_weight": _is_edit_weight(video),
+        # `fps` is the stored float, not a rational: it is what the row holds,
+        # and inventing "30000/1001" from 29.97 here would be this route
+        # guessing at the camera's intent.
+        "geometry": {
+            "width": video.get("width"),
+            "height": video.get("height"),
+            "fps": video.get("fps"),
+            "frames": video.get("frames"),
+            "start_tc": video.get("start_tc"),
+        },
+    }
 
 
 @router.get("/search")
@@ -150,6 +259,10 @@ def get_video(video_id: int, conn: sqlite3.Connection = Depends(get_db)) -> dict
 
     video = dict(video_row)
     video["insert_share"], video["insert_rel_path"] = _insert_target(video)
+    # Additive, and older pages ignore it: a new dashboard in front of an old
+    # page, or an old companion behind a new one, both behave exactly as they
+    # did (plan section 7's deploy note).
+    video["insert"] = _insert_object(video)
 
     return {
         "video": video,

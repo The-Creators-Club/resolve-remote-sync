@@ -430,6 +430,47 @@ def test_a_probe_lands_on_both_the_item_and_its_video_row(client, conn):
     assert video["width"] == 3840 and video["fps"] == 25.0
 
 
+def test_the_probes_geometry_columns_land_on_the_video_row(client, conn):
+    """frames/start_tc/bitrate (migration 012, 2026-09-17) travel in the same
+    `probe` dict and land on `videos`, not on `ingest_items`: the SPA shows a
+    clip's duration while a batch runs, never its frame count, and the detail
+    route is what needs these. Without them a clip an editor ingested would
+    answer `original_is_edit_weight: null` for ever."""
+    uid = _queue(client)
+    manifest = _claim(client, uid).json()["items"][0]
+    client.post(f"{BASE}/{uid}/items/{manifest['uid']}/status", json={
+        "state": "proxying",
+        "probe": {"duration_s": 12.5, "fps": 29.97, "width": 6064,
+                  "height": 3424, "codec": "prores", "shot_date": "2026-09-17",
+                  "frames": 1674, "start_tc": "12:05:55:26",
+                  "bitrate": 1200000000}},
+        headers=fleet_headers())
+
+    video = conn.execute("SELECT * FROM videos WHERE id = ?",
+                         (manifest["video_id"],)).fetchone()
+    assert video["frames"] == 1674
+    assert video["start_tc"] == "12:05:55:26"
+    assert video["bitrate"] == 1200000000
+
+
+def test_a_companion_older_than_the_geometry_columns_still_checkpoints(client, conn):
+    """The skew that matters: a build that predates migration 012 sends six
+    keys, not nine, and COALESCE leaves the rest alone rather than 500ing the
+    checkpoint."""
+    uid = _queue(client)
+    manifest = _claim(client, uid).json()["items"][0]
+    r = client.post(f"{BASE}/{uid}/items/{manifest['uid']}/status", json={
+        "state": "proxying",
+        "probe": {"duration_s": 9.0, "fps": 25.0, "width": 1920, "height": 1080,
+                  "codec": "h264", "shot_date": "2026-01-01"}},
+        headers=fleet_headers())
+
+    assert r.status_code == 200
+    video = conn.execute("SELECT * FROM videos WHERE id = ?",
+                         (manifest["video_id"],)).fetchone()
+    assert video["frames"] is None and video["bitrate"] is None
+
+
 def test_an_item_of_another_batch_is_404(client):
     uid_a = _queue(client)
     iuid = _first_item(client, uid_a)

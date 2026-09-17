@@ -193,7 +193,8 @@ def _frames_source(cfg: Config, video: dict[str, Any], src_path: Path) -> Path:
     it — two more full reads of the original, on top of the proxy encode. With
     source media on a 46 MB/s network share that dominates the entire run.
 
-    The proxy is a faithful 540p copy on local disk, and contact-sheet cells are
+    The proxy is a faithful downscaled copy on local disk (1080p since
+    2026-09-17, 540p before it), and contact-sheet cells are
     384px wide regardless of source, so the frames that reach the model are
     effectively identical. Falls back to the original when no proxy exists (e.g.
     `--stages frames` before `proxy`).

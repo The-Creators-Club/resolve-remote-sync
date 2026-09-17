@@ -1075,6 +1075,137 @@ def test_an_unknown_mode_is_refused_before_the_worker_spawns(
     assert worker_in_process == []
 
 
+# ---------------------------------------------------------------------------
+# the `insert` object the page forwards (BROLL_PROXY_TIERS_PLAN.md section 5)
+# ---------------------------------------------------------------------------
+#
+# The companion never fetches the detail API (audit F2), so the page carries
+# the proxy tiers in the POST body. Both skews have to be inert: an old page
+# with a new companion (no object) behaves exactly as today, and a malformed
+# object never fails an insert that would otherwise work. Phase 3 is what USES
+# the derived values; this is the parse.
+
+def _page_insert(**over):
+    body = {
+        "share": "broll",
+        "original_rel": "Creators_Club/ff5/Day 1/clip.braw",
+        "preview_rel": "Creators_Club/ff5/Day 1/Proxy/clip.mp4",
+        "edit_proxy_rel": "Creators_Club/ff5/Day 1/Proxy/clip.mov",
+        "original_is_edit_weight": False,
+        "geometry": {"width": 6064, "height": 3424, "fps": 30.0,
+                     "frames": 1674, "start_tc": "12:05:55:26"},
+    }
+    body.update(over)
+    return body
+
+
+def test_without_an_insert_object_the_paths_are_the_stem_convention():
+    """An older dashboard, or a page that predates the field. The answer is
+    what proxy_relink has always derived, and no geometry -- today's behaviour
+    exactly."""
+    tiers = broll_server.derive_insert_paths(None, "Creators_Club/ff5/clip.braw")
+
+    assert tiers["preview_rel"] == "Creators_Club/ff5/Proxy/clip.mp4"
+    assert tiers["edit_proxy_rel"] == "Creators_Club/ff5/Proxy/clip.mov"
+    assert tiers["original_is_edit_weight"] is None
+    assert tiers["geometry"] is None
+    assert tiers["from_page"] is False
+
+
+def test_the_preview_only_fallback_looks_beside_the_preview():
+    """When the page names the PREVIEW itself (the stem-diverged clips), its
+    siblings are beside it -- not in a second Proxy/ below it."""
+    tiers = broll_server.derive_insert_paths(
+        None, "Downloads/energy/Proxy/clip.mp4")
+
+    assert tiers["preview_rel"] == "Downloads/energy/Proxy/clip.mp4"
+    assert tiers["edit_proxy_rel"] == "Downloads/energy/Proxy/clip.mov"
+
+
+def test_an_insert_object_is_used_as_given():
+    tiers = broll_server.derive_insert_paths(
+        _page_insert(), "Creators_Club/ff5/Day 1/clip.braw")
+
+    assert tiers["preview_rel"] == "Creators_Club/ff5/Day 1/Proxy/clip.mp4"
+    assert tiers["edit_proxy_rel"] == "Creators_Club/ff5/Day 1/Proxy/clip.mov"
+    assert tiers["original_is_edit_weight"] is False
+    assert tiers["geometry"]["frames"] == 1674
+    assert tiers["geometry"]["start_tc"] == "12:05:55:26"
+    assert tiers["from_page"] is True
+
+
+def test_a_null_edit_proxy_is_an_answer_not_a_gap():
+    """A dashboard that LOOKED and found no `.mov` is not the same as a
+    dashboard that never said: the stem convention's guess would name a file
+    that does not exist."""
+    tiers = broll_server.derive_insert_paths(
+        _page_insert(edit_proxy_rel=None), "Creators_Club/ff5/Day 1/clip.braw")
+
+    assert tiers["edit_proxy_rel"] is None
+    assert tiers["preview_rel"] == "Creators_Club/ff5/Day 1/Proxy/clip.mp4"
+
+
+def test_an_unknown_edit_weight_stays_unknown():
+    """`null` is the answer for every row indexed before the bitrate column;
+    it must not collapse to False."""
+    tiers = broll_server.derive_insert_paths(
+        _page_insert(original_is_edit_weight=None), "a/clip.mov")
+
+    assert tiers["original_is_edit_weight"] is None
+
+
+@pytest.mark.parametrize("insert", [
+    "not a dict", 42, [], {"preview_rel": {"nested": 1}},
+    {"preview_rel": "../../etc/passwd"},
+    {"edit_proxy_rel": "C:/Windows/system32/x.mov"},
+    {"geometry": "1920x1080"},
+    {"original_is_edit_weight": "yes"},
+])
+def test_a_malformed_insert_object_is_ignored_never_fatal(insert):
+    """Advisory data about files. A page one version out must never be able
+    to fail an insert that would otherwise work -- and a rel path in it goes
+    through the same traversal test `rel_path` does, because a field that is
+    only advisory today is a field something opens tomorrow."""
+    tiers = broll_server.derive_insert_paths(insert, "Creators_Club/x/clip.mov")
+
+    assert tiers["preview_rel"] == "Creators_Club/x/Proxy/clip.mp4"
+    assert tiers["edit_proxy_rel"] == "Creators_Club/x/Proxy/clip.mov"
+    assert tiers["original_is_edit_weight"] is None
+    assert tiers["geometry"] is None
+
+
+def test_an_insert_object_in_the_body_changes_nothing_about_the_insert(
+        tmp_path, worker_in_process, monkeypatch, resolve_process):
+    """Phase 3 is gated on the phase 0 spike: today the object is parsed,
+    derived and logged, and the worker is called with exactly what it was
+    called with before."""
+    resolve_process(False)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+
+    plain, mounts = _mode_gate_body(tmp_path)
+    broll_server.build_insert_response(dict(plain), mounts)
+    without = worker_in_process[0]
+
+    worker_in_process.clear()
+    broll_server.build_insert_response({**plain, "insert": _page_insert()}, mounts)
+    with_object = worker_in_process[0]
+
+    assert with_object == without
+
+
+def test_a_malformed_insert_object_does_not_400_the_request(
+        tmp_path, worker_in_process, monkeypatch, resolve_process):
+    resolve_process(False)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+    body, mounts = _mode_gate_body(tmp_path)
+
+    status, _result = broll_server.build_insert_response(
+        {**body, "insert": {"preview_rel": "../../../etc/passwd"}}, mounts)
+
+    assert status == 200
+    assert worker_in_process
+
+
 def _archive_clip_with_preview(tmp_path):
     """A top-slot file with its adjacent Proxy/ preview, archive-style."""
     clip = tmp_path / "clip.mov"

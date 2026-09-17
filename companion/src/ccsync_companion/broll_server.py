@@ -100,6 +100,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import posixpath
 import re
 import shutil
 import sys
@@ -118,6 +119,7 @@ from . import ingest_kinds
 from . import loopback_guard
 from . import music_server
 from . import music_worker
+from . import proxy_relink
 from . import resolve_bridge
 from . import site as site_mod
 from . import ytdl_executor
@@ -683,6 +685,105 @@ def _fetchable_from_nas(
     )
 
 
+def _clean_rel(value: Any) -> Optional[str]:
+    """A rel path off the wire, re-joined from its VALIDATED components, or
+    None if it is not one.
+
+    The same traversal test `rel_path` goes through, deliberately: these
+    strings arrive in the same body from the same page, and a field that is
+    "only" advisory today is a field something opens tomorrow. Ignoring a bad
+    one (rather than 400ing the whole insert) is the rule for this object --
+    see build_insert_response.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parts = _split_components(value)
+        _validate_components(parts)
+    except PathTraversalError:
+        return None
+    return "/".join(parts) if parts else None
+
+
+def derive_insert_paths(insert: Any, rel_path: str) -> dict:
+    """What the insert may use besides the file the page named.
+
+    `insert` is the detail API's object, forwarded by the page in the POST
+    body because the companion never fetches that API (audit F2,
+    docs/BROLL_PROXY_TIERS_PLAN.md section 5). When it is absent -- an older
+    dashboard, or a page that predates the field -- both proxy paths are
+    derived from the stem convention `proxy_relink.expected_proxy_paths`
+    already encodes, and there is no geometry: exactly today's behaviour,
+    which is the skew cell `comp-broll-music-4` is the precedent for.
+
+    Nothing here is trusted. A malformed object is ignored field by field and
+    the convention answers instead: this is advisory data about files, and a
+    page one version out must never be able to fail an insert that would
+    otherwise work.
+
+    Phase 3 is what USES the result; today it is derived and logged, because
+    what the insert then does with it is gated on the phase 0 spike.
+    """
+    # posixpath, not os.path: these are the page's forward-slash rel paths,
+    # never this machine's filesystem.
+    posix = posixpath
+    parent = posix.dirname(rel_path)
+    stem = posix.splitext(posix.basename(rel_path))[0]
+    if posix.basename(parent) == proxy_relink.PROXY_DIR_NAME:
+        # The page named the PREVIEW itself (the stem-diverged fallback): its
+        # siblings are beside it, not in a second Proxy/ below it.
+        preview_rel = rel_path
+        edit_proxy_rel = posix.join(parent, stem + ".mov") if stem else None
+    else:
+        # expected_proxy_paths answers in THIS MACHINE's path flavour (its
+        # `canon.plat_for` wins over the is_windows hint), and these are wire
+        # rel paths: forward slashes on every platform, because the dashboard
+        # and the page speak one spelling.
+        candidates = [c.replace("\\", "/") for c
+                      in proxy_relink.expected_proxy_paths(rel_path, is_windows=False)]
+        by_ext = {posix.splitext(c)[1].lower(): c for c in candidates}
+        preview_rel = by_ext.get(".mp4")
+        edit_proxy_rel = by_ext.get(".mov")
+
+    derived = {
+        "preview_rel": preview_rel,
+        "edit_proxy_rel": edit_proxy_rel,
+        "original_is_edit_weight": None,
+        "geometry": None,
+        "from_page": False,
+    }
+    if not isinstance(insert, dict):
+        return derived
+
+    derived["from_page"] = True
+    for key in ("preview_rel", "edit_proxy_rel"):
+        if key not in insert:
+            # Absent is NOT null: a dashboard that never mentioned the field
+            # has said nothing, and the stem convention is still the best
+            # answer available.
+            continue
+        value = insert[key]
+        if value is None:
+            # An explicit null IS an answer, from a dashboard that looked:
+            # there is no editing proxy for this clip, and the convention's
+            # guess would name a file that does not exist.
+            derived[key] = None
+            continue
+        cleaned = _clean_rel(value)
+        if cleaned:
+            derived[key] = cleaned
+    weight = insert.get("original_is_edit_weight")
+    if isinstance(weight, bool):
+        derived["original_is_edit_weight"] = weight
+    geometry = insert.get("geometry")
+    if isinstance(geometry, dict):
+        derived["geometry"] = {
+            k: geometry.get(k)
+            for k in ("width", "height", "fps", "frames", "start_tc")
+        }
+    return derived
+
+
 def build_insert_response(
     body: dict, mounts: dict, caller: Optional[Callable[..., dict]] = None,
     ccsync_cfg: Optional[dict] = None,
@@ -709,6 +810,16 @@ def build_insert_response(
     in_frame = body.get("in_frame")
     out_frame = body.get("out_frame")
     mode = body.get("mode", "append")
+    # Parsed here, acted on in phase 3 (gated on the phase 0 Resolve spike).
+    # Deriving it now means the page/companion skew is already exercised by
+    # the time the behaviour lands, and a malformed object can never 400 an
+    # insert: `derive_insert_paths` falls back to the stem convention field by
+    # field (audit F2, 2026-09-17).
+    tiers = derive_insert_paths(body.get("insert"), str(rel_path or ""))
+    log.debug("insert tiers for %s: preview=%s edit_proxy=%s edit_weight=%s "
+              "geometry=%s (from the page: %s)", rel_path, tiers["preview_rel"],
+              tiers["edit_proxy_rel"], tiers["original_is_edit_weight"],
+              tiers["geometry"], tiers["from_page"])
 
     if mode not in (resolve_bridge.INSERT_MODE_APPEND,
                     resolve_bridge.INSERT_MODE_PLAYHEAD):

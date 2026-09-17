@@ -390,7 +390,10 @@ def test_a_youtube_download_gets_the_broll_preview_spec(tmp_path):
 
     assert gen.encode_once() == proxy_gen.RESULT_DONE
     cmd = ffmpeg.calls[0]
-    assert "libx264" in cmd and "540" in " ".join(cmd)
+    # 1080 since 2026-09-17 (docs/BROLL_PROXY_TIERS_PLAN.md section 4): the
+    # b-roll preview spec moved, and this tier follows it by construction --
+    # both callers use the one builder.
+    assert "libx264" in cmd and "1080" in " ".join(cmd)
     # No metadata/timecode carrying on this tier -- the output has to stay
     # interchangeable with one the b-roll indexer produced.
     assert "-timecode" not in cmd and "-map_metadata" not in cmd

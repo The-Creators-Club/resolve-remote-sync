@@ -6,20 +6,47 @@ blocks real Tk windows: the developer's box HAS an ffmpeg on PATH, so a test
 that "accidentally works" locally would be the one that encodes a 4 GB clip on
 somebody else's machine.
 
-The argv assertions are the point of the module. `preview_proxy_cmd` in
-particular is compared against a LITERAL flag subsequence copied from
-broll/indexer/broll_index/ffmpeg_tools.py's build_proxy — the two pipelines
-have to emit interchangeable files, so drift needs to fail here rather than be
-discovered as a b-roll preview that doesn't match its neighbours.
+The argv assertions are the point of the module. `preview_proxy_cmd` is
+compared against the b-roll indexer's build_proxy by IMPORTING that module and
+capturing the argv it would run (2026-09-17, audit F8): until then this file
+carried a hand-copied list of the indexer's flags, which failed nothing when
+the indexer alone changed -- and the two pipelines have to emit
+interchangeable files, because since the proxy-tiers plan one of them is the
+first proxy Resolve links.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 
 from ccsync_companion import ffmpeg_tools as ft
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+INDEXER_FFMPEG_TOOLS = REPO_ROOT / "broll" / "indexer" / "broll_index" / "ffmpeg_tools.py"
+
+
+def _load_indexer_ffmpeg_tools():
+    """Import the indexer's ffmpeg_tools WITHOUT putting broll/indexer on
+    sys.path -- test_broll_ingest_media.py's loader, for the same reason: two
+    `tests` packages and two `config` modules would collide. It imports only
+    the stdlib, so it needs no package around it."""
+    if not INDEXER_FFMPEG_TOOLS.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "broll_index_ffmpeg_tools_for_argv_parity", INDEXER_FFMPEG_TOOLS)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+indexer_ffmpeg = _load_indexer_ffmpeg_tools()
+needs_indexer = pytest.mark.skipif(
+    indexer_ffmpeg is None,
+    reason="broll/indexer is not in this checkout; the literal assertions still run")
 
 
 @pytest.fixture(autouse=True)
@@ -232,26 +259,31 @@ def test_own_proxy_stringifies_path_objects():
 # preview_proxy_cmd — the b-roll spec, verbatim
 # ---------------------------------------------------------------------------
 
-# Copied by hand from broll/indexer/broll_index/ffmpeg_tools.py build_proxy
-# (:180-194). If a change here is intentional, the b-roll indexer has to make
-# the same change — otherwise the two pipelines produce different files for
-# the same YouTube download, which is exactly what this tier exists to avoid.
-# `-f mp4` is the one deliberate divergence (no output byte differs): the
-# indexer writes to `<name>.mp4`, the generator to `<name>.mp4.partial`, and
-# ffmpeg cannot choose a muxer from ".partial" (2026-08-11).
+# The spec as of 2026-09-17 (docs/BROLL_PROXY_TIERS_PLAN.md section 4): 1080p,
+# never upscaled; nvenc p5/vbr/cq25 or libx264 medium/crf23; one keyframe per
+# second when the caller knows the source rate; 8-bit 4:2:0; AAC 128k;
+# +faststart. It replaced 540p/cq34/96k, which was measured for an archive of
+# already-compressed YouTube downloads that nobody cut on -- see the constants'
+# own comment for why that reasoning expired.
+#
+# These literals are the spec IN WRITING; the test below proves the indexer
+# emits the same thing, by importing it. `-f mp4` is the one deliberate
+# divergence (no output byte differs): the indexer writes to `<name>.mp4`, this
+# pipeline to `<name>.mp4.partial`, and ffmpeg cannot choose a muxer from
+# ".partial" (2026-08-11).
 BROLL_NVENC_TAIL = [
-    "-vf", "scale=-2:'trunc(min(540,ih)/2)*2'",
-    "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "34",
+    "-vf", "scale=-2:'trunc(min(1080,ih)/2)*2'",
+    "-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "25",
     "-pix_fmt", "yuv420p",
-    "-c:a", "aac", "-b:a", "96k",
+    "-c:a", "aac", "-b:a", "128k",
     "-movflags", "+faststart",
     "-f", "mp4",
 ]
 BROLL_CPU_TAIL = [
-    "-vf", "scale=-2:'trunc(min(540,ih)/2)*2'",
-    "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+    "-vf", "scale=-2:'trunc(min(1080,ih)/2)*2'",
+    "-c:v", "libx264", "-preset", "medium", "-crf", "23",
     "-pix_fmt", "yuv420p",
-    "-c:a", "aac", "-b:a", "96k",
+    "-c:a", "aac", "-b:a", "128k",
     "-movflags", "+faststart",
     "-f", "mp4",
 ]
@@ -279,11 +311,67 @@ def test_preview_proxy_cpu_argv_matches_the_broll_spec_literally():
     ]
 
 
-def test_preview_proxy_constants_are_the_measured_ones():
-    """540p/cq34 was measured ~3.7x smaller than 720p/cq26 on real archive
-    footage; the comment above these constants is the justification."""
-    assert (ft.PROXY_HEIGHT, ft.PROXY_CQ, ft.PROXY_CRF) == (540, 34, 30)
-    assert ft.PROXY_AUDIO_BITRATE == "96k"
+@needs_indexer
+@pytest.mark.parametrize("nvenc", [True, False])
+def test_preview_proxy_argv_is_the_indexers_own_build_proxy(monkeypatch, nvenc):
+    """Imported, not copied (audit F8, 2026-09-17).
+
+    The list above is a hand copy by nature, and a hand copy fails nothing
+    when the OTHER side moves: that is how these two pipelines drifted on
+    `-pix_fmt` for a week in August. This one runs the indexer's build_proxy
+    with its subprocess stubbed and compares the argv it would have spawned.
+    """
+    payload = json.dumps({
+        "format": {"duration": "10.0"},
+        "streams": [{"codec_type": "video", "codec_tag_string": "avc1",
+                     "width": 1920, "height": 1080, "codec_name": "h264",
+                     "avg_frame_rate": "25/1", "r_frame_rate": "25/1"}],
+    })
+    spawned = []
+
+    def fake_run(cmd, **kwargs):
+        spawned.append(list(cmd))
+        return _FakeCompletedProcess(0, stdout=payload)
+
+    monkeypatch.setattr(indexer_ffmpeg.subprocess, "run", fake_run)
+    indexer_ffmpeg.build_proxy("in.mp4", "out.mp4", use_nvenc=nvenc, verify=False)
+    theirs = next(cmd for cmd in spawned if "-c:v" in cmd)
+
+    ours = ft.preview_proxy_cmd("ffmpeg", "in.mp4", "out.mp4", nvenc=nvenc, fps=25.0)
+
+    # Everything but the binary, the destination and the muxer flag the
+    # `.partial` destination forces on this side.
+    assert [p for p in ours[1:-1] if p not in ("-f", "mp4")] == theirs[1:-1]
+
+
+def test_preview_proxy_constants_are_the_ones_the_plan_specifies():
+    """1080p at cq25/crf23 with 128k audio, 2026-09-17: the editors could not
+    judge a clip at 540p, and in phase 3 this file is the first proxy Resolve
+    links on a remote machine. New clips only -- nothing re-encodes what is
+    already in the archive."""
+    assert (ft.PROXY_HEIGHT, ft.PROXY_CQ, ft.PROXY_CRF) == (1080, 25, 23)
+    assert ft.PROXY_AUDIO_BITRATE == "128k"
+
+
+def test_preview_proxy_keyframes_are_one_second_of_frames():
+    """So scrubbing the b-roll page lands close to the pointer instead of at
+    the previous keyframe. round(), not int(): 29.97 is 30 keyframes' worth of
+    interval."""
+    assert _sub(ft.preview_proxy_cmd("ffmpeg", "a", "b", nvenc=True, fps=29.97),
+                ["-g", "30"])
+    assert _sub(ft.preview_proxy_cmd("ffmpeg", "a", "b", nvenc=False, fps=23.976),
+                ["-g", "24"])
+    # An OUTPUT option, after the encoder is chosen and before the pixel
+    # format -- the indexer puts it in exactly that place.
+    cmd = ft.preview_proxy_cmd("ffmpeg", "a", "b", nvenc=True, fps=25)
+    assert cmd.index("-c:v") < cmd.index("-g") < cmd.index("-pix_fmt")
+
+
+@pytest.mark.parametrize("fps", [None, 0, 0.4])
+def test_preview_proxy_omits_the_keyframe_interval_when_the_rate_is_unknown(fps):
+    """A guessed GOP is worse than ffmpeg's own default, and this builder is
+    PURE: it will not probe to find out."""
+    assert "-g" not in ft.preview_proxy_cmd("ffmpeg", "a", "b", nvenc=True, fps=fps)
 
 
 def test_preview_proxy_carries_no_metadata_flags_and_no_timecode_by_default():
@@ -352,6 +440,58 @@ def test_count_decode_errors_counts_real_lines():
     )
 
     assert ft.count_decode_errors(stderr) == 2
+
+
+def test_count_frames_cmd_counts_packets_on_the_video_stream():
+    """`nb_frames` is a container field and is a lie in exactly the case that
+    matters (an mp4 a killed encoder left behind still claims the count it
+    intended), so the check counts packets."""
+    cmd = ft.count_frames_cmd("C:/tools/ffprobe.exe", "out.mp4")
+
+    assert cmd == [
+        "C:/tools/ffprobe.exe", "-v", "error",
+        "-count_packets", "-select_streams", "v:0",
+        "-show_entries", "stream=nb_read_packets",
+        "-print_format", "json", "out.mp4",
+    ]
+
+
+def test_count_frames_reads_the_count(monkeypatch):
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeCompletedProcess(0, stdout='{"streams":[{"nb_read_packets":"1674"}]}')
+
+    monkeypatch.setattr(ft.subprocess, "run", fake_run)
+
+    assert ft.count_frames("ffmpeg", "out.mp4") == 1674
+    # ffprobe_for, not the ffmpeg binary it was given: same folder, and on
+    # this machine the real one is `ffprobe.EXE`.
+    assert "ffprobe" in captured["cmd"][0].lower()
+    assert "-count_packets" in captured["cmd"]
+
+
+@pytest.mark.parametrize("returncode, stdout", [
+    (1, ""), (0, ""), (0, "not json"), (0, '{"streams":[]}'),
+])
+def test_count_frames_is_none_when_it_cannot_tell(monkeypatch, returncode, stdout):
+    """None means "could not tell", and the caller SKIPS the comparison. A 0
+    would fail every proxy on a machine whose ffprobe printed something
+    unexpected -- a check that cannot run must not condemn good media."""
+    monkeypatch.setattr(ft.subprocess, "run",
+                        lambda cmd, **kw: _FakeCompletedProcess(returncode, stdout=stdout))
+
+    assert ft.count_frames("ffmpeg", "out.mp4") is None
+
+
+def test_count_frames_survives_an_ffprobe_that_cannot_be_run(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("no ffprobe here")
+
+    monkeypatch.setattr(ft.subprocess, "run", boom)
+
+    assert ft.count_frames("ffmpeg", "out.mp4") is None
 
 
 @pytest.mark.parametrize("text", [None, "", "\n", "  \n\t\n", "\r\n"])
@@ -668,10 +808,12 @@ def test_reset_encoder_cache_forces_a_reprobe(monkeypatch):
 # probe_video
 # ---------------------------------------------------------------------------
 
-def _probe_json(*, fmt_tags=None, streams=None, duration="12.5"):
+def _probe_json(*, fmt_tags=None, streams=None, duration="12.5", fmt_extra=None):
     fmt: dict = {"duration": duration}
     if fmt_tags is not None:
         fmt["tags"] = fmt_tags
+    if fmt_extra:
+        fmt.update(fmt_extra)
     return json.dumps({
         "format": fmt,
         "streams": streams if streams is not None else [_video_stream(), _audio_stream()],
@@ -801,6 +943,38 @@ def test_dropframe_normalization():
     assert f(None, 59.94) is None
 
 
+def test_a_timecode_a_tmcd_track_printed_is_never_rewritten():
+    """audit F6, 2026-09-17. A tmcd track carries the drop-frame BIT and
+    ffprobe prints it as the separator, so its colon is a genuine non-drop
+    timecode -- rewriting it is what makes Resolve refuse the proxy (R17's
+    tenth case: 231 of the Johnny Harris shoot's 377 proxies)."""
+    f = ft.dropframe_normalized
+    assert f("13:53:30:02", 29.97, True) == "13:53:30:02"
+    assert f("03:40:27:12", 59.94, True) == "03:40:27:12"
+    # ...and a file with no tmcd track keeps the 2026-08-12 behaviour, which
+    # is what the Sony rtmd case measured.
+    assert f("13:53:30:02", 29.97, False) == "13:53:30;02"
+
+
+def test_timecode_from_probe_says_where_the_timecode_came_from():
+    """The flag cannot be recovered later, so it travels with the value."""
+    tmcd = {"codec_type": "data", "codec_tag_string": "tmcd",
+            "tags": {"timecode": "13:53:30:02"}}
+    rtmd = {"codec_type": "data", "codec_tag_string": "rtmd",
+            "tags": {"timecode": "03:40:27:12"}}
+    video = _video_stream()
+
+    assert ft.timecode_from_probe({"streams": [video, tmcd]}) == ("13:53:30:02", True)
+    assert ft.timecode_from_probe({"streams": [video, rtmd]}) == ("03:40:27:12", False)
+    # The mov demuxer copies a tmcd track's value up into the container tag,
+    # so a container tag on a file that HAS a tmcd stream is that track's own
+    # printing -- verified on Johnny_Harris cam-1-050.mov, 2026-09-17.
+    assert ft.timecode_from_probe(
+        {"format": {"tags": {"timecode": "13:53:30:02"}},
+         "streams": [video, tmcd]}) == ("13:53:30:02", True)
+    assert ft.timecode_from_probe({"streams": [video]}) == (None, False)
+
+
 @pytest.mark.parametrize("rate", ["60000/1001", "30000/1001"])
 def test_probe_video_normalizes_a_drop_frame_timecode(monkeypatch, rate):
     """The COMP-MEDIA-1 failure, end to end: an FX3/FX6 clip at 59.94 DF whose
@@ -834,19 +1008,78 @@ def test_probe_video_leaves_a_non_ntsc_timecode_alone(monkeypatch):
     assert ft.probe_video("ffmpeg", "A001.mxf")["timecode"] == "03:40:27:12"
 
 
-def test_probe_video_normalizes_a_tmcd_stream_timecode_too(monkeypatch):
-    """The rtmd/tmcd TRACK is where Sony actually writes it -- the fallback
-    path has to be normalized or the fix misses the cameras it is for."""
+def test_probe_video_normalizes_an_rtmd_stream_timecode_too(monkeypatch):
+    """The rtmd TRACK is where Sony actually writes it -- the fallback path
+    has to be normalized or the fix misses the cameras it is for."""
     _patch_probe(monkeypatch, stdout=_probe_json(
         fmt_tags={"encoder": "x"},
         streams=[
             _video_stream(avg_frame_rate="30000/1001", r_frame_rate="30000/1001"),
-            {"codec_type": "data", "codec_tag_string": "tmcd",
+            {"codec_type": "data", "codec_tag_string": "rtmd",
              "tags": {"timecode": "01:23:45:12"}},
         ],
     ))
 
     assert ft.probe_video("ffmpeg", "A001.mxf")["timecode"] == "01:23:45;12"
+
+
+def test_probe_video_keeps_a_tmcd_streams_colon_at_29_97(monkeypatch):
+    """The live case this rule was written for (audit F6, 2026-09-17):
+    Johnny_Harris cam-1-050.mov is data/tmcd `13:53:30:02` at 30000/1001 and
+    genuinely non-drop. Until today its preview was written with a semicolon
+    the source never had, and Resolve refused every one of them."""
+    _patch_probe(monkeypatch, stdout=_probe_json(
+        fmt_tags={"encoder": "Lavf"},
+        streams=[
+            _video_stream(avg_frame_rate="30000/1001", r_frame_rate="30000/1001"),
+            {"codec_type": "data", "codec_tag_string": "tmcd",
+             "tags": {"timecode": "13:53:30:02"}},
+        ],
+    ))
+
+    info = ft.probe_video("ffmpeg", "cam-1-050.mov")
+
+    assert info["timecode"] == "13:53:30:02"
+    assert info["start_tc"] == "13:53:30:02"
+
+
+def test_probe_video_reports_frames_and_bitrate(monkeypatch):
+    """migration 012's three columns (2026-09-17, audit F3). The detail API
+    decides `original_is_edit_weight` on the bitrate, and phase 3 writes
+    frames/start_tc into the file that creates an offline clip -- neither is
+    re-derivable in the container without ffprobing the NAS per request."""
+    _patch_probe(monkeypatch, stdout=_probe_json(
+        fmt_tags={"timecode": "12:05:55:26"},
+        fmt_extra={"bit_rate": "162699853"},
+        streams=[_video_stream(nb_frames="1674", bit_rate="140972921")],
+    ))
+
+    info = ft.probe_video("ffmpeg", "cam-1-001.mov")
+
+    assert info["frames"] == 1674
+    # The VIDEO stream's rate, not the container's: a PCM audio track would
+    # otherwise decide whether the clip counts as edit-weight.
+    assert info["bitrate"] == 140972921
+    assert info["start_tc"] == "12:05:55:26"
+
+
+def test_probe_video_falls_back_to_the_container_bitrate(monkeypatch):
+    _patch_probe(monkeypatch, stdout=_probe_json(
+        fmt_extra={"bit_rate": "5902569"}, streams=[_video_stream()]))
+
+    assert ft.probe_video("ffmpeg", "x.mov")["bitrate"] == 5902569
+
+
+def test_probe_video_reports_unknown_geometry_as_none_not_zero(monkeypatch):
+    """A legacy row answering `original_is_edit_weight: null` is the honest
+    answer; a 0 would read as "tiny, definitely edit-weight"."""
+    _patch_probe(monkeypatch, stdout=_probe_json(streams=[_video_stream()]))
+
+    info = ft.probe_video("ffmpeg", "x.mov")
+
+    assert info["frames"] is None
+    assert info["bitrate"] is None
+    assert info["start_tc"] is None
 
 
 def test_probe_video_tolerates_a_null_tags_object(monkeypatch):

@@ -82,14 +82,17 @@ def plan(preview: Path) -> tuple[str, str | None]:
     src = source_for(preview)
     if src is None:
         return "no-source", None
-    src_tc = ffmpeg_tools.read_timecode(src)
+    src_tc, tc_from_tmcd = ffmpeg_tools.read_timecode_source(src)
     if not src_tc:
         return "source-no-tc", None
     try:
         fps = ffmpeg_tools.probe_video(src).get("fps")
     except Exception:
         fps = None
-    wanted = ffmpeg_tools.dropframe_normalized(src_tc, fps)
+    # The tmcd flag travels with the value (audit F6, 2026-09-17), or this
+    # repair tool would "fix" every genuinely non-drop 29.97 preview INTO the
+    # semicolon form Resolve refuses -- the exact R17 case it exists to end.
+    wanted = ffmpeg_tools.dropframe_normalized(src_tc, fps, tc_from_tmcd)
     if ffmpeg_tools.read_timecode(preview) == wanted:
         return "ok", None
     return "fix", wanted

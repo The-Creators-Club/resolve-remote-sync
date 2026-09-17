@@ -2301,35 +2301,70 @@ class BrollIngestor:
 
     def _make_proxy(self, item: dict, source: str, out_dir: Path,
                     probe: dict) -> Optional[str]:
-        """540p browsing proxy, NVENC with one CPU retry, `.partial` first.
+        """1080p browsing proxy, NVENC with one CPU retry, `.partial` first.
 
         The verify step is proxy_gen's and is not optional: NVENC on a machine
         whose sessions are all taken exits 0 having written a few seconds, and
         a proxy that plays for four of a ninety-second clip is worse than none
         (the whole point of the archive is that other editors can SEE it).
+
+        Since 2026-09-17 the frame COUNT is verified too (plan section 4): the
+        preview is the first proxy Resolve links on a remote machine, and a
+        proxy 1-18 frames short of its original is refused with nothing said
+        to the editor -- the Reproductive Rights incident, which cost a day
+        looking at sync. The CPU pass of the same loop is the retry the plan
+        asks for; after it the item fails NAMING BOTH COUNTS.
         """
         dest = out_dir / f"{item.get('video_id') or item.get('uid')}.mp4"
         partial = dest.with_suffix(".mp4.partial")
         timecode = (probe or {}).get("timecode")
+        fps = (probe or {}).get("fps")
+        why = "the proxy did not decode -- this clip was skipped"
         for nvenc in ([True, False] if self._nvenc() else [False]):
             cmd = self.media.preview_proxy_cmd(self.ffmpeg_path, source, partial,
-                                               nvenc=nvenc, timecode=timecode)
+                                               nvenc=nvenc, timecode=timecode,
+                                               fps=fps)
             code, stderr = self._run_media(cmd)
             if code == 0 and partial.is_file() and partial.stat().st_size > 0:
                 if self._verify_proxy(partial, probe):
-                    try:
-                        os.replace(str(partial), str(dest))
-                    except OSError as exc:
-                        self._fail_item(item, f"the proxy could not be published: {exc}")
-                        return None
-                    return str(dest)
-                self.log.warning("%s produced a short proxy on %s",
-                            item.get("name"), "NVENC" if nvenc else "the CPU")
+                    short = self._frames_missing(source, partial)
+                    if short is None:
+                        try:
+                            os.replace(str(partial), str(dest))
+                        except OSError as exc:
+                            self._fail_item(item, f"the proxy could not be published: {exc}")
+                            return None
+                        return str(dest)
+                    why = short
+                    self.log.warning("%s: %s on %s", item.get("name"), short,
+                                     "NVENC" if nvenc else "the CPU")
+                else:
+                    self.log.warning("%s produced a short proxy on %s",
+                                item.get("name"), "NVENC" if nvenc else "the CPU")
             _unlink(partial)
             if self._should_stop():
                 return None
-        self._fail_item(item, "the proxy did not decode -- this clip was skipped")
+        self._fail_item(item, why)
         return None
+
+    def _frames_missing(self, source: str, made: Path) -> Optional[str]:
+        """Why this proxy is the wrong LENGTH in frames, or None if it is not.
+
+        A count neither side can produce is not a mismatch: both have to be
+        known before this condemns anything, because a check that cannot run
+        must not fail good media (the same rule _verify_proxy follows for a
+        duration it could not read).
+        """
+        try:
+            src_frames = self.media.count_frames(self.ffmpeg_path, source)
+            made_frames = self.media.count_frames(self.ffmpeg_path, made)
+        except Exception:  # noqa: BLE001 - see docstring
+            self.log.debug("could not count frames for %s", made, exc_info=True)
+            return None
+        if not src_frames or not made_frames or src_frames == made_frames:
+            return None
+        return (f"the proxy has {made_frames} frames, the original has "
+                f"{src_frames} - Resolve would refuse it")
 
     def _verify_proxy(self, path: Path, probe: dict) -> bool:
         expected = float((probe or {}).get("duration_s") or 0)

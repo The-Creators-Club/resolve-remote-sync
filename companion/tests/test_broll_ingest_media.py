@@ -187,8 +187,102 @@ def test_probe_agrees_with_the_indexer_on_the_same_ffprobe_output(monkeypatch):
 
     ours = bim.probe("ffmpeg", "x.mp4")
     theirs = indexer_ffmpeg.probe_video("x.mp4")
-    for key in ("duration_s", "fps", "width", "height", "codec", "shot_date"):
+    for key in ("duration_s", "fps", "width", "height", "codec", "shot_date",
+                "frames", "start_tc", "bitrate"):
         assert ours[key] == theirs[key], key
+
+
+# ---------------------------------------------------------------------------
+# the drop-frame rule (audit F6, 2026-09-17)
+# ---------------------------------------------------------------------------
+#
+# A tmcd track carries the drop-frame BIT and ffprobe prints it as the
+# separator, so a colon out of a tmcd file is a real non-drop timecode; a Sony
+# body's rtmd data stream prints colons whatever the camera counted. Getting
+# that wrong is R17's tenth case: 231 of the Johnny Harris shoot's 377 proxies
+# are 29.97 NDF with a tmcd track, and every preview of them carried a
+# semicolon the source never had, which Resolve refuses. Both pipelines have
+# to answer identically or the same clip gets a linkable proxy on the base rig
+# and an unlinkable one on an editor's machine.
+
+_NTSC = "30000/1001"
+
+
+def _probe_payload(*, rate=_NTSC, fmt_timecode=None, streams=()):
+    fmt = {"duration": "10.0"}
+    if fmt_timecode:
+        fmt["tags"] = {"timecode": fmt_timecode}
+    video = {"codec_type": "video", "codec_tag_string": "avc1", "width": 1920,
+             "height": 1080, "codec_name": "h264", "avg_frame_rate": rate,
+             "r_frame_rate": rate}
+    return json.dumps({"format": fmt, "streams": [video, *streams]})
+
+
+def _tmcd_stream(timecode, tag="tmcd"):
+    return {"codec_type": "data", "codec_tag_string": tag,
+            "tags": {"timecode": timecode}}
+
+
+# (name, payload, what BOTH sides must answer)
+_DROPFRAME_CASES = [
+    # The Johnny Harris case, verified on cam-1-050.mov 2026-09-17: a tmcd
+    # stream printing colons at 29.97 is genuinely non-drop. Untouched.
+    ("tmcd colon at 29.97",
+     _probe_payload(streams=[_tmcd_stream("13:53:30:02")]), "13:53:30:02"),
+    # The Sony case the 2026-08-12 measurement was made on: the tag alone, no
+    # tmcd stream anywhere. Still rewritten.
+    ("tag-only colon at 29.97",
+     _probe_payload(fmt_timecode="03:40:27:12"), "03:40:27;12"),
+    # An rtmd data stream is NOT a tmcd stream: same Sony verdict.
+    ("rtmd stream colon at 29.97",
+     _probe_payload(streams=[_tmcd_stream("03:40:27:12", tag="rtmd")]),
+     "03:40:27;12"),
+    # Already drop-form: nothing to do, from either source.
+    ("tmcd semicolon",
+     _probe_payload(streams=[_tmcd_stream("13:53:30;02")]), "13:53:30;02"),
+    # 23.976 is fractional but has no drop-frame variant, and integer rates
+    # never drop -- neither is ever rewritten, tmcd or not.
+    ("23.976 colon",
+     _probe_payload(rate="24000/1001", fmt_timecode="03:40:27:12"),
+     "03:40:27:12"),
+    ("integer 30 colon",
+     _probe_payload(rate="30/1", fmt_timecode="03:40:27:12"), "03:40:27:12"),
+]
+
+
+@needs_indexer
+@pytest.mark.parametrize("name, payload, expected",
+                         _DROPFRAME_CASES, ids=[c[0] for c in _DROPFRAME_CASES])
+def test_the_drop_frame_rule_is_the_same_on_both_sides(monkeypatch, name,
+                                                       payload, expected):
+    monkeypatch.setattr(ft.subprocess, "run", lambda cmd, **kw: _FakeCompleted(stdout=payload))
+    monkeypatch.setattr(indexer_ffmpeg.subprocess, "run",
+                        lambda cmd, **kw: _FakeCompleted(stdout=payload))
+
+    ours = bim.probe("ffmpeg", "clip.mov")["timecode"]
+
+    info = json.loads(payload)
+    tc, from_tmcd = indexer_ffmpeg.timecode_from_probe(info)
+    theirs = indexer_ffmpeg.dropframe_normalized(
+        tc, indexer_ffmpeg.video_fps(info), from_tmcd)
+
+    assert ours == theirs == expected
+
+
+@needs_indexer
+def test_both_sides_report_the_untouched_timecode_as_start_tc(monkeypatch):
+    """`videos.start_tc` describes the SOURCE (migration 012), so it is what
+    the file prints -- the normalisation belongs to the proxy written against
+    it, not to the column."""
+    payload = _probe_payload(fmt_timecode="03:40:27:12")
+    monkeypatch.setattr(ft.subprocess, "run", lambda cmd, **kw: _FakeCompleted(stdout=payload))
+    monkeypatch.setattr(indexer_ffmpeg.subprocess, "run",
+                        lambda cmd, **kw: _FakeCompleted(stdout=payload))
+
+    assert bim.probe("ffmpeg", "clip.mov")["start_tc"] == "03:40:27:12"
+    assert indexer_ffmpeg.probe_video("clip.mov")["start_tc"] == "03:40:27:12"
+    # ...and the proxy still gets the drop-frame form for this source.
+    assert bim.probe("ffmpeg", "clip.mov")["timecode"] == "03:40:27;12"
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +299,129 @@ def test_the_ingest_proxy_carries_the_source_timecode():
     cmd = bim.preview_proxy_cmd("ffmpeg", "in.mov", "out.mp4", nvenc=False,
                                 timecode="03:40:27;12")
     assert _sub(cmd, ["-timecode", "03:40:27;12"])
+
+
+# The ONE thing that legitimately differs between the two proxy argvs, and at
+# the default container it changes no output byte: the indexer writes straight
+# to `<name>.mp4`, this pipeline writes `<name>.<ext>.partial`, and ffmpeg
+# cannot pick a muxer from ".partial" (EINVAL at init, the whole 1040-clip
+# base-rig queue overnight 2026-08-11).
+_MUXER_DIVERGENCE = ["-f", "mp4"]
+
+
+def _without_muxer(cmd):
+    out = list(cmd)
+    for i in range(len(out) - 1):
+        if out[i:i + 2] == _MUXER_DIVERGENCE:
+            del out[i:i + 2]
+            break
+    return out
+
+
+def _indexer_encode_argv(monkeypatch, payload, *, nvenc, dest):
+    """The argv the indexer's build_proxy would actually run, captured.
+
+    The point of going through build_proxy rather than re-listing its flags:
+    a hand copy of the indexer's spec fails nothing when the indexer alone
+    changes, which is what let the two pipelines drift before (audit F8,
+    2026-09-17). The probe it does on the way (timecode, frame rate) is
+    answered from `payload`, and `verify=False` keeps the post-encode checks
+    out of the capture.
+    """
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(list(cmd))
+        return _FakeCompleted(stdout=payload)
+
+    monkeypatch.setattr(indexer_ffmpeg.subprocess, "run", fake_run)
+    indexer_ffmpeg.build_proxy("in.mov", dest, use_nvenc=nvenc, verify=False)
+    encodes = [c for c in calls if "-c:v" in c]
+    assert len(encodes) == 1, calls
+    return encodes[0]
+
+
+@needs_indexer
+@pytest.mark.parametrize("nvenc", [True, False])
+@pytest.mark.parametrize("payload", [
+    _probe_payload(streams=[_tmcd_stream("13:53:30:02")]),
+    _probe_payload(fmt_timecode="03:40:27:12"),
+    _probe_payload(rate="24000/1001"),
+], ids=["tmcd-timecode", "tag-timecode", "no-timecode"])
+def test_the_preview_argv_is_the_indexers_flag_for_flag(monkeypatch, tmp_path,
+                                                        nvenc, payload):
+    """Both pipelines' previews land in ONE archive and are served by one web
+    UI, and since phase 3 one of them is the first proxy Resolve links -- two
+    specs would mean the same clip is linkable on the base rig and refused on
+    an editor's machine. Imported, not copied (audit F8)."""
+    dest = tmp_path / "proxy.mp4"
+    theirs = _indexer_encode_argv(monkeypatch, payload, nvenc=nvenc, dest=dest)
+
+    monkeypatch.setattr(ft.subprocess, "run", lambda cmd, **kw: _FakeCompleted(stdout=payload))
+    probe = bim.probe("ffmpeg", "in.mov")
+    ours = bim.preview_proxy_cmd("ffmpeg", "in.mov", dest, nvenc=nvenc,
+                                 timecode=probe["timecode"], fps=probe["fps"])
+
+    assert _strip_binary_and_dest(_without_muxer(ours)) == _strip_binary_and_dest(theirs)
+    # The divergence is the only one, and it is where it has to be: an OUTPUT
+    # option, immediately before the destination.
+    assert ours[-3:] == [*_MUXER_DIVERGENCE, str(dest)]
+
+
+@needs_indexer
+def test_the_preview_spec_constants_are_the_indexers():
+    assert (ft.PROXY_HEIGHT, ft.PROXY_CQ, ft.PROXY_CRF, ft.PROXY_AUDIO_BITRATE) == (
+        indexer_ffmpeg.PROXY_HEIGHT, indexer_ffmpeg.PROXY_CQ,
+        indexer_ffmpeg.PROXY_CRF, indexer_ffmpeg.PROXY_AUDIO_BITRATE)
+
+
+# ---------------------------------------------------------------------------
+# the post-encode frame check (plan section 4)
+# ---------------------------------------------------------------------------
+
+@needs_indexer
+def test_the_frame_count_argv_is_the_same_on_both_sides():
+    assert (ft.count_frames_cmd("ffprobe", "x.mp4")
+            == indexer_ffmpeg.count_frames_cmd("ffprobe", "x.mp4"))
+    assert _sub(ft.count_frames_cmd("ffprobe", "x.mp4"),
+                ["-count_packets", "-select_streams", "v:0"])
+
+
+@needs_indexer
+@pytest.mark.parametrize("stdout, expected", [
+    ('{"streams": [{"nb_read_packets": "1674"}]}', 1674),
+    ('{"streams": [{"nb_read_packets": 1674}]}', 1674),
+    # Every shape of "could not tell" is None, never 0: the caller SKIPS the
+    # comparison on None, and a 0 would condemn every proxy on a machine whose
+    # ffprobe printed something unexpected.
+    ('{"streams": []}', None),
+    ('{"streams": [{}]}', None),
+    ("", None),
+    ("not json", None),
+    (None, None),
+])
+def test_the_frame_count_is_parsed_the_same_on_both_sides(stdout, expected):
+    assert ft.parse_frame_count(stdout) == expected
+    assert indexer_ffmpeg.parse_frame_count(stdout) == expected
+
+
+def test_count_frames_returns_none_when_ffprobe_refuses(monkeypatch):
+    monkeypatch.setattr(ft.subprocess, "run",
+                        lambda cmd, **kw: _FakeCompleted(returncode=1, stderr="nope"))
+    assert bim.count_frames("ffmpeg", "x.mp4") is None
+
+
+def test_count_frames_reads_the_packet_count(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _FakeCompleted(stdout='{"streams": [{"nb_read_packets": "42"}]}')
+
+    monkeypatch.setattr(ft.subprocess, "run", fake_run)
+
+    assert bim.count_frames("ffmpeg", "x.mp4") == 42
+    assert "-count_packets" in captured["cmd"]
 
 
 # ---------------------------------------------------------------------------

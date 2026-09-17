@@ -73,6 +73,18 @@ def test_probe_video_reads_duration_fps_resolution(tiny_clip):
     assert info["codec"] == "h264"
 
 
+def test_probe_video_reports_frames_and_bitrate(tiny_clip):
+    """migration 012's columns (2026-09-17, audit F3): the detail API decides
+    `original_is_edit_weight` on the bitrate and phase 3 writes frames/start_tc
+    into the file that creates an offline clip. None is a legitimate answer for
+    each -- never 0, which would read as a measurement."""
+    info = ffmpeg_tools.probe_video(tiny_clip)
+    assert info["frames"] is None or info["frames"] > 0
+    assert info["bitrate"] is None or info["bitrate"] > 0
+    # A generated testsrc carries no timecode at all.
+    assert info["start_tc"] is None
+
+
 def test_build_proxy_libx264_fallback(tiny_clip, tmp_path):
     dest = tmp_path / "proxy.mp4"
     ffmpeg_tools.build_proxy(tiny_clip, dest, use_nvenc=False)
@@ -81,6 +93,38 @@ def test_build_proxy_libx264_fallback(tiny_clip, tmp_path):
     info = ffmpeg_tools.probe_video(dest)
     # tiny_clip is 320x240 — below PROXY_HEIGHT, so it must NOT be upscaled.
     assert info["height"] == 240
+
+
+def test_build_proxy_keeps_every_frame(tiny_clip, tmp_path):
+    """The Reproductive Rights lesson, 2026-09-17: seven proxies were 1-18
+    frames short, Resolve refused every one as a proxy, and the editor was
+    told nothing (it read as "sync is stuck"). build_proxy's own check is what
+    makes that a failed item; this proves the check's two counts agree on a
+    real encode rather than only on a fake one. libx264 deliberately: NVENC is
+    not available on every machine that runs this suite."""
+    dest = tmp_path / "proxy_frames.mp4"
+    ffmpeg_tools.build_proxy(tiny_clip, dest, use_nvenc=False)
+
+    src_frames = ffmpeg_tools.count_frames(tiny_clip)
+    assert src_frames and src_frames > 1
+    assert ffmpeg_tools.count_frames(dest) == src_frames
+
+
+def test_build_proxy_refuses_a_proxy_that_lost_frames(tiny_clip, tmp_path,
+                                                      monkeypatch):
+    """...and says both counts, because "the proxy is broken" sends the
+    operator looking at the wrong thing."""
+    dest = tmp_path / "proxy_short.mp4"
+    real = ffmpeg_tools.count_frames
+
+    def short_count(path):
+        return 5 if str(path) == str(dest) else real(path)
+
+    monkeypatch.setattr(ffmpeg_tools, "count_frames", short_count)
+
+    with pytest.raises(RuntimeError) as exc:
+        ffmpeg_tools.build_proxy(tiny_clip, dest, use_nvenc=False)
+    assert "5 frames" in str(exc.value)
 
 
 def test_build_proxy_does_not_upscale_a_small_source(tiny_clip, tmp_path):
@@ -168,6 +212,63 @@ def test_dropframe_normalization():
     assert f("03:40:27:12", 23.976) == "03:40:27:12"
     assert f("03:40:27:12", None) == "03:40:27:12"
     assert f(None, 59.94) is None
+
+
+def test_a_tmcd_tracks_colon_is_never_rewritten():
+    """audit F6, 2026-09-17. A tmcd track carries the drop-frame BIT and
+    ffprobe prints it AS THE SEPARATOR, so a colon out of one is genuinely
+    non-drop and the rewrite is what makes Resolve refuse the proxy -- R17's
+    tenth case, and 231 of the Johnny Harris shoot's 377 proxies. Only the
+    rtmd/format-tag case the 2026-08-12 measurement was made on is rewritten.
+    """
+    f = ffmpeg_tools.dropframe_normalized
+    assert f("13:53:30:02", 29.97, True) == "13:53:30:02"
+    assert f("03:40:27:12", 59.94, True) == "03:40:27:12"
+    assert f("13:53:30:02", 29.97, False) == "13:53:30;02"
+
+
+def test_timecode_from_probe_says_which_stream_printed_it():
+    """The flag cannot be recovered afterwards, so it travels with the value.
+    An `rtmd` data stream is NOT a tmcd track: that is the Sony body whose tag
+    prints colons whatever the camera counted."""
+    video = {"codec_type": "video", "codec_tag_string": "avc1"}
+    tmcd = {"codec_type": "data", "codec_tag_string": "tmcd",
+            "tags": {"timecode": "13:53:30:02"}}
+    rtmd = {"codec_type": "data", "codec_tag_string": "rtmd",
+            "tags": {"timecode": "03:40:27:12"}}
+
+    assert ffmpeg_tools.timecode_from_probe(
+        {"streams": [video, tmcd]}) == ("13:53:30:02", True)
+    assert ffmpeg_tools.timecode_from_probe(
+        {"streams": [video, rtmd]}) == ("03:40:27:12", False)
+    # The mov demuxer copies a tmcd track's value up into the container tag,
+    # so a container tag on a file that HAS one is that track's own printing
+    # (verified on Johnny_Harris cam-1-050.mov, 2026-09-17).
+    assert ffmpeg_tools.timecode_from_probe(
+        {"format": {"tags": {"timecode": "13:53:30:02"}},
+         "streams": [video, tmcd]}) == ("13:53:30:02", True)
+    assert ffmpeg_tools.timecode_from_probe({"streams": [video]}) == (None, False)
+
+
+def test_parse_frame_count_reads_a_packet_count_and_admits_when_it_cannot():
+    """None is "could not tell" and the caller skips the comparison. A 0 would
+    fail every proxy on a machine whose ffprobe printed something
+    unexpected."""
+    p = ffmpeg_tools.parse_frame_count
+    assert p('{"streams": [{"nb_read_packets": "1674"}]}') == 1674
+    assert p('{"streams": [{"nb_read_packets": 1674}]}') == 1674
+    assert p('{"streams": []}') is None
+    assert p("not json") is None
+    assert p(None) is None
+
+
+def test_count_frames_cmd_counts_packets_on_the_video_stream():
+    assert ffmpeg_tools.count_frames_cmd("ffprobe", "out.mp4") == [
+        "ffprobe", "-v", "error",
+        "-count_packets", "-select_streams", "v:0",
+        "-show_entries", "stream=nb_read_packets",
+        "-print_format", "json", "out.mp4",
+    ]
 
 
 def test_a_source_without_timecode_still_proxies(tiny_clip, tmp_path):

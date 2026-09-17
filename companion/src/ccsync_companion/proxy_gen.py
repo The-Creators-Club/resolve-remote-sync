@@ -1979,11 +1979,15 @@ class ProxyGenerator:
         # the browser serves those bytes as `video/mp4`.
         container = proxy_scan.GENERATED_EXT.lstrip(".")
         if kind == proxy_scan.KIND_PREVIEW:
-            # The b-roll 540p spec verbatim, so a proxy made for a YouTube
-            # download doubles as its b-roll preview.
+            # The b-roll preview spec verbatim, so a proxy made for a YouTube
+            # download doubles as its b-roll preview. `fps` comes from the
+            # probe this function is already handed (2026-09-17): without it
+            # the builder omits `-g` and this tier's files would differ from
+            # the ingest tier's for the same source, which is the one thing
+            # sharing the builder exists to prevent.
             cmd = ffmpeg_tools.preview_proxy_cmd(
                 self.ffmpeg_path, path, partial, nvenc=nvenc,
-                container=container,
+                container=container, fps=info.get("fps"),
             )
         else:
             cmd = ffmpeg_tools.own_proxy_cmd(

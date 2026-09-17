@@ -127,15 +127,29 @@ def hash_partial(path: str | Path) -> str:
 # ---------------------------------------------------------------------------
 
 def preview_proxy_cmd(ffmpeg_path: str, src: str | Path, dest: str | Path, *,
-                      nvenc: bool, timecode: Optional[str] = None) -> list[str]:
-    """The 540p browsing proxy. `ffmpeg_tools.preview_proxy_cmd` verbatim --
+                      nvenc: bool, timecode: Optional[str] = None,
+                      fps: Optional[float] = None) -> list[str]:
+    """The 1080p browsing proxy. `ffmpeg_tools.preview_proxy_cmd` verbatim --
     NOT a second copy of the spec: that function is already the b-roll one
     (its own tests pin the argv against the indexer's), and the ingest's only
-    addition is passing the source timecode, which camera originals have and
-    YouTube downloads do not.
+    addition is passing facts it probed off the source -- the timecode, which
+    camera originals have and YouTube downloads do not, and since 2026-09-17
+    the frame rate the one-second keyframe interval is derived from.
     """
     return ffmpeg_tools.preview_proxy_cmd(ffmpeg_path, src, dest, nvenc=nvenc,
-                                          timecode=timecode)
+                                          timecode=timecode, fps=fps)
+
+
+def count_frames(ffmpeg_path: str, path: str | Path) -> Optional[int]:
+    """`ffmpeg_tools.count_frames` unchanged: how many video frames a file
+    really holds, or None when it cannot be told.
+
+    Here rather than called directly so the orchestrator reaches every media
+    operation through one module (and one test double). The check it feeds is
+    the Reproductive Rights lesson, 2026-09-17: a proxy a few frames short of
+    its original is refused by Resolve and nothing tells the editor.
+    """
+    return ffmpeg_tools.count_frames(ffmpeg_path, path)
 
 
 def sprite_geometry(duration_s: float, *, columns: int = SPRITE_COLUMNS,

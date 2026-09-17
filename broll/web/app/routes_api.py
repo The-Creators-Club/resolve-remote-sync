@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import config
+from app import edit_weight
 from app.db import get_db
 # Import the name, not the module: the route function below is itself called
 # `search` and would shadow a module import.
@@ -53,38 +54,23 @@ def _insert_target(video: dict) -> tuple[str, str]:
 # editing proxy when both are there (plan section 2).
 EDIT_PROXY_EXT = ".mov"
 
-# Where "edit-weight" sits (plan section 5 item 1, question 4): at or below
-# 1080 lines, at or below about 12 Mbps, in a codec Resolve decodes cheaply.
-# A file like that IS its own editing proxy -- downloading it is correct and
-# making a second one would waste the space twice.
-EDIT_WEIGHT_MAX_HEIGHT = 1080
-EDIT_WEIGHT_MAX_BITRATE = 12_000_000
-EDIT_WEIGHT_CODECS = ("h264", "hevc")
+# Where the edit-weight line sits and how it is read: `app/edit_weight.py`,
+# which the companion carries a verbatim copy of because it makes the same
+# decision at ingest (plan section 5 items 1-2, 2026-09-17).
+EDIT_WEIGHT_MAX_HEIGHT = edit_weight.EDIT_WEIGHT_MAX_HEIGHT
+EDIT_WEIGHT_MAX_BITRATE = edit_weight.EDIT_WEIGHT_MAX_BITRATE
+EDIT_WEIGHT_CODECS = edit_weight.EDIT_WEIGHT_CODECS
 
 
 def _is_edit_weight(video: dict) -> bool | None:
     """Is this clip's own file already an editing proxy? None = cannot tell.
 
-    None is the answer for a row indexed before migration 012 added `bitrate`
-    (2026-09-17). It must stay distinguishable from False: a missing bitrate
-    read as 0 would say "tiny, definitely edit-weight" and send a remote
-    editor a multi-GB camera master.
+    A row read, not a rule: the rule is `edit_weight.is_edit_weight`, shared
+    with the companion's ingest so the file that got no `.mov` made beside it
+    is exactly the file this route calls edit-weight.
     """
-    bitrate = video.get("bitrate")
-    if bitrate is None:
-        return None
-    codec = str(video.get("codec") or "").lower()
-    # Any ProRes flavour counts. The archive holds Proxy and LT, which are
-    # cheap; a 6K ProRes 422 master is excluded by the height and bitrate
-    # tests above it, not by its codec name.
-    cheap_codec = codec in EDIT_WEIGHT_CODECS or codec.startswith("prores")
-    height = video.get("height")
-    return bool(
-        cheap_codec
-        and height is not None
-        and int(height) <= EDIT_WEIGHT_MAX_HEIGHT
-        and int(bitrate) <= EDIT_WEIGHT_MAX_BITRATE
-    )
+    return edit_weight.is_edit_weight(
+        video.get("height"), video.get("bitrate"), video.get("codec"))
 
 
 def insert_target_detail(video: dict) -> dict:

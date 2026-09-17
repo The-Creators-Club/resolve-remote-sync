@@ -571,6 +571,50 @@ def probe_video(ffmpeg_path: str, path: str | Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# edit-weight: does this file need an editing proxy at all?
+# ---------------------------------------------------------------------------
+#
+# A VERBATIM copy of broll/web/app/edit_weight.py, and it has to stay one: the
+# companion decides at INGEST whether to encode `Proxy/<stem>.mov`, and the
+# b-roll detail API answers `original_is_edit_weight` about the same file
+# later. If the two ever disagree, the page tells a remote editor to expect an
+# editing proxy that was deliberately never made (plan section 5 items 1-2,
+# 2026-09-17). test_broll_ingest_media.py loads the web copy by path and
+# compares them case by case, exactly as it does for the preview argv and the
+# hash. Never import across: `broll/web` is a tree on a container's PYTHONPATH
+# and this is a frozen exe on an editor's machine.
+EDIT_WEIGHT_MAX_HEIGHT = 1080
+EDIT_WEIGHT_MAX_BITRATE = 12_000_000
+EDIT_WEIGHT_CODECS = ("h264", "hevc")
+
+
+def is_edit_weight(height, bitrate, codec) -> Optional[bool]:
+    """Is this file already an editing proxy? None = cannot tell.
+
+    None is the answer when the bitrate is unknown: a row indexed before
+    migration 012 added the column (2026-09-17), or a probe that could not
+    read one. It must stay distinguishable from False -- a missing bitrate
+    read as 0 would say "tiny, definitely edit-weight" and send a remote
+    editor a multi-GB camera master.
+    """
+    if bitrate is None:
+        return None
+    name = str(codec or "").lower()
+    # Any ProRes flavour counts. The archive holds Proxy and LT, which are
+    # cheap; a 6K ProRes 422 master is excluded by the height and bitrate
+    # tests below, not by its codec name.
+    cheap_codec = name in EDIT_WEIGHT_CODECS or name.startswith("prores")
+    if not cheap_codec or height is None:
+        return False
+    try:
+        return int(height) <= EDIT_WEIGHT_MAX_HEIGHT and int(bitrate) <= EDIT_WEIGHT_MAX_BITRATE
+    except (TypeError, ValueError):
+        # A height or bitrate that is not a number is not a measurement, and
+        # guessing here would be this rule inventing a verdict.
+        return None
+
+
+# ---------------------------------------------------------------------------
 # argv builders -- PURE. No I/O, no probing, no filesystem.
 # ---------------------------------------------------------------------------
 #

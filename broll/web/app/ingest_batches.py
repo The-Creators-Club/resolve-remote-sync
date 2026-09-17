@@ -121,7 +121,7 @@ RUN_MODES = ("idle", "foreground")
 
 
 class ItemFiles:
-    """The three (or four) archive-relative paths one finished item occupies.
+    """The archive-relative paths one finished item occupies (three to five).
 
     Named rather than passed around as a tuple because `mark_uploaded` verifies
     them and `claim` advertises them, and the two must not drift.
@@ -130,6 +130,13 @@ class ItemFiles:
     def __init__(self, archive_dir: str, archive_stem: str, final_name: str,
                  video_id: int | None) -> None:
         self.proxy = f"{archive_dir}/{PROXY_DIR}/{archive_stem}.mp4"
+        # The EDITING proxy, beside the preview in the same folder (plan
+        # section 2, 2026-09-17). Nothing records it in `videos`: the detail
+        # API finds it by stem the way it finds the top slot, so an editing
+        # proxy that arrives later needs no re-index. Named here only so that
+        # the one path `mark_uploaded` will accept as an editing proxy is the
+        # one the server itself allocated.
+        self.edit_proxy = f"{archive_dir}/{PROXY_DIR}/{archive_stem}.mov"
         self.original = f"{archive_dir}/{final_name}"
         self.poster = f"posters/{video_id}.jpg" if video_id else None
         self.sprite = f"sprites/{video_id}.jpg" if video_id else None
@@ -1087,13 +1094,15 @@ def _resolve_under_root(rel: str) -> Path | None:
 
 
 def mark_uploaded(conn: sqlite3.Connection, batch: sqlite3.Row, item: sqlite3.Row, *,
-                  files: list[Any], original_uploaded: bool) -> dict:
+                  files: list[Any], original_uploaded: bool,
+                  edit_proxy_rel: str | None = None) -> dict:
     """The clip goes live -- but only once the server has seen the bytes.
 
     `BROLL_DATA_ROOT` is the NAS archive, so "did the upload land" is a
     `stat()`, not a promise. Every declared file is checked for presence AND
-    size, and the proxy the server itself allocated is required whether or not
-    the companion declared it. A 409 lists exactly which files to send again,
+    size, the proxy the server itself allocated is required whether or not the
+    companion declared it, and an editing proxy the companion says it made is
+    required too (plan section 5, 2026-09-17). A 409 lists exactly which files to send again,
     which is what lets an interrupted rclone resume instead of restarting the
     clip (plan §6, "Upload interrupted").
 
@@ -1117,6 +1126,23 @@ def mark_uploaded(conn: sqlite3.Connection, batch: sqlite3.Row, item: sqlite3.Ro
     required = [slots.proxy]
     if original_uploaded:
         required.append(slots.original)
+
+    # The editing proxy is verified when the companion DECLARES one (plan
+    # section 5, 2026-09-17). Undeclared is the normal case (an edit-weight
+    # original, a BRAW, or a companion older than the tier) and is simply
+    # absent -- there is no column for it and nothing here invents one. What
+    # must not happen is a clip going live advertising an editing proxy that
+    # is not on the NAS: the page would hand a remote editor a path Resolve
+    # then reports offline.
+    edit_rel = str(edit_proxy_rel or "").replace("\\", "/").strip()
+    if edit_rel and edit_rel != slots.edit_proxy:
+        # Not a 409: no retry can make this right. The only editing proxy this
+        # item can have is the one beside the preview the server allocated.
+        raise HTTPException(400, {
+            "detail": f"the editing proxy must be {slots.edit_proxy}",
+            "reason": "wrong_edit_proxy"})
+    if edit_rel:
+        required.append(edit_rel)
     for rel in required:
         declared.setdefault(rel, None)
 
@@ -1134,6 +1160,13 @@ def mark_uploaded(conn: sqlite3.Connection, batch: sqlite3.Row, item: sqlite3.Ro
         try:
             actual = path.stat().st_size
         except OSError:
+            missing.append(rel)
+            continue
+        if actual == 0 and rel == edit_rel:
+            # A zero-byte file is a transfer that died, not an upload: rclone
+            # writes a `.partial` and renames, so an empty `.mov` in the
+            # archive is an ffmpeg that wrote nothing. Counted as missing so
+            # the companion re-sends that one file rather than the clip.
             missing.append(rel)
             continue
         sizes[rel] = actual

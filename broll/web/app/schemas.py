@@ -237,6 +237,13 @@ class UploadedFileIn(BaseModel):
 class ItemUploadedIn(BaseModel):
     files: list[UploadedFileIn] = Field(default_factory=list, max_length=16)
     original_uploaded: bool = False
+    # The editing proxy `<folder>/Proxy/<stem>.mov`, when the companion made
+    # one (plan section 5, 2026-09-17). Optional and DECLARED: an edit-weight
+    # original and a BRAW both get none, so its absence is normal -- but a
+    # companion that names one is telling the server to check for it, and
+    # `mark_uploaded` will not flip the clip live without it. Older companions
+    # never send the field at all.
+    edit_proxy_rel: str | None = Field(default=None, max_length=1024)
 
 
 class ReleaseIn(BaseModel):

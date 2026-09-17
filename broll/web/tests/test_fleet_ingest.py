@@ -724,6 +724,104 @@ def test_the_proxy_is_required_even_if_the_companion_does_not_declare_it(
     assert "Creators_Club/E2E/Proxy/A000.mp4" in r.json()["detail"]["missing"]
 
 
+def _ready_to_go_live(client, data_root, uid):
+    """An item with a description and every required file staged: the state a
+    clip is in when only the editing proxy is left to argue about."""
+    manifest = _claim(client, uid).json()["items"][0]
+    client.post(f"{BASE}/{uid}/items/{manifest['uid']}/result", json=_result_body(),
+                headers=fleet_headers())
+    _stage(data_root, "Creators_Club/E2E/Proxy/A000.mp4", 100)
+    return manifest
+
+
+def test_a_declared_editing_proxy_the_archive_holds_goes_live(
+        client, conn, data_root):
+    """Plan section 5, 2026-09-17: the `.mov` sits beside the `.mp4` preview,
+    nothing records it in `videos` (the detail API finds it by stem), and the
+    only thing this route owes it is a stat before the clip is believed."""
+    uid = _queue(client)
+    manifest = _ready_to_go_live(client, data_root, uid)
+    edit_proxy = "Creators_Club/E2E/Proxy/A000.mov"
+    _stage(data_root, edit_proxy, 900)
+
+    r = client.post(f"{BASE}/{uid}/items/{manifest['uid']}/uploaded", json={
+        "files": [{"rel": "Creators_Club/E2E/Proxy/A000.mp4", "size": 100},
+                  {"rel": edit_proxy, "size": 900}],
+        "edit_proxy_rel": edit_proxy}, headers=fleet_headers())
+
+    assert r.status_code == 200, r.text
+    assert r.json()["live"] is True
+    # No column of its own, deliberately: archive_path stays the preview.
+    assert conn.execute("SELECT archive_path FROM videos WHERE id = ?",
+                        (manifest["video_id"],)).fetchone()[0] == \
+        "Creators_Club/E2E/Proxy/A000.mp4"
+
+
+def test_a_declared_editing_proxy_that_never_landed_keeps_the_clip_back(
+        client, conn, data_root):
+    """A live clip advertising a `.mov` that is not there is a remote editor
+    sent to a path Resolve reports offline. 409 with the file to send again,
+    the same answer an interrupted rclone already gets."""
+    uid = _queue(client)
+    manifest = _ready_to_go_live(client, data_root, uid)
+    edit_proxy = "Creators_Club/E2E/Proxy/A000.mov"
+
+    r = client.post(f"{BASE}/{uid}/items/{manifest['uid']}/uploaded", json={
+        "files": [{"rel": "Creators_Club/E2E/Proxy/A000.mp4", "size": 100}],
+        "edit_proxy_rel": edit_proxy}, headers=fleet_headers())
+
+    assert r.status_code == 409
+    assert r.json()["detail"]["missing"] == [edit_proxy]
+    assert conn.execute("SELECT status FROM videos WHERE id = ?",
+                        (manifest["video_id"],)).fetchone()["status"] == "ingesting"
+
+
+def test_an_empty_editing_proxy_counts_as_missing(client, conn, data_root):
+    """rclone writes a `.partial` and renames, so a zero-byte `.mov` in the
+    archive is an ffmpeg that wrote nothing -- not an upload."""
+    uid = _queue(client)
+    manifest = _ready_to_go_live(client, data_root, uid)
+    edit_proxy = "Creators_Club/E2E/Proxy/A000.mov"
+    _stage(data_root, edit_proxy, 0)
+
+    r = client.post(f"{BASE}/{uid}/items/{manifest['uid']}/uploaded", json={
+        "files": [{"rel": "Creators_Club/E2E/Proxy/A000.mp4", "size": 100}],
+        "edit_proxy_rel": edit_proxy}, headers=fleet_headers())
+
+    assert r.status_code == 409
+    assert r.json()["detail"]["missing"] == [edit_proxy]
+
+
+def test_an_undeclared_editing_proxy_is_simply_absent(client, conn, data_root):
+    """An edit-weight original, a BRAW and a companion older than the tier all
+    send no `edit_proxy_rel`, and the clip goes live exactly as before."""
+    uid = _queue(client)
+    manifest = _ready_to_go_live(client, data_root, uid)
+
+    r = client.post(f"{BASE}/{uid}/items/{manifest['uid']}/uploaded", json={
+        "files": [{"rel": "Creators_Club/E2E/Proxy/A000.mp4", "size": 100}]},
+        headers=fleet_headers())
+
+    assert r.status_code == 200, r.text
+    assert r.json()["live"] is True
+
+
+def test_an_editing_proxy_somewhere_else_is_400_not_409(client, conn, data_root):
+    """The only editing proxy an item can have is the one beside the preview
+    the SERVER allocated. No retry can make another path right."""
+    uid = _queue(client)
+    manifest = _ready_to_go_live(client, data_root, uid)
+    _stage(data_root, "Creators_Club/E2E/Proxy/OTHER.mov", 900)
+
+    r = client.post(f"{BASE}/{uid}/items/{manifest['uid']}/uploaded", json={
+        "files": [{"rel": "Creators_Club/E2E/Proxy/A000.mp4", "size": 100}],
+        "edit_proxy_rel": "Creators_Club/E2E/Proxy/OTHER.mov"},
+        headers=fleet_headers())
+
+    assert r.status_code == 400
+    assert r.json()["detail"]["reason"] == "wrong_edit_proxy"
+
+
 @pytest.mark.parametrize("rel", [
     "../../../etc/passwd", "/etc/passwd", "Creators_Club/../../x.mp4", "C:/Windows/x.mp4",
 ])

@@ -967,7 +967,7 @@ cannot read or stop a batch through the panel routes above.
 | `POST …/batches/{uid}/heartbeat` | `{}` | `{ok, cancel_requested, upload_paused, lease_expires_at}` |
 | `POST …/batches/{uid}/items/{iuid}/status` | `{state, stage_percent?, error?, attempts?, hash?, probe?}` | the batch counters |
 | `POST …/batches/{uid}/items/{iuid}/result` | `{segments, themes, quality_flags, category_hint, model, probe fields, sprite_*}` | server writes the rows **and computes `search_norm`** |
-| `POST …/batches/{uid}/items/{iuid}/uploaded` | `{files:[{rel,size}], original_uploaded}` | `{ok, live:true, archive_path}` |
+| `POST …/batches/{uid}/items/{iuid}/uploaded` | `{files:[{rel,size}], original_uploaded, edit_proxy_rel?}` | `{ok, live:true, archive_path}` |
 | `POST …/batches/{uid}/release` | `{state: done\|failed\|cancelled, summary}` | finalises; `done` with failures becomes `done_with_errors` |
 
 Both uids are 32 lowercase hex characters (`lower(hex(randomblob(16)))`), and
@@ -990,6 +990,17 @@ is already published in that folder ∪ this batch (`_2`, `_3`… — the
 **`uploaded` believes nothing.** Every declared `rel` is resolved under
 `BROLL_DATA_ROOT`, containment-checked and `stat()`ed, and the proxy the server
 itself allocated is required whether or not the companion mentioned it.
+
+**`edit_proxy_rel` is the editing proxy, declared** (2026-09-17,
+`BROLL_PROXY_TIERS_PLAN.md` section 5): `<folder>/Proxy/<stem>.mov` beside the
+`.mp4` preview, made at ingest only when the original is heavier than
+edit-weight. Optional, because an edit-weight original, a BRAW and a companion
+older than the tier all send none — but a companion that names one is telling
+the server to check for it, and a missing or zero-byte file is a 409 with that
+one path in `missing`, not a clip that goes live advertising a proxy the
+archive does not hold. Any other path is a 400 (`reason: wrong_edit_proxy`):
+the only editing proxy an item can have is the one beside the preview the
+server allocated. Nothing stores it — the detail API finds it by stem.
 
 ### Status codes here
 

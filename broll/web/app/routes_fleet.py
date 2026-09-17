@@ -219,12 +219,16 @@ def item_uploaded(uid: str, item_uid: str, body: ItemUploadedIn,
     """Go live -- once the server has stat'ed the files itself.
 
     409 lists exactly which files are missing or the wrong size, so an
-    interrupted rclone retries those and not the clip.
+    interrupted rclone retries those and not the clip. A DECLARED editing
+    proxy (plan section 5, 2026-09-17) is one of them: the companion that made
+    one names it here, and the clip does not go live without it.
     """
     batch = _leaseholder_or_410(conn, uid, editor, x_ccsync_machine)
     item = _item_or_404(conn, uid, item_uid)
     return ingest_batches.mark_uploaded(
-        conn, batch, item, files=body.files, original_uploaded=body.original_uploaded)
+        conn, batch, item, files=body.files,
+        original_uploaded=body.original_uploaded,
+        edit_proxy_rel=body.edit_proxy_rel)
 
 
 @router.post("/batches/{uid}/release")

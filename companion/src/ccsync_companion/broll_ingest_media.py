@@ -81,6 +81,14 @@ FRAME_SAFETY_MARGIN = 0.05
 
 _SHOWINFO_PTS_RE = re.compile(r"pts_time:(?P<t>[0-9.]+)")
 
+# The muxer the editing proxy is written with. `proxy_scan.GENERATED_EXT` is
+# `.mov` and this is its container name: ffmpeg picks a muxer by extension and
+# the encode goes to `<name>.mov.partial`, which names none (EINVAL at init,
+# the whole base-rig queue overnight 2026-08-11). A literal rather than an
+# import of proxy_scan: this module is deliberately ffmpeg-only and imports
+# nothing of the sync tree.
+EDIT_PROXY_CONTAINER = "mov"
+
 
 # ---------------------------------------------------------------------------
 # probe + hash
@@ -138,6 +146,25 @@ def preview_proxy_cmd(ffmpeg_path: str, src: str | Path, dest: str | Path, *,
     """
     return ffmpeg_tools.preview_proxy_cmd(ffmpeg_path, src, dest, nvenc=nvenc,
                                           timecode=timecode, fps=fps)
+
+
+def own_proxy_cmd(ffmpeg_path: str, src: str | Path, dest: str | Path, *,
+                  nvenc: bool, timecode: Optional[str] = None) -> list[str]:
+    """The EDITING proxy: `ffmpeg_tools.own_proxy_cmd`, proxy_gen's own recipe.
+
+    Not a second spec (plan section 5 item 2, 2026-09-17): the archive's
+    editing proxy and a project's proxy are the same file at the same quality
+    -- HEVC Main-10, 1080p, ~7 Mbps, hvc1, AAC 192k -- so one builder serves
+    both and they cannot drift. Two things are passed rather than defaulted:
+    the source timecode, without which Resolve's LinkProxyMedia refuses the
+    file, and the container, because this tier writes `.mov` the way proxy_gen
+    does (R14: the Blackmagic Proxy Generator recognises only its own
+    extension) while the preview beside it stays an `.mp4` the browser can
+    serve.
+    """
+    return ffmpeg_tools.own_proxy_cmd(ffmpeg_path, src, dest, nvenc=nvenc,
+                                      timecode=timecode,
+                                      container=EDIT_PROXY_CONTAINER)
 
 
 def count_frames(ffmpeg_path: str, path: str | Path) -> Optional[int]:

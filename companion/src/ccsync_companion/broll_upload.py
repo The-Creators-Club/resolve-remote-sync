@@ -58,13 +58,18 @@ STATE_FAILED = "failed"
 KIND_POSTER = "poster"
 KIND_SPRITE = "sprite"
 KIND_PROXY = "proxy"
+# The EDITING proxy, `<folder>/Proxy/<stem>.mov` beside the `.mp4` preview
+# (plan section 5 item 5, 2026-09-17). Between the preview and the original on
+# purpose: an editor can cut the clip from the moment it lands, and it is tens
+# of MB against the original's tens of GB.
+KIND_EDIT_PROXY = "edit_proxy"
 KIND_ORIGINAL = "original"
 # Music's one artefact per item (music_ingest.KIND_AUDIO). It has no ordering
 # problem to solve -- a music item owns exactly one file -- so it sits at the
 # end and the b-roll order above is untouched.
 KIND_AUDIO = "audio"
-UPLOAD_ORDER = {KIND_POSTER: 0, KIND_SPRITE: 1, KIND_PROXY: 2, KIND_ORIGINAL: 3,
-                KIND_AUDIO: 4}
+UPLOAD_ORDER = {KIND_POSTER: 0, KIND_SPRITE: 1, KIND_PROXY: 2,
+                KIND_EDIT_PROXY: 3, KIND_ORIGINAL: 4, KIND_AUDIO: 5}
 
 # rclone's closing "fatal error received" notice repeats the fact of failure
 # without the cause -- broll_fetch skips it for the same reason.
@@ -98,8 +103,8 @@ class UploadJob:
 
     @property
     def order(self) -> tuple[int, str]:
-        """Stills, then proxy, then original; ties broken by the remote path so
-        a queue is deterministic (and therefore testable)."""
+        """Stills, preview, editing proxy, then original; ties broken by the
+        remote path so a queue is deterministic (and therefore testable)."""
         return (UPLOAD_ORDER.get(self.kind, len(UPLOAD_ORDER)), self.remote_rel)
 
     def progress(self) -> dict[str, Any]:

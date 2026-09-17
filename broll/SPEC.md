@@ -58,6 +58,25 @@ On the NAS, `DATA_ROOT` **is** the shared archive root
 (`<prefix>\Assets\B-roll Archive`), which is what lets the web app verify an
 upload with a `stat()` rather than a promise — see "Dashboard ingest" below.
 
+### The editing proxy (2026-09-17)
+
+An archived clip is a folder of files that share one stem: `<folder>/<name>.<ext>`
+is the original, `<folder>/Proxy/<name>.mp4` is the browser preview that
+`videos.archive_path` points at, and since 2026-09-17
+`<folder>/Proxy/<name>.mov` may sit beside the preview as the **editing
+proxy** — 1080p HEVC Main-10 at about 7 Mbps with the source timecode, the
+same recipe the companion's `proxy_gen` writes for project footage
+(`docs/BROLL_PROXY_TIERS_PLAN.md` section 5). The companion's ingest makes it
+at drop time for NEW clips whose original is heavier than edit-weight (above
+1080 lines, above about 12 Mbps, or not H.264/HEVC/ProRes); an original that
+is already edit-weight is its own editing proxy and gets none, and BRAW/R3D/CRM
+get none either because ffmpeg cannot decode them. Nothing in the database
+records it: `proxy_relink.PROXY_EXTENSIONS` prefers `.mov`, so an editor's
+Resolve picks it over the preview on its own, and the detail API finds it by
+stem the way it already finds the original — which is what lets one arrive
+later without a re-index. Existing archive clips have none; nothing
+back-fills.
+
 `.ingest/` (`app.config.ARCHIVE_INGEST_DIR`) is the one directory in that tree
 that is NOT footage: it is where a companion stages dropped bytes inside the
 editor's own local mirror, `<local archive root>/.ingest/<staging_id>/`. It is

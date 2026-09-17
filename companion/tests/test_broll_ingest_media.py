@@ -28,6 +28,7 @@ from ccsync_companion import ffmpeg_tools as ft
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INDEXER_FFMPEG_TOOLS = REPO_ROOT / "broll" / "indexer" / "broll_index" / "ffmpeg_tools.py"
+WEB_EDIT_WEIGHT = REPO_ROOT / "broll" / "web" / "app" / "edit_weight.py"
 
 
 def _load_indexer_ffmpeg_tools():
@@ -45,6 +46,25 @@ def _load_indexer_ffmpeg_tools():
     return module
 
 
+def _load_web_edit_weight():
+    """The b-roll web app's copy of the edit-weight rule, by path.
+
+    Same trick as the indexer's ffmpeg_tools above and for the same reason:
+    `broll/web` is a tree deployed on a container's PYTHONPATH whose package
+    is called `app`, and importing it here would drag in fastapi and collide
+    with every other `app` in this suite. `edit_weight.py` is stdlib-only so
+    that this works.
+    """
+    if not WEB_EDIT_WEIGHT.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "broll_web_edit_weight_under_test", WEB_EDIT_WEIGHT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+web_edit_weight = _load_web_edit_weight()
 indexer_ffmpeg = _load_indexer_ffmpeg_tools()
 needs_indexer = pytest.mark.skipif(
     indexer_ffmpeg is None,
@@ -692,3 +712,46 @@ def test_the_shared_constants_are_the_indexers():
 
 def test_the_hash_chunk_is_the_schemas():
     assert bim.HASH_CHUNK_SIZE == 8 * 1024 * 1024
+
+
+# ---------------------------------------------------------------------------
+# edit-weight: one rule, two copies (plan section 5 item 1)
+# ---------------------------------------------------------------------------
+
+# (height, bitrate, codec, verdict). The verdict is what BOTH copies must say:
+# the companion skips the editing proxy exactly when the detail API tells the
+# page the original is already one, and a disagreement means the page promises
+# an editing proxy nothing ever encoded.
+EDIT_WEIGHT_CASES = [
+    (1080, 8_000_000, "h264", True),
+    (2160, 8_000_000, "h264", False),
+    (1080, 20_000_000, "h264", False),
+    (1080, 10_000_000, "prores", True),
+    (1080, None, "h264", None),
+    (1080, 8_000_000, "braw", False),
+]
+
+
+@pytest.mark.parametrize("height,bitrate,codec,verdict", EDIT_WEIGHT_CASES)
+def test_the_edit_weight_rule_answers_the_table(height, bitrate, codec, verdict):
+    assert ft.is_edit_weight(height, bitrate, codec) is verdict
+
+
+@pytest.mark.skipif(web_edit_weight is None,
+                    reason="broll/web is not in this checkout; the table above still runs")
+@pytest.mark.parametrize("height,bitrate,codec,verdict", EDIT_WEIGHT_CASES)
+def test_the_web_apps_copy_of_the_edit_weight_rule_agrees(height, bitrate, codec,
+                                                          verdict):
+    """The parity that matters: the ingest decides, the detail API describes,
+    and the file they are talking about is the same file (2026-09-17)."""
+    assert web_edit_weight.is_edit_weight(height, bitrate, codec) is verdict
+    assert ft.is_edit_weight(height, bitrate, codec) is         web_edit_weight.is_edit_weight(height, bitrate, codec)
+
+
+@pytest.mark.skipif(web_edit_weight is None, reason="broll/web is not in this checkout")
+def test_the_edit_weight_line_is_the_same_number_on_both_sides():
+    assert (ft.EDIT_WEIGHT_MAX_HEIGHT, ft.EDIT_WEIGHT_MAX_BITRATE,
+            tuple(ft.EDIT_WEIGHT_CODECS)) == (
+        web_edit_weight.EDIT_WEIGHT_MAX_HEIGHT,
+        web_edit_weight.EDIT_WEIGHT_MAX_BITRATE,
+        tuple(web_edit_weight.EDIT_WEIGHT_CODECS))

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from ccsync_companion import broll_ingest, popup, proxy_gen
+from ccsync_companion import broll_ingest, broll_upload, popup, proxy_gen
 
 
 # ---------------------------------------------------------------------------
@@ -84,8 +84,13 @@ class FakeMedia:
         self.calls: list = []
 
     def probe(self, ffmpeg, path):
+        """A 1080p H.264 clip at 8 Mbps, which is EDIT-WEIGHT (2026-09-17):
+        the default double is its own editing proxy, so the tests that were
+        written before the tier still describe the same work. The tests about
+        the tier bring their own probe."""
         return {"duration_s": 10.0, "fps": 25.0, "width": 1920, "height": 1080,
-                "codec": "h264", "shot_date": "2026-08-18", "timecode": None}
+                "codec": "h264", "bitrate": 8_000_000,
+                "shot_date": "2026-08-18", "timecode": None}
 
     def hash_partial(self, path):
         return "cafebabe"
@@ -93,6 +98,13 @@ class FakeMedia:
     def preview_proxy_cmd(self, ffmpeg, src, dest, *, nvenc, timecode=None,
                           fps=None):
         return ["proxy", str(dest), "nvenc" if nvenc else "cpu"]
+
+    def own_proxy_cmd(self, ffmpeg, src, dest, *, nvenc, timecode=None):
+        """The EDITING proxy's builder (2026-09-17). A separate marker from
+        the preview's so a test can tell which of the two files a run
+        produced -- the whole point of the tier is that a heavy original
+        yields both."""
+        return ["editproxy", str(dest), "nvenc" if nvenc else "cpu"]
 
     def count_frames(self, ffmpeg, path):
         """The post-encode frame check's counter (2026-09-17). None is
@@ -142,7 +154,7 @@ class FakeMedia:
         output exists before it believes an exit code, because NVENC exits 0
         having written nothing when every session is taken."""
         self.calls.append(list(cmd))
-        if cmd[0] in ("proxy", "poster", "sprite", "thumb", "frame"):
+        if cmd[0] in ("proxy", "editproxy", "poster", "sprite", "thumb", "frame"):
             dest = Path(cmd[1])
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(b"x" * 10)
@@ -693,6 +705,12 @@ def test_the_uploads_are_stills_then_proxy_then_the_original(tmp_path):
     assert "sprites/4127.jpg" in rels
     assert "creators/2026-08-18 ingest/Proxy/A001.mp4" in rels
     assert "creators/2026-08-18 ingest/A001.MP4" in rels
+    # The default clip is edit-weight, so there is no fourth file and the
+    # three that were always uploaded are unchanged (2026-09-17).
+    assert not [rel for rel in rels if rel.endswith("/Proxy/A001.mov")]
+    uploaded = [c["body"] for c in server.calls if c["url"].endswith("/uploaded")]
+    assert "edit_proxy_rel" not in uploaded[0], \
+        "a clip with no editing proxy declares none, byte for byte as before"
 
 
 def test_a_clip_goes_live_only_after_the_server_has_stat_ed_it(tmp_path):
@@ -811,6 +829,180 @@ def test_a_proxy_whose_frames_cannot_be_counted_is_still_published(tmp_path):
     ing.tick()
 
     assert "failed" not in server.states()
+
+
+# ---------------------------------------------------------------------------
+# the editing proxy (plan section 5 items 1-5, 2026-09-17)
+# ---------------------------------------------------------------------------
+
+class HeavyMedia(FakeMedia):
+    """A 4K ProRes master at 400 Mbps: too heavy to cut on, so it earns an
+    editing proxy of its own."""
+
+    def probe(self, ffmpeg, path):
+        return {"duration_s": 10.0, "fps": 25.0, "width": 3840, "height": 2160,
+                "codec": "prores", "bitrate": 400_000_000,
+                "shot_date": "2026-08-18", "timecode": "12:05:55:26"}
+
+
+def _crunched_item(ing):
+    return ing._batch["items"][0]
+
+
+def test_an_edit_weight_original_is_its_own_editing_proxy(tmp_path):
+    """Item 1: 1080p, about 12 Mbps and a cheap codec IS the editing proxy.
+    Encoding a second one would spend an hour to make a worse copy of a file
+    the editor could have had."""
+    server = FakeServer()
+    media = FakeMedia()
+    # The batch must not FINISH inside the tick: a released batch is gone from
+    # the state file, and the checkpoint is what this test is about.
+    queue = FakeQueue()
+    queue.land = False
+    ing = make_ingestor(tmp_path, server=server, media=media, queue=queue)
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+
+    ing.tick()
+
+    assert not [c for c in media.calls if c[0] == "editproxy"]
+    saved = json.loads((tmp_path / "state" / "broll_ingest.json").read_text())
+    item = saved["batch"]["items"][0]
+    assert item["edit_proxy"] is None
+    assert item["edit_proxy_reason"] == broll_ingest.EDIT_PROXY_EDIT_WEIGHT
+
+
+def test_a_clip_ffmpeg_cannot_decode_gets_the_preview_only(tmp_path):
+    """Item 4: BRAW, R3D and CRM decode nowhere but Resolve. The clip is still
+    indexed and still browsable; it simply says why it has no editing proxy,
+    rather than failing or retrying an encode that can never work."""
+    server = FakeServer()
+
+    class Braw(FakeMedia):
+        def probe(self, ffmpeg, path):
+            return {"duration_s": 10.0, "fps": 25.0, "width": 4608,
+                    "height": 2592, "codec": "braw", "bitrate": 300_000_000,
+                    "shot_date": "2026-08-18", "timecode": None}
+
+    media = Braw()
+    queue = FakeQueue()
+    queue.land = False
+    ing = make_ingestor(tmp_path, server=server, media=media, queue=queue)
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+
+    ing.tick()
+
+    assert not [c for c in media.calls if c[0] == "editproxy"]
+    item = json.loads((tmp_path / "state" / "broll_ingest.json").read_text()
+                      )["batch"]["items"][0]
+    assert item["edit_proxy"] is None
+    assert item["edit_proxy_reason"] == broll_ingest.EDIT_PROXY_NEEDS_RESOLVE
+    assert "failed" not in server.states()
+
+
+def test_a_camera_raw_extension_is_refused_before_any_probe_is_believed(tmp_path):
+    """The extension is the second line and the codec name the first: a
+    wrapper can hide what is inside it, and `broll_server.INGEST_VIDEO_EXTS`
+    already keeps these out of a drop. Neither check may be the only one."""
+    ing = make_ingestor(tmp_path)
+    reason = ing._edit_proxy_skip({"local_path": r"D:\cards\A001.braw"},
+                                  {"codec": "h264", "height": 1080,
+                                   "bitrate": 8_000_000})
+    assert reason == broll_ingest.EDIT_PROXY_NEEDS_RESOLVE
+
+
+def test_an_original_with_no_measured_bitrate_still_gets_an_editing_proxy(tmp_path):
+    """`is_edit_weight` answers None when it cannot measure, and the safe
+    direction is the extra file: a clip wrongly given one costs disk, a clip
+    wrongly denied one sends a remote editor the camera master."""
+    ing = make_ingestor(tmp_path)
+    assert ing._edit_proxy_skip({"local_path": "A001.MP4"},
+                                {"codec": "h264", "height": 1080,
+                                 "bitrate": None}) == ""
+
+
+def test_a_heavy_original_gets_an_editing_proxy_beside_its_preview(tmp_path):
+    """Items 2, 3 and 5: the own-footage recipe, verified like the preview,
+    and uploaded between the preview and the original."""
+    server = FakeServer()
+    media = HeavyMedia()
+    queue = FakeQueue()
+    ing = make_ingestor(tmp_path, server=server, media=media, queue=queue)
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+
+    ing.tick()
+
+    encodes = [c for c in media.calls if c[0] == "editproxy"]
+    assert encodes, media.calls
+    assert encodes[0][1].endswith("4127.mov.partial"), "written to .partial first"
+
+
+    kinds = {job["rel"]: job["kind"] for job in queue.jobs}
+    assert kinds["creators/2026-08-18 ingest/Proxy/A001.mov"] == \
+        broll_upload.KIND_EDIT_PROXY
+    uploaded = [c["body"] for c in server.calls if c["url"].endswith("/uploaded")]
+    assert uploaded[0]["edit_proxy_rel"] == "creators/2026-08-18 ingest/Proxy/A001.mov"
+
+
+def test_an_editing_proxy_a_few_frames_short_fails_the_clip(tmp_path):
+    """Item 3's verify, and the Reproductive Rights lesson applied to the file
+    an editor actually cuts on: Resolve refuses a proxy that is not the same
+    length, so a short one is a failed item and the error names both counts
+    AND which of the two files it is about."""
+    server = FakeServer()
+
+    class ShortEditProxy(HeavyMedia):
+        def count_frames(self, ffmpeg, path):
+            if str(path).endswith(".mov.partial"):
+                return 1673
+            return 1674
+
+    ing = make_ingestor(tmp_path, server=server, media=ShortEditProxy())
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+
+    ing.tick()
+
+    failures = [c["body"] for c in server.calls
+                if c["url"].endswith("/status") and c["body"]["state"] == "failed"]
+    assert failures, server.states()
+    error = failures[0]["error"]
+    assert "1673" in error and "1674" in error and "editing proxy" in error
+
+
+def test_a_restart_does_not_re_encode_the_editing_proxy(tmp_path):
+    """An hour of NVENC is not something to pay twice. The decision AND the
+    file are on the item's checkpoint, so a tray that died between the encode
+    and the describe resumes at the describe."""
+    server = FakeServer()
+    idle = FakeIdle(9999)
+    media = HeavyMedia()
+    ing = make_ingestor(tmp_path, server=server, media=media, idle=idle)
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "idle")
+    real = media.run_ffmpeg
+
+    def _run(cmd, timeout=None):
+        outcome = real(cmd, timeout)
+        if cmd[0] == "editproxy":
+            idle.seconds = 1  # the editor came back the moment it finished
+        return outcome
+
+    media.run_ffmpeg = _run
+    ing.tick()
+    assert [c for c in media.calls if c[0] == "editproxy"], "it ran once"
+    made = _crunched_item(ing)["edit_proxy"]
+    assert made and Path(made).is_file()
+
+    revived = make_ingestor(tmp_path, server=FakeServer(), media=HeavyMedia())
+    assert revived._batch["items"][0]["edit_proxy"] == made
+    revived.tick()
+
+    assert not [c for c in revived.media.calls if c[0] == "editproxy"], \
+        "the second run must not encode it again"
+    assert Path(made).is_file(), "and the file it made is the one that went up"
 
 
 def test_a_clip_whose_source_vanished_is_failed_with_a_sentence(tmp_path):

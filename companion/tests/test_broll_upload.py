@@ -222,6 +222,27 @@ def test_stills_go_first_the_proxy_next_and_the_original_last():
     queue.stop_all()
 
 
+def test_the_editing_proxy_goes_between_the_preview_and_the_original():
+    """Plan section 5 item 5 (2026-09-17): an editor can cut the clip from the
+    moment `Proxy/<stem>.mov` lands, which is long before a multi-GB original
+    finishes. It is tens of MB, so it costs the original almost nothing."""
+    order = []
+    queue = _queue(runner=lambda q, job, cmd: (order.append(job.kind), q._finish(job, True)))
+    queue.pause()
+
+    queue.enqueue("o.mov", "x/A001.MOV", up.KIND_ORIGINAL)
+    queue.enqueue("e.mov", "x/Proxy/A001.mov", up.KIND_EDIT_PROXY)
+    queue.enqueue("p.mp4", "x/Proxy/A001.mp4", up.KIND_PROXY)
+    queue.enqueue("s.jpg", "sprites/1.jpg", up.KIND_SPRITE)
+    queue.enqueue("po.jpg", "posters/1.jpg", up.KIND_POSTER)
+    queue.resume()
+
+    _drain(queue, 5)
+    assert order == [up.KIND_POSTER, up.KIND_SPRITE, up.KIND_PROXY,
+                     up.KIND_EDIT_PROXY, up.KIND_ORIGINAL]
+    queue.stop_all()
+
+
 def test_only_one_rclone_runs_at_a_time():
     """Lanes A and B are already competing for the one SFTP link; the
     sequencer exists because two rclones on one link are slower than one."""

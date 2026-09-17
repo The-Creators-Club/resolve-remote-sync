@@ -56,8 +56,10 @@ from . import broll_upload
 from . import broll_vlm_sidecar as sidecar_mod
 from . import config as config_mod
 from . import site as site_mod
+from . import ffmpeg_tools
 from . import ingest_kinds
 from . import popup
+from . import proxy_scan
 from . import root_guard
 from . import ui_copy
 from . import upgrade as upgrade_mod
@@ -145,6 +147,33 @@ DEFAULT_STAGING_RETENTION_DAYS = 7
 # much of the source's duration is not a proxy, it is the first few seconds of
 # one (proxy_gen.VERIFY_DURATION_RATIO, same number for the same reason).
 VERIFY_DURATION_RATIO = 0.97
+
+# -- the editing proxy (plan section 5, 2026-09-17) -------------------------
+#
+# Beside the browser preview `Proxy/<stem>.mp4`, a clip heavier than
+# edit-weight also gets `Proxy/<stem>.mov` at proxy_gen's own-footage spec, so
+# a remote editor can cut the clip long before its multi-GB original has
+# finished uploading. `.mov` because `proxy_relink.PROXY_EXTENSIONS` PREFERS
+# it: the two files share one Proxy/ folder and every existing reader picks
+# the editing proxy when both are there (plan section 2).
+EDIT_PROXY_EXT = ".mov"
+
+# Why a clip got none. Recorded on the item rather than inferred from the
+# absence of a file, because "we decided not to" and "we have not got there
+# yet" are different answers and only the first of them survives a restart
+# without re-encoding.
+EDIT_PROXY_EDIT_WEIGHT = "original is edit-weight"
+EDIT_PROXY_NEEDS_RESOLVE = "needs Resolve"
+
+# What ffmpeg cannot decode at any quality, by the codec name a probe might
+# still print for it. The EXTENSIONS are proxy_scan.NEEDS_RESOLVE_EXTS (BRAW,
+# R3D, CRM), which `broll_server.INGEST_VIDEO_EXTS` already keeps out of a
+# drop or a pick -- so this is the second line, for a manifest an older build
+# staged and for a wrapper whose extension says nothing about what is inside
+# it. The answer is the preview only, never a failed item: handing these to
+# the Blackmagic Proxy Generator (bpg.py) is the follow-up the plan names, not
+# something to invent here.
+NEEDS_RESOLVE_CODECS = frozenset({"braw", "r3d", "redcode", "crm"})
 
 # -- gate states. proxy_gen's vocabulary plus the three this feature adds. ---
 STATE_DISABLED = "disabled"
@@ -397,10 +426,20 @@ class FleetClient:
         return self._call("POST", f"/batches/{batch_uid}/items/{item_uid}/result", body)
 
     def item_uploaded(self, batch_uid: str, item_uid: str, files: list,
-                      original_uploaded: bool) -> tuple[int, Any]:
+                      original_uploaded: bool,
+                      edit_proxy_rel: Optional[str] = None) -> tuple[int, Any]:
+        """`edit_proxy_rel` is DECLARED, never assumed (plan section 5,
+        2026-09-17): the server stats what it is told about and refuses to flip
+        the clip live without it, and a clip that was never given an editing
+        proxy simply does not name one. Omitted from the body entirely in that
+        case, so the request a machine without the tier sends is byte for byte
+        the one it sent before."""
+        body: dict = {"files": files,
+                      "original_uploaded": bool(original_uploaded)}
+        if edit_proxy_rel:
+            body["edit_proxy_rel"] = str(edit_proxy_rel)
         return self._call(
-            "POST", f"/batches/{batch_uid}/items/{item_uid}/uploaded",
-            {"files": files, "original_uploaded": bool(original_uploaded)})
+            "POST", f"/batches/{batch_uid}/items/{item_uid}/uploaded", body)
 
     def item_uploaded_size(self, batch_uid: str, item_uid: str,
                            size: Optional[int]) -> tuple[int, Any]:
@@ -2249,6 +2288,18 @@ class BrollIngestor:
             outputs["proxy"] = proxy
             self._save()
 
+        # 2b. the editing proxy, for an original too heavy to cut on (plan
+        # section 5 items 1-4). After the preview and not instead of it: the
+        # preview is what the page shows and what phase 3 links first, so an
+        # editing proxy must never be the reason a clip has no thumbnail.
+        if not self._edit_proxy_decided(item):
+            if self._should_stop():
+                return
+            self._stage(item, ITEM_PROXYING, 25)
+            if not self._decide_edit_proxy(item, source, out_dir, probe):
+                return
+            self._save()
+
         # 3. stills off the proxy -- never off the original: a 10-bit FX3 file
         # decodes at a fraction of the speed, and the proxy is what the web UI
         # will show beside them anyway.
@@ -2316,38 +2367,137 @@ class BrollIngestor:
         asks for; after it the item fails NAMING BOTH COUNTS.
         """
         dest = out_dir / f"{item.get('video_id') or item.get('uid')}.mp4"
-        partial = dest.with_suffix(".mp4.partial")
-        timecode = (probe or {}).get("timecode")
-        fps = (probe or {}).get("fps")
-        why = "the proxy did not decode -- this clip was skipped"
+
+        def build(partial: Path, nvenc: bool) -> list:
+            return self.media.preview_proxy_cmd(
+                self.ffmpeg_path, source, partial, nvenc=nvenc,
+                timecode=(probe or {}).get("timecode"),
+                fps=(probe or {}).get("fps"))
+
+        return self._encode_verified(item, source, dest, build, probe, "proxy")
+
+    def _edit_proxy_decided(self, item: dict) -> bool:
+        """Has this clip's editing-proxy question already been answered?
+
+        A recorded `None` (with its reason) is an answer and survives a
+        restart: re-deciding would be free, but re-ENCODING a 40-minute
+        original because the state file was read back without the question in
+        it is an evening (plan section 5, the checkpoint rule of §1 step 6).
+        A recorded PATH counts only while the file is still there -- staging
+        pruning and a half-finished move are both real.
+        """
+        if "edit_proxy" not in item:
+            return False
+        made = item.get("edit_proxy")
+        return not made or os.path.isfile(str(made))
+
+    def _decide_edit_proxy(self, item: dict, source: str, out_dir: Path,
+                           probe: dict) -> bool:
+        """Record whether this clip gets an editing proxy, and make it if so.
+
+        False means the item is over for this pass -- failed, or the editor
+        came back mid-encode -- exactly as `_make_proxy` returning None does.
+        """
+        reason = self._edit_proxy_skip(item, probe)
+        if reason:
+            item["edit_proxy"] = None
+            item["edit_proxy_reason"] = reason
+            self.log.info("%s gets no editing proxy: %s", item.get("name"), reason)
+            return True
+        made = self._make_edit_proxy(item, source, out_dir, probe)
+        if made is None:
+            return False
+        item["edit_proxy"] = made
+        item["edit_proxy_reason"] = ""
+        return True
+
+    def _edit_proxy_skip(self, item: dict, probe: dict) -> str:
+        """Why this clip needs no editing proxy, or "" to encode one.
+
+        The unknown-bitrate case encodes. `is_edit_weight` answers None when
+        it cannot measure the original, and the safe direction there is the
+        extra file: a clip wrongly given an editing proxy costs 7 Mbps of
+        disk, a clip wrongly denied one sends a remote editor the camera
+        master (plan section 5 item 1).
+        """
+        ext = os.path.splitext(str(item.get("local_path")
+                                   or item.get("name") or ""))[1].lower()
+        codec = str((probe or {}).get("codec") or "").lower()
+        if ext in proxy_scan.NEEDS_RESOLVE_EXTS or codec in NEEDS_RESOLVE_CODECS:
+            return EDIT_PROXY_NEEDS_RESOLVE
+        light = ffmpeg_tools.is_edit_weight((probe or {}).get("height"),
+                                           (probe or {}).get("bitrate"),
+                                           (probe or {}).get("codec"))
+        return EDIT_PROXY_EDIT_WEIGHT if light else ""
+
+    def _make_edit_proxy(self, item: dict, source: str, out_dir: Path,
+                         probe: dict) -> Optional[str]:
+        """`Proxy/<stem>.mov` at proxy_gen's own-footage spec, verified.
+
+        `ffmpeg_tools.own_proxy_cmd` unchanged and through the same NVENC ->
+        CPU loop as the preview, because this file is what a remote editor
+        actually CUTS on: one builder for project proxies and archive proxies
+        means the two can never drift (plan section 5 item 2). The `.mov`
+        container is proxy_gen's for the same reason its own tier uses it --
+        R14, the Blackmagic Proxy Generator only recognises its own extension.
+        """
+        dest = out_dir / f"{item.get('video_id') or item.get('uid')}{EDIT_PROXY_EXT}"
+
+        def build(partial: Path, nvenc: bool) -> list:
+            return self.media.own_proxy_cmd(
+                self.ffmpeg_path, source, partial, nvenc=nvenc,
+                # Resolve's LinkProxyMedia refuses a proxy whose timecode does
+                # not match the original (proxy_relink.py:35-37); the probe has
+                # already drop-frame normalised it.
+                timecode=(probe or {}).get("timecode"))
+
+        return self._encode_verified(item, source, dest, build, probe,
+                                     "editing proxy")
+
+    def _encode_verified(self, item: dict, source: str, dest: Path,
+                         build_cmd: Callable[[Path, bool], list], probe: dict,
+                         what: str) -> Optional[str]:
+        """Encode to `<dest>.partial`, verify it, publish it -- or fail the item.
+
+        ONE loop for the preview and the editing proxy (2026-09-17, plan
+        section 5 item 3, "verify as in phase 1"): the verification is the
+        argument for the whole tier, so two copies of it would be two chances
+        for one of them to lose a check. NVENC first with one CPU retry, as
+        proxy_gen does; the verify step is not optional because NVENC on a
+        machine whose sessions are all taken exits 0 having written a few
+        seconds, and a proxy that plays for four of a ninety-second clip is
+        worse than none.
+        """
+        partial = Path(str(dest) + ".partial")
+        why = f"the {what} did not decode -- this clip was skipped"
         for nvenc in ([True, False] if self._nvenc() else [False]):
-            cmd = self.media.preview_proxy_cmd(self.ffmpeg_path, source, partial,
-                                               nvenc=nvenc, timecode=timecode,
-                                               fps=fps)
-            code, stderr = self._run_media(cmd)
+            code, stderr = self._run_media(build_cmd(partial, nvenc))
             if code == 0 and partial.is_file() and partial.stat().st_size > 0:
                 if self._verify_proxy(partial, probe):
-                    short = self._frames_missing(source, partial)
+                    short = self._frames_missing(source, partial, what)
                     if short is None:
                         try:
                             os.replace(str(partial), str(dest))
                         except OSError as exc:
-                            self._fail_item(item, f"the proxy could not be published: {exc}")
+                            self._fail_item(
+                                item, f"the {what} could not be published: {exc}")
                             return None
                         return str(dest)
                     why = short
                     self.log.warning("%s: %s on %s", item.get("name"), short,
                                      "NVENC" if nvenc else "the CPU")
                 else:
-                    self.log.warning("%s produced a short proxy on %s",
-                                item.get("name"), "NVENC" if nvenc else "the CPU")
+                    self.log.warning("%s produced a short %s on %s",
+                                item.get("name"), what,
+                                "NVENC" if nvenc else "the CPU")
             _unlink(partial)
             if self._should_stop():
                 return None
         self._fail_item(item, why)
         return None
 
-    def _frames_missing(self, source: str, made: Path) -> Optional[str]:
+    def _frames_missing(self, source: str, made: Path,
+                        what: str = "proxy") -> Optional[str]:
         """Why this proxy is the wrong LENGTH in frames, or None if it is not.
 
         A count neither side can produce is not a mismatch: both have to be
@@ -2363,7 +2513,7 @@ class BrollIngestor:
             return None
         if not src_frames or not made_frames or src_frames == made_frames:
             return None
-        return (f"the proxy has {made_frames} frames, the original has "
+        return (f"the {what} has {made_frames} frames, the original has "
                 f"{src_frames} - Resolve would refuse it")
 
     def _verify_proxy(self, path: Path, probe: dict) -> bool:
@@ -2605,6 +2755,14 @@ class BrollIngestor:
         if outputs.get("proxy") and archive_dir and stem:
             plan[f"{archive_dir}/Proxy/{stem}.mp4"] = (
                 broll_upload.KIND_PROXY, str(outputs.get("proxy") or ""))
+        # Beside the preview, same folder, different extension (plan section
+        # 2): `proxy_relink` prefers `.mov`, so an editor's Resolve picks the
+        # editing proxy over the preview without anything being told where it
+        # is. Absent for an edit-weight original and for BRAW, which is why
+        # this is a `get` and not a required slot.
+        if item.get("edit_proxy") and archive_dir and stem:
+            plan[f"{archive_dir}/Proxy/{stem}{EDIT_PROXY_EXT}"] = (
+                broll_upload.KIND_EDIT_PROXY, str(item.get("edit_proxy") or ""))
         with self._lock:
             upload_originals = bool(
                 ((self._batch or {}).get("settings") or {}).get("upload_originals", True))
@@ -2873,9 +3031,17 @@ class BrollIngestor:
         between the kinds (docs/API.md 6a vs 6b): b-roll declares a list of
         archive-relative files, music declares one size, because the server
         allocated the only name involved and nothing about it came off the
-        wire."""
+        wire.
+
+        The editing proxy is read off the item's own declaration rather than
+        passed in, because music overrides this method with the four-argument
+        signature and a fifth positional argument here would be a TypeError on
+        every music batch (2026-09-17)."""
+        edit_rel = next((rel for rel, kind in (item.get("uploads") or {}).items()
+                         if kind == broll_upload.KIND_EDIT_PROXY), None)
         return self._client().item_uploaded(batch_uid, item["uid"], files,
-                                            original_uploaded)
+                                            original_uploaded,
+                                            edit_proxy_rel=edit_rel)
 
     def _mirror_locally(self, item: dict) -> None:
         """Put this machine's own copy of the preview where the archive keeps

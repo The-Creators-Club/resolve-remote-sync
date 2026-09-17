@@ -81,10 +81,10 @@ Every **new** archive clip gets three files beside each other:
 `<dir>/Proxy/<stem>.mp4` (a **better browser preview**), and, when the
 original is heavier than edit-weight, `<dir>/Proxy/<stem>.mov` (the
 **editing proxy**, at the spec `proxy_gen` already uses for project footage).
-On a remote machine, Send to Resolve downloads the preview, creates the
-Resolve clip **at the original's canonical path while the original is
-offline**, links the preview as its proxy and inserts it. It then downloads
-the editing proxy in the background and relinks to it. On a wired rig nothing
+On a remote machine, Send to Resolve downloads the preview **to the
+original's own path as a stand-in** (spike verdict, §3: Resolve creates no
+clip at a path it cannot open), imports it there, and inserts it. It then
+downloads the editing proxy in the background and links it as the proxy. On a wired rig nothing
 is downloaded; the clip is the original, with the editing proxy linked if one
 exists. **Existing clips keep today's behaviour**, apart from one change: the
 540p preview is no longer linked as the Resolve proxy for a clip whose full
@@ -103,6 +103,49 @@ F1).
 ---
 
 ## 3. Phase 0: the spike (decides phase 3)
+
+**Verdict (base rig, 2026-09-17 evening, Resolve Studio 21.0.1, scratch
+project "Proxy tiers spike 2026-09-17"):** Resolve will not create, repoint
+or import a media-pool clip whose file it cannot open, by any route, and it
+refuses silently.
+
+| Method | Result on a path that does not exist here |
+|---|---|
+| 0 `ImportMedia(preview)` + `LinkFullResolutionMedia(ghost)` | `False`, clip unchanged. With an EXISTING full-res path the same call answers `True` and turns the preview into that clip's proxy (File Path becomes the full-res, Proxy becomes the preview), so the call works, it just validates the file |
+| A `ImportTimelineFromFile(fcpxml, importSourceClips)` | `False`, no timeline, no clip, no dialog. The identical export with the real path imports fine (control), so it is the missing media that is refused, not the XML. Note: a hand-written 1.9 FCPXML is not accepted at all; only Resolve's own 1.10 export re-imports, and a `.drt` keeps its paths in an opaque `FieldsBlob`, so neither can be "edited to a ghost path" in the field |
+| B `ImportMedia(preview)` + `ReplaceClip(ghost)` | `False`, clip unchanged |
+| **C stand-in** (the preview's bytes at the original's own path and name) | **Works.** Imports as an ordinary clip at that path, with the stand-in's geometry (1920x1080, the preview's frame count and timecode) |
+
+So phase 3 is method C, and "the project keeps pointing at
+`P:\Assets\B-roll Archive\...`" holds because the stand-in sits at exactly
+that path on the remote machine. Two consequences the design in §6 takes
+on: a stand-in cannot be a `.braw`/`.r3d`/`.crm` (preview-only insert for
+those, clip at the preview's path), and **the clip's stored geometry is the
+stand-in's, and stays so**. Second half of the spike, same evening: the
+stand-in's bytes were replaced by the real 6064x3424 ProRes original (1813
+frames) and the project closed and reopened; Resolve still reported
+1920x1080, 3255 frames and the stand-in's timecode, and still accepted the
+preview as a proxy against those stored numbers. Resolve does not re-read
+a file that changed under a clip. What does refresh it is
+`MediaPoolItem.ReplaceClip(<the same path>)`: after that the clip read
+6064x3424, 30 fps, 1813 frames, `12:09:12:22`. So a machine that holds the
+real file must run one `replace_clip` on its own path for every
+stand-in-born clip, through `resolve_bridge.replace_clip` (save point,
+undo journal), before the clip is right there. For today's Creators_Club
+entries this is moot: top slot and preview are both 1080p with the same
+frame count and timecode, so the stand-in IS the geometry.
+
+Also measured the same evening: the Johnny Harris previews re-encoded with
+the tmcd-aware rule LINK (`cam-3-039.mov`, colon `14:59:25:29`, proxy
+accepted, "1920x1080"); and R17's tenth clip is no longer refused: Resolve
+reads the Sony rtmd colon `03:40:27:12` as drop-frame (`Start TC`
+`03:40:27;12`) and the semicolon preview is attached, so the 2026-08-12
+normalisation was right for Sony and the tmcd rule is right for Blackmagic.
+Practical note for anyone scripting Resolve on this rig: a Resolve launched
+with a monitor speaker unplugged raises an "Audio Output" message box on
+every project load and page change, and the API returns `None` for
+everything until it is dismissed; the spike ran under a UI Automation loop
+that clicks OK.
 
 The whole of goal 2 on a remote machine rests on one thing Resolve may not
 allow: **a media-pool clip whose path is a file that does not exist on this
@@ -277,7 +320,8 @@ path by machine and by what exists:
 | Wired (base rig, or `local_root` is the NAS) | yes | No download. Import the original. Link `edit_proxy_rel` if it exists, **otherwise link nothing** | Original, with the good proxy or none |
 | Remote | yes (fetched before, or old behaviour) | As today, but stop linking the 540p preview | Unchanged apart from no 540p proxy |
 | Remote | no, `original_is_edit_weight` | Download the top slot, as today | Unchanged |
-| Remote | no, heavy original | **(1)** download `preview_rel` (seconds) **(2)** create the clip offline at the canonical original path (the phase 0 method) **(3)** link the preview as its proxy **(4)** insert, answer the page "inserted" **(5)** in the background, download `edit_proxy_rel` and link it in place of the preview | The original's path, playing the preview at once, then the editing proxy |
+| Remote | no, heavy original | **(1)** download `preview_rel` (seconds) **to the original's own local path** as a STAND-IN (spike method C: the bytes of the preview under the original's name; a `.braw`/`.r3d`/`.crm` original cannot have one and gets a preview-only insert at the preview's path) **(2)** record it in the stand-in ledger `~/.ccsync/state/broll_standins.json` **(3)** import it: the clip's File Path IS the canonical original path **(4)** insert, answer the page "inserted" **(5)** in the background, download `edit_proxy_rel` and link it as the proxy | The original's path, playing the stand-in at once, then the editing proxy as its proxy |
+| Wired, or a remote that later holds the real file | yes, and the clip was born from a stand-in elsewhere | The relink pass runs `replace_clip(<same path>)` once for such a clip, which is the one call that makes Resolve re-read the file (spike, second half); then links the editing proxy if there is one. A clip is "born from a stand-in" when its stored `Frames`/`Resolution` disagree with the file at its path, or the ledger says so | The real original, right geometry, with the good proxy |
 
 Details that matter:
 
@@ -321,6 +365,18 @@ Details that matter:
   original with a working proxy must not be counted there: the watcher
   subtracts clips under the archive prefix whose proxy is working. A test
   pins MISSING for the classification and zero for the count.
+* **The stand-in is a lie the companion must remember.** It sits at the
+  original's path with the original's name, so `broll_fetch`'s
+  `local_path.is_file()` would call the original present and never fetch
+  it, lane A must never upload it, and a render on that machine would
+  render 1080p H.264 under a 6K name. The ledger
+  (`~/.ccsync/state/broll_standins.json`: local path, the original's real
+  size/geometry from the `insert` object, when) is read by all three:
+  `build_insert_response` treats a ledgered path as absent for the "is the
+  original here" test, lane A's filter excludes ledgered paths, and the
+  render warning names them. A stand-in is retired (file replaced, ledger
+  entry dropped) only by a real download of the original, which is a
+  follow-up: v1 never fetches a heavy original to a remote machine.
 * **Disk:** downloaded proxies accumulate under
   `<local_root>/Assets/B-roll Archive/**/Proxy/`, which no sync lane manages.
   v1 counts them in diagnostics. A "clear cached b-roll proxies" action is a

@@ -644,7 +644,26 @@ class Sequencer:
             return 0.0
         if not self._resume_event.is_set():
             return 0.0
-        return max(0.0, time.monotonic() - self._heartbeat)
+        silent = max(0.0, time.monotonic() - self._heartbeat)
+        # CR-279 (2026-09-17): a turn is stamped only at its start, and
+        # --cutoff-mode SOFT lets a 40 GB original outlive the whole bound
+        # (leso's Mac: a 70-minute Base Drone turn, "no heartbeat for 3962s",
+        # six restart attempts refused because the thread was alive, and an
+        # ERROR line each time). A lane child that is still moving bytes is
+        # the loop making progress, so its latest progress counts as a beat.
+        # A child that moves nothing is killed by the lane's own zero-progress
+        # limit, so a truly wedged turn still ages out here.
+        for lane in (self.lane_a, self.lane_b):
+            probe = getattr(lane, "seconds_since_child_progress", None)
+            if probe is None:
+                continue
+            try:
+                age = probe()
+            except Exception:
+                continue
+            if isinstance(age, (int, float)):
+                silent = min(silent, max(0.0, float(age)))
+        return silent
 
     def last_error(self) -> Optional[str]:
         """The exception that ended the thread, else the last one a pass

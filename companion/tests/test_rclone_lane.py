@@ -2285,3 +2285,45 @@ def test_one_call_per_pass_however_many_files(tmp_path):
         tmp_path, [(f"Proxy/clip{i}.mp4", i + 1) for i in range(12)], locator=locator)
     lane._relocate_trashed("Projects/2026/CCT/Season 1")
     assert calls == [12]
+
+
+def test_a_moving_child_publishes_its_progress_and_clears_it_on_exit(tmp_path):
+    """CR-279: the sequencer's heartbeat reads this, so a 70-minute upload
+    that keeps moving is not taken for a wedged turn."""
+    seen: list = []
+    bytes_moved = {"n": 0}
+
+    def _moves(wait_count):
+        bytes_moved["n"] += 1_000_000
+        lane._handle_stderr_line(
+            '{"level":"notice","msg":"","stats":{"bytes":%d,"totalBytes":9e12,'
+            '"speed":1.0,"eta":99}}' % bytes_moved["n"],
+            tally,
+        )
+        seen.append(lane.seconds_since_child_progress())
+
+    proc = _StalledProc(moves=_moves)
+    lane = _watchdog_lane(tmp_path, proc)
+    tally = rclone_lane.RcloneRunTally()
+    assert lane.seconds_since_child_progress() is None
+    with pytest.raises(_StopWatchdog):
+        lane._monotonic = _bounded_clock(50)
+        lane._wait_with_watchdog(["rclone"], proc, tally, 600)
+    assert seen and all(isinstance(s, float) and s < 60 for s in seen)
+    assert lane.seconds_since_child_progress() is None
+
+
+def test_an_express_child_does_not_publish_progress(tmp_path):
+    proc = _StalledProc()
+    lane = _watchdog_lane(tmp_path, proc)
+    seen: list = []
+    tally = rclone_lane.RcloneRunTally()
+    orig = proc.wait
+
+    def wait(timeout=None):
+        seen.append(lane.seconds_since_child_progress())
+        return orig(timeout=timeout)
+
+    proc.wait = wait
+    lane._wait_with_watchdog(["rclone"], proc, tally, 600, express=True)
+    assert seen and all(s is None for s in seen)

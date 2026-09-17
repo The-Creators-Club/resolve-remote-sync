@@ -826,3 +826,73 @@ def test_a_failing_shared_folder_probe_never_takes_the_lane_report_down(
                      shared_folder_problems_fn=_boom)
     assert lane.check_once().state == STATE_IDLE
     assert lane.shared_folder_problems() == []
+
+
+# -- CR-278: "folder path missing" outlives the drive coming back ------------
+
+
+def _path_missing_lane(tmp_path, folder_path, db_state, posts, paused=False):
+    cfg_xml = tmp_path / "config.xml"
+    cfg_xml.write_text(
+        "<configuration><gui><apikey>k</apikey></gui></configuration>", encoding="utf-8")
+    folders = [{"id": "assets-luts", "path": str(folder_path), "paused": paused,
+                "devices": [{"deviceID": "ME"}, {"deviceID": "NAS"}]}]
+
+    def http_get(url, api_key, timeout):
+        if url.endswith("/rest/config"):
+            return {"folders": folders}
+        if "/rest/db/status" in url:
+            return dict(db_state)
+        if url.endswith("/rest/system/status"):
+            return {"myID": "ME"}
+        return {}
+
+    def http_post(url, api_key, timeout):
+        posts.append(url)
+        return {}
+
+    return SyncthingLane(api_key="k", config_xml_path=cfg_xml, http_get=http_get,
+                         http_post=http_post, expected_folder_ids=["proj-1"])
+
+
+def test_a_folder_whose_path_is_back_is_asked_to_rescan(tmp_path):
+    """leso's Mac 2026-09-17: the SSD went away at 07:24, came back, and two
+    folders still said "folder path missing" at 12:50, which the dashboard
+    showed as a lane C error. Syncthing only re-checks on a scan."""
+    root = tmp_path / "Luts"
+    (root / ".stfolder").mkdir(parents=True)
+    posts: list = []
+    lane = _path_missing_lane(
+        tmp_path, root, {"state": "error", "error": "folder path missing"}, posts)
+    lane.check_once()
+    assert len(posts) == 1
+    assert posts[0].endswith("/rest/db/scan?folder=assets-luts")
+    # Throttled: the next poll does not ask again.
+    lane.check_once()
+    assert len(posts) == 1
+
+
+def test_no_rescan_while_the_path_or_its_marker_is_still_gone(tmp_path):
+    posts: list = []
+    missing = _path_missing_lane(
+        tmp_path, tmp_path / "gone", {"state": "error", "error": "folder path missing"}, posts)
+    missing.check_once()
+    # An empty mount-point directory is not the drive being back.
+    (tmp_path / "empty").mkdir()
+    empty = _path_missing_lane(
+        tmp_path, tmp_path / "empty", {"state": "error", "error": "folder path missing"}, posts)
+    empty.check_once()
+    assert posts == []
+
+
+def test_no_rescan_for_other_errors_idle_or_paused_folders(tmp_path):
+    root = tmp_path / "Luts"
+    (root / ".stfolder").mkdir(parents=True)
+    posts: list = []
+    for state, paused in (
+        ({"state": "error", "error": "folder marker missing"}, False),
+        ({"state": "idle", "error": ""}, False),
+        ({"state": "error", "error": "folder path missing"}, True),
+    ):
+        _path_missing_lane(tmp_path, root, state, posts, paused=paused).check_once()
+    assert posts == []

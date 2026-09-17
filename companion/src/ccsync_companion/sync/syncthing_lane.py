@@ -53,6 +53,23 @@ from .base import (
 log = logging.getLogger("ccsync.sync.syncthing")
 
 HttpGetFn = Callable[[str, str, float], Any]
+HttpPostFn = Callable[[str, str, float], Any]
+
+# CR-278 (2026-09-17): Syncthing's own text for a folder whose directory was
+# not there at its last scan. It re-checks only when it scans again, so an
+# external drive that comes back leaves the folder in this error until the
+# next hourly rescan, or longer (leso's Mac: 07:24 to 12:50, found by hand).
+FOLDER_PATH_MISSING = "folder path missing"
+# How often the heal pass looks at all configured folders, and how long one
+# folder waits before it is asked to rescan again. A rescan of a folder whose
+# path really is gone just re-fails, so the cooldown only bounds noise.
+PATH_HEAL_INTERVAL_SECONDS = 60.0
+PATH_HEAL_COOLDOWN_SECONDS = 300.0
+
+
+def default_http_post(url: str, api_key: str, timeout: float) -> Any:
+    """A body-less Syncthing REST POST, through the same no-redirect opener."""
+    return syncthing_admin_mod.http_request("POST", url, api_key, None, timeout)
 
 # Syncthing's connection "type" values that mean "not a direct path". A
 # relay-client connection runs over the PUBLIC relay pool -- typically
@@ -200,6 +217,7 @@ class SyncthingLane(LaneAdapter):
         supervisor: Optional[Any] = None,
         unfiltered_folders_fn: Optional[Callable[[], list[str]]] = None,
         shared_folder_problems_fn: Optional[Callable[[], list[str]]] = None,
+        http_post: Optional[HttpPostFn] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._configured_api_key = api_key
@@ -248,6 +266,10 @@ class SyncthingLane(LaneAdapter):
         self.timeout = timeout
         self.poll_interval = poll_interval
         self._http_get = http_get or default_http_get
+        self._http_post = http_post or default_http_post
+        # CR-278: monotonic stamps for the path-missing heal pass.
+        self._path_heal_at = 0.0
+        self._path_heal_asked: dict[str, float] = {}
 
         self._status = LaneStatus(name=self.name)
         # This instance's own device ID (cached; it never changes) -- needed
@@ -320,13 +342,20 @@ class SyncthingLane(LaneAdapter):
         """GET with per-home API-key fallback: a 401/403 means "running, but
         that key belongs to a different Syncthing home", so the next
         candidate is tried; any other failure propagates unchanged."""
+        return self._call(self._http_get, path)
+
+    def _post(self, path: str) -> Any:
+        """A body-less POST with the same key fallback as _get."""
+        return self._call(self._http_post, path)
+
+    def _call(self, fn: Callable[[str, str, float], Any], path: str) -> Any:
         url = f"{self.base_url}{path}"
         last_auth_error: Optional[Exception] = None
         tried_any = False
         for api_key in self._api_key_attempts():
             tried_any = True
             try:
-                result = self._http_get(url, api_key, self.timeout)
+                result = fn(url, api_key, self.timeout)
             except urllib.error.HTTPError as exc:
                 if exc.code in (401, 403):
                     last_auth_error = exc
@@ -338,9 +367,46 @@ class SyncthingLane(LaneAdapter):
         if not tried_any:
             # No key anywhere: one unauthenticated attempt, exactly as the
             # `or [""]` fallback this replaced did.
-            return self._http_get(url, "", self.timeout)
+            return fn(url, "", self.timeout)
         assert last_auth_error is not None
         raise last_auth_error
+
+    def _heal_missing_paths(self, folders: list[dict[str, Any]]) -> None:
+        """CR-278: ask Syncthing to rescan any folder it still calls "folder
+        path missing" whose directory, marker included, is there now.
+
+        Every configured folder, not just the selection: the shared asset
+        libraries (assets-luts on leso's Mac) sit in the same error and no
+        selection names them. Paused folders are skipped, since Syncthing
+        does not scan them. The marker check is what keeps an empty mount
+        point directory on a Mac from counting as the drive being back.
+        A rescan only reads; it never deletes or pulls anything by itself.
+        Never raises."""
+        now = time.monotonic()
+        if now - self._path_heal_at < PATH_HEAL_INTERVAL_SECONDS:
+            return
+        self._path_heal_at = now
+        for folder in folders:
+            try:
+                fid = str(folder.get("id") or "")
+                path = str(folder.get("path") or "")
+                if not fid or not path or folder.get("paused"):
+                    continue
+                if now - self._path_heal_asked.get(fid, -1e18) < PATH_HEAL_COOLDOWN_SECONDS:
+                    continue
+                db_status = self._get(f"/rest/db/status?{urlencode({'folder': fid})}") or {}
+                if str(db_status.get("state") or "") != "error":
+                    continue
+                if FOLDER_PATH_MISSING not in str(db_status.get("error") or ""):
+                    continue
+                if not os.path.isdir(os.path.join(path, ".stfolder")):
+                    continue
+                self._path_heal_asked[fid] = now
+                self._post(f"/rest/db/scan?{urlencode({'folder': fid})}")
+                log.info("lane C: folder %s said %r but %s is there -- asked Syncthing "
+                         "to rescan it (CR-278)", fid, FOLDER_PATH_MISSING, path)
+            except Exception:
+                log.debug("path-missing heal failed for a folder", exc_info=True)
 
     def _set_status(self, status: LaneStatus) -> None:
         with self._lock:
@@ -641,6 +707,10 @@ class SyncthingLane(LaneAdapter):
             )
             self._set_status(self._with_problems(status))  # comp-sync-3
             return self.status()
+
+        # Before any verdict, so a folder missing from the selection cannot
+        # keep an unrelated folder's stale path error alive (CR-278).
+        self._heal_missing_paths(folders)
 
         if missing_folders:
             # A folder the server has OFFERED but the sequencer hasn't

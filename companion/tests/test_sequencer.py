@@ -2300,3 +2300,27 @@ def test_the_repather_is_built_with_this_machine_s_state_and_relink(tmp_path):
     # writes the undo journal (CLAUDE.md's media-pool rule).
     assert seq.repather._relink_fn == seq._relink_moved_project
     assert seq.repath_events() == []
+
+
+def test_a_lane_child_still_moving_counts_as_a_heartbeat():
+    """CR-279 (leso's Mac 2026-09-17): a 70-minute turn on a 40 GB original
+    read as "no heartbeat for 3962s" and drew six refused restarts."""
+    import threading as _threading
+
+    seq, lane_a, _b, _e = _build(FakeSelectionClient(selection=[]), FakeAdmin())
+    alive = _threading.Event()
+    thread = _threading.Thread(target=alive.wait, daemon=True)
+    thread.start()
+    try:
+        seq._thread = thread
+        seq._resume_event.set()
+        seq._heartbeat = time.monotonic() - 4000
+        assert seq.seconds_since_heartbeat() >= 4000
+        lane_a.seconds_since_child_progress = lambda: 5.0
+        assert seq.seconds_since_heartbeat() < 10
+        # No child running: the turn's own stamp is the answer again.
+        lane_a.seconds_since_child_progress = lambda: None
+        assert seq.seconds_since_heartbeat() >= 4000
+    finally:
+        alive.set()
+        seq._thread = None

@@ -2610,6 +2610,12 @@ class RcloneLane(LaneAdapter):
         # a wedged mount without sleeping for them.
         self._monotonic: Callable[[], float] = time.monotonic
         self._wait_poll_seconds = RCLONE_WAIT_POLL_SECONDS
+        # CR-279 (2026-09-17): time.monotonic() of the last byte/file the
+        # SEQUENCER-driven child moved, None while none is running. Always the
+        # real clock, not self._monotonic: the sequencer's heartbeat is
+        # compared against it. Express runs are not counted; they are not on
+        # the sequencer's thread.
+        self._child_progress_at: Optional[float] = None
         # Shared by both lanes on purpose: the report has ONE `stalled` slot,
         # and "the last stall this machine killed" is the question it answers.
         self._stall_file = self._state_dir / LANE_STALL_FILENAME
@@ -4445,6 +4451,30 @@ class RcloneLane(LaneAdapter):
         last_progress_at = started
         last_marker = self._progress_marker(tally, include_bytes=not express)
         over_ceiling_logged = False
+        if not express:
+            self._child_progress_at = time.monotonic()
+        try:
+            return self._wait_loop(
+                cmd, proc, tally, express, zero_limit, hard_limit, clock,
+                spawn_lock, what, started, last_progress_at, last_marker,
+                over_ceiling_logged)
+        finally:
+            if not express:
+                self._child_progress_at = None
+
+    def seconds_since_child_progress(self) -> Optional[float]:
+        """CR-279: how long ago the sequencer's rclone child last moved
+        anything, or None when no such child is running. A child that moves
+        nothing is killed by _wait_with_watchdog's zero-progress limit, so a
+        small answer here really does mean "busy with a big transfer"."""
+        at = self._child_progress_at
+        if at is None:
+            return None
+        return max(0.0, time.monotonic() - at)
+
+    def _wait_loop(self, cmd, proc, tally, express, zero_limit, hard_limit, clock,
+                   spawn_lock, what, started, last_progress_at, last_marker,
+                   over_ceiling_logged) -> int:
         while True:
             try:
                 return proc.wait(timeout=self._wait_poll_seconds)
@@ -4460,6 +4490,8 @@ class RcloneLane(LaneAdapter):
             marker = self._progress_marker(tally, include_bytes=not express)
             if marker != last_marker:
                 last_marker, last_progress_at = marker, now
+                if not express:
+                    self._child_progress_at = time.monotonic()
             idle_for = now - last_progress_at
             ran_for = now - started
             # "Moving" = something arrived within the last two polls. One

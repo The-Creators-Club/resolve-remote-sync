@@ -24330,6 +24330,84 @@ that 19-part batch, and nothing else in the episode's 728 entries, was
 mis-sourced - audited by matching every stored English against the paragraph
 index of its own clip.
 
+## CR-278 - lane C showed "syncing error" for hours after an external drive came back - FIXED in repo 2026-09-17 (syncthing_lane._heal_missing_paths), unshipped
+
+leso's Mac, 2026-09-17. The SSD (`/Volumes/SAMDISK`) went away at about
+07:24 local and Syncthing put all seven folders into `error` with
+"folder path missing". When the drive came back, five cleared on their own
+activity; `2026-ff5-animals` and `assets-luts` did not, because Syncthing
+only re-checks a folder's path when it scans it. At 12:06 the companion
+reported lane C in error and the dashboard showed "syncing error". Both
+paths, `.stfolder` included, were on the disk. A manual
+`POST /rest/db/scan` at 12:50 cleared both within a second.
+
+A hook on "drive came back" (`_on_root_present`) would not have caught it:
+the companion restarted at 12:07 after Resolve quit and saw the drive as
+present at startup, so no absent-to-present change ever fired.
+
+Fix: lane C's poll now looks at every configured, unpaused folder at most
+once a minute, and for one in `error` with "folder path missing" whose
+directory AND `.stfolder` exist, POSTs `/rest/db/scan` (one ask per folder
+per five minutes). The marker check keeps an empty mount-point directory
+from counting as the drive being back. A scan only reads. Shared asset
+folders are included, since no selection names them. Tests:
+`tests/test_syncthing_lane.py` (CR-278 block).
+
+Side note: `pytest tests/test_syncthing_lane.py` on its own fails to
+collect (circular import `syncthing_lane` -> `syncthing_admin` ->
+`syncthing_lane`); it passes when `test_syncthing_admin.py` is collected
+first, as in the full suite. Pre-existing, not touched.
+
+## CR-279 - the thread watchdog "restarts" a sequencer that is busy with one long upload, and the restart does nothing - watchdog half FIXED in repo 2026-09-17 (Sequencer.seconds_since_heartbeat), unshipped; queueing half OPEN
+
+leso's Mac, 2026-09-17 12:33 onward: lane A was uploading 4 files / 32.7 GB
+from `Base Drone` and passed its 1500 s ceiling, and rclone_lane let it run
+because bytes were still moving (correct). The sequencer thread, blocked in
+that pass, stopped heartbeating, and from 12:38 the watchdog logged ERROR
+"restarting the sequencer -- no heartbeat for 1825s" with growing backoff;
+each attempt was answered "start() while a sequencer thread is still
+alive -- ignoring". So an ERROR line and a watchdog record per attempt for a
+thread that is healthy, and lane B and lane C turns wait behind the upload
+for its whole length (a known shape, see CR-91). Wanted: the lane pass
+heartbeats while its child is still making progress, or the watchdog skips
+a thread whose current child is moving bytes; and a lane A pass this long
+should not starve lane B.
+
+Fix (watchdog half): `RcloneLane` publishes when its sequencer-driven
+child last moved a byte or a file (`seconds_since_child_progress`, None
+when no child runs; express runs are not counted) and
+`Sequencer.seconds_since_heartbeat` takes the smaller of that and the turn
+stamp. A child that moves nothing is still killed by the lane's
+zero-progress limit, so a truly wedged turn still ages out. Tests:
+`test_rclone_lane.py` and `test_sequencer.py` (CR-279).
+
+Still open (queueing half): lane B already runs beside lane A inside a
+turn, but every OTHER project waits until that turn's lane A child ends.
+Changing that means letting the sequencer leave a lane A that is past its
+budget but still moving, which touches the repath-before-lane-A ordering
+(AUDIT_2 C-1); a design decision, not a patch.
+
+Not a separate bug: the "progress thrown away" suspicion from the same
+session. The two `fx3_20260912_183x.MP4` files that started at 13:47
+most likely had never started before: the first run's rate (~20 MB/s)
+fits two files in flight, `--cutoff-mode SOFT` lets in-flight files land,
+and the 13:18 orphan scan found one 0.1 GB `.partial`. rclone's SFTP
+backend cannot resume an upload in any case; the lane already refuses to
+kill a moving one for that reason.
+
+## CR-280 - every HTTPS download from the frozen macOS companion fails certificate verification - OPEN
+
+leso's Mac, first seen 2026-09-07, still there on 0.9.73 (2026-09-17):
+`urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] ... unable to get local
+issuer certificate` for yt-dlp's SHA2-256SUMS and the ffmpeg / ffprobe /
+deno sidecars on every start. The frozen macOS Python has no CA bundle to
+verify against. Effect: "sidecar: could not install ffmpeg, ffprobe,
+deno -- YouTube downloads stay on the server"; requester-first YouTube
+downloads never run on a Mac. Fix direction: ship `certifi` in the macOS
+bundle and build the SSL context from `certifi.where()` (or point
+`SSL_CERT_FILE` at it at startup) for these fetches; check the upgrade and
+release-feed fetches use the same context. Needs a Mac build to verify.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

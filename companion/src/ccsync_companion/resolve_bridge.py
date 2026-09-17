@@ -1816,6 +1816,7 @@ def _enrich_proxy_keys(items: list[dict[str, Any]]) -> bool:
     # between chunks means a card click in Timeline Cards waits for a chunk,
     # not for the walk (library walk, 2026-08-26).
     swept = [0]
+    archive_roots = _broll_archive_roots()
     for start in range(0, len(items), _PROXY_ENRICH_CHUNK):
         chunk = items[start:start + _PROXY_ENRICH_CHUNK]
         with _bridge_call("get_media_pool_items"):
@@ -1841,7 +1842,45 @@ def _enrich_proxy_keys(items: list[dict[str, Any]]) -> bool:
                 _sweep_yield(swept)
                 item["proxy_path"] = _clip_property(clip, "Proxy Media Path")
                 item["proxy_state"] = _clip_property(clip, "Proxy")
+                if _under_broll_archive(item.get("file_path"), archive_roots):
+                    # A THIRD property read, for the archive only (plan
+                    # section 6, 2026-09-17): a clip born from a stand-in
+                    # keeps the stand-in's frame count for ever, and this is
+                    # what proxy_relink compares against the file. Two reads
+                    # over 1,298 clips measured 5.5 s, so this is deliberately
+                    # not asked of project footage, which cannot be in that
+                    # state -- it was imported on the machine holding it.
+                    item["frames"] = _clip_property(clip, "Frames")
     return True
+
+
+def _broll_archive_roots() -> tuple[str, str]:
+    """(local_root, canonical_prefix) for the archive test below, read ONCE
+    per walk. config_mod.load_config() parses the TOML on every call, so this
+    must never be inside the per-clip loop."""
+    try:
+        cfg = _config_without_creating()
+        return (str(cfg.get("local_root") or ""),
+                str(cfg.get("canonical_prefix") or ""))
+    except Exception:
+        return ("", "")
+
+
+def _under_broll_archive(file_path: Any, roots: tuple[str, str]) -> bool:
+    """Is this clip in the b-roll archive, i.e. somewhere a stand-in can be?
+
+    Never raises: an unanswerable question is "no", which costs a refresh
+    nobody asked for and never a walk.
+    """
+    path = str(file_path or "")
+    if not path:
+        return False
+    try:
+        from . import broll_standins
+
+        return broll_standins.is_under_archive(path, roots[0], roots[1])
+    except Exception:
+        return False
 
 
 def _get_media_pool_items_locked() -> dict[str, Any]:

@@ -451,6 +451,11 @@ def act_insert(req):
 
 BROLL_STATUS_ACTION = "broll_status"
 BROLL_INSERT_ACTION = "broll_insert"
+# The stand-in's editing proxy, once it has landed (plan section 6 step 5,
+# 2026-09-17). A child for the same reason the insert is one, and a SECOND
+# action rather than a bridge call in the tray process, so this build still
+# has exactly one caller of scriptapp() per process (CR-68).
+BROLL_LINK_PROXY_ACTION = "broll_link_proxy"
 
 
 def act_broll_status(_req):
@@ -472,10 +477,51 @@ def act_broll_insert(req):
     )
 
 
+def act_broll_link_proxy(req):
+    """Attach `proxy_path` to the clip whose File Path is `path`.
+
+    The background half of the b-roll stand-in (plan section 6 step 5): the
+    editor is already cutting with the preview under the original's name, and
+    this is the editing proxy arriving behind them. Both paths are LOCAL
+    absolute paths -- broll_server does the (share, rel_path) translation,
+    exactly as it does for the insert.
+
+    The proxy is linked in the CLIP's own spelling, which is proxy_relink's
+    rule verbatim: a clip stored canonically (`P:\\...`) gets a canonical
+    proxy path, so the project stays portable to every other machine in the
+    fleet. Resolve validates the link itself (LinkProxyMedia returns False on
+    a timecode/frame-count mismatch), so a wrong-but-similarly-named file is
+    refused rather than silently attached.
+    """
+    path = req["path"]
+    proxy_path = req["proxy_path"]
+    _resolve, _project, pool = connect()
+    canonical_fn = canonical_fn_from_config()
+    item = existing_item(pool, path, canonical_fn)
+    if item is None:
+        return {"ok": False, "reason": "not_in_pool",
+                "error": "that clip is not in this project's media pool"}
+    if canonical_fn is not None:
+        try:
+            spelled = canonical_fn(proxy_path)
+        except Exception:                                      # noqa: BLE001
+            spelled = None
+        if spelled:
+            proxy_path = str(spelled)
+    result = resolve_bridge.link_proxy_media(item, proxy_path,
+                                             source="broll_proxy_upgrade")
+    out = dict(result or {})
+    out.setdefault("ok", False)
+    if not out.get("ok") and "error" not in out:
+        out["error"] = str(out.get("message") or "Resolve refused the proxy")
+    return out
+
+
 ACTIONS = {"status": act_status, "bin": act_bin,
            "under": act_under, "insert": act_insert,
            BROLL_STATUS_ACTION: act_broll_status,
-           BROLL_INSERT_ACTION: act_broll_insert}
+           BROLL_INSERT_ACTION: act_broll_insert,
+           BROLL_LINK_PROXY_ACTION: act_broll_link_proxy}
 
 
 def run_request(req):

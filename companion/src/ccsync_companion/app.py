@@ -30,6 +30,7 @@ from typing import Any, Callable, Optional
 from . import broll_ingest as broll_ingest_mod
 from . import music_ingest as music_ingest_mod
 from . import broll_server as broll_server_mod
+from . import broll_standins
 from . import canon
 from . import capabilities as capabilities_mod
 from . import jobs_runner as jobs_runner_mod
@@ -1619,6 +1620,13 @@ class CompanionApp:
         # carries a live latch across the move, once.
         guard_state_dir = config_mod.resolved_log_path(cfg).parent / "state"
         latch_dir = config_mod.CONFIG_DIR
+        # The b-roll stand-in ledger, pointed at THIS machine's state dir
+        # once, here, rather than each reader deriving it from a config file
+        # it would have to re-parse (plan section 6, 2026-09-17). It is not a
+        # safety latch: losing it costs a forgotten lie, so state/ is the
+        # right home, beside the other per-machine bookkeeping.
+        broll_standins.configure(
+            guard_state_dir / broll_standins.STATE_FILENAME)
         self.lane_b_breaker = lane_guard.LaneBBreaker(
             lane_guard.adopt_legacy_latch(
                 latch_dir / lane_guard.BREAKER_STATE_FILENAME,
@@ -4425,7 +4433,20 @@ class CompanionApp:
                 self.config.get("local_root", ""),
                 str(self.config.get("canonical_prefix", "")),
                 exists_fn=self._exists_fn,
+                # Phase 3 (docs/BROLL_PROXY_TIERS_PLAN.md section 6): the
+                # frame count is only carried for archive clips (resolve_bridge
+                # reads it there and nowhere else), so this costs an ffprobe
+                # only where a stand-in could have been the source of the
+                # geometry. The counter is per PASS: a file whose count
+                # changed is the whole point of asking.
+                frames_fn=proxy_relink.stored_frames,
+                count_frames_fn=proxy_relink.frame_counter(
+                    str(self.config.get("ffmpeg_path") or "ffmpeg")),
             )
+            # ...and the editing proxies a restart, or a Resolve that was
+            # closed when the download finished, left owing. This is the
+            # cycle that already means "Resolve is open".
+            self._resume_broll_proxy_upgrades()
             if not ops:
                 return
             log.info("proxy relink: %d clip(s) need their proxy repointed", len(ops))
@@ -4901,6 +4922,21 @@ class CompanionApp:
         except Exception:
             log.exception("resolve_health: %s() failed", name)
             return []
+
+    def _resume_broll_proxy_upgrades(self) -> None:
+        """Start the b-roll editing-proxy downloads the ledger still owes.
+
+        Phase 3, step 5 (docs/BROLL_PROXY_TIERS_PLAN.md section 6): a stand-in
+        is inserted with the browser preview's bytes and the good proxy
+        follows in the background. A companion restart, or a Resolve that was
+        closed when the download landed, leaves the row `pending` -- which is
+        the whole reason the state is on disk. Fault-isolated: an upgrade that
+        cannot start must never cost the relink pass.
+        """
+        try:
+            broll_server_mod.resume_pending_upgrades(self.config)
+        except Exception:
+            log.exception("b-roll proxy upgrade: resume failed")
 
     def _note_proxy_attach(self, summary: Optional[dict[str, Any]]) -> None:
         """Keep the last attach pass's verdict (RES-3). Never raises."""

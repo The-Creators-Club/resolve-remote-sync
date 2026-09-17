@@ -281,6 +281,9 @@ def test_apply_with_nothing_to_do_is_silent():
     result = proxy_relink.apply_relinks([], lambda *_: {"ok": True})
     assert result == {
         "ok": True, "relinked": 0, "attached": 0, "failed": 0, "failures": [],
+        # Phase 3 (2026-09-17): how many clips were re-read from their own
+        # file. An added key, so every existing reader is unaffected.
+        "refreshed": 0,
         "details": [], "message": "",
         # None, not "": a status reader that renders whatever it is handed
         # must not put an empty line on the tray (RES-3).

@@ -112,7 +112,9 @@ from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import broll_fetch
+from . import broll_standins
 from . import broll_vlm_sidecar
+from . import canon
 from . import config as ccsync_config
 from . import ffmpeg_tools
 from . import ingest_kinds
@@ -120,6 +122,7 @@ from . import loopback_guard
 from . import music_server
 from . import music_worker
 from . import proxy_relink
+from . import proxy_scan
 from . import resolve_bridge
 from . import site as site_mod
 from . import ytdl_executor
@@ -748,6 +751,11 @@ def derive_insert_paths(insert: Any, rel_path: str) -> dict:
     derived = {
         "preview_rel": preview_rel,
         "edit_proxy_rel": edit_proxy_rel,
+        # What the page named, until the page says otherwise. Phase 3 reads
+        # it for ONE question -- is the original a .braw/.r3d/.crm, which can
+        # have no stand-in -- and in the stem-diverged case the page has
+        # named the preview, so its own answer is the only one there is.
+        "original_rel": rel_path,
         "original_is_edit_weight": None,
         "geometry": None,
         "from_page": False,
@@ -756,6 +764,12 @@ def derive_insert_paths(insert: Any, rel_path: str) -> dict:
         return derived
 
     derived["from_page"] = True
+    # An explicit null for the ORIGINAL is not an answer the way a null
+    # editing proxy is: there is always an original, and the rel the page
+    # posted is the fallback that has served since 2026-08-11.
+    cleaned_original = _clean_rel(insert.get("original_rel"))
+    if cleaned_original:
+        derived["original_rel"] = cleaned_original
     for key in ("preview_rel", "edit_proxy_rel"):
         if key not in insert:
             # Absent is NOT null: a dashboard that never mentioned the field
@@ -782,6 +796,128 @@ def derive_insert_paths(insert: Any, rel_path: str) -> dict:
             for k in ("width", "height", "fps", "frames", "start_tc")
         }
     return derived
+
+
+# -- the decision table (docs/BROLL_PROXY_TIERS_PLAN.md section 6) -----------
+#
+# Four answers, one pure function, so the table in the plan and the table in
+# the tests are the same table. Everything that touches disk, the NAS or
+# Resolve stays in build_insert_response.
+
+PLAN_IMPORT_ORIGINAL = "import_original"
+PLAN_FETCH_ORIGINAL = "fetch_original"
+PLAN_FETCH_STANDIN = "fetch_standin"
+PLAN_PREVIEW_ONLY = "preview_only"
+
+
+def _is_wired(ccsync_cfg: Optional[dict[str, Any]]) -> bool:
+    """Is this computer's tree the server's own tree?
+
+    Two spellings of one fact and both count: the computer's own `mode`
+    setting (CR-88 -- wired or remote belongs to the COMPUTER, not to the
+    person who is signed in), and a local_root that IS the canonical prefix,
+    which is how a wired rig has been configured since the P: mapping. A
+    wired rig never gets a stand-in: it either holds the original or it is
+    looking at an archive that is missing at the source, and that is what
+    today's "is the share mounted?" already says.
+    """
+    cfg = ccsync_cfg or {}
+    if str(cfg.get("mode", "editor")).strip().lower() == "base":
+        return True
+    local_root = str(cfg.get("local_root") or "").strip()
+    prefix = str(cfg.get("canonical_prefix") or "").strip()
+    if not local_root or not prefix:
+        return False
+    return canon.is_canonical(local_root, prefix)
+
+
+def plan_insert(local_path_exists: bool, is_standin: bool, tiers: dict,
+                wired: bool) -> dict[str, Any]:
+    """Which of the four routes this insert takes, and with which rel paths.
+
+    Pure. `tiers` is derive_insert_paths' answer (wave A), `wired` is
+    _is_wired's. Returns {"action", "fetch_rel", "insert_rel", "upgrade_rel",
+    "why"}, where every rel is a WIRE rel path under the b-roll share and
+    None means "the original's own rel_path" -- the caller owns the
+    translation into this machine's spelling, because it is the half holding
+    the mounts table.
+
+    The rules, in the plan's order:
+
+      * the original is on disk and is not a stand-in -> import it. Nothing
+        downloads, and the 540p preview is no longer linked as its proxy.
+      * a LEDGERED STAND-IN at that path counts as absent for the "is the
+        original here" question, but it is already placed, so the answer is
+        still to import that path -- and the background editing-proxy
+        upgrade may run for it.
+      * absent, and the original is edit-weight (or nobody could tell and no
+        editing proxy is known) -> download the top slot, exactly as today.
+      * absent, heavy, and the original is a .braw/.r3d/.crm -> a stand-in is
+        impossible (Resolve reads those with its own decoder, and a renamed
+        H.264 is not one), so the preview is fetched to ITS OWN path and that
+        is what is inserted.
+      * absent, heavy, ordinary container -> the stand-in: the preview's
+        bytes at the original's own path and name (spike method C).
+
+    "Heavy" deliberately includes `original_is_edit_weight = null` WITH an
+    editing proxy known: only a server that judged the original too heavy
+    ever makes one (wave B), so a null there is an old row rather than a real
+    "cannot tell".
+    """
+    tiers = tiers or {}
+    preview_rel = tiers.get("preview_rel")
+    edit_proxy_rel = tiers.get("edit_proxy_rel")
+    weight = tiers.get("original_is_edit_weight")
+    original_rel = tiers.get("original_rel")
+
+    if local_path_exists:
+        return {
+            "action": PLAN_IMPORT_ORIGINAL,
+            "fetch_rel": None,
+            "insert_rel": None,
+            # A clip born from a stand-in still owes its editing proxy; a
+            # real original owes nothing, because its own file IS the
+            # quality.
+            "upgrade_rel": edit_proxy_rel if is_standin else None,
+            "why": ("the stand-in for this clip is already in place"
+                    if is_standin else "the original is on this computer"),
+        }
+
+    if wired:
+        return {
+            "action": PLAN_FETCH_ORIGINAL, "fetch_rel": None,
+            "insert_rel": None, "upgrade_rel": None,
+            "why": "this computer's tree is the server's tree",
+        }
+
+    # `from_page` is load-bearing in the null case: without an insert object
+    # the editing proxy is only the stem convention's GUESS, and a guess is
+    # not the server saying it judged the original heavy. An older dashboard
+    # therefore keeps today's behaviour exactly, which is the skew rule wave
+    # A already follows (audit F2).
+    heavy = weight is False or (
+        weight is None and bool(tiers.get("from_page")) and bool(edit_proxy_rel))
+    if not heavy or not preview_rel:
+        return {
+            "action": PLAN_FETCH_ORIGINAL, "fetch_rel": None,
+            "insert_rel": None, "upgrade_rel": None,
+            "why": ("the original is small enough to edit with" if not heavy
+                    else "there is no preview that could stand in for it"),
+        }
+
+    ext = posixpath.splitext(str(original_rel or ""))[1].lower()
+    if ext in proxy_scan.NEEDS_RESOLVE_EXTS:
+        return {
+            "action": PLAN_PREVIEW_ONLY, "fetch_rel": preview_rel,
+            "insert_rel": preview_rel, "upgrade_rel": None,
+            "why": f"a {ext} original cannot have a stand-in",
+        }
+
+    return {
+        "action": PLAN_FETCH_STANDIN, "fetch_rel": preview_rel,
+        "insert_rel": None, "upgrade_rel": edit_proxy_rel,
+        "why": "the original is heavier than edit weight",
+    }
 
 
 def build_insert_response(
@@ -843,26 +979,56 @@ def build_insert_response(
         return 200, {"ok": False, "message": str(exc)}
 
     local_path = Path(local_path_str)
-    if not local_path.is_file():
+    # The stand-in is a LIE the companion has to remember (plan section 6,
+    # 2026-09-17): the preview's bytes sit at the original's own path and
+    # name, so is_file() alone would call the original present for ever.
+    # Reader 1 of the ledger.
+    standin_here = broll_standins.is_standin(str(local_path))
+    plan = plan_insert(local_path.is_file(), standin_here, tiers,
+                       _is_wired(ccsync_cfg))
+    action = plan["action"]
+    fetch_rel = plan["fetch_rel"]
+    log.debug("insert plan for %s: %s (%s)", rel_path, action, plan["why"])
+
+    # Which file this insert imports. None means the original's own path,
+    # which is the stand-in's entire point: the clip's File Path is the
+    # canonical original, so the project stays right for the wired rig that
+    # holds the real file.
+    insert_path = local_path
+    if plan["insert_rel"]:
+        try:
+            insert_path = Path(contained_local_path(share, plan["insert_rel"], mounts))
+        except (PathTraversalError, MountNotConfiguredError):
+            # The page's advisory rel, re-vetted and refused. Falling back to
+            # the pre-phase-3 route is always safe: it downloads the file the
+            # editor actually asked for.
+            log.warning("insert: could not place %r under share %r -- falling "
+                        "back to the original", plan["insert_rel"], share)
+            action, fetch_rel, insert_path = PLAN_FETCH_ORIGINAL, None, local_path
+
+    if not insert_path.is_file():
         if not _fetchable_from_nas(share, rel_path, mounts, ccsync_cfg):
             return 200, {
                 "ok": False,
-                "message": f"file not found at {local_path} - is the share mounted?",
+                "message": f"file not found at {insert_path} - is the share mounted?",
             }
         # ...and the tree this download would land in has to BE there, and
         # the destination inside it (2026-08-17, COMMERCIAL_READINESS.md
         # item 5's M-tier "on-demand fetch bypasses root guard"): rclone
         # against an unmounted macOS root does not fail, it fills the boot
         # disk (root_guard.py's opening paragraph).
-        refusal = broll_fetch.fetch_refusal(ccsync_cfg, str(local_path))
+        refusal = broll_fetch.fetch_refusal(ccsync_cfg, str(insert_path))
         if refusal:
             return 200, {"ok": False, "message": refusal}
         # The validated components, re-joined with forward slashes: the
         # remote side of the copy must never see the raw client string that
-        # translate_path only just finished vetting.
-        clean_rel = "/".join(_split_components(rel_path))
+        # translate_path only just finished vetting. For a stand-in the
+        # SOURCE is the preview and the DESTINATION is the original's own
+        # path and name -- rclone writes `<name>.partial` and renames, so
+        # is_file() stays honest while it runs.
+        clean_rel = "/".join(_split_components(fetch_rel or rel_path))
         fetch = (fetcher if fetcher is not None else broll_fetch.poll_fetch)(
-            ccsync_cfg, clean_rel, str(local_path)
+            ccsync_cfg, clean_rel, str(insert_path)
         )
         state = fetch.get("state")
         if state == broll_fetch.STATE_DOWNLOADING:
@@ -896,13 +1062,28 @@ def build_insert_response(
                 "message": "couldn't sync the clip from the NAS: "
                            f"{fetch.get('message') or 'the download failed'}",
             }
-        if not local_path.is_file():
+        if not insert_path.is_file():
             # "done" is only ever reported after an isfile() check inside
             # the job, so reaching here means the file vanished in between.
             return 200, {
                 "ok": False,
-                "message": f"file not found at {local_path} - is the share mounted?",
+                "message": f"file not found at {insert_path} - is the share mounted?",
             }
+        if action == PLAN_FETCH_STANDIN:
+            # BEFORE the import, always. A stand-in Resolve has already
+            # imported and the ledger does not know about is the one failure
+            # the ledger exists to prevent; a row whose import then failed is
+            # retired by the next real file at that path (is_stale).
+            broll_standins.record(
+                insert_path, share=str(share or ""), rel_path=str(rel_path or ""),
+                original_rel=tiers.get("original_rel"),
+                preview_rel=tiers.get("preview_rel"),
+                edit_proxy_rel=tiers.get("edit_proxy_rel"),
+                geometry=tiers.get("geometry"),
+                upgrade=(broll_standins.UPGRADE_PENDING
+                         if plan.get("upgrade_rel") else None),
+            )
+            standin_here = True
 
     # In a CHILD, with a timeout, for the reason build_status_response spells
     # out (MED-3, 2026-08-11). The worker calls the same
@@ -913,7 +1094,7 @@ def build_insert_response(
     run = caller if caller is not None else music_server.call
     result = run(
         music_worker.BROLL_INSERT_ACTION,
-        path=str(local_path), in_frame=in_frame, out_frame=out_frame,
+        path=str(insert_path), in_frame=in_frame, out_frame=out_frame,
         mode=mode,
     )
     if not isinstance(result, dict):
@@ -924,7 +1105,188 @@ def build_insert_response(
         # "message".
         result = dict(result)
         result["message"] = str(result.get("error") or "the Resolve worker failed")
+    if result.get("ok") and standin_here and plan.get("upgrade_rel"):
+        # Step 5 of the plan's remote row: the editor is cutting with the
+        # preview already, and the editing proxy arrives behind them. Its own
+        # lane, so two inserts in a row cannot park the next Send to Resolve
+        # behind hundreds of MB (audit F7).
+        start_proxy_upgrade(ccsync_cfg, mounts, share, str(insert_path),
+                            plan["upgrade_rel"])
     return 200, result
+
+
+# -- the background editing-proxy upgrade (plan section 6, step 5) ----------
+#
+# The editor is cutting with the stand-in's 1080p preview from the second the
+# insert answers. The editing proxy -- proxy_gen's own spec, made at ingest by
+# wave B -- arrives behind them and is linked as the clip's PROXY, which
+# leaves the clip's File Path exactly where it was: the canonical original.
+#
+# Three things keep this from being a source of new failures. It is its own
+# fetch lane (audit F7), so nobody waiting on a Send to Resolve ever waits for
+# it. It is PENDING IN THE LEDGER until it lands, so a companion restart or a
+# Resolve that was closed at the wrong moment only delays it. And it is never
+# retried in a loop nobody can see: a failure is recorded as `failed` with the
+# reason, and the next insert of that clip is what asks again.
+
+UPGRADE_POLL_SECONDS = 2.0
+# An editing proxy is tens to hundreds of MB over SFTP. An hour is not a
+# timeout for a download, it is the bound on a thread that would otherwise
+# outlive the reason it exists.
+UPGRADE_DEADLINE_SECONDS = 3600.0
+
+
+def run_proxy_upgrade(
+    ccsync_cfg: Optional[dict], mounts: dict, share: str, standin_path: str,
+    edit_proxy_rel: str,
+    fetcher: Optional[Callable[..., dict]] = None,
+    caller: Optional[Callable[..., dict]] = None,
+    sleep: Optional[Callable[[float], Any]] = None,
+    clock: Optional[Callable[[], float]] = None,
+    deadline_seconds: float = UPGRADE_DEADLINE_SECONDS,
+) -> dict[str, Any]:
+    """Fetch the editing proxy and link it to the stand-in clip. Never raises.
+
+    Synchronous and seam-injected so the whole of it is testable without a
+    thread, a NAS or a Resolve; start_proxy_upgrade is the one-line wrapper
+    that runs it on a daemon thread.
+    """
+    entry = broll_standins.get(standin_path)
+    if entry is not None and entry.get("upgrade") == broll_standins.UPGRADE_DONE:
+        return {"ok": True, "state": broll_standins.UPGRADE_DONE,
+                "message": "the editing proxy is already linked"}
+    try:
+        proxy_path = Path(contained_local_path(share, edit_proxy_rel, mounts))
+    except (PathTraversalError, MountNotConfiguredError) as exc:
+        broll_standins.set_upgrade(standin_path, broll_standins.UPGRADE_FAILED,
+                                   str(exc))
+        return {"ok": False, "state": broll_standins.UPGRADE_FAILED,
+                "message": str(exc)}
+
+    broll_standins.set_upgrade(standin_path, broll_standins.UPGRADE_PENDING)
+    fetch_fn = fetcher if fetcher is not None else broll_fetch.poll_fetch
+    wait = sleep if sleep is not None else time.sleep
+    now = clock if clock is not None else time.monotonic
+    started = now()
+    clean_rel = "/".join(_split_components(edit_proxy_rel))
+
+    while not proxy_path.is_file():
+        if now() - started > deadline_seconds:
+            broll_standins.set_upgrade(
+                standin_path, broll_standins.UPGRADE_FAILED,
+                "the editing proxy did not finish downloading")
+            return {"ok": False, "state": broll_standins.UPGRADE_FAILED,
+                    "message": "the editing proxy did not finish downloading"}
+        fetch = fetch_fn(ccsync_cfg, clean_rel, str(proxy_path), background=True)
+        state = (fetch or {}).get("state")
+        if state == broll_fetch.STATE_FAILED:
+            message = str((fetch or {}).get("message") or "the download failed")
+            broll_standins.set_upgrade(standin_path,
+                                       broll_standins.UPGRADE_FAILED, message)
+            log.warning("b-roll proxy upgrade: %s could not be downloaded (%s) "
+                        "-- the clip keeps the preview", clean_rel, message)
+            return {"ok": False, "state": broll_standins.UPGRADE_FAILED,
+                    "message": message}
+        if state == broll_fetch.STATE_DONE:
+            break
+        # downloading, or the background lane is busy with another one: both
+        # are "come back in a moment", and the deadline above is the bound.
+        wait(UPGRADE_POLL_SECONDS)
+
+    if not proxy_path.is_file():
+        broll_standins.set_upgrade(standin_path, broll_standins.UPGRADE_FAILED,
+                                   "the editing proxy is not on disk")
+        return {"ok": False, "state": broll_standins.UPGRADE_FAILED,
+                "message": "the editing proxy is not on disk"}
+
+    run = caller if caller is not None else music_server.call
+    result = run(music_worker.BROLL_LINK_PROXY_ACTION,
+                 path=str(standin_path), proxy_path=str(proxy_path))
+    if isinstance(result, dict) and result.get("ok"):
+        broll_standins.set_upgrade(standin_path, broll_standins.UPGRADE_DONE)
+        log.info("b-roll proxy upgrade: linked %s as the proxy for %s",
+                 proxy_path, standin_path)
+        return {"ok": True, "state": broll_standins.UPGRADE_DONE,
+                "message": str(result.get("message") or "the editing proxy is linked")}
+    message = str((result or {}).get("error") or (result or {}).get("message")
+                  or "Resolve did not link the editing proxy")
+    # STAYS PENDING, deliberately: the file is on disk now, and Resolve being
+    # closed (or on another project) is the commonest reason to be here. The
+    # next relink cycle picks it up again, which is the whole reason the
+    # ledger carries the state.
+    broll_standins.set_upgrade(standin_path, broll_standins.UPGRADE_PENDING,
+                               message)
+    log.info("b-roll proxy upgrade: %s is on disk but not linked yet (%s)",
+             proxy_path, message)
+    return {"ok": False, "state": broll_standins.UPGRADE_PENDING,
+            "message": message}
+
+
+def start_proxy_upgrade(ccsync_cfg: Optional[dict], mounts: dict, share: str,
+                        standin_path: str, edit_proxy_rel: str,
+                        starter: Optional[Callable[..., Any]] = None) -> bool:
+    """Run run_proxy_upgrade on a daemon thread. True when one was started.
+
+    Never raises and never blocks the insert: a machine that cannot start a
+    thread keeps a `pending` ledger row, which the next cycle drains.
+    """
+    if not edit_proxy_rel:
+        return False
+    entry = broll_standins.get(standin_path)
+    if entry is not None and entry.get("upgrade") == broll_standins.UPGRADE_DONE:
+        return False
+
+    def _run() -> None:
+        try:
+            run_proxy_upgrade(ccsync_cfg, mounts, share, standin_path,
+                              edit_proxy_rel)
+        except Exception:                                      # noqa: BLE001
+            log.exception("b-roll proxy upgrade: the background thread failed")
+
+    try:
+        if starter is not None:
+            starter(_run)
+        else:
+            threading.Thread(target=_run, name="ccsync-broll-proxy-upgrade",
+                             daemon=True).start()
+        return True
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("b-roll proxy upgrade: could not start for %s (%s)",
+                    standin_path, exc)
+        return False
+
+
+def resume_pending_upgrades(ccsync_cfg: Optional[dict],
+                            mounts: Optional[dict] = None,
+                            starter: Optional[Callable[..., Any]] = None,
+                            ) -> list[str]:
+    """Start the upgrades a restart (or a closed Resolve) left owing.
+
+    Called from the 120 s relink cycle, which is the moment that already
+    means "Resolve is open and its media pool has been read". Returns the
+    stand-in paths it started something for.
+    """
+    started: list[str] = []
+    try:
+        pending = broll_standins.pending_upgrades()
+    except Exception:                                          # noqa: BLE001
+        log.debug("b-roll proxy upgrade: could not read the pending list",
+                  exc_info=True)
+        return started
+    if not pending:
+        return started
+    table = mounts if mounts is not None else resolve_mounts(
+        load_config(), ccsync_cfg or {})
+    for entry in pending:
+        path = str(entry.get("local_path") or "")
+        rel = str(entry.get("edit_proxy_rel") or "")
+        if not path or not rel:
+            continue
+        if start_proxy_upgrade(ccsync_cfg, table,
+                               str(entry.get("share") or BROLL_SHARE),
+                               path, rel, starter=starter):
+            started.append(path)
+    return started
 
 
 # ---------------------------------------------------------------------------

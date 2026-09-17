@@ -56,6 +56,14 @@ log = logging.getLogger("ccsync.broll")
 # sync that moves everyone's footage (2026-08-17, COMMERCIAL_READINESS.md
 # item 5).
 MAX_CONCURRENT_FETCHES = 2
+# ...and the BACKGROUND lane, which the cap above does not see (audit F7,
+# 2026-09-17). The b-roll stand-in's editing proxy is fetched after the clip
+# is already in the timeline: hundreds of MB the editor is not waiting for.
+# Counted against the foreground cap it would park the next two Send to
+# Resolve clicks behind it for minutes, which is exactly the symptom the cap
+# exists to prevent. One at a time, because "not waiting for it" is not
+# permission to take the machine's bandwidth away from lane A and lane B.
+MAX_CONCURRENT_BACKGROUND_FETCHES = 1
 # CMEDIA-7 (2026-09-04): this used to be delivered as a FAILURE, and the
 # retry the cap was designed around did not exist -- the page loops only while
 # the state is "downloading", so any failure was toasted red and the loop
@@ -114,9 +122,12 @@ _ERROR_LEVELS = ("error", "critical", "fatal")
 class FetchJob:
     """One running (or just-finished) archive download."""
 
-    def __init__(self, dest: str, rel_path: str):
+    def __init__(self, dest: str, rel_path: str, background: bool = False):
         self.dest = dest
         self.rel_path = rel_path
+        # Which lane this job is in. Never read inside the job: it decides
+        # only which cap the registry counts it against (audit F7).
+        self.background = background
         self.state = STATE_DOWNLOADING
         self.error: Optional[str] = None
         self.bytes_done: Optional[int] = None
@@ -167,15 +178,20 @@ def _job_key(dest: str) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(dest)))
 
 
-def _running_count() -> int:
-    """How many downloads are in flight. Callers hold _JOBS_LOCK.
+def _running_count(background: bool = False) -> int:
+    """How many downloads are in flight IN THAT LANE. Callers hold _JOBS_LOCK.
 
     Reads job.state without job.lock on purpose: a stale answer here costs at
     most one extra (or one refused) download, and taking a second lock while
     holding the registry's is how the registry gets to deadlock against
     _run_job's terminal-state write.
+
+    The two lanes are counted separately (audit F7, 2026-09-17): a background
+    editing-proxy download must never be what makes a foreground Send to
+    Resolve answer `busy`.
     """
-    return sum(1 for job in _JOBS.values() if job.state == STATE_DOWNLOADING)
+    return sum(1 for job in _JOBS.values()
+               if job.state == STATE_DOWNLOADING and bool(job.background) == background)
 
 
 def prereq_error(ccsync_cfg: dict[str, Any]) -> Optional[str]:
@@ -366,6 +382,7 @@ def poll_fetch(
     dest: str,
     runner: Optional[Any] = None,
     remote_rel: str = ARCHIVE_REMOTE_REL,
+    background: bool = False,
 ) -> dict[str, Any]:
     """Start (or join) the download that puts `dest` in place; report state.
 
@@ -383,6 +400,11 @@ def poll_fetch(
 
     `runner` is the thread-spawn seam for tests: it receives (job, cmd) and
     defaults to a daemon thread running _run_job.
+
+    `background` puts the job in the second lane: its own cap of one, and
+    invisible to the foreground cap (audit F7). Nobody is watching a
+    background download, so it must not be able to make somebody who IS
+    watching wait.
     """
     key = _job_key(dest)
     with _JOBS_LOCK:
@@ -391,15 +413,18 @@ def poll_fetch(
             err = prereq_error(ccsync_cfg)
             if err:
                 return {"state": STATE_FAILED, "message": err}
-            if _running_count() >= MAX_CONCURRENT_FETCHES:
+            cap = (MAX_CONCURRENT_BACKGROUND_FETCHES if background
+                   else MAX_CONCURRENT_FETCHES)
+            if _running_count(background) >= cap:
                 # No queue: the web UI re-POSTs every 1.5 s anyway, so "busy"
                 # IS the retry mechanism. Registering nothing keeps a refused
-                # click out of the registry entirely.
+                # click out of the registry entirely. The background lane's
+                # caller polls on its own timer for the same reason.
                 log.info("broll fetch: at the %d-download cap -- %s waits",
-                         MAX_CONCURRENT_FETCHES, dest)
+                         cap, dest)
                 return {"state": STATE_BUSY, "message": BUSY_MESSAGE,
                         "retry_after": BUSY_RETRY_AFTER_SECONDS}
-            job = FetchJob(dest, rel_path)
+            job = FetchJob(dest, rel_path, background=background)
             cmd = build_fetch_command(ccsync_cfg, rel_path, dest, remote_rel)
             _JOBS[key] = job
             try:

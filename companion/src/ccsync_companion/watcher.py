@@ -8,7 +8,13 @@ item's "File Path" clip property and classifies it (see paths.py):
   OUT_OF_TREE -> queued for the popup fixer (debounced per session)
   BAD_PREFIX  -> mapping-health tray notification (once per broken episode)
   MISSING     -> logged at debug level ONCE per path, plus a per-poll
-                 count; no user-facing action
+                 count; no user-facing action. One exception since
+                 2026-09-17 (audit F4): an offline b-roll ARCHIVE original
+                 that has a proxy on disk, or is a ledgered stand-in, is
+                 still classified MISSING and is counted and listed
+                 NOWHERE -- it is the designed steady state of a
+                 proxy-only b-roll insert, and the count rides every
+                 report and the tray's diagnostics line.
 
 The watcher never raises: resolve_bridge already returns friendly dicts on
 every Resolve-side failure, and this module wraps its own loop body in
@@ -24,8 +30,10 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
+from . import broll_standins
 from . import canon
 from . import config as config_mod
+from . import proxy_relink
 from . import resolve_bridge
 from .fixer import IgnoreTracker
 from .paths import (
@@ -102,6 +110,7 @@ class TimelineWatcher:
         on_bridge_state: Optional[Callable[[bool, str], None]] = None,
         moved_lookup: Optional[Callable[[str], Optional[dict[str, Any]]]] = None,
         on_moved_clip: Optional[Callable[[dict[str, Any], dict[str, Any]], None]] = None,
+        archive_exempt_fn: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self.local_root = local_root
         self.canonical_prefix = canonical_prefix
@@ -122,6 +131,15 @@ class TimelineWatcher:
         # does not care), and a MISSING clip is the DEBUG line it always was.
         self._moved_lookup = moved_lookup
         self._on_moved_clip = on_moved_clip
+        # Audit F4 (docs/BROLL_PROXY_TIERS_PLAN.md section 6, 2026-09-17): an
+        # offline b-roll ORIGINAL that has a proxy is the designed steady
+        # state on a remote rig, not a problem. classify_path still answers
+        # MISSING for it -- the stored path is `P:\...`, which is not under
+        # local_root -- but since RES-12/RES-19 that count and up to 50 paths
+        # ride every report as sync_guard.resolve_health and the tray prints
+        # "N missing on disk". Every proxy-only b-roll insert would add one.
+        # The test is per path and cached per poll; see _archive_exempt.
+        self._archive_exempt_fn = archive_exempt_fn
         # Last NON-None project name seen -- deliberately NOT cleared when
         # the bridge flaps to None (Resolve restarting, transient failure),
         # so name -> None -> same name never refires on_project_changed.
@@ -294,6 +312,9 @@ class TimelineWatcher:
         # (see the log-flood note in __init__), and this rides a tray render.
         missing_items: list[dict[str, str]] = []
         new_missing = 0
+        # One answer per path per poll: a timeline item appears twice (video
+        # and audio) and the test stats a file.
+        exempt_cache: dict[str, bool] = {}
         resolve_project_name = result.get("project_name", "")
         # Did anything under the canonical prefix classify as healthy this
         # poll? See the _warned_mapping reset below.
@@ -389,6 +410,13 @@ class TimelineWatcher:
                     except Exception:
                         log.exception("on_foreign callback failed")
             elif cls == MISSING:
+                if self._archive_exempt(path, exempt_cache):
+                    # Counted nowhere and listed nowhere: an archive clip
+                    # playing its proxy is working, and a number that goes up
+                    # every time an editor inserts b-roll is a number nobody
+                    # can read (audit F4). The CLASSIFICATION is untouched --
+                    # the file really is not on this disk.
+                    continue
                 missing_now.add(key)
                 if len(missing_items) < MAX_MISSING_REPORTED:
                     missing_items.append({
@@ -471,6 +499,41 @@ class TimelineWatcher:
             "out_of_tree_total": total_out_of_tree,
             "bad_prefix": total_bad_prefix,
         }
+
+    def _archive_exempt(self, path: str, cache: dict[str, bool]) -> bool:
+        """Is this MISSING clip an offline b-roll original that is fine?
+
+        True for a clip in the b-roll archive that either IS a ledgered
+        stand-in on this machine or has a proxy file on disk beside it. The
+        second half is the "whose proxy is working" of plan section 6, asked
+        of the FILESYSTEM rather than of Resolve: a timeline item carries no
+        `proxy_state` (only a media-pool walk does), and one property read per
+        missing clip per 3 s poll is not a trade worth making for a diagnostic
+        count.
+
+        Never raises: a question that cannot be answered counts the clip, the
+        way it has always been counted.
+        """
+        try:
+            key = _norm_key(path)
+            if key in cache:
+                return cache[key]
+            if self._archive_exempt_fn is not None:
+                answer = bool(self._archive_exempt_fn(path))
+            else:
+                answer = (
+                    broll_standins.is_under_archive(
+                        path, self.local_root, self.canonical_prefix)
+                    and (broll_standins.is_standin(path)
+                         or bool(proxy_relink.find_proxy_on_disk(
+                             path, self.local_root, self.canonical_prefix)))
+                )
+            cache[key] = answer
+            return answer
+        except Exception:
+            log.debug("watcher: could not judge %s against the archive", path,
+                      exc_info=True)
+            return False
 
     def bridge_is_connected(self) -> Optional[bool]:
         """Whether the last poll reached Resolve. None until the first poll

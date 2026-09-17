@@ -388,6 +388,42 @@ Details that matter:
 * **Music is not changed.** Tracks are small and are downloaded whole, as
   today.
 
+### What phase 3 found that this section did not foresee (2026-09-17, built)
+
+Four things the wording above did not match, all settled in the code:
+
+1. **"A ledgered path counts as absent" cannot be the whole test.** The
+   ledger has to be falsifiable, or a stand-in that a later real download
+   replaces would be treated as a lie for ever and never imported again. So an
+   entry records the stand-in's SIZE, `is_standin()` is "there is an entry AND
+   the file is still that size", and `is_stale()` -- an entry whose file is a
+   different size now -- is what tells the relink pass this clip was born from
+   a stand-in. A file that is simply ABSENT leaves the entry standing.
+2. **Lane A's filter does not need to read the ledger.** Every lane A run is
+   scoped to `Projects/<rel_path>` of one selected project
+   (`sequencer._process_project`), and a rel that could climb out of it is
+   refused before any path is built, so `Assets/B-roll Archive` is never
+   inside a lane A source. Code there would be dead code; the guarantee is a
+   test instead (`test_broll_standins.py`), which fails the day the scope
+   widens.
+3. **The relink pass must not stat every clip to answer the `.mp4` rule.**
+   "Is the original on this machine" is a stat per clip per 120 s, which is
+   exactly the SMB round-trip storm ops-efficiency-8 (CR-66/CR-67 item 9)
+   removed. `plan_relinks` asks it LAZILY: only when the only proxy candidate
+   on disk is a `.mp4`, and only for a clip whose proxy is not working.
+4. **The refresh needs the clip's stored `Frames`, which nothing read.**
+   `get_media_pool_items` reads three properties per clip (5.5 s over 1,298
+   clips), so a fourth is not free. `Frames` is therefore enriched **for
+   archive clips only** (`resolve_bridge._under_broll_archive`), and the
+   refresh is scoped to the archive for the same reason: project footage is
+   imported on the machine that holds the original and cannot be in that
+   state. Two consequences worth knowing: on a machine whose pool is read
+   through the API fallback rather than the project library, `Frames` is not
+   carried and the refresh does not fire; and the refresh runs the
+   `replace_clip` BEFORE the proxy link and skips the link when it fails,
+   because a proxy judged against the stand-in's frame count would be refused
+   and that refusal is REMEMBERED (COMP-MEDIA-5's brake working against us).
+
 ---
 
 ## 7. Order, deploy and tests
@@ -397,7 +433,7 @@ Details that matter:
 | 0 spike | base rig, one Windows remote, leso's Mac | nothing | a verdict in §3 |
 | 1 preview spec | indexer + companion `ffmpeg_tools` (both `preview_proxy_cmd` and `dropframe_normalized`), the import-based parity test | nothing | indexer change + companion build |
 | 2 editing proxy at ingest | `broll/web` migration + detail API + page POST body, indexer probe, companion ingest | 1 | dashboard (b-roll web) **first**, then companion |
-| 3 proxy-only insert | companion `broll_server`, `resolve_bridge`, `broll_fetch`, `proxy_relink`, `watcher` | 0, 2 | companion build |
+| 3 proxy-only insert | companion `broll_server`, `broll_standins` (new), `broll_fetch`, `music_worker`, `proxy_relink`, `resolve_bridge`, `watcher`, `app` | 0, 2 | companion build |
 
 Deploy the dashboard before the companions: the new detail fields are
 additive, an old companion ignores them, and a new companion talking to an
@@ -419,7 +455,21 @@ Tests (per component, run once centrally as usual):
 * Companion: the table in §6 as a decision-table test with a fake bridge;
   the upgrade ledger survives a restart; no preview is linked when the
   original is local; the popup stays quiet for an offline archive original
-  that has a proxy.
+  that has a proxy. **DONE 2026-09-17**, as four companion test files, all
+  green and none of them needing Resolve, ffmpeg, NVENC, Tk or a NAS:
+  * `tests/test_broll_standins.py` (21) - the ledger: restart round trip,
+    the CR-90 key, staleness, a corrupt file, the archive prefix against its
+    two other copies, and lane A's "cannot see the archive at all".
+  * `tests/test_broll_insert_tiers.py` (30) - §6's table cell by cell, then
+    the wiring: which rel is fetched to which dest, the ledger written
+    BEFORE the import, a failed fetch recording nothing, and the
+    `downloading`/`busy` shapes unchanged.
+  * `tests/test_broll_proxy_upgrade.py` (14) - the background upgrade: its
+    own fetch lane in both directions, pending across a restart, a refusal
+    that stays pending, a failure that does not, and the worker action.
+  * `tests/test_proxy_relink_standins.py` (12) + `test_watcher_broll_archive.py`
+    (5) - the `.mp4`/`.mov` rule, the refresh op, a working proxy left
+    alone, and MISSING-but-counted-nowhere.
 * Manual, on the three spike machines: insert on remote, open on wired,
   confirm full quality with no relink; confirm the swap from preview to
   editing proxy on a clip already in the timeline.

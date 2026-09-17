@@ -103,7 +103,29 @@ On top of those:
   API. It is advisory: every rel path in it passes the same traversal test as
   `rel_path`, a malformed field is ignored (never a 400), and when the object
   is absent the companion derives both proxy paths from the `Proxy/<stem>`
-  convention. Today it is parsed and logged; phase 3 is what acts on it.
+  convention. Since 2026-09-17 (phase 3) it DECIDES which file is downloaded
+  and imported, and the answer is one of four:
+  - **`import_original`** - the file at the clip's own path is here. Nothing
+    downloads.
+  - **`fetch_original`** - the original is edit weight, or nobody could tell,
+    or this computer's tree is the server's tree. Exactly the pre-2026-09-17
+    behaviour.
+  - **`fetch_standin`** - the original is heavier than edit weight, so the
+    PREVIEW's bytes are downloaded **to the original's own local path and
+    name** and imported there, which is what keeps the clip's File Path the
+    canonical original. Recorded in `~/.ccsync/state/broll_standins.json`
+    BEFORE the import, and a WARNING names it in the log, because a render on
+    that machine would render the preview.
+  - **`preview_only`** - a `.braw`/`.r3d`/`.crm` original cannot have a
+    stand-in (Resolve reads those with its own decoder), so the preview is
+    fetched to its OWN path and that is what is inserted.
+  The wire is UNCHANGED: the same `downloading` / `busy` / `done` shapes, the
+  same messages, no new state for a page to learn. After a stand-in insert the
+  companion downloads the editing proxy in a **second fetch lane** (its own
+  cap of one, invisible to the two-download cap above, audit F7) and links it
+  through the Resolve worker; the ledger keeps that upgrade `pending` across a
+  restart, so a companion that was quit or a Resolve that was closed only
+  delays it.
 - **The ingest upload route is the one PUT, and it has its own two rules**
   (2026-08-18). Every other route on this listener caps a body at 256 KiB and
   insists on `application/json`; a camera original is 40 GB and is not JSON, so

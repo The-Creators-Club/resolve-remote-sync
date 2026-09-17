@@ -434,7 +434,10 @@ def test_a_report_whose_second_project_fails_keeps_the_firsts_rows(env, monkeypa
         "local_manifest": {"ff5": _manifest("ff5", 3), "ff6": _manifest("ff6", 3)},
     }, headers=_headers())
 
-    assert r.status_code == 500, "the injected write really did fail"
+    # 503, not 500, since 2026-09-17: a "database is locked" is answered as
+    # contention with Retry-After (test_db_busy_2026_09_17.py); the claim
+    # here is unchanged -- the injected write really did fail
+    assert r.status_code == 503, "the injected write really did fail"
     assert len(seen) == 2
 
     # The fleet state, written and committed before the manifest loop: the

@@ -1347,6 +1347,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # (first two segments) rather than something new.
         route_obj = request.scope.get("route")
         route_path = getattr(route_obj, "path", "") if route_obj is not None else ""
+        if notices.is_db_busy(exc):
+            # A busy timeout that ran out is contention, not a defect
+            # (2026-09-17, notices.py "the lock"): a 503 the companion's next
+            # cycle answers by itself, counted under its own warn notice --
+            # never the error one, whose fix line says "send to support".
+            try:
+                conn = db.connect(settings.db_path)
+                try:
+                    notices.record_db_busy(conn, request.url.path,
+                                           route=str(route_path or ""))
+                finally:
+                    conn.close()
+            except Exception:  # noqa: BLE001 - never fail a request over its own record
+                log.exception("could not record a database-busy notice")
+            return JSONResponse({"detail": "the dashboard's database is busy; try again"},
+                                status_code=503, headers={"Retry-After": "30"})
         try:
             conn = db.connect(settings.db_path)
             try:

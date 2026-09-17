@@ -27,6 +27,7 @@ import datetime as dt
 import io
 import logging
 import shutil
+import sqlite3
 import time
 import traceback
 import zipfile
@@ -1088,6 +1089,90 @@ def error_detail(exc: BaseException) -> str:
         return detail[:SERVER_ERROR_DETAIL_CHARS]
     except Exception:                                               # noqa: BLE001
         return "What went wrong: the error could not be described."
+
+
+# ------------------------------------------------------------ the lock
+# "database is locked" IS NOT A SERVER ERROR (2026-09-17: the field report the
+# CR-240i ledger note said to wait for -- nine /api/v1/report failures in
+# thirteen days, every one at clear_report_refused, the first write of the
+# report). It means a request waited its whole busy timeout and somebody
+# else still held the write lock. app.py answers it as a 503 with
+# Retry-After and counts it HERE under its own kind, so the home page says
+# "busy, told to retry" rather than "send the detail to support" -- and the
+# long writers record THEMSELVES (record_slow_write, from api_report and the
+# collector), because the request that lost the wait can never say who won
+# it, and the container log that could is gone at the next recreate.
+DB_BUSY_MARK = "database is locked"
+SLOW_WRITE_KIND = "slow_write"
+DB_BUSY_KIND = "db_busy"
+
+
+def is_db_busy(exc: BaseException) -> bool:
+    """The one OperationalError that is contention, not a defect."""
+    return isinstance(exc, sqlite3.OperationalError) and DB_BUSY_MARK in str(exc)
+
+
+def _seen_before(conn, kind: str, subject: str) -> int:
+    """The count in the previous body of this (kind, subject), plus one --
+    the first digit token of the body, exactly as record_server_error reads
+    its own (CR-266b)."""
+    row = conn.execute(
+        "SELECT body FROM notices WHERE kind=? AND subject=?", (kind, subject),
+    ).fetchone()
+    if row is None:
+        return 1
+    for token in str(row["body"] or "").split():
+        if token.isdigit():
+            return int(token) + 1
+    return 1
+
+
+def record_db_busy(
+    conn, path: str, now: str | None = None, route: str = "",
+) -> None:
+    """A request that waited the busy timeout out. One warn notice per
+    (redacted path), counted; never an error."""
+    stamp = now or db.utcnow_iso()
+    path = redact_path(path, route)
+    subject = f"{path} (database busy)"
+    seen = _seen_before(conn, DB_BUSY_KIND, subject)
+    wait_s = db.BUSY_TIMEOUT_MS / 1000.0
+    db.notice(
+        conn, DB_BUSY_KIND, "warn", subject,
+        body=(f"{seen} time(s) a request to {path} waited {wait_s:.0f} s for the "
+              f"database and was told to try again (503). For a companion report "
+              f"that is one skipped cycle; the next one lands."),
+        fix=("Something else held the database's write lock for longer than a "
+             "request waits. The long writers record themselves as 'slow write' "
+             "notices, so look for one from the same minute; if there is none and "
+             "this keeps climbing, send Diagnostics to support."),
+        now=stamp)
+    conn.commit()
+
+
+def record_slow_write(
+    conn, what: str, seconds: float, now: str | None = None,
+) -> None:
+    """A write that held the lock longer than a request waits: the culprit
+    of a 'database busy' elsewhere, written where a recreate cannot lose it.
+    One warn notice per writer, counted, carrying the LAST duration."""
+    stamp = now or db.utcnow_iso()
+    subject = str(what)[:120]
+    seen = _seen_before(conn, SLOW_WRITE_KIND, subject)
+    wait_s = db.BUSY_TIMEOUT_MS / 1000.0
+    db.notice(
+        conn, SLOW_WRITE_KIND, "warn", subject,
+        body=(f"{seen} time(s) {subject} held the database's write lock for longer "
+              f"than a request waits ({wait_s:.0f} s); the last time took "
+              f"{seconds:.1f} s. Every other writer in that window -- a companion "
+              f"report, the collector, a page -- waited on it, and one that ran out "
+              f"of patience shows as 'database busy'."),
+        fix=("A report this slow carries tens of thousands of media rows, or the "
+             "pool was slow under it. If it is always the same computer, untick the "
+             "projects it does not need; if it is the collector, send Diagnostics "
+             "to support with the time."),
+        now=stamp)
+    conn.commit()
 
 
 def record_server_error(

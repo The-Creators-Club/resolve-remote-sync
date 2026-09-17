@@ -304,3 +304,13 @@ segments behaviour rather than something new.
   banner or skipping a pass, and a retry loop here would hide contention the busy timeout is
   supposed to surface. If the field shows this firing, a bounded retry in `connect()`'s busy
   timeout is the place for it, not in each reader.
+  **It fired (2026-09-17).** The live home page carried "9 time(s) a request to
+  /api/v1/report failed with an error (OperationalError) ... database is locked", first seen
+  13 days before, every one at `clear_report_refused` -- the FIRST write of a report, so each
+  was a full 5 s busy wait lost to another writer. Not a retry, and not a longer wait either:
+  a normal companion report gives the server 5 s of its own before moving on, so nothing
+  the server waits longer for reaches it. Instead the handler answers a lock 503 +
+  `Retry-After` and counts it under its own warn notice (`db_busy`), and the long writers
+  name themselves where a recreate cannot lose it (`slow_write`, from a report or a
+  collector poll that ran past the busy timeout) -- `notices.py` "the lock",
+  `tests/test_db_busy_2026_09_17.py`. The container log from the failures was already gone.

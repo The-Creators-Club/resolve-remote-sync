@@ -490,6 +490,14 @@ class Collector:
             # other writer was timing out (2026-09-03 database is locked,
             # api_report held the lock).
             log.info("poll %s took %.1fs", kind, elapsed)
+            if elapsed > db.BUSY_TIMEOUT_MS / 1000.0:
+                # ...and where a recreate cannot lose it (2026-09-17): a pass
+                # this long is what a "database busy" elsewhere waited on
+                try:
+                    notices.record_slow_write(conn, f"collector poll {kind}", elapsed,
+                                              now=self.now_fn())
+                except Exception:  # noqa: BLE001 - never fail a cycle over its own record
+                    log.exception("could not record a slow-write notice")
         return True
 
     def _run_provision(self, conn) -> None:

@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from . import VERSION, auth, db, health, links, local_users, package_store, release_trust
 from . import jobs as jobs_mod
+from . import notices
 from . import locate as locate_mod
 from .nas import EDITORS_GROUP, NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
 from .nas import factory as nas_factory
@@ -9395,6 +9396,17 @@ def api_report(
                  "%d media trees)",
                  editor, machine, write_seconds,
                  len(payload.local_manifest or {}), len(payload.media_tree or {}))
+        if write_seconds > db.BUSY_TIMEOUT_MS / 1000.0:
+            # Longer than any request waits: this write is what a "database is
+            # locked" elsewhere was waiting on. Said where a container recreate
+            # cannot lose it (notices.record_slow_write, 2026-09-17); the log
+            # line above is the copy that lasts while the container does.
+            try:
+                notices.record_slow_write(
+                    conn, f"report from {editor}/{machine}", write_seconds,
+                    now=received_at)
+            except Exception:  # noqa: BLE001 - never fail a report over its own record
+                log.exception("could not record a slow-write notice")
     result: dict[str, Any] = {
         "ok": True, "lanes": len(payload.lanes), "received_at": received_at}
     # B6: tell the companion what was dropped so the truncation is visible on

@@ -24408,6 +24408,48 @@ bundle and build the SSL context from `certifi.where()` (or point
 `SSL_CERT_FILE` at it at startup) for these fetches; check the upgrade and
 release-feed fetches use the same context. Needs a Mac build to verify.
 
+## CR-281 - b-roll proxy tiers: a 1080p preview, an editing proxy at ingest, and a Send to Resolve that downloads only a proxy - BUILT in repo 2026-09-17 (dashboard 0.7.49, companion 0.9.74)
+
+Owner's ask 2026-09-17, plan `docs/BROLL_PROXY_TIERS_PLAN.md`, audit
+`docs/BROLL_PROXY_TIERS_PLAN_AUDIT.md`, three builds the same evening
+(142e2cf, 7008e65, 11b81e1). What an editor sees: the browser preview is
+1080p (new clips only); a remote Send to Resolve of a heavy original
+downloads the preview in seconds, places it AT the original's own path as a
+stand-in, inserts it, and fetches the editing proxy behind it; a wired rig
+opening that project gets the real file, after one ReplaceClip the relink
+pass runs because Resolve does not re-read a file that changed under a clip.
+
+Three defects found on the way, all fixed in the same builds:
+
+- **A colon timecode from a tmcd track was rewritten to drop-frame** by
+  `dropframe_normalized` (indexer and companion alike), so every 29.97 NDF
+  preview - 231 of the Johnny Harris shoot's 377 - was refused by Resolve as
+  a proxy (R17's tenth case). The rule now trusts the separator a tmcd
+  stream prints and normalises only a tag-only (Sony rtmd) timecode.
+  Verified live: the re-encoded previews link; R17's tenth clip links too,
+  because Resolve reads Sony's colon as drop-frame. `fix_proxy_timecode.py`
+  and `make_own_proxies.py` moved with the rule or would have corrupted
+  correct previews.
+- **The 120 s relink pass would have undone phase 3 two minutes after
+  every insert** (audit F1): it offered the first existing
+  `Proxy/<stem>.mov|.mp4` to any clip whose proxy was not working. A `.mp4`
+  is now offered only to a clip whose original is absent or a stand-in.
+- **The companion never received the detail API's fields** (audit F2): the
+  page forwards the `insert` object in the POST body; an old page or an old
+  companion falls back to the stem convention.
+
+Gotchas recorded for the next person: the DRT keeps its paths in an opaque
+FieldsBlob and a hand-written FCPXML is not accepted by Resolve at all, so
+"edit an interchange file to a ghost path" is not a route; Resolve on this
+rig throws an "Audio Output: selected device not found" message box on
+every project load when a monitor speaker is unplugged, and the scripting
+API answers None for everything until it is clicked (the spike ran under a
+UI Automation loop that clicks OK). Still owed: the live checks in the
+plan's section 7 (a stand-in-born clip opened on a wired rig, the
+preview-to-editing-proxy swap on a clip already in a timeline), `SPEC.md`'s
+older 540p wording, and R17's nine Energy Transition previews, whose paths
+were not recoverable from the rotated log.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

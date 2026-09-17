@@ -259,8 +259,14 @@ def worker_pool(monkeypatch):
     return install
 
 
-def test_the_worker_links_the_proxy_to_the_clip_at_that_path(worker_pool, monkeypatch):
-    clip = _Clip(r"F:\Creators_Club\Assets\B-roll Archive\cc\clip.mov")
+def test_the_worker_links_the_proxy_to_the_clip_at_that_path(worker_pool, monkeypatch,
+                                                            tmp_path):
+    # Absolute in THIS platform's spelling: existing_item folds through
+    # os.path.abspath, and a Windows drive path is RELATIVE on the macOS
+    # runner (release-macos went red on exactly this, 2026-09-17).
+    clip_path = str(tmp_path / "Assets" / "B-roll Archive" / "cc" / "clip.mov")
+    proxy_path = str(tmp_path / "Assets" / "B-roll Archive" / "cc" / "Proxy" / "clip.mov")
+    clip = _Clip(clip_path)
     worker_pool([clip])
     linked = []
     monkeypatch.setattr(music_worker.resolve_bridge, "link_proxy_media",
@@ -269,8 +275,8 @@ def test_the_worker_links_the_proxy_to_the_clip_at_that_path(worker_pool, monkey
 
     out = music_worker.run_request({
         "action": music_worker.BROLL_LINK_PROXY_ACTION,
-        "path": r"F:\Creators_Club\Assets\B-roll Archive\cc\clip.mov",
-        "proxy_path": r"F:\Creators_Club\Assets\B-roll Archive\cc\Proxy\clip.mov",
+        "path": clip_path,
+        "proxy_path": proxy_path,
     })
 
     assert out["ok"] is True
@@ -291,8 +297,9 @@ def test_a_clip_no_longer_in_the_pool_is_said_so_not_crashed_on(worker_pool):
 
 
 def test_a_refusal_comes_back_as_an_error_the_upgrade_can_record(
-        worker_pool, monkeypatch):
-    clip = _Clip(r"F:\x\clip.mov")
+        worker_pool, monkeypatch, tmp_path):
+    clip_path = str(tmp_path / "x" / "clip.mov")
+    clip = _Clip(clip_path)
     worker_pool([clip])
     monkeypatch.setattr(
         music_worker.resolve_bridge, "link_proxy_media",
@@ -302,7 +309,7 @@ def test_a_refusal_comes_back_as_an_error_the_upgrade_can_record(
 
     out = music_worker.run_request({
         "action": music_worker.BROLL_LINK_PROXY_ACTION,
-        "path": r"F:\x\clip.mov", "proxy_path": r"F:\x\Proxy\clip.mov"})
+        "path": clip_path, "proxy_path": str(tmp_path / "x" / "Proxy" / "clip.mov")})
 
     assert out["ok"] is False
     assert "wouldn't accept" in out["error"]
@@ -313,7 +320,15 @@ def test_a_refusal_comes_back_as_an_error_the_upgrade_can_record(
 # ---------------------------------------------------------------------------
 
 
-def test_a_background_download_does_not_use_up_a_foreground_slot(tmp_path):
+@pytest.fixture
+def rclone_present(monkeypatch):
+    """prereq_error passes: the CI runners have no rclone on PATH, and the
+    lane tests are about the two caps, not the binary (release-windows and
+    release-macos both went red on `failed` != `downloading`, 2026-09-17)."""
+    monkeypatch.setattr(broll_fetch, "prereq_error", lambda cfg: None)
+
+
+def test_a_background_download_does_not_use_up_a_foreground_slot(tmp_path, rclone_present):
     """Two inserts in a row must not park the next Send to Resolve behind
     hundreds of MB of editing proxy."""
     cfg = _cfg(tmp_path)
@@ -342,7 +357,7 @@ def test_a_background_download_does_not_use_up_a_foreground_slot(tmp_path):
         assert answer["state"] == broll_fetch.STATE_DOWNLOADING
 
 
-def test_a_foreground_download_does_not_use_up_the_background_slot(tmp_path):
+def test_a_foreground_download_does_not_use_up_the_background_slot(tmp_path, rclone_present):
     cfg = _cfg(tmp_path)
 
     for i in range(broll_fetch.MAX_CONCURRENT_FETCHES):

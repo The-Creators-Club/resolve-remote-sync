@@ -42,6 +42,11 @@ from typing import Any, Callable, Optional
 log = logging.getLogger("ccsync.proc_tree")
 
 IS_WINDOWS = os.name == "nt"
+# The Windows value (0x200) is spelled out because `subprocess` only defines
+# the name on Windows: the flag is only ever OR'd in on the IS_WINDOWS branch,
+# but the test that pins that branch runs on the macOS release runner too
+# (release-macos 2026-09-18, run 35333826884: AttributeError, no build).
+CREATE_NEW_PROCESS_GROUP = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200))
 
 
 def spawn_kwargs(creationflags: int = 0) -> dict[str, Any]:
@@ -58,7 +63,7 @@ def spawn_kwargs(creationflags: int = 0) -> dict[str, Any]:
     except Exception:                                               # noqa: BLE001
         flags = 0
     if IS_WINDOWS:
-        flags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        flags |= CREATE_NEW_PROCESS_GROUP
         return {"creationflags": flags}
     return {"creationflags": flags, "start_new_session": True}
 

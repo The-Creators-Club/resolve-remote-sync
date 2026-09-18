@@ -41,7 +41,10 @@ def test_spawn_kwargs_puts_the_child_in_its_own_group(monkeypatch):
     monkeypatch.setattr(proc_tree, "IS_WINDOWS", True)
     flags = proc_tree.spawn_kwargs(0x08000000)["creationflags"]
     assert flags & 0x08000000                      # the caller's CREATE_NO_WINDOW survives
-    assert flags & int(subprocess.CREATE_NEW_PROCESS_GROUP)
+    # 0x200 literally: `subprocess.CREATE_NEW_PROCESS_GROUP` does not exist on
+    # the macOS release runner, and the point is that the WINDOWS value goes in.
+    assert flags & 0x200
+    assert proc_tree.CREATE_NEW_PROCESS_GROUP == 0x200
 
     monkeypatch.setattr(proc_tree, "IS_WINDOWS", False)
     kw = proc_tree.spawn_kwargs(0)

@@ -61,7 +61,27 @@ def _encoders() -> set[str]:
             if line.startswith(" ") and len(line.split()) > 1}
 
 
-HAS_NVENC = "h264_nvenc" in _encoders()
+def _nvenc_works() -> bool:
+    """A real one-frame encode, not the encoder list. release-windows
+    2026-09-18 (run 35333824036): the hosted runner's ffmpeg LISTS h264_nvenc
+    (the build has the encoder) but has no NVIDIA GPU, so the first run with
+    ffmpeg required rather than skipped died in the encode with
+    `Terminating thread with return code -22`. The gate has to ask the
+    hardware the same question the test does. 320x240, because NVENC refuses
+    a 64x64 frame with the very same -22 on a machine that has the GPU."""
+    if not FFMPEG or "h264_nvenc" not in _encoders():
+        return False
+    try:
+        return subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+             "-i", "color=c=black:s=320x240:r=1", "-frames:v", "1",
+             "-c:v", "h264_nvenc", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=60).returncode == 0
+    except Exception:                                               # noqa: BLE001
+        return False
+
+
+HAS_NVENC = _nvenc_works()
 
 
 @pytest.fixture

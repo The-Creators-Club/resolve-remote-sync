@@ -268,7 +268,14 @@ def test_cancel_asks_and_takes_the_lease_away_rather_than_killing(as_editor, con
     assert batch["cancel_requested"] == 1
     assert batch["cancel_by"] == "jsmith"
     assert batch["state"] == "running", "still running: the machine has not stopped yet"
-    assert batch["lease_expires_at"] is None, "the lease goes at the same moment"
+    # CR-302C (2026-09-18b, the b-roll twin of music-1): the lease is NOT
+    # taken away. Nulling it here left `state='running'` with no lease, a row
+    # outside expire_stale_leases' predicate that no sweep could reach and no
+    # claim could take, holding the batch's dest_name reservations for ever.
+    # The 410 the machine meets on its next call is delivered by
+    # cancel_requested; the lease runs out on its own and the sweep finalises
+    # the batch as cancelled.
+    assert batch["lease_expires_at"] is not None, "the lease stays until the sweep"
 
 
 def test_cancel_is_idempotent_on_a_finished_batch(as_editor, conn):

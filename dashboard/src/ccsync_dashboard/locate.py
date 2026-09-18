@@ -77,16 +77,30 @@ def locate(conn: sqlite3.Connection,
             order.append(key)
 
     walked = _has_been_walked(conn)
-    as_of = _as_of(conn)
+    contributed: str | None = None
+    unreadable = _unreadable_slugs(conn)
     if walked and wanted:
         sizes = sorted({size for _name, size in wanted})
         for start in range(0, len(sizes), _SIZE_CHUNK):
             chunk = sizes[start:start + _SIZE_CHUNK]
             placeholders = ",".join("?" for _ in chunk)
+            # dash-api-1 (2026-09-18): a project whose last walk FAILED or was
+            # refused keeps its previous nas_media rows for ever (DASH-5's
+            # collapse refusal does not advance tree_sig, so every later cycle
+            # refuses again), and answering a locate off them says "found - at
+            # the path that just stopped existing". The companion then renames
+            # a file out of .ccsync-trash back onto the path lane B trashed it
+            # from, every pass, and counts it as a relocation the breaker
+            # discounts. An inventory the server itself has flagged is not a
+            # destination: it is "cannot tell", and the excluded slugs go back
+            # in the answer so the asking machine can say so in its log.
             rows = conn.execute(
-                f"""SELECT p.slug AS slug, n.rel_path AS rel_path, n.size AS size
+                f"""SELECT p.slug AS slug, n.rel_path AS rel_path, n.size AS size,
+                           n.refreshed_at AS refreshed_at
                       FROM nas_media n JOIN projects p ON p.id = n.project_id
-                     WHERE p.active=1 AND n.size IN ({placeholders})""",
+                      LEFT JOIN nas_inventory_state s ON s.project_id = n.project_id
+                     WHERE p.active=1 AND COALESCE(s.last_error, '') = ''
+                       AND n.size IN ({placeholders})""",
                 chunk,
             ).fetchall()
             for row in rows:
@@ -100,10 +114,20 @@ def locate(conn: sqlite3.Connection,
                 if bucket is not None:
                     bucket.append({"project_slug": str(row["slug"] or ""),
                                    "rel_path": rel})
+                    # dash-api-3 (2026-09-18): the OLDEST contributing walk.
+                    # See _as_of.
+                    stamp = str(row["refreshed_at"] or "")
+                    if stamp and (contributed is None or stamp < contributed):
+                        contributed = stamp
 
     return {
         "walked": walked,
-        "as_of": as_of,
+        "as_of": contributed or _as_of(conn),
+        # Additive on the wire (dash-api-1): a companion that does not know
+        # the key ignores it, and this dashboard in front of an older
+        # companion is still strictly safer than it was, because the places
+        # it would have moved a file to are the ones no longer in `files`.
+        "unreadable": unreadable,
         "files": [{"name": name, "size": size, "found": wanted[(name, size)]}
                   for name, size in order],
     }
@@ -124,7 +148,46 @@ def _has_been_walked(conn: sqlite3.Connection) -> bool:
         return False
 
 
+def _unreadable_slugs(conn: sqlite3.Connection) -> list[str]:
+    """Active projects whose inventory the server knows it could not read.
+
+    dash-api-1 (2026-09-18). `last_error` is written by the same
+    `replace_nas_media` call that REFUSES to replace a collapsed walk, so a
+    non-empty value means "the rows below this slug are the last good picture,
+    of a directory that is currently unmounted, renamed or unreadable". Only
+    `last_error` is tested, never the age of `walked_at`: a project whose
+    `tree_sig` has not changed is legitimately not re-walked, so an age test
+    would exclude healthy projects and turn every hand move back into a
+    deletion.
+    """
+    try:
+        rows = conn.execute(
+            """SELECT p.slug AS slug
+                 FROM nas_inventory_state s JOIN projects p ON p.id = s.project_id
+                WHERE p.active=1 AND COALESCE(s.last_error, '') <> ''
+                ORDER BY p.slug"""
+        ).fetchall()
+    except sqlite3.Error:                                     # pragma: no cover
+        log.exception("locate: nas_inventory_state could not be read")
+        return []
+    return [str(row["slug"] or "") for row in rows if row["slug"]]
+
+
 def _as_of(conn: sqlite3.Connection) -> str:
+    """The tree-wide freshest walk: the answer's stamp when NOTHING matched.
+
+    dash-api-3 (2026-09-18). This used to be the answer's stamp always, and
+    `refreshed_at` is written per project only when that project's walk
+    actually replaced its rows - so a project refused since a NAS reboot three
+    days ago kept its old stamp while one healthy project walked every cycle
+    made every answer look a minute old. The docstring offers this number for
+    judging staleness, and the companion logs it beside a rename it made from
+    three-day-old data. So an answer that found something is stamped with the
+    OLDEST walk that contributed to it, which BOUNDS the answer instead of
+    flattering it; only an answer with no matches falls back here, where there
+    is nothing to bound and "how old is the picture at all" is the question.
+    Same string on the wire either way, so no companion release is needed.
+    """
     try:
         row = conn.execute("SELECT MAX(refreshed_at) AS at FROM nas_media").fetchone()
     except sqlite3.Error:                                     # pragma: no cover

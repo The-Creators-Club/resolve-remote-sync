@@ -109,6 +109,28 @@ const ING_COMPANION_HINT =
   "local connections (self-test: open http://127.0.0.1:8899/status in a tab; " +
   "if that shows ok:true it is the browser, not the tray)";
 
+const ING_TOO_OLD =
+  "your CC Sync tray is too old for b-roll ingest: take the update it " +
+  "offers, then reload this page";
+
+/* broll-1's twin of music-3 (2026-09-18b mediums, owed in by the music
+   group): did the COMPANION really answer, or did the browser fail to reach
+   it? `e.message` is filled in for every rejection, so printing it as the
+   reason this computer did not take the batch renames "Failed to fetch" and
+   "HTTP 404" as things the tray said, and hides the one sentence that says
+   what to do next. A 409 is the companion's considered refusal; so is any
+   body carrying `reason` or `message`. Nothing else is. */
+function ingestSpokeARefusal(e) {
+  return !!(e && (e.status === 409 || (e.body && (e.body.reason || e.body.message))));
+}
+
+/* What to say when it did NOT answer: a 404 is a tray published before this
+   feature (nothing is wrong with it), anything else is unreachable. */
+function ingestDispatchHint(e) {
+  if (e && e.status === 404) return ING_TOO_OLD;
+  return "The CC Sync tray on this computer did not answer.";
+}
+
 const ing = {
   open: false,
   items: [],          // the drop, in order
@@ -598,10 +620,7 @@ async function ingestCapabilities(loud) {
     // A companion published before this feature existed answers 404 on every
     // /broll/ingest route - the same "editors need a republished companion"
     // gap /music/* had. Worth its own sentence: nothing is wrong with it.
-    ing.capsError = e.status === 404
-      ? "your CC Sync tray is too old for b-roll ingest: take the update it " +
-        "offers, then reload this page"
-      : ING_COMPANION_HINT;
+    ing.capsError = e.status === 404 ? ING_TOO_OLD : ING_COMPANION_HINT;
     dot.className = "status-dot status-bad";
     text.textContent = ing.capsError;
     ingestRenderTiers();
@@ -1620,10 +1639,16 @@ function ingestRenderBatches() {
     // BROLL-18: the way back from `finished, 12 could not be indexed`. Nothing
     // needs re-uploading while the staged copies survive; when they do not,
     // the companion says so per clip.
-    if (batch.n_failed > 0 && ing.scope === "mine" &&
+    // wire-1 (2026-09-18b): a clip whose proxies are up and whose ORIGINAL
+    // never made it is owed, not failed - and this is the only button that can
+    // ask for it again, so it has to be drawn for a batch with nothing failed.
+    const owed = batch.n_proxies_live || 0;
+    if ((batch.n_failed > 0 || owed > 0) && ing.scope === "mine" &&
         ["done", "done_with_errors", "failed"].includes(batch.state)) {
       const again = el("button", { className: "text-btn",
-                                   text: `try the ${batch.n_failed} failed again` });
+                                   text: batch.n_failed > 0
+                                     ? `try the ${batch.n_failed} failed again`
+                                     : `finish the ${owed} still uploading` });
       again.type = "button";
       again.addEventListener("click", () => ingestRetryFailedBatch(batch.uid));
       actions.appendChild(again);
@@ -1641,7 +1666,8 @@ function ingestRenderBatches() {
       for (const item of ing.expandedItems.slice(0, 200)) {
         list.appendChild(el("div", {
           className: `ingest-item-state state-${item.state}`,
-          text: `${item.state} · ${item.rel_dir ? item.rel_dir + "/" : ""}${item.orig_name}` +
+          text: `${ingestItemStateText(item.state)} · ` +
+                `${item.rel_dir ? item.rel_dir + "/" : ""}${item.orig_name}` +
                 (item.error ? ` - ${item.error}` : ""),
         }));
       }
@@ -1668,9 +1694,25 @@ async function ingestTakeOver(uid) {
     });
   } catch (e) {
     if (e.status === 409) {
-      toast("Another of your computers is still working on this batch.", "warn");
-    } else {
+      // music-2 (2026-09-18): the companion answers 409 for three things of
+      // its own - this computer is busy with another batch, the clips are no
+      // longer staged here, and CR-253A's "the request did not say which
+      // drop, reload the page" - and forwards the dashboard's claim refusal
+      // as a fourth. Only the last is about another computer, so its wording
+      // is the fallback and not the answer to every refusal.
+      const body = e.body || {};
+      toast((body.reason || body.message)
+              ? e.message
+              : "Another of your computers is still working on this batch.",
+            "warn");
+    } else if (ingestSpokeARefusal(e)) {
       ingestSetNotice(`This computer did not take the batch: ${e.message}`);
+    } else {
+      // broll-1's twin of music-3 (2026-09-18b mediums): a dead tray and a
+      // companion too old for /broll/ingest/* both land here, and neither
+      // said anything about this batch.
+      ingestSetNotice(`This computer did not take the batch: ` +
+                      `${ingestDispatchHint(e)}`);
     }
     ingestLoadBatches();
     return;
@@ -1740,8 +1782,17 @@ async function ingestRetryFailedBatch(uid) {
     // something that will never happen: nothing polls for queued batches.
     // And the dispatch failed, so this page is not running the batch: saying
     // it is leaves the live panel polling a run that does not exist.
-    ingestSetNotice(`The clips are queued again, but this computer did not ` +
-                    `pick them up: ${e.message}`);
+    // broll-1's twin of music-3 (2026-09-18b mediums): only an answer the
+    // companion really gave is quoted as the reason. A tray that is not
+    // running ("Failed to fetch") and one too old for /broll/ingest/* (404)
+    // are not refusals, and reporting them as such both misnames them and
+    // drops the actionable half of the sentence.
+    ingestSetNotice(ingestSpokeARefusal(e)
+      ? `The clips are queued again, but this computer did not pick them ` +
+        `up: ${e.message}`
+      : `The clips are queued again. ${ingestDispatchHint(e)} Open this page ` +
+        `on the computer that has the clips and press take over on this ` +
+        `computer.`);
     toast(`${answer.retried} clip${answer.retried === 1 ? "" : "s"} queued again.`,
           "warn");
     ingestLoadBatches();
@@ -1831,6 +1882,20 @@ const ING_BATCH_STATE_TEXT = {
   "failed": "could not run",
 };
 
+/* The item states that are not their own word. `proxies_live` is the server's
+   enum for "the clip is in the archive and searchable, its ORIGINAL is still
+   owed" (wire-1, 2026-09-18b), and an editor was never going to guess that
+   from the token. Every other state already reads as English, so this maps the
+   exception rather than all twelve - an unknown state prints itself, which is
+   what a page older than its server must do. */
+const ING_ITEM_STATE_TEXT = {
+  "proxies_live": "original still owed",
+};
+
+function ingestItemStateText(state) {
+  return ING_ITEM_STATE_TEXT[state] || String(state || "");
+}
+
 function ingestBatchStateText(batch) {
   const machine = batch.machine || "that computer";
   const fill = (template) => template
@@ -1853,8 +1918,10 @@ function ingestBatchStateText(batch) {
 /** The counters in words, not index jargon: `n_live` means "in the archive and
  *  searchable", which no editor was ever going to guess (BROLL-22). */
 function ingestBatchCounts(batch) {
+  const owed = batch.n_proxies_live || 0;
   return `${batch.n_done} of ${batch.n_items} indexed · ${batch.n_live} searchable · ` +
-         `${batch.n_failed} failed · ${batch.n_duplicate} already in the archive`;
+         `${batch.n_failed} failed · ${batch.n_duplicate} already in the archive` +
+         (owed ? ` · ${owed} still to send the original` : "");
 }
 
 function ingTierLabel(tier) {

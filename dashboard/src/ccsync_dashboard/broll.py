@@ -589,7 +589,16 @@ def _init_broll_storage() -> None:
     # path is now the `proxies` directory the loop below creates INSIDE the
     # root: it is still a directory (the probe is `os.path.isdir`), it is
     # created on whatever is really mounted there, and it goes away with it.
-    mount_status.record_root("broll", str(broll_config.get_proxies_dir()))
+    # dash-mounts-ui-6 (2026-09-18): ROOT and WITNESS, like music and ytdl.
+    # The hand-off wave added the `witness` parameter and updated those two,
+    # and left b-roll on the older single-argument shape - so the recorded
+    # "root" was the proxies subdirectory, and `recheck`'s degraded sentence
+    # ("the folder it serves is not there any more (<root>)") named
+    # `/broll-data/proxies` when it was `/broll-data` that was unmounted,
+    # sending the admin at the NAS to look for a subdirectory. The probe was
+    # always right; only the sentence was wrong.
+    mount_status.record_root("broll", str(broll_config.get_data_root()),
+                             witness=str(broll_config.get_proxies_dir()))
     for d in (
         broll_config.get_data_root(),
         broll_config.get_proxies_dir(),

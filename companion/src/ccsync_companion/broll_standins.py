@@ -74,6 +74,50 @@ UPGRADE_PENDING = "pending"
 UPGRADE_DONE = "done"
 UPGRADE_FAILED = "failed"
 
+# comp-broll-tiers-2 (2026-09-18): how many times the 120 s cycle may re-try
+# one entry's editing-proxy upgrade before it stops asking.
+#
+# `run_proxy_upgrade` deliberately leaves an entry PENDING when the download
+# landed but Resolve would not link it (Resolve closed, or open on another
+# project), and `resume_pending_upgrades` is called from the relink cycle for
+# every pending row. A row that can never link - the clip is not in this
+# project, the rel was the stem convention's guess and no such file exists -
+# therefore cost one thread and one Resolve worker CHILD every two minutes,
+# for ever, with nothing that retired it. The count lives on the entry rather
+# than in memory because a restart must not hand back the budget. An insert
+# of that clip by the editor is an explicit ask and resets it.
+UPGRADE_MAX_ATTEMPTS = 8
+
+# comp-broll-tiers-5 (2026-09-18): when an entry whose file is GONE is
+# dropped. Both conditions, in this order: a file that is merely absent is
+# still a path we lied about (the module docstring's rule, and
+# `_entry_is_stale` returns False for it), so absence alone can never retire
+# a row. Age is what makes it safe: a month after we placed it, a path with
+# no file has been deleted, moved or re-synced by some other route, and the
+# entry is describing nothing.
+PRUNE_AFTER_SECONDS = 30 * 24 * 3600.0
+
+# proxy-tiers-1 (2026-09-18b): how long an INTENT row - one written before
+# the fetch, with no size, by the insert path - may claim a file it has never
+# seen. The whole point of a size is that a different one falsifies the row;
+# a row with none can be falsified by nothing at all, not even the real 6 K
+# original arriving at that path, and `_prune_locked` would only retire it 30
+# days later. `settle_intents` is what answers it: a file that has appeared
+# is measured (the row becomes an ordinary, falsifiable one), and a path with
+# no file after this long is a download that never landed.
+#
+# Generous on purpose. It only ever runs while the tree is DEMONSTRABLY
+# there, and settling costs one stat per intent row on the 120 s cycle, so
+# the expiry is reached only by a row nothing ever landed for.
+INTENT_EXPIRY_SECONDS = 6 * 3600.0
+
+# proxy-tiers-4 (2026-09-18): how many archive rels one report may carry in
+# `sync_guard.standins_placed`. The dashboard's bound for the same section and
+# for its `standins_known` answer, written down on both sides so a truncation
+# is a decision and not a surprise (docs/bug-hunt-2026-09-18/ledger/dashboard.md,
+# "proxy-tiers-4 contract").
+FLEET_REPORT_MAX = 200
+
 
 def normalise_key(local_path: Any) -> str:
     """The comparison key for a local path. CR-90's normaliser, in order.
@@ -97,6 +141,90 @@ def normalise_key(local_path: Any) -> str:
         return canon.norm(text)
 
 
+def archive_rel_of(path: Any, local_root: Any = "",
+                   canonical_prefix: Any = "") -> Optional[str]:
+    """This file's path RELATIVE TO THE ARCHIVE, forward slashes, NFC.
+
+    proxy-tiers-4 (2026-09-18): the fleet's key for a stand-in fact. Never an
+    absolute path - the vault is a drive letter here and a container mount
+    there - and NFC because a Mac's listdir is NFD and the two spellings of
+    one name are two byte strings (CR-90). Only ever compared or reported, so
+    normalising it is right; nothing opens it.
+
+    None when the path is not under the archive by either spelling.
+    """
+    text = str(path or "")
+    if not text:
+        return None
+    for root in (str(local_root or ""), str(canonical_prefix or "")):
+        if not root:
+            continue
+        plat = canon.plat_for(root)
+        archive = plat.join(root, *ARCHIVE_REL)
+        if not canon._is_under(text, archive, plat):
+            continue
+        rel = text[len(archive):].lstrip("\\/")
+        rel = rel.replace("\\", "/")
+        if not rel:
+            continue
+        try:
+            return unicodedata.normalize("NFC", rel)
+        except Exception:
+            return rel
+    return None
+
+
+def placed_report(local_root: Any = "", canonical_prefix: Any = "",
+                  limit: int = FLEET_REPORT_MAX) -> dict[str, Any]:
+    """`sync_guard.standins_placed`: which archive ORIGINALS this machine has
+    stood in for. Never raises.
+
+    proxy-tiers-4. A stand-in is placed on the REMOTE editor's machine and the
+    ledger row is written there and nowhere else, so the plan's last table row
+    ("or the ledger says so") could never fire on the wired rig - the only
+    machine that needs it, and the machine whose ledger is empty for exactly
+    these clips by construction. This is the fact leaving the machine that
+    lied.
+
+    Every entry is listed, stale or not: the question a wired rig is asking is
+    "was this clip ever placed as a stand-in by anybody", and a row this
+    machine has since replaced still describes a project cut against the
+    stand-in's geometry. An EMPTY list is a positive statement ("none here"),
+    which is what lets the dashboard replace this machine's set; the section
+    is therefore always sent.
+    """
+    rels: list[str] = []
+    seen: set[str] = set()
+    try:
+        for entry in all():
+            rel = None
+            for key in ("original_rel", "rel_path"):
+                value = entry.get(key)
+                if isinstance(value, str) and value.strip():
+                    rel = value.strip().replace("\\", "/")
+                    break
+            if rel is None:
+                rel = archive_rel_of(entry.get("local_path"), local_root,
+                                     canonical_prefix)
+            if not rel:
+                continue
+            try:
+                rel = unicodedata.normalize("NFC", rel)
+            except Exception:
+                pass
+            if rel in seen:
+                continue
+            seen.add(rel)
+            rels.append(rel)
+            if len(rels) >= max(0, int(limit)):
+                break
+    except Exception:                                          # noqa: BLE001
+        log.debug("b-roll stand-ins: could not build the fleet report",
+                  exc_info=True)
+    return {"rels": rels,
+            "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())}
+
+
 def default_state_path(ccsync_cfg: Optional[dict] = None) -> Path:
     """`<log dir>/state/broll_standins.json`, the directory every other
     companion state file lives in (app.py derives it the same way).
@@ -114,6 +242,98 @@ def default_state_path(ccsync_cfg: Optional[dict] = None) -> Path:
         return config_mod.resolved_log_path(cfg).parent / "state" / STATE_FILENAME
     except Exception:
         return config_mod.CONFIG_DIR / "state" / STATE_FILENAME
+
+
+def _attempts_of(entry: dict[str, Any]) -> int:
+    """How many upgrade attempts this entry has spent. An entry written by
+    0.9.74 has no such field, and 0 is the right reading of that."""
+    try:
+        return int(entry.get("upgrade_attempts") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _isdir(path: Any) -> bool:
+    """Is this a directory right now? Never raises, and never guesses."""
+    try:
+        return os.path.isdir(str(path))
+    except Exception:
+        return False
+
+
+def _archive_root_of(path: Any) -> Optional[str]:
+    """The `.../Assets/B-roll Archive` this entry's file hangs off, or None.
+
+    comp-broll-tiers-1 (2026-09-18b): the ledger holds no local_root, so the
+    root is recovered from the entry's own path by walking up to the ARCHIVE_REL
+    pair. None means "cannot tell where this file's tree is", which is the one
+    answer that must never be read as "the tree is there".
+    """
+    text = str(path or "")
+    if not text:
+        return None
+    plat = canon.plat_for(text)
+    wanted = [part.lower() for part in ARCHIVE_REL]
+    current = plat.dirname(text)
+    for _ in range(64):
+        if not current:
+            return None
+        probe, matched = current, True
+        for name in reversed(wanted):
+            head, tail = plat.split(probe)
+            if tail.lower() != name or not head:
+                matched = False
+                break
+            probe = head
+        if matched:
+            return current
+        head = plat.dirname(current)
+        if head == current:
+            return None
+        current = head
+    return None
+
+
+def _geometry_wh(geometry: Any) -> Optional[tuple[int, int]]:
+    """(width, height) as a pair of positive ints, or None for "no answer".
+
+    proxy-tiers-1 (2026-09-18b): the one comparison `settle_intents` makes,
+    and a missing or unparseable half must read as "cannot tell", never as a
+    zero that happens to differ from everything.
+    """
+    if not isinstance(geometry, dict):
+        return None
+    try:
+        width = int(geometry.get("width") or 0)
+        height = int(geometry.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def _default_probe(path: Any) -> Optional[dict]:
+    """The file's HEADER, through the companion's configured ffmpeg. Never
+    raises and never a full demux: `probe_video` is one open, and the question
+    is only "is this the preview or the 6K original"."""
+    try:
+        from . import ffmpeg_tools
+
+        cfg = config_mod.load_config()
+        ffmpeg_path = str(cfg.get("ffmpeg_path", "ffmpeg") or "ffmpeg").strip()
+        return ffmpeg_tools.probe_video(ffmpeg_path or "ffmpeg", str(path))
+    except Exception:
+        return None
+
+
+def _default_job_state(dest: str) -> Optional[str]:
+    """What broll_fetch's registry says about this destination, or None.
+    Read-only: it never starts a download and never pops a finished one."""
+    try:
+        from . import broll_fetch
+
+        return broll_fetch.job_state(dest)
+    except Exception:
+        return None
 
 
 def _size_of(path: Any) -> Optional[int]:
@@ -188,6 +408,51 @@ class StandinLedger:
             if isinstance(value, dict)
         }
         self._warned_corrupt = False
+        self._prune_locked()
+
+    def _prune_locked(self) -> None:
+        """Drop entries whose file is gone AND which are older than
+        PRUNE_AFTER_SECONDS (comp-broll-tiers-5). Never persists by itself:
+        the next write carries it, so a read-only pass costs no I/O.
+
+        Order matters and is the module docstring's: absence alone leaves an
+        entry standing. Only the pair - no file, and long enough ago that no
+        download or lane B pass is still owed - retires one.
+
+        comp-broll-tiers-1 (2026-09-18b): and only while the TREE IS THERE.
+        "Cannot be stat'ed" is not "has been deleted": an external sync drive
+        pulled (CR-92), a share not yet mapped at companion start (the
+        LUT-index startup race), an SMB blip or a NAS reboot makes every entry
+        unstattable at once, and this prune would then drop every old row and
+        let the next write persist it - after which a 1080p H.264 lie reads as
+        the real original for ever. A prune that cannot tell does nothing.
+        """
+        cutoff = time.time() - PRUNE_AFTER_SECONDS
+        stale = []
+        roots: dict[str, bool] = {}
+        for key, entry in self._entries.items():
+            try:
+                placed = float(entry.get("placed_at") or 0.0)
+            except (TypeError, ValueError):
+                placed = 0.0
+            if placed > cutoff:
+                continue
+            if _size_of(entry.get("local_path")) is not None:
+                continue
+            root = _archive_root_of(entry.get("local_path"))
+            if root is None:
+                continue  # cannot tell where this file's tree is
+            if root not in roots:
+                roots[root] = _isdir(root)
+            if not roots[root]:
+                continue  # the tree is not here, so nothing here is gone
+            stale.append(key)
+        for key in stale:
+            self._entries.pop(key, None)
+        if stale:
+            log.info("b-roll stand-ins: forgot %d entr(ies) whose file has been "
+                     "gone for over %d days", len(stale),
+                     int(PRUNE_AFTER_SECONDS // 86400))
 
     def _persist_locked(self) -> bool:
         payload = {"version": 1, "standins": self._entries}
@@ -197,7 +462,13 @@ class StandinLedger:
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
             os.replace(tmp, target)
-        except OSError as exc:
+        except (OSError, TypeError, ValueError) as exc:
+            # tests-4 (2026-09-18): TypeError/ValueError are in here because
+            # `json.dumps` is, and a value json cannot encode (a geometry
+            # field off the wire that is not a number) used to come back out
+            # of `record()` as an exception - the ONE method in this module
+            # that could raise, against a docstring that says none can, on
+            # the path that writes the ledger row BEFORE the import.
             log.warning("b-roll stand-ins: could not persist %s: %s", target, exc)
             try:
                 tmp.unlink()
@@ -220,6 +491,7 @@ class StandinLedger:
         geometry: Optional[dict] = None,
         upgrade: Optional[str] = None,
         size: Optional[int] = None,
+        pending_fetch: bool = False,
     ) -> dict[str, Any]:
         """Remember that `local_path` holds a preview's bytes. Never raises.
 
@@ -244,6 +516,13 @@ class StandinLedger:
             # falsifiable later: a different size at that path means the lie
             # has been replaced (see the module docstring).
             "size": size if isinstance(size, int) else _size_of(local_path),
+            # proxy-tiers-1 (2026-09-18b): this row is an INTENT - written
+            # before the fetch, about a file that is not there yet - and it
+            # carries no size, so nothing about the file can falsify it.
+            # `settle_intents` is the only thing that answers such a row, and
+            # this flag is how it tells one from an ordinary entry whose size
+            # simply could not be read.
+            "pending_fetch": bool(pending_fetch),
             "upgrade": upgrade,
             "upgrade_note": "",
         }
@@ -251,8 +530,21 @@ class StandinLedger:
             return entry
         with self._lock:
             self._load_locked()
+            previous = self._entries.get(key)
             self._entries[key] = entry
-            self._persist_locked()
+            if not self._persist_locked():
+                # tests-4: the entry went into the in-memory dict BEFORE the
+                # write, so a payload the writer cannot serialise used to
+                # poison every later persist in the process too - every
+                # subsequent stand-in silently unwritten, and `is_standin`
+                # answering True from a dict no file agrees with. Put the
+                # previous state back and let the caller see the entry it
+                # asked for; a lost row is this module's stated cost of a
+                # failed write.
+                if previous is None:
+                    self._entries.pop(key, None)
+                else:
+                    self._entries[key] = previous
         log.warning(
             "b-roll stand-in: %s now holds the PREVIEW's bytes, not the original. "
             "Resolve will read its geometry from that file, and a render on this "
@@ -260,6 +552,135 @@ class StandinLedger:
             entry["local_path"],
         )
         return entry
+
+    def settle_intents(self, probe_fn: Optional[Any] = None,
+                       job_state_fn: Optional[Any] = None) -> int:
+        """Answer every pre-fetch INTENT row. Returns how many it changed.
+
+        proxy-tiers-1 (2026-09-18b). The insert path writes the ledger row
+        BEFORE the fetch, so a download nobody polls again (tab closed, laptop
+        asleep, companion restarted) is still remembered - but with no size,
+        and `_entry_is_stale` reads a non-int size as "still a stand-in"
+        unconditionally, so such a row could be falsified by nothing at all,
+        not even the real original arriving at that path.
+
+        SETTLED BY IDENTITY, NEVER BY PRESENCE (2026-09-18b). A file appearing
+        at that path is not proof the fetch landed: after a fetch that failed
+        unobserved, lane B or the editor's own copy can put the REAL ORIGINAL
+        there, and measuring that would record the original's size as the
+        stand-in's - permanently, because the size then never changes again.
+        `is_standin` would answer True for the real 6K file, the preview would
+        be attached as its proxy and the rel broadcast to the fleet, which is
+        proxy-tiers-1's exact outcome reached through the settlement.
+        "Under-trusting a file is the safe direction" is NOT true of a real
+        original.
+
+        So the file's own header is read (`probe_video`, one open, never
+        `-count_packets`) and compared with the geometry the row carries.
+        NOTE THE POLARITY: that geometry is the ORIGINAL's, not the
+        preview's - it comes from the `videos` row, which the indexer probed
+        from the source clip (docs/BROLL_PROXY_TIERS_PLAN.md line 294, and
+        `routes_api._insert_object`). So:
+
+          * the header MATCHES the row's geometry -> this is the real
+            original, and the row is RETIRED with a line saying so;
+          * the header DIFFERS -> the preview's bytes under the original's
+            name, i.e. the stand-in we meant to place, so the row is MEASURED
+            and becomes falsifiable by size again;
+          * no geometry on the row, or a header that cannot be read -> ask
+            `broll_fetch`'s own job record for that destination: DONE
+            measures, FAILED retires, and anything else (no such job, which
+            after a restart is every job there ever was) LEAVES THE ROW
+            PENDING. A row that cannot be settled is not guessed at.
+
+        A path with no file at all after INTENT_EXPIRY_SECONDS is a download
+        that never landed and is retired - and only while the tree is
+        demonstrably there, for comp-broll-tiers-1's reason.
+
+        Called from the 120 s relink cycle, which is why the window can be
+        hours: a fetch that lands is settled within two minutes of landing.
+        """
+        changed = 0
+        now = time.time()
+        roots: dict[str, bool] = {}
+        with self._lock:
+            self._load_locked()
+            for key, entry in list(self._entries.items()):
+                if not entry.get("pending_fetch"):
+                    continue
+                path = entry.get("local_path")
+                size = _size_of(path)
+                if size is not None:
+                    verdict = self._what_landed(entry, probe_fn, job_state_fn)
+                    if verdict is None:
+                        continue  # cannot tell: the row stays pending
+                    if verdict is False:
+                        self._entries.pop(key, None)
+                        changed += 1
+                        log.info("b-roll stand-ins: the real original arrived "
+                                 "at %s, so the stand-in entry goes", path)
+                        continue
+                    entry["pending_fetch"] = False
+                    entry["size"] = size
+                    self._entries[key] = entry
+                    changed += 1
+                    log.info("b-roll stand-ins: the download for %s landed "
+                             "while nobody was watching -- %d bytes, and the "
+                             "entry can be falsified again", path, size)
+                    continue
+                try:
+                    placed = float(entry.get("placed_at") or 0.0)
+                except (TypeError, ValueError):
+                    placed = 0.0
+                if not placed or now - placed <= INTENT_EXPIRY_SECONDS:
+                    continue
+                root = _archive_root_of(path)
+                if root is None:
+                    continue
+                if root not in roots:
+                    roots[root] = _isdir(root)
+                if not roots[root]:
+                    continue  # the tree is away; nothing here is an answer
+                self._entries.pop(key, None)
+                changed += 1
+                log.info("b-roll stand-ins: no file ever arrived at %s -- the "
+                         "download did not happen, so the entry goes", path)
+            if changed:
+                self._persist_locked()
+        return changed
+
+    @staticmethod
+    def _what_landed(entry: dict[str, Any], probe_fn: Optional[Any],
+                     job_state_fn: Optional[Any]) -> Optional[bool]:
+        """True: the stand-in we placed. False: the real original. None:
+        cannot tell, which is the answer that leaves the row alone.
+
+        The two questions in order, and every failure in either falls through
+        to the next rather than to a guess (proxy-tiers-1).
+        """
+        path = entry.get("local_path")
+        wanted = _geometry_wh(entry.get("geometry"))
+        if wanted:
+            probe = probe_fn if probe_fn is not None else _default_probe
+            try:
+                measured = _geometry_wh(probe(path))
+            except Exception:
+                measured = None
+            if measured:
+                # The original's own geometry at the original's own path is
+                # the original. A stand-in is the preview's bytes and cannot
+                # match it.
+                return measured != wanted
+        ask = job_state_fn if job_state_fn is not None else _default_job_state
+        try:
+            state = ask(str(path or ""))
+        except Exception:
+            state = None
+        if state == "done":
+            return True
+        if state == "failed":
+            return False
+        return None
 
     def forget(self, local_path: Any) -> bool:
         """Drop the entry for this path. True when there was one."""
@@ -332,8 +753,14 @@ class StandinLedger:
         return entries
 
     def set_upgrade(self, local_path: Any, state: Optional[str],
-                    note: str = "") -> bool:
-        """Mark the background editing-proxy upgrade pending/done/failed."""
+                    note: str = "", count_attempt: bool = False,
+                    reset_attempts: bool = False) -> bool:
+        """Mark the background editing-proxy upgrade pending/done/failed.
+
+        `count_attempt` records that one full attempt was spent and got
+        nowhere (comp-broll-tiers-2); `reset_attempts` hands the budget back,
+        and only an editor asking for that clip again does that.
+        """
         key = normalise_key(local_path)
         if not key:
             return False
@@ -344,6 +771,10 @@ class StandinLedger:
                 return False
             entry["upgrade"] = state
             entry["upgrade_note"] = str(note or "")
+            if reset_attempts:
+                entry["upgrade_attempts"] = 0
+            elif count_attempt:
+                entry["upgrade_attempts"] = _attempts_of(entry) + 1
             self._entries[key] = entry
             self._persist_locked()
         return True
@@ -351,10 +782,34 @@ class StandinLedger:
     def pending_upgrades(self) -> list[dict[str, Any]]:
         """Entries whose editing proxy is still owed. A restart, or a Resolve
         that was closed when the download finished, only DELAYS the upgrade:
-        this is what the next cycle drains."""
+        this is what the next cycle drains.
+
+        An entry that has spent UPGRADE_MAX_ATTEMPTS is NOT in here
+        (comp-broll-tiers-2): it stays `pending` so the next insert of that
+        clip picks it up, but the cycle stops spawning a thread and a Resolve
+        worker child for it every two minutes.
+        """
         return [entry for entry in self.all()
                 if entry.get("upgrade") == UPGRADE_PENDING
-                and entry.get("edit_proxy_rel")]
+                and entry.get("edit_proxy_rel")
+                and _attempts_of(entry) < UPGRADE_MAX_ATTEMPTS]
+
+    def given_up_upgrades(self) -> list[dict[str, Any]]:
+        """Entries whose editing proxy will not arrive without a new ask:
+        `failed`, or pending past the attempt ceiling.
+
+        comp-broll-tiers-5: an editor in this state is cutting on a 1080p
+        preview believing it is the editing proxy, and until now that fact
+        reached the log and nothing else.
+        """
+        out = []
+        for entry in self.all():
+            if entry.get("upgrade") == UPGRADE_FAILED:
+                out.append(entry)
+            elif (entry.get("upgrade") == UPGRADE_PENDING
+                  and _attempts_of(entry) >= UPGRADE_MAX_ATTEMPTS):
+                out.append(entry)
+        return out
 
 
 # -- the process's ledger ----------------------------------------------------
@@ -389,15 +844,43 @@ def configure(path: Any) -> StandinLedger:
 
 
 def record(local_path: Any, **kwargs: Any) -> dict[str, Any]:
-    return ledger().record(local_path, **kwargs)
+    """Never raises, like its five siblings below (tests-4, 2026-09-18).
+
+    This was the one public wrapper in the file without the guard, against a
+    module docstring that says no method here raises - and it is the one
+    called on the insert path, before the import, with values that came off
+    the wire.
+    """
+    try:
+        return ledger().record(local_path, **kwargs)
+    except Exception:
+        log.debug("b-roll stand-ins: could not record %r", local_path,
+                  exc_info=True)
+        return {}
 
 
 def forget(local_path: Any) -> bool:
-    return ledger().forget(local_path)
+    try:
+        return ledger().forget(local_path)
+    except Exception:
+        log.debug("b-roll stand-ins: could not forget %r", local_path,
+                  exc_info=True)
+        return False
 
 
 def get(local_path: Any) -> Optional[dict[str, Any]]:
     return ledger().get(local_path)
+
+
+def settle_intents(probe_fn: Optional[Any] = None,
+                   job_state_fn: Optional[Any] = None) -> int:
+    try:
+        return ledger().settle_intents(probe_fn=probe_fn,
+                                       job_state_fn=job_state_fn)
+    except Exception:
+        log.debug("b-roll stand-ins: could not settle the intent rows",
+                  exc_info=True)
+        return 0
 
 
 def is_standin(local_path: Any) -> bool:
@@ -431,9 +914,12 @@ def all() -> list[dict[str, Any]]:  # noqa: A001 - the plan names this reader
         return []
 
 
-def set_upgrade(local_path: Any, state: Optional[str], note: str = "") -> bool:
+def set_upgrade(local_path: Any, state: Optional[str], note: str = "",
+                count_attempt: bool = False, reset_attempts: bool = False) -> bool:
     try:
-        return ledger().set_upgrade(local_path, state, note)
+        return ledger().set_upgrade(local_path, state, note,
+                                    count_attempt=count_attempt,
+                                    reset_attempts=reset_attempts)
     except Exception:
         log.debug("b-roll stand-ins: could not record the upgrade state",
                   exc_info=True)
@@ -445,6 +931,15 @@ def pending_upgrades() -> list[dict[str, Any]]:
         return ledger().pending_upgrades()
     except Exception:
         log.debug("b-roll stand-ins: could not read the pending upgrades",
+                  exc_info=True)
+        return []
+
+
+def given_up_upgrades() -> list[dict[str, Any]]:
+    try:
+        return ledger().given_up_upgrades()
+    except Exception:
+        log.debug("b-roll stand-ins: could not read the given-up upgrades",
                   exc_info=True)
         return []
 

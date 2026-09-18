@@ -494,18 +494,60 @@ fi
 
 if [ "$SKIP_TESTS" = 1 ]; then
     warn "--skip-tests: the companion suite was skipped (recorded in the manifest as tests_run=false)"
-elif [ "$DRY_RUN" = 1 ]; then
-    dry "would run: CCSYNC_REQUIRE_RCLONE=1 \$VENV/bin/python -m pytest -q   (in $COMPANION_DIR)"
 else
-    step "running the companion tests..."
-    # CCSYNC_REQUIRE_RCLONE=1: pytest exits 0 when tests SKIP, and on a Mac
-    # the rclone fixture used to look for a hardcoded "rclone.exe" -- so the
-    # 24 tests that invoke a REAL rclone to prove lane A is up-only and lane
-    # B is down-only silently no-op'd and the suite still read green (MAC-4,
-    # 2026-08-04). In a release that is a failure, not a skip.
-    ( cd "$COMPANION_DIR" && CCSYNC_REQUIRE_RCLONE=1 "$VENV_PY" -m pytest -q ) \
-        || fail "companion tests failed -- NOT building. Fix them, or re-run with --skip-tests if you know why. (A missing rclone now FAILS rather than skipping: install it, or put ~/.local/ccsync/bin on PATH.)"
-    step "companion tests passed"
+    # tests-1 (2026-09-18): ffmpeg gets the same treatment as rclone, GUARDED.
+    # Twenty media-job tests -- the three Timeline Cards recipes, whose ffmpeg
+    # argv another repo's page reads byte for byte, plus proxy_gen's .partial
+    # + atomic-rename rule -- skipped silently on every release runner, and
+    # pytest exits 0 on a skip, so the argv could break and the build would
+    # still be published. Unlike rclone, an absent ffmpeg does NOT fail the
+    # cut: this script runs on somebody's Mac, ffmpeg is not a prerequisite of
+    # building the companion, and a release that cannot be cut without
+    # `brew install ffmpeg` is a worse failure than the hole it closes. Where
+    # there is one, the tests are required; where there is not, the run says
+    # so instead of leaving a silent skip nobody reads.
+    # server-tools-1 (2026-09-18b mediums): THE CALLER WINS. This used to be
+    # computed from `have_cmd ffmpeg` alone and then passed as a per-command
+    # assignment on the pytest line, so an empty value overrode whatever the
+    # environment carried -- and release-macos.yml sets CCSYNC_REQUIRE_FFMPEG=1
+    # on exactly that step, precisely to turn a missing binary into a failed
+    # release. The Windows half (release.ps1) only ever SETS the variable, so
+    # an inherited 1 survives there: two ends of one fix, two contracts.
+    REQUIRE_FFMPEG="${CCSYNC_REQUIRE_FFMPEG:-}"
+    FFMPEG_ASKED=""
+    if [ -n "$REQUIRE_FFMPEG" ]; then
+        FFMPEG_ASKED=1
+    elif have_cmd ffmpeg; then
+        REQUIRE_FFMPEG=1
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        if [ -n "$FFMPEG_ASKED" ] && ! have_cmd ffmpeg; then
+            dry "would run: CCSYNC_REQUIRE_RCLONE=1 CCSYNC_REQUIRE_FFMPEG=$REQUIRE_FFMPEG \$VENV/bin/python -m pytest -q   (in $COMPANION_DIR; CCSYNC_REQUIRE_FFMPEG was set by the caller but there is no ffmpeg on PATH, so the suite would FAIL as asked)"
+        elif [ -n "$REQUIRE_FFMPEG" ]; then
+            dry "would run: CCSYNC_REQUIRE_RCLONE=1 CCSYNC_REQUIRE_FFMPEG=$REQUIRE_FFMPEG \$VENV/bin/python -m pytest -q   (in $COMPANION_DIR)"
+        else
+            dry "would run: CCSYNC_REQUIRE_RCLONE=1 \$VENV/bin/python -m pytest -q   (in $COMPANION_DIR; no ffmpeg on PATH, so the media-job tests would SKIP)"
+        fi
+    else
+        step "running the companion tests..."
+        if [ -n "$FFMPEG_ASKED" ] && ! have_cmd ffmpeg; then
+            warn "CCSYNC_REQUIRE_FFMPEG=$REQUIRE_FFMPEG was set by the caller (CI sets it) but ffmpeg is not on PATH: the media-job tests will FAIL rather than skip, which is what that setting asks for. brew install ffmpeg, or unset CCSYNC_REQUIRE_FFMPEG to cut without them."
+        elif [ -n "$REQUIRE_FFMPEG" ]; then
+            step "ffmpeg is on PATH: the media-job tests are a hard requirement for this cut"
+        else
+            warn "no ffmpeg on PATH: the media-job tests will SKIP and this build is cut without them. brew install ffmpeg, or let CI's macOS runner cut it."
+        fi
+        # CCSYNC_REQUIRE_RCLONE=1: pytest exits 0 when tests SKIP, and on a Mac
+        # the rclone fixture used to look for a hardcoded "rclone.exe" -- so the
+        # 24 tests that invoke a REAL rclone to prove lane A is up-only and lane
+        # B is down-only silently no-op'd and the suite still read green (MAC-4,
+        # 2026-08-04). In a release that is a failure, not a skip.
+        ( cd "$COMPANION_DIR" \
+            && CCSYNC_REQUIRE_RCLONE=1 CCSYNC_REQUIRE_FFMPEG="$REQUIRE_FFMPEG" \
+               "$VENV_PY" -m pytest -q ) \
+            || fail "companion tests failed -- NOT building. Fix them, or re-run with --skip-tests if you know why. (A missing rclone now FAILS rather than skipping: install it, or put ~/.local/ccsync/bin on PATH.)"
+        step "companion tests passed"
+    fi
 fi
 
 # ----------------------------------------------------------------------

@@ -151,7 +151,16 @@ class StillsManager:
         if gallery_status == resolve_prefs.OK:
             log.info("stills: gallery now points at %s (media storage entry %d)", root, index)
             self._warned.clear()
-            return self._report(gallery_status, True, f"gallery moved to {root}\\{GALLERY_FOLDER}")
+            # comp-ui-6 (2026-09-18): the separator follows the MACHINE, not
+            # the wire. On macOS `root` is the real local path
+            # (/Users/<them>/.../Assets/Stills) and this line told the editor
+            # their gallery had moved to a path with a backslash in it, which
+            # Finder's Go to Folder does not find. canonical_stills_path's
+            # hard-coded backslash is a different thing and must stay: that
+            # string has to match between machines.
+            separator = "\\" if self._windows else "/"
+            return self._report(gallery_status, True,
+                                f"gallery moved to {root}{separator}{GALLERY_FOLDER}")
         if gallery_status in (resolve_prefs.RESOLVE_RUNNING, resolve_prefs.FORMAT_UNRECOGNISED):
             return self._report(gallery_status, False, self._blocked_message(gallery_status, root))
         return self._report(gallery_status, False, "")

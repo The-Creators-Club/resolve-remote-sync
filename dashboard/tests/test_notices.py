@@ -132,6 +132,9 @@ def test_run_checks_never_raises_with_every_check_broken(conn, monkeypatch):
                 # being the rule it says it is.
                 "_check_forgotten_machines", "_check_feature_mounts",
                 "_check_alerts_sink", "_check_server_crashes",
+                # dash-db-2 (2026-09-18): the contention kinds' check-time
+                # stamp is a check in the tuple like any other.
+                "_check_contention", "_check_broll_archive",
                 "_check_pending_devices", "_check_plan_without_share"):
         monkeypatch.setattr(notices, name, boom)
     ran = notices.run_checks(conn, settings, NOW, pending_devices={}, folder_devices={})

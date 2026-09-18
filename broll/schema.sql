@@ -286,7 +286,7 @@ CREATE TABLE ingest_items (
     archive_dir TEXT,                        -- archive_path = archive_dir/Proxy/archive_stem.mp4
     archive_stem TEXT,
     state TEXT NOT NULL DEFAULT 'pending'
-      CHECK (state IN ('pending','duplicate','proxying','framing','describing','indexed','uploading','live','failed','cancelled','skipped')),
+      CHECK (state IN ('pending','duplicate','proxying','framing','describing','indexed','uploading','proxies_live','live','failed','cancelled','skipped')),
     stage_percent INTEGER,
     error TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -296,4 +296,4 @@ CREATE TABLE ingest_items (
 CREATE INDEX idx_ingest_items_batch ON ingest_items(batch_uid, ord);
 CREATE INDEX idx_ingest_items_video ON ingest_items(video_id);
 
-PRAGMA user_version = 12;
+PRAGMA user_version = 13;

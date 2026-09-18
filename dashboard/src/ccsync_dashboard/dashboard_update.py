@@ -118,6 +118,19 @@ BOOT_HEALTH_PROBE_TIMEOUT = 10.0
 # a DEAD process's latch, and the 409 that healed on a restart did not.
 PROCESS_NONCE = uuid.uuid4().hex
 
+# dash-release-jobs-1 (2026-09-18b mediums): the restart INTENT, in memory,
+# for this process only. CR-285S made `request_restart`'s state write best
+# effort so a full or read-only /data could not stop the SIGTERM - but
+# `consume_restart_request` decides from `read_state()`, a pure disk read, so
+# the swallowed write took the decision with it: uvicorn exited 0, run.sh's
+# loop saw no 75, and the container went on serving the OLD code while
+# current.json already named the new tree. This flag carries the same
+# decision on a path no disk can break. It holds PROCESS_NONCE rather than a
+# bool so it can never be read across the re-exec it asks for (a fresh
+# process has a fresh nonce, and an inherited module state would otherwise
+# make every later shutdown claim to be a restart).
+_restart_requested_nonce = ""
+
 # Two failed boots of a volume tree revert it. One is not enough (a NAS that
 # lost power mid-boot is not a bad bundle); three would mean two full outages
 # before anything self-heals.
@@ -548,7 +561,20 @@ def _heal_orphaned_progress(settings, state: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
-def _set_state(settings, **fields: Any) -> dict[str, Any]:
+def _set_state(settings, best_effort: bool = False, **fields: Any) -> dict[str, Any]:
+    """Merge `fields` into the state file. Returns the state AS DECIDED.
+
+    dash-release-jobs-1 (2026-09-18): `best_effort=True` writes through
+    `_write_json_best_effort`, so the caller gets its decision back even when
+    `/data` is full or has gone read-only. CR-260g guarded the HEALER's two
+    writes and explicitly left every other caller alone - but the failure
+    scenario that ledger entry describes is `finish_restart ->
+    consume_restart_request -> _set_state`, which is a WRITE, so the OSError
+    still escaped one line later, `_exit_process(RESTART_EXIT_CODE)` still
+    never ran, uvicorn still exited 0 and run.sh still did not re-exec the
+    tree `current.json` already names. The process has to be able to exit 75
+    when it cannot write a byte.
+    """
     state = read_state(settings)
     state.update(fields)
     # Who owns the flag, so a fresh process can tell "an update is running"
@@ -562,14 +588,20 @@ def _set_state(settings, **fields: Any) -> dict[str, Any]:
         state["owner_pid"] = None
         state["owner_nonce"] = ""
     state["updated_at"] = db.utcnow_iso()
-    _write_json(update_state_path(settings), state)
+    if best_effort:
+        _write_json_best_effort(update_state_path(settings), state)
+    else:
+        _write_json(update_state_path(settings), state)
     return state
 
 
 def _fail_state(settings, message: str) -> None:
     log.warning("dashboard code update failed: %s", message)
-    _set_state(settings, step="failed", in_progress=False, error=message,
-               finished_at=db.utcnow_iso())
+    # dash-release-jobs-1: best effort, because this runs INSIDE an `except`.
+    # A `_fail_state` that raises replaces the real failure with an OSError
+    # and leaves `in_progress: true` on disk with nothing recording why.
+    _set_state(settings, best_effort=True, step="failed", in_progress=False,
+               error=message, finished_at=db.utcnow_iso())
 
 
 # ------------------------------------------------------------------ the checks
@@ -1261,7 +1293,18 @@ def _signal_restart() -> None:
 
 
 def request_restart(settings) -> None:
-    _set_state(settings, step="restarting", in_progress=True, restart_requested=True)
+    # dash-release-jobs-1: best effort. On a full or read-only /data this used
+    # to raise BEFORE `_signal_restart()`, so the apply worker died with the
+    # swap already done, `current.json` naming the new version, and no restart
+    # ever asked for - and `_fail_state` then raised again inside its own
+    # except. The restart is the thing that matters; the note about it is not.
+    global _restart_requested_nonce
+    # dash-release-jobs-1 (2026-09-18b mediums): set BEFORE the write, because
+    # the write is the half that can fail. This is what `finish_restart` reads
+    # when the disk swallowed the note.
+    _restart_requested_nonce = PROCESS_NONCE
+    _set_state(settings, best_effort=True, step="restarting", in_progress=True,
+               restart_requested=True)
     _signal_restart()
 
 
@@ -1269,11 +1312,22 @@ def consume_restart_request(settings) -> bool:
     """True means "this shutdown was asked for by an update". The flag is
     cleared FIRST, so a crash after this point cannot make every future
     shutdown claim to be a restart."""
+    global _restart_requested_nonce
     state = read_state(settings)
-    if not state.get("restart_requested"):
+    # dash-release-jobs-1 (2026-09-18b mediums): EITHER carrier is enough. The
+    # disk answers for a restart asked before this process re-read the file
+    # (or by an apply whose state write landed); the in-memory nonce answers
+    # when the write could not land at all. Cleared here with the flag, so a
+    # shutdown that is not a restart cannot inherit it.
+    in_memory = _restart_requested_nonce == PROCESS_NONCE
+    _restart_requested_nonce = ""
+    if not state.get("restart_requested") and not in_memory:
         return False
-    _set_state(settings, restart_requested=False, step="done", in_progress=False,
-               finished_at=db.utcnow_iso())
+    # dash-release-jobs-1: the answer is decided from the state we have READ,
+    # and persisting it is best effort. The exit code must not depend on a
+    # write: the whole point of this function is that run.sh re-execs.
+    _set_state(settings, best_effort=True, restart_requested=False, step="done",
+               in_progress=False, finished_at=db.utcnow_iso())
     return True
 
 
@@ -1300,6 +1354,33 @@ def finish_restart(settings) -> bool:
 
 
 # --------------------------------------------------------------------- apply
+
+def _carry_previous(held: dict[str, Any], version: str) -> str:
+    """What `current.json`'s `previous` must say after `version` is applied.
+
+    dash-release-jobs-5 (2026-09-18): re-applying the version `current.json`
+    already names must not ERASE the rollback target. `""` means "the image"
+    to `rollback` and to `deploy/select_code_root.py`, so blanking it here
+    threw away the real previous tree's name - not because there was no
+    previous tree, but because the arithmetic could not express "unchanged".
+    Reachable after a swap whose restart did not happen (dash-release-jobs-1)
+    or a boot that fell back to the image: the running VERSION is then not
+    current.json's version, so preflight lets the re-apply through.
+
+    tests-1 (2026-09-18b mediums): a NAMED helper because the only regression
+    test for that fix re-implemented this expression in its own body, so a
+    revert of the hunk left the suite green. Three-way on purpose - the
+    superseded version, the held one it did not supersede, or `""` for the
+    image - and every caller must keep all three.
+    """
+    previous = str(held.get("version") or "")
+    if previous and previous != version:
+        return previous
+    carried = str(held.get("previous") or "")
+    # A `previous` pointing at the tree being applied is not a rollback
+    # target: going "back" to it would be a no-op the admin reads as a fix.
+    return "" if carried == version else carried
+
 
 def apply(settings, app_state, *, version: str, force: bool = False,
           started_by: str = "", record: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1370,19 +1451,37 @@ def apply(settings, app_state, *, version: str, force: bool = False,
         # read back by a later rollback, which is the only thing that can be
         # too late to ask.
         staged_manifest = dict(manifest)
-        staged_manifest["schema_version"] = int(checks.get("schema_version") or 0)
+        # regression-4 (2026-09-18): WRITTEN ONLY WHEN THE PROBE ANSWERED.
+        # `select_code_root.tree_schema_version`'s own docstring says "None is
+        # NOT zero and must never read as safe", and `revert_refusal` is built
+        # on that three-way answer - but `int(... or 0)` collapsed it, and the
+        # stage-verify subprocess already defaults the key to 0 in its own
+        # `except`. So a tree that could not SAY what schema it knows was
+        # recorded as a tree claiming schema v0, `0 >= live` is false for every
+        # live schema, and the crash-loop rollback CR-259a exists to guard was
+        # refused for ever with a sentence naming a number the tree never
+        # claimed. Absent means cannot tell, which is what the reader wants.
+        probed = int(checks.get("schema_version") or 0)
+        if probed:
+            staged_manifest["schema_version"] = probed
+        else:
+            staged_manifest.pop("schema_version", None)
         _write_json(staging / "manifest.json", staged_manifest)
 
         _set_state(settings, step="swapping", message="swapping the code tree in")
         if final.exists():
             shutil.rmtree(final, ignore_errors=True)
         staging.rename(final)
-        previous = _read_json(current_json_path(settings)).get("version") or ""
+        held = _read_json(current_json_path(settings))
+        previous = held.get("version") or ""
+        # dash-release-jobs-5 (2026-09-18) / tests-1: the arithmetic is a
+        # NAMED helper so a test can drive the same code this line does.
+        carried = _carry_previous(held, version)
         _write_json(current_json_path(settings), {
             "version": version,
             # "" means "the image" -- the fallback select_code_root uses when
             # there is no previous VOLUME tree to go back to.
-            "previous": previous if previous and previous != version else "",
+            "previous": carried,
             "applied_at": db.utcnow_iso(),
             "applied_by": started_by,
             "record_sha": str(record.get("sha256") or ""),
@@ -1410,7 +1509,13 @@ def apply(settings, app_state, *, version: str, force: bool = False,
         result = {"version": version, "sha256": sha, "size_bytes": size,
                   "checks": checks.get("checks", []), "backup": backup,
                   "snapshot": snapshot, "previous": previous}
-        _set_state(settings, step="restarting", message="restarting", last_applied=result)
+        # dash-release-jobs-1 (2026-09-18b mediums): best effort, like the
+        # write inside `request_restart` one line below. The swap is DONE and
+        # current.json already names the new tree: an OSError raised here used
+        # to unwind `apply` before the restart was ever asked for, which is
+        # CR-285S's own failure shape moved one line earlier.
+        _set_state(settings, best_effort=True, step="restarting",
+                   message="restarting", last_applied=result)
         request_restart(settings)
         return result
     finally:
@@ -1497,8 +1602,13 @@ def rollback(settings, *, to_version: str = "", restore_db: str = "",
     boot_attempts_path(settings).unlink(missing_ok=True)
     result = {"version": target or "image", "restored": restored,
               "rolled_back_from": current.get("version"), "schema": schema}
-    _set_state(settings, step="restarting", in_progress=True, version=target,
-               message="rolling back", last_applied=result, error="")
+    # dash-release-jobs-1 (2026-09-18b mediums): best effort, for the same
+    # reason as apply's. current.json already names the target, so a state
+    # write that raises here would leave the process running the tree the
+    # admin just rolled AWAY from, with no restart asked for.
+    _set_state(settings, best_effort=True, step="restarting", in_progress=True,
+               version=target, message="rolling back", last_applied=result,
+               error="")
     request_restart(settings)
     return result
 
@@ -1606,6 +1716,15 @@ def status(settings, app_state) -> dict[str, Any]:
             # answer both for "no refusal" and for a pre-fix current.json.
             "revert_refused_reason": str(current.get("revert_refused_reason") or ""),
             "revert_refused_from": str(current.get("revert_refused_from") or ""),
+            # dash-mounts-ui-1 (2026-09-18): the same shape one commit later.
+            # CR-270's retire branch clears `version` and `previous` and
+            # records WHY beside them - and this key set did not carry the two
+            # keys, so an admin who applied a bundle over the air came back to
+            # a panel showing no applied version and no reason at all, with the
+            # only record a stderr line in a container log the appliance's
+            # whole promise says nobody should need.
+            "retired_from": str(current.get("retired_from") or ""),
+            "retired_reason": str(current.get("retired_reason") or ""),
         },
         "code_updates": code_updates,
         "rollback_candidates": rollback_candidates,

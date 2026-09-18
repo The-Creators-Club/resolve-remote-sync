@@ -191,7 +191,9 @@ def cleanup_remote(remote_root: str, timeout: float = 120) -> None:
     guard.assert_scratch_path(remote_root, action="rclone purge")
     try:
         subprocess.run(
-            ["rclone", "purge", remote_root], capture_output=True, text=True, timeout=timeout
+            # server-tools-4 (2026-09-18): the path is in this output too.
+            ["rclone", "purge", remote_root], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout
         )
     except subprocess.TimeoutExpired as exc:
         raise guard.CleanupFailed(
@@ -213,9 +215,20 @@ def remote_listing(remote_root: str, timeout: float = 300) -> dict[str, int] | N
             ["rclone", "lsjson", "-R", "--files-only", remote_root],
             capture_output=True,
             text=True,
+            # server-tools-4 (2026-09-18): this JSON carries every remote
+            # path, and the fleet's own vault holds `母母女子` and
+            # `Matej Šimalčík`. Decoded with the console codec a CJK name
+            # RAISES UnicodeDecodeError inside subprocess.run -- a ValueError,
+            # which the except below did not catch, so the function that
+            # documents None as its failure answer crashed the run instead.
+            # Both halves matter: with errors="replace" alone the paths would
+            # quietly become U+FFFD and verify_upload would report every file
+            # of a transfer that worked as missing.
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
-    except (subprocess.TimeoutExpired, OSError):
+    except (subprocess.TimeoutExpired, OSError, ValueError):
         return None
     if proc.returncode != 0 or not proc.stdout.strip():
         return None

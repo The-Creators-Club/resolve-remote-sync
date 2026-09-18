@@ -204,17 +204,29 @@ remove_local_tree() {
 if [ -d "$CCSYNC_LOCAL" ]; then
     if [ "$DRY_RUN" = 1 ]; then
         dry "would delete $CCSYNC_LOCAL (rclone/syncthing/companion binaries in bin/, plus the Syncthing identity in syncthing-config/)"
+        # install-onboard-5 (2026-09-18): the identity sentence used to be
+        # printed here in the PAST TENSE on a dry run, so an editor checking
+        # what the uninstaller would do mailed the admin "my device ID has
+        # been reset" and had a device removed and re-invited whose id never
+        # changed. A dry run says "would".
+        dry "that would also remove the Syncthing identity in $SYNCTHING_HOME, so a reinstall would generate a NEW device ID for the admin to approve."
     else
         remove_local_tree "$CCSYNC_LOCAL" || REMOVAL_INCOMPLETE=1
-    fi
-    if [ "$REMOVAL_INCOMPLETE" = 0 ]; then
-        warn "that included the Syncthing identity in $SYNCTHING_HOME. A reinstall generates a NEW device ID, so the admin has to approve this Mac again on the dashboard before lane C syncs. Your media was not touched."
+        if [ "$REMOVAL_INCOMPLETE" = 0 ]; then
+            warn "that included the Syncthing identity in $SYNCTHING_HOME. A reinstall generates a NEW device ID, so the admin has to approve this Mac again on the dashboard before lane C syncs. Your media was not touched."
+        fi
     fi
 else
     skip "already absent: $CCSYNC_LOCAL"
 fi
 
-if [ -d "$BIN_DIR" ]; then
+# install-onboard-1 (2026-09-18): NOT on a dry run. Nothing was deleted, so of
+# course the bin dir is still there -- and the 09-11b fix that made the
+# closing line conditional on REMOVAL_INCOMPLETE turned that into "CCSync
+# uninstall NOT complete ... remove it by hand", at an editor who ran this
+# script precisely to change nothing. The "(dry run -- nothing changed)"
+# sentence was unreachable on every machine that has the app installed.
+if [ "$DRY_RUN" != 1 ] && [ -d "$BIN_DIR" ]; then
     REMOVAL_INCOMPLETE=1
     warn "$BIN_DIR still exists -- remove it by hand: rm -rf \"$CCSYNC_LOCAL\""
 fi

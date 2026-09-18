@@ -820,6 +820,11 @@ def test_an_editing_proxy_somewhere_else_is_400_not_409(client, conn, data_root)
 
     assert r.status_code == 400
     assert r.json()["detail"]["reason"] == "wrong_edit_proxy"
+    # wire-1 (2026-09-18): and the SENTENCE beside it, which is what the
+    # companion now fails the item with and shows the editor. Until this week
+    # the companion had no reader for either half and simply re-posted the
+    # same body for ever (companion/tests/test_bug_hunt_2026_09_18_companion.py).
+    assert "editing proxy must be" in r.json()["detail"]["detail"]
 
 
 @pytest.mark.parametrize("rel", [
@@ -892,14 +897,21 @@ def test_a_cancelled_release_deletes_the_rows_that_never_got_media(
     uid = _queue(client, items=items)
     manifest = _claim(client, uid).json()["items"]
     proxy = "Creators_Club/E2E/Proxy/A.mp4"
+    original = "Creators_Club/E2E/A.MP4"
     _stage(data_root, proxy, 7)
+    _stage(data_root, original, 9)
     # The result comes first because a clip with no segments can no longer go
     # live (CR-54's server-side twin, 2026-08-21): what this test is about is
     # what a CANCEL does to a row that made it, so it has to make it.
     client.post(f"{BASE}/{uid}/items/{manifest[0]['uid']}/result",
                 json=_result_body(), headers=fleet_headers())
+    # With its ORIGINAL, i.e. the second of the two stages (wire-1,
+    # 2026-09-18b): a post without one leaves the item `proxies_live`, which
+    # is a different case and has its own test.
     r0 = client.post(f"{BASE}/{uid}/items/{manifest[0]['uid']}/uploaded",
-                     json={"files": [{"rel": proxy, "size": 7}]},
+                     json={"files": [{"rel": proxy, "size": 7},
+                                     {"rel": original, "size": 9}],
+                           "original_uploaded": True},
                      headers=fleet_headers())
     assert r0.status_code == 200, r0.text
 
@@ -917,13 +929,21 @@ def test_a_cancelled_release_deletes_the_rows_that_never_got_media(
 
 
 def test_a_cancelled_release_is_accepted_after_the_lease_was_taken_away(client, conn):
-    """Cancelling is exactly the case where the dashboard has already expired
-    the lease; refusing the release would leave the batch stuck in `running`
-    with no machine behind it."""
+    """Cancelling is exactly the case where the dashboard may have expired the
+    lease; refusing the release would leave the batch stuck in `running` with
+    no machine behind it.
+
+    music-1's twin (2026-09-18b mediums): `cancel` no longer nulls the lease -
+    doing so put the row outside `expire_stale_leases`'s predicate for ever,
+    so a companion that died before its next heartbeat wedged it. The property
+    this test is about is the RELEASE being accepted, and it is accepted with
+    the lease either way.
+    """
     uid = _queue(client)
     _claim(client, uid)
     ingest_batches.cancel(conn, uid, "root")
-    assert ingest_batches.get_batch(conn, uid)["lease_expires_at"] is None
+    assert ingest_batches.get_batch(conn, uid)["lease_expires_at"], \
+        "the lease must survive the cancel, or no sweep can reach the row"
     assert client.post(f"{BASE}/{uid}/release", json={"state": "cancelled"},
                        headers=fleet_headers()).status_code == 200
 

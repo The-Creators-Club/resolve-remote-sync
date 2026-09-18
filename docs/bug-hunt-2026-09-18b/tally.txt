@@ -1,0 +1,154 @@
+broll-indexer-1           high    CONFIRMED the new cheap frame check lets a 1-2 frame short proxy through, in both indexer producers
+broll-indexer-2           medium  PLAUSIBLE `_plausible_frames` discards a correct frame count on any short clip whose audio outlasts its video
+broll-indexer-3           medium  CONFIRMED audio-only clips are never transcribed, although two files say their speech is the only index they get
+broll-indexer-4           low     PLAUSIBLE the no-duration park does nothing for the rows that already crashed on it
+broll-1                   medium  CONFIRMED broll-3's NFC fix covers the ORIGINAL but not the editing proxy beside it
+broll-2                   medium  PLAUSIBLE broll-5's widened zero-byte rule turns a bad thumbnail into a clip that can never be archived
+broll-3                   low     CONFIRMED the detail route lists and stats the archive folder twice, and the two answers can disagree
+broll-4                   low     CONFIRMED the "another of your computers" fallback music-2 kept is now unreachable
+comp-app-1                high    CONFIRMED the remembered dashboard version is never forgotten, so a dashboard rollback 422s every report from that machine for eve
+comp-app-2                medium  CONFIRMED CR-283D moved the editing-proxy resume out of the relink flag but left it behind `get_media_pool_items()`, so a closed o
+comp-app-3                medium  CONFIRMED the retired media-tree thread is only checked at the loop boundary, so it finishes the whole wedged pass beside its repl
+comp-app-4                medium  CONFIRMED CR-283F leaves a standing upgrade refusal that nothing can ever clear once the build it names is retracted
+comp-app-5                low     CONFIRMED the watchdog's "alive but silent" hold-off is logged once per process, not once per episode
+comp-app-6                low     PLAUSIBLE `standins_owed.why` forwards a raw exception string to the dashboard, and it can carry a local absolute path
+comp-broll-tiers-1        high    CONFIRMED a tree that is absent for one poll erases the stand-in ledger
+comp-broll-tiers-2        medium  CONFIRMED the pre-fetch intent row can never be falsified, so a stand-in stays a stand-in after the real original arrives
+comp-broll-tiers-3        medium  CONFIRMED staging a clip live before the upload-failure check leaves a `live` row the companion then cannot fail
+comp-broll-tiers-4        low     CONFIRMED the early stage-live post retries every 15 s for ever with no counter and no visible failure
+comp-broll-tiers-5        low     CONFIRMED a lost lease raised inside the stage-live post bypasses `_lease_lost`
+comp-broll-tiers-6        low     CONFIRMED CR-280's CA-bundle fix also fires on every frozen WINDOWS companion, where it can only be wrong
+comp-music-ytdl-jobs-1    medium  CONFIRMED a cancelled or HALTED whisper job kills `pipeline.py` and leaves the whisper worker (and the GPU) running
+comp-music-ytdl-jobs-2    medium  CONFIRMED the browser sign-in leaves a live Google session in `~/.ccsync/yt-login-profile` with no ACL, forever
+comp-music-ytdl-jobs-3    medium  CONFIRMED killing yt-dlp does not kill the ffmpeg it spawned
+comp-music-ytdl-jobs-4    low     CONFIRMED the CLAP allow-list is now a tautology, and an https feed can redirect to http unchecked
+comp-music-ytdl-jobs-5    low     CONFIRMED `signed_in()` matches a domain by substring, and `netscape_text` sanitises a cookie value but not a cookie name
+comp-resolve-1            high    CONFIRMED the refresh verdict is written under a key nothing ever reads, on every machine that cannot open the canonical spelling
+comp-resolve-2            medium  CONFIRMED a forced refresh in which ReplaceClip RAISED (but not every time) is remembered for ever as "this file is settled"
+comp-resolve-3            medium  CONFIRMED the `.mp4` refusal is not scoped to the b-roll archive, so a legacy project `.mp4` proxy is silently never attached and 
+comp-resolve-4            medium  CONFIRMED the fleet's stand-in hint is treated as conclusive about THIS machine, and it is not the per-machine answer either side'
+comp-resolve-5            medium  PLAUSIBLE the refresh mutates the project with no save point and no undo journal, and it is not the no-op the docstring claims
+comp-resolve-6            low     CONFIRMED the `except TypeError` fallback lets an exception escape `apply_relinks`, and masks a real TypeError as a settled verdic
+comp-resolve-7            low     CONFIRMED `proxy_state_fn` is only defaulted when `resolve_fn` or `replace_fn` is None, so a caller that injects both loses the co
+comp-resolve-8            low     CONFIRMED `standins_known` is sent only when non-empty, contradicting the three-state contract both sides document
+comp-sync-1               high    CONFIRMED a machine with an empty plan now trashes every file it is told to move, including a move WITHIN the project it is holdin
+comp-sync-2               high    CONFIRMED the 4b trash path becomes the "RELINK IT" destination, so the editor is invited to point Resolve into `.ccsync-trash`
+comp-sync-3               medium  CONFIRMED res-companion-2 does not cover the folder move, which is the shape the feature exists for
+comp-sync-4               medium  CONFIRMED lane B's recovery stamp overwrites lane A's live stall record and erases it from the wire and from disk
+comp-sync-5               medium  CONFIRMED the file-move ledger now has two writer threads, no lock, and one fixed `.tmp`
+comp-sync-6               low     CONFIRMED a hard link that cannot be unlinked is reported as "kept" while the file is already at the destination
+comp-sync-7               low     CONFIRMED a relocation row whose timestamp cannot be parsed is silently dropped
+comp-ui-1                 medium  CONFIRMED a rehearsal still says `Copying "...": 0 B of 12.7 GB` for its FIRST clip, and for the whole run when there is one clip
+comp-ui-2                 medium  CONFIRMED the toast queue covers the startup window but NOT the Explorer restart, which is the window the safety latches actually 
+comp-ui-3                 medium  CONFIRMED CR-283O frees neither the window nor the window class it says it frees; the test asserts an attribute, not a handle
+comp-ui-4                 medium  CONFIRMED CR-283P's twin: the CONSOLIDATE progress window still draws "Copying ... 0 B of 800 GB" for a whole rehearsal
+comp-ui-5                 medium  CONFIRMED after CR-283N a tray icon that never comes back has no surface at all outside the local log
+comp-ui-6                 low     CONFIRMED live-5 makes `no_selection` hide the RED reasons that sit below it in the one-reason report
+comp-ui-7                 low     PLAUSIBLE the held toasts are flushed back to back, so Explorer shows at most the last one
+comp-ui-8                 low     CONFIRMED the Settings line renders an internal upgrade note, which can be an exception string carrying a path
+comp-ui-9                 low     CONFIRMED the new stand-in phrase is appended last, so on a machine with any other Resolve count it never reaches the menu line
+dash-api-1                medium  CONFIRMED res-fleet-4 landed the OFFER under a former hostname and not the ANSWER
+dash-api-2                medium  CONFIRMED locate excludes a project for ever after one transient inventory error
+dash-api-3                medium  CONFIRMED res-fleet-2 withholds the command but leaves the machine out of the job fleet
+dash-api-4                low     CONFIRMED a publish killed between the commit and the rename leaves a CURRENT row with no bytes, and nothing raises it
+dash-api-5                low     CONFIRMED `standins_known` never sends the empty list its own contract promises
+dash-api-6                low     CONFIRMED locate's module docstring still documents the old `as_of`
+dash-cards-1              medium  CONFIRMED the kill switch deletes the NEW per-episode page's shell cache too
+dash-cards-2              medium  PLAUSIBLE the no-engine hold parks one threadpool worker (and one DB connection) per idle agent, uncapped
+dash-cards-3              low     CONFIRMED an ordinary `agent_result` race is reported to the editor as "the dashboard is discarding this computer's pushes"
+dash-cards-4              low     CONFIRMED `cards_exec.is_running()` answers from a module flag, not from the thread
+dash-cards-5              low     CONFIRMED the landing page's forms name the CSRF field `csrf_token`; `auth.CSRF_FIELD` is `csrf`
+dash-cards-6              low     PLAUSIBLE a mid-build episode is closable by anyone the moment its opener's 15 minutes lapse
+dash-collector-alerts-1   high    CONFIRMED cross-cycle move pairing invents a fleet-wide file move from an unrelated delete and arrival two days apart
+dash-collector-alerts-2   medium  CONFIRMED the new b-roll archive check cannot fire on the failure it was written for, and its test pins the wrong answer
+dash-collector-alerts-3   medium  CONFIRMED a project's FIRST inventory writes one pending half per file, inside the collector's write burst
+dash-collector-alerts-4   medium  CONFIRMED one permanently unreadable project directory makes the hand-move check read [ NOT CHECKED ] for ever on a small fleet
+dash-collector-alerts-5   low     CONFIRMED a machine that switched its disk floor OFF is told its proxy download "has probably stopped itself"
+dash-collector-alerts-6   low     CONFIRMED the unreadable b-roll archive is mailed twice
+dash-collector-alerts-7   low     CONFIRMED `_slow_poll_open` gives up for the life of the process on one failed read, and two modules now own `SLOW_POLL_SECONDS`
+dash-core-1               medium  CONFIRMED wire-2's fix makes every unhandled error under a mount record itself TWICE, and write to the busy database twice
+dash-core-2               medium  CONFIRMED a notice written for a mounted app names a path that does not exist on this dashboard, and two mounts collide on one row
+dash-core-3               low     CONFIRMED the Setup page still passes a ZERO-BYTE secret file, so the dash-core-1 hole is closed at boot and open in the wizard
+dash-core-4               low     CONFIRMED the atomic secret write fsyncs the file but never its directory, so the power-loss case the finding names can still lose
+dash-core-5               low     PLAUSIBLE security-4's 512 KB locate cap can refuse a batch the route's own cap allows, and the companion reads that refusal as "t
+dash-db-1                 high    CONFIRMED res-fleet-4 landed its OFFER half only: the machine's ANSWER is still keyed on the reporting hostname, so a command offe
+dash-db-2                 high    CONFIRMED `command_machine_names` has no liveness test, so two live computers on one `machine_id` (the cloned disk SYS-18a deliber
+dash-db-3                 medium  CONFIRMED dash-db-4's LIKE escaping was applied to the db helper and not to the identical query the admin's MOVE button actually r
+dash-db-4                 low     CONFIRMED `record_standins_placed` deletes the machine's rows before inserting, so `first_seen` is rewritten on every report and t
+dash-db-5                 low     CONFIRMED `PENDING_MOVE_HALF_LIMIT` bounds the READ only; nothing bounds the table on the way in, so one unmounted share can bury 
+dash-mounts-ui-1          medium  CONFIRMED a retire carries a refusal the admin can never clear, and the banner tells them to restore a backup
+dash-mounts-ui-2          low     CONFIRMED the new "do not retire" branch keeps a tree that `check_tree` then refuses anyway, so the image boots regardless
+dash-mounts-ui-3          low     CONFIRMED the macOS release's `CCSYNC_REQUIRE_FFMPEG=1` is inert: the script overwrites it
+dash-mounts-ui-4          low     CONFIRMED the regression test for the unreported-lane chip half-passes on the unfixed template
+dash-mounts-ui-5          low     CONFIRMED admin-visible copy is produced in a file the copy scan does not cover, and it reads `--`
+dash-release-jobs-1       medium  CONFIRMED CR-285S does not fix its own `request_restart` half: the restart intent lives only in the file that could not be written
+dash-release-jobs-2       medium  CONFIRMED CR-285AA closes the direction nobody attacks and leaves the one its own comment describes
+dash-release-jobs-3       medium  CONFIRMED the regression test for CR-285AC re-implements the expression instead of calling `apply`, and passes unchanged on the un
+dash-release-jobs-4       low     CONFIRMED regression-6's replacement still does not test the absent attribute, and its comment points at a test about something el
+dash-release-jobs-5       low     CONFIRMED regression-4 fixed the manifest's `schema_version` and left the identical collapse in `current.json`
+install-onboard-1         medium  CONFIRMED the -Full leftovers verdict tells the editor to retry and, two lines later, to delete the retry path
+install-onboard-2         medium  CONFIRMED the Apps & features entry is removed before the -Full delete that may fail, then the new verdict says "run this uninstal
+install-onboard-3         medium  CONFIRMED section 5 reports "removed your sign-in and settings" from ~/.ccsync without looking, and the verdict never checks that 
+install-onboard-4         medium  CONFIRMED any surviving file is reported as "your sign-in and Syncthing identity", and one run can say both that the identity is g
+install-onboard-5         medium  CONFIRMED the fix names the root cause (Stop-Process is never waited on) and does not fix it; the supervisor can also outrun it
+install-onboard-6         medium  CONFIRMED the Mac uninstaller destroys the Syncthing identity on every run; Windows keeps it and says "no re-approval needed"
+install-onboard-7         low     CONFIRMED the new -Full tests assert only the "NOT complete" word, which is why install-onboard-1 and -4 are green
+install-onboard-8         low     CONFIRMED `_same_dashboard`'s port rule refuses a dashboard reachable on two published ports
+music-1                   medium  CONFIRMED the cancel wedge CR-286/music-1 names is still reachable on the OTHER branch of the same `if`
+music-2                   medium  CONFIRMED a cancel disarms the retry-failed guard, so two of an editor's machines can index the same tracks
+music-3                   medium  CONFIRMED the retry toast now reports a browser/network error as if it were the companion's answer, and drops the one actionable s
+music-4                   low     CONFIRMED `--dry-run` counts the files it cannot decode but never names them, and its byte totals no longer match the real run's
+music-5                   low     PLAUSIBLE the page now sends a staging id that may be stale, which walks straight past CR-253A's guard
+proxy-tiers-1             high    CONFIRMED a `busy` (or unobserved failed) fetch leaves a stand-in ledger row that nothing can ever falsify, and it makes the compa
+proxy-tiers-2             medium  CONFIRMED the dashboard never sends the empty `standins_known`, so a companion cannot be told the fleet has none left
+proxy-tiers-3             medium  CONFIRMED the `known: false` outage guard protects only 0.9.75, and the deploy order guarantees the fleet runs the unprotected bui
+proxy-tiers-4             low     CONFIRMED `record_standins_placed` resets `first_seen` on every report; its ON CONFLICT arm is unreachable
+proxy-tiers-5             low     CONFIRMED the one log line that announces a stand-in is emitted before any bytes are placed, and even when none ever are
+proxy-tiers-6             low     PLAUSIBLE the forced refresh writes the media pool with no save point and no undo journal, against CLAUDE.md's standing rule
+proxy-tiers-7             low     PLAUSIBLE a clip goes LIVE early even when its original's upload has already failed
+regression-1              medium  CONFIRMED CR-282D/CR-282E's memory is WRITTEN under a different key than it is READ under, so on any machine whose linked path is 
+regression-2              medium  CONFIRMED CR-283U (CR-280) opens a neighbour: every FROZEN WINDOWS companion now logs, at WARNING, the exact symptom of a macOS-on
+regression-3              low     CONFIRMED the proxy-tiers-4 hand-off was answered with a FLEET-GLOBAL top-200, not "the rels this machine listed", so the one mech
+regression-4              low     CONFIRMED `apply_relinks`' `except TypeError` fallback silently reverts to the UNFIXED call and then records a permanent "this cli
+regression-5              low     CONFIRMED one of the twenty-one OWED hand-offs was not discharged, and it is the one CR-283U's own text names as the next move
+regression-6              low     CONFIRMED the `upgrade_none_reason` hand-off was answered with two different vocabularies on one key: four short codes on one path
+res-companion-1           high    CONFIRMED a move into a project this machine does not sync offers the editor a one-click relink of Resolve INTO the lane B trash
+res-companion-2           high    CONFIRMED the file-move ledger became multi-threaded today and has no lock; two `_save()`s share one tmp path
+res-companion-3           medium  CONFIRMED a stand-in whose drive or share is momentarily unreachable is FORGOTTEN, not deferred
+res-companion-4           low     CONFIRMED a retired media-tree thread keeps stamping the heartbeat its replacement is judged by
+res-companion-5           low     CONFIRMED `standins_known`: the code never sends the empty list its two comments promise
+res-fleet-1               high    CONFIRMED a command offered under a machine's FORMER hostname can never be answered
+res-fleet-2               medium  CONFIRMED the carried move halves are written without a bound and read with one
+res-fleet-3               medium  CONFIRMED the OTA's last two state writes are still not best-effort, so a full /data swaps the tree and never restarts
+res-fleet-4               low     CONFIRMED `standins_known`: the contract the comment states is not the one the code sends
+res-fleet-5               low     CONFIRMED `cards_exec.is_running()` is a flag, not a fact: it lies in both directions
+res-fleet-6               low     PLAUSIBLE the new locate body cap is not derived from the route's own file cap
+res-fleet-7               low     CONFIRMED every report from a stand-in-bearing machine rewrites the whole `broll_standins` set
+security-1                medium  CONFIRMED the new 15-minute idle release measures SERVER REQUESTS, so an editor working OFFLINE in Cards is evictable by any other
+security-2                low     CONFIRMED a co-occupant may close an episode out from under the other people in it, which is the one act the ledger says stays adm
+security-3                low     CONFIRMED `_state`'s comment says a FAILED episode is closable by anybody; for the first fifteen minutes it is closable by nobody 
+security-4                low     CONFIRMED the GET-only rule stops at the static assets; `/setup`, `/api/v1/site`, `/api/v1/health` and `/api/v1/setup/status` are 
+server-tools-1            medium  CONFIRMED release_macos.sh silently cancels a CCSYNC_REQUIRE_FFMPEG the caller (and CI) set
+server-tools-2            medium  CONFIRMED publish_db's "older schema than the live one" refusal is false for `--which music`
+server-tools-3            medium  CONFIRMED gen_notices still decodes pip-licenses by the console codec, in the very pass that fixed five other sites
+server-tools-4            low     CONFIRMED the new "every bench subprocess read declares utf8" test hand-lists four of the five files
+server-tools-5            low     CONFIRMED bind-mode deploy now ships a doc set the image build and the OTA bundle both refuse, and the policy comment now says the
+server-tools-6            low     CONFIRMED the new refusal and the new exit code exist in no runbook
+tests-1                   medium  CONFIRMED the only test for dash-release-jobs-5 re-implements the fixed expression and cannot fail on the unfixed code
+tests-2                   low     CONFIRMED a whole section of companion_core is pasted twice, so one test is silently dropped at collection
+tests-3                   low     CONFIRMED the CR-283W hand-off is half-tested: the test imports the Settings window, deletes the import, and asserts nothing about
+tests-4                   low     CONFIRMED nine of the new regression tests pin their fix by grepping the SOURCE text, so a reformat re-opens the bug green (or red
+tests-5                   low     CONFIRMED comp-sync-3's regression test proves nothing on Windows, and the fallback that still has the bug is untested everywhere
+tests-6                   low     CONFIRMED two tests assert only inside an `if`, so they can pass having checked nothing
+tests-7                   low     CONFIRMED the companion CI jobs install ffmpeg with continue-on-error and never set the flag tests-1 added, so the "twenty tests v
+wire-1                    high    CONFIRMED the two-stage `/uploaded` makes the item terminal, so the original's upload can never fail, be retried, or be noticed
+wire-2                    medium  CONFIRMED the companion never forgets a dashboard version, so a rollback below 0.7.50 422s its reports for as long as a `not_synce
+wire-3                    medium  CONFIRMED `standins_known` is a fleet-wide, never-expiring list answered to every machine, and a `True` from it is conclusive with
+wire-4                    low     CONFIRMED `standins_known` never sends the empty list both sides' contracts say it sends
+wire-5                    low     PLAUSIBLE the Cards tunnel's new no-engine hold parks one threadpool worker per cards-role machine for the whole poll
+ytdl-web-1                medium  CONFIRMED CR-286K does not fix ytdl-web-3: a failed job has no manifest, so the retry button is still hidden
+ytdl-web-2                medium  CONFIRMED the paste free-space guard can never size a paste, so it misses its own stated scenario
+ytdl-web-3                low     CONFIRMED the worker's no-room sentence names "RETRY FAILED", the button CR-286K just renamed to "RETRY N CLIPS"
+ytdl-web-4                medium  PLAUSIBLE ytdl-web-5 turns "tree is gone" from a wording rule into an absolute refusal, reversing a documented decision
+ytdl-web-5                low     CONFIRMED the vanished-share guard runs after the container overlay has already been written
+ytdl-web-6                low     CONFIRMED the free-space regression tests pass for a reason unrelated to the fix

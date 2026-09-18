@@ -79,6 +79,7 @@ from . import canon
 from . import config as config_mod
 from . import ffmpeg_tools
 from . import machine as machine_mod
+from . import proc_tree
 from . import resolve_bridge
 from . import root_guard
 from . import ui_copy
@@ -480,7 +481,11 @@ def default_run(argv: list, timeout: float,
         stdin=subprocess.DEVNULL,
         encoding="utf-8",
         errors="replace",
-        creationflags=ytdlp_manager._win_creationflags(),
+        # comp-music-ytdl-jobs-3 (2026-09-18b mediums): its own process group.
+        # yt-dlp spawns the merge ffmpeg (--ffmpeg-location plus a
+        # bestvideo+bestaudio selector), and killing yt-dlp alone left that
+        # ffmpeg holding handles on the .part and the output.
+        **proc_tree.spawn_kwargs(ytdlp_manager._win_creationflags()),
         env=resolve_bridge.sanitized_child_env(),
     )
     if on_spawn is not None:
@@ -510,10 +515,9 @@ def default_run(argv: list, timeout: float,
         finally:
             proc.stdout = stdout_stream
     except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        # comp-music-ytdl-jobs-3: the tree, not the pid -- a timed-out
+        # download is exactly the case with a merge ffmpeg still running.
+        proc_tree.kill_tree(proc, timeout=5.0)
         proc.stdout, stdout_stream = None, proc.stdout
         try:
             _out, err = proc.communicate()
@@ -2011,14 +2015,18 @@ class DownloadJob:
             self._kill_proc()
 
     def _kill_proc(self) -> None:
+        """Stop yt-dlp AND the ffmpeg it spawned (comp-music-ytdl-jobs-3).
+
+        This used to be `proc.kill()` on the yt-dlp pid alone, from the lost
+        lease, the late spawn and the timeout; the merge ffmpeg survived it
+        and kept its handles on the staged file, which is what the partial
+        cleanups then failed on.
+        """
         with self._lock:
             proc = self._proc
         if proc is None:
             return
-        try:
-            proc.kill()
-        except Exception:
-            log.debug("ytdl: could not kill yt-dlp", exc_info=True)
+        proc_tree.kill_tree(proc, timeout=5.0)
 
     def lose_lease(self, why: str) -> None:
         """A 410 arrived. Stop everything, quietly (module docstring, rule 2)."""
@@ -2510,7 +2518,14 @@ class DownloadJob:
         try:
             proc = _call_run(self.deps.run, argv, CONVERT_TIMEOUT_SECONDS,
                              self._register_proc, None)
-            rc = int(getattr(proc, "returncode", 1) or 0)
+            # comp-music-ytdl-jobs-5 (2026-09-18): `X or 0` mapped a None
+            # returncode -- a runner that returns before the child is reaped,
+            # a test double -- onto 0, which is the SUCCESS branch, and a
+            # present-but-truncated .editready.mp4 then goes on to swap_in
+            # and displaces the good original. A missing attribute has always
+            # read as 1 (a failure) and still does.
+            code = getattr(proc, "returncode", None)
+            rc = 1 if code is None else int(code)
             stderr = str(getattr(proc, "stderr", "") or "")
         except subprocess.TimeoutExpired:
             stderr = (f"ffmpeg did not finish within "

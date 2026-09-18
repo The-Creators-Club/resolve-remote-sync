@@ -93,6 +93,11 @@ def _state(request: Request) -> dict:
         rows.append({**row, "state": (entry or {}).get("state", ""),
                      "detail": (entry or {}).get("detail", ""),
                      "occupants": (entry or {}).get("occupants", []),
+                     # security-1 (2026-09-18b mediums): the vault row wins
+                     # for name/show, so these two have to be carried across
+                     # explicitly or the page would never see them.
+                     "last_in": (entry or {}).get("last_in", ""),
+                     "last_in_seconds": (entry or {}).get("last_in_seconds"),
                      "href": f"/cards/p/{row['slug']}/"})
     # An episode that is open but no longer under the vault scan (a share
     # that went away, a folder renamed) is still listed: it holds a seat, and
@@ -101,6 +106,28 @@ def _state(request: Request) -> dict:
         rows.append({**entry, "href": f"/cards/p/{entry['slug']}/"})
     live = [r for r in rows if r.get("state") in
             (cards_pool.LOADING, cards_pool.READY)]
+    # security-2 / dash-cards-2 (2026-09-18): whether THIS reader may close
+    # each episode, so the template can draw the button rather than guessing
+    # from `session_is_admin` alone. A `failed` entry is closable by anybody
+    # (it has no occupant and no engine): that is the admin door dash-cards-2
+    # asks for, widened to everyone because there is nothing to take away.
+    me = auth.get_session_user(request) or ""
+    admin = auth.is_admin(request.app.state.settings, me)
+    for row in rows:
+        # security-1 (2026-09-18b mediums): the presser is TOLD who was last
+        # in and when. The idle release measures served requests, so an editor
+        # working offline in Cards looks like nobody at all after fifteen
+        # minutes; naming the last occupant is the fact that turns a blind
+        # press into a judgement. "" when nobody has ever been in it.
+        row["last_in_phrase"] = _last_in_phrase(row.get("last_in") or "",
+                                                row.get("last_in_seconds"))
+        row["close_prompt"] = _close_prompt(row.get("name") or "this episode",
+                                            row["last_in_phrase"])
+        row["may_close"] = bool(
+            pool is not None
+            and row.get("state") in (cards_pool.LOADING, cards_pool.READY,
+                                     cards_pool.FAILED)
+            and not pool.may_close(row.get("slug", ""), me, admin))
     return {
         "episodes": rows,
         "cap": getattr(pool, "cap", cards_pool.DEFAULT_CAP),
@@ -108,6 +135,33 @@ def _state(request: Request) -> dict:
         "ready": [r["slug"] for r in rows if r.get("state") == cards_pool.READY],
         "me": auth.get_session_user(request) or "",
     }
+
+
+def _close_prompt(name: str, last_in_phrase: str) -> str:
+    """What the [ CLOSE ] confirm asks. security-1 (2026-09-18b mediums).
+
+    Closing is not free (`EnginePool.drop`) and, since the seat is stamped by
+    served requests only, the presser may be taking the episode from somebody
+    who is working offline in it. So the question names them and says what
+    happens to work a disconnected browser is still holding.
+    """
+    who = f" {last_in_phrase}." if last_in_phrase else ""
+    return (f"Close {name}?{who} Anything an offline browser has not sent yet "
+            "stays in that browser until it reconnects.")
+
+
+def _last_in_phrase(who: str, ago: float | None) -> str:
+    """"ruskin was last in 22 min ago", or "" when nobody ever was.
+
+    security-1 (2026-09-18b mediums). Minutes, never seconds: the number is
+    read to decide whether somebody is still working, and a second-level
+    number invites a race nobody can win.
+    """
+    if not who or ago is None:
+        return ""
+    if ago < 60:
+        return f"{who} is in it now"
+    return f"{who} was last in {int(ago // 60)} min ago"
 
 
 @router.get("/cards", include_in_schema=False)
@@ -169,31 +223,50 @@ async def cards_open(request: Request) -> Response:
                                 status_code=303)
     pool.note_visit(entry.slug, auth.get_session_user(request) or "")
     response = RedirectResponse(f"/cards/?want={entry.slug}", status_code=303)
-    response.set_cookie(LAST_COOKIE, entry.slug, max_age=LAST_MAX_AGE,
-                        httponly=True, samesite="lax",
-                        secure=request.url.scheme == "https")
+    # security-3 (2026-09-18): ONE helper decides `secure` for every cookie
+    # this server sets. `request.url.scheme` is `http` behind a TLS terminator
+    # (Tailscale Serve, the funnel port), so on a site that sets
+    # DASH_COOKIE_SECURE=1 the session cookie carried Secure and this one did
+    # not. The payload here is only a slug, but the rule is what stops the next
+    # cookie from being a credential.
+    remember(response, entry.slug,
+             auth.cookie_secure(request.app.state.settings, request))
     return response
 
 
 @router.post("/cards/close", include_in_schema=False)
 async def cards_close(request: Request) -> Response:
-    """An admin closes an idle episode, which frees a seat.
+    """Close an episode, which frees a seat.
 
     NOT EVICTION AND NOT FREE: `EnginePool.drop` says what it does and does
     not do, and what it does not do is stop the other repo's three `while
-    True` threads. Admin only, because taking an episode away from whoever is
-    in it is exactly the act that must not happen by accident.
+    True` threads. Taking an episode away from whoever is IN it is still the
+    act that must not happen by accident, which is why an admin is still the
+    only person who can do that.
+
+    security-2 (2026-09-18): but this used to be admin-only FULL STOP, with no
+    self-close and no idle release, while opening was available to every
+    session. Two mistaken opens by one non-admin therefore parked the whole
+    feature - on the surface a phone stages a cut on - until an admin was found
+    or the container restarted, and the cap's refusal told the blocked editor
+    to "leave it", which frees nothing. `pool.may_close` is the rule: your own
+    episode, or one nobody has been in for 15 minutes, or you are an admin.
     """
+    from urllib.parse import quote
+
     settings = request.app.state.settings
     user = auth.get_session_user(request)
-    if not auth.is_admin(settings, user):
-        return RedirectResponse("/cards/?refused=only+an+admin+can+close+an+episode",
-                                status_code=303)
     form = await request.form()
+    slug = str(form.get("slug") or "")
     pool = _pool(request)
-    if pool is not None:
-        log.info("Timeline Cards: %s closed %s", user, form.get("slug"))
-        pool.drop(str(form.get("slug") or ""))
+    if pool is None:
+        return RedirectResponse("/cards/", status_code=303)
+    refusal = pool.may_close(slug, user or "", auth.is_admin(settings, user))
+    if refusal:
+        return RedirectResponse(f"/cards/?refused={quote(refusal)}",
+                                status_code=303)
+    log.info("Timeline Cards: %s closed %s", user, slug)
+    pool.drop(slug)
     return RedirectResponse("/cards/", status_code=303)
 
 
@@ -207,9 +280,32 @@ KILL_SW = """\
 // own network verdict is "down", answers them with the OLD page. The browser
 // fetches this path on its periodic update check and on navigation, which is
 // what makes a kill switch the one thing that can reach it.
+//
+// dash-cards-4 (2026-09-18): it deletes ONLY the old flat page's shell caches.
+// CacheStorage is per ORIGIN, not per worker scope, so the unfiltered
+// `caches.keys()` sweep this replaces emptied the DASHBOARD PWA's own
+// `ccsync-<version>` precache too - the offline page and htmx_errors.js, which
+// DUI-2 precached precisely for a bad connection - and the dashboard's worker
+// does not re-run `install` until its own bytes change, so a phone stayed
+// without an offline page until the next dashboard release. It also took
+// `cards-media`, the clips an editor deliberately downloaded for an offline
+// session (the 2026-09-12 incident), which this worker has no business
+// touching: the stale PAGE is what is being killed, not the media.
+//
+// dash-cards-1 (2026-09-18b mediums): and the narrowed `cards-shell-` sweep
+// was narrowed to NOTHING, because that prefix is not the flat page's alone.
+// `page.render_sw()` bakes one `page_version()` per checkout, so every page
+// this container serves - the dead flat one and every live /cards/p/<slug>/
+// one - names its shell cache `cards-shell-<same VER>`, on one origin. The
+// filter therefore deleted the LIVE per-episode worker's shell, and only
+// `install` refills it (the navigation arm never caches a navigation), so an
+// installed episode app lost its offline shell until the next Cards
+// republish. This worker cannot tell the two apart - it does not know the
+// live VER - so it deletes no cache at all: unregistering and reloading the
+// clients is the whole act, and the per-episode worker's own `activate`
+// prunes stale `cards-shell-*` with an `n !== SHELL` guard already.
 self.addEventListener('install', e => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil((async () => {
-  try { for (const k of await caches.keys()) await caches.delete(k); } catch (err) {}
   try { await self.registration.unregister(); } catch (err) {}
   try {
     const all = await self.clients.matchAll({type: 'window'});

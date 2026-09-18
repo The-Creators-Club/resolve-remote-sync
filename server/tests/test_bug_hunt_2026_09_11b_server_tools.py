@@ -282,16 +282,28 @@ def test_the_required_docs_set_matches_the_dashboard_policy():
         assert name in required and name in ida.SHIPPED_DOCS
 
 
-def test_a_missing_editor_setup_refuses_the_docs_ship(tmp_path, monkeypatch, capsys):
+def test_a_missing_editor_setup_is_named_and_does_not_stop_the_ship(
+        tmp_path, monkeypatch, capsys):
     """The half the finding is about: with EDITOR_SETUP.md absent the deploy
-    has to say so, not ship the rest and report success."""
+    has to SAY SO, not ship the rest and report success.
+
+    server-tools-5 (2026-09-18): it must also not withhold the rest. The
+    refusal was all-or-nothing over SHIPPED_DOCS + SHIPPED_DOC_TREES together,
+    so one absent guide also withheld `legal/` - the EULA the first-run wizard
+    gates on - and the operator was sent to look for a guide while every
+    editor was told no licence agreement is included in this build. Saying so
+    was the fix; refusing everything was not.
+    """
     docs = tmp_path / "docs"
     (docs / "legal").mkdir(parents=True)
     (docs / "HOW_IT_WORKS.md").write_text("x\n", encoding="utf-8")
     monkeypatch.setattr(ida, "LOCAL_DOCS_DIR", docs)
+    monkeypatch.setattr(ida, "_stage_docs_tree", lambda staging: None)
+    shipped = []
     monkeypatch.setattr(ida, "install_tree",
-                        lambda *a, **k: pytest.fail("nothing may be shipped"))
+                        lambda *a, **k: (shipped.append(a), True)[1])
 
-    assert ida.ship_dashboard_docs("/mnt/tank/apps/x", False, "/tmp") is False
+    assert ida.ship_dashboard_docs("/mnt/tank/apps/x", False, "/tmp") is True
     said = capsys.readouterr()
     assert "EDITOR_SETUP.md" in (said.out + said.err)
+    assert shipped, "the licence agreement went with the absent guide"

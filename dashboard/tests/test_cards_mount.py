@@ -418,7 +418,11 @@ def test_an_engine_that_will_not_build_is_a_failed_episode(tmp_path, fake_src,
     while entry.state == cards_pool.LOADING and time.monotonic() < end:
         time.sleep(0.01)
     assert entry.state == cards_pool.FAILED
-    assert "no postgres" in entry.detail
+    # dash-cards-7 (2026-09-18): the page gets the exception's TYPE and a
+    # pointer to the log, never its text -- a psycopg OperationalError carries
+    # the DSN. The full text is in the warning above.
+    assert "RuntimeError" in entry.detail
+    assert "no postgres" not in entry.detail
     with TestClient(app) as client:
         client.cookies.set(auth.COOKIE_NAME,
                            auth.make_session_cookie(SECRET, "owen"))
@@ -461,7 +465,7 @@ def test_a_wrap_that_fails_stops_the_engine_it_already_started(
     while entry.state == cards_pool.LOADING and time.monotonic() < end:
         time.sleep(0.01)
     assert entry.state == cards_pool.FAILED
-    assert "boom" in entry.detail
+    assert "RuntimeError" in entry.detail and "boom" not in entry.detail
     assert len(built) == 1
     assert built[0].started is True
     assert built[0].stopped is True

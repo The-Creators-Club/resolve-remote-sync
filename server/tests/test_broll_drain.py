@@ -264,8 +264,12 @@ def test_a_merge_that_fails_leaves_the_live_index_exactly_as_it_was(tmp_path):
     bundle = tmp_path / "bundle.db"
     assert run_program(broll_drain.EXPORT_PROGRAM, live, bundle)[0] == 0
 
-    stricter = SCHEMA.read_text(encoding="utf-8").replace("'uploading','live',",
-                                                          "'uploading',")
+    # CR-290B (2026-09-18b): the item-state list gained `proxies_live` between
+    # `uploading` and `live`, so the literal this rewrites has to name the pair
+    # that is actually adjacent now, or the "stricter" schema is unchanged and
+    # the merge that must fail succeeds.
+    stricter = SCHEMA.read_text(encoding="utf-8").replace("'proxies_live','live',",
+                                                          "'proxies_live',")
     make_index(live, [("ff3", "A/001.MP4")], schema=stricter)   # the swap
     rc, payload, _log = run_program(broll_drain.APPLY_PROGRAM, live, bundle)
     assert rc == broll_drain.RC_FAILED
@@ -435,6 +439,13 @@ def test_a_merge_that_fails_after_the_swap_names_the_bundle_and_the_command(
     ])
     rc, _ran = _publish(monkeypatch, tmp_path, backend)
     err = capsys.readouterr().err
-    assert rc == 0
+    # server-tools-2 (2026-09-18): ...and the exit status says so. This used to
+    # assert `rc == 0`, i.e. the suite PINNED a publish that reported success
+    # while the live index was missing every fleet-ingested clip and every
+    # ingest_batches/ingest_items row since the copy was pulled. Not 1: the
+    # swap did happen, and 1 means "nothing was published" everywhere else in
+    # this CLI.
+    assert rc == publish_db.RC_DRAIN_UNMERGED, err
+    assert rc != 0
     assert "have NOT been merged" in err and "database is locked" in err
     assert "--apply-drain" in err

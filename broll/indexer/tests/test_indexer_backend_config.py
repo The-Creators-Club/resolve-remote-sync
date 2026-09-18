@@ -62,7 +62,18 @@ def test_unknown_model_tier_is_refused(tmp_path):
         load_config(_write(tmp_path, "indexer:\n  model_tier: ultra\n"))
 
 
-def test_indexer_paths_default_empty_and_read_from_config(tmp_path):
+def test_indexer_paths_default_empty_and_read_from_config(tmp_path, monkeypatch):
+    # The three keys below are env-overridable (`_env(...) or raw.get(...)`),
+    # and this rig has `BROLL_LOCAL_CACHE_DIR` set MACHINE-WIDE for the real
+    # local-VLM cache -- so this test asserted the config file's value while
+    # the resolver was answering the developer's own environment, and it
+    # failed in the central gate and passed in the hunter's shell. A test
+    # about precedence has to state where it is standing (2026-09-18, the
+    # test-hygiene low of CR-286). The env-wins case is the next test, which
+    # sets all three itself and is unaffected: this runs first.
+    for name in ("BROLL_LOCAL_CACHE_DIR", "BROLL_LLAMA_SERVER_PATH",
+                 "BROLL_DASHBOARD_URL"):
+        monkeypatch.delenv(name, raising=False)
     cfg = load_config(_write(
         tmp_path,
         'indexer:\n  local_cache_dir: "/cache"\n  llama_server_path: "/bin/llama-server"\n'

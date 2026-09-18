@@ -441,6 +441,14 @@ details.proj-group > summary .mono-sm { margin-left: auto; }
 /* A healthy lane is drawn quiet: a row of green boxes stops the eye exactly
    as well as a red one does, and only one of them should be able to. */
 .chip.lane.quiet { color: var(--muted); border-color: #2a2a31; }
+/* dash-api-4 = dash-mounts-ui-5 (2026-09-18): a lane the report did NOT carry
+   is not a healthy lane. `health.lane_strip` fills an absent lane with
+   {state: "not reported", chip: green, reported: false} and the template drew
+   green as `quiet`, so "this lane did not report" and "this lane is fine" were
+   the same grey box - the "could not check must never render as a
+   reassurance" rule this file's own disk chip states twice. Dashed, not amber:
+   it is a gap in the evidence, not a fault. */
+.chip.lane.unknown { color: var(--muted); border-style: dashed; border-color: #4a4a55; }
 .lane-detail { margin-left: 0.2rem; }
 /* Everything that is not the headline or a lane. Collapsed by default; the
    note count beside the summary is what stops a fold hiding a real problem. */

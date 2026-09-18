@@ -743,21 +743,83 @@ def retract_record(channel: dict[str, Any], kind: str, platform: str,
     return len(channel["packages"]) != before
 
 
-def published_assets(*, repo: str, tag: str, runner: Runner) -> dict[str, int] | None:
-    """{asset name: size} of what the release already holds, or None when gh
-    could not say (then the caller uploads everything, as it always did)."""
+def published_assets(*, repo: str, tag: str,
+                     runner: Runner) -> dict[str, dict[str, Any]] | None:
+    """{asset name: {size, state, digest}} of what the release already holds,
+    or None when gh could not say (then the caller uploads everything, as it
+    always did).
+
+    dash-release-jobs-3 (2026-09-18): `state` and `digest` joined `size`. A
+    release asset whose upload was interrupted keeps its declared NAME and
+    SIZE while sitting in state `starter`, and a `starter` asset serves
+    nothing usable - so the 2026-09-11 "only upload what changed" skip left it
+    broken FOR EVER, because nothing downstream ever compares the published
+    bytes against the record's sha again. Before that change every run pushed
+    everything with `--clobber` and an interrupted upload healed itself on the
+    next release. The outcome is fail-closed (a customer's dashboard refuses
+    the bytes with `FeedHashMismatch` and says so on its feed page) but it is
+    permanent and self-inflicted.
+
+    `digest` is `sha256:...` where the API offers it and `null` where it does
+    not; either way this returns what gh said and `_asset_is_held` decides.
+    ONE `gh` call still, because the tests pin this path verb for verb.
+    """
     rc, stdout, _stderr = runner([
         "gh", "release", "view", tag, "-R", repo, "--json", "assets",
-        "--jq", r'.assets[] | "\(.name)\t\(.size)"',
+        "--jq", r'.assets[] | "\(.name)\t\(.size)\t\(.state)\t\(.digest)"',
     ])
     if rc != 0:
         return None
-    held: dict[str, int] = {}
+    held: dict[str, dict[str, Any]] = {}
     for line in (stdout or "").splitlines():
-        name, _sep, size = line.rpartition("\t")
-        if name and size.strip().isdigit():
-            held[name] = int(size)
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        name, size = parts[0], parts[1].strip()
+        if not name or not size.isdigit():
+            continue
+        held[name] = {
+            "size": int(size),
+            # An answer with no state field at all is an OLDER gh, not an
+            # uploaded asset: `_asset_is_held` treats that as "cannot tell",
+            # which re-uploads. That is the pre-2026-09-11 behaviour and is
+            # always correct.
+            "state": parts[2].strip() if len(parts) > 2 else "",
+            "digest": parts[3].strip() if len(parts) > 3 else "",
+        }
     return held
+
+
+def _asset_is_held(asset: dict[str, Any] | None, local: Path) -> bool:
+    """May this planned file be skipped? (dash-release-jobs-3.)
+
+    Three tests, in cost order, and every "cannot tell" answers False - the
+    only failure direction that costs bandwidth rather than a broken feed:
+
+      * the size still has to match, as it always did;
+      * the asset has to be `uploaded`. `starter` is a push that was cut off,
+        and it is the whole of this finding;
+      * where GitHub gives a `digest` (`sha256:...`), the local bytes have to
+        hash to it. That is the check the customer's dashboard will make
+        anyway, made here, before the skip rather than after the release.
+    """
+    if not asset:
+        return False
+    try:
+        if int(asset.get("size") or -1) != local.stat().st_size:
+            return False
+    except OSError:
+        return False
+    if str(asset.get("state") or "").lower() != "uploaded":
+        return False
+    digest = str(asset.get("digest") or "").strip().lower()
+    if digest.startswith("sha256:"):
+        want = digest.split(":", 1)[1]
+        # Only when the API offered one: a missing digest is the common case
+        # and must not turn every run back into a full 3 GB push.
+        if want and want != _sha256_file(local):
+            return False
+    return True
 
 
 def github_upload(feed_dir: Path, channel: dict[str, Any], *, repo: str, tag: str,
@@ -820,11 +882,11 @@ def github_upload(feed_dir: Path, channel: dict[str, Any], *, repo: str, tag: st
     held = {} if created else published_assets(repo=repo, tag=tag, runner=runner)
     if held is not None:
         skipped = [p for p in files
-                   if p.name not in fresh and held.get(p.name) == p.stat().st_size]
+                   if p.name not in fresh and _asset_is_held(held.get(p.name), p)]
         if skipped:
             files = [p for p in files if p not in skipped]
-            print(f"[publish-feed] {len(skipped)} asset(s) already on the release at the "
-                  f"same name and size, not re-uploaded", file=out)
+            print(f"[publish-feed] {len(skipped)} asset(s) already uploaded to the release "
+                  f"with the same bytes, not re-uploaded", file=out)
     argv = ["gh", "release", "upload", tag] + [str(p) for p in files] + ["--clobber", "-R", repo]
     rc, stdout, stderr = runner(argv)
     if rc != 0:

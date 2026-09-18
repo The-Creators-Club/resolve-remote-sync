@@ -14,7 +14,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, Sequence
 
 from pathlib import Path
 
@@ -124,6 +124,7 @@ class Collector:
         client: SyncthingClient | None = None,
         now_fn: Callable[[], str] = db.utcnow_iso,
         pin_fn: Callable[[], bool] | None = None,
+        session_prune_fn: Callable[[], Any] | None = None,
     ):
         self.settings = settings
         self.client = client or SyncthingClient.from_settings(settings)
@@ -135,6 +136,23 @@ class Collector:
         # not. A collector built with no answer says no, which is phase 1's
         # behaviour.
         self.pin_fn = pin_fn or (lambda: False)
+        # dash-core-5 (2026-09-18): `auth_sessions` was the one table with no
+        # periodic sweep. `sessions.py` says "expired sessions are deleted
+        # rather than left to accumulate", but the only unconditional
+        # `prune()` ran in the lifespan at BOOT, and `validate()` deletes a row
+        # only when that exact cookie is presented again after it expired - so
+        # a session from a phone nobody opens again, or a laptop that was
+        # reimaged, stayed until the next container restart. On a container
+        # that runs for months between deploys `list_all(limit=200)` starts
+        # hiding live sessions behind dead ones. Called as the STORE's own
+        # method, never as SQL on this connection: SessionStore has its own
+        # connection and its own `_write_lock`, and two writers on one table
+        # is how that lock stops meaning anything.
+        self.session_prune_fn = session_prune_fn
+        # dash-db-1: which kinds have a `slow_poll` card open, and which we
+        # have already asked the table about. See `_slow_poll_open`.
+        self._slow_polls: set[str] = set()
+        self._slow_polls_asked: set[str] = set()
         self._stop = threading.Event()
         # nudge(): the loop's sleep is interrupted and these kinds run on the
         # next wake (<= ~5s) instead of waiting out their intervals. Ticking
@@ -490,14 +508,65 @@ class Collector:
             # other writer was timing out (2026-09-03 database is locked,
             # api_report held the lock).
             log.info("poll %s took %.1fs", kind, elapsed)
-            if elapsed > db.BUSY_TIMEOUT_MS / 1000.0:
-                # ...and where a recreate cannot lose it (2026-09-17): a pass
-                # this long is what a "database busy" elsewhere waited on
-                try:
-                    notices.record_slow_write(conn, f"collector poll {kind}", elapsed,
-                                              now=self.now_fn())
-                except Exception:  # noqa: BLE001 - never fail a cycle over its own record
-                    log.exception("could not record a slow-write notice")
+        # dash-db-1 = dash-collector-alerts-4 (2026-09-18): this used to file a
+        # `slow_write` at `BUSY_TIMEOUT_MS`, whose body asserts that the poll
+        # "held the database's write lock for longer than a request waits".
+        # `_record_inventory`'s own docstring says the opposite, by design:
+        # every filesystem walk happens BEFORE the first write, because an
+        # os.walk of a ZFS/NFS tree inside an open write transaction is what
+        # made editors' POST /api/v1/report 500. Elapsed pass time is not
+        # lock-hold time, and on any tree of size that card was permanent,
+        # un-dismissable (`db.notice` NULLs `cleared_at` on every re-assert)
+        # and pointed the `db_busy` cross-reference at an innocent pass.
+        # Its own kind, its own words, its own threshold - and a pass that
+        # finishes inside a cycle CLEARS it.
+        #
+        # A CLEAN PASS WRITES NOTHING HERE. Measured the hard way while fixing
+        # it: an unconditional `clear_notice` + commit per poll is a write
+        # transaction per poll per kind, and `test_db_write_locks.py` - the
+        # suite that exists to pin "the collector does not hold the write lock
+        # over its network work" - went red and took three minutes, because
+        # every companion report in it was now queueing behind the collector
+        # thread. `_slow_polls` remembers which kinds have a card open (seeded
+        # from the table once per kind, with a SELECT, so a card that survived
+        # a restart still clears), and only a CHANGE writes.
+        try:
+            if elapsed > notices.SLOW_POLL_SECONDS:
+                if kind not in self._slow_polls:
+                    self._slow_polls.add(kind)
+                notices.record_slow_poll(conn, kind, elapsed, now=self.now_fn())
+            elif self._slow_poll_open(conn, kind):
+                self._slow_polls.discard(kind)
+                notices.clear_slow_poll(conn, kind, now=self.now_fn())
+        except Exception:  # noqa: BLE001 - never fail a cycle over its own record
+            conn.rollback()
+            log.exception("could not record how long the %s pass took", kind)
+        return True
+
+    def _slow_poll_open(self, conn, kind: str) -> bool:
+        """Is there a `slow_poll` card open for this pass? Read, never write.
+
+        dash-db-1 (2026-09-18). Asked at most once per kind per process: the
+        answer only ever goes from True to False here, and `record_slow_poll`
+        is what puts it back. The SELECT exists for the card that survived a
+        container restart, which an in-memory set alone could never clear.
+        """
+        if kind in self._slow_polls:
+            return True
+        if kind in self._slow_polls_asked:
+            return False
+        self._slow_polls_asked.add(kind)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM notices WHERE kind=? AND subject=? "
+                "AND cleared_at IS NULL",
+                (notices.SLOW_POLL_KIND, f"collector poll {kind}"[:120]),
+            ).fetchone()
+        except Exception:  # noqa: BLE001 - a missing table is not a cycle's problem
+            return False
+        if row is None:
+            return False
+        self._slow_polls.add(kind)
         return True
 
     def _run_provision(self, conn) -> None:
@@ -1724,7 +1793,11 @@ class Collector:
         # convenience on top of it, and a convenience may never take the walk
         # down with it.
         try:
-            detected = self._record_detected_moves(conn, diffs, now)
+            # dash-collector-alerts-1 (2026-09-18): a pass that could not read
+            # part of its own evidence has not CHECKED for hand moves, and the
+            # panel must not say it has. See _record_detected_moves.
+            detected = self._record_detected_moves(
+                conn, diffs, now, blind=len(errors) + refused)
         except Exception:                                            # noqa: BLE001
             log.exception("inventory: hand-move detection failed; the walk stands")
         else:
@@ -1732,7 +1805,9 @@ class Collector:
                 notes.append(f"{detected} move(s) detected on the server")
         return "; ".join(notes) or None
 
-    def _record_detected_moves(self, conn, walks: list[InventoryWalk], now: str) -> int:
+    def _record_detected_moves(
+        self, conn, walks: list[InventoryWalk], now: str, blind: int = 0,
+    ) -> int:
         """Write a `file_moves` row for every move this pass can prove, with
         the same target machines the project page's button computes.
 
@@ -1743,16 +1818,61 @@ class Collector:
         # Evidence that this check ran, findings or none: without it the WHAT
         # THE SERVER CHECKS panel reads a fleet that has never had a hand move
         # as a kind nobody wrote (db.mark_notice_checked).
-        db.mark_notice_checked(conn, "file_move_detected", now)
-        if not walks:
+        #
+        # AN UNVERIFIED CHECK IS NOT CHECKED (dash-collector-alerts-1,
+        # 2026-09-18). This stamp was unconditional, so a pass whose project
+        # directories were unreadable, or whose inventory the collapse brake
+        # refused, reported the check as having RUN over evidence it never
+        # saw. A blind pass leaves the LAST honest stamp in place, which the
+        # panel renders as a time going stale - the truthful rendering, and
+        # the reason this is a skip and not a clear. Only a deployment that
+        # has never had one clean pass reads [ NOT CHECKED ], which is also
+        # true.
+        if blind:
+            log.info("inventory: %d project(s) in this pass could not be read or "
+                     "were refused, so this pass is not recorded as having checked "
+                     "for hand moves", blind)
+        else:
+            db.mark_notice_checked(conn, "file_move_detected", now)
+        # dash-collector-alerts-2: the same pass owns `file_moves_dropped`, so
+        # a registered kind nothing has had to write yet does not render
+        # [ NOT CHECKED ] for ever on a fleet that has never overrun the cap.
+        # Unconditional, unlike the one above: whether this pass overran the
+        # cap is a fact about this pass, whatever it could not read.
+        db.mark_notice_checked(conn, notices.MOVES_DROPPED_KIND, now)
+        moves, plan = self._moves_including_carried_halves(conn, walks, now)
+        if not moves:
+            _settle_halves(conn, plan, (), now)
             return 0
-        moves = detect_moves(walks)
         if len(moves) > DETECTED_MOVE_LIMIT:
+            # dash-collector-alerts-2 (2026-09-18): the log line used to
+            # promise that "the rest are picked up on later cycles". They are
+            # not, and cannot be: `db.replace_nas_media` has already run for
+            # every walked project a few lines up in `_record_inventory`, and
+            # those rows were the only record of the old paths. A later cycle
+            # sees the surplus files at their new paths as ordinary inventory.
+            # So the dropped moves are deletions as far as every machine is
+            # concerned: lane A re-uploads them to the old paths, lane B's
+            # breaker parks proxy download on every machine that held them,
+            # and the only trace was one warning in a container log that a
+            # recreate throws away. The truncation is alphabetical by
+            # (from_slug, from_rel), so what survives is arbitrary with
+            # respect to importance - which is the other reason the operator
+            # has to be told rather than informed.
+            dropped = len(moves) - DETECTED_MOVE_LIMIT
             log.warning("inventory: %d moves detected in one pass, recording the first "
-                        "%d. A pass this size is a restore or a remount, not an "
-                        "afternoon of filing: check the server before the rest are "
-                        "picked up on later cycles", len(moves), DETECTED_MOVE_LIMIT)
+                        "%d and DISCARDING %d. A pass this size is a restore or a "
+                        "remount, not an afternoon of filing.",
+                        len(moves), DETECTED_MOVE_LIMIT, dropped)
+            try:
+                notices.record_moves_dropped(conn, len(moves), dropped, now=now)
+            except Exception:  # noqa: BLE001 - the walk stands either way
+                log.exception("could not record the dropped-moves notice")
             moves = moves[:DETECTED_MOVE_LIMIT]
+        # The halves of a cross-cycle move the cap DROPPED are kept, not
+        # forgotten: they are still the only record of the old paths, and the
+        # next pass may be able to record what this one could not.
+        _settle_halves(conn, plan, moves, now)
         recorded = 0
         for move in moves:
             if db.file_move_recorded(conn, from_slug=move.from_slug,
@@ -1785,6 +1905,45 @@ class Collector:
                      "not a move, open the project page's MOVES history."),
                 now=now)
         return recorded
+
+    def _moves_including_carried_halves(
+        self, conn, walks: list[InventoryWalk], now: str,
+    ) -> tuple[list[DetectedMove], "_HalfPlan"]:
+        """This pass's moves, plus the ones whose two halves are in different
+        passes (dash-collector-alerts-1, 2026-09-18).
+
+        `detect_moves` can only pair a vanish with an appearance inside the
+        walks of ONE pass, and the walk is windowed: 8 projects a cycle
+        through a rotating cursor. On any fleet with more than 8 active
+        projects a move out of project A into project B is a vanish in one
+        pass and an appearance in another, and `replace_nas_media` has
+        destroyed A's old rows by the time B is walked - so the move could
+        never be detected again, and every machine holding those clips treated
+        them as deletions (CR-267a's two days of parked breakers, again).
+
+        The unpairable halves of a pass are kept in `nas_media_pending_moves`
+        and paired here on a later cycle. Cross-cycle pairs are always FILE
+        moves, never folder ones: a folder rename is proved by "every file
+        under the old folder moved and nothing stayed behind", and the carried
+        halves are by construction a partial picture of their project, so that
+        proof cannot be made from them. One row per file is what the button
+        would have written for the same files.
+        """
+        moves = list(detect_moves(walks))
+        try:
+            carried = [_Half(*[r[f] for f in _Half._fields])
+                       for r in db.pending_move_halves(conn, now)]
+        except Exception:                                        # noqa: BLE001
+            # The table is one migration old and this is a convenience on top
+            # of a convenience: a pass that cannot read it still records
+            # everything it can see by itself.
+            log.exception("inventory: could not read the carried move halves")
+            carried = []
+        fresh = [h for h in unpaired_halves(walks)
+                 if not _the_file_is_also_somewhere_else(conn, h)]
+        cross, plan = pair_across_cycles(
+            carried, fresh, corroborate=lambda s, d: _one_copy_in_the_tree(conn, s, d))
+        return moves + cross, plan
 
     @staticmethod
     def _project_rel(row, prefix: str) -> str:
@@ -2112,6 +2271,21 @@ class Collector:
             log.debug("collector: could not ask whether jobs may be pinned",
                       exc_info=True)
         db.prune(conn, self.now_fn(), pin=pin)
+        if self.session_prune_fn is None:
+            return
+        # COMMIT FIRST. `db.prune` above leaves this connection in an open
+        # write transaction (`_timed` is what commits it), and the session
+        # store prunes on its OWN connection - so calling it here without this
+        # commit means a second writer waiting out its background busy timeout
+        # while this one holds the write lock for the whole of that wait. Every
+        # companion report in the window then gets `database is locked`, which
+        # is precisely what `tests/test_db_write_locks.py` exists to pin, and
+        # is how it caught this while dash-core-5 was being written.
+        conn.commit()
+        try:
+            self.session_prune_fn()
+        except Exception:  # noqa: BLE001 - a sweep never fails a cycle
+            log.exception("collector: could not prune expired sessions")
 
     def _run_invariants(self, conn) -> str | None:
         """The continuous invariant checker (SYS-9, resilience sweep wave 5,
@@ -2212,6 +2386,14 @@ class Collector:
 # moves; it has seen a dataset remount, a restore or a re-encode of a whole
 # archive, and the right answer to that is a log line and a human.
 DETECTED_MOVE_LIMIT = 500
+
+# res-fleet-2 (2026-09-18b mediums): how many unpairable halves one pass may
+# CARRY. Deliberately well under `db.PENDING_MOVE_HALF_LIMIT` (4000, the read
+# side's ceiling), because one pass must never be able to fill the window on
+# its own: the read takes the OLDEST rows first, so a saturating pass does not
+# merely add noise, it hides every half written after it until the two-day
+# prune drains the table.
+PENDING_MOVE_HALF_WRITE_LIMIT = 1000
 
 # How long a move already recorded suppresses an identical one. Long enough to
 # cover a walk that raced the move it was watching (the window is one cycle,
@@ -2337,6 +2519,320 @@ def _matched_pairs(
     return pairs, old_maps, new_maps
 
 
+class _Half(NamedTuple):
+    """One end of a move nobody could pair in the pass that saw it.
+
+    dash-collector-alerts-1 (2026-09-18). The fields are the row
+    `nas_media_pending_moves` holds, in its order: `half` is
+    db.HALF_VANISHED or db.HALF_APPEARED, `(base, size, mtime_ns)` is the same
+    key a within-pass match uses (`_move_key`), `rel_path` is NFC and
+    `raw_path` is the spelling on disk, which is what a companion renames to.
+    """
+    half: str
+    base: str
+    size: int
+    mtime_ns: int
+    slug: str
+    project_rel: str
+    rel_path: str
+    raw_path: str
+    seen_at: str = ""
+
+    @property
+    def key(self) -> tuple[str, int, int]:
+        return (self.base, int(self.size), int(self.mtime_ns))
+
+    @property
+    def row_key(self) -> tuple[str, str, int, int, str, str]:
+        """The primary key of its row, for a delete."""
+        return (self.half, self.base, int(self.size), int(self.mtime_ns),
+                self.slug, self.rel_path)
+
+
+class _HalfPlan(NamedTuple):
+    """What this pass owes the pending-halves table.
+
+    `persist` is what it could not pair, `delete` is what it consumed or
+    cancelled, and `by_move` maps each cross-cycle move onto the two halves
+    that proved it - so a move the cap drops keeps its evidence.
+    """
+    persist: list[_Half]
+    delete: list[_Half]
+    by_move: dict[DetectedMove, tuple[_Half, _Half]]
+
+
+def unpaired_halves(walks: list[InventoryWalk]) -> list[_Half]:
+    """The vanishes and appearances this pass could not pair by itself.
+
+    Deliberately narrower than `_matched_pairs`' own refusals:
+
+      * a key that vanished from two paths, or arrived at two, is AMBIGUOUS
+        and nothing is kept. Ambiguity is not a guess in this pass and it does
+        not become one by waiting a cycle.
+      * a file under a `Proxy/` folder is never kept. Within a pass a proxy
+        travels on its original's row, and a proxy whose original did not move
+        is deliberately not a move anybody is told about.
+    A project's FIRST walk (`walk.old` empty, because `db.nas_media_rows` has
+    never held a row for it) is deliberately NOT excluded here, though its
+    arrivals are not evidence that anything arrived: moving a folder INTO a
+    brand-new project is the common case, and it is a vanish in one pass and
+    that first walk in the next. What dash-collector-alerts-3 is really about
+    is ORDER, and that is enforced where the two halves meet
+    (`pair_across_cycles`).
+    """
+    vanished: dict[tuple[str, int, int], list[_Half]] = {}
+    appeared: dict[tuple[str, int, int], list[_Half]] = {}
+    for walk in walks:
+        old_keys: dict[tuple[str, int, int], set[str]] = {}
+        new_keys: dict[tuple[str, int, int], set[str]] = {}
+        new_raw: dict[str, str] = {}
+        old_raw: dict[str, str] = {}
+        for rel, _kind, size, mtime in walk.old:
+            norm = db.media_rel_key(rel)
+            old_raw[norm] = rel
+            key = _move_key(norm, size, mtime)
+            if key:
+                old_keys.setdefault(key, set()).add(norm)
+        for rel, _kind, size, mtime in walk.new:
+            norm = db.media_rel_key(rel)
+            new_raw[norm] = rel
+            key = _move_key(norm, size, mtime)
+            if key:
+                new_keys.setdefault(key, set()).add(norm)
+        for key, paths in old_keys.items():
+            for norm in paths - new_keys.get(key, set()):
+                vanished.setdefault(key, []).append(_Half(
+                    db.HALF_VANISHED, key[0], key[1], key[2], walk.slug,
+                    walk.project_rel, norm, old_raw.get(norm, norm)))
+        for key, paths in new_keys.items():
+            for norm in paths - old_keys.get(key, set()):
+                appeared.setdefault(key, []).append(_Half(
+                    db.HALF_APPEARED, key[0], key[1], key[2], walk.slug,
+                    walk.project_rel, norm, new_raw.get(norm, norm)))
+    out: list[_Half] = []
+    for store, other in ((vanished, appeared), (appeared, vanished)):
+        for key, halves in store.items():
+            if len(halves) != 1 or other.get(key):
+                continue      # ambiguous, or this pass paired it by itself
+            half = halves[0]
+            if _in_proxy_dir(half.rel_path):
+                continue
+            out.append(half)
+    return out
+
+
+def _the_file_is_also_somewhere_else(conn, half: _Half) -> bool:
+    """Is this half's file sitting somewhere else in the tree RIGHT NOW.
+
+    dash-collector-alerts-1 (2026-09-18b). Within a pass, two halves are one
+    act because they come from a single before/after picture of the same
+    projects in the same window. A carried half has no such proof: it pairs
+    on `(basename, size, mtime_ns)` alone, across up to two days and every
+    project in the fleet, and the result is not a suggestion - it becomes a
+    `file_moves` row in state DONE that every machine holding the source
+    applies to its own disk and relinks Resolve for, with no admin in the
+    path. The act that fakes it is a COPY: an editor duplicates a clip into a
+    second project (size and mtime survive the copy), the original is deleted
+    a day later, and the two halves look exactly like a move.
+
+    The evidence that tells them apart exists only at the moment the half is
+    SEEN, which is why this is asked here and not at pairing time: while both
+    copies exist, `nas_media` still holds the other one. By the time the
+    second half turns up the tree looks the same either way. A half whose
+    file is also elsewhere is therefore dropped outright - not carried, not
+    paired - and the pass records nothing, which is the behaviour this
+    product had before the feature existed.
+
+    Never fatal, and "cannot tell" is NOT corroboration: a read that fails
+    drops the half, because the safe direction here is to record no move.
+    """
+    try:
+        other = db.media_key_elsewhere(
+            conn, half.base, half.size, half.mtime_ns,
+            exclude=[(half.slug, half.rel_path)])
+    except Exception:                                            # noqa: BLE001
+        log.exception("inventory: could not corroborate a carried move half; "
+                      "dropping it (no move is recorded)")
+        return True
+    if other is not None:
+        log.info("inventory: %s/%s is not half of a move - the same file is also at "
+                 "%s/%s, so this is a copy, not a hand move",
+                 half.slug, half.rel_path, other[0], other[1])
+    return other is not None
+
+
+def _one_copy_in_the_tree(conn, source: _Half, destination: _Half) -> bool:
+    """The pairing-time half of the same question: does the file exist ONLY
+    at the destination now (dash-collector-alerts-1, 2026-09-18b).
+
+    The source must be gone (it is: that is the vanish) and no third copy may
+    have appeared anywhere since. A file that is in three places was never
+    moved out of one of them.
+    """
+    try:
+        other = db.media_key_elsewhere(
+            conn, source.base, source.size, source.mtime_ns,
+            exclude=[(source.slug, source.rel_path),
+                     (destination.slug, destination.rel_path)])
+    except Exception:                                            # noqa: BLE001
+        log.exception("inventory: could not corroborate a cross-cycle move; "
+                      "not recording it")
+        return False
+    if other is not None:
+        log.info("inventory: refusing a cross-cycle move %s/%s -> %s/%s: the same "
+                 "file is also at %s/%s", source.slug, source.rel_path,
+                 destination.slug, destination.rel_path, other[0], other[1])
+    return other is None
+
+
+def _seen_order(half: _Half) -> tuple[int, str]:
+    """When this half was seen, orderable across passes.
+
+    dash-collector-alerts-3 (2026-09-18b mediums). A half read back from
+    `nas_media_pending_moves` carries the pass that wrote it; a half from THIS
+    pass carries `""`, which means now, i.e. after every carried one - so it
+    sorts in a second component, not by the empty string, which would sort
+    first and invert the whole comparison.
+    """
+    return (0, str(half.seen_at)) if half.seen_at else (1, "")
+
+
+def _vanished_first(source: _Half, destination: _Half) -> bool:
+    """Did the file leave before (or in the same pass as) it arrived."""
+    return _seen_order(source) <= _seen_order(destination)
+
+
+def pair_across_cycles(
+    carried: list[_Half], fresh: list[_Half],
+    corroborate: Callable[[_Half, _Half], bool] | None = None,
+) -> tuple[list[DetectedMove], _HalfPlan]:
+    """Pair what an earlier pass kept with what this one saw.
+
+    The refusals are the within-pass ones, applied to the union: one source
+    and one destination for a key, or nothing happens. Three more are
+    specific to waiting a cycle:
+
+      * `corroborate` (dash-collector-alerts-1, 2026-09-18b) asks the CURRENT
+        inventory whether this file is in exactly one place. A key match
+        across two passes is not evidence of a move on its own, and acting on
+        it moves files on editors' machines; a pair with a copy of itself
+        still in the tree is refused and both halves are dropped, so the next
+        pass does not try again on the same untrue evidence. No callable
+        (a caller with no database, i.e. the unit tests of the pairing rules
+        themselves) means the pairing rules alone.
+
+      * the vanish must have been seen BEFORE the arrival, or in the same
+        pass (dash-collector-alerts-3, 2026-09-18b mediums). A file cannot
+        arrive before it leaves, and arrivals are cheap: a project's first
+        inventory writes one per file.
+      * a file that came BACK to the path it left (lane A re-uploading in the
+        window before a command landed, an admin undoing their own move) is
+        not a move. Both halves are dropped and nothing is recorded.
+      * the two ends must be different paths. A vanish and an appearance at
+        the same path in the same project is the same file, seen twice.
+    """
+    by_key: dict[tuple[str, int, int], list[_Half]] = {}
+    for half in list(carried) + list(fresh):
+        by_key.setdefault(half.key, []).append(half)
+    moves: list[DetectedMove] = []
+    by_move: dict[DetectedMove, tuple[_Half, _Half]] = {}
+    consumed: set[tuple] = set()
+    for halves in by_key.values():
+        sources = [h for h in halves if h.half == db.HALF_VANISHED]
+        destinations = [h for h in halves if h.half == db.HALF_APPEARED]
+        if len(sources) != 1 or len(destinations) != 1:
+            continue
+        source, destination = sources[0], destinations[0]
+        same_place = (source.slug == destination.slug
+                      and source.rel_path == destination.rel_path)
+        if same_place:
+            # The comeback, cancelled: both halves are consumed whatever
+            # order they were seen in, because a file at the path it left is
+            # one file seen twice and neither end is evidence of anything.
+            consumed.add(source.row_key)
+            consumed.add(destination.row_key)
+            continue
+        if not _vanished_first(source, destination):
+            # dash-collector-alerts-3 (2026-09-18b mediums): a file cannot
+            # arrive before it leaves. An arrival half is cheap and common -
+            # every clip of a project's FIRST inventory is one, because
+            # `walk.old` is empty for a project this collector has never
+            # walked - and an old arrival paired with a fresh vanish reads a
+            # newly indexed project that already held a copy, plus an
+            # unrelated deletion a day later, as a hand move: a `file_moves`
+            # row in state DONE that every holding machine applies to its own
+            # disk, with no admin in the path. Neither half is consumed: the
+            # vanish may still pair with a genuine LATER arrival, and the
+            # stale arrival ages out of the table on its own.
+            continue
+        consumed.add(source.row_key)
+        consumed.add(destination.row_key)
+        # dash-collector-alerts-1: both halves are consumed either way. A pair
+        # the tree contradicts is not evidence that improves by being kept.
+        if corroborate is not None and not corroborate(source, destination):
+            continue
+        move = DetectedMove(
+            from_slug=source.slug, from_project_rel=source.project_rel,
+            from_rel=source.rel_path,
+            to_slug=destination.slug, to_project_rel=destination.project_rel,
+            to_rel=destination.raw_path,
+            is_dir=False, n_files=1, proxies_moved=0)
+        moves.append(move)
+        by_move[move] = (source, destination)
+    moves.sort(key=lambda m: (m.from_slug, m.from_rel))
+    persist = [h for h in fresh if h.row_key not in consumed]
+    delete = [h for h in carried if h.row_key in consumed]
+    return moves, _HalfPlan(persist, delete, by_move)
+
+
+def _settle_halves(conn, plan: _HalfPlan, kept: Sequence[DetectedMove], now: str) -> None:
+    """Write the pending-halves table for this pass.
+
+    Never fatal: a hand move nobody can pair is the state this product was in
+    before the feature existed, and the inventory walk outranks it.
+    """
+    kept_set = set(kept)
+    delete = list(plan.delete)
+    persist = list(plan.persist)
+    if len(persist) > PENDING_MOVE_HALF_WRITE_LIMIT:
+        # res-fleet-2 (2026-09-18b mediums): the write had no bound and the
+        # READ has one (`db.pending_move_halves`, oldest 4000 inside the
+        # two-day window). A pass that persists more halves than that - a
+        # 6,000-clip upload, a restore, a remount - fills the window with
+        # rows that by construction will never pair, and every fresh half
+        # after them is crowded out of the read: cross-cycle detection turns
+        # itself off, silently, for two days. Dropping this pass's halves
+        # costs only the convenience (a hand move in the window goes
+        # undetected, which is what this product did before the feature) and
+        # it keeps the feature working for every ordinary pass after it.
+        log.warning("inventory: %d unpairable move halves in one pass, keeping none "
+                    "of them. A pass this size is an upload or a restore, not a hand "
+                    "move, and carrying them would crowd out every later one.",
+                    len(persist))
+        persist = []
+    for move, (source, destination) in plan.by_move.items():
+        if move in kept_set:
+            delete.extend([source, destination])
+        else:
+            # Dropped by the cap. Both ends go back in the table exactly as
+            # they were, so the next pass can try again.
+            persist.extend([h for h in (source, destination) if h.seen_at == ""])
+            delete[:] = [h for h in delete if h.row_key not in
+                         {source.row_key, destination.row_key}]
+    try:
+        if delete:
+            db.delete_pending_move_halves(
+                conn, [h.row_key for h in delete])
+        if persist:
+            db.record_pending_move_halves(
+                conn,
+                [(h.half, h.base, h.size, h.mtime_ns, h.slug, h.project_rel,
+                  h.rel_path, h.raw_path) for h in persist],
+                now)
+    except Exception:                                            # noqa: BLE001
+        log.exception("inventory: could not update the carried move halves")
+
+
 def _folder_move(
     pairs: list[_Pair], idx: int, by_source: dict[tuple[int, str], int],
     old_maps: list[dict[str, str]], new_maps: list[dict[str, str]],
@@ -2361,10 +2857,39 @@ def _folder_move(
     while (shared < min(len(from_parts), len(to_parts))
            and from_parts[-1 - shared] == to_parts[-1 - shared]):
         shared += 1
-    for depth in range(shared, 1, -1):
-        from_folder = "/".join(from_parts[:len(from_parts) - (depth - 1)])
-        to_folder = "/".join(to_parts[:len(to_parts) - (depth - 1)])
-        to_folder_raw = "/".join(raw_parts[:len(raw_parts) - (depth - 1)])
+    candidates = [(len(from_parts) - (depth - 1), len(to_parts) - (depth - 1),
+                   len(raw_parts) - (depth - 1))
+                  for depth in range(shared, 1, -1)]
+    # dash-collector-alerts-3 (2026-09-18): ...and the candidate the shared
+    # SUFFIX cannot see. A folder RENAMED IN PLACE (`Interviews` ->
+    # `Interviews 2026`, `B-roll` -> `Broll`) shares only the basename, so
+    # `shared == 1`, `range(1, 1, -1)` is empty, and every one of its files
+    # fell through to the per-file loop: 300 `file_moves` rows, 300
+    # `commands.file_moves` entries per holding machine, 300 events in the
+    # project page's MOVES history, and within a third of the 500-row cap in
+    # one pass - a 600-file rename crosses it and loses the tail. Only a
+    # folder moved under a DIFFERENT parent, which shares the folder name as
+    # well as the basename, was ever batched, while the doc
+    # (HAND_MOVES_ON_THE_SERVER.md section 7 phase 1) promises one row per
+    # folder for both. So the other end of the path is a candidate too: the
+    # first component where the two paths DIFFER, which for a rename in place
+    # is exactly the renamed folder. It must be a FOLDER and not the file
+    # itself, hence the bound; `_folder_members` still does all the proving,
+    # and the `Proxy` refusal below still applies to it.
+    common = 0
+    while (common < min(len(from_parts), len(to_parts)) - 1
+           and from_parts[common] == to_parts[common]):
+        common += 1
+    if common + 1 < min(len(from_parts), len(to_parts)):
+        cut = (common + 1, common + 1, common + 1)
+        if cut not in candidates:
+            candidates.append(cut)
+    for from_cut, to_cut, raw_cut in candidates:
+        from_folder = "/".join(from_parts[:from_cut])
+        to_folder = "/".join(to_parts[:to_cut])
+        to_folder_raw = "/".join(raw_parts[:raw_cut])
+        if not from_folder or not to_folder:
+            continue
         if from_folder.rsplit("/", 1)[-1].lower() == "proxy" \
                 or to_folder.rsplit("/", 1)[-1].lower() == "proxy":
             # A proxy travels with its original and is never moved on its own:

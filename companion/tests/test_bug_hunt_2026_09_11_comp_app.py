@@ -213,6 +213,10 @@ def test_resolve_health_sends_the_documented_keys_and_nothing_else(tmp_path):
         "proxy_attach", "proxy_gaps", "stills",
         "ignored_this_session", "ignored_folders", "skipped_ever",
         "last_scan_at", "open_project",
+        # comp-broll-tiers-5 (2026-09-18, CR-283X): the stand-ins whose
+        # editing-proxy upgrade gave up. Declared on the dashboard's
+        # ResolveHealthIn in the same pass (CR-285N), dashboard first.
+        "standins_owed",
     }
 
 
@@ -756,7 +760,9 @@ def test_the_move_is_applied_through_the_ledger(tmp_path, monkeypatch):
     app = _app(tmp_path)
     seen: dict[str, Any] = {}
 
-    def _apply(move, local_root, ledger=None):
+    def _apply(move, local_root, ledger=None, **kwargs):
+        # res-fleet-3 (2026-09-18, CR-283Y): the caller now also passes
+        # `project_rels=`; a stub written to the older signature must take it.
         seen["ledger"] = ledger
         return False, "nothing at the old path on this machine", None
 

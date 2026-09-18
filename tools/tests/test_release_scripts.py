@@ -538,3 +538,55 @@ class TestTheDriftDoctorReportsTheCardsCommit:
 
     def test_nothing_names_the_retired_ship_worktree(self):
         assert "Editing-ship" not in DRIFT
+
+
+class TestTheMediaJobTestsAreRequiredWhereFfmpegExists:
+    """tests-1 (2026-09-18), the OWED half of the companion-media builder's
+    fix. Twenty media-job tests -- the three Timeline Cards recipes, whose
+    ffmpeg argv another repo's page reads byte for byte, plus proxy_gen's
+    .partial + atomic-rename rule -- SKIPPED on every release runner, and
+    pytest exits 0 on a skip, so the argv could break and the build would
+    still be published. Both release scripts now set CCSYNC_REQUIRE_FFMPEG=1
+    beside CCSYNC_REQUIRE_RCLONE=1.
+
+    GUARDED on purpose, which is what these assertions are really about: an
+    unconditional requirement would make a local release cut impossible on a
+    rig with no ffmpeg, and a release that cannot be cut is worse than the
+    hole. Absent ffmpeg must leave a WARNING in the log rather than a silent
+    skip, and must not fail the run.
+    """
+
+    MAC = (TOOLS / "release_macos.sh").read_text(encoding="utf-8")
+
+    def test_the_windows_script_requires_it_when_it_has_one(self):
+        assert 'CCSYNC_REQUIRE_FFMPEG = "1"' in RELEASE
+        assert "Get-Command ffmpeg" in RELEASE
+
+    def test_the_windows_script_restores_the_previous_value(self):
+        # The rclone pin has always been restored in a `finally`; a release
+        # script that leaks an environment variable into the shell it was run
+        # from is how the next command in that window fails mysteriously.
+        assert "$env:CCSYNC_REQUIRE_FFMPEG = $prevRequireFfmpeg" in RELEASE
+
+    def test_the_windows_script_does_not_fail_without_ffmpeg(self):
+        block = RELEASE[RELEASE.index("$prevRequireFfmpeg"):]
+        block = block[:block.index("try {")]
+        assert "Write-Warn2" in block, "an absent ffmpeg must be said out loud"
+        assert "exit 1" not in block, "an absent ffmpeg must not fail the cut"
+
+    def test_the_mac_script_requires_it_when_it_has_one(self):
+        assert "CCSYNC_REQUIRE_FFMPEG" in self.MAC
+        assert "have_cmd ffmpeg" in self.MAC
+
+    def test_the_mac_script_does_not_fail_without_ffmpeg(self):
+        block = self.MAC[self.MAC.index("have_cmd ffmpeg"):]
+        block = block[:block.index("companion tests passed")]
+        assert "warn " in block, "an absent ffmpeg must be said out loud"
+        # `fail` appears once in the block, for the TESTS failing -- never for
+        # the absence itself.
+        assert block.count("fail \"companion tests failed") == 1
+        assert "fail \"no ffmpeg" not in block
+
+    def test_both_still_require_rclone(self):
+        assert 'CCSYNC_REQUIRE_RCLONE = "1"' in RELEASE
+        assert "CCSYNC_REQUIRE_RCLONE=1" in self.MAC

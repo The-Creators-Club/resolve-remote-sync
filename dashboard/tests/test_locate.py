@@ -176,3 +176,48 @@ def test_duplicate_questions_are_asked_once(env):
     body = ask(client, [{"name": "gold.mov", "size": 1234},
                         {"name": "gold.mov", "size": 1234}]).json()
     assert len(body["files"]) == 1
+
+
+# -- dash-api-1 (2026-09-18): an inventory the server could not read ---------
+
+
+def test_a_project_whose_walk_was_refused_is_not_a_destination(env):
+    """DASH-5's collapse refusal KEEPS the previous rows and never advances
+    tree_sig, so the stale picture survives every later cycle. Answering a
+    locate off it says "found - at the path that just stopped existing", and
+    the companion renames the file back out of its trash on to that path
+    every pass while the breaker discounts the deletion."""
+    client, conn = env
+    pid = seed(conn, "cct-s1", [("Interviews/gold.mov", 1234)])
+    # The real refusal, not a hand-written row: the walk comes back empty
+    # because the dataset is not mounted.
+    assert dbmod.replace_nas_media(conn, pid, [], "sig-new", 0, NOW) is False
+    conn.commit()
+    body = ask(client, [{"name": "gold.mov", "size": 1234}]).json()
+    assert body["files"][0]["found"] == []
+    assert body["unreadable"] == ["cct-s1"]
+    # ...and the rows are still there for every other reader of the inventory.
+    assert conn.execute("SELECT COUNT(*) c FROM nas_media").fetchone()["c"] == 1
+
+
+def test_a_healthy_project_is_unaffected_and_names_nobody(env):
+    client, conn = env
+    seed(conn, "cct-s1", [("Interviews/gold.mov", 1234)])
+    body = ask(client, [{"name": "gold.mov", "size": 1234}]).json()
+    assert body["unreadable"] == []
+    assert body["files"][0]["found"] == [{"project_slug": "cct-s1",
+                                          "rel_path": "Interviews/gold.mov"}]
+
+
+def test_a_readable_project_still_answers_beside_an_unreadable_one(env):
+    """The exclusion is per project, never per answer: the move that went to
+    a project the collector CAN read must still be followed."""
+    client, conn = env
+    broken = seed(conn, "cct-s1", [("Interviews/gold.mov", 1234)])
+    seed(conn, "ff5-talent-gap", [("Interviewees/gold.mov", 1234)])
+    assert dbmod.replace_nas_media(conn, broken, [], "sig-new", 0, NOW) is False
+    conn.commit()
+    body = ask(client, [{"name": "gold.mov", "size": 1234}]).json()
+    assert body["files"][0]["found"] == [{"project_slug": "ff5-talent-gap",
+                                          "rel_path": "Interviewees/gold.mov"}]
+    assert body["unreadable"] == ["cct-s1"]

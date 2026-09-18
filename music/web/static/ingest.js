@@ -1287,16 +1287,92 @@ function miRenderBatches() {
  * this editor's machines holds a live lease - so this button cannot steal a
  * batch that is genuinely running somewhere.
  */
+/** Dispatch a run/retry to THIS computer's companion, adopting the staging id
+ * it names when this page has lost its own.
+ *
+ * regression-1 (2026-09-18): CR-262C made the dispatch unconditional with an
+ * empty staging id after a reload, and CR-253A - from the same fix pass -
+ * refuses exactly that request 409 `staging_id_missing` while this machine is
+ * still holding the files. Both exits from the reload state were refused on
+ * the one computer that could do the work, and the only ways out were
+ * cancel-and-re-drop or a companion restart. The refusal's body already names
+ * the id it holds, so the answer is to send it straight back rather than to
+ * drop CR-253A's guard, which is what stops a retry burning every item's
+ * attempts.
+ */
+async function miDispatchLocal(path, uid, stagingId, withStatus) {
+  const send = (id) => miLoopback('POST', path,
+                                  {batch_uid: uid, staging_id: id,
+                                   run_mode: mi.runMode}, withStatus);
+  try {
+    return await send(stagingId || '');
+  } catch (e) {
+    const body = e.body || {};
+    if (e.status === 409 && body.reason === 'staging_id_missing' &&
+        body.staging_id) {
+      return await send(body.staging_id);
+    }
+    throw e;
+  }
+}
+
+/** The sentence for a loopback refusal: the companion's own when it sent one.
+ *
+ * music-2 (2026-09-18): every 409 used to read "another of your computers is
+ * still working on this batch". run() answers 409 for three unrelated things -
+ * this computer is busy with another batch, the tracks are no longer staged,
+ * and the staging id was missing - and forwards the dashboard's claim refusal
+ * as a fourth. Only the last one is about another computer, and the one
+ * message that names the action the editor must take was the one thrown away.
+ */
+function miRefusalText(e) {
+  const body = e.body || {};
+  if (body.reason || (body.message && e.status === 409)) {
+    return e.message;
+  }
+  if (e.status === 409) {
+    return 'Another of your computers is still working on this batch.';
+  }
+  return e.message;
+}
+
+/** Did the COMPANION refuse this, in words of its own?
+ *
+ * music-3 (2026-09-18b mediums): `miRefusalText` falls through to `e.message`
+ * for anything that is not a 409, and `e.message` is the app's own generic
+ * `the CC Sync tray returned HTTP <n>` for a bodyless error and the browser's
+ * `Failed to fetch` for a tray that is not running at all. Printing those as
+ * "this computer did not pick them up: <reason>" tells an editor a raw HTTP
+ * code and hides the one sentence that says what to DO. So only a real answer
+ * counts as a refusal; the two commonest dispatch failures (no tray, and a
+ * companion too old for /music/ingest/*) get the hint instead.
+ */
+function miSpokeARefusal(e) {
+  return !!(e && (e.status === 409 || (e.body && (e.body.reason || e.body.message))));
+}
+
+/** A hint string written for a toast of its own, used mid-sentence. */
+function miSentence(text) {
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : '';
+}
+
+function miDispatchHint(e) {
+  if (e && e.status === 404) return MI_TOO_OLD;
+  return MI_COMPANION_HINT;
+}
+
 async function miTakeOver(uid) {
   try {
-    await miLoopback('POST', '/music/ingest/run',
-                     {batch_uid: uid, staging_id: '', run_mode: mi.runMode});
+    await miDispatchLocal('/music/ingest/run', uid,
+                          mi.batchUid === uid ? (mi.stagingId || '') : '');
   } catch (e) {
-    if (e.status === 409) {
-      toast(el('div', 'row bad',
-               'Another of your computers is still working on this batch.'));
+    // music-3 (2026-09-18b mediums): the else arm printed a raw `e.message`,
+    // which for the two commonest failures is "Failed to fetch" or an HTTP
+    // code rather than anything the companion said.
+    if (miSpokeARefusal(e)) {
+      toast(el('div', 'row bad', miRefusalText(e)));
     } else {
-      miSetNotice(`This computer did not take the batch: ${e.message}`);
+      miSetNotice(`This computer did not take the batch: ${miDispatchHint(e)}`);
     }
     miLoadBatches();
     return;
@@ -1341,6 +1417,8 @@ async function miRetryFailed(uid) {
     return;
   }
   let started = false;
+  let refused = '';
+  let hint = '';
   try {
     // music-2 (2026-09-11): 202 is a companion that re-armed the batch AND
     // CLAIMED it here. One published before this route existed answers
@@ -1348,18 +1426,34 @@ async function miRetryFailed(uid) {
     // any other success is "queued again" and never "running" - an editor
     // told that work is running on a computer nothing claimed it on waits
     // for ever.
-    const taken = await miLoopback('POST', '/music/ingest/retry',
-                                   {batch_uid: uid,
-                                    staging_id: mi.batchUid === uid
-                                      ? (mi.stagingId || '') : '',
-                                    run_mode: mi.runMode},
-                                   true);
+    const taken = await miDispatchLocal(
+      '/music/ingest/retry', uid,
+      mi.batchUid === uid ? (mi.stagingId || '') : '', true);
     started = taken.status === 202;
-  } catch { /* the batch is queued on the server either way */ }
+  } catch (e) {
+    // music-2 (2026-09-18): this was a bare `catch { }`, so a companion that
+    // refused the dispatch in words was answered with "back in the queue" and
+    // the editor was told to do the thing that had just been refused. The
+    // batch IS queued on the server either way, which is what the second half
+    // of the sentence still says.
+    // music-3 (2026-09-18b mediums): only an answer the companion really
+    // gave is a refusal. A tray that is not running and a companion too old
+    // for /music/ingest/* throw here too, and reporting those as the reason
+    // this computer did not take the tracks both misnames them and hides the
+    // fallback sentence, which is the only line that says what to do next.
+    if (miSpokeARefusal(e)) refused = miRefusalText(e);
+    else hint = e.status === 404
+      ? miSentence(MI_TOO_OLD)
+      : 'The CC Sync tray on this computer did not answer.';
+  }
   toast(el('div', 'row', started
     ? `${n} track${n === 1 ? '' : 's'} back in the queue on this computer.`
-    : `${n} track${n === 1 ? '' : 's'} back in the queue. Open this page on ` +
-      `the computer that has the tracks and press take over on this computer.`));
+    : refused
+      ? `${n} track${n === 1 ? '' : 's'} back in the queue, but this computer ` +
+        `did not pick them up: ${refused}`
+      : `${n} track${n === 1 ? '' : 's'} back in the queue. ${hint ? hint + ' ' : ''}` +
+        `Open this page on the computer that has the tracks and press ` +
+        `take over on this computer.`));
   miLoadBatches();
   miPollServer();
 }

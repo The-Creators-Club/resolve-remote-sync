@@ -215,7 +215,13 @@ class SessionStore:
         try:
             idle = db.age_seconds(row["last_seen"], now)
             age = db.age_seconds(row["created_at"], now)
-        except ValueError:
+        except (ValueError, TypeError):
+            # live-3 (2026-09-18): TypeError as well. `age_seconds` now treats
+            # a naive stamp as UTC so this arm should be unreachable for that
+            # cause, but "a row nobody can parse is NO SESSION" has to be the
+            # answer here whatever the reason: raising out of `validate` makes
+            # every request carrying that cookie a 500, including the one to
+            # /login that would let the person out of it.
             return None
         if idle > self.idle_seconds or age > self.absolute_seconds:
             # Expired sessions are deleted rather than left to accumulate: the

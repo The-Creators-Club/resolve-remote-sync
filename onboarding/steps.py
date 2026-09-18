@@ -132,7 +132,7 @@ from ccsync_companion import site as site_mod
 # CCSYNC_CANONICAL_PREFIX/CCSYNC_TREE_NAME) so one failed fetch cannot map
 # one letter while config.toml names another. Both bootstraps changed, so
 # the shared number moves.
-INSTALLER_VERSION = "1.0.43"
+INSTALLER_VERSION = "1.0.44"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every
@@ -246,13 +246,48 @@ def _same_dashboard(cached_url: str, dashboard_url: str) -> bool:
     if not a or not b:
         return True
     try:
-        ha = urlparse(normalise_dashboard_url(a)).hostname or ""
-        hb = urlparse(normalise_dashboard_url(b)).hostname or ""
+        pa = urlparse(normalise_dashboard_url(a))
+        pb = urlparse(normalise_dashboard_url(b))
+        ha, hb = pa.hostname or "", pb.hostname or ""
+        # install-onboard-4 (2026-09-18): hostname alone said "same
+        # dashboard" for `nas:8480` and `nas:8481`, which is what a customer
+        # running a staging and a production container on one NAS looks like -
+        # two trees, two letters, one host. The cached prefix and tree name
+        # then went onto the bootstrap's argv, where they BEAT its own
+        # Get-SiteValue fetch (it only fetches when the flag is empty): the
+        # wrong drive letter and the wrong folder name, which is the exact
+        # failure the cache guard was written to stop, one level down.
+        #
+        # Only a PROVEN port mismatch is a refusal. A port absent on either
+        # side (no scheme to default from, a bare host) means "cannot tell",
+        # and the same rule the blank-URL test above uses applies: allow.
+        port_a = _url_port(pa)
+        port_b = _url_port(pb)
     except Exception:
         return True
     if not ha or not hb:
         return True
-    return ha.lower() == hb.lower()
+    if ha.lower() != hb.lower():
+        return False
+    if port_a and port_b and port_a != port_b:
+        return False
+    return True
+
+
+def _url_port(parsed) -> int:
+    """The port this URL EXPLICITLY names, or 0 for "cannot tell".
+
+    install-onboard-4 (2026-09-18). Deliberately not defaulted from the
+    scheme: a bare `nas.tailabc.ts.net` in the cache and
+    `https://nas.tailabc.ts.net:8480` this run are the same deployment spelled
+    two ways, and the normaliser's scheme guess is a guess. Only a port both
+    sides state, and state differently, is evidence.
+    """
+    try:
+        return int(parsed.port or 0)
+    except (ValueError, TypeError):
+        # A malformed port is not evidence of anything.
+        return 0
 
 
 def site_manifest_value(site: Optional[dict], key: str,

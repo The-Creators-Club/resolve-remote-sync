@@ -6638,14 +6638,19 @@ def test_a_disk_park_is_reported_with_the_latchs_own_sentence(tmp_path):
 
 def test_a_stall_record_left_by_the_watchdog_is_read_if_present(tmp_path):
     import json as _json
+    from datetime import datetime, timedelta, timezone
 
     from ccsync_companion import config as config_mod
 
     app = _unblocked_app(tmp_path)
     state = config_mod.resolved_log_path(app.config).parent / "state"
     state.mkdir(parents=True, exist_ok=True)
+    # live-1 (2026-09-18): a RECENT stall. The stamp here used to be a fixed
+    # 2026-08-28, which is exactly the shape that fix is about - a stall from
+    # weeks ago is not why this machine is not syncing today.
+    at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     (state / "lane_stall.json").write_text(_json.dumps({
-        "lane": "B", "seconds": 1800, "killed": True, "at": "2026-08-28T09:00:00+00:00",
+        "lane": "B", "seconds": 1800, "killed": True, "at": at,
     }), encoding="utf-8")
     blocked = app.sync_guard()["blocked"]
     assert blocked["reason"] == "lane_stalled"
@@ -6653,7 +6658,7 @@ def test_a_stall_record_left_by_the_watchdog_is_read_if_present(tmp_path):
     # dashboard uses, and a real plural.
     assert "Proxy download stopped making progress" in blocked["detail"]
     assert "Lane B" not in blocked["detail"]
-    assert blocked["since"] == "2026-08-28T09:00:00+00:00"
+    assert blocked["since"] == at
 
 
 def test_a_broken_candidate_never_hides_a_lower_priority_reason(tmp_path):
@@ -6911,7 +6916,11 @@ def test_a_moved_project_folder_reaches_the_report_and_the_one_sentence(tmp_path
     blocked = guard["blocked"]
     assert blocked["reason"] == "project_dir_moved"
     assert "Nuclear is not where CCSync expects it" in blocked["detail"]
-    assert "-" not in blocked["detail"].replace("CCSync", "") or True   # no em dash
+    # regression-6 (2026-09-18): the `or True` line that used to sit here
+    # could never fail, and enabling it would have been WRONG - it banned
+    # every hyphen, and a hyphen with spaces is the owner's own recommended
+    # replacement for an em dash. The line below is the real check. tests-3
+    # named two of these and CR-255k fixed only the dashboard one.
     assert "\u2014" not in blocked["detail"]
 
 

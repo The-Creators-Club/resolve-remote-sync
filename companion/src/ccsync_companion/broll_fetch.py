@@ -460,6 +460,26 @@ def poll_fetch(
     return {"state": STATE_FAILED, "message": error or "the download failed"}
 
 
+def job_state(dest: str) -> Optional[str]:
+    """What this destination's download is doing, WITHOUT touching it.
+
+    proxy-tiers-1 (2026-09-18b): `settle_intents` has to tell "the stand-in
+    landed" from "the fetch failed" for a download nobody polled again, and
+    `poll_fetch` cannot answer that question - it STARTS a job when there is
+    none and POPS a terminal one on read. This reads the registry and nothing
+    else: one of the four states, or None for "no such job", which after a
+    restart is every job there ever was. None means CANNOT TELL, never
+    "failed".
+    """
+    key = _job_key(dest)
+    with _JOBS_LOCK:
+        job = _JOBS.get(key)
+    if job is None:
+        return None
+    with job.lock:
+        return job.state
+
+
 def stop_all() -> None:
     """Kill every in-flight download. For companion shutdown; never raises.
 

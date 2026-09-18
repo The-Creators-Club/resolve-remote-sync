@@ -47,6 +47,7 @@ import ntpath
 import os
 import posixpath
 import threading
+import unicodedata
 from typing import Any, Callable, Iterable, Optional
 
 from . import canon
@@ -86,6 +87,15 @@ REASON_NOT_IN_POOL = (
 REASON_UNREADABLE = (
     "Resolve already points at this proxy and still cannot play it, so the "
     "proxy file itself is damaged. Delete it and CCSync will make it again."
+)
+# comp-resolve-3 (2026-09-18b mediums): the refusal that said nothing. In the
+# b-roll archive a `Proxy/<stem>.mp4` is the browser preview, not an editing
+# proxy, so it is deliberately left off a clip whose real original is on this
+# machine. Without a note the editor saw no proxy, no op and no reason.
+REASON_ARCHIVE_PREVIEW = (
+    "This file is the b-roll browser preview, not an editing proxy, and the "
+    "full quality original is already on this computer. CCSync left the clip "
+    "on the original so you are not cutting at preview quality."
 )
 
 
@@ -235,6 +245,17 @@ def _original_on_disk(path: str, local_root: str, canonical_prefix: str,
     return False
 
 
+def _fleet_key(path: str, local_root: str, canonical_prefix: str) -> Optional[str]:
+    """This clip's archive-relative, NFC key for the fleet answer, or None.
+    Imported lazily, never raises (proxy-tiers-4)."""
+    try:
+        from . import broll_standins
+
+        return broll_standins.archive_rel_of(path, local_root, canonical_prefix)
+    except Exception:
+        return None
+
+
 def _under_archive(path: str, local_root: str, canonical_prefix: str) -> bool:
     """Is this clip in the b-roll archive? Imported lazily, never raises."""
     try:
@@ -309,16 +330,214 @@ def frame_counter(ffmpeg_path: str) -> Callable[[str], Optional[int]]:
     return count
 
 
+def header_frame_estimate(ffmpeg_path: str) -> Callable[[str], Optional[int]]:
+    """A HEADER-ONLY frame estimate (duration x fps), or None. Never raises.
+
+    comp-resolve-2 (2026-09-18): the cheap question, asked before the
+    expensive one. `ffmpeg_tools.probe_video` reads the container header
+    (`-show_streams`, no `-count_packets`), so it costs one open and a few
+    kilobytes instead of a full demux of a 2 GB file over SMB. It is an
+    ESTIMATE and is only ever used to answer "these two are nowhere near each
+    other"; anything closer still goes to the exact count.
+    """
+    from . import ffmpeg_tools
+
+    def estimate(path: str) -> Optional[int]:
+        try:
+            info = ffmpeg_tools.probe_video(ffmpeg_path, path)
+            duration = float(info.get("duration_s") or 0.0)
+            fps = float(info.get("fps") or 0.0)
+        except Exception:
+            return None
+        if duration <= 0 or fps <= 0:
+            return None
+        frames = int(round(duration * fps))
+        return frames if frames > 0 else None
+
+    return estimate
+
+
+# comp-resolve-2 (2026-09-18): what the geometry question answered about one
+# FILE, keyed by its (mtime, size).
+#
+# `_geometry_disagrees` used to run `ffprobe -count_packets` -- a full demux,
+# 60 s timeout, serial, on the media-tree thread -- against every in-tree
+# archive clip whose original is present, on every 120 s pass, cached per pass
+# only. On the wired rig the archive IS the pool and every original IS
+# present: fifty 2 GB clips is ~100 GB read off the share every two minutes,
+# competing with lanes A and B for the same link, and the lane watchdog then
+# restarts the thread mid-probe so neither the library walk nor the relink
+# ever finishes.
+#
+# The verdict cannot go stale silently: the key is the file's own (mtime,
+# size), so the moment the bytes change -- which is the entire event this
+# feature exists to notice -- the answer is thrown away and asked again.
+# In-process only, for _REFUSALS' reason verbatim: a disk cache would turn one
+# bad probe into a permanent verdict, and a restart is the intended way to
+# clear it.
+_GEOMETRY_LOCK = threading.Lock()
+_GEOMETRY_VERDICTS: dict[str, tuple[Optional[tuple[float, int]], bool]] = {}
+
+
+def _geometry_key(path: Any, stored: Optional[int] = None) -> str:
+    """The identity of one question: this file, and the frame count the CLIP
+    believes. Two media pool clips can point at one file with different
+    stored geometry (one born from a stand-in, one not), and the answer is
+    about the pair, not about the file alone."""
+    text = str(path or "")
+    base = _norm(text, _plat_for(text, None)) if text else ""
+    return f"{base}|{stored if stored is not None else ''}"
+
+
+def remembered_geometry_verdict(
+    path: str, stat_fn: Callable[[str], Any] = os.stat,
+    stored: Optional[int] = None,
+) -> Optional[bool]:
+    """The verdict already reached about this exact file, or None."""
+    key = _geometry_key(path, stored)
+    if not key:
+        return None
+    with _GEOMETRY_LOCK:
+        remembered = _GEOMETRY_VERDICTS.get(key)
+    if remembered is None:
+        return None
+    fingerprint, verdict = remembered
+    return verdict if _proxy_fingerprint(str(path), stat_fn) == fingerprint else None
+
+
+def note_geometry_verdict(path: str, disagrees: bool,
+                          stat_fn: Callable[[str], Any] = os.stat,
+                          stored: Optional[int] = None) -> None:
+    """Remember what the probe (or the refresh) said about this file."""
+    key = _geometry_key(path, stored)
+    if not key:
+        return
+    with _GEOMETRY_LOCK:
+        _GEOMETRY_VERDICTS[key] = (_proxy_fingerprint(str(path), stat_fn), bool(disagrees))
+
+
+def reset_geometry_verdicts() -> None:
+    """Tests only, exactly as reset_refusals()."""
+    with _GEOMETRY_LOCK:
+        _GEOMETRY_VERDICTS.clear()
+
+
+# proxy-tiers-4 (2026-09-18): what the FLEET knows about stand-ins, off the
+# report reply.
+#
+# `broll_standins` is per machine, about an event that happened on another one:
+# a stand-in is placed on the REMOTE editor's machine, so the wired rig - the
+# only machine the plan's last table row is for, and the one that holds the
+# real 6K files - has an empty ledger for exactly those clips by construction.
+# What remained there was `_geometry_disagrees`' demux of the whole archive.
+#
+# The dashboard now holds the fact per (machine, archive rel) and answers
+# `standins_known: {rels: [...]}` on the report REPLY for the rels this
+# machine listed (the contract is in
+# docs/bug-hunt-2026-09-18/ledger/dashboard.md, "proxy-tiers-4 contract").
+# THREE STATES, and the third is the one that matters: a reply that carries
+# the key is knowledge, a rel in it is "somebody placed a stand-in here", and
+# an ABSENT key means THIS DASHBOARD DOES NOT KNOW - which must behave exactly
+# as before (ask the probe), never as "there are no stand-ins". Older
+# knowledge is kept rather than cleared on an absent key: at worst it costs
+# one ReplaceClip that changes nothing, which CR-284R remembers.
+_FLEET_LOCK = threading.Lock()
+_FLEET_STANDINS: set[str] = set()
+_FLEET_KNOWN = False
+
+
+def note_fleet_standins(resp: Any) -> bool:
+    """Read `standins_known` off a report reply. True when it said anything.
+
+    Never raises: this runs on the reporter thread inside the report-response
+    fan-out, where an exception would cost the whole reply.
+    """
+    global _FLEET_KNOWN
+    try:
+        block = (resp or {}).get("standins_known") if isinstance(resp, dict) else None
+        if not isinstance(block, dict):
+            return False
+        rels = block.get("rels")
+        if not isinstance(rels, list):
+            return False
+        known = set()
+        for rel in rels:
+            if not isinstance(rel, str) or not rel.strip():
+                continue
+            text = rel.strip().replace("\\", "/")
+            try:
+                text = unicodedata.normalize("NFC", text)
+            except Exception:
+                pass
+            known.add(text)
+        with _FLEET_LOCK:
+            _FLEET_STANDINS.clear()
+            _FLEET_STANDINS.update(known)
+            _FLEET_KNOWN = True
+        log.debug("proxy relink: the fleet knows of %d stand-in(s) among the "
+                  "archive clips this machine listed", len(known))
+        return True
+    except Exception:                                          # noqa: BLE001
+        log.debug("proxy relink: could not read standins_known", exc_info=True)
+        return False
+
+
+def fleet_says_standin(archive_rel: Optional[str]) -> Optional[bool]:
+    """Has some machine in this fleet placed a stand-in at this archive rel?
+
+    None is "nobody has told us", which is NOT False: the caller must fall
+    through to the probe it would have run anyway.
+    """
+    if not archive_rel:
+        return None
+    with _FLEET_LOCK:
+        if not _FLEET_KNOWN:
+            return None
+        return archive_rel in _FLEET_STANDINS
+
+
+def reset_fleet_standins() -> None:
+    """Tests only, as reset_refusals()."""
+    global _FLEET_KNOWN
+    with _FLEET_LOCK:
+        _FLEET_STANDINS.clear()
+        _FLEET_KNOWN = False
+
+
 def _geometry_disagrees(
     file_path: str, item: dict[str, Any], local_root: str, canonical_prefix: str,
     frames_fn: Optional[Callable[[dict[str, Any]], Optional[int]]],
     count_frames_fn: Optional[Callable[[str], Optional[int]]],
     exists: Callable[[str], bool],
+    is_stale_fn: Optional[Callable[[str], bool]] = None,
+    header_frames_fn: Optional[Callable[[str], Optional[int]]] = None,
+    stat_fn: Callable[[str], Any] = os.stat,
+    on_probe: Optional[Callable[[], None]] = None,
 ) -> bool:
     """Does this clip's stored frame count disagree with its file's?
 
     False whenever either side cannot be read: a check that cannot run must
     not condemn good media (ffmpeg_tools.count_frames' own rule).
+
+    THE CHEAP QUESTIONS COME FIRST (comp-resolve-2, 2026-09-18), in this
+    order, and the answer is remembered per (path, mtime, size) either way:
+
+      1. a verdict already reached about these exact bytes;
+      2. the stand-in ledger: a path it has an entry for whose file is no
+         longer the size we placed is a stand-in that has been replaced, and
+         needs no probe at all. (It is not sufficient on its own -- the
+         ledger is per machine, about an event that happened on another one,
+         so the wired rig's ledger is empty for exactly these clips:
+         proxy-tiers-4. It is a free short-circuit, not the test.);
+      3. a HEADER-only estimate: duration x fps, one open instead of a full
+         demux. Used only to answer "nowhere near", which is the shape a
+         stand-in's geometry over a real original has;
+      4. and only then the exact packet count, once per version of the file.
+
+    `on_probe` is called immediately before any probe that can take seconds,
+    so the caller can stamp its watchdog heartbeat PER CLIP rather than per
+    pass -- a 30-minute wedge test cannot tell a serial probe run from a
+    thread that has stopped.
     """
     if frames_fn is None or count_frames_fn is None:
         return False
@@ -329,11 +548,62 @@ def _geometry_disagrees(
         probe = _openable_path(file_path, local_root, canonical_prefix, exists)
         if not probe:
             return False
+        remembered = remembered_geometry_verdict(probe, stat_fn, stored)
+        if remembered is not None:
+            return remembered
+        if is_stale_fn is not None:
+            try:
+                if is_stale_fn(probe):
+                    note_geometry_verdict(probe, True, stat_fn, stored)
+                    log.info(
+                        "proxy relink: %s held a stand-in this machine placed and "
+                        "no longer does -- one ReplaceClip on its own path, no "
+                        "probe needed", probe)
+                    return True
+            except Exception:
+                log.debug("proxy relink: the stand-in ledger could not be asked "
+                          "about %s", probe, exc_info=True)
+        # proxy-tiers-4: the FLEET's answer, before either probe. One dict
+        # lookup against a set the last report reply filled, and it is the
+        # only mechanism that can work on a wired rig, whose own ledger is
+        # empty for exactly these clips. True is conclusive (a clip born from
+        # a stand-in somewhere needs one ReplaceClip on its own path, and
+        # CR-284R stops that repeating); False is NOT - the dashboard only
+        # knows what machines have told it - so a "no" falls through to the
+        # questions below exactly as before.
+        fleet = fleet_says_standin(
+            _fleet_key(file_path, local_root, canonical_prefix))
+        if fleet is True:
+            note_geometry_verdict(probe, True, stat_fn, stored)
+            log.info("proxy relink: the fleet says %s was placed as a stand-in "
+                     "by one of its machines -- one ReplaceClip on its own "
+                     "path, no probe needed", probe)
+            return True
+        if header_frames_fn is not None:
+            if on_probe is not None:
+                try:
+                    on_probe()
+                except Exception:
+                    pass
+            estimate = header_frames_fn(probe)
+            if isinstance(estimate, int) and estimate > 0 and abs(estimate - stored) <= 1:
+                # The header says the file is the length the clip believes.
+                # Nothing a stand-in could be hiding behind is this close, and
+                # the exact count would cost a full read of the whole file.
+                note_geometry_verdict(probe, False, stat_fn, stored)
+                return False
+        if on_probe is not None:
+            try:
+                on_probe()
+            except Exception:
+                pass
         actual = count_frames_fn(probe)
         if not isinstance(actual, int) or actual <= 0:
             return False
         if actual == stored:
+            note_geometry_verdict(probe, False, stat_fn, stored)
             return False
+        note_geometry_verdict(probe, True, stat_fn, stored)
         log.info(
             "proxy relink: %s reports %d frames and the file has %d -- the clip "
             "was born from a stand-in and needs one ReplaceClip on its own path "
@@ -459,6 +729,9 @@ def plan_relinks(
     is_standin_fn: Optional[Callable[[str], bool]] = None,
     frames_fn: Optional[Callable[[dict[str, Any]], Optional[int]]] = None,
     count_frames_fn: Optional[Callable[[str], Optional[int]]] = None,
+    header_frames_fn: Optional[Callable[[str], Optional[int]]] = None,
+    is_stale_fn: Optional[Callable[[str], bool]] = None,
+    on_probe: Optional[Callable[[], None]] = None,
 ) -> list[dict[str, Any]]:
     """Decide which clips need their proxy repointed. Pure -- no Resolve calls.
 
@@ -498,6 +771,13 @@ def plan_relinks(
         `ReplaceClip(<the same path>)` does (spike, section 3). Both default
         to None, which means "no refresh" -- an answer nobody can give is not
         a disagreement.
+
+    `header_frames_fn`, `is_stale_fn` and `on_probe` are comp-resolve-2
+    (2026-09-18): the cheap questions asked before the expensive one, and the
+    hook that lets the caller stamp its watchdog heartbeat per CLIP while a
+    probe run is in progress. All optional; without them the geometry check
+    behaves as 0.9.74 did except that its verdict is now remembered per
+    (path, mtime, size) instead of per pass.
     """
     ops: list[dict[str, Any]] = []
     stat = stat_fn if stat_fn is not None else os.stat
@@ -542,11 +822,16 @@ def plan_relinks(
             # its file's. Project footage is imported on the machine that
             # holds the original, and asking ffprobe about every clip in a
             # 1,300-clip pool every 120 s would cost more than the whole pass.
-            refresh = (_under_archive(file_path, local_root, canonical_prefix)
+            under_archive = _under_archive(file_path, local_root,
+                                           canonical_prefix)
+            refresh = (under_archive
                        and original_present() and not is_standin()
-                       and _geometry_disagrees(file_path, item, local_root,
-                                               canonical_prefix, frames_fn,
-                                               count_frames_fn, exists))
+                       and _geometry_disagrees(
+                           file_path, item, local_root, canonical_prefix,
+                           frames_fn, count_frames_fn, exists,
+                           is_stale_fn=is_stale_fn,
+                           header_frames_fn=header_frames_fn,
+                           stat_fn=stat, on_probe=on_probe))
             if proxy_is_working(state) and not refresh:
                 continue
             new_proxy = None
@@ -557,11 +842,30 @@ def plan_relinks(
                 new_proxy = find_proxy_on_disk(
                     file_path, local_root, canonical_prefix, exists_fn, is_windows)
                 if (new_proxy and str(new_proxy).lower().endswith(".mp4")
+                        and under_archive
                         and original_present() and not is_standin()):
                     # In the archive that file is the browser PREVIEW, and
                     # attaching it to a clip whose real original is here makes
                     # the editor cut at preview quality with nothing on screen
                     # to say so (audit F1).
+                    #
+                    # comp-resolve-3 (2026-09-18b mediums): scoped to the
+                    # archive, which is the only place the rule's own comment
+                    # is true. OUTSIDE it a `Proxy/<stem>.mp4` is a perfectly
+                    # good proxy - proxy_scan.py's fleet invariant is that
+                    # existing `.mp4` proxies stay valid and are never re-made
+                    # (GENERATED_EXT became `.mov` at R14 only) - so every
+                    # pre-R14 project proxy was silently never attached, with
+                    # no op AND no note to explain it.
+                    clip_name = (item.get("clip_name")
+                                 or _plat_for(file_path, is_windows)
+                                 .basename(file_path))
+                    if notes is not None:
+                        notes.append({"clip": clip_name, "path": str(new_proxy),
+                                      "reason": REASON_ARCHIVE_PREVIEW})
+                    log.debug("proxy relink: %s is the archive preview for %s "
+                              "and the original is here -- not attached",
+                              new_proxy, clip_name)
                     new_proxy = None
             if refresh:
                 plat = _plat_for(file_path, is_windows)
@@ -571,6 +875,32 @@ def plan_relinks(
                     "clip_name": item.get("clip_name") or plat.basename(file_path),
                     "file_path": file_path,
                     "old_proxy": str(item.get("proxy_path") or "").strip(),
+                    # What the CLIP believes, carried so apply_relinks can
+                    # remember the verdict under the same key the probe used
+                    # (comp-resolve-2).
+                    "stored_frames": frames_fn(item) if frames_fn else None,
+                    # comp-resolve-1 = regression-1 (2026-09-18b): the OTHER
+                    # half of that same key, and the half that was missed.
+                    # `_geometry_disagrees` keys its memory on the spelling
+                    # this process can actually open, which on a machine with
+                    # no P: mapping (a service, a remote shell, every macOS
+                    # editor) is the local twin, not the clip's linked path.
+                    # apply_relinks wrote its verdict under `file_path`, so
+                    # wherever the two differ nothing ever read it back and
+                    # the refresh was re-planned every 120 s for ever, each
+                    # pass spending one of the eight allow_automatic grants a
+                    # day. Carried rather than re-derived so both sides use
+                    # the one answer.
+                    "probe_path": _openable_path(
+                        file_path, local_root, canonical_prefix, exists) or "",
+                    # comp-resolve-6 (2026-09-18): the proxy this clip is
+                    # PLAYING right now, carried so apply_relinks can put it
+                    # back if the ReplaceClip drops it. Only for a clip whose
+                    # proxy works: there is nothing to restore otherwise, and
+                    # the `.mp4` rule below (audit F1) must not be routed
+                    # around by a re-attach.
+                    "reattach_proxy": (str(item.get("proxy_path") or "").strip()
+                                       if proxy_is_working(state) else ""),
                     # A refresh may carry a proxy link too (the same clip can
                     # need both), and may carry none at all.
                     "new_proxy": new_proxy,
@@ -643,6 +973,7 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
                   stat_fn: Optional[Callable[[str], Any]] = None,
                   resolve_fn: Optional[Callable[[Any], Any]] = None,
                   replace_fn: Optional[Callable[[Any, str], dict[str, Any]]] = None,
+                  proxy_state_fn: Optional[Callable[[Any], str]] = None,
                   ) -> dict[str, Any]:
     """Run the plan through `link_fn` (resolve_bridge.link_proxy_media).
 
@@ -678,6 +1009,8 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
 
         if resolve_fn is None:
             resolve_fn = resolve_bridge.resolve_media_pool_item
+        if proxy_state_fn is None:
+            proxy_state_fn = resolve_bridge.clip_proxy_state
         if replace_fn is None:
             # The sanctioned mutation, save point and undo journal included.
             replace_fn = resolve_bridge.replace_clip
@@ -702,12 +1035,29 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
             details.append({"clip": name, "reason": REASON_NOT_IN_POOL})
             continue
         if op.get("refresh"):
+            # comp-resolve-1 = regression-1 (2026-09-18b): the key the PROBE
+            # used, which is the only key `_geometry_disagrees` ever reads.
+            # `file_path` is the fallback for an op built by an older caller
+            # (or by a test that injects its own ops), where the two
+            # spellings are the same by construction.
+            verdict_path = str(op.get("probe_path") or "") or op["file_path"]
             # BEFORE the proxy link, and the link is skipped when it fails:
             # Resolve would be judging the new proxy against the stand-in's
             # frame count, and a refusal on those terms would be REMEMBERED
             # (note_refusal) and never asked again (plan section 6,
             # 2026-09-17).
             try:
+                # comp-resolve-1 (2026-09-18): FORCED. The refresh asks for
+                # the clip's OWN path, and without `force` replace_clip
+                # short-circuits on exactly that and answers "Already
+                # linked" -- so phase 3's one mechanism never ran, while
+                # `refreshed` and the INFO line below said it had, and the
+                # same op was re-planned every 120 s pass, each one spending
+                # an allow_automatic grant out of the 8-per-day budget.
+                refresh = replace_fn(media_pool_item, op["file_path"], force=True)
+            except TypeError:
+                # A caller that injected a two-argument replace_fn (older
+                # tests, any other caller of this module).
                 refresh = replace_fn(media_pool_item, op["file_path"])
             except Exception:
                 log.warning("proxy relink: refresh failed for %s", name, exc_info=True)
@@ -716,11 +1066,73 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
                 failures.append(name)
                 details.append({"clip": name, "reason": REASON_NO_ANSWER})
                 continue
-            refreshed += 1
-            log.info("proxy relink: re-read %s from its own file -- the clip was "
-                     "carrying a stand-in's geometry", op["file_path"])
-            if not op.get("new_proxy"):
-                continue
+            if refresh.get("changed") is False:
+                # Resolve took the call and the geometry did not move. Asking
+                # again next pass answers the same and costs another grant,
+                # so this file's verdict is remembered until its bytes change
+                # (comp-resolve-1's fourth condition, comp-resolve-2's
+                # memory). It is not a failure and it is not a refresh.
+                #
+                # comp-resolve-2 (2026-09-18b mediums): but only when the
+                # pass was CLEAN. `retryable` means some ReplaceClip attempt
+                # raised, so "the geometry did not move" is Resolve having a
+                # bad two seconds, not an answer - and remembering it would
+                # disarm phase 3 for this clip for the life of the process,
+                # since a file whose original has already arrived never
+                # changes its (mtime, size) again.
+                if refresh.get("retryable"):
+                    log.info("proxy relink: %s was re-read but Resolve did not "
+                             "answer cleanly -- asking again next pass",
+                             op["file_path"])
+                else:
+                    note_geometry_verdict(verdict_path, False, stat,
+                                          op.get("stored_frames"))
+                    log.info("proxy relink: %s was re-read and its geometry did "
+                             "not change -- not asked again until the file does",
+                             op["file_path"])
+                if not op.get("new_proxy"):
+                    continue
+            else:
+                refreshed += 1
+                log.info("proxy relink: re-read %s from its own file -- the clip "
+                         "was carrying a stand-in's geometry", op["file_path"])
+                # comp-resolve-3 / res-companion-5 (2026-09-18): remembered
+                # under the frame count the clip believed BEFORE the call.
+                # A ReplaceClip Resolve took but that does not move the
+                # stored number -- an mp4 with an edit list, a file Resolve
+                # reads at a different rate, a clip it will not re-read --
+                # otherwise re-plans this op every pass for ever, each one
+                # spending one of the 8 allow_automatic grants a day, so
+                # genuine proxy relinks are rate-limited out for the rest of
+                # it. If the geometry DID move, the next pass reads a
+                # different stored count, which is a different key, and asks
+                # again as it should.
+                note_geometry_verdict(verdict_path, False, stat,
+                                      op.get("stored_frames"))
+                reattach = str(op.get("reattach_proxy") or "")
+                if reattach and proxy_state_fn is not None:
+                    # comp-resolve-6: ReplaceClip is the API's re-import
+                    # path and may drop the clip's proxy attachment. The
+                    # clip had a WORKING proxy before this call, so a blank
+                    # one after it is this call's doing, and waiting 120 s
+                    # (or a whole allow_automatic interval) to notice would
+                    # drop the editor's timeline to the original in the
+                    # meantime. Costs one property read per refresh.
+                    try:
+                        state_now = str(proxy_state_fn(media_pool_item) or "")
+                    except Exception:
+                        state_now = ""
+                    if state_now and not proxy_is_working(state_now):
+                        log.info("proxy relink: the refresh left %s with no "
+                                 "proxy -- re-attaching %s", name, reattach)
+                        try:
+                            link_fn(media_pool_item, reattach)
+                        except Exception:
+                            log.warning("proxy relink: could not put %s back as "
+                                        "the proxy for %s", reattach, name,
+                                        exc_info=True)
+                if not op.get("new_proxy"):
+                    continue
         try:
             result = link_fn(media_pool_item, op["new_proxy"])
         except Exception:
@@ -773,8 +1185,18 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
             len(refused), refused[0],
         )
     message = ""
-    if relinked or failures:
-        message = f"repointed {relinked} proxy link(s)"
+    if relinked or failures or refreshed:
+        parts = []
+        if relinked or not refreshed:
+            parts.append(f"repointed {relinked} proxy link(s)")
+        if refreshed:
+            # comp-resolve-5 (2026-09-18): `refreshed` had one producer and
+            # no consumer, so a pass that re-read 40 clips from their own
+            # files -- phase 3's whole mechanism -- logged "nothing to do".
+            # The operator diagnosing a wired rig had no signal that the
+            # refresh was running at all, which is what hid comp-resolve-1.
+            parts.append(f"re-read {refreshed} clip(s) from their own file")
+        message = ", ".join(parts)
         if failures:
             message += f", {len(failures)} refused by Resolve"
     return {

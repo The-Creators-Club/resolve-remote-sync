@@ -151,6 +151,11 @@ def test_install_hardens_the_temp_file_before_the_rename(tmp_path, monkeypatch):
     COMMERCIAL_READINESS.md item 5). secretfile.harden is the cross-platform
     answer, and it must land on the TEMP file -- after the replace the secret
     has already existed under wider permissions.
+
+    comp-music-ytdl-jobs-4 (2026-09-18): and it must land on it BEFORE the
+    bytes do. The first harden here sees an EMPTY file; that is the
+    assertion, because a harden that follows the write leaves the session on
+    disk under the inherited ACL for the length of it.
     """
     from ccsync_companion import secretfile
 
@@ -158,11 +163,19 @@ def test_install_hardens_the_temp_file_before_the_rename(tmp_path, monkeypatch):
     src.write_text(_signed_in())
     dest = tmp_path / ".ccsync" / "youtube-cookies.txt"
     hardened: list = []
-    monkeypatch.setattr(secretfile, "harden",
-                        lambda path: hardened.append((Path(path), Path(path).exists())) or True)
+
+    def _record(path):
+        p = Path(path)
+        hardened.append((p, p.exists(), p.stat().st_size if p.exists() else None))
+        return True
+
+    monkeypatch.setattr(secretfile, "harden", _record)
 
     assert yc.install(str(src), dest=dest)[0] is True
-    assert hardened == [(dest.with_suffix(dest.suffix + ".new"), True)]
+    tmp = dest.with_suffix(dest.suffix + ".new")
+    assert hardened, "the temp file was never hardened"
+    assert all(path == tmp for path, _, _ in hardened)
+    assert hardened[0] == (tmp, True, 0)
 
 
 def test_install_refuses_a_logged_out_export_and_writes_nothing(tmp_path):

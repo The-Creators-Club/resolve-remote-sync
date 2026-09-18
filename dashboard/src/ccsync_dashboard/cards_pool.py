@@ -70,6 +70,13 @@ FAILED = "failed"
 # holds no seat and frees nothing when it lapses.
 ACTIVE_SECONDS = 15 * 60
 
+# dash-cards-2 (2026-09-18): how long a FAILED entry refuses to be rebuilt.
+# `open()` now treats a failed entry as absent, which is what makes [ OPEN ]
+# mean something again -- but a build that fails SLOWLY (a share that hangs
+# before it refuses) plus a landing page somebody keeps clicking is a thread
+# per click, so the retry has a floor.
+RETRY_FLOOR_SECONDS = 20.0
+
 _SLUG_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 
@@ -212,6 +219,8 @@ class Entry:
         self.asgi: Any = None
         self.opened_at = time.time()
         self.ready_at: float | None = None
+        # dash-cards-2: when the build gave up, for the retry floor.
+        self.failed_at: float | None = None
         # editor -> the last time a request of theirs was served here. The
         # sentence the cap refusal shows, and nothing else: it holds no seat.
         self.seen: dict[str, float] = {}
@@ -221,10 +230,28 @@ class Entry:
         return sorted(who for who, when in self.seen.items()
                       if now - when <= within)
 
+    def last_in(self) -> tuple[str, float | None]:
+        """(who was in here last, how many seconds ago) - ("", None) if never.
+
+        security-1 (2026-09-18b mediums): the idle release measures SERVED
+        REQUESTS, and a person editing OFFLINE in Cards serves none, so after
+        ACTIVE_SECONDS their episode reads as empty to everybody else. We
+        cannot invent a beat a disconnected browser did not send, so the close
+        is made an INFORMED act instead: the landing row and the confirm both
+        name who was last in and how long ago, which is the fact the presser
+        needs and did not have.
+        """
+        if not self.seen:
+            return "", None
+        who, when = max(self.seen.items(), key=lambda kv: kv[1])
+        return who, max(0.0, time.time() - when)
+
     def as_dict(self) -> dict:
+        who, ago = self.last_in()
         return {"slug": self.slug, "root": self.root, "name": self.name,
                 "show": self.show, "state": self.state, "detail": self.detail,
                 "occupants": self.occupants(),
+                "last_in": who, "last_in_seconds": ago,
                 "opened_at": self.opened_at, "ready_at": self.ready_at}
 
 
@@ -237,8 +264,17 @@ class EnginePool:
     """
 
     def __init__(self, build: Callable[[str], tuple[Any, Any]],
-                 cap: int = DEFAULT_CAP) -> None:
+                 cap: int = DEFAULT_CAP,
+                 on_evict: Callable[[str], None] | None = None) -> None:
         self._build = build
+        # dash-cards-5 (2026-09-18): the dispatcher's `_gates[slug]` holds the
+        # a2wsgi middleware, which builds a ThreadPoolExecutor(max_workers=24)
+        # in its own __init__. Dropping the pool's reference to the engine left
+        # that tuple reachable from the mounted dispatcher for the life of the
+        # container, so a deliberate close leaked whatever WSGI threads that
+        # episode had used. The pool has no reference to the dispatcher, so the
+        # eviction comes in as a callback rather than an import.
+        self._on_evict = on_evict
         self.cap = max(1, int(cap or DEFAULT_CAP))
         self._lock = threading.Lock()
         self._entries: dict[str, Entry] = {}
@@ -247,6 +283,10 @@ class EnginePool:
         # phase 1a). Set from the page's own requests, which is the only
         # place we ever learn it.
         self._where: dict[str, str] = {}
+
+    def set_evict_hook(self, on_evict: Callable[[str], None] | None) -> None:
+        """Wire the dispatcher in after both exist (dash-cards-5)."""
+        self._on_evict = on_evict
 
     # -- reading
 
@@ -316,6 +356,28 @@ class EnginePool:
             entry.seen[editor] = time.time()
             self._where[editor] = slug
 
+    def note_agent(self, editor: str) -> None:
+        """That editor's Timeline Cards AGENT just drove their episode.
+
+        security-1 (2026-09-18b mediums): `seen` was stamped only by a request
+        SERVED THROUGH THE MOUNT, so an editor whose phone or laptop is
+        offline - the shipped offline session the sw.js kill switch was
+        narrowed to protect - held no seat at all, and any other signed-in
+        session could close the engine their companion is driving Resolve
+        against. The agent's poll is a second liveness signal for exactly that
+        person, on the identity `api._require_fleet_caller` verified, and it
+        reaches the container even when their browser cannot. Best effort,
+        never raises: `_where` is where the tunnel already routed it.
+        """
+        editor = str(editor or "").strip().lower()
+        if not editor:
+            return
+        with self._lock:
+            slug = self._where.get(editor) or ""
+            entry = self._entries.get(slug)
+            if entry is not None:
+                entry.seen[editor] = time.time()
+
     def open(self, root: str, name: str = "", show: str = "") -> tuple[Entry | None, str]:
         """Open an episode. -> (entry, refusal). Exactly one is set.
 
@@ -326,8 +388,25 @@ class EnginePool:
         slug = slug_for(root)
         with self._lock:
             entry = self._entries.get(slug)
-            if entry is not None:
+            if entry is not None and entry.state != FAILED:
                 return entry, ""
+            # dash-cards-2 (2026-09-18): a FAILED entry is ABSENT, not open.
+            # `open()` used to be idempotent on the slug alone, so an episode
+            # whose build raised once (the vault share not up yet, Postgres
+            # refusing) was handed back for the life of the container: the
+            # landing page drew [ FAILED ], offered [ OPEN ], and the click
+            # changed nothing, for ever. A failed entry already holds no seat
+            # (the `live` count below skips it), so replacing it costs nothing
+            # a fresh open would not. The retry floor is what stops a page
+            # somebody keeps clicking from starting a build a second.
+            if entry is not None:
+                since = time.time() - (entry.failed_at or 0.0)
+                if since < RETRY_FLOOR_SECONDS:
+                    return None, (
+                        f"{entry.name} did not open a moment ago. Wait "
+                        f"{max(1, int(RETRY_FLOOR_SECONDS - since))} s and "
+                        f"press [ OPEN ] again.")
+                self._entries.pop(slug, None)
             live = [e for e in self._entries.values() if e.state != FAILED]
             if len(live) >= self.cap:
                 return None, self._full_sentence(live)
@@ -339,13 +418,51 @@ class EnginePool:
         return entry, ""
 
     def _full_sentence(self, live: list[Entry]) -> str:
+        # dash-cards-3 (2026-09-18): this sentence named a page that does not
+        # exist (there is no Settings > Timeline Cards; the only close control
+        # in the tree is the form on THIS page) and an act that frees nothing
+        # (a seat is held by the ENTRY; closing a tab and letting `occupants()`
+        # lapse changes the wording and nothing else). Both halves sent a
+        # blocked editor off to do something that could not work. With
+        # security-2's self-close in the same change, "close it" is now true:
+        # whoever is in an episode can close it themselves, and so can anybody
+        # when nobody has been in it for 15 minutes.
         bits = []
         for entry in live:
             who = ", ".join(entry.occupants()) or "nobody in the last 15 min"
             bits.append(f"{entry.name} ({who})")
         return (f"{self.cap} episodes are already open: " + " and ".join(bits)
-                + ". Ask one of them to leave it, or an admin can close an "
-                  "idle one on Settings > Timeline Cards.")
+                + ". Ask whoever is in one to press [ CLOSE ] beside it here, "
+                  "or close an idle one yourself. An admin can close any of "
+                  "them.")
+
+    def may_close(self, slug: str, editor: str, is_admin: bool) -> str:
+        """May this person close that episode? -> "" to allow, else a refusal.
+
+        security-2 (2026-09-18). Opening was available to every session and
+        closing was admin-only, with no self-close and no idle release: two
+        mistaken opens by one editor parked the whole feature until an admin
+        was found or the container restarted, and the refusal told them to do
+        the one thing that frees nothing. An admin may still close anything.
+        Everyone else may close an episode they are themselves an occupant of,
+        or one nobody has been in for ACTIVE_SECONDS - which is exactly the
+        "idle one" the cap refusal now names. Closing is not free (`drop`'s
+        docstring: the upstream threads stay), which is why it stays a
+        deliberate act with a button and not an eviction.
+        """
+        if is_admin:
+            return ""
+        editor = str(editor or "").strip().lower()
+        entry = self.get(slug)
+        if entry is None:
+            return ""
+        occupants = entry.occupants()
+        if not occupants or occupants == [editor]:
+            return ""
+        if editor in occupants:
+            return ""
+        return ("somebody else is in that episode. Ask them to close it, or "
+                "an admin can.")
 
     def _run_build(self, entry: Entry) -> None:
         try:
@@ -355,7 +472,17 @@ class EnginePool:
                         entry.root, type(exc).__name__, exc)
             with self._lock:
                 entry.state = FAILED
-                entry.detail = f"{type(exc).__name__}: {exc}"
+                # dash-cards-7 (2026-09-18): the page gets a SHORT reason, not
+                # the exception's text. This is the one place in the dashboard
+                # that rendered another repo's exception into a browser: a
+                # psycopg OperationalError carries host, port, database and
+                # user, and an OSError carries container paths. `app.py`'s
+                # `unhandled_error` derives nothing from an exception for the
+                # same reason. The warning above already has the full text, so
+                # nothing is lost to whoever can read the log.
+                entry.detail = (f"this episode did not open ({type(exc).__name__}). "
+                                f"The dashboard log has the detail.")
+                entry.failed_at = time.time()
             return
         with self._lock:
             # CLOSED WHILE IT WAS OPENING. `drop()` and `stop_all()` take the
@@ -398,6 +525,7 @@ class EnginePool:
         if entry is None:
             return "that episode is not open"
         _stop(entry)
+        self._evict(slug)
         return f"closed {entry.name}"
 
     def stop_all(self) -> None:
@@ -408,6 +536,16 @@ class EnginePool:
             self._where.clear()
         for entry in entries:
             _stop(entry)
+            self._evict(entry.slug)
+
+    def _evict(self, slug: str) -> None:
+        """Tell the dispatcher this slug's gate is dead (dash-cards-5)."""
+        if self._on_evict is None:
+            return
+        try:
+            self._on_evict(slug)
+        except Exception:  # noqa: BLE001 - a close must not fail on its tidy-up
+            log.exception("Timeline Cards: could not evict the gate for %s", slug)
 
 
 def _stop(entry: Entry) -> None:

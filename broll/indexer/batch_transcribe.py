@@ -11,12 +11,15 @@ Run it ALONGSIDE the pipeline's local stages, not ahead of them:
     python batch_transcribe.py    # --config defaults to private/broll/indexer/config.queue.yaml
 
 "Before" was the original instruction and it was wrong (BROLL-15, 2026-08-11).
-The queue below skips `status='skipped'`, which is a verdict `probe` reaches —
+The queue below skips most of `status='skipped'`, a verdict `probe` reaches —
 run against a freshly scanned share, every row is still 'discovered' and nothing
 has been discarded yet, so the multi-hour takes that max_duration_s is about to
 throw away get transcribed in full on the way to being thrown away. Rows still
 at 'discovered' are therefore excluded here as well: a clip is worth an hour of
-GPU once probe has said it is worth keeping.
+GPU once probe has said it is worth keeping. The AUDIO-ONLY 'skipped' rows are
+the exception and are queued (broll-indexer-3, 2026-09-18): this job is the only
+thing in the tree that writes an .srt, and speech is the only index those clips
+will ever have.
 """
 
 from __future__ import annotations
@@ -78,13 +81,28 @@ def _has_audio_stream(src: Path) -> bool:
 # The queue, as a module constant so it can be exercised against a fixture DB
 # rather than only by running a GPU job (tests/test_batch_transcribe_queue.py).
 #
-# 'discovered' is excluded alongside 'skipped' (BROLL-15, 2026-08-11): both
-# 'skipped' verdicts are ones `probe` reaches, so on a freshly scanned share the
-# filter matched everything and the multi-hour takes max_duration_s was about to
-# discard got a full Whisper pass on the way out. See the module docstring.
+# 'discovered' is excluded alongside most of 'skipped' (BROLL-15, 2026-08-11):
+# every 'skipped' verdict is one `probe` reaches, so on a freshly scanned share
+# the filter matched everything and the multi-hour takes max_duration_s was
+# about to discard got a full Whisper pass on the way out. See the module
+# docstring.
+#
+# broll-indexer-3 (2026-09-18b mediums): 'skipped' is THREE verdicts now
+# (pipeline.stage_probe), and one of them must be transcribed. They are told
+# apart structurally, exactly as `skipped_for_length` does it, never by the
+# status word:
+#   - audio-only: no codec, a real duration. Its speech is the only index it
+#     will ever have (no proxy, no sprite, no frames), and this queue is the
+#     only thing in the tree that writes an .srt - the pipeline's transcribe
+#     stage runs ingest_only. INCLUDED.
+#   - no duration in the container (broll-indexer-4): a codec, no duration.
+#     Nothing here can sample it. Excluded.
+#   - over max_duration_s: a codec and a duration. Not worth the GPU. Excluded.
 TODO_SQL = (
     "SELECT id, share, rel_path, duration_s FROM videos "
-    "WHERE status NOT IN ('skipped', 'discovered') "
+    "WHERE (status NOT IN ('skipped', 'discovered') "
+    "       OR (status = 'skipped' AND codec IS NULL "
+    "           AND duration_s IS NOT NULL)) "
     "AND duplicate_of IS NULL AND transcribed_at IS NULL "
     "ORDER BY duration_s"
 )

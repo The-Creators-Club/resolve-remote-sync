@@ -23,7 +23,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-LATEST_VERSION = 12
+LATEST_VERSION = 13
 
 # from_version -> migration filename (looked up via _find_migration_file)
 _MIGRATION_STEPS: dict[int, str] = {
@@ -38,6 +38,7 @@ _MIGRATION_STEPS: dict[int, str] = {
     9: "010_search_generation.sql",
     10: "011_ingest_batches.sql",
     11: "012_geometry.sql",
+    12: "013_proxies_live.sql",
 }
 
 # indexer/broll_index/migrate.py -> parents[1] == indexer/ -> parents[2] == repo root

@@ -169,6 +169,94 @@ _consecutive_failures = 0
 
 
 # ---------------------------------------------------------------------------
+# CR-280: a frozen Python with no CA bundle
+# ---------------------------------------------------------------------------
+
+# Every HTTPS fetch from the FROZEN macOS companion fails
+# `CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate` (leso's
+# Mac, first seen 2026-09-07, still there on 0.9.73): PyInstaller's Python has
+# no `openssl_cafile` to load, so `ssl.create_default_context()` ends up with
+# an empty trust store and yt-dlp's SHA2-256SUMS, ffmpeg, ffprobe and deno can
+# none of them be downloaded -- which is why requester-first YouTube downloads
+# have never run on a Mac.
+#
+# `SSL_CERT_FILE` is read by `SSLContext.load_default_certs()` at context
+# construction, so setting it once at startup covers EVERY urllib caller in
+# the process (the sidecars, yt-dlp's checksums, the upgrade channel and the
+# release feed) without threading a context through any of them. It is set
+# only when it is not already set: an environment that names a bundle, or a
+# site that pins its own, always wins.
+#
+# certifi would be the other half of this and is deliberately NOT imported as
+# a hard dependency -- it is not in `requirements.lock`, and adding one is a
+# lockfile + licence-gate change. It is used when it happens to be there.
+CA_BUNDLE_CANDIDATES = (
+    "/etc/ssl/cert.pem",                        # macOS (LibreSSL), and it is
+    "/private/etc/ssl/cert.pem",                # the same file through /private
+    "/opt/homebrew/etc/openssl@3/cert.pem",     # Homebrew, Apple silicon
+    "/usr/local/etc/openssl@3/cert.pem",        # Homebrew, Intel
+    "/etc/ssl/certs/ca-certificates.crt",       # Debian/Ubuntu (the container)
+    "/etc/pki/tls/certs/ca-bundle.crt",         # RHEL family
+)
+
+
+def ca_bundle_path() -> Optional[str]:
+    """A CA bundle this process can verify against, or None.
+
+    certifi first when it is importable, then the platform's own bundle.
+    Never raises."""
+    try:
+        import certifi  # noqa: PLC0415 - optional, absent in the vendor build
+
+        where = certifi.where()
+        if where and os.path.isfile(where):
+            return where
+    except Exception:
+        pass
+    for candidate in CA_BUNDLE_CANDIDATES:
+        try:
+            if os.path.isfile(candidate):
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def ensure_ca_bundle(env: Optional[dict] = None) -> Optional[str]:
+    """Point this process's default SSL context at a CA bundle (CR-280).
+
+    Returns the path adopted, or None when nothing was needed or nothing was
+    found. Called once at startup, before any HTTPS fetch. Never raises: a
+    companion that cannot find a bundle must still start - it simply fails
+    the same way it did before this existed.
+    """
+    environ = os.environ if env is None else env
+    try:
+        existing = str(environ.get("SSL_CERT_FILE") or "")
+        if existing:
+            return None
+        if not getattr(sys, "frozen", False) and sys.platform != "darwin":
+            # A dev checkout's Python found its own bundle at build time;
+            # only the frozen build (and macOS, where the failure is live)
+            # needs telling.
+            return None
+        bundle = ca_bundle_path()
+        if not bundle:
+            log.warning(
+                "no CA bundle was found on this machine, so HTTPS downloads "
+                "(yt-dlp, ffmpeg, deno, the upgrade channel) may fail to verify "
+                "certificates (CR-280)")
+            return None
+        environ["SSL_CERT_FILE"] = bundle
+        environ.setdefault("SSL_CERT_DIR", os.path.dirname(bundle))
+        log.info("verifying HTTPS certificates against %s (CR-280)", bundle)
+        return bundle
+    except Exception:
+        log.debug("could not set a CA bundle for this process", exc_info=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # where it lives
 # ---------------------------------------------------------------------------
 

@@ -151,7 +151,9 @@ def get_tailscale_status_json(timeout: float = 15) -> str | None:
         return None
     try:
         proc = subprocess.run(
-            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=timeout
+            # server-tools-4 (2026-09-18): a peer name is not ASCII.
+            ["tailscale", "status", "--json"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout
         )
         if proc.returncode == 0:
             return proc.stdout

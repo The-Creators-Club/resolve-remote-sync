@@ -50,8 +50,13 @@ def test_a_probed_clip_is_transcribed(tmp_path, schema_path):
 
 
 def test_a_discarded_clip_is_not_transcribed(tmp_path, schema_path):
+    # The codec is load-bearing since broll-indexer-3: an over-length clip is
+    # told from the audio-only one by having a codec AND a duration, the same
+    # structural rule `skipped_for_length` uses. A row with neither is not a
+    # shape probe can produce.
     assert _queue(tmp_path, schema_path, [
-        {"share": "s", "rel_path": "long.mov", "status": "skipped", "duration_s": 9000.0},
+        {"share": "s", "rel_path": "long.mov", "status": "skipped",
+         "codec": "h264", "duration_s": 9000.0},
     ]) == set()
 
 
@@ -62,3 +67,26 @@ def test_an_already_transcribed_clip_and_a_duplicate_are_left_alone(tmp_path, sc
         {"share": "s", "rel_path": "canon.mov", "status": "indexed"},
         {"share": "s", "rel_path": "dupe.mov", "status": "indexed", "duplicate_of": 2},
     ]) == {"canon.mov"}
+
+
+# broll-indexer-3 (2026-09-18b mediums): 'skipped' is three verdicts, not one,
+# and only two of them mean "do not spend GPU on this". The audio-only one
+# (probe found no video stream) is parked precisely so its SPEECH stays
+# searchable, and this queue is the only thing in the tree that writes an .srt.
+def test_an_audio_only_clip_is_transcribed(tmp_path, schema_path):
+    """Its transcript is the only index it will ever have: no codec means no
+    proxy, no sprite, no frames, so excluding it here indexes it as nothing."""
+    assert _queue(tmp_path, schema_path, [
+        {"share": "s", "rel_path": "podcast.mp4", "status": "skipped",
+         "duration_s": 1800.0},
+    ]) == {"podcast.mp4"}
+
+
+def test_a_clip_with_no_duration_is_not_transcribed(tmp_path, schema_path):
+    """The third 'skipped' verdict (broll-indexer-4): a video stream whose
+    container carries no duration. It has a codec, so it is not the audio-only
+    shape, and nothing here can sample it - leave it out."""
+    assert _queue(tmp_path, schema_path, [
+        {"share": "s", "rel_path": "stream.ts", "status": "skipped",
+         "codec": "h264"},
+    ]) == set()

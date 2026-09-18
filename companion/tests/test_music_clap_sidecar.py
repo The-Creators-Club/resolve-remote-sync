@@ -240,9 +240,14 @@ def test_ensure_refuses_an_unpinned_catalogue(monkeypatch):
     assert ok is False and "placeholder" in message
 
 
-def test_ensure_refuses_a_host_that_is_not_on_the_list(monkeypatch):
+def test_ensure_refuses_a_feed_that_is_not_https(monkeypatch):
+    """comp-music-ytdl-jobs-1 (2026-09-18): the fleet's OWN feed host is
+    allowed now, whoever hosts it, because the sha256 pin is what makes the
+    artefact safe and the old fixed GitHub list refused every fleet that does
+    not publish from GitHub. What the gate still refuses is a remote host
+    over plain http."""
     monkeypatch.setattr(sidecar, "runtime_available", lambda: (True, ""))
-    monkeypatch.setattr(sidecar, "feed_base", lambda *a, **k: "https://evil.test/v1")
+    monkeypatch.setattr(sidecar, "feed_base", lambda *a, **k: "http://evil.test/v1")
     ok, message = sidecar.ensure({})
     assert ok is False and "evil.test" in message
 

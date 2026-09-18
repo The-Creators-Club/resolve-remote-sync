@@ -26,6 +26,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 
 from . import (
@@ -43,6 +44,11 @@ from .settings import Settings
 log = logging.getLogger("ccsync.dashboard.app")
 
 STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
+
+# dash-core-1 (2026-09-18b mediums): the scope key that says "this request's
+# failure has already been logged and recorded". Namespaced because the scope
+# is shared with Starlette and with four mounted sub-apps.
+_ERROR_RECORDED = "ccsync.error_recorded"
 
 # Paths reachable without a session. Everything else redirects to /login
 # (pages) or 401s (JSON). The companion's token-authed endpoints and the
@@ -141,10 +147,43 @@ _OPEN_PATTERN = re.compile(
     r"(sw\.js|manifest\.webmanifest|icon\.svg)$")
 
 
-def _open_path(path: str) -> bool:
+# dash-core-4 = security-1 (2026-09-18): the members of `_OPEN_EXACT` that are
+# STATIC ASSETS, plus `_OPEN_PATTERN`, are GET only - and until now that was an
+# assertion three comments made and no line of code enforced, because
+# `_open_path` took a path and `login_gate` never looked at the method. So any
+# verb on those names skipped the session check, and under the cards mount
+# `POST /cards/p/<slug>/sw.js` was dispatched into the checkout's `do_POST`,
+# which reads and json.loads the whole body and runs `offline.resolve_spans`
+# BEFORE any path match (its 404 is the last `else`). Not exploitable today -
+# the dashboard's own routes at those names are GET-only and answer 405, and
+# `csrf_gate` skips an unauthenticated request anyway - but the next handler
+# registered at one of these names would inherit an unauthenticated write door
+# with nothing in its diff to say so.
+#
+# NOT the whole set: `/login`, `/api/v1/login`, `/api/v1/report`,
+# `/api/v1/diagnostics`, `/api/v1/ssh-key` and the setup pair are POST targets
+# whose credential is not a session, and they stay exactly as they are.
+_OPEN_GET_ONLY = frozenset({
+    "/favicon.ico", "/manifest.webmanifest", "/sw.js", "/offline",
+    "/cards/manifest.webmanifest", "/cards/icon.svg", "/cards/sw.js",
+    "/.well-known/assetlinks.json",
+})
+
+_READ_METHODS = frozenset({"GET", "HEAD"})
+
+
+def _open_path(path: str, method: str = "GET") -> bool:
     """Reachable with no session at the MIDDLEWARE level. One question, two
-    shapes: the literal set above and the one pattern beside it."""
-    return path in _OPEN_EXACT or _OPEN_PATTERN.match(path) is not None
+    shapes: the literal set above and the one pattern beside it.
+
+    `method` defaults to GET so a caller that only asks about the path (a
+    test, a future reader) gets the widest answer rather than an accidental
+    refusal; `login_gate` always passes the real verb.
+    """
+    method = str(method or "GET").upper()
+    if path in _OPEN_GET_ONLY or _OPEN_PATTERN.match(path) is not None:
+        return method in _READ_METHODS
+    return path in _OPEN_EXACT
 
 
 # The setup API prefix (ZERO_TOUCH_PLAN.md WP D). A prefix, not exact paths,
@@ -248,7 +287,19 @@ MAX_UPLOAD_BODY_BYTES = 512 * 1024 * 1024
 # same figure, so a body that arrives inside this ceiling with one enormous
 # field still cannot put a megabyte in a TEXT column.
 MAX_DIAGNOSTICS_BODY_BYTES = 256 * 1024
+# security-4 (2026-09-18): one locate question is a name and a size, and the
+# route's own cap is MAX_LOCATE_FILES = 2000 of them. `LocateIn.files` has no
+# `max_length`, so that cap ran INSIDE the handler - after pydantic had built
+# every LocateFileIn in a body up to the 4 MB default ceiling, roughly 100k
+# entries, on a single-worker container. A declared-length refusal before any
+# buffering costs nothing and keeps the route's careful 413 sentence (which
+# exists precisely so a caller does not read a truncated answer as "not on the
+# server"); moving the check into validation would have replaced it with a
+# pydantic 422 the companion has never seen. 2000 entries of ~120 bytes of
+# JSON, with room to spare.
+MAX_LOCATE_BODY_BYTES = 512 * 1024
 _BODY_LIMITS = {"/api/v1/report": ("POST", MAX_REPORT_BODY_BYTES),
+                "/api/v1/files/locate": ("POST", MAX_LOCATE_BODY_BYTES),
                 "/api/v1/diagnostics": ("POST", MAX_DIAGNOSTICS_BODY_BYTES),
                 # A swept timeline: ~900 cards with their transcript text on a
                 # two-episode cut. Bigger than the 4 MB default because the
@@ -538,16 +589,34 @@ def check_persisted_secrets(
     Only "generated" is checked: "env" is the deployment's own value and needs
     no file, and "file"/"sidecar-file" were read from one. Reads the directory
     back rather than trusting the write, because that is the fact in question.
+
+    dash-core-1 (2026-09-18): and it reads the CONTENT, not just the name. The
+    write used to be `O_CREAT|O_TRUNC` in place, so a create that succeeded and
+    a flush that did not (a full `/data`, a kill between `open` and `close`)
+    left a ZERO-BYTE file - which satisfies `is_file()`, so this refusal found
+    nothing lost and the dashboard served on a secret that existed only in
+    memory. The next restart read `""` back, minted a different secret, and
+    every browser session and every non-expiring identity token in the fleet
+    401'd at once, with nobody ever having known the lost value. Comparing the
+    bytes is what makes "it landed" a fact rather than a name in a directory.
     """
     out: list[str] = []
     directory = secrets_boot.secrets_dir(env)
+    values = os.environ if env is None else env
     for name, source in sorted(provenance.items()):
         if source != "generated":
             continue
         try:
-            if not (directory / name.lower()).is_file():
-                out.append(name)
-        except OSError:
+            landed = (directory / name.lower()).read_text(
+                encoding="utf-8").strip()
+        except (OSError, ValueError):
+            out.append(name)
+            continue
+        # `_read_secret_file` strips, so that is the comparison form. An
+        # expected value we somehow do not have is still a landed file if it
+        # carries anything: this must never refuse a boot it cannot judge.
+        wanted = str(values.get(name) or "").strip()
+        if not landed or (wanted and landed != wanted):
             out.append(name)
     return out
 
@@ -733,7 +802,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         executor = cards_exec.PinnedExecutor(
             settings, cards.engine_provider(app))
         app.state.pinned_executor = executor
-        if executor.available():
+        # res-fleet-1 (2026-09-18): asked of the MOUNT, never of `available()`.
+        # The engine pool builds engines lazily on first entry to an episode,
+        # so `available()` at boot is false on every container -- and this gate
+        # then skipped both the release and the start for the life of the
+        # process, while `jobs.can_pin` asked the same object an hour later,
+        # got true, and pinned rows into a queue with no worker. `start()` is
+        # already safe to call with no engine (its loop returns at once per
+        # tick), which is what makes the un-gated call the right one.
+        if executor.available() or bool(getattr(app.state, "cards_mounted", False)):
             conn = db.connect(settings.db_path)
             try:
                 # A container that went down mid-encode left rows marked in
@@ -751,7 +828,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             executor.start()
         else:
             log.info("fleet jobs are never pinned here: %s", executor.why_not())
-        collector = Collector(settings, pin_fn=lambda: jobs.can_pin(app))
+        collector = Collector(
+            settings, pin_fn=lambda: jobs.can_pin(app),
+            # dash-core-5: the periodic sweep of `auth_sessions`, which had
+            # none. Both of the store's own methods, on the store's own
+            # connection and write lock.
+            session_prune_fn=lambda: (session_store.prune(),
+                                      session_store.prune_attempts()))
         collector.start()
         app.state.collector = collector
         # ...and the thing that notices when it stops (ops-efficiency-6,
@@ -1164,7 +1247,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def login_gate(request, call_next):
         path = request.url.path
         if (
-            _open_path(path)
+            _open_path(path, request.method)
             or path.startswith("/static/")
             # internal_sftp.py's own routes: no cookie jar on the other end (a
             # sidecar container), gated on a bearer token instead -- see
@@ -1314,6 +1397,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return RedirectResponse(f"/login?next={quote(target, safe='')}", status_code=303)
         return await call_next(request)
 
+    # dash-api-2 = dash-db-3 = dash-core-2 (2026-09-18): how a 500 or a 503
+    # records itself. `unhandled_error` is `async def`, so its body runs ON
+    # the event loop of a --workers 1 container -- and the branch that gets
+    # here most is the one whose precondition is "somebody has held the write
+    # lock for longer than the busy timeout already". Opening a second
+    # connection there and writing through it blocked the WHOLE loop for
+    # another 5 s (measured 5.4 s against a held BEGIN IMMEDIATE) and then
+    # raised `database is locked` itself, swallowed -- so under sustained
+    # contention every companion report and every htmx poll stalled behind
+    # the handler, and the `db_busy` notice the rework exists to write was
+    # precisely the one that never got written.
+    #
+    # Two changes, both small: the write happens in the threadpool, and it
+    # gives up after NOTICE_BUSY_MS instead of BUSY_TIMEOUT_MS. The 503
+    # answer itself must never wait on the database.
+    NOTICE_BUSY_MS = 250
+
+    async def _record_off_the_loop(write, what: str) -> None:
+        def record() -> None:
+            conn = db.connect(settings.db_path, busy_ms=NOTICE_BUSY_MS)
+            try:
+                write(conn)
+            finally:
+                conn.close()
+
+        try:
+            await run_in_threadpool(record)
+        except Exception:  # noqa: BLE001 - never fail a request over its own record
+            # Including "database is locked" from the short timeout above:
+            # losing one notice to contention is the point of the short
+            # timeout, and it is logged rather than paid for in latency.
+            log.exception("could not record %s", what)
+
     @app.exception_handler(Exception)
     async def unhandled_error(request, exc):  # noqa: ANN001
         """One generic body for every unhandled exception; the detail is logged.
@@ -1331,6 +1447,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         still re-raises afterwards, so `TestClient(raise_server_exceptions=True)`
         and uvicorn's own error log are unchanged.
         """
+        # dash-core-1 (2026-09-18b mediums): ONE record per failed request.
+        # wire-2 put this same handler on every mounted sub-app, and
+        # Starlette's ServerErrorMiddleware runs the sub-app's handler, sends
+        # its response and then RE-RAISES, so the parent's copy catches the
+        # same exception and runs the same handler again: two tracebacks in
+        # the log and two connect-write-close cycles against the database
+        # whose contention the `db_busy` notice exists to report (the write
+        # that is loudest exactly when the server can least afford it). The
+        # mount wrapper stamps the scope after the inner entry; the second
+        # entry still has to RETURN a response - Starlette requires one even
+        # though it discards it - but it records nothing.
+        if request.scope.get(_ERROR_RECORDED):
+            return JSONResponse({"detail": "internal error"}, status_code=500)
         log.exception("unhandled error serving %s %s", request.method,
                       request.url.path)
         # UX-10, widened 2026-08-28 ("make the server as self-diagnosing as
@@ -1345,33 +1474,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # `.path` attribute worth using, and neither has an unmatched request:
         # both fall back to "", which is notices.redact_path's own behaviour
         # (first two segments) rather than something new.
+        # dash-core-2 (2026-09-18b mediums): the route template a MOUNTED
+        # sub-app matched is the INNER one (`/api/ingest`), because wire-2
+        # moved the handler inside the sub-app - so the notice named a path
+        # that does not exist on this dashboard, and `/broll` and `/music`,
+        # which expose twelve identical inner templates (every
+        # `/batches/{uid}/...` ingest route among them), collided on one
+        # notice row with one count between them. The mount prefix is
+        # `root_path`; it is NOT missing from `request.url.path` on this
+        # Starlette, so prefixing THAT would double it. `redact_path`'s
+        # two-segment fallback still covers an unmatched request.
         route_obj = request.scope.get("route")
         route_path = getattr(route_obj, "path", "") if route_obj is not None else ""
+        if route_path:
+            route_path = str(request.scope.get("root_path") or "") + str(route_path)
         if notices.is_db_busy(exc):
             # A busy timeout that ran out is contention, not a defect
             # (2026-09-17, notices.py "the lock"): a 503 the companion's next
             # cycle answers by itself, counted under its own warn notice --
             # never the error one, whose fix line says "send to support".
-            try:
-                conn = db.connect(settings.db_path)
-                try:
-                    notices.record_db_busy(conn, request.url.path,
-                                           route=str(route_path or ""))
-                finally:
-                    conn.close()
-            except Exception:  # noqa: BLE001 - never fail a request over its own record
-                log.exception("could not record a database-busy notice")
+            await _record_off_the_loop(
+                lambda conn: notices.record_db_busy(
+                    conn, request.url.path, route=str(route_path or "")),
+                "a database-busy notice")
             return JSONResponse({"detail": "the dashboard's database is busy; try again"},
                                 status_code=503, headers={"Retry-After": "30"})
-        try:
-            conn = db.connect(settings.db_path)
-            try:
-                notices.record_server_error(conn, request.url.path, exc,
-                                            route=str(route_path or ""))
-            finally:
-                conn.close()
-        except Exception:  # noqa: BLE001 - never fail a request over its own record
-            log.exception("could not record a server-error notice")
+        await _record_off_the_loop(
+            lambda conn: notices.record_server_error(
+                conn, request.url.path, exc, route=str(route_path or "")),
+            "a server-error notice")
         return JSONResponse({"detail": "internal error"}, status_code=500)
 
     app.include_router(api.router)
@@ -1492,6 +1623,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.cards_mounted = app.state.cards_status == cards.MOUNTED
     _record_mount(app, "cards", app.state.cards_status, app.state.cards_detail,
                   cards.MOUNTED)
+    # wire-2 (2026-09-18): the SAME busy answer on every mounted sub-app.
+    # `@app.exception_handler(Exception)` above is installed on the PARENT's
+    # ServerErrorMiddleware, and `/broll`, `/music` and `/ytdl` are real ASGI
+    # mounts with error middleware of their own - they answer their own plain
+    # 500 and never reach the parent's handler. So the one contention answer
+    # the 2026-09-17 rework exists to make survivable was still a 500 on the
+    # busiest fleet route of the week: `broll/web` opens its connections at
+    # sqlite3's default busy timeout, and the companion's ingest client treats
+    # any non-200 from `/items/{uid}/result` as TERMINAL - it clears
+    # `described`, fails the item, and minutes of local VLM work are thrown
+    # away with nothing recording that the archive database was merely busy.
+    # Measured before the fix: parent route 503, mounted route 500.
+    #
+    # The notice is written to the DASHBOARD's database, deliberately: the
+    # sub-apps have no `settings.db_path`, and the PROBLEMS panel that has to
+    # show this lives here. Done last, after every mount, and defensively -
+    # a sub-app that is not an app with handlers is skipped, never fatal.
+    _install_busy_handler_on_mounts(app, unhandled_error)
+
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -1505,6 +1655,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return FileResponse(str(favicon_file), media_type="image/x-icon")
 
     return app
+
+
+def _install_busy_handler_on_mounts(app: FastAPI, handler) -> None:
+    """Give every mounted sub-app the parent's busy/error answer (wire-2).
+
+    Walks the parent's routes rather than taking references at each mount
+    site: the four mounts are built in four modules on four tri-state
+    contracts, and a fifth added later must not have to remember this.
+
+    `/cards` is skipped because its mount is a bare ASGI callable
+    (`CardsDispatch`), not an app with an exception-handler registry - and its
+    own database is the episode's, not this one's.
+    """
+    async def recorded_once(request, exc):  # noqa: ANN001
+        """The parent's handler, with the scope stamped once it has run.
+
+        dash-core-1 (2026-09-18b mediums). The sub-app's ServerErrorMiddleware
+        re-raises after answering, so the parent handler is entered a second
+        time for the same request; Starlette mutates the ONE scope dict when
+        it enters a Mount, so a stamp set here is visible there. The stamp
+        goes on AFTER the call, so the inner entry - the one whose response
+        the client actually gets - is the one that logs and records.
+        """
+        try:
+            return await handler(request, exc)
+        finally:
+            request.scope[_ERROR_RECORDED] = True
+
+    for route in list(getattr(app, "routes", ())):
+        sub = getattr(route, "app", None)
+        add = getattr(sub, "add_exception_handler", None)
+        if sub is None or not callable(add) or sub is app:
+            continue
+        try:
+            add(Exception, recorded_once)
+        except Exception:  # noqa: BLE001 - never fail a boot over this
+            log.warning("could not install the busy handler on the %s mount",
+                        getattr(route, "path", "?"), exc_info=True)
 
 
 def _record_mount(app: FastAPI, name: str, status: str, detail: str,

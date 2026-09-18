@@ -84,6 +84,8 @@ class _FakeApp:
         self.blocker = ""
         self.watcher_starts = 0
         self.media_tree_starts = 0
+        self.media_tree_abandons = 0
+        self._media_tree_generation = 0
 
     def _standing_down_would_kill_work(self) -> str:
         return self.blocker
@@ -94,7 +96,15 @@ class _FakeApp:
 
     def _start_media_tree_thread(self) -> None:
         self.media_tree_starts += 1
+        self._media_tree_generation += 1
         self._media_tree_thread = _DeadThread(alive=True)
+
+    def _abandon_media_tree_thread(self) -> None:
+        # res-companion-4: the real app bumps the generation the loop
+        # carries, so the wedged thread exits instead of looping beside its
+        # replacement.
+        self.media_tree_abandons += 1
+        self._media_tree_generation += 1
 
 
 class _Clock:
@@ -184,10 +194,17 @@ def test_nothing_is_reported_while_nothing_has_been_restarted(tmp_path):
 def test_the_sequencer_bound_is_three_rotations_or_thirty_minutes(tmp_path):
     """A big upload is not a wedge: one project turn is budgeted
     project_rotation_seconds per rclone lane, so the bound has to be a
-    multiple of it."""
+    multiple of it.
+
+    res-companion-4 / CR-279 (2026-09-18): past the bound, a sequencer whose
+    thread is still ALIVE is no longer "restarted" -- sequencer.start()
+    refuses to spawn a second one, so the call never did anything but write
+    an ERROR line and a restarts record the fleet alert counts.
+    """
     app = _FakeApp(_FakeSequencer(rotation=600.0))
     app.sequencer.silent = LANE_WATCHDOG_WEDGED_SECONDS + 1.0
-    assert _watchdog(app, tmp_path).check() == ["sequencer"]
+    assert _watchdog(app, tmp_path).check() == []
+    assert app.sequencer.starts == 0
 
     # A four-hour rotation moves the bound with it (3 x 14400 s).
     slow = _FakeApp(_FakeSequencer(rotation=4.0 * 3600.0))
@@ -296,7 +313,12 @@ def test_a_wedged_watcher_is_restarted_on_its_heartbeat(tmp_path):
     monotonic = _Clock(10_000.0)
     watcher._heartbeat = monotonic.t - (LANE_WATCHDOG_WEDGED_SECONDS + 1.0)
 
-    assert _watchdog(app, tmp_path, monotonic=monotonic).check() == ["watcher"]
+    # res-companion-4: the watcher shares the process-wide stop event, so
+    # there is no way to retire one thread without stopping the companion;
+    # a second watcher thread would be a second unprompted writer into
+    # Resolve. Refused, and said so.
+    assert _watchdog(app, tmp_path, monotonic=monotonic).check() == []
+    assert app.watcher_starts == 0
 
     # ...and a watcher whose build stamps no heartbeat at all is absent
     # evidence, never evidence of a fault.
@@ -312,6 +334,10 @@ def test_a_wedged_media_tree_thread_is_restarted_on_its_heartbeat(tmp_path):
     monotonic = _Clock(10_000.0)
     app._media_tree_heartbeat = monotonic.t - (LANE_WATCHDOG_WEDGED_SECONDS + 1.0)
     assert _watchdog(app, tmp_path, monotonic=monotonic).check() == ["media_tree"]
+    # res-companion-4: and the old thread is retired FIRST, or the two run
+    # beside each other.
+    assert app.media_tree_abandons == 1
+    assert app.media_tree_starts == 1
 
 
 # -- the tray advisory ----------------------------------------------------

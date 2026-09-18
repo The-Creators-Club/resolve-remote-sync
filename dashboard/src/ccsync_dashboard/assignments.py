@@ -179,9 +179,20 @@ def _machine_options(conn: sqlite3.Connection, editor: str) -> list[dict[str, st
     options = [{"value": m, "label": m} for m in db.machines_of(conn, editor)]
     if not options:
         return [{"value": db.ANY_MACHINE, "label": "no computer yet"}]
-    if db.selections_for_machine(conn, editor, db.ANY_MACHINE):
-        options.append({"value": db.ANY_MACHINE,
-                        "label": "no computer yet (ticks no computer has claimed)"})
+    # dash-db-5 = dash-mounts-ui-3 (2026-09-18): and NOT beside real computers,
+    # which is what the paragraph above already promised and the code then did
+    # not do. `_assignments_view`'s column loop emits a `machine=""` column
+    # only for a person with NO machines, so offering the bucket to somebody
+    # who has one filtered every column away and printed "this person has no
+    # computer to show a plan for yet" - a sentence the picker had just
+    # contradicted, on a page that could then neither show nor remove the
+    # bucket rows the option existed to expose. The rows are not lost:
+    # `db.fetch_machine_selections` expands the bucket onto every machine with
+    # no plan of its own, so the real computer's column renders them ticked
+    # and correct. Offering the option only when it has a column is the narrow
+    # fix; building a bucket column beside real ones would create a tick
+    # target `selections_for_machine` only honours for a machine with no plan,
+    # and that is a write shape, not a display change (CR-110).
     return options
 
 

@@ -659,7 +659,28 @@ def build_status_response(mounts: dict, caller: Optional[Callable[..., dict]] = 
         # say what. The web UI's failure sentence blamed a tray app that was
         # running, and a page that can read this can tell the two apart.
         "loopback": {"bound": True, "port": port or PORT},
+        # comp-broll-tiers-5 (2026-09-18): the clips whose editing proxy will
+        # not arrive on its own. An editor in that state is cutting on the
+        # 1080p preview believing it is the editing proxy, and until now the
+        # only trace of it was a log line. ADDED key, so a page that has
+        # never heard of it is unaffected; the tray's own line is owed
+        # separately (app.py is not this module's to change).
+        "standins_owed": _standins_owed(),
     }
+
+
+def _standins_owed() -> list[dict[str, Any]]:
+    """The stand-ins whose editing-proxy upgrade has given up, smallest
+    possible shape: the local path and the reason. Never raises."""
+    out = []
+    try:
+        for entry in broll_standins.given_up_upgrades():
+            out.append({"local_path": str(entry.get("local_path") or ""),
+                        "rel_path": str(entry.get("rel_path") or ""),
+                        "why": str(entry.get("upgrade_note") or "")})
+    except Exception:                                          # noqa: BLE001
+        log.debug("b-roll: could not read the given-up upgrades", exc_info=True)
+    return out
 
 
 def _fetchable_from_nas(
@@ -759,17 +780,83 @@ def derive_insert_paths(insert: Any, rel_path: str) -> dict:
         "original_is_edit_weight": None,
         "geometry": None,
         "from_page": False,
+        # Is there an original ABOVE the preview at all, as far as the page
+        # could tell? False is an ANSWER (broll-1 / proxy-tiers-2 / wire-4 /
+        # comp-broll-tiers-4, 2026-09-18), and the one this object used to
+        # throw away: see below.
+        "original_known": True,
+        # overseer-1 (2026-09-18b): "there IS an original, at this path, and
+        # it has not finished uploading yet" - the server's answer during the
+        # window the two-stage `/uploaded` opened (CR-284I): the clip is live
+        # on its proxies while a multi-GB original is still going up. It is a
+        # KNOWN original, not an absent one, and it is the one field that
+        # tells the two apart.
+        "original_pending": False,
     }
     if not isinstance(insert, dict):
-        return derived
+        return _no_self_referential_proxy(derived)
 
-    derived["from_page"] = True
-    # An explicit null for the ORIGINAL is not an answer the way a null
-    # editing proxy is: there is always an original, and the rel the page
-    # posted is the fallback that has served since 2026-08-11.
+    # tests-2 (2026-09-18): `from_page` means "the dashboard LOOKED", and it
+    # was set for ANY dict, before a single field was read. An object with no
+    # tier field in it has looked at nothing - and `plan_insert` reads
+    # `from_page` as the licence to treat a null weight beside a
+    # STEM-CONVENTION editing proxy as "the server judged this original
+    # heavy", i.e. to place a stand-in for a clip nobody ever weighed. Only a
+    # tier field the code accepted earns it.
+    accepted = (isinstance(insert.get("original_is_edit_weight"), bool)
+                or isinstance(insert.get("geometry"), dict))
+    for key in ("preview_rel", "edit_proxy_rel"):
+        if key in insert and (insert[key] is None or _clean_rel(insert[key])):
+            accepted = True
+    derived["from_page"] = accepted
+    # An explicit null for the ORIGINAL is an answer too, and reading it as
+    # "the page said nothing" is what turned the archive's own preview into a
+    # ledgered stand-in (broll-1 / proxy-tiers-2 / comp-broll-tiers-4 /
+    # wire-4, 2026-09-18). `insert_target_detail` answers null for the two
+    # states where there is no original beside the preview: the stem-diverged
+    # archive clips, and any clip ingested with "upload originals" off or
+    # whose original has not landed yet - a supported, first-class steady
+    # state. `original_rel` keeps the posted rel so every path-shaped reader
+    # still works; `original_known` is what stops plan_insert claiming a
+    # genuine, lane-B-managed preview is a lie about a 6K file that does not
+    # exist.
+    if "original_rel" in insert and insert["original_rel"] is None and accepted:
+        derived["original_known"] = False
     cleaned_original = _clean_rel(insert.get("original_rel"))
     if cleaned_original:
         derived["original_rel"] = cleaned_original
+    if insert.get("known") is False:
+        # proxy-tiers-3: the server could not LIST the archive folder (the
+        # dataset unmounted, an SMB hiccup, BROLL_DATA_ROOT wrong after an
+        # image update) and says so, instead of answering the same shape as
+        # "this clip has no original". "Could not look" is not evidence of
+        # anything, so nothing in the object may be read as the server's
+        # judgement - and in particular the original is probably there, so
+        # the answer is the pre-phase-3 route (fetch the file the editor
+        # asked for), never a stand-in and never the preview. The key is
+        # OPTIONAL on the wire: a dashboard that does not send it is every
+        # dashboard today, and its absence means exactly what it did before.
+        derived["known"] = False
+        derived["from_page"] = False
+        derived["original_known"] = True
+    pending = insert.get("original_pending")
+    # overseer-1 (2026-09-18b): a non-null `original_rel` with
+    # `original_pending: true` is the EXPECTED archive path of an original
+    # that is still uploading, so the plan is the ordinary stand-in one (the
+    # preview at the original's own path, ledgered, the editing proxy as the
+    # background upgrade) and NOT PLAN_PREVIEW_ONLY, which is for a clip the
+    # archive has no original for at all. `original_known` therefore stays
+    # True: only an EXPLICIT NULL means "there is none", and a null that
+    # arrives with this flag set is a server contradicting itself, where the
+    # null wins because refusing to invent an original is the safe half.
+    # The pending original landing at that path later is what the stand-in
+    # ledger's identity settlement answers (proxy-tiers-1, CR-288B/2): the
+    # file there stops being the preview's geometry and becomes the
+    # original's. ABSENT means exactly today's behaviour: a dashboard that
+    # never mentioned it has said nothing.
+    if (isinstance(pending, bool) and derived["original_known"]
+            and derived.get("known") is not False):
+        derived["original_pending"] = pending
     for key in ("preview_rel", "edit_proxy_rel"):
         if key not in insert:
             # Absent is NOT null: a dashboard that never mentioned the field
@@ -795,6 +882,38 @@ def derive_insert_paths(insert: Any, rel_path: str) -> dict:
             k: geometry.get(k)
             for k in ("width", "height", "fps", "frames", "start_tc")
         }
+    if derived.get("known") is False:
+        # proxy-tiers-3 (2026-09-18b mediums): the known=false object carries
+        # `original_is_edit_weight: true` on purpose. That field is the only
+        # tier field every build from 0.9.65 to 0.9.74 reads, and forcing it
+        # is what keeps the whole fleet off the stand-in route during a
+        # container outage in the window between the dashboard deploy and the
+        # companion one (the server half of this finding). It is a LIE told to
+        # old code, and this build must not carry it forward as the server's
+        # judgement: "could not look" means nothing in this object is an
+        # answer, so the weight goes back to null - the value that says
+        # nobody weighed this clip. `geometry` is NOT reset: it is read off
+        # the `videos` row and never touched the failed listing.
+        derived["original_is_edit_weight"] = None
+    return _no_self_referential_proxy(derived)
+
+
+def _no_self_referential_proxy(derived: dict) -> dict:
+    """An editing proxy that IS the preview is not an editing proxy.
+
+    broll-4 (2026-09-18), the companion's half. The `basename(parent) ==
+    "Proxy"` arm above builds `stem + ".mov"` exactly as
+    `insert_target_detail` does, so a preview that is itself a `.mov` (or an
+    old page passing the same pair through) names one file twice. Downstream
+    that is a `heavy` verdict resting on an editing proxy that does not
+    exist, an upgrade owed against the file the clip already is, and a
+    background lane that can never finish. The web side closes its own half
+    (CR-286P); this closes the one a companion can reach on its own, and
+    either may deploy first.
+    """
+    edit_proxy = derived.get("edit_proxy_rel")
+    if edit_proxy and edit_proxy == derived.get("preview_rel"):
+        derived["edit_proxy_rel"] = None
     return derived
 
 
@@ -808,6 +927,12 @@ PLAN_IMPORT_ORIGINAL = "import_original"
 PLAN_FETCH_ORIGINAL = "fetch_original"
 PLAN_FETCH_STANDIN = "fetch_standin"
 PLAN_PREVIEW_ONLY = "preview_only"
+
+# The original extensions a stand-in may be written under: the containers the
+# preview's own bytes could BE (proxy-tiers-6, 2026-09-18). Everything else
+# in the archive - `.mxf`, `.avi`, `.mkv`, and whatever the indexer learns to
+# scan next - gets the preview at its own path instead.
+STANDIN_EXTS = frozenset({".mov", ".mp4", ".m4v"})
 
 
 def _is_wired(ccsync_cfg: Optional[dict[str, Any]]) -> bool:
@@ -890,6 +1015,33 @@ def plan_insert(local_path_exists: bool, is_standin: bool, tiers: dict,
             "why": "this computer's tree is the server's tree",
         }
 
+    if tiers.get("known") is False:
+        # proxy-tiers-3: the server could not read the archive folder. It has
+        # judged nothing, so this insert takes the route it took before the
+        # tiers existed: download the file the editor asked for.
+        return {
+            "action": PLAN_FETCH_ORIGINAL, "fetch_rel": None,
+            "insert_rel": None, "upgrade_rel": None,
+            "why": "the server could not read the archive folder for this clip",
+        }
+
+    # THERE IS NO ORIGINAL (broll-1 / proxy-tiers-2 / comp-broll-tiers-4 /
+    # wire-4, 2026-09-18). Either the page said so with an explicit null, or
+    # the rel it named IS the preview, which is the stem-diverged fallback's
+    # own shape. Both used to reach the stand-in row and download the preview
+    # onto the preview's own path, then ledger that genuine, lane-B-managed
+    # file as a lie about an original that does not exist: `is_standin` true
+    # for ever (its size never changes, so nothing falsifies the row), the
+    # watcher exempting it on false grounds, and every re-insert restarting
+    # an editing-proxy upgrade. The preview is the clip here, so say so.
+    if preview_rel and (tiers.get("original_known") is False
+                        or (original_rel and original_rel == preview_rel)):
+        return {
+            "action": PLAN_PREVIEW_ONLY, "fetch_rel": preview_rel,
+            "insert_rel": preview_rel, "upgrade_rel": None,
+            "why": "the archive holds no original for this clip",
+        }
+
     # `from_page` is load-bearing in the null case: without an insert object
     # the editing proxy is only the stem convention's GUESS, and a guess is
     # not the server saying it judged the original heavy. An older dashboard
@@ -906,11 +1058,26 @@ def plan_insert(local_path_exists: bool, is_standin: bool, tiers: dict,
         }
 
     ext = posixpath.splitext(str(original_rel or ""))[1].lower()
-    if ext in proxy_scan.NEEDS_RESOLVE_EXTS:
+    if ext in proxy_scan.NEEDS_RESOLVE_EXTS or ext not in STANDIN_EXTS:
+        # proxy-tiers-6 (2026-09-18): a stand-in is the preview's ISO-BMFF
+        # bytes written under the ORIGINAL's name, and only an original whose
+        # own container those bytes could plausibly be may have one. The
+        # guard used to be the camera-raw set alone, while the indexer scans
+        # `.mxf`, `.avi` and `.mkv` too and the phase 0 spike measured one
+        # ProRes `.mov` - so an MXF original got an MP4 wearing an `.mxf`
+        # name, which Resolve's MXF path (not a content sniffer the way
+        # ffmpeg is) either refuses silently or imports with the wrong
+        # container's geometry. Either way the ledger row is written before
+        # the import, and the next insert takes the "already in place" branch
+        # and re-imports the same file for ever. An allow-list, not a
+        # deny-list: a new extension in the archive must arrive as
+        # preview-only, which always works, rather than as a stand-in nobody
+        # has tested.
         return {
             "action": PLAN_PREVIEW_ONLY, "fetch_rel": preview_rel,
             "insert_rel": preview_rel, "upgrade_rel": None,
-            "why": f"a {ext} original cannot have a stand-in",
+            "why": f"a {ext} original cannot have a stand-in" if ext
+                   else "an original with no extension cannot have a stand-in",
         }
 
     return {
@@ -953,9 +1120,10 @@ def build_insert_response(
     # field (audit F2, 2026-09-17).
     tiers = derive_insert_paths(body.get("insert"), str(rel_path or ""))
     log.debug("insert tiers for %s: preview=%s edit_proxy=%s edit_weight=%s "
-              "geometry=%s (from the page: %s)", rel_path, tiers["preview_rel"],
-              tiers["edit_proxy_rel"], tiers["original_is_edit_weight"],
-              tiers["geometry"], tiers["from_page"])
+              "geometry=%s pending_original=%s (from the page: %s)", rel_path,
+              tiers["preview_rel"], tiers["edit_proxy_rel"],
+              tiers["original_is_edit_weight"], tiers["geometry"],
+              tiers.get("original_pending"), tiers["from_page"])
 
     if mode not in (resolve_bridge.INSERT_MODE_APPEND,
                     resolve_bridge.INSERT_MODE_PLAYHEAD):
@@ -1027,9 +1195,44 @@ def build_insert_response(
         # path and name -- rclone writes `<name>.partial` and renames, so
         # is_file() stays honest while it runs.
         clean_rel = "/".join(_split_components(fetch_rel or rel_path))
-        fetch = (fetcher if fetcher is not None else broll_fetch.poll_fetch)(
-            ccsync_cfg, clean_rel, str(insert_path)
-        )
+        if action == PLAN_FETCH_STANDIN:
+            # comp-broll-tiers-1 / res-companion-1 (2026-09-18): the intent
+            # goes down BEFORE the fetch, not when a polling request happens
+            # to observe "done". The download is an asynchronous rclone job on
+            # a daemon thread with no callback, so a page that stops polling
+            # (tab closed, laptop asleep, companion restarted, the editor
+            # switching to Resolve after the "syncing 40%" toast) left the
+            # PREVIEW's bytes at the ORIGINAL's name with no ledger row at
+            # all: the next Send to Resolve imported it as the original, the
+            # relink pass never learned the geometry was the stand-in's, and a
+            # render on this machine rendered 1080p H.264 under a 6K name.
+            # `size` is deliberately unknown here - `_entry_is_stale` reads a
+            # non-int size as "still a stand-in", which is the conservative
+            # direction, and the real original arriving later falsifies the
+            # row by size. `upgrade` stays None until the bytes are actually
+            # placed, so the background upgrade lane cannot start fetching an
+            # editing proxy for a stand-in that is still downloading.
+            broll_standins.record(
+                insert_path, share=str(share or ""), rel_path=str(rel_path or ""),
+                original_rel=tiers.get("original_rel"),
+                preview_rel=tiers.get("preview_rel"),
+                edit_proxy_rel=tiers.get("edit_proxy_rel"),
+                geometry=tiers.get("geometry"),
+                upgrade=None, size=None, pending_fetch=True,
+            )
+        try:
+            fetch = (fetcher if fetcher is not None else broll_fetch.poll_fetch)(
+                ccsync_cfg, clean_rel, str(insert_path)
+            )
+        except BaseException:
+            # proxy-tiers-1 (2026-09-18b): the intent row is written before
+            # this call, so anything that leaves here without an answer -- a
+            # fetcher that raises, the process going down between the two --
+            # must not leave a row claiming a file no byte was fetched for.
+            # The exception itself is the caller's, unchanged.
+            if action == PLAN_FETCH_STANDIN:
+                broll_standins.forget(insert_path)
+            raise
         state = fetch.get("state")
         if state == broll_fetch.STATE_DOWNLOADING:
             progress = fetch.get("progress") or {}
@@ -1052,11 +1255,27 @@ def build_insert_response(
             # green toast of `message`. That is why BUSY_MESSAGE opens with
             # "not sent yet": the sentence is the only part of this answer an
             # old page will read correctly.
+            #
+            # proxy-tiers-1 (2026-09-18b): and the intent row goes, because at
+            # the cap `poll_fetch` starts nothing and registers nothing (its
+            # own docstring). A row with no size has no falsifier at all, so
+            # one written for a download that never began made the ledger
+            # claim for ever that the real original at that path was a lie:
+            # the insert re-imported a preview, the relink pass attached one
+            # as a proxy, and `placed_report` told the whole fleet.
+            if action == PLAN_FETCH_STANDIN:
+                broll_standins.forget(insert_path)
             return 200, {"ok": True, "state": "busy",
                          "retry_after": broll_fetch.BUSY_RETRY_AFTER_SECONDS,
                          "message": fetch.get("message")
                          or broll_fetch.BUSY_MESSAGE}
         if state != broll_fetch.STATE_DONE:
+            # No bytes were placed, so the intent row above is retired here
+            # rather than left for `is_stale` to falsify some day: a row for a
+            # file that never arrived would make the next insert of the real
+            # original take the stand-in path (comp-broll-tiers-1).
+            if action == PLAN_FETCH_STANDIN:
+                broll_standins.forget(insert_path)
             return 200, {
                 "ok": False,
                 "message": "couldn't sync the clip from the NAS: "
@@ -1065,6 +1284,8 @@ def build_insert_response(
         if not insert_path.is_file():
             # "done" is only ever reported after an isfile() check inside
             # the job, so reaching here means the file vanished in between.
+            if action == PLAN_FETCH_STANDIN:
+                broll_standins.forget(insert_path)
             return 200, {
                 "ok": False,
                 "message": f"file not found at {insert_path} - is the share mounted?",
@@ -1074,6 +1295,13 @@ def build_insert_response(
             # imported and the ledger does not know about is the one failure
             # the ledger exists to prevent; a row whose import then failed is
             # retired by the next real file at that path (is_stale).
+            #
+            # comp-broll-tiers-1 (2026-09-18): this rewrites the intent row
+            # written before the fetch, now that the bytes are there -- with
+            # the real size (the falsifier) and the upgrade state. Nothing
+            # else can have touched the row in between: the intent row is
+            # written with `upgrade=None`, which is what keeps the background
+            # upgrade lane away from it until here.
             broll_standins.record(
                 insert_path, share=str(share or ""), rel_path=str(rel_path or ""),
                 original_rel=tiers.get("original_rel"),
@@ -1111,7 +1339,7 @@ def build_insert_response(
         # lane, so two inserts in a row cannot park the next Send to Resolve
         # behind hundreds of MB (audit F7).
         start_proxy_upgrade(ccsync_cfg, mounts, share, str(insert_path),
-                            plan["upgrade_rel"])
+                            plan["upgrade_rel"], asked_for=True)
     return 200, result
 
 
@@ -1130,6 +1358,56 @@ def build_insert_response(
 # reason, and the next insert of that clip is what asks again.
 
 UPGRADE_POLL_SECONDS = 2.0
+
+# comp-broll-tiers-2 (2026-09-18): the stand-in paths an upgrade is running
+# for right now, keyed the way the ledger keys them
+# (`broll_standins.normalise_key`, so two spellings of one path are one
+# entry) and cleared in the worker's `finally`.
+#
+# `start_proxy_upgrade` refused only an entry already `done`, and
+# `resume_pending_upgrades` is called from the 120 s relink cycle for every
+# row whose state is `pending` - which is exactly the state a RUNNING upgrade
+# sits in. A 400 MB editing proxy over SFTP therefore accumulated one thread
+# per pass, all polling the same fetch, and when the file landed every one of
+# them called the Resolve worker: six child processes for one clip. The
+# ledger's attempt ceiling bounds the other half (a row that can never link);
+# this bounds the one that is simply still working.
+_UPGRADES_LOCK = threading.Lock()
+_UPGRADES_IN_FLIGHT: set[str] = set()
+
+
+def upgrade_in_flight(standin_path: str) -> bool:
+    """Is an editing-proxy upgrade running for this path in this process?"""
+    key = broll_standins.normalise_key(standin_path)
+    if not key:
+        return False
+    with _UPGRADES_LOCK:
+        return key in _UPGRADES_IN_FLIGHT
+
+
+def _claim_upgrade(standin_path: str) -> bool:
+    key = broll_standins.normalise_key(standin_path)
+    if not key:
+        return False
+    with _UPGRADES_LOCK:
+        if key in _UPGRADES_IN_FLIGHT:
+            return False
+        _UPGRADES_IN_FLIGHT.add(key)
+        return True
+
+
+def _release_upgrade(standin_path: str) -> None:
+    key = broll_standins.normalise_key(standin_path)
+    if not key:
+        return
+    with _UPGRADES_LOCK:
+        _UPGRADES_IN_FLIGHT.discard(key)
+
+
+def reset_upgrades_in_flight() -> None:
+    """Tests only; the companion has one session per process."""
+    with _UPGRADES_LOCK:
+        _UPGRADES_IN_FLIGHT.clear()
 # An editing proxy is tens to hundreds of MB over SFTP. An hour is not a
 # timeout for a download, it is the bound on a thread that would otherwise
 # outlive the reason it exists.
@@ -1214,8 +1492,15 @@ def run_proxy_upgrade(
     # closed (or on another project) is the commonest reason to be here. The
     # next relink cycle picks it up again, which is the whole reason the
     # ledger carries the state.
+    #
+    # It is a SPENT ATTEMPT, though (comp-broll-tiers-2, 2026-09-18): a row
+    # whose clip is in no project this companion will ever see stays pending
+    # for ever, and `resume_pending_upgrades` would otherwise spawn a thread
+    # and a Resolve worker CHILD for it every 120 s until the machine is
+    # rebuilt. Past UPGRADE_MAX_ATTEMPTS the cycle stops asking; a new insert
+    # of that clip - an editor, deliberately - hands the budget back.
     broll_standins.set_upgrade(standin_path, broll_standins.UPGRADE_PENDING,
-                               message)
+                               message, count_attempt=True)
     log.info("b-roll proxy upgrade: %s is on disk but not linked yet (%s)",
              proxy_path, message)
     return {"ok": False, "state": broll_standins.UPGRADE_PENDING,
@@ -1224,16 +1509,33 @@ def run_proxy_upgrade(
 
 def start_proxy_upgrade(ccsync_cfg: Optional[dict], mounts: dict, share: str,
                         standin_path: str, edit_proxy_rel: str,
-                        starter: Optional[Callable[..., Any]] = None) -> bool:
+                        starter: Optional[Callable[..., Any]] = None,
+                        asked_for: bool = False) -> bool:
     """Run run_proxy_upgrade on a daemon thread. True when one was started.
 
     Never raises and never blocks the insert: a machine that cannot start a
     thread keeps a `pending` ledger row, which the next cycle drains.
+
+    At most ONE thread per stand-in path at a time (comp-broll-tiers-2): a
+    download that outlives a 120 s cycle is the normal case, and the cycle
+    calling this again for the row it is already working on is what used to
+    stack threads and, when the file landed, Resolve worker children.
+    `asked_for` is an editor's own insert rather than the cycle's sweep, and
+    hands back the attempt budget.
     """
     if not edit_proxy_rel:
         return False
     entry = broll_standins.get(standin_path)
     if entry is not None and entry.get("upgrade") == broll_standins.UPGRADE_DONE:
+        return False
+    if asked_for and entry is not None:
+        broll_standins.set_upgrade(standin_path,
+                                   entry.get("upgrade") or broll_standins.UPGRADE_PENDING,
+                                   str(entry.get("upgrade_note") or ""),
+                                   reset_attempts=True)
+    if not _claim_upgrade(standin_path):
+        log.debug("b-roll proxy upgrade: one is already running for %s",
+                  standin_path)
         return False
 
     def _run() -> None:
@@ -1242,6 +1544,8 @@ def start_proxy_upgrade(ccsync_cfg: Optional[dict], mounts: dict, share: str,
                               edit_proxy_rel)
         except Exception:                                      # noqa: BLE001
             log.exception("b-roll proxy upgrade: the background thread failed")
+        finally:
+            _release_upgrade(standin_path)
 
     try:
         if starter is not None:
@@ -1251,9 +1555,30 @@ def start_proxy_upgrade(ccsync_cfg: Optional[dict], mounts: dict, share: str,
                              daemon=True).start()
         return True
     except Exception as exc:                                   # noqa: BLE001
+        _release_upgrade(standin_path)
         log.warning("b-roll proxy upgrade: could not start for %s (%s)",
                     standin_path, exc)
         return False
+
+
+def _standin_probe(ccsync_cfg: Optional[dict]) -> Callable[[Any], Optional[dict]]:
+    """A header reader for `settle_intents`, on THIS machine's ffmpeg.
+
+    proxy-tiers-1 (2026-09-18b): the seam is resolved here, where the config
+    already is, rather than inside the ledger, which has no business loading
+    one. Never raises: an answer nobody can give falls through to the fetch
+    job's own record.
+    """
+    cfg = ccsync_cfg or {}
+    ffmpeg_path = str(cfg.get("ffmpeg_path", "ffmpeg") or "ffmpeg").strip()
+
+    def probe(path: Any) -> Optional[dict]:
+        try:
+            return ffmpeg_tools.probe_video(ffmpeg_path or "ffmpeg", str(path))
+        except Exception:
+            return None
+
+    return probe
 
 
 def resume_pending_upgrades(ccsync_cfg: Optional[dict],
@@ -1267,6 +1592,19 @@ def resume_pending_upgrades(ccsync_cfg: Optional[dict],
     stand-in paths it started something for.
     """
     started: list[str] = []
+    try:
+        # proxy-tiers-1 (2026-09-18b): the same 120 s beat answers the INTENT
+        # rows - the stand-in that landed while nobody was polling gets its
+        # size (and with it a falsifier), a REAL ORIGINAL that arrived at that
+        # path instead retires the row, and a path no download ever landed at
+        # is retired too. One stat per intent row, one header read per row
+        # whose file is there, and never a Resolve call.
+        broll_standins.settle_intents(
+            probe_fn=_standin_probe(ccsync_cfg),
+            job_state_fn=broll_fetch.job_state)
+    except Exception:                                          # noqa: BLE001
+        log.debug("b-roll stand-ins: could not settle the intent rows",
+                  exc_info=True)
     try:
         pending = broll_standins.pending_upgrades()
     except Exception:                                          # noqa: BLE001

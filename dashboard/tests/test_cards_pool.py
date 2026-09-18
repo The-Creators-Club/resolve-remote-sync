@@ -327,13 +327,20 @@ def test_a_flat_page_url_from_before_the_pool_says_where_it_went(landing):
     assert "one page per episode" in api.json()["error"]
 
 
-def test_only_an_admin_closes_an_episode(landing):
+def test_a_non_admin_cannot_close_an_episode_somebody_else_is_in(landing):
+    """security-2 (2026-09-18) replaced "admin only" with "not somebody
+    else's". Taking an episode away from whoever is IN it is still the act
+    that must not happen by accident."""
     client, app, roots = landing
     entry = open_episode(app, roots[0])
+    app.state.cards_pool.note_visit(entry.slug, "owen")
     client.cookies.set(auth.COOKIE_NAME,
                        auth.make_session_cookie(SECRET, "jsmith"))
-    client.post("/cards/close", data={"slug": entry.slug}, follow_redirects=False)
+    resp = client.post("/cards/close", data={"slug": entry.slug},
+                       follow_redirects=False)
+    assert "refused=" in resp.headers["location"]
     assert app.state.cards_pool.get(entry.slug) is not None
+    # ...and an admin still can.
     client.cookies.set(auth.COOKIE_NAME,
                        auth.make_session_cookie(SECRET, "owen"))
     client.post("/cards/close", data={"slug": entry.slug}, follow_redirects=False)
@@ -467,3 +474,254 @@ def test_an_episode_closed_while_it_was_opening_is_stopped_not_leaked():
         time.sleep(0.005)
     assert built[0].stopped is True
     assert pool.entries() == []
+
+
+# -- the 2026-09-18 hunt: dash-cards-2/-3/-4/-5/-6/-7/-9, security-2 ----------
+
+
+def _settle(entry, timeout=5.0):
+    end = time.monotonic() + timeout
+    while entry.state == cards_pool.LOADING and time.monotonic() < end:
+        time.sleep(0.005)
+    return entry
+
+
+def test_an_episode_that_failed_to_build_can_be_opened_again():
+    """dash-cards-2 / dash-cards-9: `open()` used to be idempotent on the SLUG,
+    not on the state, so a FAILED entry was handed back with an empty refusal
+    for the life of the container. The landing page drew [ FAILED ], offered
+    [ OPEN ], and the click changed nothing: a share that was not up at the
+    moment somebody clicked poisoned that episode until the next deploy.
+
+    The old test beside this one (`..._holds_no_seat`) only proved a DIFFERENT
+    root could still open, which is why the defect shipped green.
+    """
+    calls = []
+
+    def build(root):
+        calls.append(root)
+        if len(calls) == 1:
+            raise OSError("the vault share is not up yet")
+        return FakeEngine(root), object()
+
+    pool = cards_pool.EnginePool(build, cap=2)
+    entry = _settle(pool.open("X:/Vault/FF5/Civil Defence")[0])
+    assert entry.state == cards_pool.FAILED
+    # The retry floor is real, so a page somebody keeps clicking cannot start
+    # a build a second; the test drives past it rather than sleeping 20 s.
+    entry.failed_at = time.time() - cards_pool.RETRY_FLOOR_SECONDS - 1
+    again, refusal = pool.open("X:/Vault/FF5/Civil Defence")
+    assert refusal == ""
+    assert again is not entry
+    assert _settle(again).state == cards_pool.READY
+    assert len(calls) == 2
+
+
+def test_a_failed_episode_is_not_rebuilt_on_every_click():
+    """dash-cards-2's floor: a build that fails SLOWLY plus a landing page
+    somebody keeps pressing is one thread per press."""
+    calls = []
+
+    def build(root):
+        calls.append(root)
+        raise OSError("still not up")
+
+    pool = cards_pool.EnginePool(build, cap=2)
+    _settle(pool.open("X:/Vault/FF5/Civil Defence")[0])
+    again, refusal = pool.open("X:/Vault/FF5/Civil Defence")
+    assert again is None and "Wait" in refusal
+    assert len(calls) == 1
+
+
+def test_the_cap_refusal_names_a_place_that_exists_and_an_act_that_works():
+    """dash-cards-3: the sentence named `Settings > Timeline Cards`, which is
+    not a page anywhere in the tree, and told the blocked editor to ask
+    somebody to "leave" an episode - which frees nothing, because a seat is
+    held by the ENTRY and only `drop()` removes one."""
+    pool = cards_pool.EnginePool(lambda root: (FakeEngine(root), object()),
+                                 cap=1)
+    _settle(pool.open("X:/Vault/FF5/Civil Defence")[0])
+    _entry, refusal = pool.open("X:/Vault/FF5/Talent Gap")
+    assert "Settings" not in refusal
+    assert "leave it" not in refusal
+    assert "CLOSE" in refusal
+
+
+def test_an_editor_can_close_the_episode_they_are_in_and_an_idle_one():
+    """security-2: opening was open to every session and closing was
+    admin-only with no idle release, so two mistaken opens by one non-admin
+    parked the feature until an admin was found."""
+    pool = cards_pool.EnginePool(lambda root: (FakeEngine(root), object()),
+                                 cap=2)
+    entry = _settle(pool.open("X:/Vault/FF5/Civil Defence")[0])
+    assert pool.may_close(entry.slug, "jsmith", False) == ""    # nobody in it
+    pool.note_visit(entry.slug, "jsmith")
+    assert pool.may_close(entry.slug, "jsmith", False) == ""    # their own
+    pool.note_visit(entry.slug, "ruskin")
+    assert pool.may_close(entry.slug, "leso", False) != ""      # somebody's
+    assert pool.may_close(entry.slug, "leso", True) == ""       # an admin
+
+
+def test_closing_an_episode_evicts_its_wsgi_gate_and_its_thread_pool():
+    """dash-cards-5: `CardsDispatch._gates` had no deletion path, so the
+    a2wsgi middleware - and the ThreadPoolExecutor(max_workers=24) it builds
+    in its own __init__ - stayed reachable from the mounted dispatcher for the
+    life of the container. Closing an episode to free a seat made the thread
+    count worse than docs/CARDS_TWO_PROJECTS.md section 12 says it is."""
+    class FakeMiddleware:
+        def __init__(self):
+            self.executor = self
+            self.shut = False
+
+        def shutdown(self, wait=True):
+            self.shut = True
+
+    asgi = FakeMiddleware()
+    pool = cards_pool.EnginePool(lambda root: (FakeEngine(root), asgi), cap=2)
+    dispatch = cards.CardsDispatch(pool, lambda app: app)
+    pool.set_evict_hook(dispatch.evict)
+    entry = _settle(pool.open("X:/Vault/FF5/Civil Defence")[0])
+    dispatch._gates[entry.slug] = (asgi, object())
+    pool.drop(entry.slug)
+    assert entry.slug not in dispatch._gates
+    assert asgi.shut is True
+
+
+def test_the_flat_data_dir_is_named_rather_than_silently_orphaned(tmp_path,
+                                                                  caplog):
+    """dash-cards-6: moving the engine's data_dir to `<data>/cards/<slug>`
+    orphaned `library_backups` - the safety net for the cut list itself - and
+    said nothing. We do not adopt them (which episode they belonged to is not
+    recorded anywhere, and guessing wrong writes one episode's pick into
+    another); we name both paths once."""
+    import logging
+
+    from ccsync_dashboard.settings import Settings
+
+    data = tmp_path / "data"
+    (data / "cards" / "library_backups").mkdir(parents=True)
+    (data / "cards" / "cards_pick.json").write_text("{}", encoding="utf-8")
+    settings = Settings(db_path=str(data / "dashboard.db"),
+                        session_secret=SECRET)
+    cards._SAID_WHERE.clear()
+    with caplog.at_level(logging.WARNING, logger="ccsync.dashboard.cards"):
+        out = cards.data_dir_for(settings, "ep-abcdef01")
+    assert out and out.endswith("ep-abcdef01")
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "library_backups" in said and "cards_pick.json" in said
+    assert str(data / "cards") in said
+
+
+def test_the_kill_switch_leaves_the_dashboards_own_caches_alone():
+    """dash-cards-4: CacheStorage is per ORIGIN, so the unfiltered
+    `caches.keys()` sweep emptied the dashboard PWA's own `ccsync-<version>`
+    precache (the offline page, htmx_errors.js) and `cards-media`, the clips
+    an editor deliberately downloaded for an offline session."""
+    from ccsync_dashboard import cards_landing
+
+    js = cards_landing.KILL_SW
+    assert "unregister()" in js
+    body = js[js.index("addEventListener('activate'"):]
+    assert "await caches.keys()) await caches.delete(k)" not in body
+
+
+def test_the_kill_switch_deletes_no_cache_at_all():
+    """dash-cards-1: the narrowed sweep was narrowed to nothing. Every page
+    this checkout serves - the dead flat one and every live /cards/p/<slug>/
+    one - names its shell cache `cards-shell-<one page_version()>` on ONE
+    origin, so the prefix filter deleted the live per-episode worker's shell,
+    which only `install` can refill. The kill switch cannot tell them apart,
+    so it touches CacheStorage not at all."""
+    from ccsync_dashboard import cards_landing
+
+    body = cards_landing.KILL_SW
+    body = body[body.index("addEventListener('install'"):]
+    assert "caches" not in body
+    assert "unregister()" in body
+
+
+def test_the_failed_episode_detail_is_not_another_repos_exception_text():
+    """dash-cards-7: this was the one place in the dashboard that rendered
+    another repo's exception into a browser. A psycopg OperationalError
+    carries host, port, database and user."""
+    def build(root):
+        raise OSError('connection to server at "192.168.0.102", port 5432, '
+                      'user "cards" failed')
+
+    pool = cards_pool.EnginePool(build, cap=2)
+    entry = _settle(pool.open("X:/Vault/FF5/Civil Defence")[0])
+    assert entry.state == cards_pool.FAILED
+    assert "192.168.0.102" not in entry.detail
+    assert "OSError" in entry.detail
+
+
+# ---------------------------------------------------------------------------
+# security-1 (2026-09-18b mediums): the 15-minute idle release measures SERVED
+# REQUESTS, so an editor working OFFLINE in Cards was evictable by any other
+# signed-in session.
+# ---------------------------------------------------------------------------
+
+
+def test_an_agents_poll_keeps_its_editors_seat_while_their_browser_is_offline():
+    """`seen` was stamped only by a request served through the mount, so a
+    laptop that went offline mid-session dropped its seat after ACTIVE_SECONDS
+    even while its companion agent was still driving Resolve against that
+    engine. The agent call is the one liveness signal that survives the
+    browser, and the tunnel routes it by verified identity."""
+    pool = cards_pool.EnginePool(lambda root: (FakeEngine(root), object()),
+                                 cap=2)
+    entry = _settle(pool.open("X:/Vault/FF5/Civil Defence")[0])
+    pool.note_visit(entry.slug, "ruskin")
+    entry.seen["ruskin"] = time.time() - cards_pool.ACTIVE_SECONDS - 60
+    assert entry.occupants() == []
+    assert pool.may_close(entry.slug, "leso", False) == ""
+    pool.note_agent("Ruskin")            # the identity is case-folded
+    assert entry.occupants() == ["ruskin"]
+    assert pool.may_close(entry.slug, "leso", False) != ""
+
+
+def test_note_agent_never_raises_for_an_editor_in_no_episode():
+    pool = cards_pool.EnginePool(lambda root: (FakeEngine(root), object()),
+                                 cap=2)
+    pool.note_agent("nobody")
+    pool.note_agent("")
+
+
+def test_the_row_names_who_was_last_in_and_when():
+    """The close stays allowed (CR-285P's wedge), but it is no longer blind:
+    the landing row and the confirm both name the last occupant and how long
+    ago, which is what tells an idle engine from an offline editor."""
+    from ccsync_dashboard import cards_landing
+
+    pool = cards_pool.EnginePool(lambda root: (FakeEngine(root), object()),
+                                 cap=2)
+    entry = _settle(pool.open("X:/Vault/FF5/Civil Defence")[0])
+    pool.note_visit(entry.slug, "ruskin")
+    entry.seen["ruskin"] = time.time() - 22 * 60
+    who, ago = entry.last_in()
+    assert who == "ruskin" and ago is not None and ago > 20 * 60
+    assert entry.as_dict()["last_in"] == "ruskin"
+    phrase = cards_landing._last_in_phrase(who, ago)
+    assert phrase == "ruskin was last in 22 min ago"
+    prompt = cards_landing._close_prompt("Civil Defence", phrase)
+    assert "Civil Defence" in prompt and "ruskin was last in 22 min ago" in prompt
+    assert "-" not in prompt.replace("Close ", "")   # no em dash, no hyphen run
+    assert cards_landing._last_in_phrase("", None) == ""
+
+
+def test_the_landing_page_renders_the_confirm_and_the_last_in_line(landing):
+    """security-1: the row flag and the POST gate already agree (both ask
+    `may_close`); what was missing is the FACT the presser needs. An episode
+    nobody has served a request for in 22 minutes may still be somebody's
+    offline session, so the row names them and the button asks first."""
+    client, app, roots = landing
+    slug = cards_pool.slug_for(str(roots[0]))
+    client.post("/cards/open", data={"slug": slug}, follow_redirects=False)
+    entry = app.state.cards_pool.get(slug)
+    while entry.state == cards_pool.LOADING:
+        time.sleep(0.02)
+    entry.seen["owen"] = time.time() - 22 * 60
+    page = client.get("/cards/")
+    assert page.status_code == 200
+    assert "owen was last in 22 min ago" in page.text
+    assert "confirm(" in page.text

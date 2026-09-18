@@ -194,6 +194,18 @@ def get(name: str) -> tuple[str, str] | None:
         return _STATE.get(name)
 
 
+def root_of(name: str) -> tuple[str, str] | None:
+    """One mount's recorded (root, witness), or None.
+
+    proxy-tiers-3's dashboard half (2026-09-18): `notices._check_broll_archive`
+    needs the b-roll data root to ask whether the ARCHIVE under it can still
+    be listed, and re-deriving it from the b-roll config there would be a
+    second place for the two to disagree about which directory this is.
+    """
+    with _LOCK:
+        return _ROOTS.get(str(name))
+
+
 def reset() -> None:
     """Forget everything. For tests, and for a second create_app in one
     process -- otherwise the previous app's verdicts outlive it."""

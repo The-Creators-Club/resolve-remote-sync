@@ -215,8 +215,16 @@ def test_the_page_only_says_running_when_the_companion_claimed_it():
     body = (Path(config.STATIC_DIR) / 'ingest.js').read_text(encoding='utf-8')
     fn = body[body.index('async function miRetryFailed('):]
     fn = fn[:fn.index('\nasync function ')]
+    # regression-1 / music-2 (2026-09-18): the loopback BODY is built in
+    # `miDispatchLocal` now, which both buttons go through so that a refusal
+    # naming the staging id the companion holds can be answered with it. The
+    # properties this test is about are unchanged and are asserted across both
+    # halves rather than dropped: the path, the two body fields, and 202.
+    helper = body[body.index('async function miDispatchLocal('):]
+    helper = helper[:helper.index('\nasync function ')]
     assert "'/music/ingest/retry'" in fn, 'the old /music/ingest/run had no claim'
-    assert 'batch_uid' in fn and 'staging_id' in fn
+    assert 'miDispatchLocal(' in fn
+    assert 'batch_uid' in helper and 'staging_id' in helper
     assert 'status === 202' in fn, (
         'a 200 from an older companion is a success and not a claim')
     # music-3 (2026-09-11b): the fallback line used to say "press Run", which
@@ -306,17 +314,40 @@ def test_a_rescore_that_covers_everything_still_clears_the_marker(tmp_path,
 # --------------------------------------------------------------------------
 
 def test_the_force_docstring_describes_what_actually_settles_a_batch():
+    """music-4 (2026-09-11), and tests-4 / regression-7 (2026-09-18).
+
+    The 09-11b hunt found this test NEUTERED: it `pytest.skip()`d the moment a
+    production `force=True` caller appeared, which is precisely the change that
+    makes the docstring wrong - so the guard switched itself off exactly when
+    it was needed, invisibly, because a skip in a suite of 149 is invisible.
+    tests-4 was then dropped from that fix pass with no fix, no decline and no
+    ledger entry anywhere, which is regression-7.
+
+    Both branches assert now. What the docstring must say depends on what the
+    package does, and either way it must not contradict it: with no production
+    caller the settle is `_settle_scores` and `force` is a test-only parameter;
+    with one, the sentence claiming otherwise has to go and name it instead.
+    """
     doc = rescore.apply_for_track.__doc__ or ''
     pkg = Path(rescore.__file__).parent
     callers = sorted(p.name for p in pkg.glob('*.py')
                      if re.search(r'apply_for_track\([^)]*force=True',
                                   p.read_text(encoding='utf-8')))
-    if callers:
-        pytest.skip(f'a production caller exists now: {callers}')
-    assert '`release` passes force=True' not in doc, (
-        'no production code passes force=True; a reader reconciling the two '
-        'trusts the docstring (music-4)')
+    # True in both worlds: the settle is the thing that clears the marker, and
+    # that is what this docstring exists to point at.
     assert '_settle_scores' in doc
+    if callers:
+        assert 'only the tests use it today' not in doc, (
+            f'{callers} passes force=True in production, so the docstring may '
+            'no longer say only the tests do -- it has to name the caller and '
+            'say what that call means for the stale marker (music-4)')
+    else:
+        assert '`release` passes force=True' not in doc, (
+            'no production code passes force=True; a reader reconciling the two '
+            'trusts the docstring (music-4)')
+        assert 'only the tests use it today' in doc, (
+            'nothing in the package passes force=True, and the docstring is '
+            'the only place that says so')
 
 
 # --------------------------------------------------------------------------

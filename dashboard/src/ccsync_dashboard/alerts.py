@@ -1048,7 +1048,7 @@ class Ctx:
         self.now = now
         self.fleet = build_editors_view(conn, now)
         self.editors: list[dict[str, Any]] = list(self.fleet.get("editors") or [])
-        self.collector = db.collector_health(conn, now=now)
+        self.collector = db.collector_health(conn, now=now, settings=settings)
         self.feed = db.get_feed_state(conn)
         self.feed_mismatch = db.get_feed_runtime_mismatch(conn)
         self.halt = db.get_fleet_halt(conn, now)
@@ -1387,8 +1387,13 @@ def _check_disk_low(ctx: Ctx) -> list[Finding]:
     out = []
     for e in ctx.editors:
         g = ctx.guard(e)
+        # dash-collector-alerts-6 (2026-09-18): against THIS machine's own
+        # floor when it has reported one. A 5 GB floor with 15 GB free is not
+        # a computer about to stop, and mailing about it every day is how an
+        # owner learns to filter these.
         colour, percent = health.disk_status(g.get("disk_root_free_bytes"),
-                                             g.get("disk_root_total_bytes"))
+                                             g.get("disk_root_total_bytes"),
+                                             health.machine_disk_floor(g))
         if colour != health.RED or percent is None:
             continue
         who = ctx.name(_who(e))
@@ -1553,6 +1558,21 @@ def _check_lane_stalled(ctx: Ctx) -> list[Finding]:
         stalled = g.get("stalled_lane") or g.get("stalled_seconds")
         reason = (e.get("why") or {}).get("reason")
         if not stalled and reason != "lane_stalled":
+            continue
+        # live-1, second half (2026-09-18). The companion's stall record is
+        # PERSISTENT (SYNC-1, 2026-08-28) and nothing on that side ever clears
+        # it, so a lane killed once rides every report for the life of the
+        # install - and this check read any record as a stall happening NOW.
+        # Live on the morning of the pass: ruskin's lane A was killed on
+        # 2026-09-11 and restarted the same day, all three of his lanes were
+        # idle with nothing owed a week later, and "CC Sync: still not fixed
+        # after 4 day(s)" had gone out by mail four mornings running, with
+        # nothing any editor or admin could do about it. `stall_is_current` is
+        # the same predicate the row's own sentence uses (health._why_code),
+        # so the mail and the page cannot disagree; a stall with no `stalled_at`
+        # still fires, because "cannot tell" may not turn a real stall green.
+        # An alert already open recovers through the open_alert_subjects rule.
+        if stalled and not health.stall_is_current(e, ctx.now):
             continue
         who = ctx.name(_who(e))
         sentence = (e.get("why") or {}).get("sentence") or (
@@ -1742,19 +1762,14 @@ def _stale_after_seconds(ctx: Ctx) -> float:
     where the observed bound falls back to the floor and only the CONFIGURED
     intervals say what this site can meet.
     """
+    # regression-5 (2026-09-18): ONE COPY OF THE ARITHMETIC, and it is on the
+    # db side, because `db.collector_stale_bound` needs the same number for
+    # the STORED flag and cannot import this module. CR-256o's decline is
+    # revisited rather than worked around: what it declined was a second
+    # implementation, and this is the opposite of one.
     if getattr(ctx.settings, "syncthing_url", ""):
         return db.COLLECTOR_STALE_SECONDS
-    cadences = []
-    for kind in db.SYNCTHING_FREE_KINDS:
-        try:
-            value = float(getattr(ctx.settings, f"interval_{kind}", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            cadences.append(value)
-    if not cadences:
-        return db.COLLECTOR_STALE_SECONDS
-    return max(db.COLLECTOR_STALE_SECONDS, 2 * min(cadences))
+    return db.configured_stale_bound(ctx.settings)
 
 
 def _check_collector_stale(ctx: Ctx) -> list[Finding]:
@@ -1980,6 +1995,58 @@ def _check_notices(ctx: Ctx) -> list[Finding]:
         f"notice kind={r['kind']}") for r in rows]
 
 
+def _check_broll_archive(ctx: Ctx) -> list[Finding]:
+    """Can this server still LIST the b-roll archive? (proxy-tiers-3's alert
+    row, 2026-09-18.)
+
+    The notice half landed with CR-285R and the alert row did not, and the two
+    are not the same promise: a notice is on the home page for whoever opens
+    it, an alert is MAILED. This is the finding whose ten silent minutes put a
+    540p preview into a Resolve project and a false row in an editor's
+    stand-in ledger, damage that outlives the outage on projects nobody
+    re-checks, so it has to travel.
+
+    The listing is RE-DONE here rather than read off the notice: an alert that
+    trusts another cycle's row cannot fire on a deployment whose notices pass
+    is the thing that is broken, and this is one scandir on a directory the
+    container has open anyway. No b-roll mount in this build records no root,
+    and "could not check" is not evidence that the archive is fine: nothing is
+    reported, and the weekly list says the kind was checked either way.
+
+    dash-collector-alerts-2 (2026-09-18b): the probe is the notice half's,
+    for the reason written there - the recorded ROOT survives the unmount
+    that this check exists to catch, so the mount's WITNESS is what is asked,
+    and an empty root is unreadable rather than healthy.
+    """
+    root_of = getattr(mount_status, "root_of", None)
+    if root_of is None:
+        return []
+    recorded = root_of("broll")
+    if not recorded or not recorded[0]:
+        return []
+    root = recorded[0]
+    witness = (recorded[1] if len(recorded) > 1 else "") or root
+    # Imported HERE, not at the top: `notices` imports this module, so a
+    # module-level import would be a cycle. One probe, shared, because the
+    # notice and the alert disagreeing about whether the archive is readable
+    # is worse than either of them being wrong.
+    from . import notices
+
+    reason = notices._broll_archive_problem(root, witness)
+    if reason:
+        return [_f(
+            root,
+            f"This server cannot read the b-roll archive at {root} "
+            f"({reason}). Until it can, every clip an editor "
+            f"sends to Resolve is the small preview instead of the editing "
+            f"proxy, and their Resolve project keeps pointing at it "
+            f"afterwards.",
+            "On the NAS, check that the b-roll dataset is mounted and that "
+            "this container's bind mount for it is still there.",
+            f"path={root}")]
+    return []
+
+
 def _synced_project(ctx: Ctx, name: str) -> str | None:
     """Which tree project the open Resolve project IS, or None (CR-232).
 
@@ -2160,19 +2227,58 @@ def _check_file_moves(ctx: Ctx) -> list[Finding]:
     Defensive for the same reason `_check_notices` is: the file-move work
     package is this wave's, and its columns may not exist yet.
     """
+    # res-fleet-4 (2026-09-18): THIS CHECK HAS NEVER FIRED. `file_move_targets`
+    # has no `rel_path` column - the path lives on the `file_moves` row - so
+    # every cycle since v36 raised "no such column: rel_path" into `_rows`'
+    # defensive swallow, which exists for a table a parallel work package had
+    # not created yet and reads a typo as "nothing to report". A move that
+    # aged out unconfirmed was therefore mailed to nobody, on the one finding
+    # whose consequence is lane A putting the file back at the path an admin
+    # just cleared. The path comes from the join now.
     rows = _rows(ctx.conn,
-                 "SELECT machine, rel_path, expired_at FROM file_move_targets "
-                 "WHERE expired_at IS NOT NULL AND expired_at != '' LIMIT 40")
-    return [_f(
-        f"{r['machine']} {r['rel_path']}",
-        f"A file this server moved was never confirmed as moved on "
-        f"{r['machine']}, and the request has now aged out "
-        f"({_age_words(r['expired_at'], ctx.now)}). That computer still holds "
-        f"the file at the old path, so it will re-upload it and the move will "
-        f"undo itself.",
-        "Open the project page and use [ MOVE ON THE SERVER AND ON EVERY "
-        "MACHINE ] again once that computer is back online.",
-        f"expired_at={r['expired_at']}") for r in rows]
+                 "SELECT t.machine AS machine, t.editor_username AS editor, "
+                 "       m.from_rel AS rel_path, t.expired_at AS expired_at "
+                 "  FROM file_move_targets t JOIN file_moves m ON m.id = t.move_id "
+                 " WHERE t.expired_at IS NOT NULL AND t.expired_at != '' LIMIT 40")
+    # A TARGET WHOSE COMPUTER IS GONE IS NOT AN ACTION (res-fleet-4). The fix
+    # line asks the admin to press [ MOVE ON THE SERVER AND ON EVERY MACHINE ]
+    # "once that computer is back online", and after a forget (CR-76) or a
+    # rename there is no such computer: re-issuing files the row under a
+    # hostname nothing will ever report under again. Said ONCE, as a warn
+    # about the fleet rather than one per stranded row, because the act is the
+    # same act however many rows there are.
+    registered = {
+        (str(r["editor_username"]), str(r["machine"]))
+        for r in _rows(ctx.conn, "SELECT editor_username, machine FROM machines")
+    }
+    out: list[Finding] = []
+    stranded: list[str] = []
+    for r in rows:
+        if (str(r["editor"]), str(r["machine"])) not in registered:
+            stranded.append(f"{r['machine']} {r['rel_path']}")
+            continue
+        out.append(_f(
+            f"{r['machine']} {r['rel_path']}",
+            f"A file this server moved was never confirmed as moved on "
+            f"{r['machine']}, and the request has now aged out "
+            f"({_age_words(r['expired_at'], ctx.now)}). That computer still holds "
+            f"the file at the old path, so it will re-upload it and the move will "
+            f"undo itself.",
+            "Open the project page and use [ MOVE ON THE SERVER AND ON EVERY "
+            "MACHINE ] again once that computer is back online.",
+            f"expired_at={r['expired_at']}"))
+    if stranded:
+        out.append(_f(
+            "computers this server no longer has",
+            f"{len(stranded)} file move(s) were sent to a computer this server "
+            f"no longer knows about (it was renamed, or removed from the fleet) "
+            f"and were never confirmed. If that computer is still running, it "
+            f"holds those files at the old paths and will upload them back "
+            f"there.",
+            "Check the computer is signed in on the FLEET page, then move the "
+            "files again from the project page so every computer follows.",
+            "; ".join(sorted(stranded)[:10])))
+    return out
 
 
 def _check_versions_behind(ctx: Ctx) -> list[Finding]:
@@ -2548,6 +2654,26 @@ def _check_jobs_pinned_no_executor(ctx: Ctx) -> list[Finding]:
             "Check the container's bind mounts and restart the dashboard "
             "(docs/DOCKER.md), then Settings, JOBS to see them move.",
             f"cards mount={cards} pinned={len(rows)}"))
+    elif cards == "mounted":
+        # res-fleet-1 (2026-09-18): the third shape, and the one that shipped.
+        # Timeline Cards IS mounted, so the branch above is silent, and no row
+        # carries a claimed_machine yet, so the stale branch below is silent
+        # too - but the boot gate asked a lazily built pool whether an engine
+        # was available, got no, and never started the drain thread at all.
+        # A module-level flag because this runs on the collector thread with
+        # no app object (mount_status' own reasoning).
+        from . import cards_exec
+
+        if not cards_exec.is_running():
+            out.append(_f(
+                "the dashboard's own worker",
+                f"{len(rows)} job(s) were pinned to this server because no "
+                f"computer in the fleet could finish them, and the worker that "
+                f"drains them is not running in this container. They will wait "
+                f"for ever, and the jobs page says they are in hand.",
+                "Restart the dashboard (docs/DOCKER.md), then Settings, JOBS "
+                "to see them move.",
+                f"cards mount={cards} pinned={len(rows)} executor=not running"))
     stale = [r for r in rows
              if str(r["claimed_machine"] or "")
              and (_age(r["heartbeat_at"] or r["updated_at"], ctx.now) or 0.0)
@@ -3266,6 +3392,12 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
               "project folders not where the tree expects", _check_moved_project_dirs),
     AlertKind("ingest_staging", SEV_WARN, "footage is waiting in a drop folder",
               "unfiled footage in drop folders", _check_ingest_staging),
+    # proxy-tiers-3's alert row (2026-09-18). An ERROR: while it is true every
+    # Send to Resolve in the fleet is quietly building a project that points
+    # at a 540p preview.
+    AlertKind("broll_archive_unreadable", SEV_ERROR,
+              "the b-roll archive cannot be read",
+              "this server's own view of the b-roll archive", _check_broll_archive),
     AlertKind("file_move_expired", SEV_WARN, "a file move was never confirmed",
               "file moves a computer never answered", _check_file_moves),
     AlertKind("versions_behind", SEV_WARN, "a computer is several releases behind",

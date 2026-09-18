@@ -271,16 +271,44 @@ def encode_one(src: Path, cap_s: float, nvenc: bool, dry: bool) -> dict:
             raise RuntimeError(f"ffmpeg exited {r.returncode}: {(r.stderr or '').strip()[:300]}")
 
     def _bad() -> str | None:
-        """Why the output is unusable, or None. Two independent failure modes.
+        """Why the output is unusable, or None. Three independent failure modes.
 
         A damaged bitstream decodes with errors; a TRUNCATED file decodes
         cleanly and simply stops early, which passes an error check and then
         breaks anything that seeks past the cut. Both were seen on the b-roll
         archive, so both are checked.
+
+        broll-indexer-1 (2026-09-18): and a proxy a FEW FRAMES SHORT, which
+        passes both of those and is refused by Resolve as a proxy -- the
+        Reproductive Rights incident, seven files 1-18 frames short, reported
+        by the editor as "sync is stuck". 18 frames at 30 fps is 0.6 s, and
+        0.97 of a 60 s clip is a 1.8 s tolerance, so the duration check cannot
+        see it. The rest of the fleet got this check on 2026-09-17 and THIS
+        producer did not, although its output is editor-grade
+        `Proxy/<stem>.mp4` that Resolve links directly, and its stated use is
+        a 6,700-clip sweep over backup trees. `own_proxy_cmd` sets no `-r`, so
+        the two counts are comparable exactly as in build_proxy, and a count
+        neither side can produce is not a mismatch.
+
+        broll-indexer-1 (2026-09-18b): the comparison is exact and the source
+        is always counted. Screening it behind `duration * fps` within
+        FRAME_SLACK (CR-286B) hid the low end of the class this check exists
+        for - a CFR original's real count IS its duration * fps, so a proxy
+        one or two frames short sat inside the window and the source was
+        never counted. count_frames_cached is what keeps the cost down: one
+        demux per version of an original, so the nvenc retry's second
+        verification pass is free, as is the next clip cut from the same
+        source.
         """
         errs = ffmpeg_tools.verify_decodes(long_path(partial))
         if errs > 0:
             return f"{errs} decode errors"
+        dst_frames = ffmpeg_tools.count_frames(long_path(partial))
+        if dst_frames:
+            src_frames = ffmpeg_tools.count_frames_cached(long_path(src))
+            if (src_frames
+                    and not ffmpeg_tools.frames_match(src_frames, dst_frames)):
+                return f"{dst_frames} frames of the source's {src_frames}"
         try:
             got = ffmpeg_tools.probe_video(long_path(partial)).get("duration_s")
         except Exception:  # noqa: BLE001

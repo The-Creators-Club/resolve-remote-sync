@@ -251,7 +251,9 @@ def test_the_music_artefact_is_fetched_in_parallel_too(tmp_path, payload, monkey
     monkeypatch.setattr(music_sc, "runtime_available", lambda: (True, ""))
     monkeypatch.setattr(music_sc, "_models", lambda: _Models)
     monkeypatch.setattr(music_sc, "planned_urls", lambda *a, **k: {name: server.url(name)})
-    monkeypatch.setattr(music_sc, "host_allowed", lambda url: True)
+    # comp-music-ytdl-jobs-1 (2026-09-18): the gate takes the config and the
+    # site manifest now - the fleet's OWN feed host is what it is derived from.
+    monkeypatch.setattr(music_sc, "host_allowed", lambda url, *a, **k: True)
     monkeypatch.setattr(music_sc, "free_space_refusal", lambda *a, **k: None)
     monkeypatch.setattr(music_sc, "cache_dir", lambda: tmp_path)
     monkeypatch.setattr(music_sc, "refresh", lambda force=False: {})

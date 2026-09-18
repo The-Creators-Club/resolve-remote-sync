@@ -132,6 +132,28 @@ def stage_probe(cfg: Config, storage: Storage, video: dict[str, Any], src_path: 
         logger.info("probe: video %s is audio-only, skipping visual stages", video["id"])
         return
 
+    # broll-indexer-4 (2026-09-18): a video stream with NO DURATION (a raw
+    # elementary stream, some MPEG-TS, a recording still being written). This
+    # row used to reach `probed`, and stage_proxy then passed the None
+    # straight into build_sprite / build_poster and stage_frames into
+    # fill_gaps, where it died as `TypeError: unsupported operand type(s) for
+    # //: 'NoneType' and 'float'` -- a Python type error in the row's `error`
+    # column instead of the diagnosis the operator needs. Parked like the
+    # other two, and structurally distinguishable from both:
+    # `skipped_for_length` requires a codec AND a duration, so this third kind
+    # (codec, no duration) is not mistaken for the over-length clip, and the
+    # audio-only arm above is the one with no codec at all.
+    if info.get("duration_s") is None:
+        storage.update_video(
+            video["id"], status="skipped",
+            error="no duration in the container - nothing here can be "
+                  "sampled; remux it and re-scan",
+            **info,
+        )
+        logger.info("probe: video %s has a video stream but no duration, "
+                    "skipping visual stages", video["id"])
+        return
+
     # Over-length gate, enforced HERE because probe is where duration first exists
     # and is still the cheapest stage — everything after it (proxy encode, scene
     # detection, frame extraction, model calls) is what a long take actually costs.
@@ -732,7 +754,18 @@ def run_pipeline(
         # Both are status-independent additive enrichment, so already-finished videos
         # are still eligible — otherwise an archive indexed before these stages existed
         # could never pick up its transcripts / search_norm / embeddings.
-        statuses += ["indexed", "sorted"]
+        #
+        # 'skipped' is in that widening (broll-indexer-3, 2026-09-18b mediums)
+        # because of the audio-only clip: stage_probe parks it there precisely
+        # so its SPEECH stays searchable, and every caller of stage_transcribe
+        # passes ingest_only=True, so without this the .srt batch_transcribe.py
+        # writes for it is never ingested and the row carries no segments and
+        # no cues. Safe for the other 'skipped' verdicts: none of probe, proxy,
+        # frames or claude accepts 'skipped' as a prerequisite status
+        # (STAGE_PREREQ_STATUS), the transcribe stage still declines the
+        # over-length clip (skipped_for_length), and ingest_only makes the pass
+        # a no-op for any row with no .srt on disk.
+        statuses += ["indexed", "sorted", "skipped"]
     # storage.videos_by_status excludes confirmed duplicates (duplicate_of IS NOT NULL)
     # at the query level — see broll_index/duplicates.py. A known duplicate of another
     # indexed row must never spend a model call describing footage already described.

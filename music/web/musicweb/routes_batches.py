@@ -168,14 +168,28 @@ def cancel(uid: str, x_ccsync_user: str = Header(default=None),
            x_ccsync_admin: str = Header(default=None)):
     """Ask the machine to stop. Owner or admin.
 
-    Not a kill: this sets the flag and expires the lease, and the companion
-    learns about it on its next heartbeat (410) or from the report reply.
+    Not a kill: this sets the flag and the companion learns about it on its
+    next heartbeat (410) or from the report reply.
     Tracks already `live` stay -- their audio is in the library and somebody
     may already have cut with it.
     """
     user = require_user(x_ccsync_user)
     admin = is_admin(x_ccsync_admin)
     conn = con()
+    # music-1 (2026-09-18): this was the ONE batch route that did not sweep
+    # first, and it decided "nobody holds this" on the raw column rather than
+    # on lease_live. A cancel that landed between lease expiry and the next
+    # sweep therefore took the request-not-kill branch, which nulls
+    # `lease_expires_at` while leaving `state='running'` -- a row
+    # expire_stale_leases can never touch again (its predicate requires the
+    # column NOT NULL) and `claim` 410s for ever. The batch was undeliverable
+    # and unfinishable, and only a second click cleared it.
+    # music-1 (2026-09-18b mediums): the other branch reached the same wedge,
+    # so `ingest_batches.cancel` no longer touches the lease at all and
+    # `expire_stale_leases` finalises a cancelled batch whose machine never
+    # answered. This sweep-first call still matters: it is what turns an
+    # already-dead lease into the queued/finalise branch below.
+    ingest_batches.expire_stale_leases(conn)
     batch = _visible_or_404(conn, uid, user, admin)
     if batch['state'] in ingest_batches.BATCH_TERMINAL:
         # Idempotent, not an error: two clicks, or a click on a batch that
@@ -186,7 +200,7 @@ def cancel(uid: str, x_ccsync_user: str = Header(default=None),
     # flag alone would leave it "cancelling" forever and the panel wedged on
     # it (owner, 2026-08-18: a batch orphaned by a companion crash). Finalise
     # it here; a HELD batch keeps the request-not-kill semantics below.
-    if batch['state'] == 'queued' or not batch['lease_expires_at']:
+    if batch['state'] == 'queued' or not ingest_batches.lease_live(batch):
         ingest_batches.cancel(conn, uid, user)
         fresh = ingest_batches.get_batch(conn, uid)
         result = ingest_batches.release(conn, fresh, state='cancelled')

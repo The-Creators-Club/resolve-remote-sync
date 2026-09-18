@@ -358,6 +358,37 @@ def record_revert_refusal(current: dict, reason: str) -> None:
     write_json(CURRENT_JSON, payload)
 
 
+def _retire(current: dict, version: str, reason: str) -> None:
+    """Clear an applied tree the image has caught up with (CR-270).
+
+    regression-3 (2026-09-18) CARRIED `revert_refused_reason` /
+    `revert_refused_from` here, because the retire branch wrote a fresh
+    five-key dict and dropped a refusal recorded on an earlier boot.
+
+    dash-mounts-ui-1 (2026-09-18b mediums): that carry was permanent, and the
+    sentence it carried is false by construction. This branch is reached only
+    after `revert_refusal("")` answered "" - the image has JUST been judged
+    able to run this database - so "the image cannot run this schema" is over
+    at the moment it is written. And nothing could ever drop it again: the
+    clearing rule below sits after `main()`'s `if not version:` return, which
+    every later boot takes now that `version` is "". The admin therefore read
+    "restore a backup" on a healthy container until the next apply or revert,
+    neither of which a healthy server performs. Losing the evidence costs
+    nothing: `alerts.py`'s check compares an APPLIED version against the
+    image, and there is no applied version any more.
+    """
+    payload = {
+        "version": "",
+        "previous": "",
+        "applied_at": current.get("applied_at") or "",
+        "retired_from": version,
+        "retired_reason": reason,
+    }
+    write_json(CURRENT_JSON, payload)
+    write_json(BOOT_ATTEMPTS, {"version": "", "attempts": 0})
+    say(f"RETIRED {version}: {reason}")
+
+
 def boot_attempts(version: str) -> int:
     """How many times this exact version has been handed to run.sh without
     ever reaching a healthy boot. The app clears the file once it has been up
@@ -434,28 +465,46 @@ def main() -> int:
     # it, and the record is cleared here rather than left for the counter.
     # An image whose own version cannot be read is not evidence of anything,
     # so the tree goes on to check_tree as before.
+    retire_refused = False
     installed, image = parse_version(version), parse_version(image_version())
     if installed and image and installed <= image:
-        reason = (f"{version} is not newer than the image's own {image_version()} "
-                  "-- the image carries it")
-        write_json(CURRENT_JSON, {
-            "version": "",
-            "previous": "",
-            "applied_at": current.get("applied_at") or "",
-            "retired_from": version,
-            "retired_reason": reason,
-        })
-        write_json(BOOT_ATTEMPTS, {"version": "", "attempts": 0})
-        say(f"RETIRED {version}: {reason}")
-        print(image_pythonpath())
-        return 0
+        # regression-3 (2026-09-18): ASK THE SCHEMA QUESTION FIRST. This
+        # branch decides whether CR-259a's guard is ever consulted, and it
+        # asked the VERSION question alone. `check_tree` rule 5's invariant
+        # ("an OTA tree is always newer than the image") is what makes that
+        # safe, and nothing enforces it here: an image whose version is not
+        # lower but whose schema is - not a build this release process
+        # produces, which is why this is a low - would retire the one tree
+        # that can run this database and boot into a migrate() that raises on
+        # every start, with no dashboard left to fix it from. The image is the
+        # thing being retired ONTO, so `revert_refusal("")` is exactly the
+        # question, and "cannot tell" does not refuse (its own three-way
+        # rule). A refusal keeps the tree and records itself where the page
+        # and alerts.py can read it, exactly as the MAX_BOOT_ATTEMPTS branch
+        # below does.
+        refusal = revert_refusal("")
+        if refusal:
+            say(f"NOT RETIRING {version}: {refusal}")
+            record_revert_refusal(current, refusal)
+            retire_refused = True
+        else:
+            reason = (f"{version} is not newer than the image's own {image_version()} "
+                      "-- the image carries it")
+            _retire(current, version, reason)
+            print(image_pythonpath())
+            return 0
 
     # The counter is read BEFORE it is bumped, so the number tested is how
     # many boots of this tree have already failed: MAX_BOOT_ATTEMPTS failures
     # revert, and the tree really is tried that many times rather than being
     # written off after one.
     already_failed = boot_attempts(version)
-    if current.get("revert_refused_reason") and already_failed == 0:
+    # regression-3: ...but NOT the refusal this boot has just recorded. The
+    # clearing rule below reads a zero counter as "the thing the refusal was
+    # about is over", and a schema the image cannot run is not over because
+    # this tree boots fine - that is the whole reason it is being kept.
+    if (current.get("revert_refused_reason") and already_failed == 0
+            and not retire_refused):
         # The counter is cleared by start_boot_watchdog once the tree has been
         # up and healthy for a while, so a zero here means the thing the
         # refusal was about is over. A banner that stays after the problem has

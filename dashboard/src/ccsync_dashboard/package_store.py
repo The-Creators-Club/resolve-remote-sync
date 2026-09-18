@@ -453,9 +453,33 @@ def store_verified_package(
         log.info("publish declared pubkey_id %s but %s is what verified it",
                  pubkey_id, detail)
 
-    dest_dir = settings.packages_path() / platform
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    os.replace(part_path, dest_dir / filename)
+    # live-2 = dash-api-6 (2026-09-18): IS THIS VERSION ALREADY HELD, and is it
+    # the same bytes? Asked HERE, before anything on disk moves. The PUT route
+    # 409s on `get_package` before the body is streamed, but two publishes of
+    # one version that overlap (the ship interrupted and re-run while uvicorn
+    # drains the first, `publish_latest` retried after a timeout - the 0.9.74
+    # publish on 2026-09-17 did exactly this, twice) both pass that check, and
+    # the loser used to place its bytes at the served filename and only THEN
+    # hit `UNIQUE (kind, platform, version)`. The result was a 500 with a
+    # stack trace in an open `server_error` notice telling the admin to send
+    # the detail to support, and an artefact file swapped under a row whose
+    # sha256 still described the first upload's bytes - so every companion
+    # that downloaded that build failed its sha check and could not upgrade,
+    # while the Packages page showed a normal record.
+    held = db.get_package(conn, platform, version, kind)
+    if held is not None:
+        part_path.unlink(missing_ok=True)
+        if str(held["sha256"] or "").lower() == str(sha256 or "").lower():
+            log.info("publish of %s %s %s by %s: already held at these exact "
+                     "bytes, nothing to do", kind, platform, version, published_by)
+            return "already published at this version, with these exact bytes."
+        raise PackageStoreError(
+            409,
+            f"{kind} {version} for {platform} is already published on this "
+            f"server, from different bytes. Nothing on disk was replaced. "
+            f"Bump the version and rebuild, or delete the published record "
+            f"first if you meant to overwrite it.",
+        )
 
     db.insert_companion_package(
         conn, version=version, platform=platform, filename=filename,
@@ -498,6 +522,20 @@ def store_verified_package(
                         refusal[1])
     pruned = db.prune_companion_packages(conn, platform, kind=kind) if prune else []
     conn.commit()
+    # dash-api-6 = live-2 (2026-09-18): THE BYTES LAND LAST. This `os.replace`
+    # used to run before the insert, so any failure after it - the UNIQUE
+    # constraint of a racing publish, a busy database on the commit, the REL-1
+    # make-current gate raising - left the served filename carrying the NEW
+    # bytes under the OLD row, whose sha256 describes the old ones. Every
+    # companion downloading that build then failed its hash check and could
+    # not upgrade, with the Packages page showing a normal record. Placed
+    # after the commit, the worst case is the other way round: a row whose
+    # file is missing, which is a loud 404 on download, fixed by publishing
+    # again, and is the direction DASH-3's commit-then-unlink ordering already
+    # chose for the pruned files below.
+    dest_dir = settings.packages_path() / platform
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    os.replace(part_path, dest_dir / filename)
     for row in pruned:
         unlink_package_file(settings, row)
     return note

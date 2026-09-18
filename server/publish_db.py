@@ -112,6 +112,11 @@ SPECS = {
         "tables": ("videos", "segments", "embeddings"),
         "what": "the b-roll search index",
         "drain": True,
+        # server-tools-1..3 (2026-09-18b mediums): does the deployed app step a
+        # file swapped under it? /broll does NOT -- ensure_schema runs once, at
+        # mount time (broll/web/app/main.py), and nothing re-runs it -- so a
+        # file OLDER than the live one is a real refusal here.
+        "resteps_after_swap": False,
     },
     "music": {
         "filename": "music.db",
@@ -120,6 +125,13 @@ SPECS = {
         "tables": ("tracks", "windows", "tags"),
         "what": "the music search index",
         "drain": False,
+        # /music is built the other way round: musicweb/db.py's con() calls
+        # _check_swapped() on every connection (MUSIC-10), a replaced inode
+        # invalidates the cached schema state, and the next connection re-runs
+        # ensure_schema -- which walks its migrations by an "already applied"
+        # PREDICATE, not by user_version. So an older file heals itself here and
+        # must not be refused (server-tools-2, 2026-09-18b mediums).
+        "resteps_after_swap": True,
     },
 }
 
@@ -280,6 +292,28 @@ def local_snapshot(path: Path, dest: Path) -> None:
         src.close()
 
 
+def local_user_version(path: Path):
+    """`PRAGMA user_version` of a local database, or None if it cannot be read.
+
+    broll-2 (2026-09-18). Both search apps refuse, fatally and on purpose, a
+    file whose schema is NEWER than the code reading it (`db.py`: "written by a
+    newer version of the app"), which the mounts turn into a DEGRADED /broll or
+    /music and no search UI at all; and a file OLDER than a running container
+    is never stepped, because ensure_schema runs at mount time, so every ingest
+    push 500s on `no such column` until somebody restarts it. Neither is
+    visible from the base rig, and this command had no notion of a version at
+    all.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        try:
+            return int(conn.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            conn.close()
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+
+
 def local_verify(path: Path, tables) -> tuple[str, dict]:
     """(quick_check result, {table: count}) for a local database file."""
     conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
@@ -303,6 +337,41 @@ def local_verify(path: Path, tables) -> tuple[str, dict]:
 # The remote half
 # --------------------------------------------------------------------------
 
+def schema_refusal(source_version, live_version, which):
+    """The sentence a schema skew earns, or "" (broll-2, 2026-09-18).
+
+    Only a PROVEN skew: either version unreadable answers "", because a check
+    that cannot see the schema must not be the thing that stops a publish.
+
+    The OLDER-than-live direction belongs to the web app, not to this
+    publisher: it is a refusal only where the app cannot step a file dropped
+    under it (`SPECS[which]["resteps_after_swap"]`). Refusing it for an app
+    that heals itself trains the operator to reach for --allow-schema-skew,
+    which also disables the direction that IS fatal (server-tools-2,
+    2026-09-18b mediums).
+    """
+    if source_version is None or live_version is None:
+        return ""
+    if source_version > live_version:
+        return (f"the index you are publishing is schema v{source_version} and "
+                f"the deployed app has stepped its own to v{live_version}. A "
+                f"dashboard older than that schema refuses the file outright "
+                f"and turns the whole /{which} search UI off, with the reason "
+                f"only in the container log. Deploy the dashboard first, then "
+                f"publish.")
+    if source_version < live_version:
+        if SPECS.get(which, {}).get("resteps_after_swap"):
+            return ""
+        return (f"the index you are publishing is schema v{source_version} and "
+                f"the live one is v{live_version}. ensure_schema runs at mount "
+                f"time, so a running container never steps a file dropped "
+                f"under it: every ingest push and fleet checkpoint would 500 "
+                f"on a missing column until somebody restarts it. Re-run the "
+                f"indexer's migration, or restart the container straight after "
+                f"the swap.")
+    return ""
+
+
 def read_live_counts(backend, container: str, container_path: str, tables,
                      dry_run: bool) -> tuple[dict, str]:
     """Row counts of the LIVE database, read through the container. ({}, why)
@@ -316,6 +385,8 @@ def read_live_counts(backend, container: str, container_path: str, tables,
           f"for t in {list(tables)!r}:\n"
           "    try: o[t]=c.execute('SELECT count(*) FROM '+t).fetchone()[0]\n"
           "    except Exception: o[t]=None\n"
+          "try: o['__user_version']=c.execute('PRAGMA user_version').fetchone()[0]\n"
+          "except Exception: o['__user_version']=None\n"
           "print(json.dumps(o))")
     rc, out, err = backend.container_exec(
         container, f"python3 -c {shell_quote(py)}", dry_run)
@@ -610,6 +681,14 @@ def do_rollback(args, backend, spec) -> int:
     return 0
 
 
+# The publish succeeded and the post-swap merge did not: a distinct code,
+# because the two halves failed differently and a caller that stops on either
+# must be able to tell them apart (server-tools-2, 2026-09-18). The live index
+# is the new one; the drained rows are still in the bundle, and --apply-drain
+# puts them back.
+RC_DRAIN_UNMERGED = 3
+
+
 def do_apply_drain(args, backend, spec) -> int:
     """`--apply-drain <bundle>`: the second half of a publish, on its own.
 
@@ -640,6 +719,9 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--which", choices=sorted(SPECS), required=True)
+    ap.add_argument("--allow-schema-skew", action="store_true",
+                    help="publish even when the index's PRAGMA user_version "
+                         "and the live one's disagree (broll-2)")
     ap.add_argument("--source", default="",
                     help="the local database to publish (default: the in-repo one)")
     ap.add_argument("--allow-shrink", action="store_true",
@@ -728,6 +810,20 @@ def main():
             print(f"NOTE: could not read the live index's row counts ({why}). "
                   f"Publishing without the shrink check -- normal for a first "
                   f"publish, worth a look otherwise.", file=sys.stderr)
+        # An answer from a container too old to send the key, or from a
+        # file with no version, is None: "cannot tell", which never
+        # refuses.
+        live_version = live.pop("__user_version", None)
+        skew = schema_refusal(local_user_version(staged_local), live_version,
+                              args.which)
+        if skew:
+            if not args.allow_schema_skew:
+                print(f"FAILED: {skew} Nothing was sent; the live index is "
+                      f"untouched. Pass --allow-schema-skew if you know what "
+                      f"you are doing.", file=sys.stderr)
+                return 1
+            print(f"--allow-schema-skew given: {skew}", file=sys.stderr)
+
         refusals = shrink_refusals(live, counts, args.shrink_pct)
         if refusals:
             for line in refusals:
@@ -851,6 +947,17 @@ def main():
                       f"-- they are in {bundle_host}. Put them back with:\n"
                       f"  python publish_db.py --which {args.which} --apply-drain "
                       f"{shell_quote(bundle)} --apply", file=sys.stderr)
+                # server-tools-2 (2026-09-18): and SAY SO in the exit status.
+                # This branch used to fall through to `return 0`, so a publish
+                # whose merge lost the race with a restarting container
+                # reported success to every scripted caller and every `&&`
+                # chain, while the live index was short every clip the fleet
+                # had ingested since the copy was pulled -- plus every
+                # ingest_batches/ingest_items row, which exist NOWHERE else
+                # until the merge lands. Not 1: 1 means "nothing was
+                # published" everywhere else in this CLI, and the swap DID
+                # happen.
+                return RC_DRAIN_UNMERGED
             else:
                 print(drain_applied_line(report))
                 print(f"  the drain bundle is kept at {bundle_host}")

@@ -147,6 +147,17 @@ def main():
                 summary['after_bytes'] += proxies.proxy_path(tid).stat().st_size
                 continue
             info = proxies.source_info(src)
+            if not info:
+                # music-4 (2026-09-18): an empty answer is a file with no
+                # decodable audio stream (or a probe that could not run), and
+                # `is_pointless({})` is False -- so the estimate used to count
+                # it BUILT with duration 0 while the real run raises "no
+                # decodable audio stream" and counts it FAILED. A dry run that
+                # promises proxies the run cannot make is worse than no dry
+                # run.
+                summary[proxies.FAILED] += 1
+                summary['after_bytes'] += before
+                continue
             if proxies.is_pointless(info, args.kbps):
                 summary[proxies.ALREADY_SMALL] += 1
                 summary['after_bytes'] += before

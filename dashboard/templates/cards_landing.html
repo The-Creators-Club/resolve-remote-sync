@@ -67,17 +67,25 @@
                drives their OWN account's companions, so another person being
                live here is something to know, never something to take. #}
             {{ ep.occupants | join(', ') }}
+            {# security-1 (2026-09-18b mediums): the seat is stamped by
+               requests SERVED here, so an editor working offline in Cards
+               shows as nobody after fifteen minutes and their episode looks
+               free to close. We cannot make an offline browser beat, so the
+               row says who was last in and when, and the close asks. #}
+            {% if not ep.occupants and ep.last_in_phrase %}
+              <div class="muted">{{ ep.last_in_phrase }}</div>
+            {% endif %}
           </td>
           <td>
+            {# dash-cards-2 / security-2 (2026-09-18): [ CLOSE ] is drawn from
+               `ep.may_close`, not from `session_is_admin` and not only for
+               `ready`. A FAILED episode used to offer [ OPEN ] (which changed
+               nothing, because the pool handed the failed entry straight
+               back) and no close at all, so a transient build failure poisoned
+               that slug until the container was redeployed. It now offers BOTH:
+               [ OPEN ] retries the build, [ CLOSE ] forgets the entry. #}
             {% if ep.state == 'ready' %}
               <a class="btn tap" href="{{ ep.href }}">[ OPEN ]</a>
-              {% if session_is_admin %}
-                <form method="post" action="/cards/close" style="display:inline">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  <input type="hidden" name="slug" value="{{ ep.slug }}">
-                  <button class="btn tap" type="submit">[ CLOSE ]</button>
-                </form>
-              {% endif %}
             {% elif ep.state == 'loading' %}
               <span class="muted">opening</span>
             {% else %}
@@ -85,6 +93,18 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="slug" value="{{ ep.slug }}">
                 <button class="btn tap" type="submit">[ OPEN ]</button>
+              </form>
+            {% endif %}
+            {% if ep.may_close %}
+              {# The prompt is built server-side and emitted with `tojson`: an
+                 episode name with an apostrophe in it would otherwise end the
+                 JS string (Jinja escapes for HTML, and the browser decodes
+                 &#39; back to ' before the script is parsed). #}
+              <form method="post" action="/cards/close" style="display:inline"
+                    onsubmit='return confirm({{ ep.close_prompt | tojson }});'>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="slug" value="{{ ep.slug }}">
+                <button class="btn tap" type="submit">[ CLOSE ]</button>
               </form>
             {% endif %}
           </td>

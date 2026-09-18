@@ -139,6 +139,11 @@ def run_subprocess(
         cmd,
         capture_output=True,
         text=True,
+        # server-tools-4 (2026-09-18): rclone/syncthing/iperf3 all emit UTF-8,
+        # and a run pointed at a tree with a CJK or accented name used to die
+        # in the decode rather than in anything it was measuring.
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
     )
     seconds = time.perf_counter() - start

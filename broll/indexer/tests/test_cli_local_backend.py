@@ -5,8 +5,30 @@ from __future__ import annotations
 
 import yaml
 
+import pytest
+
 from broll_index import cli, local_runtime
 from broll_index.cli import build_parser, main
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_local_backend_env(monkeypatch):
+    """Every config in this file points the local backend at a tmp_path, and
+    every one of those keys is env-overridable (`config._env(...) or
+    raw.get(...)`).
+
+    This rig has `BROLL_LOCAL_CACHE_DIR` set MACHINE-WIDE for the real
+    local-VLM cache, so `doctor` resolved to that directory, found the models
+    already downloaded and printed the opposite of "NOT downloaded yet": the
+    test failed in the central gate and passed in the shell of whoever wrote
+    it. Autouse and file-wide rather than per-test, because the exposure is
+    `_write_config`'s, which every case here calls (2026-09-18, the
+    test-hygiene low of CR-286). A test that WANTS one of these set still
+    works: a fixture runs before the test body, so its own setenv wins.
+    """
+    for name in ("BROLL_LOCAL_CACHE_DIR", "BROLL_LLAMA_SERVER_PATH",
+                 "BROLL_DASHBOARD_URL"):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _write_config(tmp_path, extra: str = "") -> str:

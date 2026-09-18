@@ -1,0 +1,154 @@
+broll-indexer-1           high    -> high    (not in this wave)
+broll-indexer-2           medium  -> low     DOWNGRADED to low
+broll-indexer-3           medium  -> medium  CONFIRMED
+broll-indexer-4           low     -> low     (not in this wave)
+broll-1                   medium  -> medium  CONFIRMED (medium stands)
+broll-2                   medium  -> low     DOWNGRADED to low
+broll-3                   low     -> low     (not in this wave)
+broll-4                   low     -> low     (not in this wave)
+comp-app-1                high    -> high    (not in this wave)
+comp-app-2                medium  -> medium  CONFIRMED
+comp-app-3                medium  -> low     DOWNGRADED to low
+comp-app-4                medium  -> low     DOWNGRADED to low
+comp-app-5                low     -> low     (not in this wave)
+comp-app-6                low     -> low     (not in this wave)
+comp-broll-tiers-1        high    -> high    (not in this wave)
+comp-broll-tiers-2        medium  -> medium  CONFIRMED (medium stands for this hunter's own scenario; the root
+comp-broll-tiers-3        medium  -> medium  CONFIRMED
+comp-broll-tiers-4        low     -> low     (not in this wave)
+comp-broll-tiers-5        low     -> low     (not in this wave)
+comp-broll-tiers-6        low     -> low     (not in this wave)
+comp-music-ytdl-jobs-1    medium  -> medium  CONFIRMED
+comp-music-ytdl-jobs-2    medium  -> low     DOWNGRADED to low
+comp-music-ytdl-jobs-3    medium  -> medium  CONFIRMED
+comp-music-ytdl-jobs-4    low     -> low     (not in this wave)
+comp-music-ytdl-jobs-5    low     -> low     (not in this wave)
+comp-resolve-1            high    -> high    (not in this wave)
+comp-resolve-2            medium  -> medium  CONFIRMED
+comp-resolve-3            medium  -> medium  CONFIRMED (narrowed: the plan side is the live half; the insert
+comp-resolve-4            medium  -> medium  CONFIRMED
+comp-resolve-5            medium  -> low     DOWNGRADED to low
+comp-resolve-6            low     -> low     (not in this wave)
+comp-resolve-7            low     -> low     (not in this wave)
+comp-resolve-8            low     -> low     (not in this wave)
+comp-sync-1               high    -> high    (not in this wave)
+comp-sync-2               high    -> high    (not in this wave)
+comp-sync-3               medium  -> medium  CONFIRMED
+comp-sync-4               medium  -> medium  CONFIRMED
+comp-sync-5               medium  -> medium  CONFIRMED
+comp-sync-6               low     -> low     (not in this wave)
+comp-sync-7               low     -> low     (not in this wave)
+comp-ui-1                 medium  -> medium  CONFIRMED
+comp-ui-2                 medium  -> low     DOWNGRADED to low
+comp-ui-3                 medium  -> low     DOWNGRADED to low
+comp-ui-4                 medium  -> medium  CONFIRMED
+comp-ui-5                 medium  -> low     DOWNGRADED to low
+comp-ui-6                 low     -> low     (not in this wave)
+comp-ui-7                 low     -> low     (not in this wave)
+comp-ui-8                 low     -> low     (not in this wave)
+comp-ui-9                 low     -> low     (not in this wave)
+dash-api-1                medium  -> medium  CONFIRMED (and under-rated as a medium: it is the SAME defect as the high dash-db-1 / res-fleet-1, which a builder is fixing in this tree right now)
+dash-api-2                medium  -> medium  CONFIRMED
+dash-api-3                medium  -> medium  CONFIRMED
+dash-api-4                low     -> low     (not in this wave)
+dash-api-5                low     -> low     (not in this wave)
+dash-api-6                low     -> low     (not in this wave)
+dash-cards-1              medium  -> medium  CONFIRMED
+dash-cards-2              medium  -> low     DOWNGRADED to low
+dash-cards-3              low     -> low     (not in this wave)
+dash-cards-4              low     -> low     (not in this wave)
+dash-cards-5              low     -> low     (not in this wave)
+dash-cards-6              low     -> low     (not in this wave)
+dash-collector-alerts-1   high    -> high    (not in this wave)
+dash-collector-alerts-2   medium  -> medium  CONFIRMED
+dash-collector-alerts-3   medium  -> medium  CONFIRMED
+dash-collector-alerts-4   medium  -> low     DOWNGRADED to low
+dash-collector-alerts-5   low     -> low     (not in this wave)
+dash-collector-alerts-6   low     -> low     (not in this wave)
+dash-collector-alerts-7   low     -> low     (not in this wave)
+dash-core-1               medium  -> medium  CONFIRMED
+dash-core-2               medium  -> medium  CONFIRMED (conclusion), with the hunter's mechanism and suggested fix both WRONG
+dash-core-3               low     -> low     (not in this wave)
+dash-core-4               low     -> low     (not in this wave)
+dash-core-5               low     -> low     (not in this wave)
+dash-db-1                 high    -> high    (not in this wave)
+dash-db-2                 high    -> high    (not in this wave)
+dash-db-3                 medium  -> medium  CONFIRMED
+dash-db-4                 low     -> low     (not in this wave)
+dash-db-5                 low     -> low     (not in this wave)
+dash-mounts-ui-1          medium  -> medium  CONFIRMED
+dash-mounts-ui-2          low     -> low     (not in this wave)
+dash-mounts-ui-3          low     -> low     (not in this wave)
+dash-mounts-ui-4          low     -> low     (not in this wave)
+dash-mounts-ui-5          low     -> low     (not in this wave)
+dash-release-jobs-1       medium  -> medium  CONFIRMED
+dash-release-jobs-2       medium  -> medium  REFUTED
+dash-release-jobs-3       medium  -> low     DOWNGRADED to low
+dash-release-jobs-4       low     -> low     (not in this wave)
+dash-release-jobs-5       low     -> low     (not in this wave)
+install-onboard-1         medium  -> medium  CONFIRMED
+install-onboard-2         medium  -> low     DOWNGRADED to low
+install-onboard-3         medium  -> medium  CONFIRMED
+install-onboard-4         medium  -> medium  CONFIRMED
+install-onboard-5         medium  -> low     DOWNGRADED to low
+install-onboard-6         medium  -> low     DOWNGRADED to low
+install-onboard-7         low     -> low     (not in this wave)
+install-onboard-8         low     -> low     (not in this wave)
+music-1                   medium  -> medium  CONFIRMED
+music-2                   medium  -> low     DOWNGRADED to low
+music-3                   medium  -> medium  CONFIRMED
+music-4                   low     -> low     (not in this wave)
+music-5                   low     -> low     (not in this wave)
+proxy-tiers-1             high    -> high    (not in this wave)
+proxy-tiers-2             medium  -> low     DOWNGRADED to low
+proxy-tiers-3             medium  -> medium  CONFIRMED (medium stands)
+proxy-tiers-4             low     -> low     (not in this wave)
+proxy-tiers-5             low     -> low     (not in this wave)
+proxy-tiers-6             low     -> low     (not in this wave)
+proxy-tiers-7             low     -> low     (not in this wave)
+regression-1              medium  -> medium  CONFIRMED (same defect as the HIGH comp-resolve-1; a builder is fixing it now, and the lines named were still unfixed when I read them)
+regression-2              medium  -> low     DOWNGRADED to low
+regression-3              low     -> low     (not in this wave)
+regression-4              low     -> low     (not in this wave)
+regression-5              low     -> low     (not in this wave)
+regression-6              low     -> low     (not in this wave)
+res-companion-1           high    -> high    (not in this wave)
+res-companion-2           high    -> high    (not in this wave)
+res-companion-3           medium  -> high    UPGRADED to high (as a duplicate; the same code is rated high by
+res-companion-4           low     -> low     (not in this wave)
+res-companion-5           low     -> low     (not in this wave)
+res-fleet-1               high    -> high    (not in this wave)
+res-fleet-2               medium  -> medium  CONFIRMED
+res-fleet-3               medium  -> medium  CONFIRMED
+res-fleet-4               low     -> low     (not in this wave)
+res-fleet-5               low     -> low     (not in this wave)
+res-fleet-6               low     -> low     (not in this wave)
+res-fleet-7               low     -> low     (not in this wave)
+security-1                medium  -> medium  CONFIRMED (medium)
+security-2                low     -> low     (not in this wave)
+security-3                low     -> low     (not in this wave)
+security-4                low     -> low     (not in this wave)
+server-tools-1            medium  -> medium  CONFIRMED
+server-tools-2            medium  -> medium  CONFIRMED
+server-tools-3            medium  -> medium  CONFIRMED
+server-tools-4            low     -> low     (not in this wave)
+server-tools-5            low     -> low     (not in this wave)
+server-tools-6            low     -> low     (not in this wave)
+tests-1                   medium  -> medium  CONFIRMED
+tests-2                   low     -> low     (not in this wave)
+tests-3                   low     -> low     (not in this wave)
+tests-4                   low     -> low     (not in this wave)
+tests-5                   low     -> low     (not in this wave)
+tests-6                   low     -> low     (not in this wave)
+tests-7                   low     -> low     (not in this wave)
+wire-1                    high    -> high    (not in this wave)
+wire-2                    medium  -> medium  CONFIRMED (and under-rated here: the same defect is filed as a HIGH)
+wire-3                    medium  -> medium  CONFIRMED
+wire-4                    low     -> low     (not in this wave)
+wire-5                    low     -> low     (not in this wave)
+ytdl-web-1                medium  -> medium  CONFIRMED
+ytdl-web-2                medium  -> medium  CONFIRMED
+ytdl-web-3                low     -> low     (not in this wave)
+ytdl-web-4                medium  -> low     DOWNGRADED to low
+ytdl-web-5                low     -> low     (not in this wave)
+ytdl-web-6                low     -> low     (not in this wave)

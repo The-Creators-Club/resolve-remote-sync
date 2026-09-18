@@ -127,8 +127,24 @@ jobs:
           cp "$found" companion/.tools/rclone
           chmod +x companion/.tools/rclone
 
+      # tests-1 (2026-09-18): the rclone treatment for the other optional
+      # binary. release_macos.sh runs the companion suite, and a Mac-only
+      # regression in the three Timeline Cards media recipes is exactly the
+      # shape that gets published from here -- twenty skipped tests is what
+      # it would look like. CCSYNC_REQUIRE_FFMPEG=1 on the build step turns a
+      # missing binary from a skip into a failed release.
+      - name: install ffmpeg (the companion media-job tests require a real one)
+        run: |
+          set -euo pipefail
+          if command -v ffmpeg >/dev/null 2>&1; then
+            echo "ffmpeg is already on PATH"
+          else
+            brew install ffmpeg
+          fi
+
       - name: build
         env:
+          CCSYNC_REQUIRE_FFMPEG: "1"
           # Reserved for item 4. release_macos.sh ignores it today.
           CCSYNC_APPLE_DEV_ID: ${{ secrets.CCSYNC_APPLE_DEV_ID }}
         run: |

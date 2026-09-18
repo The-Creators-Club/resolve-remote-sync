@@ -184,11 +184,27 @@ def read_marker(crash_dir: Path) -> Optional[dict[str, Any]]:
 
 
 def read_history(state_dir: Path) -> list[float]:
+    """Every relaunch stamp the file holds, newest last.
+
+    comp-app-5 (2026-09-18): ONE unparseable entry used to cost the whole
+    history. The comprehension sat inside the try that answers `[]`, while
+    `merge_history` -- written in the same pass, for the same data -- skips a
+    bad item and keeps the rest. Two readers of one list disagreeing is how a
+    machine that has already been relaunched three times starts its ceiling
+    again from zero.
+    """
     try:
         data = json.loads((state_dir / HISTORY_FILENAME).read_text(encoding="utf-8"))
-        return [float(t) for t in data.get("relaunches", [])]
+        raw = data.get("relaunches", [])
     except Exception:  # noqa: BLE001
         return []
+    out: list[float] = []
+    for item in raw or []:
+        try:
+            out.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def write_history(state_dir: Path, times: list[float]) -> bool:
@@ -202,13 +218,29 @@ def write_history(state_dir: Path, times: list[float]) -> bool:
     history, and a build that could not stay up was relaunched for ever. The
     caller now says so in its log, and `merge_history` gives the ceiling a
     second source that does not need a filesystem at all.
+
+    comp-app-2 (2026-09-18): tmp+replace, the same as `write_relaunch_note`
+    eleven lines below and for the reason its own docstring gives - "a kill
+    mid-write cannot leave half a note behind either". This is the source
+    `decide` reads on a cold chain, written by the one process that exists
+    BECAUSE machines die abruptly: a power cut inside the write left
+    truncated JSON, `read_history` answered `[]`, and a build that could not
+    stay up was relaunched three more times an hour with nothing anywhere
+    saying the ceiling had been lost.
     """
+    path = state_dir / HISTORY_FILENAME
+    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
-        (state_dir / HISTORY_FILENAME).write_text(
+        tmp.write_text(
             json.dumps({"relaunches": times[-HISTORY_MAX_ENTRIES:]}), encoding="utf-8")
+        os.replace(tmp, path)
         return True
     except Exception:  # noqa: BLE001 - a history that cannot be written is not a reason to stop
+        try:
+            tmp.unlink()
+        except Exception:  # noqa: BLE001
+            pass
         return False
 
 

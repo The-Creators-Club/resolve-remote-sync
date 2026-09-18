@@ -21,6 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ccsync_dashboard import alerts
+from ccsync_dashboard import cards_exec
 from ccsync_dashboard import auth
 from ccsync_dashboard import db as dbmod
 from ccsync_dashboard.app import create_app
@@ -899,13 +900,35 @@ def test_abandoned_jobs_are_reported_once_for_the_window(env):
     assert "[ TRY AGAIN ]" in findings[0]["fix"]
 
 
-def test_a_pinned_job_with_cards_mounted_is_quiet(env, mounts):
+def test_a_pinned_job_with_cards_mounted_and_a_worker_running_is_quiet(
+        env, mounts, monkeypatch):
+    """res-fleet-1 (CR-282F, 2026-09-18) added the third shape: Timeline Cards
+    IS mounted and no drain thread was ever started in this container, which
+    is what actually shipped. So "mounted" alone is no longer the quiet
+    condition - a running worker is."""
     _client, conn, settings = env
     mounts.record("cards", "mounted", "")
+    monkeypatch.setattr(cards_exec, "is_running", lambda: True)
     job_id = _queue(conn, kind="proxy-480p", hours_old=30)
     conn.execute("UPDATE jobs SET state='pinned' WHERE id=?", (job_id,))
     conn.commit()
     assert "jobs_pinned_no_executor" not in kinds_of(alerts.scan(conn, settings, NOW))
+
+
+def test_a_pinned_job_with_cards_mounted_and_no_worker_is_a_finding(env, mounts,
+                                                                    monkeypatch):
+    """The shape res-fleet-1 found live: rows went `pinned` into a queue
+    nothing drains, on no lease and with no expiry, while the jobs page said
+    they were in hand."""
+    _client, conn, settings = env
+    mounts.record("cards", "mounted", "")
+    monkeypatch.setattr(cards_exec, "is_running", lambda: False)
+    job_id = _queue(conn, kind="proxy-480p", hours_old=30)
+    conn.execute("UPDATE jobs SET state='pinned' WHERE id=?", (job_id,))
+    conn.commit()
+    finding = one(alerts.scan(conn, settings, NOW), "jobs_pinned_no_executor")
+    assert "the dashboard's own worker" in finding["subject"]
+    assert "not running" in finding["diagnosis"]
 
 
 def test_a_pinned_job_with_no_cards_mount_is_an_error(env, mounts):
@@ -919,9 +942,12 @@ def test_a_pinned_job_with_no_cards_mount_is_an_error(env, mounts):
     assert "wait for ever" in finding["diagnosis"]
 
 
-def test_a_pinned_job_this_container_stopped_beating_on(env, mounts):
+def test_a_pinned_job_this_container_stopped_beating_on(env, mounts, monkeypatch):
     _client, conn, settings = env
     mounts.record("cards", "mounted", "")
+    # The worker IS running here: the subject under test is the STALE hold,
+    # not res-fleet-1's never-started thread.
+    monkeypatch.setattr(cards_exec, "is_running", lambda: True)
     job_id = _queue(conn, kind="peaks", hours_old=30)
     conn.execute(
         "UPDATE jobs SET state='pinned', claimed_machine=?, heartbeat_at=? "
@@ -1326,6 +1352,80 @@ def test_every_new_kind_is_in_the_registry_and_the_weekly_list(env):
     _subject, body = alerts.compose_weekly(conn, NOW, settings)
     assert "the fleet job queue" in body
     assert "computers refusing the offer outright" in body
+
+
+def test_every_notice_kind_any_writer_passes_to_db_notice_is_registered():
+    """tests-5 (2026-09-18): DERIVED from the source, not typed out twice.
+
+    The test above loops over sixteen names somebody remembered to write in
+    two places, so it can only fail if a kind is DELETED - never if one is
+    added and forgotten, which is the failure its own docstring claims to
+    prevent and which shipped twice in one week (`db_busy` and `slow_write`
+    had writers and no registry row from 2026-09-17 to 2026-09-18).
+
+    So: every literal kind passed to `db.notice(...)` anywhere under
+    `src/ccsync_dashboard/` has to be in `db.NOTICE_KINDS`. Scoped to that
+    package on purpose - a kind written by a mounted sub-app is not this
+    registry's business. An AST walk rather than a grep, so a kind spelled
+    across two lines or handed a constant is not silently skipped: a call
+    whose kind is not a literal is REPORTED, because an unreadable call is
+    not evidence of a registered kind.
+    """
+    import ast
+    import pathlib
+
+    from ccsync_dashboard import db as dbmod
+
+    src = pathlib.Path(dbmod.__file__).parent
+    literals: dict[str, set[str]] = {}
+    indirect: list[str] = []
+    for path in sorted(src.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            if name != "notice" or len(node.args) < 2:
+                continue
+            kind = node.args[1]
+            if isinstance(kind, ast.Constant) and isinstance(kind.value, str):
+                literals.setdefault(kind.value, set()).add(path.name)
+            elif isinstance(kind, ast.Name):
+                # A module constant (notices.py names most of its kinds), which
+                # this walk can resolve only for the module it is reading.
+                resolved = _module_constant(tree, kind.id)
+                if resolved is None:
+                    indirect.append(f"{path.name}:{node.lineno} {ast.dump(kind)[:60]}")
+                else:
+                    literals.setdefault(resolved, set()).add(path.name)
+            else:
+                indirect.append(f"{path.name}:{node.lineno}")
+    assert literals, "the walk found no db.notice call at all, so it proves nothing"
+    missing = {k: sorted(v) for k, v in literals.items()
+               if k not in dbmod.NOTICE_KINDS}
+    assert missing == {}, (
+        f"these notice kinds are written and not registered in "
+        f"db.NOTICE_KINDS: {missing}. Register a kind WITH its writer "
+        f"(CLAUDE.md), or the checks panel cannot say the server looks for it "
+        f"and the home page renders the raw key as the card's title.")
+    assert indirect == [], (
+        f"db.notice was called with a kind this test cannot read: {indirect}. "
+        f"An unreadable call is not evidence of a registered kind; either use "
+        f"a module-level constant or a literal.")
+
+
+def _module_constant(tree, name: str) -> str | None:
+    """The value of a module-level `NAME = "literal"`, or None."""
+    import ast
+
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    value = node.value.value
+                    return value if isinstance(value, str) else None
+    return None
 
 
 # ------------------------------------------------------- CR-190: the digest

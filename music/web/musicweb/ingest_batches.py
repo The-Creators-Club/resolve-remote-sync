@@ -481,8 +481,16 @@ def precheck(conn, items):
     boxes, and a name reserved here would be a name leaked by every abandoned
     drop. The real allocation happens at `result`; this is a preview of it, and
     the SPA says so.
+
+    music-3 (2026-09-18): READING the reservation ledger is not reserving. The
+    preview used to start from an empty set while `write_item_result` allocates
+    against `reserved_names(conn)` -- every name an unlanded item already holds
+    -- so the two answered differently for exactly the collision the ledger
+    exists for, and the panel's "what it will be called" column was wrong (or,
+    worse, silent: the SPA prints the line only when the name changes). The set
+    is copied because `allocate_name` mutates it per item.
     """
-    reserved = set()
+    reserved = set(reserved_names(conn))
     out = []
     for item in items:
         duplicate_of, duplicate_name = duplicate_for(
@@ -595,18 +603,27 @@ def retry_failed(conn, batch):
 
 
 def cancel(conn, uid, by):
-    """Ask for a stop, and take the lease away in the same breath.
+    """Ask for a stop. The lease is LEFT ALONE.
 
     A REQUEST, not a kill: the companion is mid-ffmpeg or mid-embedding and
     learns about this on its next heartbeat (410) or from the report reply,
-    then stops and releases. Expiring the lease at the same time is what makes
-    the NEXT fleet call 410 even if the heartbeat is the call that lands first
-    (YTDL-WEB-1's lesson, 2026-08-14).
+    then stops and releases.
+
+    music-1 (2026-09-18b mediums): this used to null `lease_expires_at` in the
+    same UPDATE, which wedged the row whenever the companion never came back -
+    `state='running'` with a NULL lease is outside `expire_stale_leases`'s
+    predicate (it requires the column NOT NULL), so no sweep could reach it,
+    `claim` 410d for ever on `cancel_requested`, and the batch held every
+    `dest_name` in `reserved_names` for ever. The expiry stays, so a dead
+    companion's row is reaped by the sweep. Nothing is lost by it: the
+    YTDL-WEB-1 property (the next fleet call 410s even if a heartbeat is the
+    call that lands first) is delivered by `cancel_requested`, which
+    `_leaseholder_or_410` checks FIRST and unconditionally.
     """
     with conn:
         conn.execute(
             'UPDATE ingest_batches SET cancel_requested = 1, cancel_by = ?, '
-            'lease_expires_at = NULL, updated_at = ? WHERE uid = ?',
+            'updated_at = ? WHERE uid = ?',
             (by, now_iso(), uid))
     log.info('music ingest: batch %s cancel requested by %s', uid, by)
 
@@ -659,6 +676,19 @@ def expire_stale_leases(conn, now=None):
     is chronological order.
     """
     cutoff = (now or datetime.now(timezone.utc)).isoformat()
+    # music-1 (2026-09-18b mediums): a batch the editor CANCELLED is not
+    # wanted any more, so handing it back to `queued` would leave it asking to
+    # be claimed while `_leaseholder_or_410` refuses every claim - a row that
+    # never finishes and never lets go of its `dest_name` reservations. The
+    # companion that was asked to stop is also the one that may never answer
+    # (crash, Stop-Process, power cut), which is exactly when the sweep is the
+    # only thing left, so finalise it here instead.
+    stopped = conn.execute(
+        'SELECT * FROM ingest_batches WHERE cancel_requested = 1 '
+        "AND state IN ('claimed', 'running') AND lease_expires_at IS NOT NULL "
+        'AND lease_expires_at < ?', (cutoff,)).fetchall()
+    for batch in stopped:
+        release(conn, batch, state='cancelled')
     with conn:
         cur = conn.execute(
             "UPDATE ingest_batches SET state = 'queued', lease_expires_at = NULL, "
@@ -668,7 +698,7 @@ def expire_stale_leases(conn, now=None):
     if cur.rowcount:
         log.info('music ingest: %d batch lease(s) expired and went back to queued',
                  cur.rowcount)
-    return cur.rowcount
+    return cur.rowcount + len(stopped)
 
 
 def claim(conn, *, batch_uid, editor, machine, companion_version, capabilities=None):

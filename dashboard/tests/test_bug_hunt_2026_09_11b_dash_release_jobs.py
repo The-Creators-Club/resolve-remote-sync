@@ -326,7 +326,10 @@ def test_a_settings_without_the_new_field_still_derives_the_signature_url(
     """getattr with a default: a rollback to an older tree, or a test double,
     must not turn the poll path into an AttributeError."""
     settings = _settings(tmp_path)
-    assert not hasattr(settings, "release_feed_sig_url") or True
+    # regression-6 (2026-09-18): `assert <anything> or True` cannot fail, so
+    # the line said nothing. What the docstring actually claims is that the
+    # poll works whether or not the attribute is there, and the rest of this
+    # test proves it for the present case; the absent case is the one below.
     channel, sig = make_channel([])
     patch_opener(monkeypatch, {CHANNEL_URL: json.dumps(channel).encode(),
                                SIG_URL: sig.encode()})

@@ -253,10 +253,34 @@ class _FakeResponse:
 
 
 def test_no_alert_is_sent_with_the_write_lock_held(env, monkeypatch):
-    _client, conn, _db_path, settings = env
+    """dash-db-6 (2026-09-18): THE SUBJECTS ARE KNOWN NOW.
+
+    This asserted `len(opener.in_transaction) >= 2` and `not any(...)` over a
+    list nothing in the test controlled, and it went red once during the hunt
+    and would not reproduce - which is the worst shape a safety test can have,
+    because the next red in the central gate tells nobody whether the
+    invariant broke. Two things made it non-deterministic and neither was the
+    invariant:
+
+      * the fixture's own boot leaves whatever open subjects `_check_tree` and
+        `_check_dashboard_space` found on THIS machine, so the recovery pass
+        sent a POST per subject and the count was the state of a developer's
+        disk;
+      * `env` leaves the real collector thread running, and it runs the
+        `alerts` kind on ITS OWN connection through this same monkeypatched
+        opener - so a POST from that thread recorded `conn.in_transaction`
+        for a connection it has nothing to do with, which is a reading of the
+        test's own writes and not of the sender's.
+
+    So: the collector is stopped, the ledger is emptied, and the two POSTs
+    this test is about are asserted exactly. The invariant is unchanged.
+    """
+    client, conn, _db_path, settings = env
+    client.app.state.collector.stop()
     alerts.set_settings(conn, {"alerts_sink": "webhook",
                                "alerts_webhook_url": "https://alerts.example.test/hook"},
                         "owen")
+    conn.execute("DELETE FROM alert_log")
     conn.commit()
     opener = _WatchingOpener(conn)
     monkeypatch.setattr(alerts, "_webhook_opener", lambda: opener)
@@ -269,13 +293,11 @@ def test_no_alert_is_sent_with_the_write_lock_held(env, monkeypatch):
     ]
     result = alerts.deliver(conn, settings, findings, NOW)
     assert result["sent"] == 2
-    # More than two POSTs go out: this cycle also RECOVERS every subject left
-    # open by the fixture's own boot. Every one of them matters -- each was a
-    # network call under the write lock.
-    assert len(opener.in_transaction) >= 2
-    assert not any(opener.in_transaction)
+    # Exactly the two findings, and neither POST under an open write
+    # transaction. An empty ledger means the recovery pass has nothing to say.
+    assert opener.in_transaction == [False, False]
     # Each attempt is durable as it happens, not at the end of the cycle.
-    assert len(dbmod.fetch_alerts(conn, limit=50)) >= 2
+    assert len(dbmod.fetch_alerts(conn, limit=50)) == 2
 
 
 # ------------------------------------------------------- 6. instrumentation

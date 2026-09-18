@@ -159,6 +159,15 @@ _BLOCKED_RED_REASONS = frozenset({"clock_skew", "lane_stalled", "syncthing_down"
 # 2026-08-19 owner's call below (a permanent amber teaches the admin to ignore
 # amber); every other reason still colours it.
 _BLOCKED_BASE_RIG_EXEMPT = frozenset({"no_selection", "folders_unfiltered"})
+# live-5 (2026-09-18): ...and the ones that are not a fault ANYWHERE. A
+# computer with nothing ticked is a computer with nothing to do, which the
+# owner has now ruled twice ("Alex laptop just happens to have no synced
+# projects, not an error", 2026-09-11; "a computer having nothing ticked is
+# FINE", 2026-09-18). CR-267f gave the dashboard that rule
+# (health.WHY_INFORMATIONAL) and the tray was never given it, so an editor
+# machine with an empty plan sat amber -- the colour every real fault shares.
+# The sentence is still shown, as a plain line rather than a warning.
+_BLOCKED_INFORMATIONAL = frozenset({"no_selection"})
 
 
 def compute_overall_color(
@@ -230,7 +239,7 @@ def compute_overall_color(
     except Exception:
         log.exception("compute_overall_color: guard read failed")
         blocked_reason = ""
-    if blocked_reason:
+    if blocked_reason and blocked_reason not in _BLOCKED_INFORMATIONAL:  # live-5
         if not (blocked_reason in _BLOCKED_BASE_RIG_EXEMPT
                 and app is not None and _is_base_rig(app)):
             return "red" if blocked_reason in _BLOCKED_RED_REASONS else "orange"
@@ -1017,8 +1026,24 @@ def _report_windows_icon_failure(app: "CompanionApp", icon, detail: str,
     lane lines that never move, a colour that never changes, and no breaker,
     halt or disk-floor line ever appearing. Green while dead.
 
+    comp-ui-3 (2026-09-18): `fatal` now gates the WORDING and the crash
+    report too, not just `_ccsync_stop`. A non-fatal failure is one the
+    process recovers from by itself (the re-add retry, comp-ui-2), and
+    telling the editor to sign out and back in contradicted that; worse, an
+    Explorer crash-loop wrote one TrayIconUnavailable crash file per
+    broadcast, and crash_report._prune keeps only the newest 20, so the
+    transient failures silently deleted the real crash reports an admin
+    needed -- while `sync_guard.crashes` reported a rising count on every
+    tick.
+
     Never raises: this runs on the tray's own thread.
     """
+    if not fatal:
+        log.warning(
+            "the CCSync tray icon is not in the notification area: %s. Sync is "
+            "unaffected, and the icon will be re-added automatically once "
+            "Explorer accepts it.", detail)
+        return
     log.error(
         "THE CCSYNC TRAY ICON IS NOT IN THE NOTIFICATION AREA: %s. Everything "
         "else is running normally - your files still sync - but the icon, its "
@@ -1026,11 +1051,10 @@ def _report_windows_icon_failure(app: "CompanionApp", icon, detail: str,
         "CCSync would have shown you (including 'sync has stopped itself') is "
         "being discarded. Sign out and back in, or restart CCSync, to get it "
         "back.", detail)
-    if fatal:
-        try:
-            icon._ccsync_stop = True
-        except Exception:
-            log.debug("could not stop the tray refresh loops", exc_info=True)
+    try:
+        icon._ccsync_stop = True
+    except Exception:
+        log.debug("could not stop the tray refresh loops", exc_info=True)
     try:
         from . import crash_report
 
@@ -2628,6 +2652,18 @@ def resolve_count_phrases(health: Optional[dict]) -> list[str]:
             failed = 0
         if failed:
             out.append(f"{failed} prox{'y' if failed == 1 else 'ies'} not attached")
+    # CR-283X (comp-broll-tiers-5, 2026-09-18): a stand-in whose editing proxy
+    # gave up is a clip the editor is cutting on at 1080p believing it is the
+    # 6K, and the only trace of it was a log line.
+    owed = health.get("standins_owed")
+    if isinstance(owed, dict):
+        try:
+            count = max(0, int(owed.get("count") or 0))
+        except (TypeError, ValueError):
+            count = 0
+        if count:
+            out.append(f"{count} clip{'' if count == 1 else 's'} still on a "
+                       "preview copy")
     return out
 
 
@@ -3048,6 +3084,10 @@ def _blocked_line(guard: dict) -> Optional[str]:
         return None
     if reason in _BLOCKED_REASONS_WITH_THEIR_OWN_LINE:
         return None
+    if reason in _BLOCKED_INFORMATIONAL:
+        # live-5: a fact, not a fault. The warning glyph is the tray's
+        # fault vocabulary and an empty plan is not one.
+        return detail
     return f"⚠ {detail}"
 
 

@@ -222,6 +222,14 @@ def item_uploaded(uid: str, item_uid: str, body: ItemUploadedIn,
     interrupted rclone retries those and not the clip. A DECLARED editing
     proxy (plan section 5, 2026-09-17) is one of them: the companion that made
     one names it here, and the clip does not go live without it.
+
+    Posted TWICE for a clip whose original is slower than its proxies
+    (CR-288D): once with `original_uploaded` false, which publishes the clip
+    and leaves the item `proxies_live` (non-terminal, still owing its
+    original), and once more with it true, which ends the item. The body is
+    the same shape both times, so a companion that posts only once is
+    unaffected -- the state word is decided by `mark_uploaded`, not here
+    (wire-1, 2026-09-18b).
     """
     batch = _leaseholder_or_410(conn, uid, editor, x_ccsync_machine)
     item = _item_or_404(conn, uid, item_uid)

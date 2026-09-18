@@ -313,6 +313,11 @@ def test_a_secret_that_was_written_or_came_from_the_environment_boots(
     monkeypatch.setenv("DASH_DB_PATH", str(tmp_path / "dashboard.db"))
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
+    # dash-core-1 (2026-09-18): the check compares the file's CONTENT with
+    # the value this boot is using, so the fixture has to be the real shape -
+    # `ensure_secrets` puts the generated value in the environment and writes
+    # the same bytes to the file.
+    monkeypatch.setenv("DASH_SESSION_SECRET", "x")
     (secrets_dir / "dash_session_secret").write_text("x", encoding="utf-8")
     provenance = {"DASH_SESSION_SECRET": "generated",
                   "DASH_REPORT_TOKEN": "env",

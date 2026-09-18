@@ -203,7 +203,7 @@
            for 47 min"), 15 minutes of silence, or the lane's own error. #}
         <div class="lane-strip">
           {% for lane in e.lane_strip %}
-            <span class="chip lane {{ "quiet" if lane.chip == "green" else lane.chip }}" title="{{ lane.label }}: {{ lane.state }}{% if lane.chip_reason %} - {{ lane.chip_reason }}{% elif lane.last_error %} ({{ lane.last_error }}){% endif %}">{{ lane.label }}: {{ lane.state }}{% if lane.chip_reason and "no progress" in lane.chip_reason %} STALLED{% endif %}</span>
+            <span class="chip lane {% if lane.reported is defined and not lane.reported %}unknown{% elif lane.chip == "green" %}quiet{% else %}{{ lane.chip }}{% endif %}" title="{{ lane.label }}: {{ lane.state }}{% if lane.chip_reason %} - {{ lane.chip_reason }}{% elif lane.last_error %} ({{ lane.last_error }}){% endif %}">{{ lane.label }}: {{ lane.state }}{% if lane.chip_reason and "no progress" in lane.chip_reason %} STALLED{% endif %}</span>
           {% endfor %}
           {# Transport health (B17): the companion computes this every heavy
              tick and the server used to drop it, so a lane C riding the
@@ -269,7 +269,7 @@
               {% if e.guard.resolve_out_of_tree %}<span class="chip amber" title="{{ chip_help('out_of_tree', n=e.guard.resolve_out_of_tree, bad_prefix=((", " ~ e.guard.resolve_bad_prefix ~ " of them under the wrong drive letter") if e.guard.resolve_bad_prefix else ""), at=e.guard.resolve_last_scan_at | ago) }}">[ {{ e.guard.resolve_out_of_tree }} CLIPS OUTSIDE THE TREE ]</span>{% endif %}
               {% if e.guard.stray_projects_count %}<span class="chip amber" title="{{ chip_help('stray_dirs', n=e.guard.stray_projects_count, bytes=e.guard.stray_projects_bytes | human_bytes) }}">[ {{ e.guard.stray_projects_count }} STRAY PROJECT DIRS ]</span>{% endif %}
               {% if e.guard.moved_project_dirs_count %}<span class="chip amber" title="{{ e.guard.moved_project_dirs_count }} project folder(s) on this computer are not where the tree expects them. Syncing for those projects looks busy and moves nothing. Move it back, or use MOVE ON THE SERVER AND ON EVERY MACHINE on the project page.">[ PROJECT FOLDER MOVED ]</span>{% endif %}
-              {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ chip_help('skipped_exists', n=e.guard.skipped_exists) }}">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
+              {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ chip_help('skipped_exists', n=e.guard.skipped_exists, scope=skipped_scope(e.guard)) }}">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
               {% if e.transport.orphan_partials %}<span class="chip amber" title="{{ chip_help('orphans', bytes=e.transport.orphan_partial_bytes | human_bytes) }}">[ ORPHANS: {{ e.transport.orphan_partials }} ]</span>{% endif %}
               {% if e.transport.express_last_error %}<span class="chip amber" title="last express upload failure: {{ e.transport.express_last_error }}">[ EXPRESS UPLOAD FAILED ]</span>
               {% elif e.transport.express_dropped %}<span class="chip amber" title="{{ e.transport.express_dropped }} file(s) dropped by the express upload's batch cap: they still go up on the next periodic pass.">[ EXPRESS DROPPED: {{ e.transport.express_dropped }} ]</span>{% endif %}

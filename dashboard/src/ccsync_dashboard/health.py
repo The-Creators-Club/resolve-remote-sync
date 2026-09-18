@@ -260,7 +260,8 @@ DISK_RED_FREE_BYTES = 20 * 1024 ** 3
 
 
 def disk_status(
-    free_bytes: int | None, total_bytes: int | None
+    free_bytes: int | None, total_bytes: int | None,
+    floor_bytes: int | None = None,
 ) -> tuple[str, float | None]:
     """(colour, percent free) for one machine's sync drive.
 
@@ -274,14 +275,42 @@ def disk_status(
     if not total_bytes:
         return GREEN, None
     percent = 100.0 * float(free_bytes) / float(total_bytes)
-    if percent < DISK_RED_PERCENT or free_bytes < DISK_RED_FREE_BYTES:
+    # dash-collector-alerts-6 (2026-09-18): `floor_bytes` is that MACHINE's
+    # own reported `lane_b_min_free_bytes`, and the absolute half of RED means
+    # "at or under the number this computer actually stops at". None keeps the
+    # 20 GB default, which is what the GRID chip passes: a chip is a warning
+    # about space, and only the callers that speak for the companion (the why
+    # sentence, the disk alert) hand the machine's floor in.
+    red_free = DISK_RED_FREE_BYTES if not floor_bytes else int(floor_bytes)
+    if percent < DISK_RED_PERCENT or free_bytes < red_free:
         return RED, percent
     if percent < DISK_AMBER_PERCENT or free_bytes < DISK_AMBER_FREE_BYTES:
         return AMBER, percent
     return GREEN, percent
 
 
-def _disk_floor_hit(free_bytes: Any) -> bool:
+def machine_disk_floor(row: Mapping[str, Any] | None) -> int | None:
+    """The floor THIS computer parks at, or None when it has not said.
+
+    dash-collector-alerts-6 (2026-09-18): `lane_b_min_free_bytes` is a
+    per-machine config key with 20 GB only as its default, and the companion
+    has reported its effective value on `sync_guard.disk_floor.floor_bytes`
+    since SYNC-7. Stored since v54; absent is every report written before
+    that, and every build too old to send the section.
+    """
+    if row is None:
+        return None
+    value = _why_get(row, "disk_floor_bytes")
+    if value is None:
+        return None
+    try:
+        floor = int(value)
+    except (TypeError, ValueError):
+        return None
+    return floor if floor > 0 else None
+
+
+def _disk_floor_hit(free_bytes: Any, floor_bytes: Any = None) -> bool:
     """Is the sync drive below the floor the COMPANION stops at?
 
     CR-269 (2026-09-12). `DISK_RED_FREE_BYTES` is the same 20 GB as
@@ -289,11 +318,20 @@ def _disk_floor_hit(free_bytes: Any) -> bool:
     machine actually parks proxy download. The percentage half of
     `disk_status` colours the chip and never speaks for the companion. None
     ("this build did not say") is False: no evidence is not a stop.
+
+    dash-collector-alerts-6 (2026-09-18): `floor_bytes` is that MACHINE's own
+    reported floor and beats the constant whenever it is there. The constant
+    is now only the fallback for a machine that has not said, and the sentence
+    says so (see _why_sentence).
     """
     if free_bytes is None:
         return False
     try:
-        return int(free_bytes) < DISK_RED_FREE_BYTES
+        floor = int(floor_bytes) if floor_bytes else DISK_RED_FREE_BYTES
+    except (TypeError, ValueError):
+        floor = DISK_RED_FREE_BYTES
+    try:
+        return int(free_bytes) < floor
     except (TypeError, ValueError):
         return False
 
@@ -558,6 +596,72 @@ def _lane_words(lane: Any) -> str:
     return _LANE_WORDS.get(key) or _LANE_WORDS.get(key.upper()) or "a transfer"
 
 
+# live-1 (2026-09-18): how long a stall record stays CURRENT with no further
+# evidence. SYNC-1 (2026-08-28) made the companion's stall record persistent so
+# a restart could not erase the evidence, and gave it no expiry and no "the
+# lane has since completed a pass" condition - so
+# `~/.ccsync/state/lane_stall.json` rides every report for the life of the
+# install, and this server read any record as a CURRENT blockage. Seen live on
+# 2026-09-18: ruskin's lane A was killed once on 2026-09-11 and recovered the
+# same day; a week later his row still said `blocked_reason=lane_stalled since
+# 2026-09-11`, his tray was red, and "still not fixed after 4 day(s)" had gone
+# out by mail four mornings running, with nothing any editor or admin could do
+# about it.
+STALL_CURRENT_SECONDS = 24 * 3600.0
+
+
+def _stamp_age(stamp: Any, now: str) -> float | None:
+    """Seconds since `stamp`, or None when it cannot be read."""
+    if not stamp or not now:
+        return None
+    try:
+        return age_seconds(str(stamp), str(now))
+    except (ValueError, TypeError):
+        return None
+
+
+def stall_is_current(row: Mapping[str, Any], now: str = "") -> bool:
+    """Is this machine's reported stall a blockage NOW, or a healed scar?
+
+    Safe alone against a 0.9.74 companion, which is the whole fleet: it reads
+    only what those builds already send - `stalled_at` in the guard block, and
+    the lane rows' `last_sync`. Two ways a record stops being current, neither
+    needing a companion release:
+
+      * that lane has completed a pass SINCE the stall. A lane that finished a
+        sync after the moment it was killed is not stuck in that kill.
+      * the record is older than a day. Nothing on the companion side ever
+        clears the file, so without a ceiling one bad afternoon is permanent.
+
+    No `stalled_at` means an older build, or a report that carried the stall
+    without its stamp: that keeps the old behaviour (current), because "cannot
+    tell" must never quietly turn a real stall green.
+    """
+    if not (_why_get(row, "stalled_lane") or _why_get(row, "stalled_seconds")):
+        return False
+    at = _why_get(row, "stalled_at")
+    if not at:
+        return True
+    age = _stamp_age(at, now)
+    if age is not None and age > STALL_CURRENT_SECONDS:
+        return False
+    lane = str(_why_get(row, "stalled_lane") or "").strip().lower()
+    for entry in row.get("lanes") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        name = str(entry.get("lane") or entry.get("name") or "").strip().lower()
+        label = str(entry.get("label") or "").strip().lower()
+        if lane and lane not in (name, label) and not name.endswith(f"_{lane}"):
+            continue
+        synced = entry.get("last_sync")
+        if not synced:
+            continue
+        since = _stamp_age(at, str(synced))
+        if since is not None and since > 0:
+            return False          # that lane finished a pass after the kill
+    return True
+
+
 def _why_sentence(code: str, row: Mapping[str, Any]) -> str:
     """The one plain sentence for `code`. No em dashes: an editor reads this."""
     if code == "not_signed_in":
@@ -581,14 +685,41 @@ def _why_sentence(code: str, row: Mapping[str, Any]) -> str:
         return "Not syncing: the sync drive is pointing at the wrong place"
     if code == "disk_full":
         free = _why_get(row, "disk_root_free_bytes")
-        # UX-19: the disk floor is the computer STOPPING ITSELF, which is a
-        # different sentence from "your admin stopped it" and from "you paused
-        # it". Say which one it is.
-        return (f"Not downloading proxies: proxy download stopped itself, the "
-                f"drive has {_round_bytes(free)} free"
+        # dash-collector-alerts-6 (2026-09-18): WHOSE FLOOR SAID SO. When the
+        # companion reported its own park (`blocked_reason == "disk_full"`)
+        # this is the machine's own statement and the sentence is flat. When
+        # it did not, the verdict comes from DISK_RED_FREE_BYTES, which is
+        # only the DEFAULT of `lane_b_min_free_bytes` - a per-machine config
+        # key. An editor on a small SSD who raised it to 60 GB is parked at
+        # 55 GB and this server says nothing; one who lowered it to 5 GB gets
+        # "proxy download stopped itself" on a row for a computer that is
+        # still downloading, which is the same class of false sentence CR-269
+        # fixed. Until the floor is on the wire (OWED to companion-core), the
+        # honest form of a guess is to say it is one.
+        # The sentence is flat when the number came from the MACHINE: either
+        # it reported the park itself (`blocked_reason == "disk_full"`) or it
+        # reported the floor this server compared against
+        # (dash-collector-alerts-6). It is a stated guess only when neither is
+        # true, i.e. when this server is going by its own default for a
+        # computer that never told it anything.
+        told_us = (str(_why_get(row, "blocked_reason") or "") == "disk_full"
+                   or machine_disk_floor(row) is not None)
+        if told_us:
+            # UX-19: the disk floor is the computer STOPPING ITSELF, which is
+            # a different sentence from "your admin stopped it" and from "you
+            # paused it". Say which one it is.
+            return (f"Not downloading proxies: proxy download stopped itself, the "
+                    f"drive has {_round_bytes(free)} free"
+                    if free is not None else
+                    "Not downloading proxies: proxy download stopped itself, the "
+                    "drive is out of space")
+        return (f"Proxy download has probably stopped itself: the drive has "
+                f"{_round_bytes(free)} free, under the "
+                f"{_round_bytes(DISK_RED_FREE_BYTES)} this computer's build "
+                f"stops at unless it was set otherwise on that computer"
                 if free is not None else
-                "Not downloading proxies: proxy download stopped itself, the "
-                "drive is out of space")
+                "Proxy download has probably stopped itself: this computer's "
+                "sync drive is out of space")
     if code == "fleet_halt":
         return "Not syncing: syncing is stopped by your admin for the whole fleet"
     if code == "local_halt":
@@ -691,7 +822,7 @@ def _why_first(
     # saying "syncing". A stop the machine never made is not a why. The
     # companion reports its own park as `blocked_reason == "disk_full"`,
     # handled above; this branch is only for a build too old to send it.
-    if _disk_floor_hit(_why_get(row, "disk_root_free_bytes")):
+    if _disk_floor_hit(_why_get(row, "disk_root_free_bytes"), machine_disk_floor(row)):
         return "disk_full", _why_sentence("disk_full", row)
 
     halt_active = bool(_why_get(row, "halt_active"))
@@ -724,7 +855,7 @@ def _why_first(
     # The stall, from either end: the companion's own detector (which killed
     # the pass) or this server's token watch (SYS-1's lane_stall, already on
     # the lane chips by the time this runs).
-    if _why_get(row, "stalled_lane") or _why_get(row, "stalled_seconds"):
+    if stall_is_current(row, now):
         return "lane_stalled", _why_sentence("lane_stalled", row)
     if now:
         for lane in row.get("lanes") or []:
@@ -771,7 +902,8 @@ def _second_cause(row: Mapping[str, Any], first: str) -> tuple[str, str] | None:
     halt_active = bool(_why_get(row, "halt_active"))
     fleet_halt = bool(row.get("fleet_halt_active")) or (
         halt_active and str(_why_get(row, "halt_scope") or "") == "fleet")
-    disk_red = _disk_floor_hit(_why_get(row, "disk_root_free_bytes"))
+    disk_red = _disk_floor_hit(_why_get(row, "disk_root_free_bytes"),
+                               machine_disk_floor(row))
     reported = str(_why_get(row, "blocked_reason") or "").strip()
     live = {
         "fleet_halt": fleet_halt,
@@ -992,6 +1124,34 @@ def detail_notes(row: Mapping[str, Any]) -> list[str]:
         notes.append("an update keeps failing")
     if guard.get("report_refused_at"):
         notes.append("this computer is being refused")
+
+    # dash-mounts-ui-4 (2026-09-18): the five the 2026-09-11 declutter moved
+    # INTO the fold and left out of this list. Before that they were on the row
+    # itself; afterwards a machine whose only problem was one of them drew a
+    # muted "Idle, nothing owed" headline, three quiet lane chips and a
+    # [ DETAILS ] expander with NO count beside it - the exact thing this
+    # function's docstring says can never happen. An express upload failing for
+    # a week looked like a machine with nothing to do.
+    skipped = guard.get("skipped_exists")
+    if skipped:
+        notes.append(f"{skipped} file{'' if skipped == 1 else 's'} it will not "
+                     "upload")
+    # The threshold is the TEMPLATE's (5 GB): a count that disagreed with the
+    # chip beside it would be worse than no count.
+    trash = guard.get("trash_bytes") or 0
+    if trash > 5_000_000_000:
+        notes.append("a lot of footage in the local trash")
+    if guard.get("ingest_staging_bytes"):
+        notes.append("footage waiting in the drop folder")
+
+    # `transport` is fetched as defensively as `guard` and `proxy`: a row from
+    # a build that never sent the section has no key at all.
+    transport = (row.get("transport")
+                 if isinstance(row.get("transport"), Mapping) else {})
+    if transport.get("express_last_error"):
+        notes.append("the express upload is failing")
+    elif transport.get("express_dropped"):
+        notes.append("the express upload dropped files")
 
     proxy = row.get("proxy") if isinstance(row.get("proxy"), Mapping) else {}
     need = proxy.get("missing")

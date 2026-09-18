@@ -18,6 +18,7 @@ bug in would cost an editor their evening:
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -946,11 +947,18 @@ def test_a_heavy_original_gets_an_editing_proxy_beside_its_preview(tmp_path):
     assert uploaded[0]["edit_proxy_rel"] == "creators/2026-08-18 ingest/Proxy/A001.mov"
 
 
-def test_an_editing_proxy_a_few_frames_short_fails_the_clip(tmp_path):
+def test_an_editing_proxy_a_few_frames_short_drops_the_tier_not_the_clip(tmp_path, caplog):
     """Item 3's verify, and the Reproductive Rights lesson applied to the file
     an editor actually cuts on: Resolve refuses a proxy that is not the same
-    length, so a short one is a failed item and the error names both counts
-    AND which of the two files it is about."""
+    length, so a short one is not published and the reason names both counts
+    AND which of the two files it is about.
+
+    comp-broll-tiers-3 (2026-09-18): the clip itself survives. It used to
+    fail the whole item - no preview, no stills, no original uploaded - for a
+    file whose preview had already verified, which is throwing away the clip
+    to protect an optional tier that an edit-weight original and a BRAW both
+    legitimately go without.
+    """
     server = FakeServer()
 
     class ShortEditProxy(HeavyMedia):
@@ -963,13 +971,19 @@ def test_an_editing_proxy_a_few_frames_short_fails_the_clip(tmp_path):
     staging = stage_one_clip(ing, tmp_path)
     ing.run("b" * 32, staging, "foreground")
 
-    ing.tick()
+    with caplog.at_level(logging.WARNING):
+        ing.tick()
 
     failures = [c["body"] for c in server.calls
                 if c["url"].endswith("/status") and c["body"]["state"] == "failed"]
-    assert failures, server.states()
-    error = failures[0]["error"]
-    assert "1673" in error and "1674" in error and "editing proxy" in error
+    assert not failures, server.states()
+    uploaded = [c["body"] for c in server.calls if c["url"].endswith("/uploaded")]
+    assert uploaded, server.states()
+    # The tier is simply not declared, which is the same request a clip with
+    # an edit-weight original has always sent.
+    assert "edit_proxy_rel" not in uploaded[-1]
+    said = " | ".join(r.getMessage() for r in caplog.records)
+    assert "1673" in said and "1674" in said and "editing proxy" in said
 
 
 def test_a_restart_does_not_re_encode_the_editing_proxy(tmp_path):
@@ -1002,7 +1016,12 @@ def test_a_restart_does_not_re_encode_the_editing_proxy(tmp_path):
 
     assert not [c for c in revived.media.calls if c[0] == "editproxy"], \
         "the second run must not encode it again"
-    assert Path(made).is_file(), "and the file it made is the one that went up"
+    # proxy-tiers-8 (2026-09-18): the editing proxy is MIRRORED into the
+    # archive after the upload, exactly as the preview always was, so the
+    # machine that made it does not download it again. The item is re-pointed
+    # at where it now lives.
+    mirrored = list((revived.archive_root() or tmp_path).rglob("*.mov"))
+    assert Path(made).is_file() or mirrored,         "and the file it made is the one that went up"
 
 
 def test_a_clip_whose_source_vanished_is_failed_with_a_sentence(tmp_path):
@@ -2064,3 +2083,119 @@ def test_the_progress_body_names_the_failures_not_just_a_count(tmp_path):
          "error": "the source file is not on this computer any more"}]
     assert body["batch"]["failed_items"] == body["failed_items"]
     assert ing.status()["failed_items"] == body["failed_items"]
+
+
+class OriginalStillGoing(FakeQueue):
+    """Everything lands except the camera original, which is the shape the
+    upload ORDER was built for (proxy-tiers-5)."""
+
+    def uploaded(self):
+        return [job for job in self.jobs
+                if job["kind"] != broll_upload.KIND_ORIGINAL]
+
+
+def test_a_clip_goes_live_when_its_proxies_land_not_when_its_original_does(tmp_path):
+    """proxy-tiers-5 (2026-09-18). Plan section 5 item 5: "an editor can use
+    a clip from the moment its editing proxy lands, long before a multi-GB
+    original finishes". The ORDER was implemented and nothing consumed it:
+    `/uploaded` was posted once, after the LAST file landed, and
+    `videos.status` leaves `ingesting` only there - so a day of 6K material
+    showed nothing in the archive for the eight hours its originals took.
+    """
+    server = FakeServer()
+    queue = OriginalStillGoing()
+    ing = make_ingestor(tmp_path, server=server, queue=queue)
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+
+    ing.tick()
+
+    uploaded = [c["body"] for c in server.calls if c["url"].endswith("/uploaded")]
+    assert uploaded, "the clip was never taken live"
+    assert uploaded[0]["original_uploaded"] is False
+    # ...and the original is still declared as owed: the item stays in
+    # `uploading` and the second post is what flips the flag.
+    rels = {f["rel"] for f in uploaded[0]["files"]}
+    assert not any(rel.endswith(".MP4") and "/Proxy/" not in rel for rel in rels)
+    item = ing._batch["items"][0]
+    assert item["stage"] == broll_ingest.ITEM_UPLOADING
+
+    # A second pump with nothing new must not post it again.
+    before = len(uploaded)
+    ing.tick()
+    again = [c["body"] for c in server.calls if c["url"].endswith("/uploaded")]
+    assert len(again) == before
+
+
+class OriginalUploadDies(FakeQueue):
+    """The proxies land; the camera original's rclone job dies every time -
+    a dropped VPN, a full NAS dataset, a pulled sync drive."""
+
+    def uploaded(self):
+        return [job for job in self.jobs
+                if job["kind"] != broll_upload.KIND_ORIGINAL]
+
+    def failures(self):
+        return [{"rel": job["rel"], "kind": job["kind"],
+                 "item_uid": job["item_uid"], "error": "rclone exited with code 1"}
+                for job in self.jobs
+                if job["kind"] == broll_upload.KIND_ORIGINAL]
+
+
+def test_an_original_that_fails_after_the_clip_went_live_is_reported(tmp_path, caplog):
+    """wire-1 (2026-09-18b). The first `/uploaded` post writes the server's
+    item state to `live`, which is TERMINAL there, so every later state write
+    is refused with 400 illegal_transition and was swallowed at DEBUG on both
+    sides: the batch finished as plain `done`, `videos.original_path` stayed
+    NULL for ever, and nothing an editor or an admin can see said so."""
+    server = FakeServer()
+    # The receiver's real answer to a state write on a terminal item
+    # (`_check_transition`), so the producer is fed through it.
+    server.status_codes = {broll_ingest.ITEM_FAILED: 400}
+    ing = make_ingestor(tmp_path, server=server, queue=OriginalUploadDies())
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+
+    caplog.set_level(logging.WARNING)
+    for _ in range(broll_ingest.MAX_UPLOAD_ATTEMPTS + 1):
+        ing.tick()
+
+    uploaded = [c["body"] for c in server.calls if c["url"].endswith("/uploaded")]
+    assert uploaded and uploaded[0]["original_uploaded"] is False
+    released = server.released()
+    assert released, "the batch never ended"
+    summary = released[0]["summary"]
+    assert summary["originals_failed"] == 1
+    assert summary["originals_owed"] == ["A001.MP4"]
+    assert "original never reached the archive" in caplog.text
+    # The bytes stay: the archive has no copy, so the retention clock must not
+    # take this machine's.
+    held = [entry.get("held_for_base_rig") or []
+            for entry in ing._staging.values()]
+    assert any("A001.MP4" in names for names in held)
+    # And nothing pretended the clip is not live: it is, and the server would
+    # refuse anything else.
+    assert broll_ingest.ITEM_FAILED not in server.states()
+
+
+def test_the_editing_proxy_is_mirrored_into_the_archive_too(tmp_path):
+    """proxy-tiers-8 (2026-09-18): only the preview was mirrored, so the
+    machine that encoded all three files downloaded its own editing proxy
+    back from the NAS in the upgrade lane - hundreds of MB down a link that
+    had just sent them up."""
+    ing = make_ingestor(tmp_path)
+    archive = ing.archive_root()
+    assert archive is not None
+    preview = tmp_path / "out" / "prev.mp4"
+    edit = tmp_path / "out" / "edit.mov"
+    preview.parent.mkdir(parents=True, exist_ok=True)
+    preview.write_bytes(b"preview")
+    edit.write_bytes(b"editing proxy")
+    item = {"archive_dir": "Creators_Club/ff5", "archive_stem": "clip",
+            "outputs": {"proxy": str(preview)}, "edit_proxy": str(edit)}
+
+    ing._mirror_locally(item)
+
+    assert (archive / "Creators_Club/ff5/Proxy/clip.mp4").is_file()
+    assert (archive / "Creators_Club/ff5/Proxy/clip.mov").is_file()
+    assert item["edit_proxy"] == str(archive / "Creators_Club/ff5/Proxy/clip.mov")

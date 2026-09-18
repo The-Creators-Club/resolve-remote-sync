@@ -308,7 +308,17 @@ def check_tailscale_path_from_here(peer_hints, dry_run: bool):
         info("tailnet path from here: skipped -- no `tailscale` binary on this machine")
         return
     try:
-        proc = subprocess.run([exe, "status", "--json"], capture_output=True, text=True, timeout=15)
+        # server-tools-3 (2026-09-18): tailscale emits UTF-8 JSON and every
+        # peer name is in it. `text=True` with no encoding decodes with the
+        # process locale (cp1252 here, cp950 on a Traditional-Chinese
+        # install), so one non-ASCII machine name in the tailnet raises
+        # UnicodeDecodeError inside subprocess.run -- which the except below
+        # reports as "skipped", silently removing check 2b (DERP vs direct,
+        # the half that matches what an editor experiences) from a run that
+        # still exits 0. Same class as the git_out fix in e050413.
+        proc = subprocess.run([exe, "status", "--json"], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=15)
     except Exception as e:  # noqa: BLE001 - any transport failure is one answer
         info(f"tailnet path from here: skipped -- `tailscale status --json` failed ({e})")
         return

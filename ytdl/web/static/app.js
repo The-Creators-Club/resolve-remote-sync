@@ -1406,10 +1406,36 @@ function renderRetry(job) {
   // be a second queue of the rows already in flight. A failed job with NO
   // download rows is not offered one either - the server 409s it, and an
   // offer that cannot be honoured is worse than no offer.
-  const offer = failed > 0 && (job.phase === 'done' || job.phase === 'failed');
+  // ytdl-web-3 (2026-09-18): ...and a job that failed BEFORE any clip was
+  // attempted. `_no_room_note` (and now the tree guard beside it) fires ahead
+  // of the per-clip loop: `start_download` has just written dl_failed = 0 and
+  // `mark_pending` put every row back to `pending`, so nothing is `failed`,
+  // `offer` was false, and the button the failure's own last sentence names
+  // ("press RETRY FAILED") was hidden - on the live page and after a reload,
+  // with the review grid hidden too. The only way back was a whole new search,
+  // which is the YTDL-16 situation this button exists to end. The server
+  // accepts the retry in this state: `unfinished_downloads` counts the
+  // pending rows.
+  // ytdl-web-1 (2026-09-18b mediums): from the POLL, not from the manifest.
+  // poll() never loads a manifest for a job whose phase is `failed` (and a
+  // page reloading onto #job=<id> has none either), so counting `pending` rows
+  // in state.manifest answered 0 in the one state this offer exists for and
+  // the button stayed hidden exactly as before the fix above. `dl_pending` is
+  // on every poll response; the manifest count stays as the fallback for a
+  // dashboard one release older, which simply omits the field.
+  const pending = typeof job.dl_pending === 'number'
+    ? job.dl_pending
+    : ((state.manifest && state.manifest.videos) || [])
+        .filter(v => v.dl_state === 'pending').length;
+  const stalled = job.phase === 'failed' && pending > 0;
+  const offer = (failed > 0 || stalled) &&
+                (job.phase === 'done' || job.phase === 'failed');
   const btn = $('#dlretry');
   if (btn) {
-    if (offer) btn.textContent = `[ RETRY ${failed} FAILED ]`;
+    if (offer) {
+      btn.textContent = failed > 0 ? `[ RETRY ${failed} FAILED ]`
+                                   : `[ RETRY ${pending} CLIPS ]`;
+    }
     btn.classList.toggle('hidden', !offer);
   }
   // The breaker's instruction, above the button that acts on it. `job.error` is
@@ -2532,9 +2558,12 @@ async function dispatchLocal(jobId, quality, createdLocal) {
   // An older server sends no field, so `undefined` dispatches exactly as
   // before.
   if (createdLocal === false) {
-    noteLocalSkipped('this search was submitted with "download on this '
+    // ytdl-web-8 (2026-09-18): "this search" for all three callers, one of
+    // which is a paste (runUrls) and another the review grid's DOWNLOAD on a
+    // url job. The editor was sent to look for a search they never ran.
+    noteLocalSkipped('this job was submitted with "download on this '
                      + 'computer" unticked, so the server is fetching it. Tick '
-                     + 'the box before the next search to have clips land here');
+                     + 'the box before the next one to have clips land here');
     return false;
   }
   const cap = await companionCapabilities();

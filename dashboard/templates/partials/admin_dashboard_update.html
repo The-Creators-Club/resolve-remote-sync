@@ -34,6 +34,19 @@
       {{ dash_update.current.revert_refused_reason }}</div>
   {% endif %}
 
+  {# dash-mounts-ui-1 (2026-09-18): an applied over-the-air update that the
+     boot selector RETIRED - because the image now carries that version or a
+     newer one - used to vanish from this panel with no word at all. The admin
+     who applied it came back to "code from image" and nothing else, and the
+     only record was a line in a container log. One calm line, not a banner:
+     nothing is wrong, the image simply carries it now. #}
+  {% if dash_update.current.retired_from %}
+    <div class="muted" style="margin-top:0.6rem">
+      {{ dash_update.current.retired_from }} was applied here and has been retired:
+      {{ dash_update.current.retired_reason or "this image carries it" }}.
+    </div>
+  {% endif %}
+
   {% if not dash_update.image_mode %}
     <div class="muted" style="margin-top:0.6rem">
       This deployment updates from your wired computer, not over the air: its code is read

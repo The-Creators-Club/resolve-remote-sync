@@ -4,7 +4,7 @@ The refusals are the interesting half. This app writes into the Projects tree,
 so "409 because you already have a job" and "400 because that is not a project
 you sync" are the actual product, not error handling.
 """
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -465,15 +465,28 @@ def test_health_reports_how_old_the_running_yt_dlp_is(client, monkeypatch,
     container's yt-dlp was weeks old. yt-dlp's versions ARE release dates, so
     the age costs nothing to compute and is the signal that would have shown
     either coming."""
-    from ytdlweb import routes_api
+    from ytdlweb import config, routes_api
 
-    monkeypatch.setattr(routes_api, '_yt_dlp_version', lambda: '2026.08.27')
+    # ytdl-web-1 (2026-09-18): BOTH versions come off the clock, never a
+    # literal date. This test pinned '2026.08.27' as fresh against a limit
+    # computed from date.today(), which held until 2026-09-17 and failed from
+    # 2026-09-18 for ever -- and the `ytdl/web -- pytest` CI step has no
+    # continue-on-error, while `tools/publish_latest.py` publishes only the
+    # newest GREEN run, so one rotted line stopped the vendor feed taking any
+    # commit at all. Derived like this the test pins the RULE, and it cannot
+    # rot in the other direction either if YTDLP_MAX_AGE_DAYS is ever raised.
+    fresh = date.today() - timedelta(days=1)
+    stale = date.today() - timedelta(days=config.YTDLP_MAX_AGE_DAYS + 1)
+
+    monkeypatch.setattr(routes_api, '_yt_dlp_version',
+                        lambda: fresh.strftime('%Y.%m.%d'))
     h = client.get('/api/health').json()
-    assert h['yt_dlp_age_days'] == (date.today() - date(2026, 8, 27)).days
+    assert h['yt_dlp_age_days'] == (date.today() - fresh).days
     assert h['yt_dlp_stale'] is False
     assert 'days old' in h['yt_dlp_age_detail']
 
-    monkeypatch.setattr(routes_api, '_yt_dlp_version', lambda: '2026.01.01')
+    monkeypatch.setattr(routes_api, '_yt_dlp_version',
+                        lambda: stale.strftime('%Y.%m.%d'))
     h = client.get('/api/health').json()
     assert h['yt_dlp_stale'] is True
     assert 'past the' in h['yt_dlp_age_detail']

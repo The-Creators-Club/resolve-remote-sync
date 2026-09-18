@@ -19,6 +19,17 @@ PREVIEW = r"P:\Assets\B-roll Archive\cc\ff5\Proxy\clip.mp4"
 EDIT_PROXY = r"P:\Assets\B-roll Archive\cc\ff5\Proxy\clip.mov"
 
 
+@pytest.fixture(autouse=True)
+def _forget_geometry_verdicts():
+    """comp-resolve-2 (2026-09-18) gave the geometry check an in-process
+    memory keyed on (file, mtime, size, stored frames), so a clip that agrees
+    is never probed twice. These tests all use one path and one fake stat, so
+    without this they would answer each other's questions."""
+    proxy_relink.reset_geometry_verdicts()
+    yield
+    proxy_relink.reset_geometry_verdicts()
+
+
 def _item(**overrides):
     item = {"file_path": ORIGINAL, "media_pool_item": object(),
             "media_pool_uid": "uid-1", "clip_name": "clip.mov",

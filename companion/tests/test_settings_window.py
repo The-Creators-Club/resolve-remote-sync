@@ -1029,6 +1029,29 @@ def test_resolve_section_reports_proxy_attachment_and_the_gap_reasons():
     assert any("Set the still store" in l for l in lines)
 
 
+def test_a_refresh_only_pass_and_a_given_up_stand_in_reach_the_settings_window():
+    """CR-283W / CR-283X (2026-09-18, owed in by companion-media): a pass that
+    only RE-READ clips whose file changed under them drew nothing at all, and
+    a stand-in whose editing proxy gave up - an editor cutting on the 1080p
+    preview believing it is the 6K - reached the log and `GET /status` only."""
+    app = _health_app({
+        "connected": True,
+        "proxy_attach": {"attached": 0, "failed": 0, "refreshed": 3},
+        "standins_owed": {"count": 2, "why": "the server gave up after 5 tries"},
+    })
+    lines = [i.text for i in _section(build_settings_model(_snap(app), app),
+                                      "RESOLVE").items if isinstance(i, Line)]
+    assert any("3 clips re-read after the file changed" in l for l in lines)
+    assert any("2 clips still on the preview copy" in l for l in lines)
+    assert any("gave up after 5 tries" in l for l in lines)
+
+    # Nothing owed draws nothing.
+    quiet = _health_app({"connected": True, "standins_owed": {}})
+    quiet_lines = [i.text for i in _section(build_settings_model(_snap(quiet), quiet),
+                                            "RESOLVE").items if isinstance(i, Line)]
+    assert not any("preview copy" in l for l in quiet_lines)
+
+
 def test_undo_last_fix_is_offered_only_when_there_is_something_to_undo():
     app = _health_app({"connected": True})
     app.undo_last_fix_available = lambda: True

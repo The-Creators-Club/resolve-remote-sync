@@ -1,0 +1,152 @@
+broll-indexer-1           medium  CONFIRMED `make_own_proxies.py` never got the frame-count check that the rest of the fleet did
+broll-indexer-2           medium  CONFIRMED the `frames` column that decides an offline clip's LENGTH is read from `nb_frames`, which this same module documents as 
+broll-indexer-3           medium  CONFIRMED the new frame check costs a second full network read of every original, on the one path the pipeline was tuned to read o
+broll-indexer-4           low     CONFIRMED a probe that yields no duration crashes the proxy stage with a bare TypeError
+broll-indexer-5           low     CONFIRMED `fix_proxy_timecode` verifies that the remux has *a* timecode, not the one it just decided on
+broll-indexer-6           low     CONFIRMED a killed indexer leaves a truncated proxy under its final name, and a later `--stages frames` indexes from it
+broll-1                   medium  CONFIRMED a null `original_rel` is turned back into "the preview IS the original", and the archive's own preview is then ledgered 
+broll-2                   medium  CONFIRMED migration 012 makes a published `broll.db` unreadable by any dashboard older than 0.7.49, and `publish_db.py` neither ch
+broll-3                   low     PLAUSIBLE the archive top slot is matched by an exact stem string, with no NFC/NFD normaliser
+broll-4                   low     CONFIRMED `edit_proxy_rel` can name the preview itself
+broll-5                   low     CONFIRMED the zero-byte guard in `mark_uploaded` covers only the declared editing proxy, not the preview the server itself require
+comp-app-1                medium  CONFIRMED the b-roll editing-proxy upgrade resume is gated behind `proxy_relink_enabled` and behind `plan_relinks()` not raising
+comp-app-2                medium  CONFIRMED the relaunch ceiling's primary source is still written non-atomically, in the one process that exists because machines d
+comp-app-3                medium  CONFIRMED a standing upgrade refusal is cleared by the four report replies that mean "there IS a build, we are just not offering i
+comp-app-4                medium  CONFIRMED "CCSync" is hardcoded in ~60 user-visible companion strings while the vendor-neutral brand helper is used once
+comp-app-5                low     CONFIRMED `read_history` loses the whole relaunch ceiling to one unparseable stamp
+comp-app-6                low     CONFIRMED the "cannot read this computer's id file" toast does not mention the repair the same fix pass built
+comp-app-7                low     CONFIRMED a cached `capabilities` block keeps a stale `jobs_gate` when the runner stops answering
+comp-broll-tiers-1        high    CONFIRMED a stand-in whose download finishes after the page stops polling is never ledgered
+comp-broll-tiers-2        medium  CONFIRMED nothing dedupes an in-flight editing-proxy upgrade, and a permanently pending row spawns a Resolve worker child every re
+comp-broll-tiers-3        medium  PLAUSIBLE an exact frame-count equality now fails the WHOLE ingest item, including for VFR sources
+comp-broll-tiers-4        medium  CONFIRMED an archive clip with no unique original sibling is "downloaded onto itself" and ledgered as a stand-in
+comp-broll-tiers-5        low     CONFIRMED the stand-in ledger grows for ever and nothing surfaces a failed upgrade to the editor
+comp-music-ytdl-jobs-1    medium  CONFIRMED the CLAP model allow-list is hard-coded to GitHub, so a fleet whose release feed is anywhere else can never download it
+comp-music-ytdl-jobs-2    medium  CONFIRMED `test_ytdlp_manager.py` leaks a live ytdlp manager thread that holds `sidecar_tools._work_lock` through real GitHub I/O,
+comp-music-ytdl-jobs-3    low     CONFIRMED `broll_vlm_sidecar.host_allowed` accepts an `http://` URL; its music sibling refuses one
+comp-music-ytdl-jobs-4    low     CONFIRMED the YouTube cookie jar is written to a temp file before it is hardened, contrary to the comment beside it
+comp-music-ytdl-jobs-5    low     PLAUSIBLE a `None` returncode from the edit-ready conversion reads as success
+comp-resolve-1            high    CONFIRMED the stand-in geometry refresh never runs: `replace_clip` short-circuits on its own path, and reports success
+comp-resolve-2            high    CONFIRMED the geometry check ffprobes every archive clip, whole-file, on every 120 s pass
+comp-resolve-3            medium  CONFIRMED a refresh is never remembered, so a clip that does not refresh is re-ReplaceClip'd for ever
+comp-resolve-4            medium  CONFIRMED every test of the refresh injects `replace_fn`, so the shipped default is untested
+comp-resolve-5            low     CONFIRMED a refresh-only pass reports "nothing to do" and `attached: 0`
+comp-resolve-6            low     PLAUSIBLE a refresh on a clip whose proxy is working carries no proxy, and ReplaceClip may drop the link
+comp-resolve-7            low     CONFIRMED the watcher's archive exemption stats the disk for every missing archive clip on a 3 s poll
+comp-sync-1               high    CONFIRMED lane B puts a file back at the exact path it just trashed it from, forever, while the server's inventory is stale
+comp-sync-2               medium  CONFIRMED CR-278's path-missing heal never runs on the machine shape its own docstring describes
+comp-sync-3               medium  CONFIRMED `_move_out_of_trash` claims it can never overwrite; on macOS and Linux `os.rename` silently does
+comp-sync-4               low     CONFIRMED a file moved into a BORROWED project has a home on this disk and is trashed anyway
+comp-sync-5               low     CONFIRMED the 09-11b fix pass wrote mojibake into two `file_moves.py` comments
+comp-sync-6               low     PLAUSIBLE the path-missing heal hardcodes `.stfolder` instead of the folder's own `markerName`
+comp-ui-1                 medium  CONFIRMED the startup registration backoff widened the "every toast is dropped" window from 2.5 s to 105 s, and nothing queues or 
+comp-ui-2                 medium  CONFIRMED a failed Explorer-restart re-add leaves the companion permanently headless: nothing ever retries NIM_ADD again
+comp-ui-3                 low     CONFIRMED a self-recovering re-add failure writes a crash report and prints the terminal remedy
+comp-ui-4                 low     CONFIRMED a terminal registration failure leaks the tray window and its HICON cache: `run()`'s error path never calls `_teardown()
+comp-ui-5                 low     CONFIRMED the FIX ALL bar now reads a flat 0% for a whole rehearsal, while the file line says "Copying"
+comp-ui-6                 low     CONFIRMED the stills "gallery moved" line joins a POSIX path with a backslash on macOS
+dash-api-1                high    CONFIRMED locate answers from an inventory the dashboard itself has flagged as unreadable, and that resurrects deleted files while
+dash-api-2                high    CONFIRMED the database-busy handler does a blocking 5 s write on the event loop, under exactly the contention it is reporting, and
+dash-api-3                medium  CONFIRMED `as_of` is a tree-wide MAX, so one freshly walked project makes every locate answer look current
+dash-api-4                low     CONFIRMED a lane a machine never reported draws as a quiet GREEN chip
+dash-api-5                low     PLAUSIBLE `skipped_exists` is now a per-subpath figure rendered as a tree-wide fact, and a stale one never clears
+dash-api-6                low     PLAUSIBLE a publish places the file before the row is inserted, so a failed insert leaves a replaced live artefact under an existi
+dash-cards-1              high    CONFIRMED an agent whose editor is in no episode long-polls in a hot loop
+dash-cards-2              medium  CONFIRMED an episode that failed to build can never be opened again
+dash-cards-3              medium  CONFIRMED the cap refusal names a page that does not exist, and an act that frees nothing
+dash-cards-4              medium  CONFIRMED the /cards/sw.js kill switch deletes every cache on the origin, not just its own
+dash-cards-5              medium  CONFIRMED closing an episode leaks its 24-thread WSGI executor
+dash-cards-6              medium  CONFIRMED the per-slug data dir abandons every engine's existing state, with no migration
+dash-cards-7              low     CONFIRMED the raw build exception is rendered into the landing page
+dash-cards-8              low     CONFIRMED a discarded agent push reads as a healthy cards role
+dash-cards-9              low     CONFIRMED the failed-episode test cannot fail for the bug it sits next to
+dash-collector-alerts-1   high    CONFIRMED a hand move BETWEEN two projects is detected only if both projects happen to fall in the same cycle's 8-project window, 
+dash-collector-alerts-2   medium  CONFIRMED the 500-move cap drops the rest of a pass permanently, while its log line promises they will be picked up later
+dash-collector-alerts-3   medium  CONFIRMED a folder RENAMED in place becomes one detected row per file, not one folder row
+dash-collector-alerts-4   medium  CONFIRMED the new "slow write" notice blames the collector for holding a write lock the collector deliberately does not hold
+dash-collector-alerts-5   low     CONFIRMED `db_busy` and `slow_write` are notice kinds with a writer but no registry row
+dash-collector-alerts-6   low     CONFIRMED the dashboard's stand-in for the companion's disk floor is hard-coded, so a machine with a configured floor is described
+dash-core-1               high    CONFIRMED the DCORE-3 boot refusal passes on a zero-byte secret file, so a half-written `dash_session_secret` still signs the whol
+dash-core-2               medium  CONFIRMED the database-busy 503 opens a second connection and WRITES, so a busy request waits the busy timeout twice and adds writ
+dash-core-3               medium  CONFIRMED OIDC mints a session for a username the rest of the dashboard will not accept, and says nothing
+dash-core-4               low     CONFIRMED the per-episode open paths are not restricted to GET, although the comment beside them says they are
+dash-core-5               low     CONFIRMED expired browser sessions accumulate on a long-running container: the only sweep runs at boot
+dash-core-6               low     CONFIRMED `internal.env` and `syncthing.env` are rewritten in place on every boot, so a boot cut off mid-write leaves the sidecars
+dash-db-1                 medium  CONFIRMED a collector poll that held no write lock at all is recorded as the writer that held it, for ever
+dash-db-2                 medium  CONFIRMED the two notice kinds the busy rework writes are not in the registry, so the panel that exists to say what the server che
+dash-db-3                 medium  CONFIRMED the busy handler answers contention by adding another writer to it
+dash-db-4                 low     CONFIRMED the "who holds this file" query is a LIKE with the path's own wildcards unescaped
+dash-db-5                 low     CONFIRMED the assignments picker offers a computer whose grid can never have a column
+dash-db-6                 low     PLAUSIBLE a write-lock test in my territory failed once and will not reproduce
+dash-mounts-ui-1          medium  CONFIRMED CR-270 writes `retired_from` / `retired_reason` into a file no surface reads, so an applied OTA update vanishes from Set
+dash-mounts-ui-2          medium  CONFIRMED the new vendor section calls a locally RECALLED build "[ STAGED, NOT CURRENT ]" and offers [ MAKE CURRENT ] on it, and h
+dash-mounts-ui-3          low     CONFIRMED the Assignments computer picker offers the unassigned bucket to a person who HAS computers, and choosing it renders "thi
+dash-mounts-ui-4          medium  CONFIRMED the fleet-grid declutter moved five amber conditions behind [ DETAILS ] that neither the headline nor the note count kno
+dash-mounts-ui-5          medium  CONFIRMED a lane a machine never reported is drawn in the same quiet colour as a healthy one
+dash-mounts-ui-6          low     CONFIRMED the b-roll mount records its PROXIES directory as its root, so a degraded-mount notice names the wrong path
+dash-release-jobs-1       medium  CONFIRMED the restart path still dies on a full or read-only /data: CR-260g fixed the reader, not the writer its own failure scena
+dash-release-jobs-2       medium  CONFIRMED `repair_provenance` lets an untrusted feed host rewrite the provenance of a package this dashboard published itself
+dash-release-jobs-3       medium  PLAUSIBLE the new "only upload what changed" skip trusts a GitHub asset's name and size, and cannot see a half-uploaded asset
+dash-release-jobs-4       low     CONFIRMED a channel `retracted` entry whose `kind` is not lower-case recalls nothing, silently, on both halves of the recall
+dash-release-jobs-5       low     CONFIRMED re-applying the version already running erases the rollback target
+dash-release-jobs-6       low     CONFIRMED the install worker's crash handler can itself crash and leave the wizard spinning
+install-onboard-1         medium  CONFIRMED a macOS `--dry-run` uninstall now ends "CCSync uninstall NOT complete"
+install-onboard-2         medium  CONFIRMED `-Full` on Windows says "removed" and "your identity is gone" without looking
+install-onboard-3         low     CONFIRMED the macOS uninstall test pins the verdict function, not the code path that sets its argument
+install-onboard-4         low     CONFIRMED `_same_dashboard` compares hostnames only, so two deployments on one host share a cache
+install-onboard-5         low     CONFIRMED a macOS dry run claims, in the past tense, that the Syncthing identity was deleted
+music-1                   medium  CONFIRMED a cancel that lands in the window between lease expiry and the next sweep wedges the batch in `running` for ever
+music-2                   medium  CONFIRMED the take-over / retry buttons report every loopback 409 as "another of your computers is still working on this batch"
+music-3                   low     CONFIRMED the drop preview mints names that ignore every name already promised to an unlanded item
+music-4                   low     CONFIRMED `make_proxies --dry-run` dies on the files the real run survives, and over-counts the ones it cannot decode
+proxy-tiers-1             medium  CONFIRMED "stop linking the 540p preview" was built in the relink pass only; every insert still attaches it, and the pass can neve
+proxy-tiers-2             high    CONFIRMED a clip whose original is not in the archive folder turns the whole tier machine onto the PREVIEW: the project stores the
+proxy-tiers-3             high    CONFIRMED the container losing sight of the archive turns every insert into proxy-tiers-2, and nothing anywhere says so
+proxy-tiers-4             high    CONFIRMED the wired rig, which is the point of the whole design, has no working signal that a clip was born from a stand-in
+proxy-tiers-5             medium  CONFIRMED "usable from the moment the editing proxy lands" is not what the code does: a clip stays invisible until its multi-GB or
+proxy-tiers-6             medium  PLAUSIBLE a stand-in can be written under a .mxf, .avi or .mkv name; the spike only ever tested a QuickTime original
+proxy-tiers-7             low     CONFIRMED the geometry half of migration 012 is write-only: three columns, a wire field and a ledger field that nothing reads
+proxy-tiers-8             low     CONFIRMED the machine that made the editing proxy re-downloads it from the NAS, and re-downloads its own preview as a stand-in
+regression-1              medium  CONFIRMED CR-262C does not close music-3: the retry it made unconditional is refused by CR-253A from the SAME fix pass, and the ba
+regression-2              medium  CONFIRMED CR-279's heartbeat relaxation counts an rclone child CONSOLIDATE spawned, so a wedged sequencer is never restarted while
+regression-3              medium  CONFIRMED CR-270's retire branch is asked before CR-259a's schema guard, is not schema-aware, and no test can reach it
+regression-4              low     CONFIRMED CR-259a's guard treats "the staged tree could not say what schema it knows" as schema v0, and permanently refuses the ro
+regression-5              low     CONFIRMED CR-258B does not close dash-collector-alerts-1 for a deployment whose collector has not yet run any kind twice
+regression-6              low     CONFIRMED CR-255k fixed one of tests-3's two neutered assertions; the companion one is untouched and unledgered, and the fix pass 
+regression-7              low     CONFIRMED tests-4 was dropped from the fix pass with no fix, no decline and no ledger entry anywhere
+res-companion-1           high    CONFIRMED a stand-in download that nobody polls to completion leaves an UNLEDGERED lie at the original's path, for ever
+res-companion-2           high    CONFIRMED lane B's hand-move follow leaves Resolve pointing at the old path, and the later file_moves command answers "nothing at 
+res-companion-3           medium  CONFIRMED the phase 3 geometry check runs a whole-file ffprobe per archive clip per 120 s pass, on the media-tree thread, before a
+res-companion-4           medium  CONFIRMED a wedged media-tree (or watcher) thread is "restarted" without being stopped, so the watchdog stacks duplicate threads t
+res-companion-5           low     PLAUSIBLE a stand-in-born clip whose stored geometry never converges re-runs replace_clip every pass, with nothing remembering the
+res-fleet-1               high    CONFIRMED the engine pool killed the pinned-job executor: it is never STARTED, and jobs still get pinned into a queue nothing drai
+res-fleet-2               medium  CONFIRMED a pushed update the machine can never take removes that computer from the jobs fleet for ever, and nothing anywhere says
+res-fleet-3               medium  CONFIRMED a detected hand move between two projects makes every holding machine file its copy into a directory that is not a proje
+res-fleet-4               medium  CONFIRMED forgetting or renaming a computer strands its outstanding file moves and Resolve undos, and leaves an alert nobody can c
+security-1                low     CONFIRMED the `/cards` PWA login-gate carve-outs are method-agnostic, so an unauthenticated POST reaches the mounted engine
+security-2                medium  CONFIRMED any signed-in non-admin can take both Timeline Cards engine seats, and only an admin can give one back
+security-3                low     CONFIRMED the Cards carry-on cookie sets `secure` from the raw request scheme, not from the site's cookie policy
+security-4                low     CONFIRMED `/api/v1/files/locate` answers across every active project for any fleet credential, with no per-editor scoping and the 
+server-tools-1            medium  CONFIRMED an LGPL dependency shipped to customers has no notice, and the generator that would catch it is in no gate
+server-tools-2            medium  CONFIRMED a b-roll publish whose drain merge fails still exits 0, and a test pins that
+server-tools-3            low     CONFIRMED `tailscale status --json` is decoded with the console codec, so a non-ASCII peer name turns a health check into a false 
+server-tools-4            low     PLAUSIBLE bench's rclone readback decodes with the console codec and its decode failure is not caught
+server-tools-5            low     CONFIRMED one absent guide now suppresses the licence agreement as well
+tests-1                   medium  CONFIRMED twenty media-job tests skip silently on every CI and release runner
+tests-2                   medium  CONFIRMED the malformed-`insert` test asserts three fields and misses the one that changes the plan
+tests-3                   low     CONFIRMED a phase-2 test still pins "the insert object changes nothing", after phase 3 shipped
+tests-4                   low     CONFIRMED the "a write that cannot land is not an exception" test monkeypatches away the thing that raises
+tests-5                   low     CONFIRMED the "every new kind is in the registry" test is a hand-written list, so it cannot fail for a new kind
+tests-6                   low     CONFIRMED three copies of the b-roll schema and migrations, no test that they are the same
+wire-1                    high    CONFIRMED a non-409 refusal of `/items/{uid}/uploaded` wedges the item in `uploading` for ever
+wire-2                    medium  CONFIRMED "a busy database is contention, not an error" stops at the dashboard's own routes; the mounted apps still 500, and the c
+wire-3                    medium  CONFIRMED an agent whose editor has no episode open is told so in a body nobody reads, and reports itself healthy
+wire-4                    low     CONFIRMED `insert.original_rel: null` means "there is no original"; the companion reads it as "the path you posted is the original
+ytdl-web-1                high    CONFIRMED the ytdl/web suite has been RED since 2026-09-17 on a hard-coded date, and CI red blocks the vendor feed
+ytdl-web-2                medium  CONFIRMED the worker's new "no room" refusal reintroduces the wrong sentence a vanished share earns (ytdl-web-1's whole point), on
+ytdl-web-3                medium  CONFIRMED the "no room" failure tells the editor to press RETRY FAILED, and the page hides that button in exactly that state
+ytdl-web-4                medium  CONFIRMED a pasted-links job never gets a free-space check at all, on either executor
+ytdl-web-5                medium  CONFIRMED when the share vanishes but the container has room, the download SUCCEEDS into the container overlay and the ledger perm
+ytdl-web-6                low     PLAUSIBLE any fleet-credentialled editor can claim, and be handed the work order for, another editor's job
+ytdl-web-7                low     CONFIRMED `db.py` defines `_column` twice; the first definition is dead
+ytdl-web-8                low     CONFIRMED the new "download on this computer was unticked" sentence says "this search" on a pasted-links job

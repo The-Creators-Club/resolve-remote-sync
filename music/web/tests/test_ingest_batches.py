@@ -291,7 +291,11 @@ def test_cancel_is_a_request_and_takes_the_lease_away(clean_batches):
     # crunching a batch the server has already forgotten
     assert row['state'] == 'running'
     assert row['cancel_requested'] == 1
-    assert row['lease_expires_at'] is None
+    # CR-304A (2026-09-18b, music-1): the lease is NOT taken away - nulling it
+    # wedged the row (running, no lease) outside every sweep and every claim;
+    # cancel_requested delivers the 410 and the sweep finalises the batch as
+    # cancelled once the lease runs out.
+    assert row['lease_expires_at'] is not None
     assert row['cancel_by'] == 'jsmith'
 
 

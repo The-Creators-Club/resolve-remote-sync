@@ -244,8 +244,18 @@ def test_the_same_move_seen_twice_is_recorded_once(env):
     assert len(moves_in(conn)) == 1
 
     # The detection is handed the identical diff a second time (the shape a
-    # walk that was refused, or a partner project walked late, produces).
-    walks = [walk(D_SLUG, DRONE, old=[orig("B-roll/A001_0512.braw")], new=[]),
+    # walk that was refused, or a partner project walked late, produces). The
+    # source walk carries the files that did NOT move, which is what the
+    # collector really hands it - dash-collector-alerts-3 (2026-09-18) made
+    # that difference visible, because a sparse `old` holding only the moved
+    # file now reads as the whole folder having been renamed, which it would
+    # be if that were really all the folder held.
+    walks = [walk(D_SLUG, DRONE,
+                  old=[orig("B-roll/A001_0512.braw"),
+                       orig("B-roll/A002_0513.braw", size=200),
+                       proxy("B-roll/Proxy/A001_0512.mp4", size=5)],
+                  new=[orig("B-roll/A002_0513.braw", size=200),
+                       proxy("B-roll/Proxy/A001_0512.mp4", size=5)]),
              walk(A_SLUG, ANIMALS, old=[], new=[orig("Interviewees/A001_0512.braw")])]
     assert collector._record_detected_moves(conn, walks, dbmod.utcnow_iso()) == 0
     assert len(moves_in(conn)) == 1
@@ -265,10 +275,15 @@ def test_detection_never_takes_the_inventory_walk_down_with_it(env, monkeypatch)
 def test_a_pass_records_at_most_the_cap(env, monkeypatch):
     collector, conn, projects = env
     monkeypatch.setattr(collector_mod, "DETECTED_MOVE_LIMIT", 2)
+    # dash-collector-alerts-3 (2026-09-18): each file has to go somewhere
+    # DIFFERENT, or this is one folder move batched into one row now - which
+    # is the fix, and would leave the cap untested. Five separate files, each
+    # with its own key and its own destination folder.
     walks = [walk(D_SLUG, DRONE,
                   old=[orig(f"B-roll/A{i:03d}.braw", size=100 + i) for i in range(5)],
-                  new=[orig(f"Archive/A{i:03d}.braw", size=100 + i) for i in range(5)])]
-    # Five separate files, each with its own key: five moves, two recorded.
+                  new=[orig(f"Archive {i}/A{i:03d}.braw", size=100 + i)
+                       for i in range(5)])]
+    # Five moves, two recorded.
     assert collector._record_detected_moves(conn, walks, dbmod.utcnow_iso()) == 2
     assert len(moves_in(conn)) == 2
 

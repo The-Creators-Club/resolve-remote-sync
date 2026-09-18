@@ -158,7 +158,7 @@ def get_one(uid: str, user: str = Depends(require_user),
     only ever the faster one."""
     ingest_batches.expire_stale_leases(conn)
     batch = _visible_or_404(conn, uid, user, admin)
-    return {"batch": ingest_batches.batch_public(batch),
+    return {"batch": ingest_batches.batch_public(batch, conn),
             "items": [ingest_batches.item_public(i)
                       for i in ingest_batches.list_items(conn, uid)]}
 
@@ -174,6 +174,12 @@ def cancel(uid: str, user: str = Depends(require_user),
     already `live` stay -- their media is on the NAS and somebody may have cut
     with it.
     """
+    # music-1 (2026-09-18): the b-roll twin of the same defect. Sweeping
+    # first, and asking lease_live rather than the raw column, is what stops a
+    # cancel that lands after the lease died from parking the row in
+    # `running` with a NULL lease -- a state no sweep can reach and no claim
+    # can take back.
+    ingest_batches.expire_stale_leases(conn)
     batch = _visible_or_404(conn, uid, user, admin)
     if batch["state"] in ingest_batches.BATCH_TERMINAL:
         # Idempotent, not an error: two clicks, or a click on a batch that
@@ -184,7 +190,7 @@ def cancel(uid: str, user: str = Depends(require_user),
     # flag alone would leave it "cancelling" forever and the panel wedged on
     # it (owner, 2026-08-18: a batch orphaned by a companion crash). Finalise
     # it here; a HELD batch keeps the request-not-kill semantics below.
-    if batch["state"] == "queued" or not batch["lease_expires_at"]:
+    if batch["state"] == "queued" or not ingest_batches.lease_live(batch):
         ingest_batches.cancel(conn, uid, user)
         fresh = ingest_batches.get_batch(conn, uid)
         result = ingest_batches.release(conn, fresh, state="cancelled")

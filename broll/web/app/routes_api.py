@@ -1,14 +1,17 @@
 """GET /api/search, /api/videos/{id}, /api/categories, /api/shares."""
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
+import unicodedata
 from pathlib import PurePosixPath
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import config
 from app import edit_weight
+from app import ingest_batches
 from app.db import get_db
 # Import the name, not the module: the route function below is itself called
 # `search` and would shadow a module import.
@@ -17,11 +20,63 @@ from app.search import (BROWSE_PREDICATE, UNCATEGORISED, count_in_scope,
 from app.semantic import mode_availability
 
 router = APIRouter(prefix="/api")
+log = logging.getLogger(__name__)
 
 # The share slug the companions derive a mount for without any hand-written
 # config: <local_root>/Assets/B-roll Archive. Everything the archive holds is
 # addressable under it on every machine.
 ARCHIVE_SHARE = "broll"
+
+
+def _pending_original(conn: sqlite3.Connection | None, video: dict) -> str | None:
+    """The archive path an original that is STILL UPLOADING will land at.
+
+    overseer-1 (2026-09-18b). A clip whose proxies are on the NAS and whose
+    original is not is published on purpose (wire-1's `proxies_live`), and for
+    the hours that window lasts `insert_target_detail` finds no sibling beside
+    the preview and answers `original_rel: null`. The companion reads that as
+    "this clip has no original", imports the PREVIEW at the original's own
+    path, permanently, and nothing upgrades when the real file lands - which
+    is the common case for every heavy clip and defeats the plan's "usable
+    from the moment its editing proxy lands".
+
+    So the path is answered before the bytes exist, and flagged. It is
+    `ingest_batches.ItemFiles(...).original`, i.e. the SAME expression
+    `mark_uploaded` will store on the second post, never a reconstruction of
+    it. None whenever nothing is genuinely coming: no ingest item (everything
+    the indexer archived), an item that already sent its original, or a batch
+    ingested with `upload_originals` off, whose item is `live` with the flag
+    at 0 and has nothing owed at all.
+    """
+    if conn is None or not video.get("id"):
+        return None
+    try:
+        row = conn.execute(
+            "SELECT i.state, i.original_uploaded, i.archive_dir, i.archive_stem, "
+            "b.settings_json FROM ingest_items i "
+            "JOIN ingest_batches b ON b.uid = i.batch_uid "
+            "WHERE i.video_id = ? ORDER BY i.updated_at DESC LIMIT 1",
+            (video["id"],)).fetchone()
+    except sqlite3.Error:
+        # The insert object degrades; it never fails the detail page.
+        return None
+    if row is None or not row["archive_dir"]:
+        return None
+    if not bool(ingest_batches.load_settings(row).get("upload_originals", True)):
+        return None
+    owed = (row["state"] == "proxies_live"
+            # A `live` row with the flag at 0 is a wire-1 victim written
+            # before that fix deployed: published, original never sent, and no
+            # longer reachable by any retry. It is owed just the same.
+            or (row["state"] == "live" and not row["original_uploaded"]))
+    if not owed:
+        return None
+    final_name = PurePosixPath(str(video.get("rel_path") or "")).name
+    if not final_name:
+        return None
+    return ingest_batches.ItemFiles(
+        row["archive_dir"], row["archive_stem"] or "", final_name,
+        video.get("id")).original
 
 
 def _insert_target(video: dict) -> tuple[str, str]:
@@ -73,7 +128,8 @@ def _is_edit_weight(video: dict) -> bool | None:
         video.get("height"), video.get("bitrate"), video.get("codec"))
 
 
-def insert_target_detail(video: dict) -> dict:
+def insert_target_detail(video: dict,
+                         conn: sqlite3.Connection | None = None) -> dict:
     """Everything "Send to Resolve" may need about this clip, as rel paths.
 
     `share` and `rel_path` are _insert_target's answer unchanged -- the page
@@ -89,6 +145,20 @@ def insert_target_detail(video: dict) -> dict:
     itself is what gets inserted -- the archive task #23 clips. A caller must
     not read "no original" as "use the preview and pretend": that is what the
     flag is for.
+
+    `known` is proxy-tiers-3 (2026-09-18, the server half of CR-284G). This
+    function discovers the original and the editing proxy by LISTING the
+    archive folder inside the container, and an OSError - the dataset
+    unmounted, an SMB hiccup, `BROLL_DATA_ROOT` wrong after an image update -
+    was swallowed into "no entries", which is byte for byte the answer for
+    "this clip has no original". Ten minutes of that turned every Send to
+    Resolve in the window into a preview-only insert with a stand-in ledger
+    row, and the damage outlived the outage for ever on projects nobody
+    re-checks. `known: false` says "the server judged nothing", and the
+    companion falls back to the pre-phase-3 route: fetch the file the editor
+    asked for, never a stand-in. The keys are still PRESENT and null on that
+    path on purpose - an ABSENT `preview_rel`/`edit_proxy_rel` means "use the
+    stem convention", which re-creates exactly the wrong answer.
     """
     rel = str(video.get("archive_path") or "")
     if not rel:
@@ -97,36 +167,97 @@ def insert_target_detail(video: dict) -> dict:
         # 2026-08-12, and there is no archive geometry to describe.
         return {"share": video["share"], "rel_path": video["rel_path"],
                 "original_rel": video["rel_path"], "preview_rel": None,
-                "edit_proxy_rel": None}
+                "edit_proxy_rel": None, "known": True}
 
     preview = PurePosixPath(rel)
     if preview.parent.name != "Proxy":
         return {"share": ARCHIVE_SHARE, "rel_path": rel,
-                "original_rel": None, "preview_rel": rel, "edit_proxy_rel": None}
+                "original_rel": None, "preview_rel": rel,
+                "edit_proxy_rel": None, "known": True}
 
     top_dir = preview.parent.parent
     top_dir_fs = config.get_data_root() / str(top_dir)
+    # An EMPTY listing is an answer; a listing that RAISED is not. Only the
+    # second makes this object unknown (proxy-tiers-3).
+    known = True
     try:
         entries = os.listdir(top_dir_fs)
-    except OSError:
+    except OSError as exc:
         entries = []
+        known = False
+        log.warning("proxy-tiers-3: could not read the archive folder %s (%s); "
+                    "answering known=false rather than 'this clip has no "
+                    "original'", top_dir, exc)
+    # broll-3 (2026-09-18): CR-90. The left side is listdir bytes off the NAS
+    # (a Mac's rclone upload spells an accented name NFD), the right side is a
+    # string the DB holds in NFC, and this comparison is only ever compared --
+    # never opened. A miss answers `original_rel: None`, i.e. it silently
+    # degrades a clip that HAS an original to a preview-only insert. The join
+    # below keeps the entry's own bytes, which is where the truth is.
+    want = unicodedata.normalize("NFC", preview.stem)
     matches = [
         e for e in entries
-        if os.path.splitext(e)[0] == preview.stem
+        if unicodedata.normalize("NFC", os.path.splitext(e)[0]) == want
         and (top_dir_fs / e).is_file()
     ]
+    if len(matches) > 1:
+        # Two files whose names differ only by normalisation is a real archive
+        # shape; the clip degrades exactly as before, but not in silence.
+        log.warning("broll-3: %s has %d top-slot candidates for stem %r; "
+                    "answering original_rel=None", top_dir, len(matches),
+                    preview.stem)
     original_rel = str(top_dir / matches[0]) if len(matches) == 1 else None
 
     # Found by stem beside the preview, the same way the top slot is: nothing
     # records it, and an editing proxy that arrives later must show up without
     # a re-index.
-    edit_proxy = preview.parent / (preview.stem + EDIT_PROXY_EXT)
+    # broll-1 (2026-09-18b mediums): "the same way" has to include CR-90.
+    # broll-3 fixed the top slot's compare and left this one building
+    # `preview.stem + ".mov"` from the DB's NFC string and stat'ing it, so a
+    # Mac's NFD upload made the editing proxy invisible while the original
+    # beside it was found. That asymmetry is worse than missing both:
+    # `broll_server.derive_insert_paths` reads a null `edit_proxy_rel` as
+    # either "the original is light enough to edit with" (a multi-GB camera
+    # master over the internet) or a stand-in with no `upgrade_rel`, i.e. one
+    # nothing ever upgrades. So list the Proxy folder once and compare
+    # normalised, keeping the entry's own bytes in the answer - never NFC a
+    # path something opens.
+    proxy_dir_fs = config.get_data_root() / str(preview.parent)
     edit_proxy_rel = None
     try:
-        if (config.get_data_root() / str(edit_proxy)).is_file():
-            edit_proxy_rel = str(edit_proxy)
-    except OSError:
-        edit_proxy_rel = None
+        proxy_entries = os.listdir(proxy_dir_fs)
+    except OSError as exc:
+        # Same rule as the listing above: a listing that could not be taken is
+        # not "there is no editing proxy" (proxy-tiers-3). This is a second
+        # call and can raise on its own.
+        proxy_entries = []
+        known = False
+        log.warning("proxy-tiers-3: could not read the proxy folder %s (%s); "
+                    "answering known=false", preview.parent, exc)
+    # broll-4 (2026-09-18): a preview whose own suffix is already the
+    # editing-proxy one IS this file, and advertising a file as its own
+    # editing proxy costs the companion a background upgrade thread and a
+    # stand-in ledger row for a tier that does not exist.
+    # `build_archive.preview_source` produces exactly that shape when it
+    # falls back to the top slot (the audio-only `skipped` arm, BROLL-14).
+    # The guard survives the listing rewrite by comparing normalised too: the
+    # preview's own name off disk may be spelled differently from the row's.
+    preview_name = unicodedata.normalize("NFC", preview.name)
+    edit_matches = [
+        e for e in proxy_entries
+        if unicodedata.normalize("NFC", os.path.splitext(e)[0]) == want
+        and os.path.splitext(e)[1].lower() == EDIT_PROXY_EXT
+        and unicodedata.normalize("NFC", e) != preview_name
+        and (proxy_dir_fs / e).is_file()
+    ]
+    if len(edit_matches) > 1:
+        # Two editing proxies differing only by normalisation: degrade rather
+        # than guess, and say so, exactly as the top slot does.
+        log.warning("broll-1: %s has %d editing-proxy candidates for stem %r; "
+                    "answering edit_proxy_rel=None", preview.parent,
+                    len(edit_matches), preview.stem)
+    elif len(edit_matches) == 1:
+        edit_proxy_rel = str(preview.parent / edit_matches[0])
 
     return {
         "share": ARCHIVE_SHARE,
@@ -134,18 +265,38 @@ def insert_target_detail(video: dict) -> dict:
         "original_rel": original_rel,
         "preview_rel": rel,
         "edit_proxy_rel": edit_proxy_rel,
+        "known": known,
     }
 
 
-def _insert_object(video: dict) -> dict:
+def _insert_object(video: dict, conn: sqlite3.Connection | None = None) -> dict:
     """The detail response's `insert` object. Older pages ignore it."""
-    target = insert_target_detail(video)
-    return {
+    target = insert_target_detail(video, conn)
+    obj = {
         "share": target["share"],
         "original_rel": target["original_rel"],
         "preview_rel": target["preview_rel"],
         "edit_proxy_rel": target["edit_proxy_rel"],
-        "original_is_edit_weight": _is_edit_weight(video),
+        # proxy-tiers-3: "did the server manage to look?", not "is there
+        # one?". Optional on the wire - a companion that has never heard of
+        # it behaves exactly as before (CR-284G).
+        "known": target.get("known", True),
+        # proxy-tiers-3 (2026-09-18b mediums, owed to CR-302 by the
+        # companion-broll group): FORCED on the known=false path, and the one
+        # field in this object that is not the truth. `known` is read by
+        # companion 0.9.75 and later only; every build in the field today
+        # reads `original_is_edit_weight` alone, and a `false` there during an
+        # outage is what makes it plan a stand-in and write a ledger row that
+        # outlives the outage for ever. `true` forces PLAN_FETCH_ORIGINAL on
+        # 0.9.65..0.9.74 - fetch the file the editor asked for, which is the
+        # route 0.9.75 takes from `known` anyway, so nothing changes for a new
+        # build (it returns before the weight is consulted). The dashboard
+        # deploys first, so this is what protects the fleet in between. It
+        # stays scoped to this path: a `true` on the healthy path would
+        # suppress every stand-in.
+        "original_is_edit_weight": (
+            True if target.get("known") is False
+            else _is_edit_weight(video)),
         # `fps` is the stored float, not a rational: it is what the row holds,
         # and inventing "30000/1001" from 29.97 here would be this route
         # guessing at the camera's intent.
@@ -157,6 +308,20 @@ def _insert_object(video: dict) -> dict:
             "start_tc": video.get("start_tc"),
         },
     }
+    # overseer-1 (2026-09-18b): only while an original is genuinely on its way,
+    # and only when the server could LOOK (a `known: false` object judged
+    # nothing, and naming a path there would contradict it). ADDED, never
+    # substituted: `original_rel` is null in this window today, so a companion
+    # that ignores the flag simply gets the path it would have got once the
+    # upload finished, which is its ordinary stand-in path. The key is absent
+    # rather than false when nothing is pending, so nothing has to be taught
+    # to read it.
+    if obj["original_rel"] is None and obj["known"]:
+        pending = _pending_original(conn, video)
+        if pending:
+            obj["original_rel"] = pending
+            obj["original_pending"] = True
+    return obj
 
 
 @router.get("/search")
@@ -248,7 +413,7 @@ def get_video(video_id: int, conn: sqlite3.Connection = Depends(get_db)) -> dict
     # Additive, and older pages ignore it: a new dashboard in front of an old
     # page, or an old companion behind a new one, both behave exactly as they
     # did (plan section 7's deploy note).
-    video["insert"] = _insert_object(video)
+    video["insert"] = _insert_object(video, conn)
 
     return {
         "video": video,

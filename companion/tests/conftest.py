@@ -535,6 +535,32 @@ def rclone_binary() -> str:
     pytest.skip(message)
 
 
+def require_ffmpeg_or_skip(missing: str) -> None:
+    """Skip for a missing ffmpeg/ffprobe -- unless the caller insists.
+
+    tests-1 (2026-09-18), the rclone treatment for the other optional binary.
+    `test_jobs_media.py` gates TWENTY tests on `shutil.which`, and those
+    twenty are the only thing that holds `jobs_media.py`'s three Timeline
+    Cards recipes to `library_engine.py`'s ffmpeg argv VERBATIM (CLAUDE.md)
+    and to proxy_gen's `.partial` + atomic-rename rule. ffmpeg is installed
+    by exactly one CI step, scoped to the broll/indexer job on Linux, so on
+    both companion CI jobs and both release runners they reported as SKIPS -
+    and pytest exits 0 on a skip, so the argv could break and the build would
+    still be published.
+
+    Set CCSYNC_REQUIRE_FFMPEG=1 (both release scripts should, as they do for
+    rclone) to turn the skip into a hard failure.
+    """
+    if os.environ.get("CCSYNC_REQUIRE_FFMPEG") == "1":
+        pytest.fail(
+            f"{missing}\n\nCCSYNC_REQUIRE_FFMPEG=1 is set, so this is a failure "
+            "rather than a skip -- these tests run a real ffmpeg to prove the "
+            "media-job recipes byte for byte, and a release must not be cut "
+            "without them."
+        )
+    pytest.skip(missing)
+
+
 def make_timeline_item(
     file_path: str,
     clip_name: str | None = None,

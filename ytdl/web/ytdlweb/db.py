@@ -204,7 +204,21 @@ def term_scope_of(row_or_value):
 
 
 def _column(row, key):
-    """row[key] or None, for a row that may predate the column."""
+    """row[key], or None if this row does not carry the column at all.
+
+    Same defensive read shot_types_of makes, for the same two cases: a partial
+    SELECT, and a database the migration has not reached yet (in which case
+    there is no lease, which is the correct answer).
+
+    ytdl-web-7 (2026-09-18): there were TWO module-level definitions of this
+    name, at 206 and at 976, and the second shadowed the first for every caller
+    in the file including the fourteen readers written against it. They behaved
+    identically, so nothing was broken - but tightening either one would have
+    been a silent no-op for half the module. One definition, moved up to where
+    the first readers are.
+    """
+    if row is None:
+        return None
     try:
         return row[key]
     except (IndexError, KeyError, TypeError):
@@ -973,19 +987,6 @@ def _future(seconds):
             + timedelta(seconds=max(0, int(seconds)))).isoformat(timespec='seconds')
 
 
-def _column(row, key):
-    """row[key], or None if this row does not carry the column at all.
-
-    Same defensive read shot_types_of makes, for the same two cases: a partial
-    SELECT, and a database the migration has not reached yet (in which case
-    there is no lease, which is the correct answer).
-    """
-    if row is None:
-        return None
-    try:
-        return row[key]
-    except (IndexError, KeyError, TypeError):
-        return None
 
 
 def lease_active(job, at=None):
@@ -1637,6 +1638,22 @@ def selected_for_download(c, job_id):
 def pending_videos(c, job_id):
     return c.execute("SELECT * FROM job_videos WHERE job_id=? AND dl_state='pending' "
                      'ORDER BY id', (job_id,)).fetchall()
+
+
+def pending_download_count(c, job_id):
+    """How many of this job's rows are still `pending`.
+
+    ytdl-web-1 (2026-09-18b mediums): the SPA used to answer "is there anything
+    to retry" from the manifest it holds, and `poll()` deliberately never loads
+    a manifest for a FAILED job (nor does a page reloading onto one). A job the
+    download phase failed BEFORE its first clip - no room, or the tree gone -
+    therefore showed no retry button at all, which is the state its own last
+    sentence tells the editor to press one in. This count rides on the poll
+    response instead, so the offer survives a 404 manifest and a reload alike.
+    """
+    return c.execute("SELECT COUNT(*) FROM job_videos "
+                     "WHERE job_id=? AND dl_state='pending'",
+                     (job_id,)).fetchone()[0]
 
 
 def begin_download(c, job_id, video_id):

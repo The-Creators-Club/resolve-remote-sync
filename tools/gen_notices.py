@@ -65,6 +65,73 @@ COMPONENTS: list[tuple[str, Path, str]] = [
      "2026-08-17 -- its deps are in dashboard/deploy/requirements.txt"),
 ]
 
+# server-tools-1 (2026-09-18): the CONTAINER's own dependency list, which is
+# what a customer is actually conveyed and which no venv describes. It was
+# invisible here, so `psycopg2-binary` (LGPL) entered
+# dashboard/deploy/requirements.lock on 2026-08-31, was excused in
+# tools/license_allowlist.toml on the written promise that its notice lives in
+# THIRD_PARTY_NOTICES.md, and that file has never carried a psycopg2 row. A
+# lock is names and versions only: the licence is taken from whichever scanned
+# venv holds the same package, and a package no venv holds is reported as
+# unknown rather than as permissive, which is the safe direction for a
+# document whose purpose is finding copyleft.
+CONTAINER_LOCKS: list[tuple[str, Path, str]] = [
+    ("dashboard-container", REPO / "dashboard" / "deploy" / "requirements.lock",
+     "what the deployed dashboard image installs -- the artefact a customer "
+     "receives, not a developer venv"),
+]
+
+_LOCK_PIN = "=="
+
+
+def read_lock(path: Path) -> list[tuple[str, str]]:
+    """[(name, version)] from a hash-pinned requirements lock. [] if absent."""
+    out: list[tuple[str, str]] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("--"):
+            continue
+        if _LOCK_PIN not in line:
+            continue
+        name, _, rest = line.partition(_LOCK_PIN)
+        version = rest.split()[0].strip().rstrip("\\").strip()
+        if name.strip() and version:
+            out.append((name.strip(), version))
+    return sorted(set(out), key=lambda p: p[0].lower())
+
+
+def lock_rows(per_component: dict[str, list[dict]],
+              path: Path) -> list[dict]:
+    """Lock entries as package rows, with the licence borrowed from a venv.
+
+    `_licence_source` records WHERE the licence string came from, because a
+    lock pin and the venv's own copy are routinely different versions
+    (2.9.12 in the container, 2.9.13 here) and a reader must not be told the
+    container's version was inspected when it was not.
+    """
+    by_name: dict[str, dict] = {}
+    for packages in per_component.values():
+        for pkg in packages:
+            by_name.setdefault(str(pkg.get("Name", "")).lower(), pkg)
+    rows: list[dict] = []
+    for name, version in read_lock(path):
+        venv_pkg = by_name.get(name.lower())
+        rows.append({
+            "Name": name,
+            "Version": version,
+            "License": (venv_pkg or {}).get("License", "UNKNOWN"),
+            "URL": (venv_pkg or {}).get("URL", ""),
+            "_licence_source": (
+                f"a venv's {venv_pkg.get('Version')}" if venv_pkg
+                else "not installed anywhere on this machine"),
+        })
+    return rows
+
+
 # Substring match, upper-cased, against the metadata licence string. Anything
 # that hits this list needs a human to decide whether the way we ship it is
 # compliant -- it is not an assertion that it is not.
@@ -85,22 +152,32 @@ def run_piplicenses(python: Path) -> list[dict]:
     The module name is `piplicenses`, not `pip_licenses` and not the
     distribution name -- calling it wrong reads as "not installed" and sends
     this into a pointless reinstall loop.
+
+    server-tools-3 (2026-09-18b mediums): every read here is decoded as UTF-8
+    with `errors="replace"`, never by the console codec. `text=True` alone
+    decodes with `locale.getpreferredencoding(False)` -- cp1252 on the base
+    rig, whose 0x81/0x8D/0x8F/0x90/0x9D are undefined and are ordinary UTF-8
+    continuation bytes -- and `--with-license-file` pulls whole licence TEXTS
+    through this pipe, so one package with a CJK author or licence file killed
+    the only document that must exist before a build is conveyed.
     """
     argv = [
         str(python), "-m", "piplicenses",
         "--format=json", "--with-urls", "--with-license-file", "--no-license-path",
     ]
-    proc = subprocess.run(argv, capture_output=True, text=True)
+    proc = subprocess.run(argv, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         sys.stderr.write(f"  installing pip-licenses into {python.parent.parent}\n")
         install = subprocess.run(
             [str(python), "-m", "pip", "install", "--quiet", "pip-licenses"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         if install.returncode != 0:
             raise RuntimeError(
                 f"pip install pip-licenses failed: {install.stderr.strip()[:400]}")
-        proc = subprocess.run(argv, capture_output=True, text=True)
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
         if proc.returncode != 0:
             raise RuntimeError(f"pip-licenses failed: {proc.stderr.strip()[:400]}")
     return json.loads(proc.stdout)
@@ -122,7 +199,11 @@ def collect() -> tuple[dict[str, list[dict]], list[str]]:
         sys.stderr.write(f"  scanning {label} ({venv})\n")
         try:
             packages = run_piplicenses(python)
-        except (RuntimeError, json.JSONDecodeError) as exc:
+        # server-tools-3 (2026-09-18b mediums): ValueError, not the pair.
+        # json.JSONDecodeError is a ValueError, and so is the UnicodeDecodeError
+        # a byte the pipe's codec cannot map raises -- which used to escape
+        # main() as a traceback and leave the notices file unregenerable.
+        except (RuntimeError, ValueError) as exc:
             warnings.append(f"{label}: pip-licenses failed — {exc}")
             sys.stderr.write(f"WARNING: {label}: {exc}\n")
             continue
@@ -179,7 +260,14 @@ def esc(value: object) -> str:
 
 def render(per_component: dict[str, list[dict]], warnings: list[str],
            hand_block: str) -> str:
-    rows = merged(per_component)
+    # server-tools-1: the container lock's packages are part of the
+    # attention scan, not a footnote. They are what is conveyed.
+    container: dict[str, list[dict]] = {
+        label: lock_rows(per_component, path)
+        for label, path, _desc in CONTAINER_LOCKS
+    }
+    rows = merged({**per_component,
+                   **{k: v for k, v in container.items() if v}})
     flagged = attention(rows)
     lines: list[str] = []
     add = lines.append
@@ -205,7 +293,9 @@ def render(per_component: dict[str, list[dict]], warnings: list[str],
     add("     certainly NOT the correct contracting entity — confirm before use.")
     add("     TODO(legal): confirm which of these components are actually")
     add("     CONVEYED to a customer versus merely present in a developer venv;")
-    add("     the tables below are the venvs, not the shipped artefacts. -->")
+    add("     the venv tables below are the venvs. The dashboard-container")
+    add("     table IS the shipped artefact's own lock (server-tools-1,")
+    add("     2026-09-18), with its licences borrowed from a venv. -->")
     add("")
     add("# CC Sync — third-party notices")
     add("")
@@ -280,6 +370,26 @@ def render(per_component: dict[str, list[dict]], warnings: list[str],
         for pkg in packages:
             add(f"| `{esc(pkg.get('Name'))}` | {esc(pkg.get('Version'))} | "
                 f"{esc(pkg.get('License'))} | {esc(pkg.get('URL'))} |")
+        add("")
+
+    for label, path, desc in CONTAINER_LOCKS:
+        packages = container.get(label) or []
+        if not packages:
+            continue
+        add(f"### {label}")
+        add("")
+        add(f"{desc}. Lock: `{path.relative_to(REPO).as_posix()}` — "
+            f"{len(packages)} package(s). A lock carries no licence metadata, "
+            f"so each licence below is the one the same package's metadata "
+            f"declares in a developer venv on this machine; the version column "
+            f"is the CONTAINER's.")
+        add("")
+        add("| Package | Version (container) | Licence | Licence read from |")
+        add("|---|---|---|---|")
+        for pkg in packages:
+            add(f"| `{esc(pkg.get('Name'))}` | {esc(pkg.get('Version'))} | "
+                f"{esc(pkg.get('License'))} | "
+                f"{esc(pkg.get('_licence_source'))} |")
         add("")
 
     add("## All pip dependencies (merged)")

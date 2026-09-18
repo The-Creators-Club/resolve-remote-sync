@@ -828,6 +828,13 @@ def test_a_restart_request_left_by_a_DEAD_process_is_spent_not_honoured(world):
     raw["owner_pid"] = 999999
     raw["owner_nonce"] = "a-nonce-from-a-process-that-is-gone"
     dashboard_update._write_json(dashboard_update.update_state_path(settings), raw)
+    # dash-release-jobs-1 (2026-09-18b mediums): the restart intent now has a
+    # second carrier, an in-memory flag, so that a state write swallowed by a
+    # read-only /data cannot lose it. It belongs to THIS process, exactly like
+    # the nonce this test has just rewritten - a real new process starts with
+    # it empty - so modelling the dead owner means clearing it too. Without
+    # this line the test would be pretending to be two processes at once.
+    dashboard_update._restart_requested_nonce = ""
 
     state = dashboard_update.read_state(settings)
     assert state["in_progress"] is False

@@ -444,6 +444,9 @@ class TimelineCardsRole:
         self._seen: Optional[float] = None
         self._timeline = ""
         self._project = ""
+        # wire-3 / dash-cards-8 (2026-09-18): the sentence a 200 carried,
+        # when that 200 meant "I threw your push away". See _note_answer.
+        self._not_attached = ""
         # THE EVIDENCE report_block() JUDGES ON (RES-6). `_last_poll_at` is
         # any successful tunnel call, not only a `state` push: the pull loop
         # long-polls `pending` and a role whose push loop alone had died would
@@ -917,8 +920,49 @@ class TimelineCardsRole:
             self._note_call(int(status), message)
             raise CardsTunnelError(message)
         self._note_call(200, "")
+        if self._note_answer(parsed):
+            # wire-3 / dash-cards-8 (2026-09-18): a 200 that DISCARDED this
+            # push. `/cards/agent/{state,result}` answer 200 with
+            # `{"error": ...}` when the editor is in no episode -- deliberate,
+            # because a 4xx would put the loops into retry/backoff and
+            # re-create the hot loop CR-282H just fixed -- and this client
+            # judged health on the STATUS alone, so the tray, the role's
+            # health and the fleet grid all said "serving timeline X" while
+            # every sweep was being dropped on the floor. The transport IS
+            # healthy, so nothing here raises and `_last_poll_at` still
+            # moves; what changes is that the sentence reaches the log, the
+            # tray and the grid, and the discarded push does not get recorded
+            # as traffic served.
+            return parsed if isinstance(parsed, dict) else {}
         self._note_traffic(suffix, body, parsed)
         return parsed if isinstance(parsed, dict) else {}
+
+    def _note_answer(self, parsed: Any) -> bool:
+        """True when this 200 was a refusal in a success's clothing.
+
+        `error` and `note` are the two keys the tunnel uses for it; the poll
+        route's `{}` and a real answer carry neither. Logged once per change,
+        not once per call: the loops run every few seconds and a person who
+        has not opened an episode yet is not an incident.
+        """
+        sentence = ""
+        if isinstance(parsed, dict):
+            for key in ("error", "note"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    sentence = value.strip()[:300]
+                    break
+        with self._lock:
+            changed = sentence != self._not_attached
+            self._not_attached = sentence
+        if changed:
+            if sentence:
+                log.warning("cards: the dashboard is discarding this "
+                            "computer's pushes: %s", sentence)
+            else:
+                log.info("cards: the dashboard is taking this computer's "
+                         "pushes again")
+        return bool(sentence)
 
     def _note_call(self, status: Optional[int], error: str) -> None:
         """What the dashboard last said, and when it last said 200.
@@ -990,6 +1034,16 @@ class TimelineCardsRole:
                          "Timeline Cards loops")
         if gate_state != STATE_RUNNING:
             return HEALTH_STOPPED, gate_detail
+        with self._lock:
+            not_attached = self._not_attached
+        if not_attached:
+            # Still RUNNING, deliberately: the loops are alive and the
+            # dashboard is answering, which is what the word means and what
+            # the grid's colour is about. The DETAIL is the part that was
+            # missing (wire-3) -- without it the only honest description of
+            # this state, "pushing into nothing", reached no log line, no
+            # tray line and no fleet page.
+            return HEALTH_RUNNING, not_attached
         return HEALTH_RUNNING, gate_detail
 
     def status(self) -> dict[str, Any]:

@@ -55,6 +55,7 @@ import logging
 import struct
 import sys
 import threading
+from collections import deque
 from typing import Any, Callable, Optional
 
 log = logging.getLogger("ccsync.tray.native")
@@ -327,6 +328,29 @@ _NIM_ADD_RETRY_DELAY = 0.5
 # alone -- which is what the first version of this fix got wrong.
 _NIM_ADD_STARTUP_ATTEMPTS = 12
 _NIM_ADD_MAX_DELAY = 15.0
+# comp-ui-2 (2026-09-18): after a failed Explorer-restart re-add, the ONLY
+# recovery in the process used to be another TaskbarCreated broadcast, which
+# the branch's own comment says "may be never" -- so one late Explorer left
+# the editor with no icon, no menu, no Quit and every toast dropped for the
+# rest of the session, on a companion that went on syncing. The pump thread
+# is alive (that is the whole premise of fatal=False), so a WM_TIMER on the
+# tray window retries NIM_ADD once a minute, for ever: a successful add is
+# cheap and `_added` gates it. ONE attempt per tick, so the retry costs one
+# log line a minute rather than six, and no crash report (comp-ui-3).
+# comp-ui-1 (2026-09-18): how many toasts are held while the icon is not yet
+# registered. The FIRST registration backs off for up to 105 s (see
+# _NIM_ADD_STARTUP_ATTEMPTS) and run() does not enter the message pump until
+# it returns, so everything raised in that window - app.py's post-upgrade and
+# crash-loop-rollback sentences on their fixed 3 s timers, a fleet halt
+# arriving on the first report, a disk floor read at startup - was discarded
+# with one WARNING and no queue anywhere. Small and bounded: an editor who
+# comes back to a registered icon wants the last few sentences, not a minute
+# and a half of them, and the oldest is dropped first (still logged, which is
+# what the 2026-09-11 test asserts on).
+_PENDING_TOAST_MAX = 5
+_WM_TIMER = 0x0113
+_CCSYNC_READD_TIMER_ID = 1
+_NIM_READD_RETRY_MS = 60_000
 
 
 def _nim_add_delays(attempts: int,
@@ -666,6 +690,13 @@ class _Win32:
         u.DestroyIcon.restype = wintypes.BOOL
         u.GetSystemMetrics.argtypes = [ctypes.c_int]
         u.GetSystemMetrics.restype = ctypes.c_int
+        # UINT_PTR, which is pointer-sized: c_size_t, never wintypes.UINT
+        # (comp-ui-2, 2026-09-18).
+        u.SetTimer.argtypes = [wintypes.HWND, ctypes.c_size_t, wintypes.UINT,
+                               ctypes.c_void_p]
+        u.SetTimer.restype = ctypes.c_size_t
+        u.KillTimer.argtypes = [wintypes.HWND, ctypes.c_size_t]
+        u.KillTimer.restype = wintypes.BOOL
         self.kernel32.GetTickCount.argtypes = []
         self.kernel32.GetTickCount.restype = wintypes.DWORD
 
@@ -833,6 +864,13 @@ class _WindowsIcon:
         # Queue latency of the click being dispatched, stamped by _pump
         # just before DispatchMessageW and consumed by _show_menu (CR-70).
         self._click_queued_ms = 0
+        # comp-ui-2 (2026-09-18): is the once-a-minute re-add retry armed?
+        # Pump-thread state only.
+        self._readd_timer_armed = False
+        # comp-ui-1 (2026-09-18): toasts raised before the icon existed.
+        # Written from any thread (notify) and drained on the pump thread, so
+        # it is a deque with a maxlen rather than a list.
+        self._pending_toasts: deque = deque(maxlen=_PENDING_TOAST_MAX)
 
     # -- the properties tray.py assigns ------------------------------------
 
@@ -870,6 +908,15 @@ class _WindowsIcon:
         except Exception as exc:
             log.exception("the tray icon could not be created")
             self._announce_failure(str(exc) or exc.__class__.__name__)
+            # comp-ui-4 (2026-09-18): the happy path frees the window, its
+            # per-instance class and every cached HICON in _pump's finally;
+            # this arm returned with all of them held for the life of the
+            # process. BEFORE _stopped.set(), or a stop() waiter can return
+            # while the window is still alive.
+            try:
+                self._teardown()
+            except Exception:
+                log.debug("teardown after a failed registration failed", exc_info=True)
             self._stopped.set()
             return
         self._running.set()
@@ -959,9 +1006,18 @@ class _WindowsIcon:
             # breaker, a fleet halt, the free-space park, a sync drive pulled
             # mid-transfer -- and a machine that has stopped syncing with no
             # icon to say so needs the sentence somewhere a human can find it.
+            # comp-ui-1 (2026-09-18): ...and it is now HELD as well as
+            # logged, so the sentence arrives when the icon does instead of
+            # being lost for the sake of a registration that was still in
+            # progress. The log line is unchanged: a queue that evicts must
+            # still say what it dropped.
             log.warning("tray toast DROPPED, no icon is registered%s: %s",
                         f" ({self._register_error})" if self._register_error else "",
                         message)
+            try:
+                self._pending_toasts.append((str(message), title))
+            except Exception:
+                log.debug("could not hold the toast", exc_info=True)
             return
         self._modify(info=(fit_toast(message), str(title or self.name)[:60]))
 
@@ -1077,6 +1133,7 @@ class _WindowsIcon:
             if api.shell32.Shell_NotifyIconW(_NIM_ADD, ctypes.byref(data)):
                 self._added = True
                 self._register_error = ""
+                self._flush_pending_toasts()
                 return
             last = attempt + 1 >= attempts
             # comp-ui-1: at WARNING on EVERY attempt. This loop used to be
@@ -1093,6 +1150,26 @@ class _WindowsIcon:
         raise OSError(
             "Shell_NotifyIcon(NIM_ADD) failed after "
             f"{attempts} attempts (GetLastError={ctypes.get_last_error()})")
+
+    def _flush_pending_toasts(self) -> None:
+        """Show the toasts raised before the icon was registered (comp-ui-1).
+
+        Called on the success path of every _add_icon, which is the first
+        moment Shell_NotifyIcon will accept an NIM_MODIFY at all. Never
+        raises: a held sentence must not be able to fail the registration
+        that is delivering it."""
+        while True:
+            try:
+                message, title = self._pending_toasts.popleft()
+            except IndexError:
+                return
+            except Exception:
+                log.debug("could not read a held toast", exc_info=True)
+                return
+            try:
+                self._modify(info=(fit_toast(message), str(title or self.name)[:60]))
+            except Exception:
+                log.debug("a held toast could not be shown", exc_info=True)
 
     def _modify(self, icon: bool = False, tip: bool = False, info=None) -> None:
         import ctypes
@@ -1194,6 +1271,7 @@ class _WindowsIcon:
                 # the pump thread; every second slept here is a second of
                 # frozen tray.
                 self._add_icon()
+                self._cancel_readd_retry(hwnd)
             except Exception as exc:
                 log.warning("could not re-add the tray icon after an Explorer restart",
                             exc_info=True)
@@ -1210,6 +1288,13 @@ class _WindowsIcon:
                 self._announce_failure(
                     f"Explorer restarted and the icon could not be re-added: {exc}",
                     fatal=False)
+                # comp-ui-2 (2026-09-18): and keep trying, which is the half
+                # fatal=False did not have. Without this the session is
+                # headless until Explorer restarts again.
+                self._arm_readd_retry(hwnd)
+            return 0
+        if msg == _WM_TIMER and int(wparam) == _CCSYNC_READD_TIMER_ID:
+            self._retry_readd(hwnd)
             return 0
         return api.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
@@ -1339,8 +1424,58 @@ class _WindowsIcon:
         except Exception:
             log.exception("tray menu action %r failed", item.label())
 
+    def _arm_readd_retry(self, hwnd) -> None:
+        """Retry NIM_ADD once a minute until it works (comp-ui-2).
+
+        Pump thread only. Idempotent: SetTimer with the same id resets the
+        existing timer rather than making a second one."""
+        api = _Win32.get()
+        try:
+            if api.user32.SetTimer(hwnd, _CCSYNC_READD_TIMER_ID,
+                                   _NIM_READD_RETRY_MS, None):
+                self._readd_timer_armed = True
+                log.info("the tray icon will be re-added automatically, once a "
+                         "minute, until Explorer accepts it")
+            else:
+                log.warning("could not arm the tray icon re-add retry")
+        except Exception:
+            log.debug("arming the tray icon re-add retry failed", exc_info=True)
+
+    def _cancel_readd_retry(self, hwnd) -> None:
+        if not self._readd_timer_armed:
+            return
+        api = _Win32.get()
+        try:
+            api.user32.KillTimer(hwnd, _CCSYNC_READD_TIMER_ID)
+        except Exception:
+            log.debug("cancelling the tray icon re-add retry failed", exc_info=True)
+        self._readd_timer_armed = False
+
+    def _retry_readd(self, hwnd) -> None:
+        """One NIM_ADD attempt from the WM_TIMER (comp-ui-2).
+
+        ONE attempt, not the flat six: this runs on the pump thread, where
+        every slept second is a frozen tray, and the next tick is a minute
+        away anyway. No _announce_failure here -- a retry that fails is the
+        state we are already in, and announcing it once a minute would write
+        one TrayIconUnavailable crash file a minute (comp-ui-3)."""
+        if self._added:
+            self._cancel_readd_retry(hwnd)
+            return
+        try:
+            self._add_icon(attempts=1)
+        except Exception:
+            log.debug("the tray icon re-add retry did not take; trying again "
+                      "in a minute", exc_info=True)
+            return
+        log.info("the CCSync tray icon is back")
+        self._cancel_readd_retry(hwnd)
+
     def _teardown(self) -> None:
         api = _Win32.get()
+        # comp-ui-2: the retry timer dies with the window it is armed on.
+        if self._readd_timer_armed and self._hwnd is not None:
+            self._cancel_readd_retry(self._hwnd)
         try:
             self._remove_icon()
         except Exception:

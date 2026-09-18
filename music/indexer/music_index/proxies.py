@@ -50,11 +50,27 @@ BITRATE_TOLERANCE = 1.05
 
 
 def _ffprobe(path):
-    """Format + audio-stream facts, including bitrate. {} if unreadable."""
-    out = subprocess.run(
-        [config.FFPROBE, '-v', 'quiet', '-print_format', 'json',
-         '-show_format', '-show_streams', str(path)],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120)
+    """Format + audio-stream facts, including bitrate. {} if unreadable.
+
+    music-4 (2026-09-18): "{} if unreadable" was only true of a JSON parse
+    failure. `subprocess.run` itself still raised -- TimeoutExpired on a
+    truncated `.aac` whose probe hangs past 120 s, OSError on a vanished
+    binary -- and while every REAL-run caller sits inside build_all.one's
+    blanket `except Exception` (one FAILED row), the `--dry-run` estimate has
+    no guard at all and died with a traceback and no summary, several hundred
+    files in, over a library the real run completes.
+    """
+    try:
+        out = subprocess.run(
+            [config.FFPROBE, '-v', 'quiet', '-print_format', 'json',
+             '-show_format', '-show_streams', str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        # The real run's behaviour is unchanged in KIND: build_track raises
+        # its own "no decodable audio stream" instead of propagating
+        # TimeoutExpired, so the row is FAILED either way with a better
+        # message.
+        return {}
     try:
         j = json.loads(out.stdout.decode('utf-8', errors='replace'))
     except ValueError:
@@ -118,10 +134,17 @@ def decoded_duration(path):
     Cheap enough to use as a tie-breaker: a full decode of a 4-minute track
     runs at over 1000x realtime (~0.1 s) because nothing is being encoded.
     """
-    r = subprocess.run(
-        [config.FFMPEG, '-v', 'error', '-stats', '-nostdin', '-i', str(path),
-         '-f', 'null', '-'],
-        capture_output=True, timeout=900)
+    try:
+        r = subprocess.run(
+            [config.FFMPEG, '-v', 'error', '-stats', '-nostdin', '-i', str(path),
+             '-f', 'null', '-'],
+            capture_output=True, timeout=900)
+    except (OSError, subprocess.SubprocessError):
+        # music-4 (2026-09-18): the identical unguarded shape, and this one is
+        # a FULL DECODE with a 900 s timeout. 0.0 is what this function
+        # already answers for "no time line in the output", i.e. "no second
+        # opinion", which every caller handles.
+        return 0.0
     last = None
     for last in _TIME_RE.finditer(r.stderr):
         pass

@@ -508,7 +508,10 @@ def machine_facts(
         "mode": (row["mode"] if row is not None else None) or "editor",
         "halt_active": bool(row["halt_active"]) if row is not None else False,
         "breaker_tripped": bool(row["breaker_tripped"]) if row is not None else False,
-        "upgrading": bool(upgrade),
+        # Same rule as fleet_facts' `upgrading` set, and commented there
+        # (CR-306): a push this dashboard has decided it cannot send is not an
+        # upgrade about to happen, and an undecided one is.
+        "upgrading": bool(upgrade) and not (upgrade or {}).get("withheld"),
         "live_jobs": db.machine_live_jobs(conn, editor, machine),
         "fleet_halt": bool(db.get_fleet_halt(conn)["active"]),
         "cooldown_until": (str(row["jobs_cooldown_until"] or "")
@@ -618,12 +621,26 @@ def fleet_facts(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any
     """
     caps_map = db.fetch_capabilities_map(conn)
     halted = bool(db.get_fleet_halt(conn)["active"])
+    # CR-306 (dash-api-3, 2026-09-18b): a standing push is "upgrading" only
+    # while this dashboard has NOT decided it cannot be sent. The report
+    # handler writes `update_requested_withheld` when the build a push names
+    # is not being offered to that machine (retracted, needs a newer
+    # dashboard, wrong processor) and leaves the request standing, because the
+    # build may become offerable again - but `policy()` refuses EVERY job kind
+    # to a machine that is upgrading, so a push that could never be delivered
+    # cost that computer the whole whisper/proxy/audio-extract/peaks fleet for
+    # the 14 days until the request expired. An UNDECIDED row (NULL or '') is
+    # still upgrading: fail CLOSED, because the upgrade the refusal protects a
+    # job from may really be about to happen. Only the explicit "this push
+    # cannot be sent" verdict lifts it. `machine_facts` below reads the same
+    # column through `db.machine_update_request`, and the two must not drift.
     upgrading = {
         (row["editor_username"], row["machine"])
         for row in conn.execute(
             "SELECT editor_username, machine FROM machines "
             " WHERE update_requested_version IS NOT NULL "
-            "   AND update_requested_version != ''")
+            "   AND update_requested_version != '' "
+            "   AND COALESCE(update_requested_withheld, '') = ''")
     }
     live: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in conn.execute(

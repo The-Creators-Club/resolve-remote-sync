@@ -70,6 +70,14 @@ jobs:
     # working around; a job-level env is visible to both.
     env:
       PFX_B64: ${{ secrets.CCSYNC_SIGN_PFX_BASE64 }}
+      # tests-1 (2026-09-18), the rclone treatment for the other optional
+      # binary: release.ps1 runs the companion suite, and without a real
+      # ffmpeg the twenty media-job tests that hold jobs_media.py's recipes
+      # to library_engine.py's argv verbatim report as SKIPS -- which pytest
+      # exits 0 on, so a broken recipe would be published. The step below
+      # installs it; this turns "installed it and it still is not there"
+      # from a silent skip into a failed release.
+      CCSYNC_REQUIRE_FFMPEG: "1"
     steps:
       # Full history: release.ps1 stamps the manifest with the commit, and a
       # shallow checkout makes that describe the wrong thing.
@@ -176,6 +184,18 @@ jobs:
       # indistinguishable in the run summary from one that had nothing to do,
       # which is how a whole signing route stayed dead. Either way this prints
       # what it decided into the run summary.
+      # See CCSYNC_REQUIRE_FFMPEG above. Hard failure, like the rclone step:
+      # a release runner that cannot get ffmpeg cannot run the coverage this
+      # build is being cut on.
+      - name: install ffmpeg (the companion media-job tests require a real one)
+        run: |
+          if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
+            Write-Host "ffmpeg is already on PATH"
+          } else {
+            choco install ffmpeg --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "could not install ffmpeg" }
+          }
+
       - name: materialise the signing certificate
         shell: pwsh
         run: |

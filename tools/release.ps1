@@ -633,11 +633,33 @@ else {
     # companion/tests/conftest.py::rclone_binary).
     $prevRequireRclone = $env:CCSYNC_REQUIRE_RCLONE
     $env:CCSYNC_REQUIRE_RCLONE = "1"
+    # ...and the same for ffmpeg (tests-1, 2026-09-18). Twenty media-job tests
+    # -- the three Timeline Cards recipes, whose ffmpeg argv another repo's
+    # page reads byte for byte, plus proxy_gen's .partial + atomic-rename rule
+    # -- skipped silently on every release runner, and pytest exits 0 on a
+    # skip, so the argv could break and the build would still be published.
+    #
+    # GUARDED, unlike rclone's: ffmpeg is not a prerequisite of this script
+    # the way rclone is of the lane tests, and a local release cut on a rig
+    # that has no ffmpeg must not start failing for that reason alone. Where
+    # there IS one, the tests are a hard requirement; where there is not, the
+    # run says so in the log rather than leaving a silent hole nobody reads.
+    $prevRequireFfmpeg = $env:CCSYNC_REQUIRE_FFMPEG
+    $ffmpegOnPath = [bool](Get-Command ffmpeg -ErrorAction SilentlyContinue)
+    if ($ffmpegOnPath) {
+        $env:CCSYNC_REQUIRE_FFMPEG = "1"
+        Write-Step "ffmpeg is on PATH: the media-job tests are a hard requirement for this cut"
+    }
+    else {
+        Write-Warn2 "no ffmpeg on PATH: the media-job tests will SKIP, and this build is cut without them. CI's release runners install one."
+    }
     try {
         foreach ($s in $suites) {
             $py = Get-VenvPython -ProjectDir $s.Dir -Label $s.Name
             if ($DryRun) {
-                Write-Step "[dry-run] would run: $py -m pytest -q   (in $($s.Dir), CCSYNC_REQUIRE_RCLONE=1)"
+                $requires = if ($ffmpegOnPath) { "CCSYNC_REQUIRE_RCLONE=1, CCSYNC_REQUIRE_FFMPEG=1" }
+                            else { "CCSYNC_REQUIRE_RCLONE=1 (no ffmpeg on PATH)" }
+                Write-Step "[dry-run] would run: $py -m pytest -q   (in $($s.Dir), $requires)"
                 continue
             }
             Write-Step "running $($s.Name) tests..."
@@ -652,6 +674,7 @@ else {
     }
     finally {
         $env:CCSYNC_REQUIRE_RCLONE = $prevRequireRclone
+        $env:CCSYNC_REQUIRE_FFMPEG = $prevRequireFfmpeg
     }
 }
 

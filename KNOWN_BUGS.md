@@ -24450,6 +24450,5569 @@ preview-to-editing-proxy swap on a clip already in a timeline), `SPEC.md`'s
 older 540p wording, and R17's nine Energy Transition previews, whose paths
 were not recoverable from the rotated log.
 
+## CR-282 - the ninth hunt's ten highs: a deletion that came back, a refresh that never ran, and a handler that blocked the loop - FIXED in repo 2026-09-18 (companion 0.9.75, dashboard 0.7.50), unshipped
+
+The ten HIGH findings of `docs/bug-hunt-2026-09-18.md`, fixed in the order
+that document gives them, by one builder, against `214869b`. Six of the ten
+are in code the whole fleet took on 2026-09-17 (companion 0.9.74 / dashboard
+0.7.49); three are in the hand-moves feature (CR-268); one is the CI red that
+blocks the vendor feed. Every fix carries a regression test that fails on the
+unfixed source.
+
+### CR-282A (comp-sync-1 = dash-api-1) - lane B put a deleted file back at the path it had just trashed it from, every pass, and hid the event from the breaker - FIXED (sync/rclone_lane.py, sync/server_locate.py, dashboard/locate.py)
+
+CR-268b's `_relocate_trashed` read "the server's inventory holds exactly one
+place for this (basename, size)" as "it was moved there", and never asked
+whether that place was the path this pass had just trashed the file FROM.
+`nas_media` is the last COMPLETED walk, so for the whole staleness window a
+file genuinely deleted on the NAS is still listed at its old path - and when
+a walk keeps collapsing it is listed there for ever, because DASH-5's
+refusal deliberately keeps the old rows and never advances `tree_sig`. The
+companion rebuilt exactly the path rclone had just emptied and renamed the
+file back into it; the next pass trashed it again. The deletion never landed,
+and because every restore counted as a relocation that
+`LaneBBreaker._discount_relocations` subtracts, a NAS folder wiped by
+accident raised nothing at all. `docs/HAND_MOVES_ON_THE_SERVER.md` §4a says
+"found ELSEWHERE"; the code did not implement the word.
+
+Both ends are fixed. The companion resolves every candidate place to a local
+path and drops any that equals the path the file came out of (NFC-folded and
+normcased - `_is_same_local_path`, `_trashed_from`); a file whose only place
+is its own old path is a deletion again, is not added to
+`_server_relocated_keys`, and so is counted by the breaker. A place that is
+the old path BESIDE a real new one is dropped rather than read as ambiguity,
+so a walk that caught the copy but not the delete still follows the move. The
+dashboard excludes projects whose `nas_inventory_state.last_error` is
+non-empty from the locate join and names them in a new `unreadable` key, so
+the asking machine can log "the server could not tell for N project(s)".
+Only `last_error` is tested, never the age of `walked_at`: a project whose
+`tree_sig` has not changed is legitimately not re-walked, and an age test
+would exclude healthy projects and turn every hand move back into a deletion.
+
+Tests: `companion/tests/test_rclone_lane.py` (three cases: the own-path
+answer, the old path beside a real new one, a differently spelled own path),
+`companion/tests/test_bug_hunt_2026_09_18_companion.py` (the `unreadable`
+key parsed, and ignored when the dashboard does not send it),
+`dashboard/tests/test_locate.py` (a refused walk is not a destination, a
+healthy project is unaffected, a readable project still answers beside an
+unreadable one).
+
+### CR-282B (res-companion-2) - a move lane B had already followed left Resolve pointing at the old path, and the command that followed said "nothing at the old path" - FIXED (file_moves.py, sync/rclone_lane.py, app.py)
+
+Lane B renames the local copy itself on the server's locate answer, minutes
+before the dashboard's own detection delivers the same move as a `file_moves`
+command. `apply_move` then found the source gone, its resume branch needed an
+intent row lane B had never written, and it answered `ok` with `paths=None` -
+so `app.py` skipped `_relink_moved_result` entirely and recorded the move as
+done. Every clip under a hand-moved folder was Media Offline in that editor's
+Resolve while the MOVES history said the machine had followed, and after the
+follow `expected_proxy_paths(<old original path>)` no longer finds the proxy,
+so the 120 s relink pass could not heal it either.
+
+Lane B cannot write an intent row (the move has no id yet - the dashboard
+mints it later), so it writes what it does know: `FileMoveLedger`
+`record_relocation(old_local, new_local)`, in the same ledger file, aged out
+after a day and capped at 500 entries. `apply_move` accepts that as the
+evidence its resume branch needs and answers with the pair of paths, so the
+relink runs. Both halves of the note are checked: a machine that merely
+DOWNLOADED the file at the new path wrote no note and still answers "nothing
+at the old path on this machine", which is what keeps every machine that
+syncs the destination from claiming it made the move. Lane B relocates
+`**/Proxy/**` only, so this covers exactly what lane B moves.
+
+Test: `companion/tests/test_bug_hunt_2026_09_18_companion.py` - the real lane
+B follows a move through a real `ServerLocator` answer, and the real
+`apply_move` is then handed the same ledger object the companion wires to
+both.
+
+### CR-282C (comp-broll-tiers-1 = res-companion-1) - a stand-in whose download finished after the page stopped polling was never ledgered - FIXED (broll_server.py)
+
+`fetch_standin` writes the 1080p preview to the ORIGINAL's local path with an
+asynchronous rclone job on a daemon thread with no callback, and the ledger
+row was written only by the request that observed `state == "done"`. Close
+the tab, background it, restart the companion or simply switch to Resolve
+after the "syncing 40%" toast, and the preview's bytes land under a 6K name
+with no ledger entry at all: the next Send to Resolve takes the
+import-original path, `broll_fetch` calls the original present for ever, the
+relink pass never learns the geometry is the stand-in's, and a render on that
+machine renders 1080p H.264 under a 6K name.
+
+The intent row is now written BEFORE the fetch starts, with no size (a
+non-int size reads as "still a stand-in", the conservative direction, and the
+real original arriving later falsifies the row) and with `upgrade=None`, so
+the background upgrade lane cannot start fetching an editing proxy for a
+stand-in that is still downloading. The done branch rewrites the row with the
+real size and the upgrade state; a refused fetch, and a file that vanished
+between "done" and the import, retire it with `forget()` rather than leaving
+a row for a file that never arrived.
+
+Tests: `companion/tests/test_broll_insert_tiers.py` - the assertion that
+pinned the defect (`assert broll_standins.all() == []` on the downloading
+path) is inverted, and a new test lands the bytes after the page has stopped
+polling and asserts the ledger knows.
+
+### CR-282D (comp-resolve-1) - the stand-in geometry refresh never ran, and reported success every 120 s - FIXED (resolve_bridge.py, proxy_relink.py)
+
+Phase 3's one mechanism is `ReplaceClip(<the same path>)`, the only call that
+makes Resolve re-read a file that changed underneath a clip. `apply_relinks`
+called `resolve_bridge.replace_clip`, which short-circuits with "Already
+linked" whenever the requested path equals the clip's own - which for a
+refresh is always. Nothing was ever re-read, `refreshed += 1` and an INFO
+line said it had been, and the same op was planned again on every pass, each
+one spending one of the 8 `allow_automatic` grants a day, so genuine proxy
+relinks were rate-limited out for the rest of the day.
+
+`replace_clip` grows `force=False`. A forced call skips the short-circuit and
+really calls ReplaceClip; success is a GEOMETRY change (`Frames` /
+`Resolution` re-read), never the File Path, which is vacuously equal to what
+was asked for - so a forced call whose ReplaceClip raised every time reports
+failure, not success. It takes no save point and writes no undo-journal
+entry: old_path == new_path, so the journal's inverse edit is this same call
+again, and a SaveProject + ExportProject on every 120 s pass is part of the
+cost the finding is about. The answer carries `changed` beside `ok`: a
+refresh Resolve took that moved nothing is not a failure and not a refresh,
+and `apply_relinks` remembers that verdict (CR-282E's memory) instead of
+re-planning the op for ever. Every other caller of `replace_clip`
+(fixer, popup, file moves, music worker) keeps the short-circuit unchanged.
+
+Tests: `companion/tests/test_bug_hunt_2026_09_18_companion.py` - the REAL
+`replace_clip` against a fake media pool item (ReplaceClip called, geometry
+success, the all-raised case refused, the no-change case reported), plus
+`apply_relinks` asking for `force=True` and not counting a no-change refresh.
+
+### CR-282E (comp-resolve-2 = res-companion-3) - the geometry check ffprobed every archive clip, whole file, every 120 s - FIXED (proxy_relink.py, app.py)
+
+`_geometry_disagrees` ran `ffprobe -count_packets` - a full demux, 60 s
+timeout, serial, on the media-tree thread - against every in-tree archive
+clip whose original was present and was not a ledgered stand-in, cached per
+pass only. On the wired rig the archive IS the pool and every original IS
+present: fifty 2 GB clips is about 100 GB read off the SMB share every two
+minutes, competing with lanes A and B for the same link, and the lane
+watchdog restarts the thread mid-probe, so neither the library walk nor the
+relink ever completes. The rate limiter cannot bound it: `allow_automatic` is
+consulted only after `if not ops: return`.
+
+The cheap questions are asked first, in order: a verdict already reached about
+these exact bytes; the stand-in ledger's `is_stale` (which nothing called),
+free and conclusive when it answers; a HEADER-only estimate (`probe_video`,
+duration x fps, one open) which settles the clear-cut case; and only then the
+exact packet count. Every answer is remembered per (file, mtime, size, the
+frame count the CLIP believes), in process, so an agreeing clip is never
+asked twice and a file whose bytes change - the event this feature exists to
+notice - is asked again at once. The ledger is a short-circuit and never the
+test, because on the wired rig it is empty by construction
+(proxy-tiers-4). While a probe run IS needed the media-tree heartbeat is
+stamped per clip (`on_probe` -> `_stamp_media_tree_heartbeat`), so a slow
+serial probe run no longer reads as a wedged thread to LaneWatchdog.
+
+Tests: `companion/tests/test_bug_hunt_2026_09_18_companion.py` (probed once
+over five passes, asked again when the bytes change, the header answer
+skipping the demux, a disagreeing header still paying for the count, the
+ledger answering free of charge, the heartbeat stamped around the probe) and
+an autouse reset in `companion/tests/test_proxy_relink_standins.py`, which
+uses one path and one fake stat throughout.
+
+### CR-282F (dash-api-2 = dash-db-3 = dash-core-2) - the database-busy handler did a blocking 5 s write on the event loop, under the contention it was reporting - FIXED (dashboard/app.py)
+
+`unhandled_error` is `async def`, so on a `--workers 1` container its body
+runs ON the event loop - and the branch that gets there most is the one whose
+precondition is that somebody has held the write lock longer than the busy
+timeout already. Opening a second connection there and writing through it
+blocked the whole loop for another busy timeout (5.4 s measured against a
+held `BEGIN IMMEDIATE`) and then raised `database is locked` itself,
+swallowed: every companion report and every htmx poll stalled behind the
+handler, and the `db_busy` notice the 2026-09-17 rework exists to write was
+precisely the one that never got written.
+
+Both branches now record through one helper that runs in the threadpool and
+opens its connection with a 250 ms busy timeout instead of 5 s. Losing a
+notice to contention is the point of the short timeout, and it is logged. The
+503 answer itself never waits on the database.
+
+Tests: `dashboard/tests/test_bug_hunt_2026_09_18_dashboard.py` - the record
+runs on a different thread from the `async` route that raised (both
+branches), and with a real `BEGIN IMMEDIATE` held the 503 comes back in well
+under the busy timeout.
+
+### CR-282G (res-fleet-1) - the pinned-job executor was never started, and jobs were still pinned into a queue nothing drains - FIXED (dashboard/app.py, cards_exec.py, alerts.py)
+
+`PinnedExecutor.start()` was correctly un-gated for the lazily built engine
+pool, but its caller still read `if executor.available():`, which at boot asks
+a pool with no engines and gets None. The thread was never created and
+`release_pinned_jobs()` never ran - while `jobs.can_pin` asks the same object
+later, after an editor has opened an episode, and answers true. A spent
+`proxy-480p` job went `pinned` with no worker, was not `abandoned`, and
+DDIAG-6 could not see it: its two shapes need "not mounted" or a non-empty
+`claimed_machine`. The boot log line said "fleet jobs are never pinned here:
+Timeline Cards is not mounted", which was untrue.
+
+The release and the start are now gated on the MOUNT
+(`app.state.cards_mounted`), not on `available()`; `start()` is already safe
+with no engine, because its loop returns at once per tick. `why_not()`
+distinguishes "no episode is open yet" from "not mounted", so the boot line
+is true. `cards_exec.is_running()` is a module-level fact (the
+`mount_status` pattern, because the check runs on the collector thread with
+no app object) and DDIAG-6 has a third shape: pinned rows, Cards mounted, no
+drain thread in this container.
+
+Tests: `dashboard/tests/test_bug_hunt_2026_09_18_dashboard.py` - the lifespan
+is driven with a mounted Cards whose pool has no engine and the executor must
+start (and the flag must come down on shutdown), the boot sentence, and the
+new DDIAG-6 finding appearing and clearing.
+
+### CR-282H (dash-cards-1) - an agent whose editor is in no episode long-polled in a hot loop - FIXED (cards_tunnel.py)
+
+Phase 1a made `/cards/agent/pending` answer a note IMMEDIATELY when `_routed`
+finds no engine for that editor. The companion's `pull_loop` has no sleep of
+its own on a 200 - its pacing was always this route's 25 s hold - so every
+machine with the cards role on issued that GET continuously, from every
+container restart until somebody opened an episode, each request a token
+lookup plus an identity verify plus a barred-account query on a single-worker
+dashboard. Before the engine pool this path raised and the loop's own backoff
+caught it; the pool turned the exception into a 200.
+
+The refusal now honours `wait`: an interruptible poll (half-second steps) on
+a route that stays a blocking `def`, so it is one threadpool worker asleep
+rather than the event loop. An episode opened mid-hold attaches the agent
+within a step, and the engine is then asked for what is LEFT of the wait, not
+for a second full one - the companion's read timeout is the wait plus its own
+margin. Dashboard-only: the answer's shape is unchanged, so no companion
+needs republishing. `dash-cards-8` (the honest-signal half) is untouched.
+
+Tests: `dashboard/tests/test_bug_hunt_2026_09_18_dashboard.py`, with an
+injected clock so the 25 s hold costs the suite nothing: the full hold, the
+early wake with the remaining wait passed on, and `wait=0` answering at once.
+
+### CR-282I (wire-1) - a non-409 refusal of `/items/{uid}/uploaded` wedged the item in `uploading` for ever - FIXED (broll_ingest.py)
+
+`_pump_uploads` handled 200 and 409 and logged everything else. The item kept
+`uploading` with every rel landed, so the next pump recomputed `missing = []`
+and posted the identical body again, with no attempt counter and no ceiling,
+while the batch lease was heartbeated and this machine 409ed every later drop
+on it. This week the server grew the first non-409 refusals of that route
+(`400 wrong_edit_proxy`, `400 outside_root`), whose own comments say no retry
+can make them right, and the companion had no reader for either.
+
+A 4xx is now terminal: the item fails with the server's own sentence
+(`_detail_of`, or the new `_reason_of`) and releases its share of the batch.
+Anything else - a 5xx, a connection-level refusal - is a counted attempt on
+the 409 branch's `upload_attempts` and `MAX_UPLOAD_ATTEMPTS`, so a server
+that is down for an hour costs a retry and a server that is broken ends the
+item instead of wedging it. `wire-2` is deliberately not fixed here, and the
+5xx path is what keeps a busy-database 500 or 503 retryable, so fixing it
+later moves no loss.
+
+Tests: `companion/tests/test_bug_hunt_2026_09_18_companion.py` drives the
+REAL pump with the server's own refusal body; `broll/web/tests/test_fleet_
+ingest.py` gained one assertion pinning the sentence beside the reason, so
+the two ends of the wire cannot drift.
+
+### CR-282J (ytdl-web-1) - the ytdl/web suite was red from today on a hard-coded date, and red CI blocks the vendor feed - FIXED (ytdl/web/tests/test_api.py)
+
+`test_health_reports_how_old_the_running_yt_dlp_is` monkeypatched the running
+yt-dlp to the literal `2026.08.27` and asserted it was not stale against a
+21-day limit computed from `date.today()`. It held until 2026-09-17 and
+failed from 2026-09-18 for ever. The `ytdl/web -- pytest` CI step has no
+`continue-on-error` and `tools/publish_latest.py` publishes only the newest
+GREEN run on `main`, so the vendor feed could not take any commit made after
+2026-09-17. Both versions are now derived from the clock (`today - 1 day`,
+`today - (YTDLP_MAX_AGE_DAYS + 1)`), so the test pins the rule and cannot rot
+in either direction if the limit is changed.
+
+Swept the rest of the tree for the same shape: no other test compares a
+literal date against `date.today()` / `datetime.now()`. The other literal
+yt-dlp versions in `ytdl/web/tests` are compared against the configured
+fleet FLOOR, which only a deliberate change moves.
+
+### Verification
+
+- companion/tests/test_rclone_lane.py::test_the_only_place_is_the_path_it_was_trashed_from_so_it_stays_deleted -> fails at 214869b, passes now
+- companion/tests/test_rclone_lane.py::test_the_old_path_beside_a_real_new_one_still_follows_the_move -> fails at 214869b, passes now
+- companion/tests/test_rclone_lane.py::test_a_differently_spelled_own_path_is_still_the_own_path -> fails at 214869b, passes now
+- companion/tests/test_rclone_lane.py::test_the_projects_the_server_could_not_read_are_carried_and_logged -> fails at 214869b, passes now
+- dashboard/tests/test_locate.py::test_a_project_whose_walk_was_refused_is_not_a_destination -> fails at 214869b, passes now
+- dashboard/tests/test_locate.py::test_a_readable_project_still_answers_beside_an_unreadable_one -> fails at 214869b, passes now
+- companion/tests/test_bug_hunt_2026_09_18_companion.py::test_the_move_command_after_lane_b_followed_it_still_relinks_resolve -> fails at 214869b, passes now
+- companion/tests/test_broll_insert_tiers.py::test_a_download_in_flight_answers_the_page_the_shape_it_understands -> fails at 214869b (it pinned the defect), passes now
+- companion/tests/test_broll_insert_tiers.py::test_a_download_that_finishes_after_the_page_gave_up_is_still_ledgered -> fails at 214869b, passes now
+- companion/tests/test_bug_hunt_2026_09_18_companion.py::test_the_refresh_really_calls_replace_clip_on_the_clips_own_path -> fails at 214869b (no `force`, and ReplaceClip is never called), passes now
+- companion/tests/test_bug_hunt_2026_09_18_companion.py::test_a_clip_that_agrees_is_probed_once_and_never_again -> fails at 214869b (five probes), passes now
+- dashboard/tests/test_bug_hunt_2026_09_18_dashboard.py::test_the_busy_notice_is_written_off_the_event_loop -> fails at 214869b, passes now
+- dashboard/tests/test_bug_hunt_2026_09_18_dashboard.py::test_a_held_write_lock_does_not_make_the_503_wait_for_it -> fails at 214869b (waits the full busy timeout), passes now
+- dashboard/tests/test_bug_hunt_2026_09_18_dashboard.py::test_the_pinned_executor_starts_even_though_no_episode_is_open -> fails at 214869b, passes now
+- dashboard/tests/test_bug_hunt_2026_09_18_dashboard.py::test_a_pinned_job_with_no_worker_running_is_a_finding -> fails at 214869b, passes now
+- dashboard/tests/test_bug_hunt_2026_09_18_dashboard.py::test_an_agent_in_no_episode_is_held_for_the_wait_it_asked_for -> fails at 214869b, passes now
+- companion/tests/test_bug_hunt_2026_09_18_companion.py::test_a_refusal_no_retry_can_fix_ends_the_item_and_says_why -> fails at 214869b (the item stays `uploading` for ever), passes now
+- ytdl/web/tests/test_api.py::test_health_reports_how_old_the_running_yt_dlp_is -> fails at 214869b from 2026-09-18 onwards, passes now and on every later day
+
+### Deploy order
+
+- **The dashboard first, then the companions** (CR-282A). The dashboard's
+  half of the locate wire is additive (`unreadable`) and a 0.9.74 companion
+  ignores it; the companion's own-path exclusion works against a 0.7.49
+  dashboard. Neither end needs the other, but the dashboard's exclusion is
+  the half that stops the resurrection fleet-wide in one deploy, including
+  for machines that have not upgraded.
+- CR-282F, CR-282G, CR-282H are dashboard-only and need no companion
+  release. CR-282H deliberately changes no answer shape.
+- CR-282B, CR-282C, CR-282D, CR-282E, CR-282I are companion-only.
+  CR-282I reads a refusal the server already sends today, so no server
+  deploy is owed with it.
+- CR-282J is CI only, and it must land before any commit can reach the
+  vendor feed.
+
+### Owner decisions
+
+- **CR-282A: `last_error` only, not the age of `walked_at`.** The brief
+  allowed excluding stale walks too. The verifier's caution is the reason it
+  was not done: a project whose `tree_sig` is unchanged is legitimately not
+  re-walked, so an age test alone would exclude healthy projects and turn
+  every hand move back into a deletion. If the owner wants the age test as
+  well, it needs its own signal (last ATTEMPT, not last successful walk).
+- **CR-282B: the evidence is a note lane B writes, not "src gone and dest
+  present".** The verifier suggested accepting the bare filesystem shape.
+  That would make every machine which syncs the DESTINATION project - and
+  which merely downloaded the file there - answer "I moved it" and run a
+  relink for a path it never held. The note costs one line in the ledger
+  file and says who actually moved what.
+- **CR-282D: a forced refresh writes no undo-journal entry and takes no save
+  point.** An entry whose old_path equals its new_path undoes nothing, and
+  the save point is a SaveProject plus an ExportProject on a pass that runs
+  every 120 s. If the owner wants a record of refreshes, it should be its own
+  journal kind rather than a replace-clip entry that cannot be replayed.
+- **CR-282E: the probe memory is in process, not on disk**, following
+  `_REFUSALS`' own reasoning in the same module ("a blacklist persisted to
+  disk turns one bad night into a permanent refusal"). A restart re-asks
+  every clip once.
+- **CR-282I: a 4xx fails the item, and the editor sees the server's own
+  sentence.** The alternative (park it for a human) has no UI to park it in
+  today, and a wedged batch is what the finding is about.
+
+## CR-283 - the ninth hunt's companion-core mediums and lows - FIXED in repo 2026-09-18 (companion 0.9.75, unshipped)
+
+Second wave of the 2026-09-18 fix pass, `companion-core` group: the sync
+lanes' own files, the tray and its Windows icon, the supervisor, the upgrade
+client, the stills helper and `app.py`'s watchdog/guard halves, plus the three
+items the LIVE dashboard put on this group (`hunters/live.md`) and live-5,
+added by the owner mid-pass, and the two halves owed IN by companion-media
+(CR-283W and CR-283X). Eighteen assigned findings, four live items and two
+owed-in halves, plus res-fleet-3 (the one medium left with no disposition
+anywhere): twenty-four fixed, one declined with a reason (comp-app-4),
+one half of CR-279 declined as the design decision its own ledger entry says
+it is.
+
+### CR-283A (comp-sync-2) - CR-278's path-missing heal never ran on the machine its docstring describes - FIXED (companion/src/ccsync_companion/sync/syncthing_lane.py)
+
+`_heal_missing_paths` is documented as covering "every configured folder, not
+just the selection: the shared asset libraries (assets-luts on leso's Mac) sit
+in the same error and no selection names them" - and its single call site sat
+several branches BELOW `if not expected: return`, where `expected` is the
+ticked full-mode PROJECT slugs. So the one machine the heal was written for -
+an editor between projects whose only path-missing folder is a shared asset
+library - could never run it, and neither could a machine whose selection
+fetch had not landed yet after a restart. The `/rest/config` read and the heal
+now happen once, above the no-selection return, and the folder verdict below
+reuses that same read (no extra GET). A config read that fails is carried down
+to the verdict, which is where a failure is allowed to become a lane error:
+the no-selection branch still answers "no project folders to check yet" rather
+than turning into an error on a machine that has nothing ticked.
+
+### CR-283B (comp-ui-2) - a failed Explorer-restart re-add left the companion permanently headless - FIXED (companion/src/ccsync_companion/tray_native.py)
+
+comp-ui-1 (2026-09-11b) correctly stopped a failed re-add from setting
+`_ccsync_stop`, and its justification - "the next TaskbarCreated broadcast can
+still succeed" - was the ONLY recovery in the process: `_add_icon` had exactly
+two callers, and the branch's own comment says that next broadcast "may be
+never". After one late Explorer the editor had no icon, no menu, no Settings
+and no Quit for the life of the process, every toast dropped, on a companion
+that went on syncing correctly. A failed re-add now arms a `SetTimer` on the
+tray window (`_CCSYNC_READD_TIMER_ID`, 60 s) and the WM_TIMER retries NIM_ADD
+until it takes, then kills the timer. ONE attempt per tick, not the flat six:
+this runs on the pump thread, where every slept second is a frozen tray, and
+it means one log line a minute rather than six. No `_announce_failure` on a
+retry, which is why this had to land with CR-283N.
+
+### CR-283C (res-companion-4) - a wedged thread was "restarted" without being stopped, so the watchdog stacked duplicate writers into Resolve - FIXED (companion/src/ccsync_companion/app.py)
+
+`LaneWatchdog._restart` called `target.restart()` and nothing else, for the
+DIED branch and the silent-but-alive branch alike. For the media tree that
+meant `_start_media_tree_thread`, whose first statement CLEARS the shared stop
+event before it overwrites the thread reference: the orphan went on looping
+once it unblocked, so two threads walked the same media pool and both reached
+`apply_relinks` -> `resolve_bridge.replace_clip` / `link_proxy_media`, two
+unprompted writers into one Resolve project, while the new thread's heartbeat
+made the wedge read as healed. `_SupervisedThread` now carries an `abandon`
+callable; the media tree's is `_abandon_media_tree_thread`, which bumps a
+generation counter the loop was born with, so the old thread exits at its next
+check (before a pass and after it, since the pass is where the wedge happens)
+instead of running beside its replacement. A live thread with NO way to retire
+it is no longer "restarted" at all: the sequencer refuses a second thread
+outright and the watcher shares the process-wide stop event, so a restart of
+either was never anything but an ERROR line and a `sync_guard.restarts` record
+(see CR-283T). It is logged once per change of answer, as the ceiling is.
+
+### CR-283D (comp-app-1) - the b-roll editing-proxy resume was gated behind the relink feature flag - FIXED (companion/src/ccsync_companion/app.py)
+
+`_resume_broll_proxy_upgrades` had one call site and it was the third
+statement inside `_relink_proxies_once`'s `try`, below its two early returns.
+`proxy_relink_enabled = false` is a supported config key, and the insert path
+that CREATES a pending row is not gated on it, so on such a machine a stand-in
+queued by Send to Resolve and interrupted by a restart stayed `pending` for
+ever: an editor cutting on a 1080p H.264 lie under a 6K name with no path back
+but a re-insert. The call is now its own statement in the 120 s media-pool
+cycle. `broll_server.resume_pending_upgrades` needs no Resolve connection at
+all, so nothing is lost by moving it out; the `_local_root_is_broken()` guard
+came WITH it (the download lands under local_root) and lives inside the
+function now.
+
+### CR-283E (comp-app-2, comp-app-5) - the relaunch ceiling's own file was written in place, and one bad stamp cost the whole history - FIXED (companion/src/ccsync_companion/supervisor.py)
+
+`write_relaunch_note` was given tmp+replace in the 09-11b pass with the stated
+reason "a kill mid-write cannot leave half a note behind either", and
+`write_history` - `<state>/supervisor.json`, the source `decide()` reads on a
+cold chain, written by the one process that exists BECAUSE machines die
+abruptly - was left a bare `write_text`. A power cut inside that write left
+truncated JSON, `read_history` answered `[]`, and a build that could not stay
+up got three more relaunches an hour with nothing anywhere saying the ceiling
+had been lost. It is tmp+replace now, tmp cleanup included, byte for byte like
+its neighbour. In the same edit, `read_history` coerces per item
+(`except (TypeError, ValueError): continue`) exactly as `merge_history` - same
+pass, same data - already did, so one hand-edited or future entry costs one
+entry rather than the ceiling.
+
+### CR-283F (comp-app-3) - a standing upgrade refusal was cleared by the four replies that mean "there IS a build, we are just withholding it" - FIXED (companion/src/ccsync_companion/upgrade.py)
+
+comp-ytdl-jobs-1 (2026-09-11b) reads a reply with no `upgrade` key as "the
+dashboard says there is nothing to take" and clears `last_refusal`.
+`api._upgrade_info` returns None in four further states in which a package
+EXISTS and is being withheld - it is retracted, it needs a newer dashboard,
+its arch does not match the reporter, the reported platform is unknown - and
+its own comment calls three of them "silent to the companion on purpose". In
+all four the build is never re-offered, so the cleared refusal could not come
+back: the chip and the `upgrade_refused` alert went out and the operator was
+told nothing was wrong about a machine that is refusing to upgrade and will
+never be offered anything. The companion now clears only when the reply
+carries neither `upgrade` nor `upgrade_none_reason`. The key is ADDITIVE and
+the dashboard does not send it yet (OWED, below), so a companion on this build
+against any dashboard in the field behaves exactly as 0.9.74 did.
+
+### CR-283G (comp-app-4) - "CCSync" is hardcoded in ~60 user-visible strings - NOT FIXED (declined)
+
+The verifier downgraded this to low and refuted its central claim: `app.py`
+routes 101 calls through `site_mod` (`notify_title` 85, `drive_phrase` 13),
+`site.notify_title()` already resolves org_short -> product_name for the TITLE
+of every balloon and dialog, and the owner's 2026-08-18 ruling is that the
+product mark appears on every customer's build, like Resolve or Premiere - so
+"CCSync" in body copy is not a customer's name leaking. What is left is a
+SPELLING inconsistency (`CC Sync` in `site.DEFAULT_PRODUCT_NAME`, `CCSync` in
+~60 sentences), and settling it means touching 32 modules and every test that
+pins a sentence, for no user-visible gain, in a time-boxed pass. Left for the
+owner to decide; see "Owner decisions".
+
+### CR-283H (comp-app-6) - the unreadable-id toast did not mention the repair that shipped beside it - FIXED (companion/src/ccsync_companion/app.py)
+
+comp-app-8's two halves shipped in one pass: a once-per-process tray warning
+and a [ repair ] button in the Settings window. The warning's copy predated
+the button - "Send your log to your admin: the file is repairable and CCSync
+will not overwrite it on its own" - so the editor was told to wait for
+somebody else while the fix was two clicks away. The sentence now names
+Settings as the place the repair lives, and deliberately does not read as an
+instruction to press it: the button's own comment is that a one-click identity
+change is not a decision to take from a notification, and the dialog's "if
+your admin is still looking at the old file, wait for them" tone is kept.
+
+### CR-283I (comp-sync-3) - `_move_out_of_trash` claimed it could never overwrite; on macOS it could - FIXED (companion/src/ccsync_companion/sync/rclone_lane.py)
+
+The docstring said "NOTHING here overwrites and nothing here deletes --
+os.rename, never os.replace, so a destination that appeared between the check
+and the rename is a refusal rather than a file lost". That is a WINDOWS
+behaviour: POSIX rename(2) replaces an existing destination silently, and this
+code runs on every Mac in the fleet, so `dest.exists()` was a TOCTOU check
+selling a guarantee the call could not keep - lane B's own express run for
+another project, Syncthing or the editor landing that path in the window
+destroyed the fresh copy with the trashed one, silently, in a case the
+function's contract calls impossible. On POSIX the move is now `os.link` +
+`os.unlink` (EEXIST is the refusal we wanted, and the trash lives under
+local_root, so it is always one volume), falling back to the plain rename when
+hard links are refused (exFAT, an SMB mount) and on Windows, where rename
+already IS the refusal. The docstring says which is which.
+
+### CR-283J (comp-sync-4) - a file moved into a BORROWED project had a home on this disk and was trashed anyway - FIXED (companion/src/ccsync_companion/app.py, sync/rclone_lane.py)
+
+`_project_rel_for_slug` - lane B's answer to "the server says this file moved
+into project X, do I sync X?" - read `sequencer.rel_to_slug`, which holds
+SELECTED projects only by design (it is the manifest and proxy-scan scope). A
+hand move into a project this machine borrows from therefore resolved to None,
+and the editor's copies sat in `.ccsync-trash` for 14 days as "no home on this
+disk" while lane C downloaded them again, which is the exact cost CR-268b
+exists to avoid. The hunter's suggested `rel_to_slug_with_borrowed()` would
+have been WRONG (the verifier caught it): that map is LENDER subpath ->
+BORROWER slug, so a lookup by the slug the server named answers somebody
+else's directory. A borrowed project is only PARTLY on this disk, so the
+question cannot be answered by slug alone: `_project_rel_for_slug(slug, rel)`
+now falls through to `_borrowed_rel_for_slug`, which resolves the lender's own
+rel from `sequencer.borrowed_lenders()` and accepts the place only when the
+file's project-relative path is inside one of the subtrees this machine
+actually borrows. Lane B passes the rel with the slug; a callable that takes
+the slug alone still works.
+
+### CR-283K (comp-sync-5) - the 09-11b pass wrote mojibake into two `file_moves.py` comments - FIXED (companion/src/ccsync_companion/file_moves.py)
+
+Commit 34a3c8f re-encoded `Matej Simalcik.mov`'s accented spelling by decoding
+it as latin-1 and encoding it again as UTF-8, in the two comments whose only
+job is to document CR-90's NFC/NFD rule. Harmless at runtime and fatal to the
+one worked example a future reader will look for - and evidence that an
+editing tool in that pass was not UTF-8 clean. Both lines are back to their
+pre-34a3c8f bytes, and a scan test now fails on any of the three sequences
+that corruption produces, anywhere in `src/ccsync_companion`.
+
+### CR-283L (comp-sync-6) - the path-missing heal hardcoded `.stfolder` - FIXED (companion/src/ccsync_companion/sync/syncthing_lane.py)
+
+The "is the drive really back?" test was `os.path.isdir(path/".stfolder")`.
+The marker name is a per-folder Syncthing config field (`markerName`, in the
+very dict the loop already holds), it was a plain FILE before Syncthing 1.0,
+and Syncthing stores the folder path as configured, `~` included - so a folder
+created outside our installer never healed, silently. The heal now reads the
+folder's own `markerName`, accepts a file as well as a directory, and expands
+`~`. This covers the HEAL only: `rclone_lane`'s four filter sites and
+`tray.py` still assume `.stfolder`, so the product is not markerName-aware,
+and the comment says so.
+
+### CR-283M (comp-ui-1) - every toast raised during the 105 s registration window was discarded - FIXED (companion/src/ccsync_companion/tray_native.py)
+
+`notify()` refuses to emit while `_added` is False and there was no queue, no
+replay and no reader anywhere. comp-ui-1 (2026-09-11) changed the FIRST
+registration to twelve attempts across 105.5 s and `run()` does not enter the
+message pump until `_add_icon` returns, so everything raised in that window
+was lost with one WARNING: app.py's +3 s post-upgrade line, the crash-loop
+rollback sentence (the ONE line that explains a silent downgrade), and any
+safety latch that trips at startup. A bounded deque (5, oldest dropped first)
+now holds them and every successful `_add_icon` flushes it. The DROPPED
+warning is unchanged - a queue that evicts must still say what it dropped, and
+the 2026-09-11 test asserts on that wording.
+
+### CR-283N (comp-ui-3) - a self-recovering re-add failure wrote a crash report and printed the terminal remedy - FIXED (companion/src/ccsync_companion/tray.py)
+
+`fatal` gated only the `_ccsync_stop` assignment: the ERROR line ("Sign out
+and back in, or restart CCSync, to get it back") and the
+`crash_report.write_report({"type": "TrayIconUnavailable"})` both ran
+unconditionally. So a failure the same fix pass declared self-recovering told
+the editor to restart, and an Explorer crash-loop wrote one crash file per
+broadcast - counted by `crash_summary()`, reported as `sync_guard.crashes` on
+every tick, shown in Settings and on the grid, and `_prune` keeps only the
+newest 20, so the transient failures silently deleted the real crash reports
+an admin needed. A non-fatal failure is now a WARNING that says the icon will
+be re-added automatically (which CR-283B makes true) and writes no crash
+report; the terminal path is unchanged.
+
+### CR-283O (comp-ui-4) - a terminal registration failure leaked the tray window and its HICON cache - FIXED (companion/src/ccsync_companion/tray_native.py)
+
+`run()`'s happy path frees the window, its per-instance window class and every
+cached HICON in `_pump`'s `finally`; the `except` arm announced, set
+`_stopped` and returned with all of them held for the life of the process.
+`_teardown()` is called there now, BEFORE `_stopped.set()` - the verifier's
+catch - so a `stop()` waiter cannot return while the window is still alive.
+
+### CR-283P (comp-ui-5) - the FIX ALL bar read a flat 0% for a whole rehearsal, under the word "Copying" - FIXED (companion/src/ccsync_companion/popup.py)
+
+comp-resolve-b-1 (2026-09-11b) correctly stopped a rehearsal from crediting
+bytes it never copied, and left `batch_bytes_total` at the real size of
+everything - so under `fixer_dry_run` the batch bar sat at 0 of 800 GB for the
+whole run, `RateEstimator` never saw a moving sample, and the file line said
+`Copying "A001_C012.braw": 0 B of 12.7 GB` for each clip in turn. One
+misleading screen was swapped for another, on the run whose whole purpose
+(RES-15) is a screen an admin can trust. The loop now learns from the first
+`dry_run` answer, publishes `rehearsing` with no byte totals in the PROGRESS
+keys only (the final publish still carries `rehearsal`/`fixed`/`skipped` for
+`_fix_done` and `summarize_fix_results`), the bar counts CLIPS, and
+`format_file_progress` says `Checking "..."` behind a flag rather than an edit
+to the string the real copy path shares.
+
+### CR-283Q (comp-ui-6) - the stills "gallery moved" line joined a POSIX path with a backslash - FIXED (companion/src/ccsync_companion/stills.py)
+
+On macOS `root` is the real local path (`/Users/<them>/.../Assets/Stills`) and
+the message hard-coded a backslash, so the one line telling a Mac editor where
+their gallery went named a path that exists in no spelling - pasted into
+Finder's Go to Folder it simply fails. The separator follows `self._windows`,
+which the manager already carries. `canonical_stills_path`'s hard-coded
+backslash is a different thing and is untouched: that string has to match
+between machines.
+
+### CR-283R (regression-6) - the companion half of tests-3's neutered assertions - FIXED (companion/tests/test_app.py)
+
+tests-3 named two `or True` assertions; CR-255k's entry and ledger describe
+only the dashboard one, and the companion line survived verbatim. Deleted
+rather than enabled, on the verifier's reasoning: as written it banned every
+hyphen, and a hyphen with spaces is the owner's own recommended replacement
+for an em dash - the `(em dash)` assertion beside it is the real check, and it
+stays. The third one, written by the fix pass itself into
+`dashboard/tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py:329`, is
+another group's file and is OWED below. `grep -rn "or True" companion/tests`
+now returns lambdas only.
+
+### CR-283S (live-1, companion half) - a stall killed and recovered from a week ago was reported as a CURRENT blockage, for ever - FIXED (companion/src/ccsync_companion/sync/rclone_lane.py, app.py)
+
+SYNC-1 made the stall record persistent so a restart could not erase the
+evidence, and gave it no expiry and no "the lane has since completed a pass"
+condition. ruskin/DESKTOP-LQQ41TC: one lane A upload killed on 2026-09-11
+16:26 UTC, and on 2026-09-18 with all three lanes idle and nothing owed the
+row still said `blocked_reason=lane_stalled since 2026-09-11`, the mail "still
+not fixed after 4 day(s)" had gone out four days running and his tray was red,
+with nothing any editor or admin could do about it. leso's Mac had the same
+shape. Two conditions now end the CLAIM (never the evidence): a completed pass
+of THAT lane stamps `recovered_at` on the record - lane A and lane B share one
+state dir and one file, so the label must match, and an express run clears an
+express stall - and nothing is reported after 24 h in any case.
+`stall_report()` returns None in both cases, i.e. the field is ABSENT, which
+is how "nothing is stalled" is spelled on this wire; app.py's own fallback,
+which reads the FILE when the guard carries no section, applies the same two
+rules. Deliberately NOT a `recovered_at` on the wire: a 0.7.49 dashboard reads
+any record it is sent as a current blockage, so that would have fixed nothing
+until every dashboard was updated.
+
+### CR-283T (CR-279, queueing half) - the alert that fired for all three editor machines - PARTLY FIXED (companion/src/ccsync_companion/app.py); the starvation half stays a design decision
+
+The live dashboard showed `thread_restarts` for all three editor machines
+(leso 8, Razer 5, ruskin 3 in 24 h). What the alert counts is the watchdog
+"restarting" a sequencer that is busy with one long upload: `sequencer.start()`
+answers "start() while a sequencer thread is still alive -- ignoring", so no
+restart ever happened - only an ERROR line and a `sync_guard.restarts` record
+per backoff, on a healthy machine uploading 32.7 GB. CR-283C's rule ends that:
+a live thread with no way to retire it is not restarted and not recorded, and
+says so once at WARNING. The other half of CR-279's open item - that every
+other project waits behind a lane A child that is past its budget but still
+moving - is NOT fixed here: its own entry calls it "a design decision, not a
+patch" (it touches the repath-before-lane-A ordering, AUDIT_2 C-1), and a
+time-boxed fix pass is the wrong place for it. It stays open in KNOWN_BUGS,
+with the alert noise gone.
+
+### CR-283U (CR-280) - every HTTPS download from the frozen macOS companion fails certificate verification - FIXED in repo, UNVERIFIED (companion/src/ccsync_companion/sidecar_tools.py, app.py)
+
+leso's Mac, first seen 2026-09-07 and still there on 0.9.73:
+`CERTIFICATE_VERIFY_FAILED ... unable to get local issuer certificate` for
+yt-dlp's SHA2-256SUMS and the ffmpeg / ffprobe / deno sidecars on every start,
+so requester-first YouTube downloads have never run on a Mac. The frozen
+Python has no CA bundle to load into `ssl.create_default_context()`.
+`sidecar_tools.ensure_ca_bundle()` (called once from `run()`, after logging and
+before any HTTPS fetch) sets `SSL_CERT_FILE`/`SSL_CERT_DIR` to the first
+bundle it finds - `certifi.where()` when certifi happens to be importable,
+then the platform's own (`/etc/ssl/cert.pem` on macOS, the Homebrew and Linux
+paths after it). `SSL_CERT_FILE` is read by `load_default_certs()` at context
+construction, so one call covers EVERY urllib caller in the process: the
+sidecars, the yt-dlp checksums, the upgrade channel and the release feed, with
+no context threaded through any of them. An environment that already names a
+bundle always wins, and no bundle anywhere is a WARNING, never a refusal to
+start. **What cannot be verified here**: that a frozen macOS build actually
+finds `/etc/ssl/cert.pem` and that leso's downloads then succeed - this rig
+has no Mac and PyInstaller does not cross-compile. certifi is deliberately NOT
+imported as a hard dependency: it is not in `requirements.lock` and adding one
+is a lockfile plus licence-gate change (OWED below). If the Mac build still
+fails after this, certifi in the bundle is the next move, not a different
+mechanism.
+
+### CR-283V (live-5) - the tray coloured a computer with nothing ticked ORANGE - FIXED (companion/src/ccsync_companion/tray.py)
+
+CR-267f (2026-09-11) made the dashboard treat `no_selection` as informational
+(`health.WHY_INFORMATIONAL`) on the owner's words "Alex laptop just happens to
+have no synced projects, not an error", and the tray was never given the same
+rule: on an editor machine `no_selection` still coloured the icon amber, the
+colour every real fault shares, and the line wore the warning glyph.
+alex/Razer has been amber since 2026-09-17 with everything working as planned.
+The owner restated the rule on 2026-09-18 ("a computer having nothing ticked
+is FINE"), so `_BLOCKED_INFORMATIONAL` now exempts `no_selection` from the
+colour on EVERY machine, not just the base rig, and `_blocked_line` renders
+its sentence as a plain line. Nothing else is softened: every other blocked
+reason keeps its colour and its glyph. Nothing is owed on the dashboard side.
+
+### CR-283W (comp-resolve-5, owed in by companion-media) - a refresh-only pass reported "nothing to do" and `attached: 0` - FIXED (companion/src/ccsync_companion/app.py, settings_window.py)
+
+`apply_relinks` answers `refreshed` as well as `relinked`/`failed` - the phase
+3 geometry re-read of a clip whose file changed under it, which is what makes
+a stand-in replaced by the real original usable - and `_note_proxy_attach`
+kept only the other two. So a pass that did nothing but refresh published
+`attached: 0, failed: 0`, and every surface reading that block (the Settings
+window's RESOLVE section, the tray, the fleet grid) said the pass had done
+nothing at all. `refreshed` is now an ADDED key on `_proxy_attach`, never
+replacing the two beside it, and the Settings line says "N clips re-read after
+the file changed". Companion-only in effect; the key rides inside the reported
+`proxy_attach` block, so the dashboard's `ProxyAttachIn` has to declare it or
+`ignored_report_sections` opens (OWED below).
+
+### CR-283X (comp-broll-tiers-5, owed in by companion-media) - a stand-in whose editing proxy gave up reached the log and nothing else - FIXED (companion/src/ccsync_companion/app.py, tray.py, settings_window.py)
+
+`broll_standins.given_up_upgrades()` is the list of clips whose editing-proxy
+upgrade has failed or has run out of attempts: an editor holding one is
+cutting on the 1080p preview believing it is the 6K original, under the
+original's own name. `broll_server`'s `GET /status` carries it as
+`standins_owed`, which nothing an editor sees reads. `app.standins_owed()`
+gives it RES-3's shape - a COUNT and one sentence, never the list, and `{}`
+rather than a zero when nothing is owed, which is what clears the line - and
+it is rendered in the two places `proxy_attach` already is: the tray's
+`resolve_count_phrases` ("2 clips still on a preview copy") and the Settings
+window's RESOLVE section, which names the reason and says to send them to
+Resolve again. No new tray path, no new thread, no new file. Same wire caveat
+as CR-283W: it rides in the reported `resolve_health` section, so
+`ResolveHealthIn` must declare it (OWED below).
+
+### CR-283Y (res-fleet-3, companion half) - a move into a project this machine does not sync built an invisible orphan and reported it as done - FIXED (companion/src/ccsync_companion/file_moves.py, app.py)
+
+`db.file_move_target_machines` picks its targets from the SOURCE project's
+ticks and never asks about the destination's, so a hand move between two
+projects reaches every machine that holds the file - including the ones that
+do not sync where it is going. `apply_move` had no plan argument at all and
+did `dest.parent.mkdir(parents=True, exist_ok=True)` unconditionally: it built
+`P:\Projects\2026\FF5 Talent Gap\...` on an editor who syncs neither, moved
+the file in and answered ok/"moved". Nothing in the product writes
+`.ccsync-project`, so that directory is invisible to `fixer.list_project_dirs`,
+to the media manifest and to both lanes - the file is a permanent orphan on
+the editor's disk, filling the disk lane B's 20 GB floor parks on, while the
+MOVES history says that computer followed the move.
+`docs/HAND_MOVES_ON_THE_SERVER.md` section 4b has always said what to do
+instead, and only lane B's relocation path ever did it.
+
+`apply_move` takes an optional `project_rels` (keyword, None default, so the
+positional `(move, root, ledger)` every existing caller uses is untouched and
+None keeps today's behaviour for an unmanaged companion). When the
+destination is not one this machine syncs, the local copy goes to the LANE B
+TRASH under its own project path - never deleted, recoverable for the same
+fourteen days, aged out by the same `lane_guard.prune_trash` - and the answer
+is `ok=True`, "trashed locally, destination not synced here", with no paths,
+so nothing relinks Resolve to a file in the trash.
+
+The plan is `sequencer.rel_to_slug_with_borrowed()`, never `rel_to_slug`: a
+borrowed subtree is on this disk too, and the selection-only map would grow
+comp-sync-4's bug from the other end. The test is on the destination PATH
+rather than the destination project, which is what lets one rule cover both -
+a selected project's rel is a prefix of everything in it, and a borrowed
+entry's key is the lender's subpath, so a move into the borrowed folder falls
+under it and a move into the rest of that lender's project does not.
+
+**The state word is gated on the dashboard's own version.**
+`FileMoveResultIn.state` is a `Literal` and `file_moves_applied` is NOT one of
+`ReportIn`'s tolerant sections, so a word an older dashboard has never heard
+of is not a dropped field: it 422s the WHOLE report - the lanes, the presence,
+the alarms - every thirty seconds, until somebody upgrades the dashboard. That
+is the trap `applying` walked into and answered with "THE DASHBOARD DEPLOYS
+FIRST", which is a rule about people rather than a property of the code. So
+the companion remembers `dashboard_version` off each report reply (additive,
+added by the dashboard builder in the same wave) and sends
+`state: "not_synced_here"` only when it parses to 0.7.50 or above; an absent
+or unrankable version means an older dashboard and the answer is exactly
+today's shape - `ok=True`, the sentence, no state key. The LEDGER records the
+word either way: it is this machine's own record, nothing validates it, and
+the redelivery after the dashboard is upgraded then says so.
+
+### Verification
+
+Companion venv, run from `companion/`. Every line below fails on the source as
+it was before its fix and passes now (the three checked by reverting the hunk
+and re-running are marked "reverted and re-run").
+
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_the_heal_runs_on_a_machine_whose_selection_names_no_project -> fails before (no rescan is ever posted), passes now  (reverted and re-run)
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_a_config_read_that_fails_still_answers_no_project_folders -> guard for the same fix (the no-selection branch must not become an error)
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_a_failed_re_add_keeps_trying_until_explorer_takes_it -> fails before the fix, passes now  (reverted and re-run)
+- tests/test_lane_watchdog.py::test_a_wedged_media_tree_thread_is_restarted_on_its_heartbeat -> now also asserts the old thread was retired first; fails before the fix
+- tests/test_lane_watchdog.py::test_the_sequencer_bound_is_three_rotations_or_thirty_minutes and ::test_a_wedged_watcher_is_restarted_on_its_heartbeat -> rewritten to the new contract (a live thread with no way to retire it is not restarted and not recorded); both fail on the old code for the new assertions
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_a_retired_media_tree_thread_exits_instead_of_looping -> fails before the fix (the loop took no generation), passes now
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_the_editing_proxy_resume_runs_with_proxy_relink_turned_off -> fails before the fix, passes now  (reverted and re-run)
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_the_resume_still_waits_for_a_local_root -> guard for the same fix
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_a_truncated_history_is_never_what_a_kill_leaves_behind -> fails before the fix, passes now
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_one_bad_stamp_costs_one_stamp_not_the_ceiling -> fails before the fix, passes now
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_a_withheld_build_does_not_retire_the_standing_refusal -> fails before the fix, passes now
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_the_unreadable_id_toast_says_where_the_repair_is -> fails before the fix, passes now
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_a_destination_that_appeared_mid_move_is_a_refusal_not_a_loss -> can only FAIL on POSIX, which is where the defect is (the macOS and Linux runners run this suite); on Windows it pins the behaviour that was already right
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_a_file_moved_into_a_borrowed_folder_is_not_trashed -> fails before the fix, passes now
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_lane_b_asks_with_the_path_and_still_accepts_an_older_callable -> pins the (slug, rel) call and the one-argument fallback
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_no_companion_source_file_carries_latin1_mojibake -> fails before the fix, passes now
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_the_heal_reads_the_folders_own_marker_name and ::test_a_home_relative_folder_path_is_expanded_before_the_marker_test -> both fail before the fix, pass now  (reverted and re-run)
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_toasts_raised_during_registration_arrive_when_the_icon_does -> fails before the fix, passes now
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_the_held_toasts_are_bounded_and_oldest_first -> bounds the queue
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_the_retry_never_writes_a_crash_report -> fails before the fix, passes now  (reverted and re-run)
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_the_recoverable_wording_does_not_send_the_editor_to_a_restart -> fails before the fix, passes now  (reverted and re-run)
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_a_terminal_registration_failure_frees_the_window -> fails before the fix, passes now  (reverted and re-run)
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_a_rehearsal_says_checking_and_moves_its_bar -> fails before the fix, passes now
+- tests/test_stills.py::test_the_gallery_moved_line_is_a_path_the_editor_can_open -> fails before the fix, passes now
+- tests/test_app.py::test_a_moved_project_folder_reaches_the_report_and_the_one_sentence (the regression-6 line) -> the `or True` assertion is gone; `grep -rn "or True" companion/tests` returns lambdas only
+- tests/test_rclone_lane.py::test_a_completed_pass_ends_the_stall_it_is_still_reporting -> fails before the fix, passes now  (reverted and re-run)
+- tests/test_rclone_lane.py::test_a_stall_nothing_has_run_past_still_ages_out -> fails before the fix, passes now  (reverted and re-run)
+- tests/test_rclone_lane.py::test_the_other_lanes_pass_does_not_end_this_lanes_stall -> guard: lane A and lane B share one record file
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_a_recovered_or_old_stall_is_not_why_this_machine_is_not_syncing -> fails before the fix, passes now
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_the_process_is_pointed_at_a_ca_bundle_when_it_has_none, ::test_an_environment_that_already_names_a_bundle_always_wins, ::test_no_bundle_anywhere_is_a_warning_not_a_refusal_to_start -> the function did not exist before
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_an_editor_machine_with_nothing_ticked_is_green -> fails before the fix (amber), passes now
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_the_nothing_ticked_line_is_not_a_warning and ::test_a_real_blockage_is_still_amber_and_still_warns -> the second is the guard that nothing else was softened
+
+- tests/test_settings_window.py::test_a_refresh_only_pass_and_a_given_up_stand_in_reach_the_settings_window -> fails before the fix (neither line is drawn), passes now  (reverted and re-run)
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_a_refresh_only_pass_is_not_nothing_to_do -> fails before the fix (KeyError: the verdict had no `refreshed`), passes now  (reverted and re-run)
+- tests/test_bug_hunt_2026_09_18_companion_core.py::test_a_stand_in_whose_proxy_gave_up_reaches_the_editor -> `standins_owed()` did not exist before the fix; also pins that nothing owed draws no line
+
+- tests/test_file_moves.py::test_a_move_into_a_project_this_machine_does_not_sync_is_trashed -> fails before the fix (the file is moved into a directory that is not a project here), passes now  (reverted and re-run)
+- tests/test_file_moves.py::test_the_trashed_outcome_is_recorded_with_its_own_word -> fails before the fix, passes now  (reverted and re-run)
+- tests/test_file_moves.py::test_a_move_into_a_BORROWED_folder_is_carried_out_normally -> the guard that the fix does not grow comp-sync-4 from the other end
+- tests/test_file_moves.py::test_the_rest_of_a_lenders_project_is_still_not_synced_here -> fails before the fix, passes now  (reverted and re-run)
+- tests/test_file_moves.py::test_no_plan_at_all_keeps_the_old_behaviour -> pins the positional signature and the None default
+- tests/test_file_moves.py::test_the_app_answers_a_not_synced_destination_with_its_own_state_word -> through the real command path; fails before the fix  (reverted and re-run)
+- tests/test_file_moves.py::test_the_state_word_is_withheld_from_a_dashboard_that_would_422_on_it -> fails before the version gate (0.7.49, an absent version and an unrankable one all got the word), passes now  (reverted and re-run)
+- tests/test_file_moves.py::test_a_dashboard_that_knows_the_word_is_told -> 0.7.50, 0.7.51 and 0.8.0 are told
+- tests/test_file_moves.py::test_the_ledger_keeps_the_word_even_when_the_wire_cannot -> fails before the version gate, passes now  (reverted and re-run)
+
+Suites re-run whole after the edits (all green): test_bug_hunt_2026_09_18_companion_core.py (29), test_rclone_lane.py (125), test_syncthing_lane.py, test_sequencer.py, test_lane_watchdog.py, test_supervisor.py, test_tray.py, test_stills.py, test_popup.py, test_app.py, test_app_contract.py, test_settings_window.py, test_bug_hunt_2026_09_11_comp_ui.py, test_bug_hunt_2026_09_11b_comp_ui.py, test_bug_hunt_2026_09_11b_comp_ytdl_jobs.py, test_bug_hunt_2026_09_18_companion.py (the first wave's). `py_compile` on every source file touched.
+
+### Not fixed
+
+- comp-app-4: declined. The verifier refuted its central claim (the brand helper is used 101 times in app.py, and the product mark on every customer's build is the owner's 2026-08-18 ruling); what is left is one spelling in ~60 sentences across 32 modules, which is more churn than the defect warrants inside a time box. See "Owner decisions".
+- CR-279, starvation half: its own ledger entry calls it a design decision (letting the sequencer leave a lane A past its budget but still moving touches the repath-before-lane-A ordering, AUDIT_2 C-1). The alert-noise half IS fixed (CR-283T).
+- CR-280 is fixed in repo but cannot be VERIFIED without a Mac build: see CR-283U.
+
+### OWED TO ANOTHER GROUP
+
+- dashboard: `dashboard/src/ccsync_dashboard/api.py`, `_upgrade_info`: add an additive `upgrade_none_reason` (a short string: `retracted` / `needs_newer_dashboard` / `arch_mismatch` / `unknown_platform`) to the report reply on each of the four paths where a package EXISTS but is withheld, so the companion can tell them from "there is nothing to take". Old companions ignore it. THE DASHBOARD DEPLOYS FIRST; until it does, CR-283F is inert and behaviour is exactly 0.9.74's. (comp-app-3)
+- dashboard: `dashboard/tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py:329`: delete the `assert not hasattr(settings, "release_feed_sig_url") or True` line - the third neutered assertion, written by the 09-11b fix pass itself. Nothing reads it. (regression-6)
+- webapps-tools: `companion/requirements.lock` + the macOS build (`tools/release_macos.sh` / `companion/build.spec`): add `certifi` and bump `tools/check_licenses.py`'s inputs with it, so the frozen Mac bundle carries a CA bundle of its own rather than depending on `/etc/ssl/cert.pem` being where we think it is. `sidecar_tools.ca_bundle_path()` already prefers `certifi.where()` when it is importable, so the code side needs no further change. Companion-only; either side deploys first. (CR-280)
+- dashboard: `dashboard/src/ccsync_dashboard/api.py`, `ProxyAttachIn`: declare `refreshed: int | None = Field(default=None, ge=0)`. The companion sends it from 0.9.75 and an undeclared key inside a sub-model is what `ignored_report_sections` exists to catch (live-4 is the same shape). DASHBOARD FIRST. (CR-283W)
+- dashboard: `dashboard/src/ccsync_dashboard/api.py`, `ResolveHealthIn`: declare `standins_owed` as a bounded sub-model - `count: int | None = Field(default=None, ge=0)` and `why: str | None = Field(default=None, max_length=300)`, the whole shape the companion sends. Storing it is optional; DECLARING it is not, for the same reason as above. DASHBOARD FIRST. (CR-283X)
+- dashboard (already in that group's own list, noted for the join): live-1's dashboard half (`health._why_code`, `alerts._check_lane_stalled` age gate) stops the mails and the red chips FLEET-WIDE in one deploy; CR-283S only clears them for machines running 0.9.75 or later. Deploy the dashboard half first for that reason.
+
+### Deploy order
+
+- Dashboard first, for two reasons: comp-app-3's `upgrade_none_reason` is a dashboard-side key the companion reads, and live-1's dashboard half fixes the whole fleet at once while the companion half only fixes upgraded machines. Nothing here requires a companion ahead of a dashboard.
+- **res-fleet-3 (CR-283Y) makes that a hard order, not a preference.** The
+  companion only puts `state: "not_synced_here"` on the wire when the report
+  reply says the dashboard is 0.7.50 or above, so a 0.9.75 companion against
+  today's 0.7.49 is safe - but that gate depends on the dashboard builder's
+  additive `dashboard_version` on the report reply landing in the same
+  release. If that key is dropped from the dashboard half, the companion
+  simply never sends the word (absent means old), which is the safe failure.
+  Nothing in this pass sends an unknown state word to an old dashboard.
+- Everything else in CR-283 is companion-local and safe against every dashboard in the field (0.7.34..0.7.49): the only wire change is the ABSENCE of `sync_guard.stalled` once a stall is recovered or a day old, which every dashboard already reads as "nothing is stalled".
+
+### Owner decisions
+
+- comp-app-4 (the "CCSync" vs "CC Sync" spelling) is left for you: settling it means editing ~60 sentences in 32 modules and the tests that pin them. My reading is that the vendor build should say "CC Sync" everywhere, as `site.DEFAULT_PRODUCT_NAME` already does, and that it is worth one dedicated pass rather than a corner of this one.
+- CR-283S keeps the stall record on disk (stamped `recovered_at`) rather than deleting it, and stops REPORTING it, rather than sending `recovered_at` on the wire. That is what makes the fix work against today's dashboards; if you would rather the dashboard see the recovery explicitly, that is a wire addition and a second deploy.
+- CR-283C now REFUSES to restart a wedged watcher (it shares the process-wide stop event, so it cannot be retired without stopping the companion) where it used to spawn a second one. A duplicate watcher is a second unprompted writer into Resolve, so refusing is the safe direction; the cost is that a genuinely wedged watcher stays wedged until the companion is restarted, and the log now says so once.
+- One thing NOT on the finding list, fixed because it blocked the tests and is one line: `sync/syncthing_lane.py` imported `syncthing_admin` at module scope while `syncthing_admin` imports three helpers back out of it, so `import ccsync_companion.sync.syncthing_lane` FIRST was an ImportError - the cycle only resolved because something else always imported the other module first. Both uses are inside functions, so the import moved into them.
+
+## CR-284 - the tiers on the insert path: a preview ledgered as a lie, a 540p proxy nobody could take back, and twenty tests that never ran (2026-09-18)
+
+The twenty-five companion-media findings (plus three owed in from webapps-tools) of `docs/bug-hunt-2026-09-18.md`
+(twelve medium, thirteen low), fixed in that document's order against
+`214869b` plus the uncommitted first wave (CR-282), which several of these
+build directly on. Twelve of the twenty-five are in the proxy-tiers release
+the whole fleet took on 2026-09-17 (companion 0.9.74); the rest are the
+music/ytdl sidecars, the Cards agent's health line, and the test gaps that
+let the first twelve ship. Every fix carries a regression test that fails on
+the unfixed source.
+
+### CR-284A (comp-broll-tiers-2) - a still-downloading editing proxy grew one thread and one Resolve worker child every two minutes - FIXED (broll_server.py, broll_standins.py)
+
+`start_proxy_upgrade` refused only a row already `done`, kept no registry of
+what was running, and `resume_pending_upgrades` is called from the 120 s
+relink cycle for every row whose state is `pending` - which is exactly the
+state a RUNNING upgrade sits in. A 400 MB editing proxy over SFTP therefore
+accumulated one thread per pass, all polling one fetch, and when the file
+landed every one of them called `music_server.call(BROLL_LINK_PROXY_ACTION)`:
+six worker child processes for one clip. The worse half is the row
+`run_proxy_upgrade` deliberately leaves `pending` when the download landed
+but Resolve would not link it (Resolve closed, or open on another project):
+with no backoff and no ceiling anywhere, a dozen such rows cost a dozen
+threads and a dozen child processes every two minutes, for ever.
+
+Two bounds, because the two cases are different. In flight: a module-level
+set of stand-in paths keyed through `broll_standins.normalise_key` (never the
+raw string, or two spellings of one path both start), claimed before the
+thread and cleared in its `finally`. Given up: `upgrade_attempts` on the
+LEDGER row, not in memory - a restart must not hand the budget back -
+incremented by `set_upgrade(..., count_attempt=True)` on the leave-it-pending
+branch, and `pending_upgrades()` stops offering a row that has spent
+`UPGRADE_MAX_ATTEMPTS` (8). It stays `pending` rather than becoming `failed`,
+so an insert of that clip by the editor still picks it up; that insert passes
+`asked_for=True`, which resets the count, because an editor asking is not the
+cycle sweeping.
+
+Tests: `test_bug_hunt_2026_09_18_companion_media.py::test_a_running_upgrade_is_not_started_again_by_the_next_cycle`
+and `::test_an_upgrade_that_can_never_link_stops_costing_a_worker_child`.
+
+### CR-284B (comp-music-ytdl-jobs-1) - music indexing was impossible on any fleet whose release feed is not GitHub - FIXED (music_clap_sidecar.py)
+
+The module comment says the CLAP allow-list "is DERIVED: the artefact is ours
+and is served from the site's own release feed", and `host_allowed`'s
+docstring repeats "the feed's OWN host is trusted by definition". Neither was
+implemented: the list was four fixed GitHub patterns, while `feed_base`
+genuinely honours `music_clap_feed_base` and the manifest's
+`release_feed_base`. A customer publishing from a self-hosted feed, an S3/R2
+bucket or the dashboard's own Tailscale Serve host got `refusing to download
+the music indexing model: <their own host> is not one of the hosts this build
+is allowed to fetch from` on every ingest tick, for ever, with no action
+short of a new companion build - and the sentence blamed their own correct
+configuration. This studio was unaffected only because its feed happens to be
+GitHub Releases.
+
+`host_allowed(url, cfg, site)` now accepts the parsed hostname of
+`feed_base(cfg, site)` as well as the GitHub redirect chain. The sha256 pin
+is what makes an artefact safe, on that host exactly as on GitHub's; the
+allow-list is here to stop a URL nobody configured. https stays a condition
+for a remote host, with plain http allowed for LOOPBACK only, which is what
+the override's own "a local directory server" docstring offers a dev loop.
+
+Tests: `::test_the_clap_model_may_be_fetched_from_the_fleets_own_feed`, and
+`test_music_clap_sidecar.py::test_ensure_refuses_a_feed_that_is_not_https`
+replaces the test that pinned the old refusal.
+
+### CR-284C (comp-music-ytdl-jobs-2) - the companion suite reached GitHub and cost the gate eleven minutes - FIXED (tests/test_ytdlp_manager.py)
+
+Six tests in that file start a real `YtDlpManager`, whose `_loop` calls
+`sidecar_tools.ensure` / `ensure_ffmpeg_pair` - both of which take the
+module-level `sidecar_tools._work_lock` and then do real network I/O against
+GitHub. `stop()` only sets an event and `join(timeout=5)` cannot be asked
+whether it worked, so a daemon thread parked in that call outlived the file
+WITH THE LOCK HELD, and the next test in the same process to call
+`sidecar_tools.ensure({})` blocked on it. `tools\run_all_tests.ps1` runs the
+companion suite in one pytest process, so that pairing is the normal gate:
+nine files measured at ~40 s run separately and 660 s together. It is also
+the suite reaching the public internet, which 3c7cf8e and 214869b exist to
+stop.
+
+An autouse fixture stubs both entry points for every test in the file - the
+leak is a property of starting the manager at all, not of the one test that
+noticed, and the tests that want the sidecar's own behaviour monkeypatch them
+again afterwards, which still wins. Measured after: the two files the hunter
+paired run in 1.6 s.
+
+Test: `test_ytdlp_manager.py::test_no_sidecar_thread_this_file_started_outlives_it`
+(last in the file, deliberately): no `ccsync-ytdlp` thread is alive and
+`sidecar_tools._work_lock` is free.
+
+### CR-284D (comp-resolve-4) - the refresh's shipped default was exercised nowhere - FIXED (tests/test_bug_hunt_2026_09_18_companion_media.py)
+
+All three refresh tests injected `replace_fn`, so `resolve_bridge.replace_clip`
+- which is what `app._relink_proxies_once` actually gets, because it passes
+only `link_fn` - was tested nowhere, and it was the half that was broken
+(CR-282D). Fifty-two green tests pinned the shape of a feature that had never
+refreshed a clip, which is the specific reason CR-281 shipped written up as
+built.
+
+The new test calls `apply_relinks` with NO `replace_fn` against a fake media
+pool item, so the real `replace_clip` runs end to end and the assertion is
+that `ReplaceClip` WAS called on the clip's own path. No Resolve is involved:
+the forced path takes no save point, so `_before_mutation` -> `connect()` is
+never reached, and the `_no_live_resolve` fixture stays in force.
+
+Test: `::test_apply_relinks_default_replace_fn_really_calls_replace_clip`.
+
+### CR-284E (proxy-tiers-1) - every insert still attached the 540p preview, and the relink pass could never take it back - FIXED (resolve_bridge.py)
+
+Phase 3's one behaviour change for existing clips is that the browser preview
+is no longer the proxy of a clip whose real file is on this machine (plan
+section 6: "Original, with the good proxy or none"). Two readers implement
+the offer of `Proxy/<stem>.{mov,mp4}` and only `proxy_relink.plan_relinks`
+got the rule; `_attach_adjacent_proxy` still walked `expected_proxy_paths`
+and linked the first file that existed, `.mov` then `.mp4`, for every insert.
+The 120 s pass cannot undo it, because it skips a clip whose proxy IS working
+- which is audit F1's own point. So the editor cut at 540p under a
+full-quality original, permanently, on the machine the feature exists for,
+while CR-281 recorded the behaviour as changed.
+
+`_attach_adjacent_proxy` now asks the relink pass's two questions before a
+`.mp4` candidate, through `_real_original_here`: is the clip's own file
+there, and is it a ledgered stand-in. Both are filesystem/JSON only, because
+this runs with `_API_LOCK` held and nothing in it may be a bridge call. The
+`.mov` arm is unconditional - that is the editing proxy, and linking it is
+what the plan's table asks for.
+
+Tests: `::test_an_insert_does_not_attach_the_preview_over_a_real_original`,
+`::test_a_stand_in_still_gets_its_preview_attached`,
+`::test_the_editing_proxy_is_still_attached_unconditionally`. The two tests
+in `test_broll_server.py` that pinned the old unconditional attach now use a
+`.mov` sibling and say why.
+
+### CR-284F (proxy-tiers-2 = broll-1 = comp-broll-tiers-4 = wire-4) - "there is no original" was read as "use the preview and pretend", and a genuine archive preview was ledgered as a lie - FIXED (broll_server.py)
+
+`insert_target_detail` answers `original_rel: null` for the two states where
+no original sits beside the preview: the stem-diverged archive clips, and any
+clip ingested with "upload originals" off or whose original has not landed
+yet - a first-class, supported steady state, not four legacy rows. Its own
+docstring spends a paragraph saying so ("a caller must not read 'no original'
+as 'use the preview and pretend'"). `derive_insert_paths` honoured an
+explicit null for `preview_rel` and `edit_proxy_rel` and deliberately not for
+`original_rel` ("there is always an original"), so the null fell back to the
+posted rel - which in exactly these cases IS the preview. `plan_insert` then
+answered `fetch_standin`: download the preview onto the preview's own path,
+`broll_standins.record()` that genuine, lane-B-managed file as a lie about a
+6K original that does not exist, and import it. `is_standin` answers True for
+it for ever - its size never changes, so `is_stale` can never retire the row
+- the watcher exempts it from the missing count on false grounds,
+`proxy_relink` treats its geometry as suspect, and every re-insert reports
+"the stand-in for this clip is already in place" and restarts an
+editing-proxy upgrade.
+
+`derive_insert_paths` carries a third state, `original_known`, set False when
+the object is present and `original_rel` is explicitly null; `original_rel`
+still holds the posted rel, so every path-shaped reader works unchanged.
+`plan_insert` answers `PLAN_PREVIEW_ONLY` for it - fetch the preview to its
+own path, import that, record nothing - with `resolved original_rel ==
+preview_rel` as the belt-and-braces test, which is also the bare-rel
+stem-diverged shape.
+
+Tests: `::test_a_clip_with_no_original_is_preview_only_and_ledgers_nothing`
+(the producer's real object, copied verbatim from the shape
+`broll/web/tests/test_insert_target.py` pins) and
+`::test_a_clip_with_a_real_original_still_gets_its_stand_in`.
+
+### CR-284G (proxy-tiers-3) - the container losing sight of the archive was indistinguishable from "this clip has no original" - FIXED companion half (broll_server.py)
+
+`insert_target_detail` discovers the original and the editing proxy by
+listing the archive folder inside the dashboard container, and an OSError -
+the dataset unmounted, an SMB hiccup, `BROLL_DATA_ROOT` wrong after an image
+update - is swallowed into "no entries", which is byte for byte the answer
+for "this clip has no original". Ten minutes of that turns every Send to
+Resolve in the window into CR-284F, and the damage outlives the outage for
+ever on projects nobody re-checks.
+
+The companion half is here and is safe on its own: an `insert` object
+carrying `known: false` is read as "the server judged nothing", and the plan
+is the pre-phase-3 route - download the file the editor asked for - never a
+stand-in and never the preview, because in this case the original probably IS
+there. The key is optional on the wire: no dashboard sends it yet, and its
+absence means exactly what it meant before. The server half (answer
+`known: false` rather than a null that reads as an answer, and raise a
+notice) is OWED below.
+
+Test: `::test_an_archive_the_server_could_not_read_falls_back_to_the_old_route`.
+
+### CR-284H (proxy-tiers-4) - the wired rig had no working signal that a clip was born from a stand-in - FIXED (broll_standins.py, proxy_relink.py, app.py)
+
+`broll_standins.record` runs on the machine doing the insert and the ledger is
+that machine's own file, so the plan's last table row - "a clip is born from a
+stand-in when its stored `Frames`/`Resolution` disagree with the file at its
+path, OR the ledger says so" - had no working second half on the wired rig,
+which is the only machine that needs it and the machine whose ledger is empty
+for exactly those clips by construction. What was left there was
+`_geometry_disagrees`' `ffprobe -count_packets` over the archive (CR-282E made
+it cheap; it is still the expensive question), and one `replace_clip` per clip
+that until CR-282D did nothing at all.
+
+Built to the dashboard builder's contract
+(`docs/bug-hunt-2026-09-18/ledger/dashboard.md`, "proxy-tiers-4 contract"),
+unchanged, in three pieces:
+
+  * **Producer.** `broll_standins.placed_report(local_root, canonical_prefix)`
+    answers `{rels, checked_at}` and `app.sync_guard()` sends it as
+    `sync_guard.standins_placed`. Each rel is the ARCHIVE-RELATIVE path of the
+    ORIGINAL the stand-in stands in for, forward slashes, NFC (CR-90 - the
+    value is only ever compared, and a path a Mac reported is not `==` a path
+    anything else reported), never an absolute path, capped at
+    `broll_standins.FLEET_REPORT_MAX` (200, the same bound written down on
+    both sides). Every entry is listed, stale or not: the question a wired rig
+    asks is "was this clip ever placed as a stand-in by anybody", and a row
+    this machine has since replaced still describes a project cut against the
+    stand-in's geometry. The section is ALWAYS sent, empty list included,
+    because the dashboard replaces this machine's set from it - an absent
+    section could never clear a stand-in that has been replaced.
+  * **Consumer.** `proxy_relink.note_fleet_standins(resp)` reads
+    `standins_known.rels` off the report REPLY, and `_geometry_disagrees` asks
+    `fleet_says_standin` FIRST - after the remembered verdict and the local
+    ledger, before the header estimate and before the exact count. A True is
+    conclusive (one `ReplaceClip` on the clip's own path, and CR-284R's memory
+    stops that repeating); a False is not, because the dashboard only knows
+    what machines have told it, so it falls through to the probes that were
+    there before.
+  * **The third state.** An ABSENT `standins_known` means THIS DASHBOARD DOES
+    NOT KNOW, and behaves exactly as today: `fleet_says_standin` answers None
+    rather than False and the demux still runs. A dashboard deployed behind
+    the companions therefore cannot turn the geometry check off. Knowledge
+    from an earlier reply is kept rather than cleared on a silent one - at
+    worst that costs one ReplaceClip which changes nothing.
+
+`app.py` belongs to companion-core and carries exactly two additions, both
+cited `proxy-tiers-4`: one `try` block in `sync_guard()` that calls
+`placed_report`, and one in `_on_report_response` that calls
+`note_fleet_standins`. Everything else is in this group's files. Nothing new
+reaches Resolve, and both calls are wrapped the way every other section and
+every other reply consumer in those two functions is.
+
+Tests: `::test_the_report_carries_the_archive_rels_this_machine_stood_in_for`,
+`::test_the_report_says_none_rather_than_saying_nothing`,
+`::test_the_fleet_report_is_bounded_and_deduplicated`,
+`::test_a_wired_rig_learns_from_the_fleet_without_demuxing_the_archive`,
+`::test_a_clip_the_fleet_has_not_heard_of_is_still_probed`,
+`::test_a_dashboard_that_does_not_know_behaves_exactly_as_before`,
+`::test_a_mac_spelling_of_one_name_is_one_key`.
+
+### CR-284I (proxy-tiers-5) - a clip stayed invisible until its multi-GB original had finished uploading - FIXED (broll_ingest.py)
+
+Plan section 5 item 5 says "an editor can use a clip from the moment its
+editing proxy lands, long before a multi-GB original finishes", and the
+upload ORDER was built for it (`broll_upload.UPLOAD_ORDER` puts the original
+last). Nothing consumed the order: `_pump_uploads` posts `/uploaded` once,
+when NOTHING is missing, and `mark_uploaded` is the only writer of
+`status = 'indexed'`. Browse, tree and search all skip an `ingesting` row, so
+a day of 6K material showed nothing in the archive for the eight hours its
+originals took, and the only signal was the ingest SPA's progress bar.
+
+`_maybe_stage_live` posts the first stage - the landed files,
+`original_uploaded: false` - as soon as everything except the original is up,
+once per item, leaving it in `uploading` so the ordinary post still flips the
+flag when the original lands. The server was already ready for it:
+`mark_uploaded` requires the original slot only when the flag is true and
+stores it on the row, and the route has no item-state guard. This lands WITH
+CR-284F by necessity: until that fix, a clip live before its original was on
+the NAS inserted the PREVIEW at the original's path.
+
+Test: `test_broll_ingest.py::test_a_clip_goes_live_when_its_proxies_land_not_when_its_original_does`.
+
+### CR-284J (proxy-tiers-6) - a stand-in could be written under a .mxf, .avi or .mkv name - FIXED (broll_server.py)
+
+A stand-in is the preview's ISO-BMFF bytes under the ORIGINAL's name and
+extension, and the only guard was `proxy_scan.NEEDS_RESOLVE_EXTS` (`.braw`,
+`.r3d`, `.crm`). The archive indexer scans `.mov .mp4 .mxf .braw .avi .mkv
+.m4v`, and the phase 0 spike measured method C against one ProRes `.mov`, so
+an MXF original got an MP4 wearing an `.mxf` name - which Resolve's MXF path,
+not a content sniffer the way ffmpeg is, either refuses silently or imports
+with the wrong container's geometry. Either way `broll_standins.record` has
+already run (deliberately, before the import), so the next insert takes the
+"already in place" branch and re-imports the same unopenable file for ever.
+
+`STANDIN_EXTS` is an allow-list - `.mov`, `.mp4`, `.m4v`, the containers the
+preview's bytes could BE - and everything else falls to `PLAN_PREVIEW_ONLY`,
+which is already implemented and always works. A deny-list would put the next
+extension the archive learns to scan straight back into this shape.
+
+Tests: `::test_a_container_the_preview_is_not_gets_the_preview_instead`
+(`.mxf`, `.avi`, `.mkv`) and `::test_the_containers_the_spike_covers_still_get_a_stand_in`.
+
+### CR-284K (tests-1) - twenty media-job tests skipped silently on every CI and release runner - FIXED (tests/conftest.py, tests/test_jobs_media.py, .github/workflows/*)
+
+`test_jobs_media.py` gated twenty tests on a bare `shutil.which` skipif with
+no `CCSYNC_REQUIRE_*` escape, and its module-scoped `clips` fixture skipped
+as well, so the whole file could vanish at exit code 0. Those twenty are the
+only thing holding `jobs_media.py`'s three Timeline Cards recipes to
+`library_engine.py`'s ffmpeg argv VERBATIM (CLAUDE.md) and to `proxy_gen`'s
+`.partial` + atomic-rename rule. ffmpeg is installed by exactly one CI step,
+`if:`-scoped to the broll/indexer job on Linux; neither companion job nor
+either release workflow had it.
+
+`conftest.require_ffmpeg_or_skip` is `rclone_binary`'s treatment, beside it so
+a future ffmpeg-dependent companion test inherits it: a skip normally, a
+`pytest.fail` when `CCSYNC_REQUIRE_FFMPEG=1`. The `needs_ffmpeg` mark is a
+fixture now rather than a `skipif`, because a mark cannot fail. Both companion
+CI jobs install ffmpeg (continue-on-error: a broken package feed must not red
+a run about our own code - the tests fall back to skipping, exactly where they
+were), and BOTH release workflows install it as a hard requirement and set
+`CCSYNC_REQUIRE_FFMPEG=1`, so a release cannot be cut without that coverage.
+
+Test: `::test_a_missing_ffmpeg_is_a_failure_when_the_release_says_so`.
+
+### CR-284L (wire-3 = dash-cards-8) - an agent pushing into nothing reported itself healthy - FIXED (timeline_cards_role.py)
+
+`cards_tunnel._no_engine` answers HTTP 200 with `{"error": "<editor> is not
+in a Timeline Cards episode..."}` - deliberately, because a 4xx would put the
+loops into retry/backoff and re-create the hot loop CR-282H just fixed. The
+companion's transport judged on the STATUS alone: `_note_call(200, "")` moved
+`_last_poll_at` and cleared `_last_error`, and `_note_traffic` then recorded
+the pushed timeline off the REQUEST body. So the tray, the role's health and
+the fleet grid all read `[ CARDS: E1 v5 ]` while every sweep was dropped on
+the floor, and the one sentence that says what to do ("open an episode at
+/cards/") reached no log line, no tray line and no fleet page.
+
+`call()` inspects a 200 body for `error`/`note` through `_note_answer`: the
+sentence becomes the role's health DETAIL, the discarded push is not recorded
+as traffic served, and a change of state is logged once rather than once per
+poll. Nothing raises and the health WORD stays `running`, because the loops
+are alive and the dashboard is answering - that is what the word means, and a
+raise would reintroduce the hot loop from the other end. `/agent/pending`'s
+`{}` answer is untouched: `pull_loop`'s `if got.get("id") is None: continue`
+depends on its shape.
+
+Tests: `::test_a_push_the_dashboard_threw_away_is_not_reported_as_serving`
+and `::test_an_answer_with_no_refusal_records_the_timeline_as_before`.
+
+### CR-284M (comp-broll-tiers-3) - an editing proxy that would not encode failed the whole clip - FIXED (broll_ingest.py)
+
+`_encode_verified` is one loop for the preview and the editing proxy, and its
+exhaustion path calls `_fail_item`. So a frame-count mismatch on the EDITING
+proxy - the optional tier - failed the entire item: no preview, no stills, no
+original uploaded, for a clip whose preview had already verified. An
+edit-weight original and a BRAW both reach the archive with no editing proxy
+and nothing is wrong with them, which is what `edit_proxy_reason` exists to
+say.
+
+`_encode_verified` takes `required`, and `_make_edit_proxy` passes False: the
+tier drops with the encoder's own sentence in `edit_proxy_reason` and the
+clip goes live with its preview, which is what a remote editor cut on before
+the tier existed. No tolerance was added to `_frames_missing` - the
+Reproductive Rights clips were 1 to 18 frames short and Resolve refused every
+one, so a tolerance would readmit the exact defect the check was written for.
+
+Test: `test_broll_ingest.py::test_an_editing_proxy_a_few_frames_short_drops_the_tier_not_the_clip`
+(the test that pinned the old behaviour, rewritten).
+
+### CR-284N (comp-broll-tiers-5) - the stand-in ledger grew for ever and a failed upgrade reached nobody - FIXED (broll_standins.py, broll_server.py)
+
+Entries were added and never removed except by a `forget()` nothing called,
+and `all()` re-reads and re-sorts the whole file on every `pending_upgrades()`
+poll from the 120 s cycle. An upgrade that ends `failed` was written to the
+ledger and the log and to nothing an editor sees: they keep cutting on the
+1080p preview believing it is the editing proxy.
+
+Pruning is both conditions in the module's own order: a file that is merely
+absent leaves its entry standing (an absent path is still one we lied about),
+and only a file that has been gone for longer than `PRUNE_AFTER_SECONDS` (30
+days) retires one. It happens on load and is carried by the next write, so a
+read-only pass costs no I/O. `given_up_upgrades()` is the new reader -
+`failed`, plus pending past CR-284A's attempt ceiling - and `GET /status`
+carries it as `standins_owed`, an ADDED key. The tray line an editor would
+actually see is OWED to companion-core: `app.py` is not this group's to
+change.
+
+Test: `::test_an_entry_whose_file_has_been_gone_for_a_month_is_forgotten`,
+plus the `given_up_upgrades` half of `::test_an_upgrade_that_can_never_link_stops_costing_a_worker_child`.
+
+### CR-284O (comp-music-ytdl-jobs-3) - the b-roll model allow-list accepted an http:// URL - FIXED (broll_vlm_sidecar.py)
+
+`broll_vlm_sidecar.host_allowed` tested the hostname alone while its music
+sibling refuses a non-https scheme first, and nothing downstream re-checks.
+Nothing today can reach it (the catalogue is vendored and every pin is
+https) and the sha256 pin means the exposure would be confidentiality rather
+than a swapped artefact - the defect is the asymmetry, which is what bites
+the day these URLs become site-derived as the CLAP ones already are. The
+scheme test is now in both.
+
+Test: `::test_the_vlm_allow_list_refuses_plain_http`.
+
+### CR-284P (comp-music-ytdl-jobs-4) - the YouTube cookie jar was written before it was hardened - FIXED (ytdl_cookies.py)
+
+The comment beside it says harden() runs "before the rename so the secret is
+never briefly world-readable". The order was write -> harden -> replace, so
+the bytes of a live Google session existed on disk under the inherited ACL
+(Windows) or the umask (posix) for the duration of the write. It is now
+create-empty with `O_CREAT|O_EXCL|O_WRONLY, 0o600` (the mode does it on
+posix; on Windows it is ignored, so `secretfile.harden` runs on the empty
+file before a byte goes in), then write, then harden again, then replace. A
+`.new` left by a killed write is unlinked first, or `O_EXCL` would fail every
+install from then on.
+
+Test: `test_ytdl_cookies.py::test_install_hardens_the_temp_file_before_the_rename`
+now asserts the FIRST harden saw a zero-byte file.
+
+### CR-284Q (comp-music-ytdl-jobs-5) - a None returncode from the edit-ready conversion read as success - FIXED (ytdl_executor.py)
+
+`int(getattr(proc, "returncode", 1) or 0)` maps `None` onto 0, which is the
+success branch, while a missing attribute correctly yields 1. `deps.run` is an
+injected seam, so a runner that returns before the child is reaped (or a test
+double) would deliver a present-but-truncated `.editready.mp4` into
+`swap_in`, which renames the good original aside. `subprocess.run` always
+sets an int, which is why it has not bitten.
+
+Test: `::test_a_conversion_that_reported_no_return_code_is_not_a_success`
+drives the real `_ensure_edit_ready` with a runner that writes a file and
+answers `returncode=None`.
+
+### CR-284R (comp-resolve-3 = res-companion-5) - a clip that would not converge was re-ReplaceClip'd for ever - FIXED (proxy_relink.py)
+
+The proxy half of this module has a refusal memory keyed on the proxy file's
+(mtime, size) precisely so Resolve is not asked the same impossible thing
+every pass. The refresh half had none: CR-282E remembers a refresh Resolve
+took that changed nothing, but a refresh that SUCCEEDED and still left the
+clip's stored `Frames` where they were - an mp4 with an edit list, a file
+Resolve reads at another rate, a clip it will not re-read - was re-planned
+every pass, each one spending one of `allow_automatic`'s eight grants a day,
+so genuine proxy relinks were rate-limited out for the rest of it.
+
+A successful refresh now records its verdict too, under the frame count the
+clip believed BEFORE the call (`note_geometry_verdict(path, False, stat,
+stored_frames)`). If the geometry really moved, the next pass reads a
+different stored count, which is a different key, and asks again as it
+should; if it did not, the key matches and the op is not re-planned. A
+refresh that got no answer at all is NOT remembered - that is Resolve going
+away, and it deserves the next attempt.
+
+Test: `::test_a_clip_that_will_not_converge_is_refreshed_once_not_for_ever`.
+
+### CR-284S (comp-resolve-5) - a pass that refreshed forty clips reported "nothing to do" - FIXED (proxy_relink.py)
+
+`refreshed` was added to the return dict and read by nobody: `message` was
+built only `if relinked or failures`, so a refresh-only pass produced `""`
+and `app.py` logged "proxy relink: nothing to do". The operator diagnosing a
+wired rig had no signal that phase 3's refresh was running at all, which is
+exactly what hid CR-282D. The message now names both counts. The other half -
+`_note_proxy_attach`'s stored dict, which still reads `relinked` only, so the
+tray and the report say `attached: 0` - is OWED to companion-core.
+
+Test: `::test_a_pass_that_only_refreshed_does_not_report_nothing_to_do`.
+
+### CR-284T (comp-resolve-6) - a refresh on a clip with a working proxy carried no proxy back - FIXED (proxy_relink.py, resolve_bridge.py)
+
+`plan_relinks` computes `new_proxy` only when the proxy is NOT working, so a
+refresh planned for a clip that was playing its editing proxy carried none,
+and `ReplaceClip` is the API's re-import path. If it clears the attachment,
+the clip drops to its original (or to offline media on a remote-ish rig)
+until the next pass - 120 s away at best and behind `allow_automatic`'s 900 s
+bar at worst. The verifier could not confirm what Resolve does here without a
+live Resolve, so the fix is the cheap, always-safe half rather than the one
+that would need `plan_relinks`' careful `.mp4` rule changed: the op carries
+`reattach_proxy` (the proxy it was playing, only when it was working), and
+after a changed refresh `apply_relinks` reads the clip's `Proxy` property
+back through `resolve_bridge.clip_proxy_state` and re-links only if it came
+back blank. One property read per refresh; nothing is re-linked when the
+attachment survived. A live check on the wired rig is still owed, and is
+already on CR-281's list.
+
+Tests: `::test_a_refresh_that_blanked_the_proxy_re_attaches_it`,
+`::test_a_refresh_that_left_the_proxy_alone_re_attaches_nothing`,
+`::test_a_refresh_plans_the_proxy_it_is_playing`.
+
+### CR-284U (comp-resolve-7) - the archive exemption stat'ed the disk for every missing clip every three seconds - FIXED (watcher.py)
+
+`_archive_exempt`'s cache was per POLL, and the poll is every 3 s. For every
+distinct MISSING archive path it read the stand-in ledger (a stat of the
+ledger plus a stat of the media file inside `_entry_is_stale`) and then
+`find_proxy_on_disk`, which probes up to four candidates. A remote rig with a
+proxy-only b-roll timeline is the designed steady state in which every one of
+those clips is MISSING on every poll: a 200-clip timeline is roughly a
+thousand filesystem probes every three seconds, on the thread the popup and
+fixer latency depend on, for a diagnostic count.
+
+The verdict is now remembered per path across polls with a 60 s TTL - short
+on purpose, because the answer flips when a proxy lands or is deleted and a
+long memory would keep a genuinely missing clip out of the count. The memo is
+dropped whole past 4,000 entries; it is a cache, not a ledger. The
+`archive_exempt_fn` injection point the tests use is unchanged.
+
+Tests: `::test_the_archive_exemption_is_remembered_across_polls`,
+`::test_the_exemption_memory_expires`.
+
+### CR-284V (proxy-tiers-8) - the machine that made the editing proxy downloaded it back from the NAS - FIXED (broll_ingest.py)
+
+`_mirror_locally` moves this machine's own PREVIEW into the archive so a
+later Send to Resolve needs no fetch (plan section 9.9). The editing proxy it
+just encoded was left in staging, so the very machine that produced all three
+files answered `fetch_standin` for its own clips: it downloaded its own
+preview from the NAS onto the original's archive path, then its own editing
+proxy in the upgrade lane. Hundreds of MB back down a link that had just sent
+them up.
+
+Both outputs go through one `_mirror_one` now, which re-points the item at
+where the file landed so a later re-send uses the right path. The clip still
+takes the stand-in route (the ORIGINAL's archive path genuinely is not on
+that machine - the original was dropped from outside the tree); what it no
+longer does is re-download a file it made. Noticing the real original out of
+tree, via the ingest state file's `local_path`, crosses a module boundary
+`broll_server` has no handle on today and is not attempted here.
+
+Tests: `test_broll_ingest.py::test_the_editing_proxy_is_mirrored_into_the_archive_too`,
+and `::test_a_restart_does_not_re_encode_the_editing_proxy` follows the file
+to where it now lives.
+
+### CR-284W (tests-2) - `from_page` was true for any dict, and a malformed object could place a stand-in - FIXED (broll_server.py, tests/test_broll_server.py)
+
+`derive_insert_paths` set `from_page = True` for ANY dict, before a single
+field was validated, and `plan_insert` reads `from_page` as the licence to
+treat a null weight beside a STEM-CONVENTION editing proxy as "the server
+judged this original too heavy". So a truncated or garbled object - one with
+`share` and `original_rel` and no tier fields is enough - made the companion
+place a stand-in for a clip nobody had ever weighed: the 1080p preview at the
+original's canonical path, a ledger row, and an upgrade owed against a
+`Proxy/<stem>.mov` the server never made. Every shipped producer sends the
+full object, so this is hardening rather than a live break - and the test
+that existed asserted four fields and never this one.
+
+`from_page` is now true only when a tier field was ACCEPTED: a `preview_rel`
+or `edit_proxy_rel` that is an explicit null or a rel that passed the
+traversal test, a boolean weight, or a dict geometry. The parametrised
+malformed-object test asserts `from_page is False` and that the plan is
+`fetch_original`.
+
+Test: `test_broll_server.py::test_a_malformed_insert_object_is_ignored_never_fatal`
+(extended), plus `::test_a_malformed_insert_object_does_not_count_as_the_dashboard_looking`.
+
+### CR-284X (tests-3) - a phase-2 test still pinned "the insert object changes nothing" - FIXED (tests/test_broll_server.py)
+
+The test asserted the worker call was identical with and without the `insert`
+object, with a docstring saying "phase 3 is gated on the phase 0 spike".
+Phase 3 shipped on 2026-09-17 and the object now decides which file is
+fetched and imported; the test kept passing only because `_mode_gate_body`
+writes the clip to disk, so both runs took the `import_original` row. It is
+vacuous for the thing it is named after, and its docstring invites the next
+change to be "fixed" by narrowing phase 3. Renamed to what it actually pins
+(that row IS object-independent, which is worth keeping), and paired with
+`::test_an_absent_original_plus_an_insert_object_changes_the_fetch`, which
+goes red the moment the object stops mattering.
+
+### CR-284Y (tests-4) - the "a write that cannot land is not an exception" test monkeypatched away the thing that raises - FIXED (broll_standins.py, tests/test_broll_standins.py)
+
+The test replaced `StandinLedger._persist_locked` - the exact function whose
+failure it claims to cover - with `lambda self: False`, so it proved only
+that a False return is tolerated. The real one catches `OSError` and nothing
+else, `json.dumps` sits inside that try, and the module-level `record()` was
+the one public wrapper in the file without the `try/except -> log.debug` its
+five siblings have, against a docstring that says no method here raises. A
+geometry value json cannot encode therefore raised out of `record()` on the
+insert path - and worse: the entry is inserted into `_entries` BEFORE the
+persist, so the in-memory ledger was poisoned and every subsequent `record()`
+in the process raised too, with the file never written.
+
+Three changes: `_persist_locked` catches `TypeError`/`ValueError` as well
+(they are `json.dumps`'s); `record()` rolls the entry back when the write did
+not land, so one bad payload cannot poison the process; and the module-level
+`record()`/`forget()` wrappers are guarded like their siblings. The old test
+now raises a real `OSError` from `os.replace`.
+
+Tests: `test_broll_standins.py::test_a_write_that_cannot_land_is_not_an_exception`
+(rewritten), `::test_a_value_json_cannot_encode_does_not_raise_and_does_not_poison`,
+`::test_a_write_that_really_cannot_land_is_not_an_exception`.
+
+### CR-284Z (broll-indexer-2 = proxy-tiers-7, owed in by webapps-tools) - the companion's `frames` column was a container's claim - FIXED (ffmpeg_tools.py)
+
+`probe_video` read `"frames": _int_or_none(video_stream.get("nb_frames"))`,
+which this same module's `count_frames` docstring calls a claim rather than a
+count - and that column is what decides an OFFLINE clip's length on a remote
+editor's timeline (migration 012, plan section 5). The indexer's twin got a
+`duration x fps` cross-check in this same pass (CR-286R), and two producers
+of one wire field have to agree about how confident it is.
+
+`_plausible_frames` is a verbatim twin of the indexer's helper: the claim
+stands when duration x fps supports it (one frame of slack plus 1% for a VFR
+average), None when it does not, and unchanged when there is nothing to check
+it against. None is what every reader of the field already handles.
+
+Tests: `::test_a_containers_frame_claim_is_cross_checked_against_its_duration`,
+`test_ffmpeg_tools.py::test_a_frame_claim_the_duration_does_not_support_is_not_reported`,
+and `::test_probe_video_reports_frames_and_bitrate` whose fixture now gives a
+duration that agrees with its own claim.
+
+### CR-284AA (comp-broll-tiers-3's second half, owed in by webapps-tools) - one frame-count rule, on both sides - FIXED (ffmpeg_tools.py, broll_ingest.py)
+
+The indexer grew `frames_match` in this pass and deliberately left it EXACT,
+pending this group's decision on a tolerance. **The decision is EXACT**, and
+it is a decision rather than an omission: the verifier measured the VFR
+mechanism comp-broll-tiers-3 proposed and refuted it (a filtered encode
+passes VFR timestamps through - 200 packets in, 200 out, in both
+containers), and the Reproductive Rights clips were 1 to 18 frames short with
+Resolve refusing every one, so "a frame rate's worth" of slack would readmit
+exactly the defect the check exists for. What comp-broll-tiers-3 changed is
+the blast radius (CR-284M), not the threshold.
+
+The companion now carries `ffmpeg_tools.frames_match` as the twin of the
+indexer's, with the reasoning in its docstring, and `_frames_missing` calls
+it instead of an inline `==`. A tolerance introduced later cannot land on one
+side alone without the other function's docstring contradicting it.
+
+Test: `::test_the_two_frame_count_rules_are_one_rule`.
+
+### CR-284AB (broll-4's companion half, owed in by webapps-tools) - an editing proxy that IS the preview - FIXED (broll_server.py)
+
+`derive_insert_paths`' `basename(parent) == "Proxy"` arm builds
+`stem + ".mov"` exactly as `insert_target_detail` does, so a preview that is
+itself a `.mov` names one file twice: `edit_proxy_rel == preview_rel`.
+Downstream that is a `heavy` verdict resting on an editing proxy that does
+not exist, an upgrade owed against the file the clip already is, and a
+background lane that can never finish. `_no_self_referential_proxy` drops the
+editing proxy when it equals the preview, on both the derived and the
+page-supplied path. The web side closes its own half (CR-286P); this is the
+one a companion can reach on its own, and either may deploy first.
+
+Test: `::test_an_editing_proxy_that_is_the_preview_is_no_editing_proxy`.
+
+### Verification
+
+All in `companion/`, run from that directory with `.venv\Scripts\python.exe -m pytest`.
+"Fails before" means on 214869b plus the first wave (CR-282), except where
+noted.
+
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_running_upgrade_is_not_started_again_by_the_next_cycle -> fails before (the second cycle starts a second thread), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_an_upgrade_that_can_never_link_stops_costing_a_worker_child -> fails before (no ceiling exists), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_the_clap_model_may_be_fetched_from_the_fleets_own_feed -> fails before (the fleet's own host is refused), passes now
+- tests/test_music_clap_sidecar.py::test_ensure_refuses_a_feed_that_is_not_https -> replaces the test that pinned the defect
+- tests/test_ytdlp_manager.py::test_no_sidecar_thread_this_file_started_outlives_it -> fails before (a ccsync-ytdlp thread is still in a real GitHub call), passes now; the file pairing measured 115+ s before and 1.6 s now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_apply_relinks_default_replace_fn_really_calls_replace_clip -> fails at 214869b (replace_clip short-circuits and ReplaceClip is never called), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_an_insert_does_not_attach_the_preview_over_a_real_original -> fails before, passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_stand_in_still_gets_its_preview_attached -> passes both (the case the fix must not break)
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_clip_with_no_original_is_preview_only_and_ledgers_nothing -> fails before (fetch_standin onto the preview's own path), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_an_archive_the_server_could_not_read_falls_back_to_the_old_route -> fails before (`known` is not read), passes now
+- tests/test_broll_ingest.py::test_a_clip_goes_live_when_its_proxies_land_not_when_its_original_does -> fails before (nothing is posted until the original lands), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_container_the_preview_is_not_gets_the_preview_instead -> fails before (a `.mxf` gets a stand-in), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_missing_ffmpeg_is_a_failure_when_the_release_says_so -> fails before (no such gate exists), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_push_the_dashboard_threw_away_is_not_reported_as_serving -> fails before (the timeline is recorded and the detail says "serving the page"), passes now
+- tests/test_broll_ingest.py::test_an_editing_proxy_a_few_frames_short_drops_the_tier_not_the_clip -> fails before (the whole item is failed), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_an_entry_whose_file_has_been_gone_for_a_month_is_forgotten -> fails before (nothing prunes), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_the_vlm_allow_list_refuses_plain_http -> fails before, passes now
+- tests/test_ytdl_cookies.py::test_install_hardens_the_temp_file_before_the_rename -> fails before (the first harden sees the written file, not an empty one), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_conversion_that_reported_no_return_code_is_not_a_success -> fails before (rc reads as 0 and the truncated file is swapped in), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_clip_that_will_not_converge_is_refreshed_once_not_for_ever -> fails before (no verdict is remembered for a changed refresh), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_pass_that_only_refreshed_does_not_report_nothing_to_do -> fails before (message is ""), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_refresh_that_blanked_the_proxy_re_attaches_it -> fails before (nothing re-attaches), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_refresh_plans_the_proxy_it_is_playing -> fails before (no `reattach_proxy` key), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_the_archive_exemption_is_remembered_across_polls -> fails before (five polls, five probes; and there is no memo), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_the_exemption_memory_expires -> fails before, passes now
+- tests/test_broll_ingest.py::test_the_editing_proxy_is_mirrored_into_the_archive_too -> fails before (only the preview is mirrored), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_malformed_insert_object_does_not_count_as_the_dashboard_looking -> fails before (`from_page` is True and the plan is fetch_standin), passes now
+- tests/test_broll_server.py::test_a_malformed_insert_object_is_ignored_never_fatal -> the new `from_page` assertion fails before, passes now
+- tests/test_broll_server.py::test_an_absent_original_plus_an_insert_object_changes_the_fetch -> replaces the vacuous phase-2 pin
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_value_json_cannot_encode_does_not_raise_and_does_not_poison -> fails before (TypeError out of record()), passes now
+- tests/test_broll_standins.py::test_a_write_that_cannot_land_is_not_an_exception -> rewritten to raise from os.replace; the ledger-is-empty assertion fails before, passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_containers_frame_claim_is_cross_checked_against_its_duration -> fails before (no such helper; `frames` is the raw claim), passes now
+- tests/test_ffmpeg_tools.py::test_a_frame_claim_the_duration_does_not_support_is_not_reported -> fails before (1674 is reported against a 12.5 s file), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_the_two_frame_count_rules_are_one_rule -> fails before (no `frames_match` in the companion), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_an_editing_proxy_that_is_the_preview_is_no_editing_proxy -> fails before (the pair names one file twice), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_the_report_carries_the_archive_rels_this_machine_stood_in_for -> fails before (no such producer), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_the_report_says_none_rather_than_saying_nothing -> fails before, passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_the_fleet_report_is_bounded_and_deduplicated -> fails before, passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_wired_rig_learns_from_the_fleet_without_demuxing_the_archive -> fails before (the reply is ignored and the clip is demuxed), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_clip_the_fleet_has_not_heard_of_is_still_probed -> fails before (no such reader), passes now
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_dashboard_that_does_not_know_behaves_exactly_as_before -> fails before (no such reader), passes now; this is the compatibility direction
+- tests/test_bug_hunt_2026_09_18_companion_media.py::test_a_mac_spelling_of_one_name_is_one_key -> fails before, passes now
+
+Suites run (only the files touched, per the brief): test_bug_hunt_2026_09_18_companion_media.py,
+test_broll_server.py, test_broll_insert_tiers.py, test_broll_standins.py,
+test_broll_proxy_upgrade.py, test_broll_ingest.py, test_proxy_relink.py,
+test_proxy_relink_standins.py, test_watcher.py, test_music_clap_sidecar.py,
+test_broll_vlm_sidecar.py, test_ytdl_cookies.py, test_ytdl_executor.py,
+test_ytdlp_manager.py, test_timeline_cards_role.py, test_jobs_media.py,
+test_vendored_downloader.py, test_loopback_guard.py, test_music_server.py,
+test_ffmpeg_tools.py, test_broll_ingest_media.py, test_proxy_gen.py,
+test_bug_hunt_2026_09_18_companion.py (the first wave's, unaffected) -> every
+one green. `py_compile` clean on every source file touched; the three
+workflow files parse as YAML.
+
+### Not fixed
+
+- none. The two halves listed here at first (comp-broll-tiers-5's
+  editor-facing line and comp-resolve-5's report key) were built by
+  `companion-core` the same evening as CR-283X and CR-283W, and the dashboard
+  declared both keys as CR-285N.
+
+### OWED TO ANOTHER GROUP
+
+- webapps-tools: `broll/web/app/routes_api.py`: `insert_target_detail` / `_insert_object`: when the archive listing raises OSError (both the `entries = []` swallow at ~106-110 and the editing-proxy one at ~120-127), put `"known": false` in the insert object instead of answering the same shape as "this clip has no original". The companion already refuses to judge on such an object (CR-284G) and falls back to fetching the original. Do NOT drop the keys instead: an ABSENT `preview_rel`/`edit_proxy_rel` means "use the stem convention" to the companion, which re-creates the wrong answer. Either side may deploy first: the key is optional on the wire and a companion that has never heard of it behaves exactly as today.
+- webapps-tools: `broll/web/tests/test_insert_target.py`: `test_a_missing_archive_directory_answers_without_a_proxy` pins the conflation ("could not look" answered as "there is none") and needs the new key asserted; `test_the_preview_only_fallback_reports_no_original` should also assert that a caller reading `original_rel: null` gets no `original_rel` fallback - the companion half of that contract is now `original_known` (CR-284F).
+- webapps-tools / dashboard: a notice kind for "the container cannot list the b-roll archive" (proxy-tiers-3's second half). `mount_status` already records the b-roll root, and `dash-collector-alerts` owns the registry; the schema/registry row is the dashboard builder's (CLAUDE.md: register a kind WITH its writer).
+- companion-core: `app.py`: `_note_proxy_attach`: add `refreshed` to the stored dict from `apply_relinks`' answer (comp-resolve-5's other half). ADDED key, same rule the module already states; no wire change, companion-only.
+- companion-core: `app.py`: the tray/report surface: one line for `broll_standins.given_up_upgrades()` (comp-broll-tiers-5), reusing `_note_proxy_attach`'s RES-3 shape rather than a new tray path. The reader exists and `GET /status` already carries it as `standins_owed`; companion-only.
+- companion-core (INFORMATION, not a request): `app.py` carries two lines for proxy-tiers-4 (CR-284H) - `sync_guard()` sends `standins_placed`, `_on_report_response` calls `proxy_relink.note_fleet_standins`. That builder had finished, so there was no conflict; both are cited `proxy-tiers-4` and wrapped like their neighbours.
+- dashboard: proxy-tiers-4's other half is being built to the same contract by a second dashboard builder (`StandinsPlacedIn`, schema v54's `broll_standins` table, `standins_known` on the report reply). The exact keys this companion sends and reads are in CR-284H. DASHBOARD FIRST, per the contract.
+- webapps-tools: the three items owed IN to this group are done and are CR-284Z, CR-284AA and CR-284AB above. The frame-count decision is EXACT, so `broll/indexer/broll_index/ffmpeg_tools.frames_match` needs no change; its docstring's "comp-broll-tiers-3 is the open question" sentence can now say it was answered.
+- webapps-tools: `tools/release.ps1` and `tools/release_macos.sh`: nothing is strictly owed (the release WORKFLOWS now set `CCSYNC_REQUIRE_FFMPEG=1`), but the two scripts are where `CCSYNC_REQUIRE_RCLONE=1` lives, so a local release cut from a terminal still skips those twenty tests. Setting it there too is the tidy finish; only do it beside an ffmpeg the machine actually has.
+
+### Deploy order
+
+- **Either, with one exception.** Everything in CR-284 is companion-side and
+  safe against a 0.7.49 dashboard: the one new wire key (`insert.known`) is
+  read optionally and nothing sends it yet.
+- The exception is the pair CR-284F + CR-284I. Taking a clip live before its
+  original is on the NAS (CR-284I) makes every such clip answer
+  `original_rel: null`, which is precisely the state CR-284F fixes. They are
+  in the same build, so no ordering is needed - but neither may be
+  cherry-picked without the other.
+- **CR-284H is DASHBOARD FIRST**, per the contract. A dashboard that does not
+  declare `standins_placed` drops it (`extra="ignore"`), and the companion's
+  reader treats a missing `standins_known` as "this dashboard does not know",
+  which is exactly today's behaviour - so a companion shipped first is inert
+  rather than wrong, and a dashboard shipped first simply has nothing to
+  record until the companions arrive.
+- CR-284K changes CI and both release workflows; it must land before the next
+  release is cut, or the release runner will fail on a missing ffmpeg it was
+  never asked to install.
+
+### Owner decisions
+
+- **A clip with no original inserts the PREVIEW, not the editing proxy.**
+  proxy-tiers-2 suggested inserting the editing proxy where one exists, since
+  it is better quality. It is also a file the server only THINKS is there
+  (the same listing that was wrong about the original), and a failed fetch
+  fails the insert, whereas the preview is the one file the archive always
+  has. If the owner wants the editing proxy used, it should be a
+  `preview_only` variant that falls back to the preview when the fetch
+  refuses.
+- **A failed IMPORT does not retire the stand-in ledger row.** proxy-tiers-6
+  asked for it. It would re-open CR-282C's hole - a stand-in on disk with no
+  row is the one failure the ledger exists to prevent, and a render would
+  then render 1080p under a 6K name. With the extension allow-list the
+  scenario it was for (an unopenable `.mxf` stand-in re-imported for ever)
+  cannot arise.
+- **`upgrade_attempts` is 8 and lives on the ledger row.** In memory it would
+  be handed back by every restart, which is the shape the finding is about. A
+  smaller ceiling would give up on a slow NAS; a larger one is most of a day
+  of worker children.
+- **The archive exemption's TTL is 60 s.** Long enough to turn twenty probes
+  a minute into one, short enough that a proxy landing shows up in the
+  missing count while the editor still remembers doing it.
+- **The CI ffmpeg install is `continue-on-error`, the release one is not.**
+  A broken package feed must not red a CI run about our own code (the tests
+  fall back to skipping, exactly where they were), but a release that cannot
+  run the coverage it is being cut on should stop. If the owner would rather
+  a release never blocked on choco/brew, drop `CCSYNC_REQUIRE_FFMPEG` from
+  the two release workflows and the skip comes back.
+- **CR-284H reports EVERY ledger entry, stale or not, and a fleet "yes" is
+  conclusive.** A stale row still describes a project that was cut against the
+  stand-in's geometry, and the cost of a "yes" that turns out not to matter is
+  one `ReplaceClip` on the clip's own path, which CR-284R then remembers. The
+  cautious alternative (report only live stand-ins, treat the answer as a
+  hint) leaves the wired rig demuxing for exactly the clips the feature exists
+  for.
+- **An earlier reply's knowledge survives a reply that carries none.**
+  Forgetting on every silent reply would make one dashboard restart cost a
+  full archive demux.
+- **comp-resolve-6 is fixed by reading the proxy back, not by planning one.**
+  The verifier could not confirm what `ReplaceClip` does to an attached proxy
+  without a live Resolve. Reading it back costs one property read and needs
+  no change to `plan_relinks`' `.mp4` rule (audit F1). The live check on the
+  wired rig is still owed and is already on CR-281's list.
+
+## CR-285 - the ninth hunt's dashboard mediums and lows: an episode nobody could reopen, a card that blamed an innocent pass, and a publish that swapped the bytes first - FIXED in repo 2026-09-18 (dashboard 0.7.50), unshipped
+
+The `dashboard` group of `docs/bug-hunt-2026-09-18/ASSIGNMENTS.md`: 47 hunt
+findings plus the four the live dashboard showed on the morning of the pass,
+fixed against `214869b` plus the uncommitted CR-282 wave, by one builder
+(CR-285A..AK) and then a second (CR-285AL..AW: the mediums the first left,
+the lows it could not reach, and the alert half of live-1).
+Mediums first, in the order the assignment lists them, then the lows it could
+reach. Five findings are in code the whole fleet took on 2026-09-17 (dashboard
+0.7.49), five are in the Timeline Cards engine pool that went live 2026-09-14,
+and four are things the live dashboard was doing while the hunt was being read.
+
+Three OWED items routed here by other builders are folded in as lettered
+sections of their own (comp-app-3, comp-resolve-5, comp-broll-tiers-5,
+proxy-tiers-3's dashboard half, server-tools-1's CI step and regression-6's
+neutered assertion), because they are changes to files in this group.
+
+### CR-285A (dash-cards-2) - an episode that failed to build could never be opened again - FIXED (cards_pool.py, templates/cards_landing.html)
+
+`EnginePool.open` was idempotent on the SLUG, not on the STATE: an entry the
+builder thread left in `FAILED` came back as-is with an empty refusal, so
+`_run_build` was never re-entered. The landing page drew `[ FAILED ]` and, in
+the final `{% else %}` branch of the action cell, offered `[ OPEN ]` - which
+posted, got the same failed entry back, and redirected to `?want=<slug>` with
+nothing changed. `[ CLOSE ]` was inside `{% if ep.state == 'ready' %}`, so not
+even an admin had a door. One transient cause - the vault share not up yet,
+Postgres refusing at the moment somebody clicked - poisoned that episode for
+the life of the container, and the only cure was redeploying the dashboard.
+
+`open()` now treats a FAILED entry as ABSENT: it is dropped and a fresh
+builder thread starts. A failed entry already held no seat (the `live` count
+skips it), so nothing about the cap changes. `RETRY_FLOOR_SECONDS` (20 s) is
+the one addition the verifier asked for: a build that fails SLOWLY plus a page
+somebody keeps pressing would otherwise be a thread per press, so a retry
+inside the floor is refused with the seconds to wait. The template draws
+`[ CLOSE ]` from a new per-row `may_close` instead of `session_is_admin`, and
+for `failed` as well as `ready`, so a failed episode offers both doors.
+
+### CR-285B (dash-cards-3) - the cap refusal named a page that does not exist and an act that frees nothing - FIXED (cards_pool.py)
+
+`_full_sentence` read "Ask one of them to leave it, or an admin can close an
+idle one on Settings > Timeline Cards." There is no Settings > Timeline Cards
+page anywhere in the tree - the only close control is the form on the landing
+page itself - and "leaving" releases nothing: a seat is held by the ENTRY, and
+`occupants()` lapsing after 15 minutes changes the wording and nothing else.
+A blocked editor was told to do a no-op and then sent looking for a page that
+is not there. The sentence now names `[ CLOSE ]` beside the episode on that
+same page, and says an idle one may be closed by anybody - which is true as of
+CR-285P below, and would have been a second lie without it.
+
+### CR-285C (dash-cards-4) - the /cards/sw.js kill switch deleted every cache on the origin - FIXED (cards_landing.py)
+
+`KILL_SW`'s activate handler was `for (const k of await caches.keys()) await
+caches.delete(k)`. CacheStorage is per ORIGIN, not per worker scope, so that
+sweep also emptied the dashboard PWA's own `ccsync-<version>` precache - the
+offline page and `htmx_errors.js`, which DUI-2 precached precisely for a bad
+connection - and the dashboard's worker does not re-run `install` until its own
+`__VERSION__` bytes change, so a phone stayed without an offline page until the
+next dashboard release. It also took `cards-media`, the clips an editor
+deliberately downloaded for an offline session, which after the 2026-09-12
+incident is not a small thing. It now deletes only `cards-shell-*`, the stale
+page shell it exists to remove; the names come from the other repo's own
+`page/sw.js` (`SHELL = 'cards-shell-' + VER`, `MEDIA = 'cards-media'`), not
+from a guess.
+
+### CR-285D (dash-cards-5) - closing an episode leaked its 24-thread WSGI executor - FIXED (cards.py, cards_pool.py)
+
+Every engine is wrapped in `a2wsgi.WSGIMiddleware(..., workers=24)`, which
+builds a `ThreadPoolExecutor(max_workers=24)` in its own `__init__`.
+`EnginePool.drop` / `stop_all` cleared `entry.asgi`, but `CardsDispatch._gates`
+had no deletion path anywhere in the tree, so the middleware - and whatever
+WSGI threads that episode had already spun up - stayed reachable from the
+mounted dispatcher for the life of the container. An admin closing an episode
+to free a seat therefore made the thread count worse than
+`docs/CARDS_TWO_PROJECTS.md` §12's accounting says it is. The pool has no
+reference to the dispatcher, so the eviction arrives as a callback:
+`EnginePool.set_evict_hook(dispatch.evict)` is wired in `mount_cards`, `drop`
+and `stop_all` call it, and `CardsDispatch.evict` pops `_gates[slug]` and calls
+`executor.shutdown(wait=False)` - `wait=False` because a request may still be
+in flight on one of those threads and the threads are what is being reclaimed,
+not the request. The same-slug reopen path evicts the old gate too.
+
+### CR-285E (dash-cards-6) - the per-slug data dir abandoned every engine's existing state with no word - FIXED (cards.py)
+
+`data_dir_for` moved the engine's `data_dir` from `<data>/cards` to
+`<data>/cards/<slug>` and nothing moved the files already there:
+`cards_mirror.json`, `cards_pick.json`, `cards_lane_keys.json`, `cards_ui.json`,
+the EN-index / translation caches and `library_backups` - the last of which is
+the safety net for the cut list itself. They simply sat unread one directory up.
+
+NOT adopted, on the verifier's reasoning and the owner's risk: which episode
+the flat files belonged to is not recorded anywhere (§11 removed the boot root
+in the same change), so an automatic adopt is a guess, and guessing wrong
+writes another episode's pick and mirror into this one, which is worse than the
+loss. `_say_where_the_old_state_went` logs ONE warning per data dir naming both
+paths and the files it found, so nobody spends an evening looking for the
+backups. The files are only orphaned, never deleted.
+
+### CR-285F (dash-collector-alerts-2) - the 500-move cap dropped the rest of a pass permanently while its log line promised otherwise - FIXED (collector.py, notices.py, db.py)
+
+`moves = moves[:DETECTED_MOVE_LIMIT]` runs AFTER the loop that has already
+called `db.replace_nas_media` for every walked project, and those rows were the
+only record of the old paths - so the surplus cannot be "picked up on later
+cycles", which is what the warning said. A later cycle sees those files at
+their new paths as ordinary inventory. The dropped moves are therefore a
+DELETION as far as every machine is concerned: lane A re-uploads them to the
+old paths, lane B's breaker parks proxy download on every machine that held
+them, and the only trace was one `log.warning` in a container log a recreate
+throws away. The truncation is alphabetical by `(from_slug, from_rel)`, so what
+survived was arbitrary with respect to importance.
+
+The log line no longer states an untruth (it says DISCARDING and the count),
+and `notices.record_moves_dropped` files an ERROR notice naming both numbers
+with the fix line "move the rest with [ MOVE ON THE SERVER AND ON EVERY
+MACHINE ]". `file_moves_dropped` is registered in `db.NOTICE_KINDS` WITH its
+writer and stamped `mark_notice_checked` from the same inventory pass that owns
+`file_move_detected`, so a fleet that has never overrun the cap does not read
+[ NOT CHECKED ] for ever. Not fixed here: making the cap RECOVERABLE (deferring
+`replace_nas_media` for the affected projects) reorders phase 2 of the walk and
+is not a fix-pass change - see "Not fixed".
+
+### CR-285G (dash-collector-alerts-3) - a folder RENAMED in place was one detected row per file - FIXED (collector.py)
+
+`_folder_move` derived its candidate folder from the shared SUFFIX only and
+then iterated `range(shared, 1, -1)`. For a rename of the leaf folder itself
+(`Interviews` -> `Interviews 2026`, `B-roll` -> `Broll`) the only shared
+component is the basename, `shared == 1`, the range is empty, and every file
+fell through to the per-file loop. Only a folder moved under a DIFFERENT parent
+- which shares the folder name as well as the basename - was ever batched,
+while `docs/HAND_MOVES_ON_THE_SERVER.md` section 7 phase 1 promises one row per
+folder for both. A 300-clip rename was 300 `file_moves` rows, 300
+`commands.file_moves` entries per holding machine, 300 events in the project
+page's MOVES history and a third of CR-285F's 500-row cap in one pass; 600
+files crossed it and lost the tail.
+
+The candidate list now also carries the other end of the path: the first
+component where the two paths DIFFER, bounded so it names a FOLDER and never
+the file. `_folder_members` still does all the proving - every file under the
+old folder moved to the matching path under the new one, and nothing stayed
+behind - and the `Proxy` refusal at either end is unchanged. Two existing
+tests had to be corrected rather than kept: the cap test's five files all moved
+into one folder (one row now, which is the fix), and the idempotence test's
+synthetic second diff held ONLY the moved file, which now legitimately reads as
+that folder having been renamed. Both were given the shape the collector really
+produces, and both cite the finding.
+
+### CR-285H (dash-core-1, dash-core-6) - a secret file could land empty and the boot refusal passed on it - FIXED (secrets_boot.py, app.py)
+
+`_write_secret_file` was `os.open(O_WRONLY|O_CREAT|O_TRUNC)` + `fh.write`: no
+temp file, no rename, no fsync, no read-back. The good copy was destroyed
+BEFORE the new bytes were written, `ensure_secrets` swallows the OSError and
+carries on with the in-memory value, `_read_secret_file` strips an empty file
+to `""`, and `check_persisted_secrets` - the whole DCORE-3 refusal - asked only
+`is_file()`. So a create that succeeded and a flush that did not (ENOSPC on a
+full `/data`, a kill or a host power loss between write and disk) left a
+ZERO-BYTE file that satisfied the refusal, the dashboard served on a secret
+that existed only in memory, and the next `docker restart` minted a different
+one: every browser session and every non-expiring `cce1.` identity token in the
+fleet 401'd at once, with nobody ever having known the lost value.
+`DASH_SESSION_SECRET_PREVIOUS` cannot help with a value nobody knows.
+`internal.env` and `syncthing.env` go through the same helper on EVERY boot,
+where a truncated `CCSYNC_INTERNAL_TOKEN` is the dash-admin-2 outage by another
+road (dash-core-6, the same root cause).
+
+Both halves, as the verifier asked. The write is a sibling `.tmp` (same
+directory, so `os.replace` is atomic), 0600 set on the fd before the rename so
+the secret is never briefly world-readable, `fsync` before the rename, and the
+temp removed on any failure so a failing volume does not fill with them.
+`check_persisted_secrets` compares the file's CONTENT with the value this boot
+is using rather than testing existence. `ai_providers.write_secret_file` shares
+the helper and inherits both, which is what that docstring always promised.
+
+### CR-285I (dash-db-1 = dash-collector-alerts-4) - a collector pass that held no write lock was recorded as the writer that held it, for ever - FIXED (collector.py, notices.py, db.py)
+
+`_timed` measures `elapsed` around the WHOLE runner - `_run_inventory` is an
+SSH walk of the NAS tree, `_run_enforce` and `_run_connections` are Syncthing
+round trips - and treated anything over `BUSY_TIMEOUT_MS / 1000` as evidence
+that the poll "held the database's write lock for longer than a request waits".
+`_record_inventory`'s own docstring says the opposite, by design: every
+filesystem walk happens BEFORE the first write, because an `os.walk` of a
+ZFS/NFS tree inside an open SQLite write transaction is what made editors'
+`POST /api/v1/report` 500. So on any tree of size the home page grew a
+permanent `slow_write` card blaming an innocent pass, un-dismissable (`db.notice`
+NULLs `cleared_at` on every re-assert), climbing by one per cycle, competing for
+the 25 rows of `NOTICE_PANEL_LIMIT` with real findings - and it pointed the
+`db_busy` fix line's cross-reference at the wrong thing.
+
+The poll branch has its own kind (`slow_poll`), its own words ("the <kind> pass
+took longer than a cycle ... most of a pass is a walk of the NAS tree or a
+Syncthing round trip, which happen outside any database transaction, so on its
+own this does not mean anything waited on the database"), its own threshold
+(`notices.SLOW_POLL_SECONDS`, one cycle rather than the write-lock timeout) and
+- the half the hunter asked for and nothing had - a CLEARING writer: a pass
+that finishes inside a cycle closes its card. `record_slow_write` keeps its
+wording and its one honest caller, `api_report`'s measured write burst.
+
+A CLEAN PASS WRITES NOTHING, and that is load-bearing rather than tidy: the
+first version of this fix cleared unconditionally, which is a write
+transaction per poll per kind, and `tests/test_db_write_locks.py` went red with
+`database is locked` on every companion report and took three minutes.
+`_slow_polls` remembers which kinds have a card open and is seeded from the
+table once per kind with a SELECT, so a card that survived a restart still
+clears without a write on the happy path.
+
+### CR-285J (dash-db-2 = dash-collector-alerts-5, tests-5) - two notice kinds with a writer and no registry row, and the test that could not see them - FIXED (db.py, notices.py, collector.py, tests/test_alerts.py)
+
+The 2026-09-17 busy-database rework added `db_busy` and `slow_write` writers
+and no `NOTICE_KINDS` rows. That registry is where every rendered property of a
+notice comes from: `notice_kinds()` builds the WHAT THE SERVER CHECKS panel,
+`notice_href()` builds `[ TAKE ME THERE ]`, and `ui.py`'s health rows take the
+row's TITLE from it with the raw key as the fallback. So an operator under
+contention read a problem card headed `db_busy` with no link, and the panel
+that exists to answer "is it even looking?" had no line for database contention
+at all - the mirror image of the false `[ OK ]` this registry was built for.
+
+All four kinds of this wave are registered (`db_busy`, `slow_write`,
+`slow_poll`, `file_moves_dropped`, plus `broll_archive_unreadable` from
+CR-285R), each WITH its writer, and `notices._check_contention` stamps the
+three contention kinds' check times on the notices cycle - not from `_timed`,
+which would be the per-poll write CR-285I is about. `tests-5`'s half is the
+test: `test_every_new_kind_is_in_the_registry_and_the_weekly_list` loops over
+sixteen names typed into the test file, so it can only fail when a kind is
+DELETED, never when one is added and forgotten, which is the failure its own
+docstring claims to prevent and which shipped twice in one week. The new
+`test_every_notice_kind_any_writer_passes_to_db_notice_is_registered` walks the
+AST of every module under `src/ccsync_dashboard/`, resolves a module-level
+constant kind, and REPORTS a call whose kind it cannot read rather than
+skipping it.
+
+### CR-285K (dash-mounts-ui-4) - five amber conditions behind [ DETAILS ] that the note count did not know about - FIXED (health.py)
+
+`detail_notes`' own docstring says its count "is the one thing shown beside the
+collapsed expander, so that folding a row's diagnostics away can never hide a
+real problem silently". The 2026-09-11 declutter moved five conditions INTO
+that fold and into neither `detail_notes` nor `why_causes`/`fleet_headline`:
+`skipped_exists`, `transport.express_last_error`, `transport.express_dropped`,
+`guard.trash_bytes` over 5 GB and `guard.ingest_staging_bytes`. An editor whose
+express upload had been failing for a week drew a muted "Idle, nothing owed"
+headline, three quiet lane chips, and `[ DETAILS ]` with no count at all: the
+one place the failure was stated was inside a fold with nothing to suggest
+opening it. All five are notes now. `transport` is fetched as defensively as
+`guard` and `proxy` (a build that never sent the section has no key), and the
+trash threshold is the TEMPLATE's 5 GB, because a count that disagreed with the
+chip beside it would be worse than no count.
+
+### CR-285L (live-1, dashboard half) - a stall the companion recovered from a week ago was reported as a current blockage and alerted daily, for ever - FIXED (health.py)
+
+SYNC-1 (2026-08-28) made the companion's stall record persistent so a restart
+could not erase the evidence, and gave it no expiry and no "the lane has since
+completed a pass" condition. `~/.ccsync/state/lane_stall.json` therefore rides
+every report for the life of the install, and `_why_code` read any record as a
+CURRENT blockage. Live on 2026-09-18: ruskin's lane A was killed once after 25
+minutes of no progress on 2026-09-11 and restarted the same day; a week later
+all three of his lanes were idle with nothing owed, his last report was four
+minutes old, and his row still said `blocked_reason=lane_stalled since
+2026-09-11`, his tray was red, and "CC Sync: still not fixed after 4 day(s)"
+had gone out by mail four mornings running. leso's Mac had the same shape from
+a 2026-09-17 stall. Nothing any editor or admin could do cleared it.
+
+`health.stall_is_current(row, now)` is the one predicate, and it is safe alone
+against a 0.9.74 companion - which is the whole fleet - because it reads only
+what those builds already send: `stalled_at` in the guard block, and the lane
+rows' `last_sync`. A record stops being current when that lane has completed a
+pass since the kill, or when it is more than `STALL_CURRENT_SECONDS` (24 h)
+old. NO `stalled_at` keeps the old behaviour: "cannot tell" must never quietly
+turn a real stall green. The companion half (clearing or stamping the file when
+a pass completes) is `companion-core`'s and is not needed for this. CORRECTED
+2026-09-18 by the second builder: this section originally said the fix stops
+the mails fleet-wide in one deploy, and it stops the ROW and the tray. The
+mail is `alerts._check_lane_stalled`, which had no age test of its own - see
+CR-285AP, which is the other half of the same sentence.
+
+### CR-285M (live-2 = dash-api-6) - a publish placed its bytes before the row existed, so a failed insert left a replaced live artefact - FIXED (package_store.py)
+
+`store_verified_package` did `os.replace(part_path, dest_dir / filename)` and
+only THEN `db.insert_companion_package`, with the commit later still. The PUT
+route 409s on `db.get_package` before the body is streamed, so two publishes of
+one version that OVERLAP both pass that check - the ship interrupted and
+re-run while uvicorn drains the first, `publish_latest` retried after a timeout
+- and the loser's bytes were already at the served filename when its INSERT hit
+`UNIQUE (kind, platform, version)`. Seen live on 2026-09-17: the 0.9.74 publish
+hit the route twice, each time answering a 500 that is now an open
+`server_error` notice telling the admin to send the detail to support, and each
+time swapping the artefact under a row whose `sha256` describes the first
+upload's bytes. Every companion downloading that build then failed its hash
+check and could not upgrade, with the Packages page showing a normal record.
+
+Two changes. A version this server already holds is answered BEFORE anything
+on disk moves: the same bytes are a no-op with a note ("already published at
+this version, with these exact bytes"), different bytes are a 409 naming what
+to do, and the `.part` is unlinked either way. And the `os.replace` moved to
+AFTER `conn.commit()`, past the REL-1 make-current gate that can raise, so the
+worst case is the other way round: a row whose file is missing, which is a loud
+404 on download and is fixed by publishing again. That is the direction DASH-3's
+commit-then-unlink ordering already chose for the pruned files on the next line.
+
+### CR-285N (live-4, comp-resolve-5, comp-broll-tiers-5) - three report fields the dashboard threw away, one of them telling the admin to update a current dashboard - FIXED (api.py)
+
+The companion's `stray_projects()` has carried `slugs` and `checked_at` since
+the 2026-09-11 fix pass and `StrayProjectsIn` never declared them. An
+undeclared key inside a reported SUB-MODEL is invisible to `model_extra`, which
+is why the generic walker could not see it - what it did instead was open
+`ignored_report_sections` as a warn on 2026-09-11 with the fix line "Update the
+dashboard", on a dashboard that IS current, and keep it open for a week
+(`last_seen 2026-09-18T03:42:07`). An admin who followed that line found nothing
+to update, and a real future "companions ahead of the dashboard" event would
+have been invisible behind it.
+
+`slugs` (bounded at 20, like `paths`) and `checked_at` are declared. Two more in
+exactly the same shape, owed here by `companion-core` and both dashboard-first:
+`ProxyAttachIn.refreshed` (comp-resolve-5 - the companion counts refreshed
+clips beside attached/failed now) and `ResolveHealthIn.standins_owed`, a bounded
+`StandinsOwedIn(count, why)` (comp-broll-tiers-5). Declaring them is the
+contract; storing them is a later decision, and the verification test feeds the
+PRODUCER's real dicts through all three models so the next added field fails a
+test instead of opening a notice.
+
+### CR-285O (wire-2) - "a busy database is contention, not an error" stopped at the dashboard's own routes - FIXED (app.py)
+
+`@app.exception_handler(Exception)` is installed on the PARENT FastAPI app's
+`ServerErrorMiddleware`, and `/broll`, `/music` and `/ytdl` are real ASGI mounts
+with error middleware of their own: they answer their own plain
+`500 Internal Server Error` and the parent's `is_db_busy` -> 503 branch never
+runs for them. Measured: parent route 503, mounted route 500. `broll/web`
+opens its connections at sqlite3's default busy timeout and has no busy
+translation anywhere, and the companion's ingest client treats any non-200 from
+`/items/{uid}/result` as TERMINAL - it clears `described` and calls
+`_fail_item`, so a `publish_db.py` swap holding a write for five seconds cost a
+clip its minutes of local VLM work and nothing recorded that the archive
+database was merely busy.
+
+`_install_busy_handler_on_mounts` walks the parent's routes after every mount
+and installs the same handler on any mounted app that has a handler registry,
+so a fifth mount added later does not have to remember. Deliberately not a
+reference taken at each mount site: the four mounts are built in four modules
+on four tri-state contracts. `/cards` is skipped (its mount is a bare ASGI
+callable, and its database is the episode's). The notice is written to the
+DASHBOARD's database, because the sub-apps have no `settings.db_path` and the
+PROBLEMS panel that has to show it lives here. A real defect under a mount is
+still a 500.
+
+### CR-285P (security-2) - any signed-in non-admin could take both Timeline Cards seats, and only an admin could give one back - FIXED (cards_pool.py, cards_landing.py, templates/cards_landing.html)
+
+The pool caps live entries at `DASH_CARDS_ENGINES` and REFUSES the third rather
+than evicting, which is deliberate. But opening was available to every session,
+closing was admin-only with no self-close, and nothing ages a seat out
+(`ACTIVE_SECONDS` only decorates the refusal sentence). So an editor who opened
+the wrong episode by mistake and then the right one held both seats and could
+release neither, and everybody else - including the person whose phone is
+staging a cut - got CR-285B's refusal with no way to act on it until an admin
+was found or the container restarted. A bad state the user cannot clear, on the
+surface a phone stages a cut on.
+
+`EnginePool.may_close(slug, editor, is_admin)` is the rule: an admin may close
+anything; anyone else may close an episode they are themselves an occupant of,
+or one nobody has been in for `ACTIVE_SECONDS`, which is exactly the "idle one"
+the refusal now names. `cards_close` asks it and redirects with the refusal
+when it says no; the template draws the button from `may_close` so the page
+never promises an act it cannot do. Taking an episode away from somebody who IS
+in it is still admin-only, because that is the act that must not happen by
+accident.
+
+### CR-285Q (res-fleet-2, comp-app-3) - a pushed update the machine can never take removed that computer from the jobs fleet, and the reply could not say why - FIXED (api.py)
+
+Two halves of one silence. `_upgrade_info` withholds an offer - silently, by
+design, because there is no "refused offer" shape in the protocol - for a
+retracted build, one needing a newer dashboard, and one built for another
+processor; and `machine_update_request` emitted `commands.upgrade` whenever a
+request existed, computed independently of that. So a machine was asked for a
+build it is not being offered, logged "this machine is not being offered that
+build" once in a log on somebody else's PC, reported nothing back, and
+`jobs.machine_facts` turned "has an update waiting" into a blanket refusal of
+every job kind - out of the whisper/proxy/peaks fleet until
+`db.expire_machine_update_requests` dropped the row 14 days later (the
+verifier's correction: bounded, not "for ever").
+
+`_machine_can_be_offered` asks the SAME `_upgrade_info` the offer comes from
+rather than copying its three refusals, and fails OPEN - anything unexpected
+sends the command exactly as before, so a defect here cannot take the push
+channel away. When the answer is no the command is not sent, the request is
+LEFT STANDING (the build may become offerable again: an un-retraction, a
+dashboard update), and a plain `upgrade_none_reason` rides the reply.
+
+That key is comp-app-3's half, owed here by `companion-core` and already
+written on the companion side, inert until this lands: `_upgrade_info` takes an
+optional `withheld` sink and the report reply carries
+`upgrade_none_reason` when a build exists and is being held back, so the
+companion can tell "there is no build" from "there is a build, we are just not
+offering it to you" and stop clearing the standing refusal it is on. Additive
+and ignored by every build in the field that does not read it. DASHBOARD FIRST.
+
+### CR-285R (proxy-tiers-3, dashboard half) - an archive this container cannot list turned every insert into a preview, and nothing said so - FIXED (notices.py, mount_status.py, db.py)
+
+Owed here by `companion-media`, whose half answers `known: false` and falls
+back. `insert_target_detail` discovers a clip's original and its editing proxy
+by LISTING the archive folder inside this container, and an OSError there - the
+dataset unmounted, an SMB hiccup, `BROLL_DATA_ROOT` wrong after an image update
+- was swallowed into "no entries", which is byte for byte the answer for "this
+clip has no original". Ten minutes of that turned every Send to Resolve in the
+window into a preview-only insert with a stand-in ledger row on the editor's
+machine and a Resolve project pointing at a 540p file, damage that outlives the
+outage for ever on projects nobody re-checks - and the dashboard showed no
+error, because the detail view was otherwise complete.
+
+`notices._check_broll_archive` runs on the notices cycle, asks
+`mount_status.root_of("broll")` (a new accessor, so the check and the mount
+cannot disagree about which directory this is) and files an ERROR notice naming
+the path and the strerror when the listing raises, with the fix line pointing
+at the bind mount. It clears itself when the mount comes back, and a build with
+no b-roll mount writes and clears nothing - "could not check" is not evidence
+that the archive is fine. `broll_archive_unreadable` is registered WITH the
+writer. Not done: the matching `alerts.ALERT_KINDS` row, which would mail it -
+see "Not fixed".
+
+### CR-285S (dash-release-jobs-1) - the restart path still died on a full or read-only /data - FIXED (dashboard_update.py)
+
+CR-260g routed the HEALER's two writes through `_write_json_best_effort` and
+explicitly left every other caller unchanged - but the failure path that ledger
+entry describes is `finish_restart -> consume_restart_request -> _set_state`,
+which is a WRITE through the unguarded `_write_json`. So on a data dataset that
+is full or read-only the OSError still escaped, `_exit_process(RESTART_EXIT_CODE)`
+still never ran, uvicorn still exited 0 and `deploy/run.sh` still did not
+re-exec the tree `current.json` already names. The fix moved the raise one line
+later. The same unguarded write is the FIRST statement of `request_restart`, so
+on the same disk the apply worker raised before `_signal_restart()` ever fired
+and `_fail_state` then raised again inside its own `except`, leaving
+`in_progress: true` on disk with no restart requested at all.
+
+`_set_state` takes `best_effort`, and the three callers whose decision must
+survive an unwritable volume use it: `consume_restart_request` (the exit code is
+decided from the state it READ), `request_restart` (the restart matters, the
+note about it does not) and `_fail_state` (it runs inside an `except`; a
+`_fail_state` that raises replaces the real failure with an OSError). The
+lifespan's `try/except` around `finish_restart` stays - it is the last net, not
+the fix.
+
+### CR-285T (dash-api-4 = dash-mounts-ui-5) - a lane a machine never reported drew as a quiet GREEN chip - FIXED (templates/partials/fleet_grid.html, static/style.css)
+
+`health.lane_strip` fills a missing lane with `{"state": "not reported",
+"chip": GREEN, "reported": False}` and the template coloured by `chip` alone
+(`"quiet" if lane.chip == "green"`), so the `reported` flag it is handed was
+never read: "this lane did not report" and "this lane is fine" were the same
+grey box, differing only in the words inside. That is the "could not check must
+never render as a green reassurance" rule the same file states twice about its
+own disk chip and its Resolve block. The template reads `lane.reported` now and
+draws an unreported lane in `.chip.lane.unknown` - dashed and dimmer, not
+amber, because it is a gap in the evidence and not a fault. Fixed in the
+template rather than in `lane_strip`, as the verifier asked: changing `chip` to
+amber would change what every downstream counter keyed on chip colour sees.
+
+### CR-285U (dash-mounts-ui-6) - the b-roll mount recorded its PROXIES directory as its root - FIXED (broll.py)
+
+The hand-off wave added `record_root`'s `witness` parameter and updated music
+and ytdl; b-roll was left on the older single-argument shape with the proxies
+directory as its ROOT. `record_root`'s docstring states the contract the other
+two now follow ("The root is still what the degraded sentence names: the admin
+has to be told which mount is gone, not which file this server happened to
+stat"), and `recheck` formats the first element - so with `/broll-data`
+unmounted the notice named `/broll-data/proxies`, sending the admin at the NAS
+to look for a subdirectory. Now `record_root("broll", get_data_root(),
+witness=get_proxies_dir())`, which is also what CR-285R's archive check reads.
+
+### CR-285V (dash-db-4) - the "who holds this file" query was a LIKE with the path's own wildcards unescaped - FIXED (db.py)
+
+`file_move_target_machines` bound `media_rel_key(from_rel) + "/%"` into
+`rel_path LIKE ?` with no `ESCAPE`. `_` is a single-character wildcard in SQL
+LIKE and is in half the folder names this product handles (`Gold_Card_Meetup`,
+`A_001`), and `%` is legal in a filename too - so a directory move of
+`Gold_Card_Meetup` also matched any sibling of the same length differing only
+where an underscore sits. That machine was sent a `commands.file_moves` entry
+for a file it does not hold at that path; the companion's not-found arm answers
+harmlessly, but the move's per-machine progress row on the project page was
+wrong, and the next reader of this predicate would inherit the over-match.
+`_like_prefix` escapes the escape character first, then `%` and `_`, and the
+statement carries `ESCAPE '\'`. The other prefix LIKE in `db.py` documents
+itself as a prefilter with an exact re-check and is unchanged.
+
+### CR-285W (dash-db-5 = dash-mounts-ui-3) - the assignments picker offered a computer whose grid can never have a column - FIXED (assignments.py)
+
+`_machine_options`' own docstring promises "Never a bucket option invented
+beside two real computers", and it then APPENDED one whenever
+`db.selections_for_machine(conn, editor, ANY_MACHINE)` was non-empty - on
+exactly the legacy shape the docstring calls out. `_assignments_view`'s column
+loop only ever emits a `machine=""` column under `if not machines:`, so choosing
+the offered option filtered every column away and the page printed "this person
+has no computer to show a plan for yet", which the picker had just contradicted
+- and the bucket rows the option existed to expose could then be neither
+inspected nor removed there. The narrow fix, per the verifier: the option is
+offered only when the person has no registered machine, matching the column
+loop. Building a bucket COLUMN beside real ones would create a tick target
+`db.selections_for_machine` only honours for a machine with no plan of its own,
+which is a write shape and not a display change (CR-110). The rows are not
+lost: `db.fetch_machine_selections` expands the bucket onto every machine with
+no plan, so the real column renders them ticked and correct.
+
+### CR-285X (dash-core-3) - OIDC minted a session for a username the rest of the dashboard will not accept - FIXED (oidc.py)
+
+`username_from_claims` lower-cased the claim and refused only `@`, `/` and `\`.
+Everything else became the session identity - a space, a colon, non-ASCII, a
+leading digit, 200 characters - while `db.record_known_editor`,
+`db.set_selection` and `local_users` all gate on
+`^[a-z][a-z0-9._-]{0,31}$` and simply refuse. On a deployment that lets the IdP
+decide membership (`DASH_OIDC_ALLOWED_GROUPS`) with `DASH_OIDC_USERNAME_CLAIM`
+pointed at a display name, that editor appeared signed in to a dashboard where
+every tick, every Syncthing device join and every selection write did nothing,
+with no sentence anybody could read. The regex is IMPORTED from `db` rather
+than copied a third time, and the refusal names
+`DASH_OIDC_USERNAME_CLAIM` and the shape it wants: a 403 an admin can act on
+beats a session that half-works.
+
+### CR-285Y (dash-core-4 = security-1) - the open PWA paths were method-agnostic although every comment beside them says GET only - FIXED (app.py)
+
+`_open_path` took a path; `login_gate` called it before any method test. So any
+verb on `/cards/sw.js`, `/cards/manifest.webmanifest`, `/cards/icon.svg`,
+`/manifest.webmanifest`, `/sw.js`, `/offline`, `/favicon.ico`,
+`/.well-known/assetlinks.json` and the whole `_OPEN_PATTERN` skipped the
+session check - and under the cards mount `POST /cards/p/<slug>/sw.js` was
+dispatched to that episode's gate and into the checkout's `do_POST`, which
+reads and `json.loads`es the whole body and runs `offline.resolve_spans` BEFORE
+any path match. Not exploitable today (the dashboard's own routes at those
+names are GET-only and 405, `CardsDispatch` never builds an engine, and
+`csrf_gate` skips an unauthenticated request anyway), but the invariant three
+comments assert was not the one the code enforced, and the next handler
+registered at one of those names would inherit an unauthenticated write door
+with nothing in its diff to say so. `_open_path(path, method)` requires
+GET/HEAD for the static members and the pattern; `/login`, `/api/v1/login`,
+`/api/v1/report`, `/api/v1/diagnostics`, `/api/v1/ssh-key` and the setup pair
+are POST targets whose credential is not a session and are untouched.
+
+### CR-285Z (dash-core-5) - expired browser sessions accumulated on a long-running container - FIXED (collector.py, app.py)
+
+`sessions.py` says "expired sessions are deleted rather than left to
+accumulate", and the only unconditional sweep ran in the lifespan at BOOT.
+`validate()` deletes a row only when that exact cookie is presented again after
+it expired, and nothing in `collector.py` - the module that prunes the other
+eight tables - touched `auth_sessions`. A session from a phone nobody opens
+again, or a laptop that was reimaged, stayed until the next container restart;
+on a container that runs for months `list_all(limit=200)` starts hiding live
+sessions behind dead ones. The collector's prune cycle calls
+`session_prune_fn`, which is the STORE's own `prune()` and `prune_attempts()`
+on the store's own connection and write lock - not SQL on the collector's
+connection, or two writers fight over one table. AND it runs AFTER
+`conn.commit()`: the first version called it inside the open write transaction
+`db.prune` leaves behind, which is a second writer waiting out its background
+busy timeout while this one holds the lock, and `test_db_write_locks.py` caught
+it as `database is locked` on every companion report.
+
+### CR-285AA (dash-release-jobs-2) - an untrusted feed host could rewrite the provenance of a package this dashboard published itself - FIXED (release_feed.py)
+
+PREMISE CORRECTED (2026-09-18b, verifier dash-release-jobs-2, checked by the orchestrator): the vendor channel document is signed as a WHOLE (`canonical_channel_bytes` dumps the entire document sorted; `verify_channel_signature` rejects it before use), so a feed host cannot rewrite `git_dirty` or any other field without the offline release key. The change below is harmless (a narrower `repair_provenance`) but the threat it names does not exist; keep it as hygiene, not as a security fix.
+
+`git_sha` and `git_dirty` are outside the Ed25519 record signature by design
+(REL-13 - they are advisory), so a feed host, or anyone who can serve its
+static files, can edit them freely without breaking any signature.
+`repair_provenance` read exactly those two fields off the feed and UPDATEd them
+onto any already-published row whose sha256 matched, arguing that the sha check
+means "a vendor copy that differs from ours cannot rewrite our row's story" - but
+a matching sha proves only that the BYTES agree. So a build published here by
+`ship.cmd -AllowDirty` and correctly stamped `+dirty` could have that chip
+cleared, and the commit shown on the Packages page rewritten, on the one day
+the chip exists for. The verifier's narrower alternative is what landed, because
+the `published_by` gate would have stopped the repair working at all (the feed
+page's own [ PUBLISH ] button stamps an admin's username, not `release-feed`):
+ONE correction in ONE direction - a row that says dirty where the feed record
+says clean, which is exactly the `bool("0")` bug this function was written for -
+and `git_sha` is never written. Nothing may make a clean row look dirty.
+
+### CR-285AB (dash-release-jobs-4) - a recall whose kind is not lower-case recalled nothing, silently - FIXED (release_feed.py)
+
+`channel_retractions` folded `platform` and left `kind` at `.strip()`, while
+`companion_packages` stores kind folded and `db.retract_package` ->
+`get_package` matches it exactly. A recall entry spelled `"kind": "Companion"`
+therefore un-currented nothing and `retract_package` answered False, which is
+indistinguishable from "we never published that" - and nothing logged either
+way. The module's own comment calls a recall "the one channel message whose
+SUPPRESSION is the attack"; this was suppression by a capital letter. `kind` is
+folded now, exactly as `platform` beside it and `_record_key` everywhere else.
+(The verifier's correction: `_valid_records` builds both sides of its `recalled`
+set from the raw kind, so the OFFER was suppressed correctly; the two halves
+disagreed only against the database.)
+
+### CR-285AC (dash-release-jobs-5) - re-applying the version already running erased the rollback target - FIXED (dashboard_update.py)
+
+`"previous": previous if previous and previous != version else ""` blanks a key
+whose `""` means "the image" to both `rollback` and `select_code_root`. So
+applying the version `current.json` already names discarded the real previous
+tree's name - not because there was no previous tree, but because the
+arithmetic could not express "unchanged", and the admin who then pressed
+ROLLBACK got the image's much older code against a v53 database. The verifier
+replaced the hunter's scenario (`preflight` 409s on the version this dashboard
+is RUNNING, and `force` does not bypass it) with the reachable one: after a
+swap whose restart did not happen (CR-285S) or a boot that fell back to the
+image, the running `VERSION` is not `current.json`'s version, so the re-apply
+passes preflight. The existing `previous` is carried forward unchanged.
+
+### CR-285AD (regression-4) - CR-259a's guard treated "the staged tree could not say what schema it knows" as schema v0 - FIXED (dashboard_update.py)
+
+`select_code_root.tree_schema_version`'s own docstring says "None is NOT zero
+and must never read as safe", and `revert_refusal` is built on that three-way
+answer - but the writer was `int(checks.get("schema_version") or 0)` in both
+places, and the stage-verify subprocess already defaults the key to `0` in its
+own `except`. A tree whose probe could not answer was therefore recorded as a
+tree CLAIMING schema v0, `0 >= live` is false for every live schema, and the
+crash-loop rollback CR-259a exists to permit was refused for ever with a
+sentence naming a number the tree never claimed. The key is written only when
+the probe answered and popped otherwise, so "cannot tell" reads back as
+`None`, which is what the reader wants.
+
+### CR-285AE (dash-mounts-ui-1) - CR-270 wrote `retired_from` / `retired_reason` into a file no surface reads - FIXED (dashboard_update.py, templates/partials/admin_dashboard_update.html)
+
+CR-270's retire branch clears `current.json`'s `version` and `previous` and
+records WHY beside them; `dashboard_update.status()` builds its `current` dict
+from a deliberately FIXED key list that did not carry the two keys, and the
+Settings partial renders that dict. So an admin who applied a bundle over the
+air came back weeks later, after a newer image was deployed, to a panel showing
+no applied version and no reason at all, with the only record a stderr line in
+a container log the appliance's whole promise says nobody should need. This is
+the same shape as res-fleet-3, which was fixed one commit earlier for
+`revert_refused_reason` with the comment "a refusal that reaches no API body
+reaches no notice and no alert either". Both keys reach the body now and one
+calm line renders them - not a banner: nothing is wrong, the image simply
+carries it.
+
+### CR-285AF (security-4, parse-cost half) - a locate body was fully parsed before its own cap was consulted - FIXED (app.py)
+
+`LocateIn.files` has no `max_length`, so `MAX_LOCATE_FILES` (2000) ran INSIDE
+the handler, after pydantic had built every `LocateFileIn` in a body up to the
+4 MB default ceiling - roughly 100k entries - on a single-worker container by an
+authenticated fleet caller. Fixed with a `_BODY_LIMITS` entry
+(`MAX_LOCATE_BODY_BYTES`, 512 KB), which is a declared-length refusal before
+any buffering, rather than with `Field(max_length=...)`: the verifier's point
+is that the latter turns the route's careful 413 sentence into a pydantic 422
+the companion has never seen, and that sentence exists precisely so a caller
+does not read a truncated answer as "not on the server". The route's
+cross-project SCOPE is not touched - `api_locate_files`' own docstring chose it
+knowingly and the verifier REFUTED that half.
+
+### CR-285AG (security-3) - the Cards carry-on cookie set `secure` from the raw request scheme - FIXED (cards_landing.py)
+
+Every other cookie this server sets goes through `auth.cookie_secure`, which
+honours `DASH_COOKIE_SECURE` and `X-Forwarded-Proto` from a TRUSTED proxy. The
+new 90-day `ccsync_cards_last` cookie asked `request.url.scheme` directly,
+which behind a TLS terminator (Tailscale Serve, the funnel port) is `http` - so
+on a site that forces `DASH_COOKIE_SECURE=1` the session cookie carried Secure
+and this one did not, invisibly. It carries only a slug and is httponly, so the
+value of the finding is the one-helper rule, which is what stops the next
+cookie from being a credential. `/cards/open` now goes through the exported
+`remember()` helper with `auth.cookie_secure(settings, request)`, which also
+gives that helper the caller its docstring claims.
+
+### CR-285AH (dash-cards-7) - the raw build exception was rendered into the landing page - FIXED (cards_pool.py)
+
+`_run_build` stored `entry.detail = f"{type(exc).__name__}: {exc}"` and
+`cards_landing.html` renders it with no admin gate, so whatever
+`ProjectAgentEngine.__init__`/`start()` raises reached any signed-in user's
+browser: a psycopg `OperationalError` carries host, port, database and user, and
+an `OSError` carries container paths. This was the one place in the dashboard
+that printed another repo's exception to a browser, while `app.py`'s
+`unhandled_error` deliberately derives nothing from an exception. The page gets
+the exception's TYPE and "The dashboard log has the detail"; the warning one
+line up already logs the full text, so nothing is lost to whoever can read the
+log. An admin-only render was rejected (it still prints the DSN to a browser).
+
+### CR-285AI (dash-cards-9) - the failed-episode test could not fail for the bug it sat next to - FIXED (tests/test_cards_pool.py)
+
+`test_an_episode_that_will_not_build_holds_no_seat` proved only that a
+DIFFERENT root can still be opened after one fails. Nothing re-opened the
+failed root and nothing asserted the landing page offers a way out of `failed`,
+which is why CR-285A shipped green. Three tests landed with that fix rather
+than before it: a failed episode can be opened again, a failed episode is not
+rebuilt on every click, and the close control is drawn from `may_close`.
+
+### CR-285AJ (server-tools-1, CI step) - the third-party notices generator was in no gate - FIXED (.github/workflows/ci.yml)
+
+Owed here by `webapps-tools`: an LGPL dependency shipped to customers had no
+entry in `docs/legal/THIRD_PARTY_NOTICES.md`, and `tools/gen_notices.py` - the
+generator that would have caught it - ran only when somebody remembered.
+`gen_notices.py --check` is now a step in the LINUX job, immediately after the
+`dashboard-container` licence gate, and nowhere else: `--check` RENDERS the
+notices from the component venvs, so it can only pass in a job that has
+installed every `requirements.lock`, and that is the one that has. Ordered
+after the licence gate so an unlicensed package is still reported as a licence
+failure first.
+
+### CR-285AK (regression-6, dashboard half) - a neutered assertion that cannot fail - FIXED (tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py)
+
+`assert not hasattr(settings, "release_feed_sig_url") or True` is true for
+every input, so the line said nothing. What the docstring actually claims - the
+poll works whether or not the attribute is there - is proved by the rest of the
+test and by its sibling; the line is gone and the comment says why. The
+companion twin was removed by `companion-core`.
+
+### CR-285AL (dash-collector-alerts-1) - a hand move between two projects was detected only when both fell in one cycle's 8-project window - FIXED (collector.py, db.py)
+
+`_record_inventory` walks at most `inventory_projects_per_cycle` (8) projects
+a cycle through a rotating cursor, and `_matched_pairs` can only pair a vanish
+with an appearance inside the walks of ONE pass. A move out of project A into
+project B is a vanish in A's walk and an appearance in B's, so on any fleet
+with more than 8 active projects - this studio has well over 8 - the two
+halves land in different passes, and `db.replace_nas_media` has already
+destroyed A's old rows by the time B is walked. The move could then never be
+detected again: a later cycle sees the files at their new paths as ordinary
+inventory, every machine that holds them treats them as deletions, lane A
+re-uploads them to the old path and lane B's breaker parks proxy download -
+CR-267a's two days of warnings, again, on the exact incident this feature was
+built for. The collapse brake's refusal has the same shape.
+
+The halves a pass cannot pair are PERSISTED now (`nas_media_pending_moves`,
+schema v54) and paired on a later cycle. The refusals are the within-pass ones
+applied to the union: one source and one destination for a
+`(basename, size, mtime_ns)` key or nothing happens, a proxy is never a half
+of its own (within a pass it travels on its original's row), and two new ones
+that only waiting a cycle can raise - a file that comes BACK to the path it
+left is not a move (lane A re-uploading in the window before a command lands,
+or an admin undoing themselves) and cancels both halves, and the two ends must
+be different paths. A cross-cycle pair is always a FILE move, never a folder
+one: a folder rename is proved by "every file under the old folder moved and
+nothing stayed behind", and carried halves are by construction a partial
+picture of their project, so that proof cannot be made from them and a
+one-file carry must never become a directory rename the fleet applies.
+Nothing here forces a full-fleet walk, which is what the verifier ruled out:
+an `os.walk` inside an open write transaction is what `_record_inventory`'s
+phase split exists to prevent. `db.prune` ages a half out after two days (the
+retention lives there, not in the collector, so a container that stops running
+the inventory kind cannot grow the table), a dropped half is simply the old
+behaviour, and the halves of a move the 500-row cap discarded are KEPT so the
+next pass can try again.
+
+The honesty half the verifier called out is the same change:
+`db.mark_notice_checked(conn, "file_move_detected", now)` was stamped
+unconditionally, so a pass whose project directories were unreadable, or whose
+inventory the collapse brake refused, reported the check as having RUN over
+evidence it never saw. A blind pass now leaves the last honest stamp in place
+and says so in the log, which the checks panel renders as a time going stale -
+truthful, where [ NOT CHECKED ] is reserved for a deployment that has never
+had a clean pass. `file_moves_dropped` stays unconditional: whether this pass
+overran the cap is a fact about this pass whatever it could not read.
+
+### CR-285AM (res-fleet-4) - a renamed or forgotten computer stranded its outstanding commands, and the alert about it had never once fired - FIXED (db.py, api.py, alerts.py)
+
+`file_move_targets` and `resolve_undo_requests` are keyed on the HOSTNAME and
+nothing in `db.py` ever deleted from either, so `forget_machine` (CR-76) left
+them behind and a rename left them under the old name. The target kept
+`applied_at IS NULL`, was never offered again, aged into `expired_at` and then
+raised a warn whose fix line ("use [ MOVE ON THE SERVER AND ON EVERY MACHINE ]
+again once that computer is back online") named a computer the dashboard no
+longer has. Meanwhile that machine still held the file at the old path and
+lane A, which never deletes, put it back on the NAS at the path the admin had
+just cleared: the failure the whole feature exists to prevent.
+
+Four parts, and the re-key is the careful one. Both tables are in
+`_MACHINE_STATE_TABLES` now, so a forget takes its commands with it.
+`adopt_renamed_machine` - the point where the registry has already PROVED the
+old and new hostnames are one `machine_id`, and refuses while both look live
+(SYS-18a) - moves the unanswered rows across with `UPDATE OR IGNORE`. The two
+`pending_*` queries take an optional `machine_id` and look under the former
+names of that SAME identity (`db.command_machine_names`), which covers the
+report or two SYS-18a defers the adoption by; never the editor's other
+computers, because a machine that never held the file must not be told to move
+it (the verifier's caution: res-fleet-3's gap made wider). Because a row may
+then be filed under a name other than the reporting one, the offer carries
+`target_machine` and `api._by_target_machine` stamps delivery against the
+row's own key - a stamp written against the reporting hostname would update
+nothing and the command would age out with the machine having been told every
+thirty seconds.
+
+And the fourth part, found while fixing the third: **`alerts._check_file_moves`
+has never fired**. It selected `rel_path` from `file_move_targets`, which has
+no such column (the path is on the `file_moves` row), so every cycle since v36
+raised "no such column" into `_rows`' defensive swallow - which exists for a
+table a parallel work package had not created yet and reads a typo as "nothing
+to report". The path comes from the join now, and a target whose computer is
+not in the registry is one warn about the FLEET rather than one unanswerable
+row per file.
+
+### CR-285AN (proxy-tiers-4, dashboard half) - the wired rig had no cheap signal that a clip was born from a stand-in - FIXED (api.py, db.py)
+
+Built exactly to the contract this file's previous section sketched, because
+a companion builder is building the other half to it. A stand-in is placed on
+the REMOTE editor's machine and `broll_standins.record` is called in one place
+on that machine, so its ledger is per machine: the wired rig that later opens
+the project has an empty ledger for those clips, the "or the ledger says so"
+half of the tier plan's last table row can never fire there, and what is left
+is an ffprobe of every archive clip every 120 s whose one action is a
+`replace_clip` onto the same path that answers "Already linked".
+
+So the fact travels with the FLEET. `sync_guard.standins_placed`
+(`rels`, max 200, `checked_at`) is declared on the report - on `sync_guard`
+because it is about what this machine did to the ARCHIVE, not about Resolve -
+and each rel is the NFC archive-relative path of the ORIGINAL, never an
+absolute path (the vault is a drive letter here and a container mount there).
+`broll_standins` (v54) is keyed `(archive_rel, editor_username, machine)` and
+`db.record_standins_placed` REPLACES that machine's set on every report, like
+`editor_media`: a rel the companion no longer lists has been upgraded to the
+real editing proxy, and a stale row would send a wired rig looking for a
+stand-in that is not there. An ABSENT section changes nothing, which is what
+every build in the field sends today. The answer rides the report REPLY as
+`standins_known: {rels}`, bounded to the same 200 and best-effort - a hint is
+never worth failing a report over - because the machine that needs the answer
+is already sending the list the answer is about, and a second route is a
+second credential path for a question that is not a secret. Absent means "this
+dashboard does not know", which the companion must read as "demux as before".
+`db.prune` ages a row out on `machine_state`'s own 30 days and
+`_MACHINE_STATE_TABLES` drops a forgotten computer's. Every part is additive.
+DASHBOARD FIRST.
+
+### CR-285AO (proxy-tiers-3, the alert row) - the notice was drawn and never mailed - FIXED (alerts.py)
+
+CR-285R filed the notice and left the `ALERT_KINDS` row for a pass with more
+than half an hour in it. A notice is on the home page for whoever opens it; an
+alert is MAILED, and this is the finding whose ten silent minutes put a 540p
+preview into a Resolve project and a false row in an editor's stand-in ledger,
+damage that outlives the outage on projects nobody re-checks. The kind is
+registered with its check and therefore with its weekly "checked and found
+nothing wrong" line. The check RE-DOES the listing rather than reading the
+notice: an alert that trusts another cycle's row cannot fire on a deployment
+whose notices pass is the broken thing, and this is one `scandir` on a
+directory the container has open anyway. No b-roll mount records no root and
+writes nothing, because "could not check" is not evidence that the archive is
+fine.
+
+### CR-285AP (live-1, the alert half) - the daily mail about a stall that healed a week ago - FIXED (alerts.py)
+
+CR-285L fixed the ROW's sentence and this file claimed it "stops the daily
+stall mails and the red trays fleet-wide in one deploy". Half true, and the
+coordinator caught it: `alerts._check_lane_stalled` fires on
+`g.get("stalled_lane") or g.get("stalled_seconds")` with no age test at all,
+so the mail for ruskin/DESKTOP-LQQ41TC would have gone out on the morning
+after the deploy exactly as it did on the four before it. The check now asks
+the same `health.stall_is_current(row, ctx.now)` predicate `_why_code` uses,
+so the mail and the page cannot disagree: a stall older than 24 h, or one
+whose lane has completed a pass since the kill, is not a finding, and the open
+alert RECOVERS through the existing `open_alert_subjects` rule rather than
+simply going quiet. A stall with no `stalled_at`, and a fresh one, still fire -
+"cannot tell" may not turn a real stall green. CR-285L's claim above is
+corrected in place.
+
+### CR-285AQ (dash-api-3) - `as_of` reported the freshest project in the tree as the freshness of THIS answer - FIXED (locate.py)
+
+`_as_of` was `SELECT MAX(refreshed_at) FROM nas_media`, and `refreshed_at` is
+written per project only when that project's walk actually replaced its rows -
+so a project whose walk has been refused since a NAS reboot three days ago
+keeps its old stamp while one healthy project walked every cycle makes every
+answer look a minute old. The companion logs that number beside a rename it
+made from three-day-old data, so even the post-mortem points the wrong way.
+An answer that found something is stamped with the OLDEST walk that
+CONTRIBUTED to it, which bounds the answer instead of flattering it; an answer
+with no matches keeps the tree-wide maximum, where there is nothing to bound
+and "how old is the picture at all" is the question. Same string on the wire,
+so no companion release is needed - the verifier's objection to a per-entry
+stamp does not apply.
+
+### CR-285AR (dash-api-5) - a per-project count rendered as a fact about the whole computer - FIXED (db.py, api.py, ui.py, templates/partials/fleet_grid.html)
+
+`SkippedExistsIn.subpath` was declared by CR-267a so the nested-key audit
+would stop flagging every 0.9.7x companion, and nothing read it. The
+companion's scan is scoped to one project prefix; the stored figure is one
+number per MACHINE and `ui.py`'s sentence states it of the whole computer - so
+an admin looking for four files was looking in the wrong nine projects, and
+(the half the hunter missed and the verifier found) on a machine syncing
+several projects each scan OVERWROTE the last, project Y's zero hiding project
+X's four. The scope travels with the count now:
+`machine_state.skipped_exists_subpath` (v54) is written in the same statement
+as the count and by the same CASE, so the two can never describe different
+scans, and `ui.skipped_scope` puts " (counted under Projects/2026/FF5)" into
+the chip's sentence. An older companion sends no subpath and the sentence
+simply loses the scope, never inventing "the whole tree", which is the claim
+that was wrong.
+
+### CR-285AS (dash-collector-alerts-6) - every sentence about a parked lane B was said from this server's own default - FIXED (db.py, api.py, health.py, alerts.py)
+
+`_disk_floor_hit` compared free space against `DISK_RED_FREE_BYTES`, which is
+the DEFAULT of the companion's `lane_b_min_free_bytes` and not the floor any
+particular machine uses. An editor on a small SSD who raised it to 60 GB was
+parked at 55 GB with this server saying nothing; one who lowered it to 5 GB
+was told "proxy download stopped itself" on a row for a computer that was
+still downloading - the same class of false sentence CR-269 fixed.
+
+THE FLOOR WAS ALREADY ON THE WIRE, which is what turns this from a wire change
+into a storage one (the coordinator's correction, and the hunter's "the
+companion reports no floor value" was wrong):
+`lane_guard.DiskFloorLatch.report()` has sent `floor_bytes` on
+`sync_guard.disk_floor` since SYNC-7 and `api.DiskFloorIn` has declared it all
+along. Nothing stored it. `machine_state.disk_floor_bytes` (added to the same
+v54 step, which has shipped nowhere) is written from `guard.disk_floor.
+floor_bytes` on the report - COALESCE, like `trash_bytes` beside it rather
+than the latch columns, because a floor is a SETTING on that computer and not
+an incident, so a light tick or an older build keeps the last number that
+machine told us rather than sending this server back to guessing.
+`health.machine_disk_floor(row)` is the one reader: `_disk_floor_hit` and
+`disk_status`'s ABSOLUTE half take it when it is there, the why sentence is
+FLAT when the number came from the machine (either it reported the park itself
+or it reported the floor), and the "probably ... unless it was set otherwise on
+that computer" wording is now only what a machine that has never said gets.
+`alerts._check_disk_low` passes the same floor, so a 5 GB floor with 15 GB
+free is not mailed about daily. The grid CHIP keeps the 20 GB constant on
+purpose: a chip is a warning about space, and only the callers that speak FOR
+the companion hand the machine's own floor in. Nothing is owed to
+companion-core.
+
+### CR-285AT (dash-db-6) - the most sensitive detector in this territory could not say what it was measuring - FIXED (tests/test_db_write_locks.py)
+
+`test_no_alert_is_sent_with_the_write_lock_held` asserted
+`len(opener.in_transaction) >= 2` and `not any(...)` over a list nothing in
+the test controlled. It went red once during the hunt and would not reproduce
+for the hunter (seven runs) or the verifier (seven more) - and it went red for
+me, once, in a four-file run, and then passed on three repeats of the same
+command. Diagnosed rather than tidied: the failure is the test, and there were
+two causes. The fixture's own boot leaves whatever open subjects `_check_tree`
+and `_check_dashboard_space` found on the machine running the suite, so the
+recovery pass sends a POST per subject and the count is the state of a
+developer's disk. And `env` leaves the REAL collector thread running, which
+runs the `alerts` kind on its OWN connection through the same monkeypatched
+opener - so a POST from that thread recorded `conn.in_transaction` for a
+connection it has nothing to do with, i.e. a reading of the test's own writes
+and not of the sender's. The collector is stopped, the ledger is emptied and
+the two POSTs this test is about are asserted exactly. The invariant is
+untouched.
+
+### CR-285AU (dash-mounts-ui-2) - "[ STAGED, NOT CURRENT ]" said of a version this server holds from different bytes - FIXED (ui.py, templates/partials/admin_packages.html)
+
+The verifier REFUTED the headline (a recalled record is dropped by
+`_valid_records` before `_vendor_rows` can see it) and what survives is the
+sha half: a version this server published from a DIFFERENT binary
+(`release_feed.sha_conflict`, the `--allow-replace` case) was classified
+`held`, which says the vendor's bytes are already here - the one thing they
+are not - and offered [ MAKE CURRENT ] on bytes nobody compared, while
+`build_feed_view` routes exactly that case into the `sha_conflicts` block
+further down the same page. `_vendor_state` is its own function now with five
+answers: `conflict` draws [ SAME VERSION, DIFFERENT BYTES ] with the held
+sha's first twelve characters and offers no button, and `recalled` is belt and
+braces for the one way a retracted row can still be seen here (a vendor
+un-retracting a version; nothing clears `retracted_at`) - cheap, and a page
+must not offer an act `package_store.make_current_refusal` will 409.
+
+### CR-285AV (regression-3) - the retire branch decided whether the schema guard was ever consulted, and asked the version question alone - FIXED (deploy/select_code_root.py)
+
+CR-270's retire branch returns `image_pythonpath()` before the
+`already_failed >= MAX_BOOT_ATTEMPTS` block that calls `revert_refusal`, and
+it rewrote `current.json` as a fresh five-key dict - dropping
+`revert_refused_reason` / `revert_refused_from`, which `alerts.py` is looking
+for. It is safe only under `check_tree` rule 5's invariant ("an OTA tree is
+always newer than the image"), which nothing enforces at that point. The
+verifier downgraded it because reaching the danger needs an image whose
+VERSION is not lower but whose SCHEMA is, which the release process does not
+produce; it is still a latent invariant dependency plus a test gap, and the
+fix is cheap. `revert_refusal("")` - is the IMAGE safe for this database - is
+asked before retiring, with its own three-way rule intact (cannot tell does
+not refuse); a refusal keeps the tree, records itself where the page and the
+alert can read it, and is not cleared by the zero-counter branch two lines
+later (that rule reads a zero as "the thing the refusal was about is over",
+and a schema the image cannot run is not over). `_retire` carries the two
+`revert_refused_*` keys through the write. The test world has a real
+`APP_ROOT` for the first time, which is why no test could reach this branch.
+
+### CR-285AW (regression-5) - a brand new deployment reported its own healthy collector as STOPPED - FIXED (db.py, alerts.py)
+
+CR-258B derived the staleness bound from the collector's OBSERVED rhythm, and
+the observed rhythm needs a kind to have started twice. With none it returned
+the 180 s floor, which is the original bug's premise: on a Syncthing-less
+deployment the fastest kind that runs is `alerts` at 600 s, so between about
+t+3 min and the second alerts cycle a brand new zero-touch or vendor dashboard
+showed "the last collector cycle finished too long ago" on its home page and
+reported itself stale on `/api/v1/health`, on a collector that was perfectly
+healthy. The alert, the notice and the chip were all correctly silent, so the
+visible half was exactly the half CR-258B was written for: the first
+impression of the product was a red banner.
+
+CR-256o's decline is REVISITED rather than worked around, as the verifier
+asked. What it declined was a second implementation of the cadence
+arithmetic; this moves the ONE implementation to the side that both readers
+can import (`db.configured_stale_bound`, with `alerts._stale_after_seconds`
+calling it - `settings.py` imports nothing of ours, so the cycle CR-256o was
+about does not exist on this side). Which kinds this deployment runs is read
+from the DATABASE rather than from a config most of `collector_stale_bound`'s
+callers do not hold: a `poll_runs` row for any kind outside
+`SYNCTHING_FREE_KINDS` is the evidence that the 60 s Syncthing-backed kinds
+are running here, and their second start arrives long before 180 s, so
+nothing about noticing a collector that really stopped is slowed down. No such
+row - a Syncthing-less site, or the first minutes of any site - takes the
+configured bound.
+
+The central gate caught the one case that reading the database cannot see: a
+site WITH Syncthing whose Syncthing-backed kinds have NEVER run, which is
+exactly a collector that died at boot and must still be noticed at 180 s. So
+`settings` is passed where a caller has it (`alerts.Ctx`, `/api/v1/health`)
+and DECIDES; the database heuristic is the fallback for the page renderers,
+which have none. `test_a_site_with_syncthing_keeps_the_three_minute_threshold`
+is green again on the code, not on an edited assertion.
+
+### CR-285AX (res-fleet-3, the answer word) - "trashed locally, destination not synced here" had no spelling the server understood - FIXED (db.py, api.py, templates/partials/project_detail.html)
+
+`companion-media` is implementing section 4b of
+docs/HAND_MOVES_ON_THE_SERVER.md: a move whose DESTINATION project this
+machine does not sync is trashed locally instead of being `mkdir(parents=True)`
+into a directory with no `.ccsync-project` marker, which is a permanent
+invisible orphan reported as done. The answer keeps `ok=True` and the detail
+sentence and adds `state: "not_synced_here"`. This is the dashboard half of
+that vocabulary, and the first builder's OWED line said it would have to come
+back here: it has.
+
+`db.FILE_MOVE_TARGET_NOT_SYNCED_HERE` joins `retrying` and `blocked`.
+It is TERMINAL and `ok` is true: `mark_file_move_applied`'s non-retrying arm
+stamps `applied_at`, so the command is never offered again - nothing about
+that machine is going to change, and re-sending it would ask the same
+impossible question every thirty seconds. It is not `blocked` (a machine that
+ran out of attempts at something it should have managed) and not a plain
+success (nothing arrived anywhere), so the MOVES history gives it its own
+words: "trashed on this computer: it does not sync the destination project".
+"moved" would be untrue and "FAILED" would send an admin looking for a fault
+that is not there.
+
+**What an unknown state word did until today, which the coordinator asked to
+have confirmed: it 422'd the WHOLE report.** `FileMoveResultIn.state` is a
+`Literal` and `file_moves_applied` is NOT one of `ReportIn`'s tolerant
+sections, so a companion sending a word its dashboard does not know loses its
+lanes, its presence and its alarms, once every thirty seconds - the field's own
+comment says so about `applying` and answers it with "THE DASHBOARD DEPLOYS
+FIRST", which is a rule about people rather than a property of the code. So a
+0.9.75 companion sending `not_synced_here` to a **0.7.49** dashboard is NOT
+recorded as done: it is a 422 per report until this build is live, and that is
+the reason this half is DASHBOARD FIRST and hard. Two things follow, and both
+landed here.
+
+A `field_validator(mode="before")` maps an unrecognised state to NO state,
+keeping `ok` and `detail`, which is the pre-RES-1 meaning (answered, terminal,
+say what the machine said). That fixes the NEXT word and cannot help a
+dashboard older than this build; the test says so in its name.
+
+And the reply now carries **`dashboard_version`** (one additive key on
+`api_report`'s result, ignored by every companion in the field). The companion
+had nothing to gate a new word on - the report reply has never said which
+dashboard is answering - so "deploy the dashboard first" was the only
+protection a fleet had against losing a machine's whole report. From here a
+companion sends a state word only to a dashboard that has told it its version
+is 0.7.50 or newer, and answers every older one with `ok` plus the sentence and
+no state, which those builds record as done. That is the companion's half to
+implement and it is now possible to implement correctly.
+
+### Verification
+
+Run from `dashboard/` with `dashboard\.venv\Scripts\python.exe -m pytest`. The
+whole of `tests/test_bug_hunt_2026_09_18_dashboard_mediums.py` was also run
+against a pristine HEAD tree (`git archive HEAD` into the scratchpad, source
+files only): **29 of its 36 tests fail there and 36 pass here**. The seven that
+pass on both are named below as the guards they are.
+
+- `tests/test_cards_pool.py::test_an_episode_that_failed_to_build_can_be_opened_again` -> fails before CR-285A, passes now
+- `tests/test_cards_pool.py::test_a_failed_episode_is_not_rebuilt_on_every_click` -> fails before CR-285A's floor, passes now
+- `tests/test_cards_pool.py::test_the_cap_refusal_names_a_place_that_exists_and_an_act_that_works` -> fails before CR-285B, passes now
+- `tests/test_cards_pool.py::test_the_kill_switch_leaves_the_dashboards_own_caches_alone` -> fails before CR-285C, passes now
+- `tests/test_cards_pool.py::test_closing_an_episode_evicts_its_wsgi_gate_and_its_thread_pool` -> fails before CR-285D (AttributeError: no `evict`), passes now
+- `tests/test_cards_pool.py::test_the_flat_data_dir_is_named_rather_than_silently_orphaned` -> fails before CR-285E, passes now
+- `tests/test_cards_pool.py::test_the_failed_episode_detail_is_not_another_repos_exception_text` -> fails before CR-285AH, passes now
+- `tests/test_cards_pool.py::test_an_editor_can_close_the_episode_they_are_in_and_an_idle_one` -> fails before CR-285P (no `may_close`), passes now
+- `tests/test_cards_pool.py::test_a_non_admin_cannot_close_an_episode_somebody_else_is_in` -> rewritten from the admin-only test CR-285P replaces
+- `tests/test_bug_hunt_2026_09_18_dashboard_mediums.py::test_moves_dropped_by_the_cap_become_a_problem_the_server_found` -> fails before CR-285F, passes now
+- `...::test_a_folder_renamed_in_place_is_one_row_not_one_per_file` -> fails before CR-285G, passes now
+- `...::test_a_renamed_proxy_folder_is_still_refused_as_a_folder_move` -> a GUARD on CR-285G (passes on both; the `Proxy` refusal must not widen)
+- `...::test_a_secret_write_that_fails_leaves_the_previous_file_intact` -> fails before CR-285H, passes now
+- `...::test_a_zero_byte_secret_file_is_a_lost_secret_not_a_saved_one` -> fails before CR-285H, passes now
+- `...::test_a_long_collector_pass_is_not_reported_as_a_held_write_lock` -> fails before CR-285I, passes now
+- `...::test_a_clean_collector_pass_writes_nothing_about_how_long_it_took` -> a GUARD on CR-285I's own regression (passes on both)
+- `tests/test_alerts.py::test_every_notice_kind_any_writer_passes_to_db_notice_is_registered` -> fails before CR-285J (`db_busy`, `slow_write` unregistered), passes now
+- `...::test_the_folded_amber_conditions_are_counted_on_the_closed_summary` -> fails before CR-285K, passes now
+- `...::test_a_stall_older_than_a_day_is_not_a_current_blockage` -> fails before CR-285L (no `stall_is_current`), passes now
+- `...::test_a_lane_that_has_synced_since_the_kill_is_not_stuck_in_it` -> fails before CR-285L, passes now
+- `...::test_a_stall_with_no_stamp_keeps_the_old_behaviour` -> fails before CR-285L, passes now (it is also the guard on the "cannot tell" direction)
+- `...::test_a_publish_that_fails_to_insert_does_not_replace_the_live_artefact` -> fails before CR-285M, passes now
+- `...::test_publishing_a_version_this_server_already_holds_is_a_refusal` -> fails before CR-285M, passes now
+- `...::test_the_companions_real_report_sections_are_all_declared` -> fails before CR-285N, passes now (the PRODUCER's real dicts, all three models)
+- `...::test_a_mounted_sub_app_answers_a_busy_database_with_the_same_503` -> fails before CR-285O (500), passes now
+- `...::test_a_push_of_a_build_this_machine_cannot_take_is_not_sent` -> fails before CR-285Q, passes now
+- `...::test_a_build_withheld_from_a_machine_says_so_on_the_reply` -> fails before CR-285Q (no `withheld`), passes now
+- `...::test_an_archive_this_server_cannot_list_is_a_problem_it_found` -> fails before CR-285R, passes now
+- `...::test_the_restart_still_happens_when_the_state_file_cannot_be_written` -> fails before CR-285S (the OSError escapes), passes now
+- `...::test_a_restart_is_signalled_even_when_the_note_about_it_cannot_land` -> fails before CR-285S, passes now
+- `...::test_an_unreported_lane_carries_the_flag_the_template_now_reads` -> a GUARD on CR-285T's data half (the flag predates the fix)
+- `...::test_the_grid_draws_an_unreported_lane_in_its_own_style` -> fails before CR-285T's template change, passes now
+- `...::test_the_broll_mount_records_its_root_and_a_witness_inside_it` -> fails before CR-285U (no `root_of`), passes now
+- `...::test_a_move_of_an_underscored_folder_does_not_claim_its_siblings` -> fails before CR-285V, passes now
+- `...::test_the_bucket_option_is_not_offered_beside_a_real_computer` -> fails before CR-285W, passes now
+- `...::test_oidc_refuses_a_claim_the_rest_of_the_dashboard_will_not_accept` -> fails before CR-285X, passes now
+- `...::test_the_open_pwa_paths_are_open_to_reads_only` -> fails before CR-285Y (TypeError: one positional arg), passes now
+- `...::test_an_unauthenticated_post_to_an_open_path_is_sent_to_login` -> fails before CR-285Y (the POST falls through), passes now
+- `...::test_the_collector_prunes_expired_sessions` -> fails before CR-285Z, passes now (and asserts the sweep is OUTSIDE the write transaction)
+- `...::test_the_feed_may_clear_a_dirty_chip_and_may_not_write_a_commit` -> fails before CR-285AA (the feed's `git_sha` lands), passes now
+- `...::test_a_recall_with_a_capitalised_kind_still_recalls` -> fails before CR-285AB, passes now
+- `...::test_reapplying_the_running_version_keeps_the_rollback_target` -> WEAK: it re-states `apply`'s expression rather than driving a whole bundle, so it passes on both. CR-285AC's behaviour is otherwise unpinned.
+- `...::test_a_tree_that_could_not_say_its_schema_is_not_recorded_as_schema_zero` -> fails before CR-285AD (a source assertion, for the same reason: `apply` needs a signed bundle)
+- `...::test_a_naive_timestamp_is_read_as_utc_rather_than_raising` -> fails before live-3's fix, passes now
+- `...::test_a_session_row_nobody_can_parse_is_no_session` -> a GUARD (HEAD's ValueError arm already covers a garbage date; the TypeError arm is what changed)
+- `...::test_a_locate_body_is_refused_by_declared_length` -> fails before CR-285AF, passes now
+- `tests/test_hardening.py::test_the_package_route_is_not_buffered_by_the_gate` -> the existing pin on `_BODY_LIMITS`' exact membership, updated with the new entry (CR-285AF) and citing it
+- `tests/test_db_write_locks.py` (11) -> the suite that caught CR-285I's and CR-285Z's first drafts; green
+- Suites re-run green after the changes: `test_cards_mount.py`, `test_notices.py`, `test_hand_moves_detected.py`, `test_sweep_2026_09_04_dashboard.py`, `test_alerts.py`, `test_release_feed.py`, `test_dashboard_update.py`, `test_select_code_root.py`, `test_bug_hunt_2026_09_11b_dash_release_jobs.py`, `test_admin_assignments.py`, `test_health.py`, `test_mount_status.py`, `test_fleet_grid_declutter_2026_09_11.py`, `test_pwa.py`, `test_packages.py`, `test_locate.py`, `test_broll_mount.py`, `test_music_mount.py`, `test_ytdl_mount.py`, `test_report_endpoint.py`, `test_oidc.py`, `test_auth.py`, `test_secrets_boot.py`, `test_db_busy_2026_09_17.py`, `test_health_page.py`, `test_bug_hunt_2026_09_18_dashboard.py`
+- `py_compile` on every touched `.py`, a Jinja parse of the three touched templates, and a YAML parse of `.github/workflows/ci.yml`
+
+
+Second builder (run from `dashboard/`, `dashboard\.venv\Scripts\python.exe -m pytest`).
+Every one of these is in `tests/test_bug_hunt_2026_09_18_dashboard_lows.py`
+unless another file is named, and every one fails on the tree as the first
+builder left it - the four that call a function that did not exist
+(`pending_move_halves`, `standins_known`, `_vendor_state`, the `blind` /
+`machine_id` keywords) fail with a TypeError or an AttributeError there, which
+is the honest "before".
+
+- `...::test_a_move_between_two_projects_is_paired_across_two_passes` -> fails before CR-285AL, passes now
+- `...::test_a_file_that_comes_back_to_its_old_path_is_not_a_move` -> a REFUSAL guard on CR-285AL
+- `...::test_an_ambiguous_half_is_never_kept` -> a REFUSAL guard on CR-285AL
+- `...::test_a_half_nobody_pairs_ages_out_of_the_table` -> pins the `db.prune` retention
+- `...::test_a_pass_that_could_not_read_its_evidence_is_not_a_check` -> fails before CR-285AL's honesty half
+- `...::test_forgetting_a_computer_takes_its_outstanding_commands_with_it` -> fails before CR-285AM
+- `...::test_a_rename_carries_the_outstanding_commands_onto_the_new_name` -> fails before CR-285AM
+- `...::test_a_command_under_a_former_hostname_is_still_offered` -> fails before CR-285AM (and asserts the fan-out that must NOT happen)
+- `...::test_the_file_move_alert_can_fire_at_all` -> fails before CR-285AM (the check has never fired)
+- `...::test_a_stranded_move_names_the_fleet_not_a_computer_that_is_gone` -> fails before CR-285AM
+- `...::test_a_stand_in_this_machine_placed_is_known_to_the_whole_fleet` -> fails before CR-285AN (the PRODUCER's section in, the reply key out)
+- `...::test_a_stand_in_the_machine_no_longer_lists_stops_being_reported` -> fails before CR-285AN
+- `...::test_a_forgotten_computers_stand_ins_are_forgotten_too` -> fails before CR-285AN
+- `...::test_an_unreadable_broll_archive_is_mailed_not_only_drawn` -> fails before CR-285AO
+- `...::test_the_new_alert_kind_carries_its_weekly_line` -> fails before CR-285AO
+- `...::test_a_healed_stall_is_not_mailed_every_morning` -> fails before CR-285AP (measured: reverted the guard, the test goes red, restored)
+- `...::test_a_stall_from_an_hour_ago_still_raises_the_alarm` -> the GUARD on CR-285AP
+- `...::test_as_of_is_the_oldest_walk_that_answered` -> fails before CR-285AQ
+- `...::test_the_skipped_exists_count_carries_its_scope` -> fails before CR-285AR
+- `...::test_a_disk_verdict_this_server_guessed_says_it_is_a_guess` -> fails before CR-285AS
+- `...::test_a_machine_with_a_raised_floor_is_judged_against_its_own_number` -> fails before CR-285AS (the column does not exist, and the verdict is this server's default)
+- `...::test_a_machine_with_a_lowered_floor_is_not_accused_of_stopping` -> fails before CR-285AS
+- `...::test_a_machine_that_has_never_said_keeps_the_default_and_the_guess` -> the GUARD on CR-285AS (an older build keeps the constant, and the sentence says it is a guess)
+- `...::test_a_move_trashed_locally_is_a_terminal_answer` -> fails before CR-285AX (422 on the report today; the PRODUCER's real answer shape through the report route), passes now
+- `...::test_the_moves_history_gives_it_its_own_words` -> fails before CR-285AX
+- `...::test_a_state_word_this_build_does_not_know_never_422s_the_report` -> fails before CR-285AX (the Literal rejects it and the whole report goes with it)
+- `...::test_the_report_reply_says_which_dashboard_answered` -> fails before CR-285AX's `dashboard_version` key, passes now
+- `tests/test_bug_hunt_2026_09_11b_dash_collector_alerts.py` (28) -> two reds from CR-285AW in the central gate, one contract and one precondition: `test_a_site_with_syncthing_keeps_the_three_minute_threshold` was a real break and is fixed in the CODE (`settings` now reaches `collector_stale_bound` through `collector_health` / `fetch_collector_status`, so a site WITH Syncthing keeps the 180 s bound even before its Syncthing-backed kinds have ever run - the one state where a collector that died at boot must still be noticed), and `test_a_syncthing_less_site_whose_collector_is_turning_is_not_stopped` asserted the stored flag was True as its PRECONDITION, which is the residue regression-5 closes, so that line now asserts False with the reason beside it. The contract both tests are named for holds.
+- `...::test_a_version_held_from_different_bytes_is_not_staged` -> fails before CR-285AU
+- `...::test_a_fresh_syncthingless_deployment_is_not_reported_as_stopped` -> fails before CR-285AW (and pins that a Syncthing site keeps the tight bound)
+- `...::test_a_tree_the_image_cannot_run_is_not_retired` -> fails before CR-285AV, passes now (the first test world with a real `APP_ROOT`, which is why this branch had never been reached)
+- `...::test_an_image_that_has_caught_up_still_retires_the_tree` -> the GUARD on CR-285AV (CR-270 must keep working)
+- `...::test_a_retire_keeps_an_earlier_refusal_where_the_alert_looks_for_it` -> fails before CR-285AV
+- `tests/test_db_write_locks.py::test_no_alert_is_sent_with_the_write_lock_held` -> CR-285AT: rewritten, and green on three repeats of the four-file command that caught it red
+- Suites re-run green after these changes: `test_hand_moves_detected.py`, `test_alerts.py`, `test_db.py`, `test_db_write_locks.py`, `test_report_endpoint.py`, `test_health.py`, `test_health_page.py`, `test_locate.py`, `test_notices.py`, `test_packages.py`, `test_release_feed.py`, `test_select_code_root.py`, `test_dashboard_update.py`, `test_db_busy_2026_09_17.py`, `test_file_moves.py`, `test_fleet_halt.py`, `test_fleet_scope.py`, `test_recovery.py`, `test_sweep_2026_09_04_says_what_it_knows.py`, `test_admin_assignments.py`, `test_fleet_grid_declutter_2026_09_11.py`, `test_hardening.py`, `test_sweep_2026_09_04_dashboard.py`, `test_bug_hunt_2026_09_11b_dash_release_jobs.py`, `test_bug_hunt_2026_09_11b_dash_mounts_ui.py`, `test_bug_hunt_2026_09_18_dashboard.py`, `test_bug_hunt_2026_09_18_dashboard_mediums.py`
+- `py_compile` on every touched `.py` and a Jinja parse of the two touched templates
+
+### Not fixed
+
+Nothing in this group is left unfixed. The four lines the second builder
+left here were closed by other groups the same evening, as the orchestrator
+records: dash-release-jobs-3 by `webapps-tools` as CR-286AJ, regression-7 by
+`webapps-tools` as CR-286AK, proxy-tiers-4's companion half by
+`companion-media` as CR-284H (built to the contract below, unchanged), and
+dash-collector-alerts-1's RECOVERABLE cap is narrowed by CR-285AL (the halves
+of a capped cross-cycle move are kept and retried; only a within-pass surplus
+is lost, and the notice names it), which is the residue this pass accepts.
+
+### OWED TO ANOTHER GROUP
+
+- webapps-tools: `music/web/tests/test_bug_hunt_2026_09_11_music.py:307-315` (`test_...force...`): the test `pytest.skip()`s when a production `apply_for_track(..., force=True)` caller appears, so a caller landing makes it skip silently for the rest of the repo's life. Make the caller case an explicit assertion about what the docstring must then say, or delete the test and keep the docstring fix (regression-7). No deploy order - a test only.
+- webapps-tools: `tools/publish_feed.py` `published_assets` (~:746) and the skip in `github_upload` (~:818): add `.state` to the `--jq` and treat an asset as held only when `state == "uploaded"`, so an interrupted upload is re-pushed instead of skipped for ever (dash-release-jobs-3). `tools/tests/` pins the runner verb for verb, so the new `--jq` string needs those pins updated in the same change. Publisher-side only; no deploy order.
+- companion-media: `companion/file_moves.py` `apply_move` and `companion/app.py` `_apply_file_moves`: the §4b branch for a destination project this machine does not sync - trash locally and answer "trashed locally, destination not synced here" - instead of `mkdir(parents=True)` into a directory with no `.ccsync-project` marker, which is a permanent invisible orphan reported as done (res-fleet-3). The dashboard side is deliberately NOT changed: `db.file_move_target_machines` computes targets from the SOURCE project on purpose (a machine that holds the file must be told the move happened), and the destination check belongs where the plan is known. The answer vocabulary HAS gained that state and the dashboard half landed with it (CR-285AX, `state: "not_synced_here"`). **DASHBOARD FIRST, and hard**: `file_moves_applied` is not a tolerant section, so that word reaching a fleet before 0.7.50 is live 422s every report from that machine, every thirty seconds. The companion must gate the word on the reply's new `dashboard_version` key (>= 0.7.50); below that, answer `ok` plus the sentence and no `state`, which every older dashboard records as done.
+- companion-core (or whoever owns the tray): the companion may now read `upgrade_none_reason` on the report reply for a build it is being withheld (CR-285Q). Already written on the companion side per the coordinator; nothing further owed.
+- companion-core: SYNC-1's stall record (`~/.ccsync/state/lane_stall.json`) still has no expiry and nothing clears it when the lane completes a pass, so it rides every report for the life of the install. The dashboard now ignores a stale one on both surfaces (CR-285L, CR-285AP) and needs nothing further; clearing it on the companion side is still the honest fix, and until it lands the evidence in the raw report is a week old. No deploy order.
+- companion-media: the other half of proxy-tiers-4, to the contract below and unchanged: send `sync_guard.standins_placed.rels` (NFC archive rels, max 200) and READ `standins_known` off the report reply, treating an absent key as "demux as before" and never as "there are none". DASHBOARD FIRST; this side is built and inert until a companion sends it.
+
+### proxy-tiers-4 contract (owed here by companion-media; the dashboard half is BUILT to this, CR-285AN, and the contract has NOT changed)
+
+The ask: a stand-in fact that travels with the FLEET, so a wired rig can ask
+one cheap question per clip instead of demuxing the archive. Sketched, not
+built; it needs schema v54 and a companion half, and v54 is free.
+
+1. **Report payload.** A new bounded section on the report's `sync_guard`
+   block, NOT on `resolve_health` (it is about what this machine did to the
+   archive, not about Resolve):
+   `standins_placed: {rels: list[str] (max_length=200), checked_at: str}`,
+   where each `rel` is the ARCHIVE-relative path of the ORIGINAL the stand-in
+   stands in for, in NFC (`db.media_rel_key`), never an absolute path - the
+   vault is a drive letter here and a container mount there. Declared in
+   `api.py` as `StandinsPlacedIn(_BoundedSectionIn)` first, dashboard-first,
+   per this file's standing rule.
+2. **Schema v54.** `broll_standins (archive_rel TEXT NOT NULL, editor_username
+   TEXT NOT NULL, machine TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen
+   TEXT NOT NULL, PRIMARY KEY (archive_rel, editor_username, machine))`, keyed
+   by the NFC archive rel. `db.record_standins_placed(conn, editor, machine,
+   rels, now)` replaces that machine's set (the report is a full picture, like
+   `editor_media`), and `db.prune` drops rows whose `last_seen` is older than
+   `MACHINE_STATE_MAX_AGE_DAYS` and rows for a machine that has been forgotten
+   (add the table to `_MACHINE_STATE_TABLES` - res-fleet-4's lesson).
+3. **Asking.** On the report REPLY, not a new route: for the rels this machine
+   listed in its own `media_tree`/`local_manifest` the reply carries
+   `standins_known: {rels: list[str]}` - "these archive rels were placed as a
+   stand-in by SOME machine in this fleet". Bounded to the same 200. A reply
+   key rather than a fleet route because the wired rig already sends the list
+   the answer is about, and a second route is a second credential path for a
+   question that is not a secret.
+4. **Compatibility.** Every part is additive: a companion that sends nothing
+   contributes nothing and a companion that reads nothing is unaffected;
+   `standins_known` absent means "this dashboard does not know", which the
+   companion must treat as "demux as before", never as "no stand-ins".
+   DASHBOARD FIRST.
+
+### Deploy order
+
+- **Schema v54 is TAKEN** (`nas_media_pending_moves`, `broll_standins`,
+  `machine_state.skipped_exists_subpath`, `machine_state.disk_floor_bytes`):
+  one step, four findings, gapless.
+  Every new reader of those tables is defensive or best-effort, so a dashboard
+  rolled back past it behaves exactly as it did the day before. The next pass
+  takes v55.
+- **CR-285AX is the one that is dangerous to get the wrong way round**: a
+  companion answering `not_synced_here` to a dashboard below 0.7.50 fails
+  the report model and loses that machine's whole report, not just the
+  answer. Deploy this dashboard before the companion that sends it.
+- **DASHBOARD FIRST, in every case.** Nothing here needs a companion release
+  to be correct, and three things are the companion's other half waiting on
+  this side: CR-285L and CR-285AP together stop the daily stall mails, the
+  recovered messages and the red trays fleet-wide in one deploy with no
+  companion change at all; CR-285N declares three fields
+  0.9.74 already sends, so `ignored_report_sections` clears the moment this is
+  live; CR-285Q's `upgrade_none_reason` is read by a companion half that is
+  already written and inert until this lands.
+- One thing to watch on the deploy, not a blocker: CR-285M turns a duplicate
+  publish from a 500 into a 409 (different bytes) or a 200 with a note (same
+  bytes). `tools/publish_latest.py` and `installer/build_editor_package.ps1`
+  read the route's answer; neither should be surprised by a 409 it already gets
+  from the route's own pre-check, but the 200-with-a-note path is new.
+- The open `server_error` notices for `/api/v1/admin/feed/publish` on the live
+  dashboard (id 31552) and for the naive session (id 31154) can be dismissed
+  once 0.7.50 is live: both causes are fixed here.
+
+### Owner decisions
+
+- **CR-285E does not adopt the orphaned Timeline Cards state**, it names it in
+  the log. The safer of the hunter's two options, and the verifier's
+  preference: which episode `<data>/cards`'s flat `cards_pick.json` and
+  `library_backups` belonged to is not recorded anywhere, so an automatic adopt
+  is a guess that can write one episode's cut into another. The loss has
+  already happened once on this dashboard (the pool went live 2026-09-14). If
+  you want those backups, they are still on disk one directory up and the log
+  line names both paths.
+- **CR-285P lets a non-admin close an idle episode.** An episode nobody has
+  been in for 15 minutes can now be closed by any signed-in user, which is
+  what makes CR-285B's sentence true. It is not free (`drop()`'s docstring:
+  the upstream threads stay), so a bored editor closing episodes is a slow
+  thread leak. The alternative is leaving the cap unclearable without an admin.
+- **CR-285P does NOT redact the occupants' names from the cap refusal**, which
+  security-2 also asked for: the landing page's own table already lists who is
+  in which episode to every signed-in user (deliberately, Alex 2026-09-14 -
+  "an editor drives their OWN account's companions, so another person being
+  live here is something to know"). Redacting one of the two would be theatre.
+- **CR-285AA writes no `git_sha` from the feed at all**, which is stricter than
+  the finding asked for. The `published_by` gate the hunter suggested would
+  have stopped the repair working (the feed page's [ PUBLISH ] button stamps an
+  admin's username), and the narrow version closes the hole without a
+  provenance column. If a future feature really needs the vendor's commit
+  string on a locally published row, it needs the field inside the signature
+  first.
+- **CR-285I gives the collector's slow pass its own notice kind rather than
+  re-timing the write burst.** Measuring the real lock-hold means threading a
+  clock through every runner's internal commits; the verifier called the
+  re-wording the safer half to land first. `slow_write` still exists and
+  `api_report` still writes it from a measured burst.
+- **Schema v54 is UNUSED.** Nobody in the first builder's pass took it. Three
+  deferred items wanted it (dash-collector-alerts-1's pending-halves table,
+  dash-api-5's per-subpath count, proxy-tiers-4's `broll_standins`) and the
+  second builder took it ONCE, for all three (CR-285AL / AN / AR).
+- **A cross-cycle move is recorded as a FILE move, one row per file, never a
+  folder one** (CR-285AL). A folder rename spread over two passes is therefore
+  N rows and N `commands.file_moves` entries rather than one, which is the
+  shape dash-collector-alerts-3 was about. The alternative is proving a folder
+  rename from a partial picture of its project, which can tell a fleet to
+  rename a directory on the strength of one file, so the safe direction was
+  taken. If the row count ever bites, the answer is a later pass that
+  re-derives folders from complete walks, never a looser proof here.
+- **Two days is the shelf life of an unpaired half** (CR-285AL,
+  `db.PENDING_MOVE_HALF_MAX_AGE_DAYS`): long enough for the rotating cursor to
+  make several full rounds of a big fleet, short enough that a file which
+  really was deleted, and whose bytes appear elsewhere a week later, is not
+  paired with it.
+- **A blind inventory pass no longer stamps `file_move_detected`**
+  (CR-285AL). An operator with one permanently unreadable project directory
+  will watch that check's time go stale on the WHAT THE SERVER CHECKS panel
+  while every other check stays current. That is the truth, and the unreadable
+  directory is its own finding beside it, but it is a visible change.
+- **A forgotten computer's outstanding file moves are DELETED, not kept**
+  (CR-285AM), so its per-machine line disappears from the project page's MOVES
+  history with it. The alternative is a row nobody can ever answer raising a
+  warn nobody can act on, which is what the finding was.
+- **CR-285AS leaves the grid's DISK chip on the 20 GB constant** and gives the
+  machine's own floor only to the callers that speak for the companion (the
+  why sentence, the `disk_low` alert). A chip is a warning about space; a
+  sentence that says a computer has stopped itself is a claim about that
+  computer.
+- **CR-285AT rewrote a test rather than product code.** The invariant it
+  guards is unchanged; what changed is that its subjects are now known, so the
+  next time it goes red somebody can tell what broke.
+
+## CR-286 - the ninth hunt's webapps and tools: a cancel that could not be swept, a paste nobody measured, and a dry run that told an editor to delete their install (CR-286, 2026-09-18)
+
+The 32 findings of `docs/bug-hunt-2026-09-18.md` that live under `broll/`,
+`music/`, `ytdl/`, `server/`, `tools/`, `bench/`, `installer/` and
+`onboarding/` - 13 medium, 19 low - fixed in the order ASSIGNMENTS.md gives
+them, against `214869b` plus the first wave's ten highs. Every one carries a
+regression test that fails on the unfixed source.
+
+### CR-286A (broll-indexer-1) - the one editor-proxy producer that never got the frame-count check - FIXED (broll/indexer/tools/make_own_proxies.py, broll_index/ffmpeg_tools.py)
+
+2026-09-17 (CR-281) added the third proxy-verification failure mode - "a few
+frames short, decodes perfectly, Resolve refuses it as a proxy" - to the
+indexer's browsing proxy and to the companion's ingest. `make_own_proxies.py`
+was missed, and it is the one that produces EDITOR-GRADE `Proxy/<stem>.mp4`
+from the companion's own `own_proxy_cmd`: files Resolve links directly. Its
+`_bad()` checked decode errors and duration >= 97% only, and 18 frames at 30
+fps is 0.6 s against a 1.8 s tolerance on a 60 s clip. Its stated use is a
+sweep over backup trees (~6,700 clips), so a dropped NVENC session a few
+frames early would have been verified clean, renamed into `Proxy/`, indexed
+and lane-B'd to every editor - verbatim the Reproductive Rights incident the
+check exists to end. `own_proxy_cmd` sets no `-r`, so the two counts are
+comparable exactly as in `build_proxy`. The comparison itself is now ONE
+predicate, `ffmpeg_tools.frames_match`, shared by both producers, so the open
+question of a VFR tolerance (comp-broll-tiers-3) has one place to land
+instead of three.
+
+### CR-286B (broll-indexer-3) - the new frame check cost a second full network read of every original - FIXED (broll/indexer/broll_index/ffmpeg_tools.py)
+
+`count_frames` runs `ffprobe -count_packets`, which demuxes the whole file,
+and `build_proxy._bad()` ran it against the ORIGINAL for every clip.
+`stage_proxy` and `_frames_source` exist precisely to stop that - their own
+comments say "with source media on a 46 MB/s network share those reads
+dominate the whole run ... one network read per file instead of three" - so
+the check roughly doubled the NAS read load of a back-catalogue run with no
+log line attributing the cost. The probe `build_proxy` already takes for the
+timecode and the rate gives `duration * fps` for free, so the expensive read
+now happens only when the PROXY's own packet count disagrees with it
+(`expected_frames`, `FRAME_SLACK = 2`). Both-known-or-skip is unchanged, and
+the argv is untouched - the parity tests and the companion's loader pin it.
+
+### CR-286C (install-onboard-1) - a macOS dry-run uninstall ended "CCSync uninstall NOT complete" - FIXED (installer/macos_uninstall.sh, installer/tests/test_macos_site_values.sh)
+
+CR-265's fix made the closing line conditional on `REMOVAL_INCOMPLETE`, and
+the pre-existing "`$BIN_DIR` still exists" block sets that flag
+unconditionally. A dry run deletes nothing, so the bin dir is of course still
+there, so every dry run on an installed Mac ended with a red warning whose
+own remedy is `rm -rf "$CCSYNC_LOCAL"` - at an editor who ran the script
+precisely to change nothing. The "(dry run -- nothing changed)" sentence was
+unreachable on any machine that has the app. The block is now gated on
+`DRY_RUN`.
+
+### CR-286D (install-onboard-2) - `-Full` on Windows said "removed" and "your identity is gone" without looking - FIXED (installer/windows_uninstall.ps1)
+
+Section 4 re-reads the bin dir after its delete (CR-265); section 5's `-Full`
+removal of the whole of `%LOCALAPPDATA%\ccsync` - which CONTAINS that bin dir
+plus `syncthing-config`, the device identity - did not. PowerShell 5.1's
+`Remove-Item -Recurse` deletes NOTHING when one child is locked, and section
+1's `Stop-Process -Force` is never waited on, so a syncthing.exe still
+holding a handle left the whole tree while the script printed "removed
+%LOCALAPPDATA%\ccsync" and the paragraph telling the editor to send the admin
+a NEW device ID. They reinstall, Syncthing comes up on the OLD id, and the
+admin waits for a device that will never appear on the pending list - the
+stuck-lane-C incident pointing the other way. New `Get-FullRemovalLeftovers`
+(the twin of `Get-BinDirLeftovers`), the identity paragraph is printed only
+when the identity really did go and is replaced by its opposite when it did
+not, and the leftovers feed `Get-UninstallClosingAdvice` through a new
+optional `-IdentityLeftovers`, so the verdict can no longer say "complete"
+over a surviving device identity.
+
+### CR-286E (music-1) - a cancel that landed between lease expiry and the next sweep wedged the batch in `running` for ever - FIXED (music/web/musicweb/routes_batches.py, broll/web/app/routes_batches.py)
+
+`cancel` was the one batch route that did not call `expire_stale_leases`
+first, and it decided "nobody holds this" on the truthiness of
+`lease_expires_at` rather than on `lease_live`. A batch whose lease had run
+out but which no request had swept took the request-not-kill branch, which
+sets `cancel_requested = 1` and NULLs the lease while leaving
+`state='running'` - a row `expire_stale_leases` can never touch again (its
+predicate requires the column NOT NULL) and `claim` 410s for ever. The panel
+kept drawing live work with a cancel button and no take-over button, and only
+a second click cleared it, which nothing told the editor. Both halves fixed:
+the sweep first, and the test is `state == 'queued' or not lease_live(batch)`.
+The b-roll twin had the identical shape and moved with it.
+
+### CR-286F (music-2) - every loopback 409 was reported as "another of your computers is still working on this batch" - FIXED (music/web/static/ingest.js, broll/web/static/ingest.js)
+
+`broll_ingest.run()` answers 409 for three things of its own - this computer
+is already indexing another batch, those tracks are no longer staged here,
+and CR-253A's `staging_id_missing` ("reload the page and try again") - and
+forwards the dashboard claim's 409 as a fourth. `miTakeOver` branched on
+`e.status === 409` alone and discarded the body, so the one message that
+names the action the editor must take was the one thrown away, and
+`miRetryFailed` swallowed it entirely in a bare `catch { }` while toasting
+that the tracks were queued. The companion's own sentence is now shown
+whenever it sent one (`miRefusalText`, keyed on `reason`/`message`, never on
+the prose), the "another of your computers" wording is kept for the claim's
+own 409, and the retry toast says when this computer did not pick the tracks
+up. b-roll's `ingestTakeOver` had the same blind branch and moved with it.
+
+### CR-286G (regression-1) - CR-262C and CR-253A, from the same fix pass, made a reloaded music batch undispatchable by any button on the page - FIXED (music/web/static/ingest.js)
+
+CR-262C made the dispatch unconditional and sends `staging_id: ''` when the
+page no longer remembers the drop; CR-253A refuses exactly that request 409
+`staging_id_missing` while this machine is still holding the staging entries
+for those files - and `self._staging` is in-process and persisted, so a page
+reload clears none of it. Both exits from the reload state were therefore
+refused on the one computer that has the audio, and the only ways out were
+cancel-and-re-drop or a companion restart. The guard is NOT dropped (it is
+what stops a retry burning `MAX_ITEM_ATTEMPTS` on every track): the refusal's
+body already names the staging id the companion holds, so `miDispatchLocal`
+sends it straight back and retries once. Web-side only - no companion change
+and no new wire field.
+
+### CR-286H (server-tools-1) - an LGPL dependency conveyed to customers had no notice, and the generator that would catch it inventories developer venvs - FIXED (tools/gen_notices.py, docs/legal/THIRD_PARTY_NOTICES.md)
+
+`tools/license_allowlist.toml` excuses `psycopg2-binary` (LGPL) for the
+`dashboard-container` target on the written promise that "the notice, the
+licence text, and a written offer" are tracked in
+`docs/legal/THIRD_PARTY_NOTICES.md`. That file carried no psycopg2 row in any
+of its five tables: the ONE gate that runs (`check_licenses.py --strict`)
+passed because a human wrote a promise into a TOML file, and nothing checked
+the promise. The deeper half is that `gen_notices.py` inventories the five
+component VENVS and has no notion of the artefact a customer receives, so
+even a regeneration would have printed the dev venv's 2.9.13 rather than the
+2.9.12 the image installs. `CONTAINER_LOCKS` now scans
+`dashboard/deploy/requirements.lock` itself: names and versions from the
+lock, licence borrowed from whichever scanned venv holds the same package and
+LABELLED as borrowed (`_licence_source`), unknown - never permissive - when
+no venv holds it, and folded into the attention scan rather than into a
+footnote. The file is regenerated: psycopg2-binary 2.9.12 now appears under
+LICENCES NEEDING ATTENTION as `dashboard-container`.
+
+### CR-286I (server-tools-2) - a b-roll publish whose drain merge failed still exited 0, and a test pinned that - FIXED (server/publish_db.py, server/tests/test_broll_drain.py)
+
+The drain's second half runs AFTER the rename. When it fails (`database is
+locked`, a container mid-restart) the code printed a WARNING with the
+recovery command and fell through to `return 0`, so every scripted caller and
+every `&&` chain was told the publish succeeded while the live index was
+missing each clip the fleet had ingested since the source copy was pulled -
+plus every `ingest_batches`/`ingest_items` row, which exist nowhere else
+until the merge lands. `do_apply_drain` returns 1 for the identical failure
+when it is the whole command. Now `RC_DRAIN_UNMERGED = 3`, distinct because 1
+means "nothing was published" everywhere else in this CLI and the swap DID
+happen; the WARNING text is unchanged.
+`test_a_merge_that_fails_after_the_swap_names_the_bundle_and_the_command`
+asserted `rc == 0`, i.e. the suite pinned the lie; it asserts the new code.
+
+### CR-286J (ytdl-web-2) - the worker's "no room" refusal reintroduced the wrong sentence a vanished share earns - FIXED (ytdl/web/ytdlweb/worker.py, routes_api.py)
+
+`_no_room_note` duplicates `_refuse_if_full`'s two numbers, its factor, its
+floor and its cache invalidation, but not its TREE GUARD. A bind mount that
+has gone away leaves its mount point on the container overlay, so
+`disk_usage` answers with the overlay's couple of spare gigabytes and the job
+failed with "there is only 2.0 GB free on the server where these clips go ...
+Free some space" about a share with 900 GB on it - the exact sentence
+CR-263a/ytdl-web-1 exist to stop an admin acting on, emitted from the
+executor path instead of the press path. The tree test is factored out of
+`_refuse_if_the_tree_is_gone` into `tree_is_gone` / `tree_missing_note`,
+which return rather than raise (a worker thread cannot raise an
+`HTTPException`), keep `_named_under_the_root` for CR-90, and answer False
+for everything they cannot prove - including a `PROJECTS_ROOT` that is not
+readable at all, which is a container whose mount has not arrived yet.
+
+### CR-286K (ytdl-web-3) - the "no room" failure told the editor to press a button the page hides in exactly that state - FIXED (ytdl/web/static/app.js)
+
+`renderRetry` offers `[ RETRY N FAILED ]` only when `failed > 0`, and
+`_no_room_note` fires BEFORE any clip is attempted: `start_download` has just
+written `dl_failed = 0`, `mark_pending` put every row back to `pending`, and
+`_phase_download` returns before the loop. So no row is `failed`, `offer` is
+false, the button is hidden - and so is `#dlnote`, which is gated on the same
+expression - and `poll()` does not reload the manifest for a failed job while
+`startDownload` has already hidden the review grid. The editor frees 500 GB
+and has no control on the page; their only route back is a whole new search,
+which is the YTDL-16 situation the button exists to end. `offer` now also
+covers "phase is `failed` and the manifest has pending rows", and the button
+reads `[ RETRY N CLIPS ]` in that case. The rows are deliberately NOT marked
+`failed` server-side (the breaker path leaves them `pending` on purpose,
+CR-263b).
+
+### CR-286L (ytdl-web-4) - a pasted-links job got no free-space check at all, on either executor - FIXED (ytdl/web/ytdlweb/routes_api.py, worker.py)
+
+YTWEB-9's guard lives in `start_download`, and a url job goes straight to
+`downloading` from `create_url_job`; the worker's backstop is gated on
+`config.LOCAL_DOWNLOAD and created_local`, and `YTDL_LOCAL_DOWNLOAD` is off
+in the shipped fleet. So 40 links into a project with 6 GB left produced N
+opaque per-clip ENOSPC failures and a breaker note about identical failures -
+precisely the symptom one sentence replaced, still live for the paste door.
+Both halves: `create_url_job` calls `_refuse_if_full` when the server is the
+executor for that paste, and `_no_room_note` treats a url job as one the
+press did not measure. The refusal takes the caller's own button (`press`
+parameter) because the paste page's control is GET LINKS, not DOWNLOAD - the
+same class of defect as CR-286K one screen over.
+
+### CR-286M (ytdl-web-5) - when the share vanished but the host had room, the download SUCCEEDED into the container overlay - FIXED (ytdl/web/ytdlweb/worker.py)
+
+`_refuse_if_full` consults the tree guard only on the way to a disk_full
+refusal, by design ("a download that fits is a download that fits"). On a
+host with 200 GB free and a vanished bind mount the check passes,
+`ensure_outdir` makedirs the mount point's children, yt-dlp writes there, and
+`db.ledger_add` records every clip at a NAS-relative path with no file behind
+it - `phase='done'`, no notice, no refusal. The clips are lost on the next
+container recreate, and every later search or paste of those video ids is
+skipped as "the fleet already has that video". `_phase_download` now asks
+`tree_missing_note(job)` unconditionally before anything is fetched and fails
+the job with the share's own sentence.
+
+### CR-286N (broll-2) - a published `broll.db` could be unreadable by the deployed dashboard, and the publish neither checked nor warned - FIXED (server/publish_db.py)
+
+`PRAGMA user_version` is stamped 12 by this week's indexer. A dashboard in
+the field on 0.7.34..0.7.48 carries `CURRENT_SCHEMA_VERSION = 11` and
+`ensure_schema` raises deliberately for a file newer than the app, which the
+mount turns into a DEGRADED `/broll` - the whole search UI off, with the
+reason only in the container log. The reverse skew is worse in its own way:
+`ensure_schema` runs at mount time, so an OLDER file dropped under a running
+newer container is never stepped and every ingest push 500s on `no such
+column` until somebody restarts it. `publish_db.py` had no notion of a
+version at all. It now reads the staged snapshot's version locally and the
+live file's through the container - IN THE SAME `container_exec` the row
+counts already use, because this chain is an ordered script of container
+calls - and refuses either skew with the action that fixes it
+(`--allow-schema-skew` to override). A version either side cannot read never
+refuses.
+
+### CR-286O (broll-3) - the archive top slot was matched by an exact stem string, with no normaliser - FIXED (broll/web/app/routes_api.py)
+
+CR-90's rule is that a path from one platform is not `==` a path from
+another. `insert_target_detail` compared `os.listdir()` bytes on the NAS
+against a stem the DB holds, raw: a name a Mac's rclone upload spelled NFD
+does not compare equal to the NFC stem, `len(matches)` is 0, `original_rel`
+becomes null, and the clip silently degrades to a preview-only insert - the
+archive-task-#23 path, for a clip that does have an original, which is also
+the shape proxy-tiers-2 turns into a bad stand-in ledger row. Both sides now
+go through `unicodedata.normalize("NFC", ...)` for the STEM TEST only; the
+join that follows keeps the entry's own bytes, where the truth is. Two
+candidates differing only by normalisation still degrade, but say so in the
+log rather than in silence.
+
+### CR-286P (broll-4) - `edit_proxy_rel` could name the preview itself - FIXED (broll/web/app/routes_api.py)
+
+The editing proxy is derived as `<preview.parent>/<preview.stem>.mov` with no
+check that it is a different file. `build_archive.preview_source` falls back
+to the TOP SLOT for an audio-only clip and keeps its suffix, so a `.mov`
+preview was advertised as its own editing proxy: the companion records
+`upgrade_rel` = the file it has already downloaded, runs a background upgrade
+thread that re-fetches it and links a clip's preview as its own proxy, and
+keeps a stand-in ledger row for a tier that does not exist. One inequality
+guard.
+
+### CR-286Q (broll-5) - the zero-byte guard covered only the declared editing proxy, not the preview the server itself requires - FIXED (broll/web/app/ingest_batches.py)
+
+"A zero-byte file is a transfer that died, not an upload" applies verbatim to
+`slots.proxy` and `slots.original` - and those are the files this route adds
+to `required` itself with `declared.setdefault(rel, None)`, i.e. with NO
+declared size, so the size-mismatch arm (`want is not None`) skips them. A
+0-byte preview from a killed transfer therefore passed presence AND size, and
+the clip went live with the one file the search UI plays being empty. The
+rule is now `actual == 0` for every required entry, and deliberately still
+not "a size must be declared": a queue entry rebuilt after a restart
+legitimately carries no size and would 409-loop for ever.
+
+### CR-286R (broll-indexer-2 = proxy-tiers-7) - the column that decides an offline clip's LENGTH was read from a field this module calls a lie - FIXED (broll/indexer/broll_index/ffmpeg_tools.py)
+
+Migration 012's own comment says `frames` is "what phase 3 writes into the
+interchange file that creates an OFFLINE media-pool clip ... a wrong or
+absent frame count is a clip of the wrong length on every remote machine".
+Fifty lines below `probe_video`, `count_frames_cmd` explains that `nb_frames`
+"is absent or a lie in exactly the cases that matter (an mp4 written by a
+killed encoder still carries the count it intended)" - and `probe_video`
+filled the column from `nb_frames` with nothing cross-checking it. It is now
+checked against `duration * fps`, which the same probe already has, with one
+frame plus 1% of slack for a rounded container duration and an averaged VFR
+rate; a claim that fails is recorded as NULL, which every reader already
+handles and which is the honest answer. Deliberately NOT `count_frames`,
+which would be CR-286B's cost moved onto the probe stage.
+
+### CR-286S (broll-indexer-4) - a probe that yields no duration crashed the proxy stage with a bare TypeError - FIXED (broll/indexer/broll_index/pipeline.py)
+
+`probe_video` answers `duration_s = None` for a raw elementary stream, some
+MPEG-TS and a growing recording; `stage_probe` guarded only on a missing
+codec, so such a row reached `probed` and `stage_proxy` passed the None into
+`build_sprite`/`build_poster` and `stage_frames` into `fill_gaps` -
+`TypeError: unsupported operand type(s) for //: 'NoneType' and 'float'` in
+the row's `error` column instead of the diagnosis an operator can act on.
+Parked at `skipped` with its own sentence, like the other two. It is
+structurally distinguishable from both: `skipped_for_length` requires a codec
+AND a duration, and the audio-only arm has no codec, so neither reads this
+third kind as itself - and `build_archive.eligible` (codec IS NULL AND
+duration_s IS NOT NULL) does not ship it.
+
+### CR-286T (broll-indexer-5) - `fix_proxy_timecode` verified that the remux had A timecode, not the one it had just decided on - FIXED (broll/indexer/fix_proxy_timecode.py)
+
+Since audit F6 the VALUE is the whole point of this tool: a colon and a
+semicolon at the same numbers are different absolute frames, and writing the
+wrong one is what makes Resolve refuse the proxy. `plan()` compares
+`read_timecode(preview) == wanted`; `remux()` asserted only that some
+timecode survived, so a container that normalises the form would have every
+file reported "fixed" and replaced while still carrying the form `plan()`
+rejected, re-planned on the next run, for ever, with the run exiting 0 each
+time - "green while dead" for a repair sweep whose whole output is a count.
+The mp4 tmcd box stores a drop-frame FLAG rather than a separator, which is
+exactly where that can happen silently. Now compared, and the two faults
+("dropped the timecode", "wrote X, not Y") stay distinguishable in the
+summary.
+
+### CR-286U (install-onboard-3) - the macOS uninstall test pinned the verdict function, not the code path that sets its argument - FIXED (installer/tests/test_macos_site_values.sh)
+
+The closing-verdict case extracts `closing_verdict`, forces `DRY_RUN=0` and
+calls it with a hand-picked argument, so the one thing CR-265 changed about
+the script's FLOW - which branch a real run reaches - was untested, and
+CR-286C was green in CI. A new case runs section 3 WHOLESALE over a populated
+fake tree with `DRY_RUN=1` and reads the verdict the section computes: no
+"NOT complete", no "remove it by hand", no past-tense identity claim, and the
+tree still on disk afterwards.
+
+### CR-286V (install-onboard-4) - `_same_dashboard` compared hostnames only, so two deployments on one host shared a cache - FIXED (onboarding/steps.py)
+
+Both URLs were reduced to `urlparse(...).hostname`, so `nas:8480` and
+`nas:8481` - a customer's staging and production container on one NAS, or a
+move from the container port to a Funnel port - counted as one dashboard. The
+other deployment's cached `canonical_prefix` and `tree_name` then went onto
+the bootstrap's argv, where they BEAT its own `Get-SiteValue` fetch (which
+only runs when the flag is empty): the wrong drive letter and the wrong
+folder name, which is the exact failure the cache guard was written to stop,
+one level down. Only a PROVEN port mismatch refuses, and only an EXPLICIT
+port counts - a bare host in the cache and `https://host:8480` this run are
+the same deployment spelled two ways, and the normaliser's scheme guess is a
+guess.
+
+### CR-286W (install-onboard-5) - a macOS dry run claimed, in the past tense, that the Syncthing identity was deleted - FIXED (installer/macos_uninstall.sh)
+
+The "that included the Syncthing identity in ... A reinstall generates a NEW
+device ID" warning sat inside the `-d "$CCSYNC_LOCAL"` block gated only on
+`REMOVAL_INCOMPLETE = 0`, which is still 0 at that point in a dry run. An
+editor checking what the uninstaller would do mails the admin "my device ID
+has been reset"; the admin removes and re-invites a device whose id never
+changed. The sentence moved into the real-removal branch, and the dry run has
+its own "would also remove ..." line.
+
+### CR-286X (music-3) - the drop preview minted names that ignore every name already promised to an unlanded item - FIXED (music/web/musicweb/ingest_batches.py)
+
+`precheck` called `allocate_name(..., reserved=set())` while the real
+allocation in `write_item_result` passes `reserved=reserved_names(conn)` -
+every `dest_name` held by an item of any batch that has not landed. The
+preview's collision set was a strict subset of the real one, and the two
+answered differently for exactly the case the reservation ledger exists for:
+editor A's batch in flight holding `Theme.mp3`, editor B told their file
+keeps its name and then finding `Theme (2).mp3`. Reading the ledger is not
+reserving, so the docstring's property is intact; the set is copied because
+`allocate_name` mutates it per item.
+
+### CR-286Y (music-4) - `make_proxies --dry-run` died on the files the real run survives, and over-counted the ones it cannot decode - FIXED (music/indexer/music_index/proxies.py, make_proxies.py)
+
+`_ffprobe` documents "{} if unreadable" and caught only `ValueError` from
+`json.loads`; `subprocess.run` still raised `TimeoutExpired` (120 s, a
+truncated `.aac`) and `OSError` out of it. Every real-run caller is inside
+`build_all.one`'s blanket `except Exception` (one FAILED row); the
+`--dry-run` branch has no guard at all, so the estimate died with a traceback
+and no summary, several hundred files in, over a library the real run
+completes. `decoded_duration` had the identical unguarded shape with a 900 s
+timeout. Both guarded. Separately, `source_info` answers `{}` for a file with
+no audio stream and `is_pointless({})` is False, so the dry run counted it
+BUILT with duration 0 while the real run raises "no decodable audio stream"
+and counts it FAILED: it is FAILED in both now, because an estimate that
+promises proxies the run cannot make is worse than no estimate.
+
+### CR-286Z (server-tools-3) - `tailscale status --json` was decoded with the console codec - FIXED (server/check_health.py)
+
+`text=True` with no `encoding=` decodes tailscale's UTF-8 JSON with
+`locale.getencoding()` - cp1252 here, cp950 on a Traditional-Chinese install
+- and every peer name is in that JSON. One non-ASCII machine name raises
+`UnicodeDecodeError` inside `subprocess.run`, which the broad `except` at the
+next line reports as "skipped -- `tailscale status --json` failed": check 2b,
+the DERP-vs-direct probe that matches what an editor experiences, silently
+stops being performed and the health run still exits 0. Same class as the
+`git_out` fix in e050413, which was made one file over and only there.
+
+### CR-286AA (server-tools-4) - bench's rclone readback decoded with the console codec, and its decode failure was not caught - FIXED (bench/ccbench/runners/_rclone_common.py, base.py, syncthing.py, iperf3.py)
+
+`rclone lsjson -R` emits every remote path, and this fleet's vault holds
+`母母女子` and `Matej Šimalčík`. `remote_listing` caught only
+`TimeoutExpired`/`OSError`, so the `UnicodeDecodeError` - a `ValueError` -
+escaped the function that documents `None` as its failure answer and took the
+run with it. Both halves matter and both are done: `encoding="utf-8",
+errors="replace"` on all five subprocess reads in the runners, and the except
+widened to `ValueError` - with the replacement characters alone,
+`verify_upload` would have reported every file of a transfer that worked as
+missing.
+
+### CR-286AB (server-tools-5) - one absent guide suppressed the licence agreement as well - FIXED (server/install_dashboard_app.py, server/tests/test_bug_hunt_2026_09_11b_server_tools.py)
+
+`ship_dashboard_docs` built `missing` from `SHIPPED_DOCS` and
+`SHIPPED_DOC_TREES` together and returned False for any member, so after
+dash-core-6 promoted `EDITOR_SETUP.md` into `SHIPPED_DOCS` a hand-trimmed
+bind-mode checkout deployed successfully while shipping NO documents at all -
+including `legal/`, the EULA the first-run wizard gates on. `/setup` told
+every editor no licence agreement is included in this build and the operator
+was pointed at a guide. Ship what is present, NOTE what is not, refuse only
+for the legal tree. CR-265's own test asserted the all-or-nothing refusal; it
+now asserts the saying half, which was the fix, and that the licence
+agreement still ships.
+
+### CR-286AC (tests-6) - three copies of the b-roll schema and migrations, and no test that they are the same - FIXED (broll/indexer/tests/test_bug_hunt_2026_09_18_webapps_tools.py)
+
+The twelve migration scripts exist in three copies and `schema.sql` in two,
+each suite testing only its own. Worse than the hunter knew: both
+`broll_index/migrate.py` and `broll/web/app/db.py` resolve REPO-ROOT FIRST,
+so in a checkout - which is what every test run is - the bundled copies are
+exercised by no test at all, and drift would show up only in a deployed
+container or an installed package. One test hashes the SQL of every copy,
+comments and blank lines stripped (the bundled copies carry a five-line
+"kept in sync here" header, so a byte comparison fails on day one and would
+have to be disabled, which is how three copies stay unwatched), and names the
+file that drifted.
+
+### CR-286AD (ytdl-web-6) - any fleet-credentialled editor could claim another editor's job - DECLINED by the owner (2026-09-18)
+
+`claim` never compares `editor` with `job['created_by']`, so once a lease
+has lapsed any live companion in the fleet may take the work order (the
+owner's project label, term dir and clip list) and download it. The hunter
+and the verifier read that as a leak; the builder closed it with a 410
+`not_your_job` and reversed the test that pinned the old contract
+(`test_local_download.py::test_a_second_editor_may_claim_once_the_lease_has_run_out`,
+"until the SERVER has taken the job back, a live companion may pick it up").
+The owner ruled the same evening: "I want the old behaviour back" - a
+colleague's machine finishing an expired job is the DESIGN, not a leak, in
+a studio whose editors share one archive. The guard and the reversed tests
+were removed by the orchestrator before the gate; the route is exactly as
+0.7.49 shipped it. If the studio ever has editors who must not see each
+other's jobs, this is the four-line guard to put back.
+
+### CR-286AE (ytdl-web-7) - `db.py` defined `_column` twice - FIXED (ytdl/web/ytdlweb/db.py)
+
+Two module-level `def _column(row, key)`, at 206 and 976; the second shadowed
+the first for every caller in the file, including the fourteen readers
+written against the first. Behaviourally identical today, so nothing was
+broken - and a future tightening of either would have been a silent no-op for
+half the module. One definition, kept where the first readers are.
+
+### CR-286AF (ytdl-web-8) - the "download on this computer was unticked" sentence said "this search" on a pasted-links job - FIXED (ytdl/web/static/app.js)
+
+regression-26's sentence serves all three callers of `dispatchLocal`, one of
+which is `runUrls` and another the review grid's DOWNLOAD on a url job (the
+reachable path: a paste submitted unticked, the box ticked afterwards, then
+RETRY FAILED). The editor was told to change a setting on a screen they did
+not use. "this job ... before the next one".
+
+### CR-286AG (proxy-tiers-3, OWED from companion-media) - the archive folder the server could not READ answered the same shape as "this clip has no original" - FIXED web half (broll/web/app/routes_api.py)
+
+`insert_target_detail` discovers the original and the editing proxy by
+listing the archive folder inside the container. An OSError - the dataset
+unmounted, an SMB hiccup, `BROLL_DATA_ROOT` wrong after an image update - was
+swallowed into `entries = []`, and a stat that could not be taken into "no
+editing proxy", which is byte for byte the answer for a clip that genuinely
+has neither. Ten minutes of that turns every Send to Resolve in the window
+into a preview-only insert with a stand-in ledger row whose `is_stale`
+retirement can never fire, and the damage outlives the outage for ever on
+projects nobody re-checks.
+
+The insert object now carries `known`, and only a listing or a stat that
+RAISED makes it false: an empty directory is an answer, and is still
+`known: true`. Both failure paths log which path they could not read. The
+keys stay PRESENT and null on that path, deliberately - an ABSENT
+`preview_rel`/`edit_proxy_rel` means "use the stem convention" to the
+companion, which re-creates the identical wrong answer by another road. The
+companion half is CR-284G and is already in the tree, so the pair is
+complete; the key is optional on the wire and a companion that has never
+heard of it behaves exactly as before.
+
+Tests: `broll/web/tests/test_insert_target.py::test_a_missing_archive_directory_answers_without_a_proxy`
+(the new key, plus that the two null keys are still there) and
+`::test_the_preview_only_fallback_reports_no_original` (a JUDGED null is
+`known: true`, and `original_rel` is present-and-null so no reader may fall
+back to the posted `rel_path`, which in that case IS the preview).
+
+### CR-286AH (comp-broll-tiers-3, OWED from companion-media) - the frame-count comparison's open question is answered - FIXED (broll/indexer/broll_index/ffmpeg_tools.py, docstring only)
+
+`frames_match` is the one predicate `build_proxy` and `make_own_proxies` both
+use (CR-286A), and its docstring said the VFR tolerance was still open. The
+companion-media builder settled it in the same pass by giving the companion's
+ingest the EXACT twin of this rule, so all three producers refuse the same
+file. The docstring now records the answer and keeps the standing rule: a
+tolerance introduced later belongs here and in the companion's twin in the
+SAME change. No code change - the behaviour was already exact.
+
+### CR-286AI (tests-1, OWED from companion-media) - the two release scripts now require a real ffmpeg, where there is one - FIXED (tools/release.ps1, tools/release_macos.sh)
+
+Twenty media-job tests - the three Timeline Cards recipes, whose ffmpeg argv
+another repo's page reads byte for byte, plus proxy_gen's `.partial` +
+atomic-rename rule - skipped silently on every CI and release runner, and
+pytest exits 0 on a skip, so the argv could break and the build would still
+be published. `CCSYNC_REQUIRE_FFMPEG=1` turns those skips into failures and
+the companion suite has read it since the first wave; neither release script
+set it.
+
+Both do now, beside the `CCSYNC_REQUIRE_RCLONE=1` they have always set - and
+GUARDED, which is the part worth the comment. rclone is a prerequisite of the
+lane tests; ffmpeg is not a prerequisite of building the companion, and a
+release that cannot be cut on a rig without `brew install ffmpeg` is a worse
+failure than the hole it closes. So the variable is set only when
+`Get-Command ffmpeg` / `have_cmd ffmpeg` finds one, and its absence is a
+WARNING in the run log rather than a silent skip or a refusal. The Windows
+half restores the previous value in the existing `finally`, so the release
+script does not leak the pin into the shell it was run from.
+
+Test: `tools/tests/test_release_scripts.py::TestTheMediaJobTestsAreRequiredWhereFfmpegExists`
+(five cases: each script sets it, each script warns rather than fails without
+one, the Windows restore, and rclone still required).
+
+### CR-286AJ (dash-release-jobs-3, taken from the dashboard builder) - the "only upload what changed" skip could not see a half-uploaded asset - FIXED (tools/publish_feed.py)
+
+The 2026-09-11 speed-up reads the release's own asset list and skips any
+planned file the release already holds at the same NAME and SIZE. It never
+read the asset's `state`. A GitHub asset whose upload was interrupted keeps
+its declared name and size while sitting in `starter`, and a `starter` asset
+serves nothing usable - so what used to heal itself on the next release
+(before the speed-up every run pushed everything with `--clobber`) is now
+skipped for ever, because nothing downstream ever compares the published
+bytes against the record's sha again. `fresh_key` protects only the one
+package this run signed, not the other three artefacts or the older records
+in the mirror. The outcome is fail-closed - a customer's dashboard refuses
+the bytes with `FeedHashMismatch` and shows it as `last_error` on its feed
+page - but permanent and self-inflicted, which is why the verifier put it at
+low rather than refuting it.
+
+`published_assets` now asks for `state` and `digest` alongside `size` in the
+SAME `gh` call (this path is pinned verb for verb by the feed tests, and a
+second round trip would be a change to every one of them), and
+`_asset_is_held` decides: the size still has to match, the asset has to be
+`uploaded`, and where GitHub offers a `digest` the local bytes have to hash
+to it - which is the check the customer's dashboard will make anyway, made
+before the skip instead of after the release. Every "cannot tell" answers
+False and re-uploads: a missing digest, an older `gh` that sends no state at
+all, a stat that raised. That is the pre-2026-09-11 behaviour, which costs
+bandwidth and nothing else.
+
+Tests (`tools/tests/test_publish_feed.py`, five new or extended cases):
+`::test_an_interrupted_upload_is_not_mistaken_for_a_published_asset` - with
+its CONTROL, an `uploaded` asset of the same size still being skipped,
+without which the case passes on the old code for the wrong reason;
+`::test_the_asset_list_is_asked_for_the_state_and_the_digest` (a field nobody
+asks for cannot be read, and still one `runner(` call);
+`::test_a_digest_the_bytes_do_not_match_is_re_uploaded` both ways;
+`::test_a_gh_that_sends_no_state_uploads_everything`; and the existing
+`::test_assets_the_release_already_holds_are_not_re_uploaded`, whose FakeGh
+now answers state and digest.
+
+### CR-286AK (regression-7 = tests-4, taken from the dashboard builder) - the neutered test that was dropped from the 09-11b pass with no fix, no decline and no ledger entry - FIXED (music/web/tests/test_bug_hunt_2026_09_11_music.py)
+
+`test_the_force_docstring_describes_what_actually_settles_a_batch` grepped
+`musicweb` for a production `apply_for_track(..., force=True)` caller and
+`pytest.skip()`d if it found one - so the guard switched itself off exactly
+when the thing it guards happened, invisibly, because a skip in a suite of
+149 is invisible. tests-4 reported that in the 09-11b hunt and is the ONE id
+of that hunt's 154 with neither a fix nor a recorded decline anywhere, which
+is regression-7.
+
+Both branches assert now, and the assertion is about what the docstring must
+then SAY: with no production caller, `force` is a test-only parameter and the
+docstring has to say so ("only the tests use it today") and must not claim
+`release` passes it; with one, that sentence has to be gone and the caller
+named. `_settle_scores` - the thing that actually clears the stale marker -
+is asserted in both worlds. Checked by mutation both ways: neutering the
+docstring fails it, and adding a `force=True` caller to `routes_fleet.py`
+fails it too (it used to skip).
+
+While in that file: `::test_the_page_only_says_running_when_the_companion_claimed_it`
+pinned `batch_uid`/`staging_id` as literals INSIDE `miRetryFailed`, which
+CR-286F/G moved into the shared `miDispatchLocal`. It now asserts the same
+three properties across both halves (the path and the dispatch call in the
+button, the body fields in the helper, 202 still the only "running"). This
+was a real break my own fix introduced and it would have been red in the
+central gate: the full `music/web` suite is 615 passed / 2 skipped now.
+
+### CR-286AL (test hygiene, taken from the dashboard builder) - two indexer tests read the developer's own environment and answered differently in the gate - FIXED (broll/indexer/tests/test_cli_local_backend.py, test_indexer_backend_config.py)
+
+`broll_index.config`'s indexer block resolves `local_cache_dir`, `llama_server_path` and
+`dashboard_url` as `_env(NAME) or raw.get(...)`, i.e. the environment BEATS
+the config file. This rig has `BROLL_LOCAL_CACHE_DIR` set machine-wide for
+the real local-VLM cache, so
+`test_indexer_paths_default_empty_and_read_from_config` asserted the config
+file's value against the developer's own environment, and
+`test_doctor_reports_gpu_tier_and_missing_runtime` had `doctor` resolve to
+that directory, find the models already downloaded and print the opposite of
+"NOT downloaded yet". Both failed in the central gate and passed in the shell
+of whoever wrote them, which is the worst shape a test can have: it makes the
+gate look wrong.
+
+The config test deletes the three names itself. The CLI file gets an AUTOUSE
+fixture instead, because the exposure is `_write_config`'s and every case in
+that file calls it. `test_env_overrides_win_over_config_yaml` is unaffected -
+a fixture runs before the test body, so its own `setenv` still wins.
+Confirmed by running the two files three ways (as-is on this rig, with the
+variable forced to the rig's value, and with it unset): 18 passed in all
+three, where before it was 16 passed / 2 failed with the variable set.
+
+### Verification
+
+Run as CLAUDE.md prescribes, from each component directory.
+
+- broll-indexer-1 -> `broll/indexer/tests/test_bug_hunt_2026_09_18_webapps_tools.py::test_make_own_proxies_checks_the_frame_count` (+ `::test_a_good_proxy_still_lands`)
+- broll-indexer-3 -> same file `::test_a_proxy_whose_length_is_right_costs_no_second_read_of_the_source`, `::test_a_suspect_proxy_still_pays_for_the_real_count`, `::test_the_expected_count_comes_from_the_probe_and_not_nb_frames`
+- install-onboard-1 -> `installer/tests/test_macos_site_values.sh` ("a dry run ends with the nothing-changed sentence", "a dry run asks nobody to delete anything")
+- install-onboard-2 -> `installer/tests/Test-BinDirLeftovers.ps1` ("a tree the delete could not clear is reported", "a -Full run that left the identity behind does not end 'complete'", "a -Full run that removed nothing never claims it did", "the -Full leftovers are printed where an editor can read them")
+- music-1 -> `music/web/tests/test_bug_hunt_2026_09_18_webapps_tools.py::test_a_cancel_after_the_lease_died_finalises_the_batch`, `::test_a_cancel_never_leaves_a_row_no_sweep_can_reach`, `::test_a_cancel_on_a_live_lease_still_only_asks`; b-roll twin in `broll/web/tests/test_bug_hunt_2026_09_18_webapps_tools.py::test_a_cancel_after_the_lease_died_finalises_the_batch`
+- music-2 -> `music/web/tests/test_bug_hunt_2026_09_18_webapps_tools.py::test_the_companions_own_refusal_is_what_the_editor_is_shown` (node-driven, skips where node is absent)
+- regression-1 -> same file `::test_a_dispatch_that_lost_its_staging_id_adopts_the_one_the_companion_names`
+- server-tools-1 -> `tools/tests/test_gen_notices.py::test_the_container_lock_is_licence_scanned_and_flagged` (+ `::test_a_hash_pinned_lock_is_read_as_names_and_versions`, `::test_an_absent_lock_is_not_an_exception`, `::test_a_locked_package_no_venv_holds_is_unknown_not_permissive`)
+- server-tools-2 -> `server/tests/test_broll_drain.py::test_a_merge_that_fails_after_the_swap_names_the_bundle_and_the_command` (now asserts `RC_DRAIN_UNMERGED`)
+- ytdl-web-2 -> `ytdl/web/tests/test_bug_hunt_2026_09_18_webapps_tools.py::test_the_workers_no_room_note_names_the_lost_share_not_a_full_disk`, `::test_a_present_tree_still_earns_the_full_disk_sentence`
+- ytdl-web-3 -> same file `::test_a_job_that_failed_before_any_clip_still_offers_the_retry`
+- ytdl-web-4 -> same file `::test_a_pasted_job_is_measured_at_the_press`, `::test_the_workers_backstop_covers_a_paste_with_the_flag_off`
+- ytdl-web-5 -> same file `::test_a_vanished_share_stops_the_download_even_when_there_is_room`, `::test_a_root_that_cannot_be_read_is_never_called_gone`
+- broll-2 -> `server/tests/test_bug_hunt_2026_09_18_webapps_tools.py::test_publishing_a_newer_schema_than_the_deployed_app_is_refused` (+ the older-schema, unreadable-version and one-exec cases)
+- broll-3 -> `broll/web/tests/test_bug_hunt_2026_09_18_webapps_tools.py::test_an_nfd_top_slot_is_still_found_beside_an_nfc_preview`
+- broll-4 -> same file `::test_a_mov_preview_is_not_its_own_editing_proxy`
+- broll-5 -> same file `::test_a_zero_byte_preview_does_not_take_the_clip_live`, `::test_a_preview_with_bytes_still_goes_live`
+- broll-indexer-2 -> `broll/indexer/tests/...::test_a_frame_count_the_duration_contradicts_is_not_recorded`, `::test_probe_video_uses_the_checked_frame_count`, `::test_a_frame_count_nothing_can_check_is_left_alone`
+- broll-indexer-4 -> same file `::test_a_clip_with_no_duration_is_parked_rather_than_crashing`, `::test_the_parked_row_is_not_mistaken_for_an_over_length_clip`
+- broll-indexer-5 -> same file `::test_the_remux_verifies_the_value_it_decided_on`, `::test_a_remux_that_kept_the_value_is_not_an_error`
+- install-onboard-3 -> `installer/tests/test_macos_site_values.sh` (the section-3 case above; it is the test)
+- install-onboard-4 -> `onboarding/tests/test_bug_hunt_2026_09_18_webapps_tools.py::test_two_dashboards_on_one_host_are_not_the_same_deployment` (+ the three control cases)
+- install-onboard-5 -> `installer/tests/test_macos_site_values.sh` ("a dry run does not claim the device identity is gone")
+- music-3 -> `music/web/tests/test_bug_hunt_2026_09_18_webapps_tools.py::test_the_precheck_preview_honours_a_name_an_unlanded_item_holds`
+- music-4 -> `music/indexer/tests/test_bug_hunt_2026_09_18_webapps_tools.py` (all four cases)
+- server-tools-3 -> `server/tests/test_bug_hunt_2026_09_18_webapps_tools.py::test_the_tailscale_status_read_names_its_encoding`
+- server-tools-4 -> same file `::test_every_bench_subprocess_read_declares_utf8` (4 params), `::test_the_rclone_listing_returns_none_on_a_decode_failure`
+- server-tools-5 -> same file `::test_an_absent_guide_does_not_withhold_the_licence_agreement`, `::test_an_absent_legal_tree_is_still_fatal`, and the rewritten `test_bug_hunt_2026_09_11b_server_tools.py::test_a_missing_editor_setup_is_named_and_does_not_stop_the_ship`
+- tests-6 -> `broll/indexer/tests/...::test_the_three_migration_copies_hold_the_same_sql`, `::test_the_two_schema_copies_hold_the_same_sql` (a DRIFT GUARD: it passes today by construction and fails the moment one copy is edited alone)
+- ytdl-web-6 -> DECLINED by the owner; guard and tests removed, `test_local_download.py` restored to HEAD
+- ytdl-web-7 -> same file `::test_the_db_module_defines_column_once`
+- ytdl-web-8 -> same file `::test_the_unticked_note_does_not_call_a_paste_a_search`
+- proxy-tiers-3 (OWED in) -> `broll/web/tests/test_insert_target.py::test_a_missing_archive_directory_answers_without_a_proxy`, `::test_the_preview_only_fallback_reports_no_original` -> both fail with the `known` key removed
+- comp-broll-tiers-3 (OWED in) -> docstring only; `broll/indexer/tests/test_bug_hunt_2026_09_18_webapps_tools.py` still pins the EXACT behaviour the sentence now describes
+- tests-1 (OWED in) -> `tools/tests/test_release_scripts.py::TestTheMediaJobTestsAreRequiredWhereFfmpegExists` (5 cases) -> fails on both scripts at HEAD
+- dash-release-jobs-3 (taken in) -> `tools/tests/test_publish_feed.py` five cases -> all five fail on the unfixed `publish_feed.py`
+- regression-7 / tests-4 (taken in) -> `music/web/tests/test_bug_hunt_2026_09_11_music.py::test_the_force_docstring_describes_what_actually_settles_a_batch` -> mutation-checked both ways (neuter the docstring, add a production `force=True` caller); it SKIPPED silently before
+- test hygiene (taken in) -> `broll/indexer/tests/test_cli_local_backend.py`, `::test_indexer_paths_default_empty_and_read_from_config` -> 2 failed with `BROLL_LOCAL_CACHE_DIR` set before the fix, 18 passed with it set, unset and forced after
+
+Every one was run against the reverted source and fails there (tests-6 and
+`test_a_suspect_proxy_still_pays_for_the_real_count` excepted, and said so
+above: both are guards against a regression rather than proofs of a defect).
+
+### Not fixed
+- none. All 32 findings in the group are fixed.
+
+### OWED TO ANOTHER GROUP
+- DISCHARGED, and recorded above as CR-286AG / CR-286AH / CR-286AI: the three items companion-media owed ME (the `known` key on the insert object, the `frames_match` docstring, and `CCSYNC_REQUIRE_FFMPEG` in the two release scripts). Nothing is owed back to them for any of the three.
+- dashboard: `.github/workflows/ci.yml`: add `python tools/gen_notices.py --check` beside the `check_licenses.py --strict` steps (server-tools-1's third half; `tools/` is mine, the workflow is not). CAVEAT the orchestrator must weigh: `--check` renders from the COMPONENT VENVS on the machine it runs on, so it can only pass in a job that installs every component lock; anywhere else it would fail for reasons that have nothing to do with the notices. Either put it in the strict/all-locks job, or narrow `--check` to the `dashboard-container` table first. The file is regenerated in this pass, so it is current for THIS rig's venvs. Either side deploys first; nothing ships.
+- companion-media: `companion/src/ccsync_companion/ffmpeg_tools.py` (`probe_video`, the `"frames": _int_or_none(video_stream.get("nb_frames"))` line, ~567): apply the same `duration * fps` cross-check the indexer now applies (CR-286R), or the two producers of the same wire field disagree about how confident it is. The indexer's helper is `_plausible_frames`; copying it is four lines and needs no import. Either side first: the field is optional on read and a NULL is what every reader already handles.
+- companion-media: if comp-broll-tiers-3 settles on a TOLERANCE for the proxy/original frame-count comparison, it must be mirrored in `broll/indexer/broll_index/ffmpeg_tools.frames_match` (one function, used by `build_proxy` and by `make_own_proxies` since CR-286A), or the three producers grow two rules about the same file. I have left it EXACT, which is what the fleet shipped on 2026-09-17.
+- companion-media: `companion/src/ccsync_companion/broll_server.py` `derive_insert_paths`: the `basename(parent) == "Proxy"` arm builds `stem + ".mov"` the same way `insert_target_detail` does, so an old page (or a companion deriving for itself) can still produce the self-referential preview/editing-proxy pair CR-286P closes on the web side. One inequality guard. Web side is already safe on its own; deploy order does not matter.
+
+### Deploy order
+- The web apps and the dashboard first, as always: everything here is
+  server-side or page-side, and no companion change is required by any of it.
+  Nothing in this group adds or changes a wire field a companion reads. The
+  ONE contract change an operator should know about is
+  `server/publish_db.py`'s new non-zero exit `RC_DRAIN_UNMERGED = 3`: a
+  scripted publish that used to see 0 after a failed post-swap merge now sees
+  3. `docs/INDEXERS.md` and `docs/BACKUP_RESTORE.md` were checked for a
+  documented `&&` chain that would newly stop; there is none.
+
+### Owner decisions
+- **ytdl-web-6: the owner chose the old behaviour** ("I want the old behaviour back", 2026-09-18): an expired job may be finished by any editor's live companion. Reverted before the gate.
+- **server-tools-1: the notices file is regenerated from THIS rig's venvs.**
+  That is what the generator does, and it is why the diff is larger than
+  psycopg2 (pystray is gone from the companion venv, several versions moved).
+  The alternative - hand-editing the generated half - is what the file's own
+  header forbids.
+- **broll-2 refuses BOTH directions of a schema skew.** The newer-than-the-app
+  direction is the one the finding is about; refusing the older direction too
+  is my call, because a file dropped under a running container is never
+  stepped and 500s every ingest push until a restart.
+  `--allow-schema-skew` is the escape hatch.
+- **ytdl-web-4's paste refusal is measured only when the server is the
+  executor** (`not (LOCAL_DOWNLOAD and req.local)`), matching
+  `start_download`'s existing rule. A created-local paste is still measured by
+  the worker if it ends up executing it.
+
+
+## CR-287 - the file-move fixes of 2026-09-18 corrected - FIXED in repo 2026-09-18 (companion 0.9.75, unshipped)
+
+All four findings are about fixes made THE SAME MORNING - CR-283Y's section 4b
+branch, CR-283's dashboard-version gate and CR-282B's lane B relocation note -
+and every one of them is a way those fixes lose an editor's original or take
+their machine off the fleet grid. Nothing here is a wire change: the companion
+says exactly what it said this morning, to exactly the same dashboards.
+
+### CR-287A (comp-sync-1) - a machine with an empty plan trashed every file it was told to move - FIXED (companion/src/ccsync_companion/file_moves.py)
+
+`app._synced_project_rels` returns `[]`, not `None`, for any managed companion
+whose sequencer has an empty selection - an editor between projects, or one
+whose admin has just cleared the ticks, which today's owner decision says must
+never read as a fault anywhere. `_dest_is_synced_here` answered False for every
+path against an empty list, so `apply_move` took the section 4b branch for
+EVERY move, including a move whose source and destination are the one project
+this machine is holding the file in. The local original went into
+`.ccsync-trash`, `paths=None` meant Resolve was never relinked, `ok=True` meant
+the dashboard recorded the machine as having followed, and
+`lane_guard.prune_trash` deleted the batch on its age rule a fortnight later -
+on a machine that may be the file's only holder.
+
+**What the 4b branch may trust, stated:** a plan with AT LEAST ONE ENTRY that
+also NAMES THE PLACE THIS MACHINE IS HOLDING THE FILE. Not an explicit "managed
+and empty" signal: that would be a second thing for `_synced_project_rels` to
+get right (it is driven unbound, through getattr, on stubs), and the honest
+reading of an empty list is "cannot tell", which is what `None` already means
+here. So `_dest_is_synced_here` now answers True - "move it normally, no
+trash" - in three further cases, each with its own reason:
+
+- the plan is empty (cannot tell; the pre-4b path, the same answer `None` gets);
+- `to_project_rel` folds to `from_project_rel` (a move within the project the
+  file is already sitting in; "the destination is not synced here" cannot be
+  true of it whatever the plan says);
+- the SOURCE path is not under any plan entry (this machine is holding the file
+  in a project its plan does not account for, which proves the plan is not the
+  whole truth about that disk - trashing on that evidence is a guess, following
+  the move is not).
+
+The destination prefix test is unchanged, and lifted into `_under_any` so the
+source and the destination are judged by one rule: a selected project's rel is
+a prefix of everything in it and a borrowed entry's key is the lender's
+subpath, so the borrowed folder still passes and the rest of the lender's
+project still does not.
+
+Also here, from the same finding: the 4b branch now carries the
+`Proxy/<stem>.*` siblings into the trash with the original, as every other
+branch of `apply_move` carries them with the file. Left behind they are an
+orphan whose original has gone, which lane B trashes on its own next pass, in
+a different batch with a different age - so an admin's recovery was in two
+places.
+
+### CR-287B (comp-sync-2 = res-companion-1) - the 4b trash path became the "RELINK IT" destination - FIXED (companion/src/ccsync_companion/file_moves.py)
+
+The 4b branch returns `paths=None` on purpose ("a relink to the trash would be
+worse than the offline clip"), but it first wrote an INTENT row whose
+`new_local` WAS the trash path, and `record()` carries `old_local`/`new_local`
+forward from the previous row whenever `paths` is falsy. The completion row
+therefore carried `<local_root>\.ccsync-trash\<stamp>\...` with state
+`not_synced_here`, which `moved_to()` did not skip (it skips `applying` only) -
+so the watcher's RES-10 hook offered the editor "CCSync can repoint Resolve to
+where it is now", `_moved_destination_is_there` passed (the file really is in
+the trash), and RELINK IT wrote that path into the media pool through
+`replace_clip`. `prune_trash` then deletes the batch inside the 30 day relink
+window, and every relinked clip is permanently Media Offline pointing at a
+directory that no longer exists.
+
+Three layers, because one of them is about rows already written:
+
+1. the 4b intent row is written with an EMPTY `new_local`. It exists for its
+   lane A exclusion and for the crash window, never as a destination;
+2. `record()` does not inherit paths when the state is `not_synced_here`. A
+   move with that word has no new path anywhere, by definition;
+3. `moved_to()` and `pending_relinks()` skip `not_synced_here` rows the way
+   they skip `applying` ones - which is what protects a ledger written by
+   0.9.75 before this fix and read after the upgrade.
+
+The lane A exclusion is untouched: `recent_excludes` keys on `from_project_rel`
+/ `from_rel`, not on the local paths, so the old path still cannot re-upload
+itself.
+
+### CR-287C (comp-app-1) - a dashboard rollback 422'd every report from that machine for ever - FIXED (companion/src/ccsync_companion/app.py)
+
+`_note_dashboard_version` only WROTE `app._dashboard_version` when the reply
+carried the key; an absent key left the remembered value in place, for the life
+of the companion process. Its own docstring says the opposite ("an ABSENT
+`dashboard_version` means a dashboard older than the one that started sending
+it, which is the safe reading") and the whole `not_synced_here` gate rests on
+that reading. So: 0.7.50 is deployed, a companion sees it once, the deploy is
+rolled back (a scripted, documented operation - `install_dashboard_app.py
+--rollback-on-unhealthy`, `docs/RELEASE.md`), 0.7.49 answers and sends no
+version at all, the companion still puts `not_synced_here` on the wire, and
+0.7.49's `FileMoveResultIn.state` Literal rejects it - a 422 for the WHOLE
+report, lanes and presence and alarms and jobs, every thirty seconds. Nothing
+recovers it: there is no 422 shedding path on the companion side, the dashboard
+never records the answer so it redelivers the command for ever, and the machine
+reads as silent on the fleet grid until somebody restarts the tray.
+
+The absent key now clears the memory, so the very report that would have been
+rejected is the one that stops sending the word. A reply that is not a dict at
+all is not an answer and still says nothing either way (the redelivery harness
+and the tests drive this unbound).
+
+### CR-287D (res-companion-2) - the file-move ledger had two writer threads and no lock - FIXED (companion/src/ccsync_companion/file_moves.py)
+
+CR-282B handed the sequencer/lane thread a writer (`record_relocation`, up to
+rclone's 100 per pass) into a ledger that until this morning only the reporter
+thread wrote (`record_intent` / `record`), with lane A reading
+`recent_excludes` on a third. There was no lock anywhere in the class and both
+`_save()`s wrote one fixed `file_moves.json.tmp` before promoting it, so
+interleaved they publish a truncated or doubly-written file - and on Windows
+the loser's `replace` raises PermissionError, which was caught, logged and
+lost. `_load` runs once, in `__init__`, so nothing notices while the process
+runs: the damage surfaces at the next restart, which after a crash is the ONE
+case the whole `applying`/intent design exists for. A ledger that reads back as
+`[]` loses every intent row AND every exclusion, so lane A - which never
+deletes - re-uploads the moved file to the old path on the NAS, the single
+failure `docs/FILE_MOVES.md` exists to prevent.
+
+`FileMoveLedger` now holds a `threading.RLock` (reentrant: the writers call the
+readers, and `record_attempt_failed` calls `record`) taken around the mutation
+AND the `_save()` that follows it, by `entry`, `record`, `record_intent`,
+`record_relocation`, `relocation_to`, `record_attempt_failed`,
+`clear_relink_pending` and `_save` itself; `pending_relinks`, `moved_to` and
+`recent_excludes` copy the list under the lock and iterate their copy. The
+scratch file is `file_moves.json.<pid>.<counter>.tmp` on top of that, because
+the lock covers the threads of ONE companion and a second process on the same
+state directory (a supervisor relaunch racing the dying tray, CR-93's shape) is
+covered by nothing; a tmp that could not be promoted is unlinked, since
+`state/` is not somewhere anything prunes.
+
+### Verification
+
+New file `companion/tests/test_bug_hunt_2026_09_18b_companion_core.py`; the
+eight named here all fail on the pre-fix tree, the other two are the "must
+still work" guards (section 4b still trashes a real 4b move; a reply that is
+not a dict still says nothing).
+
+- `test_an_empty_plan_moves_the_file_normally_instead_of_trashing_it` -> fails before the fix (the file was in `.ccsync-trash`), passes now
+- `test_a_move_within_the_project_holding_the_file_is_never_trashed` -> fails before, passes now
+- `test_a_source_the_plan_does_not_account_for_takes_the_pre_4b_path` -> fails before, passes now
+- `test_a_real_4b_move_is_still_trashed` -> passed before, passes now (plus the new proxy assertion, which failed before)
+- `test_the_4b_completion_row_carries_no_path_into_the_trash` -> fails before (the row carried the trash path and `moved_to` returned it), passes now
+- `test_a_not_synced_here_row_is_never_offered_as_a_relink` -> fails before, passes now
+- `test_a_dashboard_rollback_stops_the_state_word` -> fails before (`state: not_synced_here` to a 0.7.49 reply), passes now
+- `test_a_reply_that_is_not_a_dict_leaves_the_memory_alone` -> passed before, passes now (the guard on the forgetting)
+- `test_two_threads_never_write_the_ledger_at_once` -> fails before (two threads inside `_save`, and a real PermissionError on the shared tmp on Windows), passes now
+- `test_the_ledger_tmp_file_is_unique_per_write` -> fails before, passes now
+
+Re-run green, unchanged by this pass: `test_file_moves.py`,
+`test_bug_hunt_2026_09_18_companion.py`, `test_bug_hunt_2026_09_11_comp_sync.py`,
+`test_bug_hunt_2026_09_11b_comp_sync.py`, `test_bug_hunt_2026_09_11b_comp_app.py`,
+`test_repath.py`, `test_rclone_lane.py` (299 tests).
+
+### Not fixed
+
+- none of the four.
+
+### OWED TO ANOTHER GROUP
+
+- none. Every change is inside `file_moves.py` and `app.py`; no wire field,
+  no dashboard behaviour and no state word changed.
+
+### Deploy order
+
+- Unchanged from this morning, and CR-287C is what makes it survivable in both
+  directions: the dashboard still deploys first for the `not_synced_here` word
+  (0.7.50 declares it, the companion only says it to a dashboard that has told
+  it 0.7.50 or above on the report reply in hand), and a dashboard ROLLBACK now
+  stops the word within one report instead of 422ing every report for ever.
+- The companion half is safe alone against every dashboard in the field
+  (0.7.34..0.7.50): a 0.9.75 with these fixes and a 0.7.49 dashboard answers
+  ok=True with the same sentence it has always sent.
+
+### Owner decisions
+
+- The 4b branch's trust rule is stated above as a decision, not a guess: a plan
+  is trusted only when it has an entry AND accounts for where this machine is
+  holding the file. The cost is that a machine whose plan genuinely covers
+  nothing now FOLLOWS a move into a project it does not sync (the pre-CR-283Y
+  behaviour: the file lands in a directory with no `.ccsync-project` marker
+  that neither lane can see) instead of trashing it. That is a recoverable,
+  visible-on-disk wrong answer; the alternative was deleting the original a
+  fortnight later, which is not.
+
+
+## CR-288 - four highs in today's own fixes: the verdict key, the intent row, the prune and the two-stage uploaded - FIXED in repo 2026-09-18 (companion 0.9.75, unshipped)
+
+Every one of these is about a change made EARLIER TODAY (CR-282D/E, CR-284I,
+CR-284N, CR-284R), so each fix builds on that change rather than around it.
+Nothing here is a wire word: the companion's requests are byte for byte what
+0.9.75 already sent.
+
+### CR-288A (comp-resolve-1 = regression-1) - the geometry verdict was written under a key nothing reads - FIXED (proxy_relink.py)
+
+`_geometry_disagrees` keys its memory on `probe` - the spelling
+`_openable_path` proved this process can OPEN, which on a machine with no `P:`
+mapping is the local twin (a service, a remote shell, every macOS editor).
+`apply_relinks` wrote the post-refresh verdict under `op["file_path"]`, the
+clip's LINKED canonical spelling, and `_geometry_key` normalises without
+translating, so the two are different dict keys wherever the twin is in play -
+and the fingerprint under the canonical key was a stat of a path this process
+cannot stat. Every verdict CR-282D, CR-282E and CR-284R rest on was therefore
+unreadable on exactly the machines the twin exists for: the refresh was
+re-planned every 120 s for ever, each pass spending one of the eight
+`resolve_journal.allow_automatic` grants a day, so within about sixteen
+minutes genuine proxy attachments stopped for the rest of the day on that
+machine.
+
+`plan_relinks` now carries `probe_path` on the refresh op, from the one
+`_openable_path` answer, beside the `stored_frames` its own comment said was
+carried "so apply_relinks can remember the verdict under the same key the
+probe used"; `apply_relinks` notes both verdicts (the no-change one and the
+CR-284R one) under it, falling back to `file_path` when the key is absent, so
+an op built by an older caller or injected by a test behaves exactly as
+before.
+
+Test: `::test_the_geometry_verdict_is_written_where_the_next_pass_reads_it` -
+canonical `P:\...` clip, only the twin exists, both `exists` and `stat`
+refusing the canonical spelling, two `plan_relinks` passes with a real
+`apply_relinks` in between. The second pass must plan nothing and must not
+re-run the whole-file demux.
+
+### CR-288B (proxy-tiers-1) - an intent row nothing could falsify, for a download that never started - FIXED (broll_server.py, broll_standins.py)
+
+CR-282C moved the stand-in ledger write to BEFORE the fetch so a download
+nobody polls again is still remembered. Two holes: `STATE_BUSY` returns three
+branches earlier than the retirement (at the two-download cap `poll_fetch`
+starts nothing and registers nothing - its own docstring), and an exception
+out of the fetch skipped every branch below it. Both left a row with
+`size: None`, and `_entry_is_stale` reads a non-int size as "still a stand-in"
+unconditionally, so that row could be falsified by nothing at all - not even
+the real 6K original arriving at that path - and `_prune_locked` would only
+retire it 30 days later, which the real original prevents. `_real_original_here`
+then answers False for a file that IS the original, `plan_relinks`' `.mp4`
+rule inverts, and `placed_report` tells the whole fleet.
+
+Three parts, all in the companion:
+
+  * the `STATE_BUSY` branch retires the row (nothing was started), and the
+    fetch call is wrapped so anything that leaves without an answer does the
+    same before re-raising the caller's exception unchanged;
+  * `record(..., pending_fetch=True)` MARKS an intent row, so it is told apart
+    from an ordinary entry whose size merely could not be read;
+  * `settle_intents()` answers those rows on the 120 s cycle (called from
+    `resume_pending_upgrades`, which already runs there): the row is settled
+    by IDENTITY (CR-288B/2 below), and a path with no file at all after
+    `INTENT_EXPIRY_SECONDS` (6 h, and only while the tree is demonstrably
+    present) is a download that never landed and is retired.
+
+Tests: `::test_a_download_that_never_started_leaves_no_standin_row`,
+`::test_a_fetch_that_blows_up_leaves_no_standin_row`,
+`::test_an_intent_row_whose_stand_in_landed_unobserved_becomes_falsifiable`,
+`::test_an_intent_row_for_a_download_that_never_landed_is_retired`.
+
+#### CR-288B/2 - and settled by IDENTITY, never by presence - FIXED (broll_standins.py, broll_fetch.py, broll_server.py)
+
+The first cut of `settle_intents` measured whatever was at the path. That
+reaches proxy-tiers-1's own outcome through the settlement: after a fetch that
+failed unobserved, lane B or the editor's own copy can put the REAL ORIGINAL
+at that path, and measuring it records the original's size as the stand-in's -
+permanently, because the size then never changes again. `is_standin` answers
+True for the real 6K file, `_entry_is_stale` never fires, the preview is
+attached as its proxy and the rel is broadcast to the fleet. "Under-trusting a
+file is the safe direction" is not true of a real original.
+
+A stand-in IS the preview's bytes, so the file's own header decides. The row
+already carries `geometry`, which is read with `ffmpeg_tools.probe_video` (one
+open, never `-count_packets`) through a seam `broll_server._standin_probe`
+resolves from this machine's configured ffmpeg.
+
+**Note the polarity, which is the opposite of the one the fix was asked for
+in.** That `geometry` is the ORIGINAL's, not the preview's: it comes from the
+`videos` row (`routes_api._insert_object`), which the indexer probed from the
+SOURCE clip, and the plan's own example is `6064x3424`
+(docs/BROLL_PROXY_TIERS_PLAN.md line 294). So a header that MATCHES the row is
+the real original and RETIRES the row with a line saying so; a header that
+DIFFERS is the 1080p preview under the original's name, i.e. the stand-in, and
+the row is measured. Reading it the other way round would retire exactly the
+rows that must stand.
+
+When the row has no usable geometry, or the header cannot be read, the
+fallback is `broll_fetch`'s own job record for that destination - new
+`broll_fetch.job_state(dest)`, which reads `_JOBS` under the lock and NEITHER
+STARTS a job (as `poll_fetch` would when there is none) NOR POPS a terminal
+one: DONE measures, FAILED retires, and anything else, including the "no such
+job" that a restart makes of every job there ever was, LEAVES THE ROW PENDING.
+A row that cannot be settled is not guessed at; it stays a stand-in, which is
+the safe reading of a file that has not been identified.
+
+Tests: `::test_the_real_original_arriving_at_a_pending_path_retires_the_row`,
+`::test_a_row_nothing_can_identify_is_left_pending`,
+`::test_a_fetch_the_registry_calls_failed_retires_the_row`,
+`::test_the_job_registry_is_read_without_starting_or_popping_anything`.
+
+### CR-288C (comp-broll-tiers-1) - a tree absent for one poll erased the ledger - FIXED (broll_standins.py)
+
+CR-284N's 30-day prune dropped every entry whose file could not be stat'ed.
+"Cannot be stat'ed" is not "has been deleted": an external sync drive pulled
+(CR-92), a share not yet mapped at companion start, an SMB blip or a NAS
+reboot makes every entry unstattable AT ONCE, so one poll dropped every old
+row and the next write of any kind persisted it. When the drive came back
+`is_standin` answered False for those paths and a 1080p H.264 lie read as the
+real original - the one failure the module says it exists to prevent.
+
+The prune now needs the TREE to be there: `_archive_root_of` walks the entry's
+own path up to the `Assets/B-roll Archive` pair (the ledger holds no
+local_root) and `_isdir` answers whether it is present, cached per root per
+pass. A path whose archive root cannot be derived, or whose root is not there,
+is skipped entirely. A prune that cannot tell does nothing.
+
+Test: `::test_a_tree_that_is_absent_for_one_poll_does_not_erase_the_ledger`.
+CR-284N's own test moved its two files under the archive, which is the only
+place a stand-in can be.
+
+### CR-288D (wire-1) - a clip could go live and its original fail in silence - FIXED (broll_ingest.py)
+
+CR-284I's first `/uploaded` post (`original_uploaded: false`) is not a
+partial-progress call on the server: `mark_uploaded` writes
+`ingest_items.state = 'live'`, which is in the server's `ITEM_TERMINAL`, so
+every later state write is refused with `400 illegal_transition`. The
+companion's `_fail_item` posted `failed` into that refusal, kept the failure
+locally only, and the batch then finished as plain `done` with
+`videos.original_path` NULL for ever and no retry able to reach it.
+
+The companion side, which works against today's server unchanged:
+`_fail_item` diverts a `staged_live` item to `_note_original_failed`, which
+leaves the item LIVE (which is what the server believes and what the editor is
+already cutting with), records `original_failed`, says it at WARNING naming
+the clip and what has to happen, and HOLDS the staged drop so the retention
+clock cannot delete this machine's copy while the archive has none.
+`_maybe_finish` carries `originals_failed` / `originals_owed` into the release
+summary, which is the batch's own `error` text on the dashboard - the one
+surface this side can still write to once the item is terminal.
+
+The item state the server should grow (a non-terminal `proxies_live`) and a
+retry that re-queues the original alone are OWED to webapps-tools; neither is
+needed for this half to be honest.
+
+Test: `test_broll_ingest.py::test_an_original_that_fails_after_the_clip_went_live_is_reported`,
+with the server fake answering the real `400` to a state write on a terminal
+item.
+
+### CR-288E (overseer-1) - an original that is still uploading is a KNOWN original - FIXED (broll_server.py)
+
+The two-stage `/uploaded` (CR-284I) opened a window nothing downstream knew
+about: a clip is live on its proxies while a multi-GB original is still going
+up. In that window `insert_target_detail` answered `original_rel: null`, which
+CR-284F reads as "the archive holds no original for this clip" - a genuine,
+first-class state - and `plan_insert` therefore returns `PLAN_PREVIEW_ONLY`:
+the preview imported at the PREVIEW's own path. For a clip whose 6K original
+is minutes away that is the wrong File Path on every machine the project
+travels to.
+
+The server now answers that window with the original's EXPECTED archive path
+plus `original_pending: true` (webapps-tools, SERVER FIRST). The companion
+half: `derive_insert_paths` carries `original_pending` on the derived object,
+`original_known` stays True for it, and `plan_insert` therefore takes the
+ordinary stand-in path - the preview fetched to the original's own path,
+ledgered, the editing proxy as the background upgrade. Three rules hold the
+edges, and each has a test:
+
+  * `original_known = False` is still for an EXPLICIT NULL only. A null that
+    arrives with `original_pending: true` is a server contradicting itself,
+    and the null wins: refusing to invent an original is the safe half.
+  * proxy-tiers-3's `known: false` ("the server could not look") clears it,
+    like every other field in the object: a server that judged nothing has
+    not judged this either.
+  * ABSENT means today's behaviour exactly. Every deployed dashboard is in
+    that state, and silence is not `false`.
+
+The pending original landing at that path later needs nothing new: it is the
+identity settlement of CR-288B/2 (the file stops being the preview's geometry
+and becomes the original's), after which the fleet fact and the refresh path
+take over.
+
+Tests: `::test_an_original_still_uploading_gets_a_stand_in_not_the_preview`,
+`::test_an_explicit_null_original_is_still_preview_only`,
+`::test_a_null_original_that_also_claims_to_be_pending_is_still_no_original`,
+`::test_a_dashboard_that_never_mentions_pending_behaves_exactly_as_today`,
+`::test_a_server_that_could_not_look_is_never_pending`.
+
+### Verification
+- `companion/tests/test_bug_hunt_2026_09_18b_companion_media.py::test_the_geometry_verdict_is_written_where_the_next_pass_reads_it` -> fails before the fix, passes now
+- `companion/tests/test_bug_hunt_2026_09_18b_companion_media.py::test_a_download_that_never_started_leaves_no_standin_row` -> fails before, passes now
+- `companion/tests/test_bug_hunt_2026_09_18b_companion_media.py::test_a_fetch_that_blows_up_leaves_no_standin_row` -> fails before, passes now
+- `companion/tests/test_bug_hunt_2026_09_18b_companion_media.py::test_an_intent_row_whose_stand_in_landed_unobserved_becomes_falsifiable` -> fails before, passes now
+- `companion/tests/test_bug_hunt_2026_09_18b_companion_media.py::test_the_real_original_arriving_at_a_pending_path_retires_the_row` -> fails before (watched, with the settlement forced back to presence-only), passes now
+- `companion/tests/test_bug_hunt_2026_09_18b_companion_media.py::test_a_row_nothing_can_identify_is_left_pending` -> fails before (same), passes now
+- `companion/tests/test_bug_hunt_2026_09_18b_companion_media.py::test_a_fetch_the_registry_calls_failed_retires_the_row` -> fails before (same), passes now
+- `companion/tests/test_bug_hunt_2026_09_18b_companion_media.py::test_the_job_registry_is_read_without_starting_or_popping_anything` -> pins `job_state`'s read-only contract
+- `companion/tests/test_bug_hunt_2026_09_18b_companion_media.py::test_an_intent_row_for_a_download_that_never_landed_is_retired` -> fails before, passes now
+- `companion/tests/test_bug_hunt_2026_09_18b_companion_media.py::test_a_tree_that_is_absent_for_one_poll_does_not_erase_the_ledger` -> fails before, passes now
+- `companion/tests/test_broll_ingest.py::test_an_original_that_fails_after_the_clip_went_live_is_reported` -> fails before (watched, with the divert disabled: the summary has no `originals_failed` and the server logs the refused `failed` write), passes now
+- `companion/tests/test_bug_hunt_2026_09_18b_companion_media.py::test_an_original_still_uploading_gets_a_stand_in_not_the_preview` -> fails before the fix (watched, with the field's parse disabled), passes now; the other four overseer-1 tests pin the edges that must NOT change
+- Adjacent suites run green as a check on the blast radius: `test_broll_standins.py`, `test_broll_insert_tiers.py`, `test_proxy_relink.py`, `test_proxy_relink_standins.py`, `test_broll_server.py`, `test_broll_proxy_upgrade.py`, `test_watcher_broll_archive.py`, `test_library_walk.py`, `test_broll_ingest*.py`, `test_music_ingest.py`, `test_bug_hunt_2026_09_18_companion*.py` (all pass).
+
+### Not fixed
+- wire-1's server half: a `/uploaded` first stage still makes the ITEM terminal on the server. The companion no longer loses the failure, but the server cannot yet be told "this live clip's original never arrived", and the page's retry still cannot re-queue the original alone. OWED below.
+
+### OWED TO ANOTHER GROUP
+- webapps-tools: `broll/web/app/ingest_batches.py`: `mark_uploaded` / `ITEM_TERMINAL` / `retry_failed`: give the two-stage `/uploaded` an explicit non-terminal item state (`proxies_live`, NOT in `ITEM_TERMINAL`), written when `original_uploaded` is false, with `live` written only on the second post; `retry_failed` re-queues an item whose `original_uploaded` is 0 (the original alone); the batch panel shows "original still owed" for such a row, and `release`'s recount counts one as an error so a batch ends `done_with_errors`. SERVER DEPLOYS FIRST, and it is safe alone in both directions: the companion posts exactly the body it posts today, an older companion against the new server simply never posts the second stage for a clip it never staged, and a newer companion against the old server behaves as this fix leaves it (live item, WARNING, release summary).
+- companion-core: none.
+
+### Deploy order
+- CR-288A, CR-288B, CR-288C are companion-only and need no dashboard change. Any order.
+- CR-288D: dashboard/b-roll web BEFORE companions if webapps-tools lands the owed half; the companion half here is safe against either server.
+- CR-288E: SERVER FIRST (that is where `original_pending` is minted), and it is safe in both directions on its own. A new server against an old companion is exactly today: the old companion ignores the field, and the non-null `original_rel` it now sees already routes it to the stand-in plan - the field is what stops a FUTURE reader treating "pending" as "absent". A new companion against an old server sees no field and behaves as today.
+
+### Owner decisions
+- `INTENT_EXPIRY_SECONDS` is 6 hours. It only ever retires a row whose file NEVER appeared and only while the tree is demonstrably present, so a slow link cannot trip it; shorten it only with that in mind.
+- `settle_intents` identifies the file by its header geometry against the ORIGINAL's geometry on the row, because the preview's expected size is not on the insert object and its geometry is not either. One header read per intent row whose file has appeared, once, on the 120 s cycle.
+- A row with no geometry and no live job record stays PENDING for ever rather than being guessed at. It still reads as a stand-in, which is the conservative direction, and the six-hour expiry cannot retire it while a file sits at that path. If that ever needs an ending, the honest one is an operator-visible notice, not a guess.
+
+
+## CR-289 - the morning's own fixes finished: the answer half of res-fleet-4, a liveness test on identity, and corroboration before the fleet is told to move a file - FIXED in repo 2026-09-18 (db.py, api.py, collector.py)
+
+All three findings are about CR-285AM (res-fleet-4) and CR-285AL
+(dash-collector-alerts-1), built ON them rather than around them. Schema stays
+at v54 (unshipped): one index is added to that block, no new table.
+
+### CR-289A (dash-db-1 = res-fleet-1 = dash-api-1) - a command offered under a computer's FORMER hostname could never be answered - FIXED (db.py, api.py)
+
+res-fleet-4 taught the OFFER and the delivery stamp to look under every
+hostname of one `machine_id` (`command_machine_names`, `_by_target_machine`).
+The three writers that record the machine's ANSWER were not taught: they
+matched `machine = <reporting hostname>`, so for exactly the rows that fix
+newly offers - the ones filed under the old name, inside the window SYS-18a
+defers the adoption by, or for ever when the new name has a plan of its own -
+the answer updated zero rows. `applied_at` stayed NULL, the same move rode
+every report at thirty-second intervals, the companion re-applied it or
+answered its not-found arm each time, and `expire_delivered_file_moves`
+finally stamped `expired_at` and raised a `file_move_expired` warn for a move
+that HAD been applied: verbatim the outcome res-fleet-4 was written to end.
+The Resolve undo path had the same shape, and is worse, because an undo is
+replayed against the editor's own Resolve.
+
+Offer and answer read ONE function now (`db.file_move_answer_names`, which is
+`command_machine_names`), so the two directions cannot drift apart again:
+`mark_file_move_applied` and `mark_resolve_undo_applied` take the reporting
+`machine_id` and match `machine IN (...)`, and `api._file_move_answer` - the
+comp-app-2 log de-dupe - reads the same set, preferring this computer's own
+row, because a de-dupe that reads a different row from the one it writes says
+"no previous answer" every time and is the WARNING flood it exists to stop.
+`machine_id` is optional everywhere: a companion whose report carries no id
+answers under its own hostname, which is every build's behaviour to date.
+
+### CR-289B (dash-db-2) - two live computers on one machine_id were each offered the other's file moves and Resolve undos - FIXED (db.py, api.py)
+
+`command_machine_names` returned every registry row sharing the `machine_id`
+with no test of whether that row is still LIVE, while SYS-18a's clone refusal
+exists precisely to leave TWO live rows on one id, indefinitely, on a copied
+disk. So on a cloned disk the predicate did what its own docstring forbids: it
+handed each twin the other's commands, and a Resolve undo addressed to
+creator-1 would be replayed against whatever project the clone has open.
+
+A former name is by definition QUIET; a twin is by definition not. The
+predicate that already decides this for the adoption (`_previous_row_is_live`,
+five minutes, measured on `last_seen`, i.e. the SERVER's `received_at` and
+never the companion's clock) moved into `db.machine_row_is_live` and is now
+the one rule both sides read - api keeps its `CLONE_ADOPTION_WINDOW_SECONDS`
+name and delegates, because `health` imports `db` and not the reverse.
+`pending_resolve_undos` gained the `now` its sibling already had, so the quiet
+test is measured against the report's own instant.
+
+The cost is stated plainly: inside the first five minutes after a rename the
+old name still looks live, so a move outstanding under it is NOT offered until
+either it goes quiet (and `adopt_renamed_machine` re-keys the rows, which is
+the normal path) or the adoption is refused for good. That is a delay of
+minutes on a file lane A would need a pass to undo, against a file move and a
+Resolve undo executed on the wrong computer. Under-acting is SYS-18a's own
+ruling in the same situation.
+
+### CR-289C (dash-collector-alerts-1) - a cross-cycle pair turned a COPY into a fleet-wide, unattended file move - FIXED (collector.py, db.py)
+
+Within a pass, two halves are one act because they come out of a single
+before/after picture of the same projects in the same window.
+`pair_across_cycles` dropped that proof and kept pairing on `(basename, size,
+mtime_ns)` alone, across up to two days and every project in the fleet - and
+the result is not a suggestion: `_record_detected_moves` writes a `file_moves`
+row in state DONE, targeted at every machine holding the source, each of which
+moves its own copy and relinks Resolve with no admin anywhere in the path. The
+act that fakes it is a COPY: an editor duplicates a clip into a second project
+(size and mtime survive the copy), the original is deleted a day later, and
+the two halves are indistinguishable from a move.
+
+**Corroboration, not a notice, and asked at the moment each half is SEEN.**
+The evidence that tells a copy from a move exists only while both copies are
+on the NAS: `nas_media` still holds the other one, because the partner project
+has not been walked since. By the time the two halves meet, the tree looks the
+same either way. So `_the_file_is_also_somewhere_else` asks
+`db.media_key_elsewhere` about every fresh half before it is carried, and a
+half whose file is also elsewhere is dropped outright - not carried, not
+paired - which is exactly the behaviour this product had before the feature
+existed. `_one_copy_in_the_tree` asks the same question of the PAIR at pairing
+time (a file in three places was never moved out of one of them), and both
+halves are consumed when it refuses: evidence the tree contradicts does not
+improve by being kept for another two days. A read that fails is not
+corroboration - it drops the half and records nothing.
+
+A notice for an admin to confirm was the alternative and was not taken: the
+incident CR-285AL was built for (CR-267a) is two days of parked lane B
+breakers and lane A re-uploading to the old path, which a notice nobody opens
+does not stop. Corroborated pairs still act; uncorroborated ones now do not
+exist. The within-pass matcher is untouched - it has its own proof.
+
+`ix_nas_media_identity` on `nas_media(size, mtime_ns)` is added to the v54
+block (unshipped) so that query is an index seek and not a full scan of the
+fleet's inventory on the collector thread, with the report path waiting on the
+same database.
+
+### Verification
+
+Run: `dashboard\.venv\Scripts\python.exe -m pytest tests/test_bug_hunt_2026_09_18b_dashboard_highs.py -q` (8 passed). Six of the eight fail on the tree as the morning left it (measured by reverting the three call sites into a scratch copy of the package and running the same file: 6 failed, 2 passed).
+
+- `tests/test_bug_hunt_2026_09_18b_dashboard_highs.py::test_an_answer_retires_a_move_offered_under_a_former_hostname` -> fails before CR-289A, passes now
+- `...::test_an_answer_retires_a_resolve_undo_offered_under_a_former_hostname` -> fails before CR-289A
+- `...::test_the_answer_de_dupe_reads_the_row_the_answer_is_written_to` -> fails before CR-289A (the comp-app-2 flood)
+- `...::test_a_live_twin_is_never_offered_the_other_computers_commands` -> fails before CR-289B
+- `...::test_a_copy_whose_original_is_deleted_later_is_not_a_move` -> fails before CR-289C
+- `...::test_a_half_whose_corroboration_cannot_be_read_is_dropped` -> fails before CR-289C
+- `...::test_a_real_move_between_two_projects_is_still_paired_across_cycles` -> a GUARD on CR-289C (CR-285AL's own case, with a real inventory under it); passes before and after
+- `...::test_a_third_copy_in_the_tree_refuses_the_pair` -> a unit test of the new pairing-time seam (it asserts first that the pairing rules alone would have recorded the move)
+
+Edited: `tests/test_bug_hunt_2026_09_18_dashboard_lows.py::test_a_command_under_a_former_hostname_is_still_offered` - OLD-PC is an hour old there now. It upserted the former name with `now=NOW`, i.e. as a LIVE twin, which is the case CR-289B refuses; the test's own subject (a QUIET former name is still offered) is unchanged and still passes.
+
+Also run, unchanged: `test_bug_hunt_2026_09_18_dashboard_lows.py`, `test_hand_moves_detected.py`, `test_bug_hunt_2026_09_11b_dash_db.py`, `test_bug_hunt_2026_09_18_dashboard_mediums.py` (108 passed), and `test_db.py test_api.py test_invariants.py test_file_moves.py` (139 passed).
+
+### Not fixed
+- none
+
+### OWED TO ANOTHER GROUP
+- none. All three fixes are inside `dashboard/`, and none of them changes the wire: the companion sends `machine_id` on the report already (res-fleet-4 reads it for the offer), and no field, key or word is added to the report or to the reply.
+
+### Deploy order
+- Dashboard alone, any time, in either direction. A companion older or newer than this dashboard is unaffected: a report with no `machine_id` answers under its own hostname exactly as today, and a rollback to the morning's dashboard restores the morning's behaviour with no state left behind (nothing new is written to any row).
+- The v54 migration gains one index. A dashboard already migrated to v54 in a dev tree will not re-run the block, so its `nas_media` query falls back to a scan; v54 has shipped nowhere, so no deployment is in that state.
+
+### Owner decisions
+- CR-289B costs a few minutes of delay on a command outstanding across a hostname rename (the old name has to go quiet first). Recorded above; the alternative is a cloned disk executing the other computer's Resolve undo.
+- CR-289C keeps the cross-cycle move AUTOMATIC when it can be corroborated, rather than downgrading every one to a notice. If the owner would rather see a confirmation on the project page for any move detected across two passes, that is a small change on top of this one (the pair is already refused or accepted in a single place).
+
+## CR-290 - the tenth hunt's highs, the webapps/tools half - FIXED in repo 2026-09-18 (broll/indexer, broll/web)
+
+The 2026-09-18b hunt's high findings for `broll/`, `music/`, `ytdl/`,
+`server/`, `tools/`, `installer/`, `onboarding/`, built on the same day's
+first fix pass (CR-282..CR-286), not around it. Two findings fell to this
+group: its own `broll-indexer-1`, and the server half of `wire-1`, owed to it
+by companion-media and routed by the orchestrator mid-pass - plus `overseer-1`,
+which the orchestrator found by reading the second of those against the
+companion's CR-284F.
+
+### CR-290A (broll-indexer-1) - a proxy 1 or 2 frames short passed both indexer producers - FIXED (broll/indexer/broll_index/ffmpeg_tools.py, broll/indexer/tools/make_own_proxies.py)
+
+CR-286B bought back the second full network read of every original with a
+cheap screen: skip `count_frames(src)` whenever the proxy's own packet count
+sits within `FRAME_SLACK` (2) of the SOURCE's `duration * fps`. The screen
+cannot see the failure it screens for. A CFR camera original's real frame
+count IS its duration * fps - that is the whole population this check exists
+for - so a proxy 1 or 2 frames short of it lands inside the window, the source
+is never counted, and the exact comparison `frames_match` performs never runs.
+An estimate carrying two frames of slack cannot decide a one-frame question.
+
+That is the low end of the Reproductive Rights class (seven files 1-18 frames
+short, Resolve refused every one, the editor reported "sync is stuck"), and it
+broke the invariant `frames_match`'s own docstring states: three producers,
+one rule. The companion counts both files unconditionally and compares
+exactly, so the same file was refused on an editor's machine and accepted by
+the indexer - in `make_own_proxies` accepted into an editor-grade
+`Proxy/<stem>.mp4` that Resolve links directly, with `status: ok` in the
+ledger and nothing anywhere recording why Resolve then refused it.
+
+Fixed by the brief's second option, "always count the source once per
+original": the screen is gone from both producers, the comparison is exact in
+both directions again, and what survives of CR-286B's saving is
+`ffmpeg_tools.count_frames_cached` - `count_frames` memoised on `(path, size,
+mtime_ns)`, bounded at 512 entries. An original is therefore demuxed once per
+VERSION of itself rather than once per verification pass: the libx264
+fallback's second `_bad()` is free, as is a second proxy cut from the same
+source in the same process. Keyed on the bytes, never the path alone, because
+a re-encoded file at the same path is a different file; a file that cannot be
+stat'ed is counted rather than cached, so the memo can never be the reason a
+count is wrong. The source read is still skipped when the DESTINATION's count
+is unknown - "both known or skip" is unchanged, and an unknowable comparison
+must not pay for the expensive half of itself.
+
+The memo remembers only a REAL count (coordinator review of this entry, same
+day). `count_frames` answers None for a transient failure as readily as for an
+unreadable file - an SMB blip, a NAS too busy to serve the demux - and the
+first cut of this fix stored that None, which would have pinned "cannot tell"
+on that original for the life of the process and sent every later proxy of it
+down the "both known or skip" branch unchecked: the memo becoming the reason a
+count is wrong, which is the one thing its docstring forbids. A failed count
+is now simply retried, at worst costing the read it was always going to cost.
+
+`FRAME_SLACK` and `expected_frames` remain, with comments saying plainly that
+neither may decide a verdict any more. The ffmpeg/ffprobe argv is untouched
+(the parity tests and the companion's loader pin it), and nothing about the
+companion's twin changes: it was already exact, so the three producers agree
+again.
+
+Cost, stated honestly: a back-catalogue run pays one extra full read of each
+original, which is what CR-286B removed. That is the price of the invariant,
+and the invariant is the one that stopped seven bad proxies reaching an
+editor. If the read cost has to come back down, the answer is a count carried
+FORWARD from a read the pipeline already does (`stage_probe` / `_frames_source`
+territory), not a tolerance on one of the three producers.
+
+### CR-290B (wire-1, the server half owed by companion-media) - a two-stage `/uploaded` made the item terminal while the original was still going up - FIXED (broll/web/app/ingest_batches.py, routes_batches.py, routes_fleet.py, static/ingest.js, migrations/013_proxies_live.sql)
+
+The companion stages a clip live as soon as its preview, poster and sprite are
+on the NAS and posts `/uploaded` a second time when the original finishes
+(CR-288D). Both posts landed on a route that wrote `live`, which is TERMINAL.
+So an original whose upload then failed left: an item no retry could move
+(`_check_transition` refuses to leave a terminal state, and `retry_failed`
+only ever moved `failed`), a batch that called itself `done`, and a `videos`
+row advertising an `original_path` the archive does not hold - with the
+failure recorded nowhere at all.
+
+The first stage now writes `proxies_live`: a new item state between
+`uploading` and `live` in `ITEM_PROGRESS`, in neither `ITEM_TERMINAL` nor
+`ITEM_FINISHED`. The clip stays VISIBLE throughout, which is the whole point
+of the two stages - visibility is `videos.status`, which both stages set to
+`indexed`, and no reader anywhere filters browse, search or the tree on the
+item state (checked: the only other readers of `ITEM_TERMINAL` are `claim`,
+which skips an item that already has a `video_id` anyway, and the cancel
+sweep). Around that word:
+
+  * `release` counts an item still at `proxies_live` exactly as a failure when
+    it decides `done` versus `done_with_errors`. At release nothing more is
+    coming, so an owed original is a permanent one. It is NOT folded into
+    `n_failed` mid-run, which would flash "1 failed" at an editor while an
+    upload was healthy; it is its own counter, `n_proxies_live`.
+  * a CANCEL leaves it alone, as it leaves `live` alone (`_CANCEL_KEEPS`,
+    from the new `ITEM_PUBLISHED`): its media is in the archive and an editor
+    may already have cut with it, and its `videos` row is `indexed`, so the
+    ghost-row DELETE cannot reach it either.
+  * `retry_failed` moves it back to `pending` beside the failed ones. Not to
+    `uploading`: that is the one state `_next_item` skips, so an item parked
+    there whose local upload queue died with the old process is a dead end
+    (comp-loopback-2's shape). The re-run is idempotent on this side -
+    `record_result` REPLACES segments, themes and flags, and the archive slot
+    is the one already allocated - so the cost is a re-describe, which is the
+    price of a button that works with a companion of any age.
+  * the panel says "original still owed" per clip, adds "N still to send the
+    original" to the counters line, and draws the retry button for a batch
+    with nothing failed and something owed ("finish the N still uploading") -
+    without that last part the one way back would have been invisible.
+
+`ingest_items.state` carries a CHECK constraint and SQLite cannot alter one,
+so `013_proxies_live.sql` REBUILDS the table: every column, index and foreign
+key of migration 011 with one more word in the CHECK, rows copied whole. Safe
+inside the runner's single transaction because nothing references
+`ingest_items` (`ingest_batches.current_item_uid` is plain TEXT). Landed in
+all three migration directories, both `schema.sql` copies, `app/db.py`'s chain
+(v13) and the indexer's `migrate.py` (`LATEST_VERSION = 13`), which the
+existing parity tests check.
+
+### CR-290C (overseer-1) - during the upload window the insert object said the clip HAS no original, so the preview was imported in its place for good - FIXED (broll/web/app/routes_api.py, broll/web/app/ingest_batches.py)
+
+Found by the orchestrator reading CR-290B against the companion's CR-284F.
+CR-290B's whole point is that a clip is usable while its original uploads -
+and for those hours `insert_target_detail` lists the archive folder, finds no
+sibling beside the preview and answers `original_rel: null`. The 0.9.75
+companion reads null as "this clip has no original" and imports the PREVIEW at
+the original's own path, permanently, ignoring the editing proxy; when the
+real file lands hours later nothing upgrades, because nothing is watching. It
+is the common case for every heavy clip, and it defeats plan item 5 ("usable
+from the moment its editing proxy lands").
+
+`_insert_object` now answers the path the original WILL land at, and says so:
+
+  * the path is `ingest_batches.ItemFiles(archive_dir, archive_stem,
+    basename(videos.rel_path), id).original` - the SAME expression
+    `mark_uploaded` stores on the second post, not a reconstruction that can
+    drift from it.
+  * `original_pending: true` rides beside it. ADDITIVE: `original_rel` is null
+    in this window today, so a 0.9.74 companion sees a non-null path and takes
+    its ordinary stand-in route, which is the designed behaviour, and a
+    companion that ignores the flag loses nothing. The key is ABSENT rather
+    than false when nothing is owed, so nothing has to be taught to read it.
+  * only when the server could LOOK. A `known: false` object judged nothing
+    (proxy-tiers-3), and naming a path there would contradict it.
+  * null, with no flag, for every clip genuinely without an original: no
+    ingest item at all (everything the indexer archived), an item that already
+    sent one, a stem-diverged row, and a batch ingested with
+    `upload_originals` off.
+  * a `live` item whose `original_uploaded` is 0 counts as owed too. After
+    CR-290B that combination can only be a wire-1 VICTIM, written before this
+    deploy: published, original never sent, and no retry can reach it.
+  * a DB error degrades the insert object, never the detail page.
+
+**And a defect of CR-290B's own, found writing this one and fixed with it:**
+`upload_originals: false` is a deliberate proxies-only ingest (the companion's
+`_upload_plan` omits the original), so its one `/uploaded` post carries
+`original_uploaded: false` - and CR-290B as first written parked every such
+item at `proxies_live` for ever, ending every proxies-only batch
+`done_with_errors` and offering a retry that could never succeed.
+`mark_uploaded` now reads the batch's own setting: nothing owed, so the one
+post ends the item `live`.
+
+### Verification
+- `broll/indexer/tests/test_bug_hunt_2026_09_18b_webapps_tools.py::test_a_proxy_one_or_two_frames_short_is_refused[1799]` and `[1798]` -> accepted the proxy before the fix (no RuntimeError), refuse it now
+- `...::test_a_proxy_longer_than_its_source_is_refused_too` -> same, the other direction of the exact rule
+- `...::test_make_own_proxies_refuses_a_one_frame_short_proxy[1799]` and `[1798]` -> before the fix the `.partial` was renamed into `Proxy/A003.mp4` with `status: ok`; now `bad-output` with the counts in `detail`
+- `...::test_a_good_proxy_costs_one_source_read_across_the_encoder_fallback` -> the memo, across an nvenc failure and the libx264 retry
+- `...::test_a_count_the_destination_cannot_produce_costs_no_source_read` -> "both known or skip" still holds and costs nothing
+- `...::test_the_source_count_memo_is_keyed_on_the_bytes` -> a re-encoded file at the same path is re-counted
+- `...::test_a_count_that_failed_once_is_not_remembered` -> with the None cached (the first cut of this fix) the second proxy of that original is never frame-checked and the test does not raise; with the guard the source is re-counted and the 1799-frame proxy is refused
+- `broll/indexer/tests/test_bug_hunt_2026_09_18_webapps_tools.py::test_a_source_is_demuxed_once_however_many_proxies_it_feeds` replaces `::test_a_proxy_whose_length_is_right_costs_no_second_read_of_the_source`, which pinned the defective screen; it now pins the saving that survives it
+- Run: `cd broll/indexer; python -m pytest tests/test_bug_hunt_2026_09_18b_webapps_tools.py tests/test_bug_hunt_2026_09_18_webapps_tools.py -q` -> 22 passed. Neighbours of the touched files, run as a safety check: `tests/test_ffmpeg_tools.py tests/test_fix_10bit_proxies.py tests/test_proxy_integrity.py tests/test_sprite_geometry_recorded.py` -> 62 passed.
+
+- `broll/web/tests/test_bug_hunt_2026_09_18b_webapps_tools.py::test_the_two_stages_end_live` -> before the fix the FIRST post left the item `live`; now `proxies_live`, visible and searchable, and the second post ends it `live` with `original_path` set
+- `...::test_a_failed_original_leaves_a_visible_retryable_item` -> before, the batch released as `done` and `retry-failed` moved nothing; now `done_with_errors`, the clip is still browsable, and the retry re-queues it to `pending`
+- `...::test_a_batch_whose_originals_all_landed_is_plain_done` and `...::test_an_older_companions_single_post_is_unchanged` -> the two directions that must NOT change (they pass on the unfixed source too, deliberately: they are the compatibility pins)
+- `...::test_the_panel_is_told_what_is_owed` -> `n_proxies_live` on both browser routes
+- `...::test_a_cancelled_batch_keeps_a_staged_item` -> before, a cancel relabelled a published clip `cancelled`
+- `...::test_the_stepped_migration_takes_the_new_word_and_keeps_the_rows` -> a v12 database stepped to v13 keeps its item rows and accepts `proxies_live`; verified to fail with migration 013 unregistered
+- `...::test_the_panel_says_original_still_owed_rather_than_the_enum` -> the page words it
+- `...::test_the_insert_object_names_the_original_that_is_still_coming` -> before the fix `original_rel` was null through the whole upload window (which is what made the companion import the preview in its place); now the expected archive path plus `original_pending`, and after the second post the real path with no flag
+- `...::test_a_batch_that_never_sends_originals_owes_nothing` -> a proxies-only batch: the item ends `live` on its one post, the batch releases `done`, and the insert object says null with no flag. Fails on CR-290B as first written (item stuck `proxies_live`, batch `done_with_errors`)
+- `...::test_a_clip_with_no_ingest_item_is_unchanged` -> everything the indexer archived is untouched
+- `broll/web/tests/test_fleet_ingest.py::test_a_cancelled_release_deletes_the_rows_that_never_got_media` was EDITED, not broken: it posted `/uploaded` with no original and expected `live`, which is now the two-stage case. It posts the original too, so it still tests what its name says.
+- `broll/indexer/tests/test_migrate.py` and `tests/test_schema_parity.py` pin the literal latest version on purpose; both moved 12 -> 13.
+- Runs: `cd broll/web; .venv\Scripts\python.exe -m pytest tests -q` -> 642 passed (whole suite, because a schema version touches everything). `cd broll/indexer; python -m pytest tests -q` -> 822 passed.
+
+### Not fixed
+- none.
+
+### OWED TO ANOTHER GROUP
+- companion-media (INFORMATIONAL, no code owed, but WORTH KNOWING before the companion side is finished): `insert.original_pending` is a new key a companion MAY use - it means "this path is not on the NAS yet". A companion that treats a non-null `original_rel` as "fetchable now" will simply fail the fetch and retry, exactly as it does for any original not yet synced; nothing regresses without it. If CR-284F's stand-in ledger wants to avoid writing a stand-in it will have to upgrade later, that flag is the signal to wait for the second post instead.
+- companion-media (INFORMATIONAL, no code owed): a companion older than this server that posts `/uploaded` with `original_uploaded` false and then never posts again now leaves the item `proxies_live` instead of `live`. That is the intended fix and needs no companion change; the response body is unchanged apart from two ADDED keys (`state`, `original_uploaded`), and `live` keeps its meaning "the clip is published", true of both stages.
+- The companion's twin (`companion/src/ccsync_companion/ffmpeg_tools.frames_match`, `broll_ingest._frames_missing`) is already exact and counts both files unconditionally, so this fix makes the indexer match IT, not the other way round. Optional and NOT required for the rule: companion-media may adopt a `count_frames_cached` of its own if the ingest's double count ever costs measurably; the verdict does not change either way.
+
+### Deploy order
+- CR-290A is indexer-only, base rig, no wire. Nothing on an editor's machine or the dashboard reads any of this, so there is no ordering constraint and no rollback hazard: an older indexer simply accepts the short proxy again.
+- CR-290C: server first, same as CR-290B and in the same change; purely additive on the wire in both directions.
+- CR-290B: THE SERVER DEPLOYS FIRST (the dashboard image carries `broll/web`), before any companion. It is safe alone in both directions - an older companion posting one call with its original sees exactly today's behaviour, and a newer one's first stage simply gets the new word.
+- Two things to know about the schema step, both from `server/publish_db.py`'s own refusals. (1) `ensure_schema` runs at MOUNT time, so the live `broll.db` is stepped to v13 when the new dashboard boots; a `broll.db` published from this rig AFTER that must be stepped too (`broll-index migrate`), or the publish is refused as older than the live file. (2) Publishing a v13 index UNDER an older dashboard is refused the other way round, correctly: deploy first, publish second.
+- A dashboard ROLLBACK to a v12 image against a v13 database: `app/db.py` refuses to run and the mount fails ABSENT, not fatal, so the dashboard still boots with `/broll` off (`ccsync_dashboard/broll.py` already recognises that exact message). The rows are not lost - `proxies_live` items simply cannot be read by the old code. Rolling forward again fixes it; there is no down migration and there should not be one.
+
+### Owner decisions
+- `retry_failed` sends an owed clip back to `pending`, i.e. it is re-proxied and re-described (a model call) rather than only re-uploaded. The alternative needs the companion to resume an upload from a state the server names, which is a companion change nobody owes this pass; say the word if the re-describe cost matters and it becomes one.
+- The cheap screen versus the exact rule: the rule wins, and the back-catalogue read cost comes back. Worth knowing before the next full archive run, since CR-286B was written because that cost was felt. The memo means it is one extra read per original, not per proxy.
+
+## CR-291 - companion core: the stranded editing-proxy resume, the folder move nothing followed, and one stall slot for two lanes - FIXED in repo 2026-09-18 (companion app.py, file_moves.py, sync/rclone_lane.py)
+
+### CR-291A (comp-app-2) - the editing-proxy resume still sat behind a live Resolve - FIXED (companion/src/ccsync_companion/app.py)
+
+CR-283D/comp-app-1 took the b-roll editing-proxy resume out of
+`_relink_proxies_once` (and so out of `proxy_relink_enabled`), but left the
+call at the TAIL of `_refresh_media_tree_once`, below its two early returns:
+`get_media_pool_items()` answering not-ok, and an ignored project. So the
+resume still needed Resolve open, scripting alive and a non-ignored project,
+while its own docstring says the ledger is on disk precisely for "a Resolve
+that was closed when the download landed". An editor who inserted an archive
+clip, got a stand-in, restarted the companion and did not reopen Resolve kept
+a 1080p H.264 preview under a 6K name for ever, with the attempt budget never
+even spent. The call now runs in `_media_tree_loop`, on every tick, beside
+`retry_loopback_bind()` - the shape the loop already had for work that needs
+no Resolve - and the `_local_root_is_broken()` gate stays inside the function
+where comp-app-1 put it. The old test stubbed `get_media_pool_items` to
+`ok: True`, i.e. it mocked away the gate that was still there; it is replaced
+by one that drives the real loop with Resolve answering not-ok.
+
+### CR-291B (comp-sync-3) - a hand-moved FOLDER was the one shape res-companion-2 could not read - FIXED (companion/src/ccsync_companion/file_moves.py)
+
+The collector describes a hand-moved folder as ONE `is_dir=True` command whose
+`from_rel`/`to_rel` name the directory, while lane B relocates FILES and writes
+one `(old_local, new_local)` row each. `relocation_to` is an exact `_cmp_key`
+equality on both halves, so the directory pair matched nothing: `apply_move`
+fell through to "nothing at the old path on this machine" with `paths=None`,
+app.py skipped the relink, and every clip under the folder stayed Media
+Offline while the MOVES history said this machine had followed. A new ledger
+method, `relocated_folder`, answers the question lane B's rows can actually
+support: every row under the source must land at the SAME relative path under
+the destination (prefixes folded through `_cmp_key`, CR-90), and one row
+pointing elsewhere means a partly carried folder, which must not be relinked
+as if it were complete. It is consulted in both branches - the `not
+src.exists()` resume branch, and the `dest.exists()` refusal, where an EMPTY
+leftover source directory (lane B carries files, not the husk) otherwise
+produced the flat "the destination already exists on this machine". Nothing
+here deletes the husk.
+
+### CR-291C (comp-sync-4) - lane B's recovery stamp erased lane A's live stall - FIXED (companion/src/ccsync_companion/sync/rclone_lane.py)
+
+Lane A and lane B share one `state/lane_stall.json`, and only lane B's
+`sync_guard_report()` reaches the wire. `_note_stall_recovered` read
+`stall_record()`, which prefers the lane's OWN in-memory `_last_stall`,
+checked the label against that stale copy, and then wrote it back over the
+shared file - so a lane A kill that landed after a lane B kill was destroyed
+by lane B's next good pass: `stall_report()` answered None, app.py's
+`_lane_stall_record()` fallback skipped the `recovered_at` row, and the only
+persisted evidence of the lane A kill was gone with lane A still uploading
+nothing. `_note_stall_recovered` now reads the PERSISTED record and re-checks
+the label against what the file actually holds; another lane's record is left
+untouched (this lane only retires its own stale in-memory copy). The mirror of
+the same shared-slot bug is closed too: `stall_record()` returns the NEWER of
+the in-memory and persisted records (file first on a tie, undateable sorts
+oldest), so lane B's report carries a fresh lane A stall instead of its own old
+one. The existing `test_the_other_lanes_pass_does_not_end_this_lanes_stall`
+could not see any of this because it builds a FRESH lane object; the new test
+REUSES the lane B instance, which is the live shape.
+
+### Verification
+- comp-app-2: `tests/test_bug_hunt_2026_09_18_companion_core.py::test_the_editing_proxy_resume_runs_with_resolve_closed` - fails with the call back in `_refresh_media_tree_once` (asserted by reverting the move), passes now.
+- comp-sync-3: `tests/test_bug_hunt_2026_09_18b_companion_core.py` - four tests (folder followed, partly followed refused, empty husk accepted, husk with files still refused); the two positive ones fail with `relocated_folder` short-circuited out.
+- comp-sync-4: `tests/test_rclone_lane.py::test_a_lane_b_recovery_does_not_erase_a_later_lane_a_stall` - fails on the pre-fix `stall_record()` read, passes now.
+- Suites re-run green: `test_bug_hunt_2026_09_18_companion_core.py`, `test_bug_hunt_2026_09_18b_companion_core.py`, `test_rclone_lane.py`, `test_file_moves.py` (206 passed) plus the neighbours that drive the same code, `test_app.py`, `test_broll_proxy_upgrade.py`, `test_bug_hunt_2026_09_18_companion_media.py`, `test_lane_watchdog.py` (465 passed).
+
+### Not fixed
+- Nothing from this group's list. All three assigned findings landed inside the box.
+
+### OWED TO ANOTHER GROUP
+- None. One foreign test was touched only because the fix made it a stub-attribute error: `tests/test_bug_hunt_2026_09_18_companion_core.py`'s `_Stub` in `test_a_retired_media_tree_thread_exits_instead_of_looping` gained a no-op `_resume_broll_proxy_upgrades` counter (same file group, same file).
+
+### Deploy order
+- Companion-only, no wire change. `relocated_folder` reads a ledger the same companion writes, and the stall record's shape on the wire is unchanged (the dashboard still sees a `stalled` block or nothing), so a dashboard one release older or newer, and a rollback, are all fine.
+
+### Owner decisions
+- None needed.
+
+## CR-292 - the rehearsal progress screen, both surfaces - FIXED in repo 2026-09-18 (companion-ui, 2026-09-18b mediums)
+
+CR-283P (comp-ui-5) gave FIX ALL a screen an admin can trust while
+`fixer_dry_run` is on. It missed the FIRST file of every such run, and the
+CONSOLIDATE window entirely. Both are fixed here, in `popup.py`.
+
+### CR-292A (comp-ui-1) - the first file of a rehearsal still said "Copying ... 0 B of 12.7 GB" - FIXED (companion/src/ccsync_companion/popup.py)
+
+`perform_fix_all` learned `rehearsing` from the first `dry_run` ANSWER, but a
+file's progress keys are published BEFORE `call_fix_clip` runs. So file 1 of
+every rehearsal was published with `rehearsing` false and the real
+`file_bytes_total`/`batch_bytes_total`, and with a single dead link - the
+common FIX ALL case - that was the whole run: the word "Copying", a byte total
+that will never be reached, and two bars that never move. The loop now SEEDS
+`rehearsing` before the first publish from `fixer.dry_run_default()`, the same
+cached `fixer_dry_run` answer `fixer.fix_clip` itself reads (one resolution per
+process, so the screen cannot disagree with the run), and only when the caller
+injected no `fix_clip_fn` - an injected copier decides its own dry-run, and the
+first-answer latch stays its fallback. `_FIX_CLIP_DEFAULT` exists because the
+bound default arg and `fixer.fix_clip` are two different objects once a test
+monkeypatches the module attribute. Test:
+`test_the_first_file_of_a_rehearsal_is_already_checking` (the real-fixer path,
+`popup.call_fix_clip` stubbed so Resolve is never reached) and
+`test_an_injected_fix_clip_still_decides_its_own_rehearsal`.
+
+### CR-292B (comp-ui-4) - the CONSOLIDATE window drew a whole rehearsal as a copy - FIXED (companion/src/ccsync_companion/popup.py)
+
+`consolidate.run_consolidation` publishes the real byte totals and no
+`rehearsing` key, and its renderer is `ProgressWindow._tick`, which called
+`format_file_progress` with no `rehearsal=` and drew its batch bar off bytes.
+An 800 GB COPY THIS PROJECT'S MEDIA IN rehearsal therefore sat at `File 7 of
+412: 0 B of 800 GB done` with "Copying" beside every clip. `_tick` now asks the
+new `ProgressWindow._rehearsing(info)`: an explicit `rehearsing` key wins (so
+the publisher can start sending one later with no second mechanism), a phase
+with its own `headline` is never a rehearsal (the lane A upload's bytes are
+real, and a rehearsal never reaches it - `app.py` skips the upload when nothing
+was copied in), and otherwise it falls back to the same cached `fixer_dry_run`
+answer every copy in this process obeys. When rehearsing, the file line reads
+`Checking "x"`, the batch line drops its byte total and the batch bar counts
+CLIPS, exactly as `_render_progress` does for FIX ALL. Tests:
+`test_the_consolidate_window_says_checking_on_a_rehearsal`,
+`test_a_real_consolidate_copy_is_untouched`,
+`test_the_upload_phase_headline_is_never_a_rehearsal` - all against stand-in
+widgets, since `ProgressWindow.__init__` builds no Tk (CR-93 is not in play).
+
+### Verification
+- comp-ui-1: `tests/test_bug_hunt_2026_09_18b_companion_ui.py` - 5 passed; with
+  the seed neutralised, `test_the_first_file_of_a_rehearsal_is_already_checking`
+  fails (`rehearsing` False, `file_bytes_total` 1024).
+- comp-ui-4: same file; with `_rehearsing` reduced to the key lookup,
+  `test_the_consolidate_window_says_checking_on_a_rehearsal` fails with
+  `Copying "A001_C012.braw": 0 B of 11.8 GB`.
+- `tests/test_popup.py` 134 passed with the new file; the CR-283P test
+  (`tests/test_bug_hunt_2026_09_18_companion_core.py -k rehearsal`) still
+  passes and now says why it asserts on `mid[-1]`.
+
+### Not fixed
+- Nothing from this group's list. (`consolidate.py`'s own publish is OWED
+  below, not required: the renderer fix stands alone.)
+
+### OWED TO ANOTHER GROUP
+- `companion/src/ccsync_companion/consolidate.py` (unassigned this wave):
+  `run_consolidation` should publish the rehearsal explicitly rather than lean
+  on the renderer's fallback - seed `rehearsing = fixer.dry_run_default()` when
+  no `fix_clip_fn` was injected, latch it on the first `dry_run` outcome, add
+  `rehearsing=rehearsing` to the per-file publish at `consolidate.py:471-473`
+  and send `file_bytes_total`/`batch_bytes_total` as 0 while it is true (the
+  shape `popup.perform_fix_all` already has). `ProgressWindow._rehearsing`
+  takes an explicit key in preference to its fallback, so that change is
+  additive and needs no second change here.
+
+### Deploy order
+- Companion-only, no wire. Any companion build carries both halves; a
+  dashboard rollback is not involved.
+
+### Owner decisions
+- None.
+
+## CR-293 - the refresh that was remembered on a flap, and the .mp4 refusal that was not the archive's - FIXED in repo 2026-09-18 (mediums wave, companion-resolve)
+
+Two confirmed mediums in `proxy_relink.py` + `resolve_bridge.py`, both about
+phase 3's editing-proxy/stand-in machinery answering a question it was never
+asked.
+
+### CR-293A (comp-resolve-2) - a forced refresh in which ReplaceClip RAISED is remembered for ever as settled - FIXED (resolve_bridge.py, proxy_relink.py)
+
+`replace_clip` answered `ok: False` only when `raised == max(1, tries)`, so a
+burst in which one or two of the three `ReplaceClip` calls raised (Resolve
+mid-render, a script-server flap) and the surviving call did not move the
+geometry returned `{"ok": True, "changed": False}`. `apply_relinks` treats
+`changed is False` as a permanent verdict and calls `note_geometry_verdict`,
+whose only expiry is the proxy file's `(mtime, size)` - which for a file whose
+original has already arrived never changes again. Phase 3's one mechanism was
+therefore disarmed for that clip for the life of the process, silently. The
+fix is the verifier's cheaper half: the forced arm now returns
+`retryable: True` when `raised > 0` (still `ok: True`, so the clip does not
+fall into `failures` / `REASON_NO_ANSWER` and the RES-3 channel reports
+nothing new), and `apply_relinks` skips `note_geometry_verdict` on that flag
+and logs "asking again next pass". The `changed is True` branch, which
+deliberately notes a verdict under the pre-call `stored_frames`, is untouched.
+Three tests: the consumer does not remember a flap, a CLEAN no-change refresh
+is still remembered (CR-284R must not be lost), and the producer - the real
+`replace_clip` driven with a stub item whose first two `ReplaceClip` calls
+raise - says `retryable`.
+
+### CR-293B (comp-resolve-3) - the `.mp4` refusal was not scoped to the b-roll archive - FIXED (proxy_relink.py)
+
+`plan_relinks` refused a `Proxy/<stem>.mp4` offer on "the file exists and is
+not a ledgered stand-in" with no `_under_archive` test, although every comment
+on the rule says "in the archive that file is the browser PREVIEW". Outside
+the archive a `.mp4` proxy is a perfectly good one: `GENERATED_EXT` became
+`.mov` only at R14 (2026-08-19) and `proxy_scan.py` states in capitals that
+existing `.mp4` proxies stay valid and are never re-made, so every pre-R14
+project proxy in the fleet was silently never attached - no op AND no `notes`
+entry, so the RES-3 "why is my proxy not attached" channel, the tray line and
+the log all said nothing. `_under_archive` is now hoisted into a local (it was
+already computed six lines above for the refresh gate) and the refusal is
+gated on it; when the rule does fire, a `notes` entry carries the new
+`REASON_ARCHIVE_PREVIEW`, so an archive refusal is explainable instead of
+invisible. The insert side (`resolve_bridge._attach_adjacent_proxy`) was left
+alone on the verifier's narrowing: its only caller is the b-roll insert, so it
+is archive-scoped by construction. Two tests: a project clip's legacy `.mp4`
+is planned again, and an archive preview is still refused and now says why.
+
+### Verification
+- comp-resolve-2: `test_a_refresh_in_which_resolve_raised_is_not_remembered_for_ever`, `test_a_clean_refresh_that_did_not_move_is_still_remembered`, `test_replace_clip_says_a_partly_raised_refresh_is_retryable` - all three red with the two hunks reverted in place, green after.
+- comp-resolve-3: `test_a_legacy_project_mp4_proxy_is_still_attached` red with the `under_archive` gate removed, green after; `test_an_archive_preview_is_still_refused_and_now_says_so` guards the half that stays.
+- Re-run green together with `test_proxy_relink.py`, `test_proxy_relink_standins.py`, `test_bug_hunt_2026_09_18_companion_media.py`, `test_bug_hunt_2026_09_18b_companion_media.py` (116 passed), plus `test_resolve_bridge.py` + `test_watcher.py` (188) and `test_no_em_dash.py` (103).
+
+### Not fixed
+- Nothing from this group's list. `watcher.py` needed no change.
+
+### OWED TO ANOTHER GROUP
+- None. Both halves of each fix are inside this group's files.
+- Worth knowing for whoever owns the tray/popup copy later: `REASON_ARCHIVE_PREVIEW` is a new editor-visible string in `proxy_relink.py`, surfaced through `plan_relinks`' `notes` and whatever the caller does with them. No other file needs a change for it.
+
+### Deploy order
+- Companion-only, no wire change. Any dashboard, old or new, is unaffected.
+
+### Owner decisions
+- None needed.
+
+## CR-294 - the b-roll insert wire during a container outage - PARTLY FIXED in repo 2026-09-18 (mediums wave, companion-broll)
+
+### CR-294A (proxy-tiers-3) - a `known: false` object must carry no judgement forward - FIXED (companion/src/ccsync_companion/broll_server.py)
+
+The finding is that the `known` outage guard (CR-284G) is understood by 0.9.75
+and later only, while every build in the field today is 0.9.74, so a ten-minute
+unreadable archive folder still turns every Send to Resolve into a ledgered
+stand-in. Most of it was already closed in the working tree: `derive_insert_paths`
+has the `known is False` branch, `plan_insert` returns PLAN_FETCH_ORIGINAL from
+it, and broll-1's explicit-null handling (`original_known`) means even a
+dashboard ROLLED BACK below the `known` fix answers an outage with
+`original_rel: null` and gets PLAN_PREVIEW_ONLY here, never a stand-in. What was
+still open was the server half - the verifier's `original_is_edit_weight: true`
+on the known=false path - and that lives in `broll/web/app/routes_api.py`, which
+belongs to the webapps-broll group, so it is under OWED below, written out
+verbatim. The one piece in this group's files is the consequence of that OWED
+change: once the route forces `true`, this build would have carried the lie into
+its derived tiers (`weight = insert.get(...)` runs unconditionally after the
+`known` branch), so a reader of the tiers - the insert debug line today, a
+decision tomorrow - would read "a 6K original is already small enough to edit
+with" off the one object whose whole point is that the server judged nothing.
+The weight is now reset to `None` when `known is False`; `geometry` is not,
+because it comes off the `videos` row and never touched the failed listing. Four
+tests in a new file pin it: the weight is null and `from_page` false on the
+outage object, the plan is still "fetch the file the editor asked for", a
+healthy heavy clip still keeps `False` and still plans a stand-in (the reset is
+scoped), and the rolled-back-dashboard outage shape is still preview-only.
+
+### Verification
+- CR-294A: `companion/tests/test_bug_hunt_2026_09_18b_mediums_broll.py` - 4
+  passed; with the new branch disabled,
+  `test_a_known_false_object_carries_no_weight_judgement_forward` fails
+  (`assert True is None`). `tests/test_broll_insert_tiers.py` and
+  `tests/test_bug_hunt_2026_09_18b_companion_media.py` re-run together: 46
+  passed. `py_compile` clean on both touched files.
+
+### Not fixed
+- proxy-tiers-3's server half (`original_is_edit_weight: true` on the
+  known=false path) is not this group's file; see OWED. Without it the fleet's
+  0.9.74 builds remain unprotected during a container outage, exactly as the
+  finding says.
+
+### OWED TO ANOTHER GROUP
+- **webapps-broll (CR-302), `broll/web/app/routes_api.py`, `_insert_object`.**
+  Replace `"original_is_edit_weight": _is_edit_weight(video),` with the forced
+  answer on the outage path:
+
+  ```python
+        # proxy-tiers-3 (2026-09-18b mediums): FORCED on the known=false
+        # path, and it is the only field in this object that is not the
+        # truth. `known` is read by companion 0.9.75 and later only; every
+        # build in the field today reads `original_is_edit_weight` alone, and
+        # a `false` there during an outage is what makes it plan a stand-in
+        # and write a ledger row that outlives the outage for ever. `true`
+        # forces PLAN_FETCH_ORIGINAL on 0.9.65..0.9.74 - fetch the file the
+        # editor asked for, which is the route 0.9.75 takes from `known`
+        # anyway, so nothing changes for a new build (it returns before the
+        # weight is consulted). The dashboard deploys first, so this is what
+        # protects the fleet in between. It must stay scoped to this path: a
+        # `true` on the healthy path would suppress every stand-in.
+        "original_is_edit_weight": (
+            True if target.get("known") is False
+            else _is_edit_weight(video)),
+  ```
+
+  `edit_proxy_rel` is already null there, so nothing else changes. Test:
+  `broll/web/tests/test_insert_target.py`'s known=false cell (around lines
+  250-271) is a 3 Mb/s clip that is already edit-weight, so it cannot pin
+  this - add a NEW cell with a HEAVY row (e.g. 2160p, 200 Mb/s, h264) whose
+  archive listing raises, asserting `insert["known"] is False` and
+  `insert["original_is_edit_weight"] is True`, and keep an assert on a HEALTHY
+  heavy clip that it is still `False`.
+
+### Deploy order
+Dashboard first, companion second - unchanged, and the OWED change is precisely
+what makes that order safe. This group's change is inert on its own (it only
+nulls a field the outage path never consults) and tolerates a dashboard one
+release older or newer, including a rollback below the `known` fix: with no
+`known` key, the explicit-null path (broll-1) still answers preview-only.
+
+### Owner decisions
+None.
+
+## CR-295 - the whisper worker and the merge ffmpeg outlive the kill that names them - FIXED in repo 2026-09-18 (companion)
+
+### CR-295A (comp-music-ytdl-jobs-1) - a cancelled or halted whisper job left the worker on the GPU - FIXED (companion/src/ccsync_companion/jobs_runner.py, proc_tree.py)
+
+`_run_child` spawns the whisper venv's `pipeline.py transcribe`, but that
+process is not the worker: `whisper_corpus.run_worker` Popens a second process,
+and that one loads the model and holds the VRAM. `_terminate` was
+`proc.terminate()` / `proc.kill()` on the pipeline's pid alone, with no group
+and no job object, so a cancel, a fleet halt or a tray quit reported the job
+stopped within a heartbeat while the worker kept the GPU, kept writing into the
+episode folder, and the machine went back to idle and could claim the next
+whisper job onto the same card. The fix spawns the child at the head of its own
+group (`proc_tree.spawn_kwargs`, preserving the caller's CREATE_NO_WINDOW) and
+makes `_terminate` a single call to `proc_tree.kill_tree`, which is `taskkill
+/T /F /PID` on Windows and `killpg(SIGTERM)` then `SIGKILL` elsewhere, always
+followed by the old single-process stop. The verifier's note is honoured:
+`CREATE_NEW_PROCESS_GROUP` alone changes nothing, because `Popen.terminate()`
+still calls TerminateProcess on one pid. Tests:
+`test_jobs_runner_terminate_goes_through_the_tree_kill` and
+`test_whisper_child_is_spawned_in_its_own_group`.
+
+### CR-295B (comp-music-ytdl-jobs-3) - killing yt-dlp did not kill the ffmpeg it spawned - FIXED (companion/src/ccsync_companion/ytdl_executor.py, proc_tree.py)
+
+`_kill_proc` (reached from `lose_lease`, from `_register_proc` when the lease
+went away during the spawn, and from the timeout path's own bare `proc.kill()`)
+killed the yt-dlp pid only. Every download here is a `bestvideo+bestaudio`
+merge with `--ffmpeg-location`, so the merge ffmpeg survived the kill holding
+handles on the `.part` and the output, which is what `clear_partials` /
+`clear_aside_originals` then failed on (MEDIA-2's symptom, one process further
+out). yt-dlp now spawns in its own group through the same
+`proc_tree.spawn_kwargs`, and both `_kill_proc` and the timeout path go through
+`proc_tree.kill_tree`. The helper is SHARED with `jobs_runner`, not copied a
+fourth time, as the verifier asked. Test:
+`test_ytdl_executor_kill_proc_goes_through_the_tree_kill`, plus the helper's own
+Windows/POSIX tests.
+
+### Verification
+- comp-music-ytdl-jobs-1: `companion/tests/test_proc_tree.py` (7 tests) passes; the two delegation tests fail on the pre-fix source, where `_terminate` never reaches the helper.
+- comp-music-ytdl-jobs-3: same file; `_kill_proc` delegation pinned.
+- Neighbours re-run green: `test_jobs_runner.py`, `test_jobs_phase4.py`, `test_jobs_runner_visibility.py`, `test_ytdl_executor.py` (275 passed with the new file).
+- `py_compile` clean on `proc_tree.py`, `jobs_runner.py`, `ytdl_executor.py`.
+
+### Not fixed
+- comp-music-ytdl-jobs-2 was DOWNGRADED to low by the verifier and is not in this group's list; the "forget this sign-in" it asks for is untouched.
+- A Windows Job Object (the verifier's "better still") was not built: `taskkill /T` is the shape the repo already documents and can be landed inside the box.
+
+### OWED TO ANOTHER GROUP
+- None. `sidecar_tools.py` was listed in this group's files but needed no change: it installs binaries and spawns nothing that spawns.
+- Not owed, but worth recording for whoever owns the other spawners: `broll_vlm_sidecar`, `supervisor.py`, `sync/syncthing_supervisor.py` and `bpg.py` pass `CREATE_NEW_PROCESS_GROUP` to DETACH a child (the opposite intent) and were deliberately left alone.
+
+### Deploy order
+- Companion only, no wire change. A machine on an older build behaves as before; nothing on the dashboard side reads any of this.
+
+### Owner decisions
+- None needed.
+
+## CR-296 - the b-roll indexer never transcribes an audio-only clip - FIXED in repo 2026-09-18 (mediums wave, indexer group)
+
+### CR-296A (broll-indexer-3) - audio-only clips are never transcribed, although two files say their speech is the only index they get - FIXED (`broll/indexer/batch_transcribe.py`, `broll/indexer/broll_index/pipeline.py`)
+
+`stage_probe` parks a file with no video stream at `status='skipped'` on
+purpose, with a comment saying its speech is the only index it will ever have.
+Both halves of the transcript path then refused it: `batch_transcribe.TODO_SQL`
+queued `WHERE status NOT IN ('skipped', 'discovered')`, and 'skipped' and
+'discovered' are the only two statuses such a row can ever hold, so the one job
+in the tree that writes an `.srt` could never see it; and `run_pipeline`'s
+status widening for `transcribe`/`embed` did not include 'skipped' either, so
+even a hand-written `.srt` would never have been ingested (every caller of
+`stage_transcribe` passes `ingest_only=True`). The clip was indexed as nothing
+at all, silently. The fix tells the three 'skipped' verdicts apart
+structurally, the way `skipped_for_length` already does rather than by the
+status word: the queue now also takes `status = 'skipped' AND codec IS NULL AND
+duration_s IS NOT NULL` (audio-only), leaving the over-length clip (codec +
+duration), the no-duration container (codec, no duration, broll-indexer-4) and
+the scanner's proxy-folder rows (neither) excluded; and `run_pipeline` adds
+'skipped' to the `transcribe`/`embed` widening only. That widening cannot undo
+the park: none of probe, proxy, frames or claude accepts 'skipped' as a
+prerequisite status, the transcribe stage still declines `skipped_for_length`,
+and `ingest_only` makes the pass a no-op for a row with no `.srt`. Per the
+verifier's fix note, `test_a_discarded_clip_is_not_transcribed`'s row gained a
+codec (its over-length row had none, so it would have started matching the new
+predicate) and the stale "both 'skipped' verdicts" comment above `TODO_SQL`,
+plus the module docstring's line about it, were rewritten.
+
+Tests: `broll/indexer/tests/test_batch_transcribe_queue.py` gains
+`test_an_audio_only_clip_is_transcribed` (red before: `assert set() ==
+{'podcast.mp4'}`) and `test_a_clip_with_no_duration_is_not_transcribed` (pins
+the third verdict staying out); new file
+`broll/indexer/tests/test_bug_hunt_2026_09_18b_indexer.py` drives
+`run_pipeline` end to end against a real SQLite backend for the ingest half -
+`test_an_audio_only_clip_reaches_the_transcribe_stage` (red before: `assert []
+== [1]`) and `test_a_skipped_clip_is_not_selected_for_the_visual_stages`, which
+would catch the widening leaking into the paid and visual stages.
+
+### Verification
+- broll-indexer-3: `python -m pytest tests/test_batch_transcribe_queue.py tests/test_bug_hunt_2026_09_18b_indexer.py tests/test_pipeline.py tests/test_pipeline_embed.py tests/test_share_not_indexed.py tests/test_scanner_proxy_skip.py -q` from `broll/indexer` on system python: 76 passed. Both new assertions were watched red on the unfixed source. `py_compile` clean on every touched file.
+
+### Not fixed
+- None. The group had one confirmed medium.
+
+### OWED TO ANOTHER GROUP
+- None. Both files are in this group's file set (`broll/indexer/*`).
+
+### Deploy order
+- Not a wire change. `broll/indexer` runs on the base rig only; no companion or
+  dashboard release is involved. A re-run of `batch_transcribe.py` followed by
+  `broll-index run --stages transcribe,embed` is what picks up the backlog of
+  audio-only rows already in the DB.
+
+### Owner decisions
+- None needed.
+
+## CR-297 - Dashboard api/db mediums - FIXED in repo 2026-09-18 (2 of 3; dash-api-3 not fixed)
+
+### CR-297A (dash-api-2) - one transient inventory error excluded a project for ever - FIXED (dashboard/src/ccsync_dashboard/db.py)
+
+`record_inventory_error` upserted `walked_at` and `last_error` and left
+`tree_sig` standing. The collector's phase 1 skips the whole walk when the
+directory signature matches the stored one, and `_dir_signature` is directory
+mtimes only, so an archived project (the normal case, nothing in it is
+changing) never produces a different signature again. One blink of the share
+therefore stuck `last_error` on the row permanently: `last_error` is cleared
+in exactly one place, the successful `replace_nas_media` upsert, which the
+skip guarantees is never reached, and there is no admin re-walk route. Downstream
+`locate`'s `COALESCE(s.last_error,'') = ''` filter then excluded the project
+for ever, which the companion's lane guard reads as "those files are gone" -
+the lane B breaker parks and only a human can clear it. The fix clears
+`tree_sig` in that upsert (the verifier's smaller of the two shapes), which
+forces exactly one re-walk; the cost for a project that really is still
+unmounted is one `is_dir()` per cycle, before any `os.walk`. The test runs a
+real collector cycle, renames the project dir away for one cycle and back
+(a rename does not touch the mtimes inside the tree, so the signature that
+returns is the same one), and asserts `last_error` is cleared by the third
+cycle.
+
+### CR-297B (dash-db-3) - the admin's MOVE button kept its own unescaped copy of the predicate - FIXED (dashboard/src/ccsync_dashboard/api.py)
+
+dash-db-4's LIKE escaping (`_like_prefix` + `ESCAPE '\'`) was applied to
+`db.file_move_target_machines`, whose only caller is the collector's DETECTED
+hand-move path, while the admin MOVE route carried a byte-for-byte duplicate
+of the same plan pass and manifest query with a raw `media_key + "/%"`. So the
+path CR-267a added was escaped and the path the button runs was not: moving
+`Gold_Card_Meetup` still matched a machine holding `Gold-Card-Meetup` (`_` is
+a single-character wildcard) and sent it a `commands.file_moves` entry for a
+file it does not hold - a harmless answer from the companion, a wrong
+per-machine progress row on the project page. The route now calls the helper,
+which the verifier diffed as identical in every other respect; the duplicate
+query and its now-unused `media_key` local are gone (the verifier expected a
+later use of `media_key` in the route, but it has none - grep confirms one
+occurrence before the change and none needed after). The test drives the POST
+route, not the helper, which is what the existing dash-db-4 test could not do.
+
+### Verification
+- dash-api-2: `test_a_project_that_could_not_be_read_once_is_walked_again` - fails on the reverted `record_inventory_error` (last_error still set after the share returns), passes after.
+- dash-db-3: `test_the_move_button_does_not_claim_a_lookalike_folders_machines` - fails on the reverted route (DESK-1 in `machines`), passes after.
+- `dashboard\.venv\Scripts\python.exe -m pytest tests/test_bug_hunt_2026_09_18b_dashboard_api_db.py tests/test_file_moves.py tests/test_collector.py -q` -> 45 passed.
+- `py_compile` on api.py, db.py, locate.py.
+
+### Not fixed
+- **dash-api-3** (`upgrading` in fleet_facts/machine_facts is `update_requested_version != ''` alone, so a withheld push costs the machine every job kind for 14 days). Not started: the verifier's workable shape needs a new column plus its migration in db.py (schema v55), a write in api.py's withhold arm, AND both readers in `jobs.py`, which is not this group's file. Landing the db and api halves alone would leave the fix inert while spending a schema version, which is the half-landed shape the brief forbids. Left whole for the next pass.
+
+### OWED TO ANOTHER GROUP
+- None from the fixes above; both changes are wholly inside `api.py` and `db.py`.
+- dash-api-3, if a later pass takes it, owes `jobs.py` (no group this wave): `fleet_facts` (~line 621) and `machine_facts` (~line 503) must read the persisted "this push cannot be offered" flag instead of `update_requested_version != ''`, and must fail CLOSED (treat unknown as upgrading), or the two readers drift. The dashboard side would be a new `machine_state` flag beside `upgrade_none_reason`, written by the `_machine_can_be_offered` withhold arm in api.py (~line 9711) and cleared when the build becomes offerable again, plus a line on the Packages page for the standing-but-unsendable push.
+
+### Deploy order
+Dashboard only; no wire change, no companion change. Both fixes are read-side
+behaviour on the dashboard's own database, so a rollback is safe: the cleared
+`tree_sig` only costs an older build one extra walk, and the move route
+reverts to its own copy of the query.
+
+### Owner decisions
+None needed.
+
+## CR-298 - the dashboard collector/notices/app mediums - FIXED in repo 2026-09-18 (2026-09-18b mediums wave)
+
+Five confirmed mediums in `collector.py`, `notices.py`, `alerts.py` and
+`app.py`. All five fixed; nothing owed to this group.
+
+### CR-298A (dash-collector-alerts-2) - the b-roll archive check could not fire on the outage it was written for - FIXED (notices.py, alerts.py)
+
+Both copies of `_check_broll_archive` scandir'd the RECORDED ROOT and treated
+success as healthy. `mount_status.record_root`'s own docstring says why that
+cannot work: a bind mount that goes away leaves its mount point behind, so an
+unmounted dataset lists fine (empty) and the check answered OK in exactly the
+window where `insert_target_detail` starts answering `known: false` and every
+Send to Resolve degrades to a 540p preview. The fix is one shared probe,
+`notices._broll_archive_problem(root, witness)`: the WITNESS the mount
+recorded (`root_of()[1]`, b-roll's proxies directory) must EXIST, falling back
+to the root for a build that recorded no witness, and an empty root is
+unreadable rather than healthy - the same canary `_record_inventory` and
+`alerts._check_nas_tree` already read. Existence, not directory-ness, because
+another mount's witness is allowed to be a file. `alerts.py` imports the probe
+inside the function (`notices` imports `alerts`, so a module-level import
+would be a cycle) so the mail half and the card half can never disagree. The
+dead `except StopIteration` the hunter spotted is gone with the rewrite.
+
+### CR-298B (dash-collector-alerts-3) - a file could pair as having arrived before it left - FIXED (collector.py)
+
+`InventoryWalk.old` is `db.nas_media_rows`, which is EMPTY for a project this
+collector has never walked, so every media file of a newly activated episode
+is an "appeared" half and stays live pairing evidence for two days: an
+unrelated deletion elsewhere in the fleet a day later then pairs with it and
+becomes a `file_moves` row in state DONE that every holding machine applies to
+its own disk, with no admin in the path. The first attempt at this dropped a
+first walk's arrivals outright; the coordinator's correction (2026-09-18b) is
+that the harm is ORDER, not first walks, because a folder moved INTO a
+brand-new project is the common case and is exactly a vanish in one pass plus
+a first walk in the next. So the halves are kept and `pair_across_cycles` now
+pairs only when the vanish was seen BEFORE the arrival or in the same pass
+(`_vanished_first` / `_seen_order`; a half from this pass carries `""`, which
+means now and must sort AFTER every carried stamp, not first). A refused pair
+consumes neither half: the vanish may still pair with a genuine later
+arrival, and the stale arrival ages out on its own. The comeback cancel
+(same slug and rel path) is applied before the order rule and still consumes
+both halves whichever order they were seen in.
+
+### CR-298C (res-fleet-2) - the carried halves were written without a bound and read with one - FIXED (collector.py)
+
+`db.record_pending_move_halves` had no cap while `db.pending_move_halves`
+reads the OLDEST 4000 rows inside the two-day window, so one 6,000-clip upload
+filled the window with halves that by construction never pair and crowded out
+every half written after it: cross-cycle move detection turned itself off,
+silently, for two days. `_settle_halves` now drops a pass's whole `persist`
+list when it exceeds `PENDING_MOVE_HALF_WRITE_LIMIT` (1000, deliberately well
+under the read's 4000 so one pass can never fill the window), with a warning
+naming the count. The halves of a move the `DETECTED_MOVE_LIMIT` cap dropped
+are added after the check and are never discarded - they are the only record
+of those old paths. Dropping costs only the convenience (a hand move in that
+window goes undetected, which is what this product did before the feature).
+
+### CR-298D (dash-core-1) - every failure under a mount recorded itself twice - FIXED (app.py)
+
+wire-2 installed the parent's `unhandled_error` on every mounted sub-app, and
+Starlette's `ServerErrorMiddleware` runs the handler, sends its response and
+then RE-RAISES, so the parent's copy catches the same exception and runs the
+same handler again: two tracebacks and two connect-write-close cycles against
+the database whose contention the `db_busy` notice exists to report (the write
+that is loudest exactly when the server can least afford it). The wrapper
+`_install_busy_handler_on_mounts` installs now stamps `scope` with
+`_ERROR_RECORDED` after the inner entry - Starlette mutates the one scope dict
+when it enters a Mount, so the parent sees it - and the second entry returns a
+response (Starlette requires one even though it discards it) without logging
+or writing. A parent-route error is unchanged: one entry, one record.
+
+### CR-298E (dash-core-2) - a mounted app's notice named a path that does not exist, and two mounts collided on one row - FIXED (app.py, notices.py)
+
+Since wire-2 the handler runs INSIDE the sub-app, so `scope["route"]` is the
+sub-app's own route and `route_path` was the INNER template (`/api/ingest`) -
+a path that exists nowhere on this dashboard, and one that `/broll` and
+`/music` share verbatim across twelve routes, so one notice row and one count
+served two features. Per the verifier's correction the ROUTE template is
+prefixed with the mount's `root_path`, never `request.url.path` (which already
+carries the prefix on this Starlette and would double it); an unmatched
+request still falls through to `redact_path`'s two-segment form, which is what
+keeps a `/broll/share/<token>/` failure from writing a client's credential
+into a row. `redact_path`'s docstring, which still claimed the route is absent
+inside a mounted sub-app, is corrected in the same change.
+
+### Verification
+
+- CR-298A: `test_a_mount_point_left_behind_by_an_unmount_is_not_a_readable_archive` (new) - an existing root with a missing witness raises the card AND the alert finding, and only a witness plus a non-empty root clears both. The existing `test_an_archive_this_server_cannot_list_is_a_problem_it_found` pinned the wrong invariant (it asserted an EMPTY directory clears the card) and was corrected to put a folder in the archive before asserting the clear.
+- CR-298B: `test_a_file_cannot_arrive_before_it_leaves` (a carried arrival plus a fresh vanish is no move and consumes nothing; the honest order still pairs, including into a project walked for the first time) and `test_a_first_walks_arrivals_are_still_kept_as_halves`. Both of the afternoon's pinned behaviours still pass - `test_a_move_between_two_projects_is_paired_across_two_passes` and `test_a_file_that_comes_back_to_its_old_path_is_not_a_move` in `test_bug_hunt_2026_09_18_dashboard_lows.py`, the second of which is what proves the cancel-on-return still deletes both halves. The ordering test was run against the source with `_vanished_first` disabled and FAILED there.
+- CR-298C: `test_one_pass_cannot_fill_the_carried_halves_window` - at the limit the halves are written, one over it none are.
+- CR-298D: `test_a_failure_under_a_mount_is_recorded_once_and_under_its_own_path` and `test_a_busy_database_under_a_mount_is_counted_once` - one row, count 1, for one request under a mount.
+- CR-298E: `test_two_mounts_with_the_same_inner_route_are_two_notices` plus the subject assertion in the test above (`/broll/api/ingest (RuntimeError)`).
+- All six new tests were run against the pre-fix source (the four files restored to their pre-fix shape in a scratch copy) and all six FAILED; with the fixes in place `test_bug_hunt_2026_09_18b_collector_core.py`, `test_bug_hunt_2026_09_18_dashboard_mediums.py`, `test_notices.py`, `test_alerts.py`, `test_hand_moves_detected.py` are 179 passed, and `test_bug_hunt_2026_09_11b_dash_collector_alerts.py`, `test_hardening.py`, `test_db_write_locks.py` are 83 passed.
+
+### Not fixed
+
+- Nothing from this group's list.
+
+### OWED TO ANOTHER GROUP
+
+- To dashboard-api-db (`db.py`), res-fleet-2's read half: `db.pending_move_halves` is `ORDER BY seen_at, rowid LIMIT PENDING_MOVE_HALF_LIMIT`, i.e. OLDEST first, so a saturated table hides the newest halves rather than the least useful ones. Change to `ORDER BY seen_at DESC, rowid DESC` and correct the "oldest first" docstring at the same site. My side is safe alone: the write cap means one pass can no longer saturate the window, so oldest-first only matters for a table filled over many passes. `test_hand_moves_detected.py` and `test_db_write_locks.py` must be re-read with that change.
+- To whoever triages dash-db-5 (low): the write cap above drops a pass's halves with a log line only. dash-db-5 asks for a `file_move_halves_dropped` notice so it is not silent; that needs a new notice kind registered WITH its writer (`db.NOTICE_KINDS`, `alerts.ALERT_KINDS`, the checks meta), which is more than this box allowed. The drop is the safe direction either way (no move is recorded, the pre-feature behaviour).
+
+### Deploy order
+
+Dashboard only; no wire change, no companion change. A rollback is safe: every
+change is inside one container's own notice/collector behaviour, and the
+pending-halves rows a rolled-back build reads are the same shape.
+
+### Owner decisions
+
+- None needed.
+
+## CR-299 - Timeline Cards landing, the kill switch and the retire banner - FIXED in repo 2026-09-18 (mediums wave, dashboard-cards-ui)
+
+Three confirmed mediums on the dashboard's Cards surfaces: a kill switch that
+deleted the live per-episode page's cache, a retire that left a refusal banner
+no admin could clear, and an idle release that cannot see an editor working
+offline.
+
+### CR-299A (dash-cards-1) - the kill switch deletes the NEW per-episode page's shell cache too - FIXED (dashboard/src/ccsync_dashboard/cards_landing.py)
+
+`KILL_SW`'s sweep was narrowed by CR-285C to `cards-shell-*`, on the belief
+that the prefix belonged to the dead flat page. It does not: `page.render_sw()`
+bakes ONE `page_version()` per checkout, so the flat page and every live
+`/cards/p/<slug>/` page name their shell cache `cards-shell-<same VER>` on one
+origin. The kill switch therefore deleted the live per-episode worker's shell,
+and nothing refills it - only `install` writes `SHELL_URLS`, the navigation arm
+never caches a navigation - so an installed episode app lost its offline shell
+until the next Cards republish. The worker cannot tell the two apart (it does
+not know the live VER), so it now deletes NO cache at all: unregistering plus
+reloading the clients is the whole act, and the per-episode worker's own
+`activate` already prunes stale shells behind an `n !== SHELL` guard. The test
+is `test_the_kill_switch_deletes_no_cache_at_all`, which asserts the string
+`caches` does not occur anywhere from the `install` listener onwards; it fails
+on the old source because the `caches.keys()` loop is there.
+
+### CR-299B (dash-mounts-ui-1) - a retire carries a refusal the admin can never clear - FIXED (dashboard/deploy/select_code_root.py)
+
+regression-3 made `_retire` CARRY `revert_refused_reason` /
+`revert_refused_from` so `alerts.py` kept its evidence. The carry is permanent:
+`_retire` writes `version: ""`, and every later boot returns at `main()`'s
+`if not version:` long before the clearing rule, so nothing in the script can
+drop the keys again, while `admin_dashboard_update.html` renders the banner on
+the key alone. The admin read "restore a backup" on a healthy container for
+ever. The keys are now dropped, because the sentence is false by construction
+at that point: the branch is reached only after `revert_refusal("")` answered
+"" - the image has just been judged able to run this database. The evidence is
+moot too, since `alerts.py`'s check compares an APPLIED version against the
+image and there is no applied version left.
+
+Owner decision recorded here because it contradicts a pinned test:
+`test_a_retire_keeps_an_earlier_refusal_where_the_alert_looks_for_it` pinned
+the carry, and it is REPLACED by
+`test_a_retire_drops_a_refusal_the_admin_could_never_clear` (same file), which
+also boots a second time to prove the banner does not come back. The verifier
+asked for exactly this rewrite and gave the reason above.
+
+### CR-299C (security-1) - the 15-minute idle release measures SERVER REQUESTS - PARTLY FIXED (cards_pool.py, cards_tunnel.py, cards_landing.py, templates/cards_landing.html)
+
+`Entry.seen` was stamped only by a request SERVED through the mount (plus the
+landing's open), so an editor working OFFLINE in Cards - the shipped feature
+the sw.js kill switch was narrowed to protect - held no seat after
+`ACTIVE_SECONDS`, and any other signed-in session could close the engine their
+companion agent is driving Resolve against. Two changes, neither of which
+lengthens `ACTIVE_SECONDS` (that would trade this against the wedge CR-285P
+exists to end). First, a SECOND liveness signal: `EnginePool.note_agent(editor)`
+stamps the seat, called from `cards_tunnel.local_engine` once `engine_for` has
+routed an agent call by the identity `_require_fleet_caller` verified - the one
+beat that reaches the container when the browser cannot, best effort and never
+able to fail an agent call. Second, the close is an INFORMED act: `Entry.last_in()`
+answers who was in last and how long ago, `_state` carries it onto the row, the
+landing names it in the Who column when the occupant list is empty, and
+[ CLOSE ] confirms with a server-built prompt (emitted through `tojson`, since
+an apostrophe in an episode name would otherwise end the JS string). The row
+flag and the POST gate still ask the same `pool.may_close`, so they cannot
+disagree. Tests:
+`test_an_agents_poll_keeps_its_editors_seat_while_their_browser_is_offline`,
+`test_note_agent_never_raises_for_an_editor_in_no_episode`,
+`test_the_row_names_who_was_last_in_and_when`,
+`test_the_landing_page_renders_the_confirm_and_the_last_in_line`.
+
+What is NOT done, and is OWED as a follow-up: the verifier's third signal -
+treating an episode as occupied while the OFFLINE seam still has unacknowledged
+work (the page's last known rev). An offline session with no companion agent
+attached is still closable after fifteen quiet minutes; it is now closable only
+by somebody who has been told who was last in and when.
+
+### Verification
+- dash-cards-1: `dashboard/tests/test_cards_pool.py -k kill_switch` (3 passed).
+- dash-mounts-ui-1: `dashboard/tests/test_bug_hunt_2026_09_18_dashboard_lows.py -k retire` (3 passed).
+- security-1: `dashboard/tests/test_cards_pool.py` (43 passed), plus
+  `test_cards_mount.py test_cards_tunnel.py test_cards_page_prefix.py`
+  (61 passed, 5 skipped) for the neighbours of the tunnel change.
+- Pre-existing and NOT mine: `test_a_move_between_two_projects_is_paired_across_two_passes`
+  and `test_a_file_that_comes_back_to_its_old_path_is_not_a_move` in the lows
+  file fail on the current uncommitted tree (file_moves / db.py, another
+  group's live edit); nothing I touched is on that path.
+
+### Not fixed
+- security-1's offline-rev seam (above): an episode with unacknowledged offline
+  work and no agent attached still reads as idle.
+
+### OWED TO ANOTHER GROUP
+- `KNOWN_BUGS.md` (nobody edits it this wave): the CR-285C entry should gain a
+  line saying the narrowed `cards-shell-` sweep was narrowed to NOTHING, because
+  one `page_version()` per checkout means the live per-episode pages share the
+  prefix, and that the kill switch now deletes no cache; and the regression-3
+  entry should gain a line that the retire carry it introduced was permanent
+  (the `if not version:` return) and has been dropped.
+- No companion, no cross-repo and no MulticamPipeline change is needed.
+
+### Deploy order
+Dashboard only, and it may be deployed alone in either direction. The kill
+switch and the retire change are container-local. `note_agent` is stamped from
+a route the companion already calls with an unchanged request and response
+shape, so a companion one release older or newer, and a dashboard ROLLBACK,
+all behave exactly as today (the seat simply stops being stamped again).
+
+### Owner decisions
+- The regression-3 test was rewritten rather than kept: see CR-299B.
+
+## CR-300 - the dashboard release/update half of the 2026-09-18b mediums wave - FIXED in repo 2026-09-18 (dashboard_update.py and its tests)
+
+### CR-300A (dash-release-jobs-1) - the restart intent lived only in the file that could not be written - FIXED (`dashboard/src/ccsync_dashboard/dashboard_update.py`)
+
+CR-285S made `request_restart`'s state write best effort so a full or
+read-only `/data` could not stop the SIGTERM, and in the same stroke lost the
+decision: `consume_restart_request` reads `read_state(settings)`, a pure disk
+read, so a swallowed write meant `finish_restart` answered False, uvicorn
+exited 0, `run.sh`'s loop saw no 75, and the container went on serving the OLD
+code while `current.json` already named the new tree. The fix carries the
+intent on a second path no disk can break: a module-level
+`_restart_requested_nonce`, set to `PROCESS_NONCE` by `request_restart` BEFORE
+the write and OR'd into `consume_restart_request`, which clears it as it
+clears the file flag. It holds the nonce rather than a bool so it can never be
+read across the re-exec it asks for. The second half of the finding was the
+stronger one: `apply` and `rollback` each ran an UNGUARDED
+`_set_state(step="restarting", ...)` on the line before `request_restart`, so
+the OSError escaped one line EARLIER than the guarded call, `start_apply`'s
+generic `except` routed it to the silent `_fail_state`, and no restart was
+ever asked for; both calls now pass `best_effort=True`, with a comment saying
+why (the swap is already done at that point). Two tests: one drives
+`request_restart` then `finish_restart` with a writer that raises `OSError(30)`
+throughout and asserts exit 75 and that a second shutdown does NOT claim to be
+a restart; one drives the real `rollback` end to end with a writer that fails
+PART WAY (the state file only, which no earlier case did) and asserts the
+signal fired and the process can still exit 75. `test_dashboard_update.py`'s
+`test_a_restart_request_left_by_a_DEAD_process_is_spent_not_honoured` needed
+one line: it fakes a dead owner by rewriting the nonce on disk, so it must
+clear the in-memory carrier too or it is pretending to be two processes at
+once.
+
+### CR-300B (tests-1) - the only test for dash-release-jobs-5 re-implemented the fixed expression - FIXED (`dashboard/tests/test_bug_hunt_2026_09_18_dashboard_mediums.py`, `dashboard_update.py`)
+
+`test_reapplying_the_running_version_keeps_the_rollback_target` wrote a
+`current.json`, read it back and then evaluated a COPY of `apply`'s arithmetic
+in the test body, so reverting the `apply` hunk left it green and the branch
+the fix actually added (`carried == version`) was never reached. The three
+lines are now a named helper, `dashboard_update._carry_previous(held,
+version)`, called by `apply` on the line the fix lives at, with the
+dash-release-jobs-5 reasoning moved into its docstring and the three-way
+result (the superseded version, the held one, or `""` for the image) called
+out, because `rollback` and `deploy/select_code_root.py` both read `""` as the
+image. The test now drives that real function from a real `current.json` on
+disk for all three branches and additionally pins that `apply` calls it
+(`inspect.getsource`), so the only way to pass without guarding the fix is to
+take the call out. Verified red on the reverted arithmetic
+(`carried = previous if previous != version else ""`).
+
+### Verification
+- CR-300A: `test_the_restart_intent_survives_a_disk_that_never_took_the_note` and `test_a_rollback_whose_state_write_fails_still_asks_for_the_restart` both FAIL on the reverted source (in-memory flag removed, two `_set_state` guards removed) and pass after.
+- CR-300B: `test_reapplying_the_running_version_keeps_the_rollback_target` FAILS with `apply`'s arithmetic reverted and passes after.
+- `dashboard/.venv/Scripts/python.exe -m pytest tests/test_dashboard_update.py tests/test_bug_hunt_2026_09_11b_dash_release_jobs.py tests/test_bug_hunt_2026_09_18_dashboard_mediums.py tests/test_release_feed.py tests/test_release_channel.py -q` -> 229 passed.
+- `py_compile` clean on `dashboard_update.py`.
+
+### Not fixed
+- Nothing in this group's assignment. dash-release-jobs-2 was REFUTED by the verifier and dash-release-jobs-3 (the same defect as tests-1, from the other hunter) is covered by CR-300B's helper.
+
+### OWED TO ANOTHER GROUP
+- None. Both fixes are inside `dashboard_update.py` and its own tests.
+
+### Deploy order
+- Dashboard only, no wire change. The in-memory flag and the two `best_effort`
+  guards are process-local; a rollback to an older dashboard tree simply
+  returns to the previous behaviour, and no companion, feed or state file
+  format changed. `update_state.json` is written and read exactly as before.
+
+### Owner decisions
+- None needed.
+
+## CR-301 - webapps-server mediums (server/, tools/, bench/) - FIXED in repo 2026-09-18 (2026-09-18b mediums wave)
+
+Three confirmed mediums, all three fixed: the macOS release script cancelling
+the ffmpeg gate CI sets, publish_db's false "older schema" refusal for music,
+and gen_notices decoding pip-licenses by the console codec.
+
+### CR-301A (server-tools-1) - release_macos.sh silently cancelled a CCSYNC_REQUIRE_FFMPEG the caller set - FIXED (tools/release_macos.sh)
+
+The Mac half of tests-1 computed `REQUIRE_FFMPEG` from `have_cmd ffmpeg`
+alone and then passed `CCSYNC_REQUIRE_FFMPEG="$REQUIRE_FFMPEG"` as a
+per-command assignment on the pytest line, so an empty value overrode whatever
+the environment carried. `.github/workflows/release-macos.yml:147` sets
+`CCSYNC_REQUIRE_FFMPEG: "1"` on exactly that step to turn a missing binary
+into a failed release, and `conftest.require_ffmpeg_or_skip` tests `== "1"`:
+brew succeeding with ffmpeg off the step's PATH published a macOS companion
+whose twenty media-job tests had skipped with exit 0. The caller now wins -
+`REQUIRE_FFMPEG="${CCSYNC_REQUIRE_FFMPEG:-}"`, with the `have_cmd` probe only
+filling a blank - and the "asked for, but no ffmpeg" case says so out loud in
+both the real and the `--dry-run` branch, with the suite's own refusal left to
+happen as the caller asked. An absent ffmpeg nobody asked about still only
+warns; this script also runs on somebody's Mac. Tested by extracting the real
+block from the script and running it under bash with `have_cmd` stubbed, which
+fails on the unfixed script for the CI case and passes for both probe cases.
+
+### CR-301B (server-tools-2) - publish_db's "older schema than the live one" refusal was false for --which music - FIXED (server/publish_db.py)
+
+broll-2's new refusal was reasoned from b-roll's mount, where `ensure_schema`
+runs once at mount time and nothing re-runs it, so a file dropped under a
+running container is never stepped. /music is built the other way round:
+`musicweb.db.con()` checks the inode on every connection (MUSIC-10),
+invalidates its cached schema state when the file was swapped, and re-runs
+`ensure_schema`, which walks its migrations by an "already applied" PREDICATE
+rather than by `user_version`. The refusal fired anyway, with b-roll's
+sentence and a remedy ("restart the container") that music does not need, and
+pushed the operator to `--allow-schema-skew`, the same flag that disables the
+direction which IS fatal for music. The property belongs to the web app, so it
+is now a per-SPEC `resteps_after_swap` flag that `schema_refusal` consults for
+the older-than-live direction only; the newer-than-live refusal is unchanged
+for both. Tested with music cases added beside the existing broll ones.
+
+### CR-301C (server-tools-3) - gen_notices decoded pip-licenses by the console codec - FIXED (tools/gen_notices.py, tools/publish_latest.py)
+
+The same pass added `encoding="utf-8", errors="replace"` to
+`server/check_health.py` and the four bench runners but left the three
+`subprocess.run` calls in `run_piplicenses` decoding by
+`locale.getpreferredencoding(False)` - cp1252 here, whose 0x81/0x8D/0x8F/0x90/
+0x9D are undefined and are ordinary UTF-8 continuation bytes - while
+`--with-license-file` pulls whole licence TEXTS through that pipe. The
+resulting `UnicodeDecodeError` is a `ValueError` but neither a `RuntimeError`
+nor a `json.JSONDecodeError`, so `collect()`'s except let it escape `main()`
+and the one document that must exist before a build is conveyed could not be
+regenerated. All three calls now decode UTF-8 with `errors="replace"`, the
+except is widened to `ValueError` (which subsumes `json.JSONDecodeError`), and
+`publish_latest.run()` - documented as never raising, over git and gh output -
+got the same treatment. A scan test over `tools/*.py` replaces the
+hand-written file list that let this survive the first pass.
+
+### Verification
+- server-tools-1: `tools/tests/test_bug_hunt_2026_09_18b_webapps_server.py` - the caller-wins case and the text pin both fail on the reverted script, pass after; the probe cases pass either way by design.
+- server-tools-2: `server/tests/test_bug_hunt_2026_09_18_webapps_tools.py` - the music older-than-live case fails on the reverted `schema_refusal`, passes after.
+- server-tools-3: `tools/tests/test_bug_hunt_2026_09_18b_webapps_server.py` - the CJK decode and the escaped-ValueError cases both fail on the reverted `gen_notices.py`, pass after.
+- Suites run: tools `test_bug_hunt_2026_09_18b_webapps_server.py`, `test_release_scripts.py`, `test_gen_notices.py`, `test_publish_latest.py`, `test_publish_feed.py` (187 passed); server `test_bug_hunt_2026_09_18_webapps_tools.py` (18 passed). `py_compile` on every touched .py, `bash -n` on the script, `git ls-files --eol` confirms release_macos.sh is still LF.
+
+### Not fixed
+- Nothing from this group's list. The downgraded-to-low items were not reached.
+
+### OWED TO ANOTHER GROUP
+- None. All three fixes are inside `server/` and `tools/`.
+
+### Deploy order
+- None of the three is a wire change. `release_macos.sh` and `gen_notices.py`
+  are base-rig/CI tooling only; `publish_db.py` runs from the base rig against
+  the NAS and needs no dashboard or companion change (the music behaviour it
+  now allows is what the deployed /music already does).
+
+### Owner decisions
+- None needed.
+
+## CR-302 - the b-roll web app's mediums (2026-09-18b wave) - FIXED in repo 2026-09-18 (broll/web)
+
+### CR-302A (broll-1) - broll-3's NFC fix covers the ORIGINAL but not the editing proxy beside it - FIXED (broll/web/app/routes_api.py)
+
+Today's broll-3 fix made `insert_target_detail`'s TOP-SLOT sibling search
+normalisation-insensitive (NFC on both sides of the compare, the entry's own
+bytes kept in the answer), and left the editing proxy two lines below built as
+`preview.parent / (preview.stem + ".mov")` from the DB's NFC string and
+`is_file()`-d. On the container a `.mov` whose name is spelled NFD on the NAS
+(CR-90, a Mac's rclone upload) was therefore invisible while the original
+beside it was found, which is worse than missing both:
+`broll_server.derive_insert_paths` reads a null `edit_proxy_rel` either as
+"the original is light enough to edit with" (a null-bitrate row, i.e. every
+pre-2026-09-17 row, so the editor downloads the camera master the tier exists
+to avoid) or as a stand-in with `upgrade_rel = None`, a ledgered stand-in
+nothing will ever upgrade. The fix discovers the editing proxy the same way
+the top slot is discovered: one `os.listdir` of the `Proxy/` folder, match
+`NFC(splitext(e)[0]) == want` and `splitext(e)[1].lower() == EDIT_PROXY_EXT`,
+and `edit_proxy_rel` carries the entry's own bytes because the companion
+OPENS that path (CLAUDE.md's CR-90 rule: never normalise a path something
+opens). Two things came with the rewrite: broll-4's guard survives as a
+normalised comparison against the preview's own name (a `.mov` preview is
+still not its own editing proxy, and its spelling on disk need not match the
+row's), and proxy-tiers-3's rule extends to the new call - a listing that
+RAISED sets `known = False` rather than answering "there is no editing
+proxy". Ambiguity (two candidates differing only by normalisation) degrades
+to None with a log line, exactly as the top slot does.
+
+The wire is unchanged: the same keys with the same meanings, so no deploy
+ordering is implied. Tests:
+`broll/web/tests/test_bug_hunt_2026_09_18b_webapps_broll.py` -
+an NFD editing proxy beside an NFC preview is found and returned in its disk
+bytes, a `.mov` preview is still not its own editing proxy, and an unreadable
+`Proxy/` answers `known: false`.
+
+### CR-302B (proxy-tiers-3, owed in by companion-broll) - a server that could not LOOK must not send a 0.9.74 companion a stand-in plan - FIXED (broll/web/app/routes_api.py)
+
+`_insert_object` answered `original_is_edit_weight` from the row on every
+path, including the `known: false` outage path. `known` is read by companion
+0.9.75 and later only; every build in the field today reads
+`original_is_edit_weight` alone, so a heavy clip during an outage came back as
+`false` and the companion planned a stand-in and wrote a ledger row that
+outlives the outage for ever. On the `known is False` path the field is now
+FORCED to `True` - the only value in this object that is not the truth - which
+forces PLAN_FETCH_ORIGINAL on 0.9.65..0.9.74, i.e. fetch the file the editor
+asked for, which is the route 0.9.75 takes from `known` anyway (it returns
+before the weight is consulted). It is scoped to that path deliberately: a
+`true` on the healthy path would suppress every stand-in the tier exists to
+make, so the healthy arm keeps `_is_edit_weight(video)` byte for byte.
+`edit_proxy_rel` is already null there, so nothing else changes. Two new cells
+in `tests/test_bug_hunt_2026_09_18b_webapps_broll.py` pin both arms with a
+HEAVY row (2160p, 200 Mb/s, h264), because the existing known=false cell in
+`test_insert_target.py` is a 3 Mb/s clip that is edit-weight either way.
+
+### CR-302C (music-1's twin, owed in by the music group) - a cancel delivered to a LIVE lease wedged the batch - FIXED (`broll/web/app/ingest_batches.py`)
+
+`cancel()` set `lease_expires_at = NULL` in the same UPDATE that asked for the
+stop, while leaving `state = 'running'`. That is outside
+`expire_stale_leases`'s predicate (`lease_expires_at IS NOT NULL`) for ever, so
+a companion killed before its next heartbeat (crash, Stop-Process, power cut,
+its own upgrade) left a row no sweep could reach, no claim could take
+(`_leaseholder_or_410` 410s on `cancel_requested` first) and whose every
+`dest_name` stayed reserved, so each later drop of the same clip was allocated
+a `(2)` name. The lease is now left alone - the YTDL-WEB-1 property it was
+nulled for (the next fleet call 410s even if a heartbeat lands first) is
+already delivered by `cancel_requested` - and `expire_stale_leases` finalises a
+`cancel_requested = 1` batch whose lease ran out with `release(conn, batch,
+state='cancelled')` before the requeue UPDATE, returning `cur.rowcount +
+len(stopped)`: handing a cancelled batch back to `queued` would leave it asking
+to be claimed while every claim is refused. Three new cells plus one existing
+cell updated (`test_fleet_ingest.py`'s cancelled-release test asserted the
+nulled lease; its real property, that the release is accepted, holds either
+way and is unchanged).
+
+### CR-302D (music-3's twin, owed in by the music group) - the retry and take-over notices reported a browser error as the companion's answer - FIXED (`broll/web/static/ingest.js`)
+
+`ingestRetryFailedBatch` and `ingestTakeOver` printed `e.message` as the reason
+this computer did not pick the clips up. The two commonest dispatch failures
+are not refusals in words at all: no tray at all (a rejected fetch, message
+"Failed to fetch", no status) and a companion too old for `/broll/ingest/*`
+(404, the app's own generic "the CC Sync tray returned HTTP 404"). Both read as
+something the companion said, and on the retry path the only sentence that says
+what to DO - open this page on the computer that has the clips and press take
+over - was unreachable. `ingestSpokeARefusal(e)` (a 409, or a body carrying
+`reason`/`message`) now decides whether the companion really answered;
+otherwise `ingestDispatchHint(e)` names it (`ING_TOO_OLD` on a 404, "The CC
+Sync tray on this computer did not answer." otherwise) and the actionable
+fallback stays. `ING_TOO_OLD` was hoisted out of the capabilities probe, which
+already said exactly that sentence. Four node-driven tests drive the real
+thrown shapes through both functions.
+
+### Verification
+- CR-302C: three new cells in `tests/test_bug_hunt_2026_09_18b_webapps_broll.py`; the lease-survives-the-cancel and sweep-finalises cells FAIL on the pre-fix source (checked with only those hunks reverted) and pass after, and the uncancelled-lease cell passes both ways, which is what pins that the sweep's own job is untouched.
+- CR-302D: four node-driven cells in the same file; the no-tray, too-old and take-over cells FAIL pre-fix and pass after, and the real-409 cell passes both ways (the 2026-09-11b wording must survive). `node --check` on `ingest.js`.
+- Re-run all of it: `cd broll/web; .venv\Scripts\python.exe -m pytest tests/test_bug_hunt_2026_09_18b_webapps_broll.py tests/test_fleet_ingest.py tests/test_insert_target.py tests/test_bug_hunt_2026_09_18_webapps_tools.py tests/test_no_em_dashes.py tests/test_one_vocabulary.py tests/test_ingest_ui.py -q` - 179 passed.
+- proxy-tiers-3 (CR-302B): the heavy-outage cell FAILS on the source with only this hunk reverted (`original_is_edit_weight` False) and passes after; the healthy heavy cell passes both ways, which is what pins the scoping.
+- broll-1: `broll\web\.venv\Scripts\python.exe -m pytest tests/test_bug_hunt_2026_09_18b_webapps_broll.py tests/test_bug_hunt_2026_09_18_webapps_tools.py tests/test_insert_target.py tests/test_no_em_dashes.py -q` from `broll/web` - 38 passed. On the source with only this hunk reverted, the NFD-editing-proxy cell and the unreadable-`Proxy/` cell FAIL (the broll-4 guard cell passes both ways by design: it pins that the guard survived the rewrite). `py_compile` clean on both files.
+
+### Not fixed
+- Nothing: broll-1 was this group's only confirmed medium. The downgraded-to-low broll-2 was not started (the box).
+
+### OWED TO ANOTHER GROUP
+- None outstanding. Three OWED items came IN and all three landed: companion-broll's forced `original_is_edit_weight` as CR-302B, and the music group's two twins as CR-302C (`ingest_batches.py`) and CR-302D (`static/ingest.js`). Nothing is owed OUT. The change is inside `broll/web/app/routes_api.py`; the companion side (`broll_server.derive_insert_paths`) needs no change, it simply starts receiving the non-null `edit_proxy_rel` it always expected.
+
+### Deploy order
+- Dashboard (which mounts `broll/web`) FIRST, as the companion-broll group's ledger says; no companion change is required by this group and no wire key changes shape. CR-302B is precisely what makes that order safe for the 0.9.65..0.9.74 builds in the field. A companion one release older or newer reads the same keys, and a dashboard rollback returns the pre-fix behaviour without stranding anything on either side.
+
+### Note on scope
+- CR-302C changes what an editor sees for one row shape: a cancelled batch whose companion never answered now ends as `cancelled` rather than reappearing as `queued`. That is the point of the fix, and `_leaseholder_or_410` already 410s such a batch, so no companion of any vintage can observe a difference.
+
+### Owner decisions
+- None needed.
+
+## CR-303 - the -Full uninstall's closing paragraph: one verdict, and LOOK before claiming - FIXED in repo 2026-09-18 (installer)
+
+The three findings are three faces of one paragraph, so they were fixed in one
+change (the verifier asked for exactly that: fix install-onboard-4 first or in
+the same change as -3, because -3's survivors inherit -4's wording).
+
+### CR-303A (install-onboard-1) - the -Full leftovers verdict tells the editor to retry and, two lines later, to delete the retry path - FIXED (installer/windows_uninstall.ps1)
+CR-286's new "NOT complete" branch in `Get-UninstallClosingAdvice` is keyed on
+`$identityCount`, but the self-path arm below it was still keyed on
+`$LeftoverCount -gt 0` alone. On the identity branch `$LeftoverCount` is 0 -
+`Get-BinDirLeftovers` deliberately excludes the running script - so the same
+paragraph printed "run this uninstaller again with -Full" and then "delete that
+file, and the folder it is in, whenever you like". The arm is now gated on
+`($LeftoverCount -gt 0 -or $identityCount -gt 0)` and its LEAVE line no longer
+claims "the program files listed above" on the identity branch, where nothing
+was listed. `Test-BinDirLeftovers.ps1` asserts the whole paragraph now, not the
+"NOT complete" substring: an unfinished -Full run must carry the LEAVE line and
+must not carry the delete-it notice.
+
+### CR-303B (install-onboard-4) - any surviving file was called "your sign-in and Syncthing identity" - FIXED (installer/windows_uninstall.ps1)
+Section 5's paragraph decided the identity question with
+`Test-Path $SyncthingHome`; the closing verdict decided it with
+`Get-FullRemovalLeftovers`, which returns every surviving top-level child of
+`%LOCALAPPDATA%\ccsync` and called all of them items of the identity. The
+ordinary split outcome - `bin\` survives because it is the CWD of the host Apps
+& features launched, `syncthing-config\` really went - printed both "a reinstall
+generates a NEW device ID" and "your sign-in and Syncthing identity are still on
+this machine", which answers the admin's re-approve question both ways. The
+verdict is measured once now (`$identityStillThere`, declared beside
+`$fullLeftovers` so every path has it) and passed into the advice as
+`-IdentityPresent`; the leftovers line says "item(s) of the CC Sync app folder"
+and names the identity only when it really survived. Tests drive both
+`-IdentityPresent` values and assert that SAME and NEW device ID never appear
+together.
+
+### CR-303C (install-onboard-3) - "removed your sign-in and settings" printed without looking - FIXED (installer/windows_uninstall.ps1)
+The `~/.ccsync` loop deletes with `-ErrorAction SilentlyContinue` and printed
+`$doomed.Count`, the count it INTENDED to delete, outside any leftovers test;
+`$fullLeftovers` scans `%LOCALAPPDATA%\ccsync` only, so the closing verdict
+could not catch it either and a run that removed nothing there still ended
+"CCSync uninstall complete". `config.toml` holds the per-editor `cce1.` fleet
+credential and `dashboard_token`, and `companion.log` is held open by the
+companion section 1 killed without waiting. The block now re-reads the
+directory (still excluding `state\`, which is KEPT on purpose), prints "removed
+N, could NOT remove M" with the survivors named, and folds the survivors into
+`$fullLeftovers` so the closing verdict sees them. The test executes the
+script's own statements from its AST with `Remove-Item` stubbed (PowerShell
+5.1's real locked case: nothing is deleted at all).
+
+### Verification
+- CR-303A: `Test-BinDirLeftovers.ps1` - "an unfinished -Full run does not tell the editor to delete its own retry path" / "... says to leave the uninstaller in place". Both FAIL on the pre-fix script (reverted copy in the scratchpad), pass now.
+- CR-303B: same file - "leftovers that are not the identity are not called the identity", "an identity that survived is reported as the SAME device ID, once", "the two device ID answers never appear together". All FAIL pre-fix.
+- CR-303C: same file - "a ~/.ccsync delete that removed nothing never claims it did", "the survivors ... counted from the directory, not from the intent", "the ~/.ccsync survivors reach the closing verdict" (2), "the surviving config.toml is named". All FAIL pre-fix; "state\ is still kept" guards the KEPT paragraph.
+- Whole file green after: `powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-BinDirLeftovers.ps1` -> all cases pass. `Test-UninstallEntry.ps1` (the other reader of this script) still passes. No uninstaller was executed at any point.
+- Pre-fix run: 9 FAILED, all of them the new cases.
+
+### Not fixed
+- install-onboard-2, -5, -6 (downgraded to low by the verifier) were not started. install-onboard-2's workable half - the identity branch naming the exact hand-delete command - is partly covered: the branch now ends "or delete the item(s) listed above by hand", and section 5 lists them. A literal `Remove-Item -LiteralPath ... -Recurse -Force` line was left out of the box.
+- install-onboard-7 (the -Full tests assert only the "NOT complete" substring) is answered in passing for this paragraph: the new cases assert the whole text.
+
+### OWED TO ANOTHER GROUP
+- None. Every change is inside `installer/windows_uninstall.ps1` and its own test file.
+
+### Deploy order
+- No wire. The uninstaller ships with the editor package (`windows_bootstrap.ps1` copies it into `bin\`), so the fix reaches a machine only on its next install or upgrade; an older copy on disk keeps the old paragraph and is harmless.
+
+### Owner decisions
+- None needed.
+
+## CR-304 - music: the cancel wedge's other branch, and a toast that blamed the companion for the browser - FIXED in repo 2026-09-18 (mediums wave)
+
+Group `music` (files: `music/web/*`, `music/indexer/*`). Both confirmed
+mediums fixed. `music/indexer` was not touched.
+
+### CR-304A (music-1) - a cancel delivered to a LIVE lease still wedged the batch - FIXED (`music/web/musicweb/ingest_batches.py`)
+
+CR-286's music-1 fix made the finalise branch of the cancel route correct, but
+the branch it deliberately keeps - a cancel delivered to a machine that really
+is indexing - still called `ingest_batches.cancel()`, which set
+`lease_expires_at = NULL` while leaving `state = 'running'`. That is outside
+`expire_stale_leases`'s predicate (`lease_expires_at IS NOT NULL`) for ever, so
+a companion killed before its next heartbeat (crash, Stop-Process, power cut,
+its own upgrade) left a row no sweep could reach, no claim could take
+(`_leaseholder_or_410` 410s on `cancel_requested` first), and whose every
+`dest_name` stayed in `reserved_names`, so each later drop of `Theme.wav` was
+allocated as `Theme (2).wav`. The fix is the verifier's: `cancel()` no longer
+touches the lease at all - the YTDL-WEB-1 property it was written for (the next
+fleet call 410s even if a heartbeat lands first) is already delivered by
+`cancel_requested` - and `expire_stale_leases` now finalises a cancelled batch
+whose lease ran out (`release(..., state='cancelled')`) instead of handing it
+back to `queued`, which nobody would be allowed to claim. Four tests: the lease
+survives the cancel, the swept row is `cancelled` with a `finished_at`, the
+names it held are released, and an uncancelled expired lease still goes back to
+the queue.
+
+### CR-304B (music-3) - the retry toast reported a browser error as the companion's answer - FIXED (`music/web/static/ingest.js`)
+
+CR-286's music-2 fix replaced a bare `catch { }` with `refused =
+miRefusalText(e)` for EVERY exception, and `miRefusalText` falls through to
+`e.message` for anything that is not a 409. The two commonest dispatch failures
+are not refusals in words at all: no tray at all (a rejected fetch, message
+"Failed to fetch", no status) and a companion too old for `/music/ingest/*`
+(404, the app's own generic "the CC Sync tray returned HTTP 404"). Both printed
+as the reason this computer did not pick the tracks up, and because `refused`
+was truthy the only sentence that says what to DO - open the page on the
+computer that has the tracks - was unreachable on that path. Now
+`miSpokeARefusal(e)` (a 409, or a body carrying `reason`/`message`) decides
+whether the companion really answered; anything else keeps the fallback
+sentence and gains a hint, `MI_TOO_OLD` on a 404 and "The CC Sync tray on this
+computer did not answer." otherwise. `miTakeOver`'s mirror shape (its else arm
+printed a raw `e.message` into the notice) goes through the same two helpers.
+Three node-driven tests drive `miRetryFailed` with the real thrown shapes.
+
+### Verification
+- music-1: `tests/test_bug_hunt_2026_09_18b_music.py` - four tests, all four fail on the pre-fix source (checked) and pass after.
+- music-3: same file, three node tests; the no-tray and too-old ones fail on the pre-fix source and pass after.
+- Re-run: `cd music/web; .venv\Scripts\python.exe -m pytest tests/test_bug_hunt_2026_09_18b_music.py tests/test_bug_hunt_2026_09_18_webapps_tools.py tests/test_bug_hunt_2026_09_11b_music.py tests/test_bug_hunt_2026_09_11_music.py tests/test_fleet_ingest.py tests/test_ingest_ui.py tests/test_plain_words.py tests/test_one_vocabulary.py tests/test_api.py tests/test_db.py -q` - 179 passed. `py_compile` on both changed modules and the new test file; `node --check` on `ingest.js`.
+
+### Not fixed
+- Nothing in the group's list. music-2 (downgraded to low) was not started.
+
+### OWED TO ANOTHER GROUP
+- `webapps-broll` (CR-302), `broll/web/app/ingest_batches.py`: the b-roll twin of music-1. `cancel()` there nulls `lease_expires_at` in the same UPDATE - drop that column from the UPDATE, and in `expire_stale_leases` select rows with `cancel_requested = 1` whose lease has expired and `release(conn, batch, state='cancelled')` them before the requeue UPDATE, returning `cur.rowcount + len(stopped)`. Same reasoning applies: the 410 comes from `cancel_requested`, not from the lease.
+- `webapps-broll` (CR-302), `broll/web/static/ingest.js`: the same helper pair (`miRefusalText` / `miRetryFailed` / `miTakeOver`) carries the music-3 shape. Port `miSpokeARefusal` and the hint arm.
+- Both are safe alone: neither half of this fix reads or writes anything in the b-roll checkout.
+
+### Deploy order
+Dashboard side only (both files are served by the dashboard's `/music` mount);
+no companion or wire change. A companion of any vintage is unaffected: the
+fleet routes' answers are unchanged, and the only difference a companion can
+observe is that a cancelled batch it never answered for now reaches
+`cancelled` rather than `queued`, which its own `_leaseholder_or_410` already
+treats as 410. A dashboard rollback restores the old wedge, nothing worse.
+
+### Owner decisions
+None.
+
+## CR-305 - the ytdl web app's retry offer and its paste free-space guard - FIXED in repo 2026-09-18 (mediums wave, group `ytdl`)
+
+Two confirmed mediums from `hunters/ytdl-web.md`, both of them the unfinished
+half of a fix the 2026-09-18 pass landed (CR-286K and CR-286L).
+
+### CR-305A (ytdl-web-1) - a job that failed before its first clip still had no retry button - FIXED (ytdl/web/ytdlweb/routes_api.py, db.py, static/app.js)
+
+CR-286K decided the retry offer from `state.manifest.videos`, but `poll()`
+deliberately never loads a manifest for a job whose phase is `failed`, and a
+page reloading onto `#job=<id>` has none at all. In the one scenario the fix
+names - `_no_room_note` or the tree guard failing the job ahead of the per-clip
+loop, so `dl_failed` is 0 and every row is `pending` - `state.manifest` was
+null, `pending` was 0, `stalled` was false and the button stayed hidden, which
+is exactly what the failure's own last sentence tells the editor to press. The
+fix carries the count on the poll instead: `db.pending_download_count` is one
+`COUNT(*)`, `get_job` puts it on the JOB dict (`renderRetry(job)` is handed
+nothing else), and `renderRetry` prefers `job.dl_pending` and keeps the
+manifest count as the fallback for a page served by an older build. Tests drive
+the real route for a failed job with three pending rows and for a done job with
+none, plus a source assertion that `renderRetry` reads the poll.
+
+### CR-305B (ytdl-web-2) - the paste free-space guard could never size a paste - FIXED (ytdl/web/ytdlweb/routes_api.py, worker.py)
+
+`estimated_bytes` sums `r['duration']` and a pasted row has only
+`video_id`/`url`: `parse_url_list` fetches no metadata and a `KIND_URLS` job
+has no enrich phase, so the estimate was always 0 and both the press guard and
+the worker's backstop collapsed to the flat 2 GB `UNKNOWN_ESTIMATE_FLOOR`
+whether 1 or 40 links were pasted. CR-286L's own advertised scenario ("40 links
+into a project with 6 GB left") was still accepted on both. `space_needed(rows,
+quality)` is now the ONE place both callers get `(estimate, need)` from: a
+measurable estimate keeps the `FREE_SPACE_FACTOR` headroom rule unchanged, and
+an unmeasurable one becomes `max(UNKNOWN_ESTIMATE_FLOOR, len(rows) * rate *
+TYPICAL_CLIP_SECONDS)` - three minutes at the job's own rung, no factor on top,
+because doubling a guess is how a check that should refuse 40 links starts
+refusing 3 that would have fit. A single pasted link therefore still meets the
+old flat floor and still passes on 6 GB, which is pinned by its own test.
+
+### Verification
+- CR-305A: `tests/test_bug_hunt_2026_09_18b_ytdl.py` -
+  `test_a_failed_jobs_poll_carries_the_count_the_retry_offer_needs`,
+  `test_a_job_with_nothing_owed_is_offered_no_retry`,
+  `test_render_retry_reads_the_poll_not_only_the_manifest` - all three fail on
+  the pre-fix source (measured by reverting the three hunks in place).
+- CR-305B: same file - `test_forty_pasted_links_are_refused_with_six_gb_free`
+  and `test_the_workers_backstop_uses_the_same_floor` fail before, pass after;
+  `test_one_pasted_link_still_passes_the_same_six_gb` and
+  `test_space_needed_is_the_flat_floor_when_a_paste_is_small` are the
+  no-over-refusal controls.
+- Re-run green: `tests/test_bug_hunt_2026_09_18b_ytdl.py`,
+  `tests/test_bug_hunt_2026_09_18_webapps_tools.py`, `tests/test_api.py`,
+  `tests/test_bug_hunt_2026_09_11b_ytdl_web.py`, `tests/test_db.py`,
+  `tests/test_says_what_it_knows.py` - 229 passed. `py_compile` on
+  `routes_api.py`, `db.py`, `worker.py`.
+
+### Not fixed
+- ytdl-web-3, ytdl-web-4, ytdl-web-5, ytdl-web-6 are not in this group's
+  assignment (low / downgraded); untouched.
+
+### OWED TO ANOTHER GROUP
+- None. Both fixes are inside `ytdl/web/*`.
+
+### Deploy order
+- One artefact: `ytdl/web` ships inside the dashboard image, page and API
+  together, so there is no skew between the two halves of CR-305A. The page
+  still tolerates an older API (no `dl_pending` -> the manifest fallback) and an
+  older page tolerates the new API (it ignores the extra field), so a dashboard
+  rollback is safe in both directions.
+
+### Owner decisions
+- None needed. `TYPICAL_CLIP_SECONDS = 180` is the one number a reader may want
+  to argue with: it only ever raises the need for a paste whose rows carry no
+  duration, and it is quoted in no editor-visible sentence (an unmeasurable
+  refusal still says "this download needs room to work in").
+
+### CR-306 (dash-api-3) - a push that could not be sent still cost the machine every job kind for 14 days - FIXED (dashboard/src/ccsync_dashboard/db.py, api.py, jobs.py, templates/partials/admin_packages.html)
+
+res-fleet-2 taught the report handler to WITHHOLD `commands.upgrade` when the
+build a push names is not being offered to that machine (retracted, needing a
+newer dashboard, built for another processor) and to leave the request
+standing on purpose, because the build may become offerable again. It did not
+touch the larger harm its own comment names: `jobs.fleet_facts` and
+`jobs.machine_facts` compute `upgrading` from `machines.update_requested_version`
+being non-empty and nothing else, and `policy_refusal` answers
+`REFUSE_UPGRADING` before any capability is looked at. So an admin who pushed
+an arm64 build at an Intel Mac took that computer out of the
+whisper/proxy-480p/audio-extract/peaks fleet for the whole 14 days of
+`MACHINE_UPDATE_REQUEST_MAX_AGE_DAYS`, the Packages page went on showing the
+push as "asked, waiting for its next report", and nothing anywhere said the
+update could never arrive.
+
+The hunter's first suggestion - ask `_machine_can_be_offered` from jobs.py -
+cannot be built: that predicate needs the report PAYLOAD (running version,
+platform, arch) and `machines` stores no arch at all. So the verdict is
+computed where it can be, in the report handler, and PERSISTED: schema v55
+adds `machines.update_requested_withheld`. NULL or '' means "this dashboard
+has not decided the push cannot be sent" - an old row, a fresh push, or a push
+it IS sending - and every reader takes it as upgrading, which is fail CLOSED,
+because the upgrade a job is being protected from may really be about to
+happen. A non-empty sentence is the reason from `_upgrade_info`'s own
+`withheld` sink (now forwarded through `_machine_can_be_offered`, whose
+fail-OPEN contract is unchanged: an exception writes nothing), and it is what
+lifts the refusal. The column is nulled by `request_machine_update` (a new
+push starts undecided), by `clear_machine_update_request` and by
+`expire_machine_update_requests`, and cleared by the report handler's own
+send arm the moment the build becomes offerable again - so the command and
+the return to "upgrading" ride the same reply. `jobs.fleet_facts`'s SQL and
+`jobs.machine_facts`'s `bool(upgrade)` both read it; `policy_refusal` and the
+`/why` wording are untouched. The Packages page renders
+`[ CANNOT BE SENT ]` with the reason beside the "asked for" chip and says the
+computer still takes jobs, so the admin can withdraw the push with the
+[ CANCEL ] form that was always there.
+
+### Verification
+- `tests/test_bug_hunt_2026_09_18b_dashboard_api_db.py` -
+  `test_a_withheld_push_no_longer_costs_the_machine_every_job` (both readers
+  before and after the report, the `policy_refusal` code, and the undecided
+  row still reading as upgrading),
+  `test_the_flag_clears_the_moment_the_build_is_offerable_again`,
+  `test_withdrawing_or_expiring_a_push_clears_the_verdict`,
+  `test_the_packages_page_names_a_push_that_cannot_be_sent` (the view dict and
+  the rendered partial), `test_v55_adds_the_withheld_column`.
+- Re-run green: `tests/test_bug_hunt_2026_09_18b_dashboard_api_db.py`,
+  `test_bug_hunt_2026_09_18_dashboard_mediums.py`, `test_db.py`,
+  `test_multi_machine.py`, `test_release_channel.py`, `test_packages.py`, all
+  eleven `test_jobs*.py` / dash-jobs files - 516 passed, 1 skipped; plus
+  `test_dashboard_update.py`, `test_bug_hunt_2026_09_11b_dash_mounts_ui.py`,
+  `test_bug_hunt_2026_09_18_dashboard_lows.py` (the schema-version readers) -
+  111 passed. `py_compile` on `api.py`, `db.py`, `jobs.py`.
+
+### Deploy order
+Dashboard only; no wire change, no companion change - the reply keeps the
+`upgrade_none_reason` shape res-fleet-2 added. Schema v55 is one nullable
+column. It fails closed in both directions: an older dashboard reading a v55
+database simply ignores the column and keeps refusing jobs to that machine
+exactly as it does today, and a v55 dashboard reading rows written before it
+treats every standing push as undecided, i.e. upgrading.
+
+### Owner decisions
+None needed.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

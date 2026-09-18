@@ -73,6 +73,7 @@ from typing import Any, Callable, Optional
 
 from . import config as config_mod
 from . import job_paths, jobs_media
+from . import proc_tree
 
 log = logging.getLogger("ccsync.jobs")
 
@@ -1269,10 +1270,14 @@ class JobRunner:
         chip had nothing to show for twenty minutes.
         """
         try:
+            # comp-music-ytdl-jobs-1 (2026-09-18b mediums): its own process
+            # group, because pipeline.py is not the worker -- it Popens the
+            # process that holds the GPU, and only a group gives _terminate
+            # something to take down.
             proc = self._runner(
                 argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace",
-                creationflags=_win_creationflags())
+                **proc_tree.spawn_kwargs(_win_creationflags()))
         except Exception as exc:                                    # noqa: BLE001
             log.exception("jobs: could not start the transcription")
             return False, "", f"could not start the transcription: {exc}"
@@ -1494,15 +1499,14 @@ def _drain_lines(stream: Any, feed: Callable[[str], None]) -> None:
 
 
 def _terminate(proc: Any) -> None:
-    """Stop the child, and do not hang waiting for it to agree."""
-    try:
-        proc.terminate()
-        proc.wait(timeout=10)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            log.debug("jobs: could not kill the child", exc_info=True)
+    """Stop the child AND the worker it spawned, without hanging on either.
+
+    comp-music-ytdl-jobs-1 (2026-09-18b mediums): this used to be
+    `proc.terminate()` on the pipeline's pid alone, so a cancel, a fleet halt
+    or a shutdown left the whisper worker running on the GPU while the machine
+    reported itself idle and eligible for the next whisper job.
+    """
+    proc_tree.kill_tree(proc)
 
 
 def _tail(chunks: list[str]) -> str:

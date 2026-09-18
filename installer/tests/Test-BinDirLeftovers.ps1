@@ -229,6 +229,101 @@ if (($leftoverText + $cleanText) -like "*$dash*") {
     Ok "no em dash in the closing advice"
 }
 
+# --- install-onboard-2 (2026-09-18): the -Full path must LOOK before it says
+# "removed" and "your identity is gone". Section 4 re-reads the bin dir;
+# section 5 deleted the whole tree -- the bin dir plus syncthing-config, the
+# device identity -- with -ErrorAction SilentlyContinue and reported success
+# either way, and the closing verdict was computed from $binLeftovers, which
+# was measured before section 5 ran.
+Invoke-Expression (Get-Function $UninstallScript "Get-FullRemovalLeftovers")
+
+$FullSandbox = Join-Path $TempRoot "ccsync-test-full-leftovers"
+try {
+    if (Test-Path -LiteralPath $FullSandbox) { Remove-Item -LiteralPath $FullSandbox -Recurse -Force }
+    New-Item -ItemType Directory -Path (Join-Path $FullSandbox "syncthing-config") -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $FullSandbox "syncthing-config\cert.pem") -Value "x" -Encoding UTF8
+    $stuckFull = @(Get-FullRemovalLeftovers -CcsyncLocal $FullSandbox)
+    Check "a tree the delete could not clear is reported" 1 $stuckFull.Count
+    Check "a tree that is gone leaves nothing" 0 (@(Get-FullRemovalLeftovers -CcsyncLocal (Join-Path $TempRoot "ccsync-test-never-existed")).Count)
+
+    $fullAdvice = @(Get-UninstallClosingAdvice -LeftoverCount 0 -BinDir $Bin -SelfPath $Self `
+                        -IdentityLeftovers $stuckFull)
+    $fullText = ($fullAdvice | ForEach-Object { $_.Text }) -join "`n"
+    if ($fullText -match "NOT complete") {
+        Ok "a -Full run that left the identity behind does not end 'complete'"
+    } else {
+        Bad "the closing verdict says complete over a surviving Syncthing identity: $fullText"
+    }
+    Check "a -Full run with no leftovers is unchanged" 0 `
+        (@(Get-UninstallClosingAdvice -LeftoverCount 0 -BinDir $Bin -SelfPath $Self -IdentityLeftovers @() |
+           Where-Object { $_.Kind -eq "warn" }).Count)
+
+    # --- install-onboard-1 (2026-09-18b mediums): the whole paragraph, not the
+    # "NOT complete" substring. The identity branch used to fall into the
+    # self-path arm's else, so the same paragraph said "run this uninstaller
+    # again with -Full" and "delete that file, and the folder it is in".
+    $binSurvived = @($Bin)
+    $contradiction = @(Get-UninstallClosingAdvice -LeftoverCount 0 -BinDir $Bin -SelfPath $Self `
+                          -IdentityLeftovers $binSurvived)
+    $contraText = ($contradiction | ForEach-Object { $_.Text }) -join "`n"
+    if ($contraText -match "elete that file, and the folder it is in") {
+        Bad "an unfinished -Full run still tells the editor to delete the uninstaller it just told them to re-run: $contraText"
+    } else {
+        Ok "an unfinished -Full run does not tell the editor to delete its own retry path"
+    }
+    if ($contraText -match "LEAVE this uninstaller where it is") {
+        Ok "an unfinished -Full run says to leave the uninstaller in place"
+    } else {
+        Bad "an unfinished -Full run says nothing about the uninstaller still on disk: $contraText"
+    }
+    if ($contraText -match "program files listed above") {
+        Bad "the LEAVE line points at a list of program files the identity branch never printed: $contraText"
+    } else {
+        Ok "the LEAVE line does not cite a file list that was never printed"
+    }
+
+    # --- install-onboard-4: ONE verdict. bin\ surviving while syncthing-config
+    # went is the ordinary shape (bin\ is the CWD of the host Apps & features
+    # launched), and it used to print "your identity is gone" and "item(s) of
+    # your sign-in and Syncthing identity are still on this machine" together.
+    $goneText = ((Get-UninstallClosingAdvice -LeftoverCount 0 -BinDir $Bin -SelfPath $Self `
+                     -IdentityLeftovers $binSurvived -IdentityPresent $false |
+                  ForEach-Object { $_.Text }) -join "`n")
+    if ($goneText -match "item\(s\) of your sign-in and Syncthing identity") {
+        Bad "a surviving bin dir is still reported as the editor's identity after the identity really went: $goneText"
+    } else {
+        Ok "leftovers that are not the identity are not called the identity"
+    }
+    if ($goneText -match "NEW device ID") {
+        Ok "the one verdict still tells the editor to expect a new device ID when the identity went"
+    } else {
+        Bad "the closing line lost the device ID answer: $goneText"
+    }
+    $stayedText = ((Get-UninstallClosingAdvice -LeftoverCount 0 -BinDir $Bin -SelfPath $Self `
+                       -IdentityLeftovers $binSurvived -IdentityPresent $true |
+                    ForEach-Object { $_.Text }) -join "`n")
+    if ($stayedText -match "SAME device ID") {
+        Ok "an identity that survived is reported as the SAME device ID, once"
+    } else {
+        Bad "the closing line does not say the device ID is unchanged when the identity survived: $stayedText"
+    }
+    if ($stayedText -match "NEW device ID") {
+        Bad "one paragraph says both that the identity is gone and that it is still there: $stayedText"
+    } else {
+        Ok "the two device ID answers never appear together"
+    }
+    if (($contraText + $goneText + $stayedText) -like "*$dash*") {
+        Bad "the -Full closing advice contains an em dash"
+    } else {
+        Ok "no em dash in the -Full closing advice"
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $FullSandbox) {
+        Remove-Item -LiteralPath $FullSandbox -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # --- tests-5 (hand-off wave, 2026-09-11b): REPORTED, not merely computed ------
 # Every case above drives Get-BinDirLeftovers / Get-UninstallClosingAdvice
 # directly, so a refactor that keeps both functions and stops PRINTING their
@@ -321,6 +416,8 @@ if ($closingLoop) {
         function Write-Warn2 { param([string]$m) [void]$printed.Add("warn: $m") }
         $DryRun = $false
         $binLeftovers = @("a.exe", "b.exe", "c.exe")
+        $fullLeftovers = @()
+        $identityStillThere = $false
         Invoke-Expression $loopText
         ,@($printed)
     } $closingLoop "C:\Users\leso\AppData\Local\ccsync\bin" "C:\Users\leso\AppData\Local\ccsync\bin\windows_uninstall.ps1"
@@ -335,6 +432,105 @@ if ($closingLoop) {
         Ok "the closing advice names how many files are left"
     } else {
         Bad "the closing advice lost the count: $($run2 -join '; ')"
+    }
+}
+
+
+# The script's OWN -Full statements: the delete is stubbed (PowerShell 5.1
+# deletes nothing at all when one child is locked) and what it prints is read.
+$fullBlock = Get-ScriptStatement -Ast $uAst -TypeName "IfStatementAst" `
+    -Match @('Get-FullRemovalLeftovers', 'Remove-Item -LiteralPath \$CcsyncLocal -Recurse')
+if ($fullBlock) {
+    $FullSandbox2 = Join-Path $TempRoot "ccsync-test-full-report"
+    try {
+        if (Test-Path -LiteralPath $FullSandbox2) { Remove-Item -LiteralPath $FullSandbox2 -Recurse -Force }
+        New-Item -ItemType Directory -Path (Join-Path $FullSandbox2 "syncthing-config") -Force | Out-Null
+        $run3 = & {
+            param($blockText, $CcsyncLocal)
+            $printed = New-Object System.Collections.ArrayList
+            function Write-Step  { param([string]$m) [void]$printed.Add("step: $m") }
+            function Write-Skip  { param([string]$m) [void]$printed.Add("skip: $m") }
+            function Write-Warn2 { param([string]$m) [void]$printed.Add("warn: $m") }
+            function Remove-Item { }
+            $DryRun = $false
+            $fullLeftovers = @()
+            Invoke-Expression $blockText
+            [pscustomobject]@{ Printed = @($printed); Count = @($fullLeftovers).Count }
+        } $fullBlock $FullSandbox2
+        $out3 = ($run3.Printed) -join "`n"
+        Check "the script's own -Full block finds what survived" 1 $run3.Count
+        if ($out3 -match "removed $([regex]::Escape($FullSandbox2))") {
+            Bad "the -Full path reported 'removed' over a tree that is still on disk: $out3"
+        } else {
+            Ok "a -Full run that removed nothing never claims it did"
+        }
+        if ($out3 -match "could NOT remove all of") {
+            Ok "the -Full leftovers are printed where an editor can read them"
+        } else {
+            Bad "the -Full path computed leftovers and printed nothing: $out3"
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $FullSandbox2) {
+            Remove-Item -LiteralPath $FullSandbox2 -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# --- install-onboard-3 (2026-09-18b mediums): the ~/.ccsync block. It deleted
+# with -ErrorAction SilentlyContinue, never re-read the directory, and printed
+# the count it INTENDED to delete; $fullLeftovers scanned %LOCALAPPDATA%\ccsync
+# only, so a run that removed nothing there still ended "complete". config.toml
+# holds the per-editor fleet credential. The delete is stubbed, which is the
+# real locked case.
+$profileBlock = Get-ScriptStatement -Ast $uAst -TypeName "IfStatementAst" `
+    -Match @('\$keepNames = @\("state"\)', 'Get-ChildItem -LiteralPath \$CcsyncProfile')
+if ($profileBlock) {
+    $ProfSandbox = Join-Path $TempRoot "ccsync-test-profile-leftovers"
+    try {
+        if (Test-Path -LiteralPath $ProfSandbox) { Remove-Item -LiteralPath $ProfSandbox -Recurse -Force }
+        New-Item -ItemType Directory -Path (Join-Path $ProfSandbox "state") -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $ProfSandbox "config.toml") -Value "report_token = 'cce1.x'" -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $ProfSandbox "companion.log") -Value "held open" -Encoding UTF8
+        $run4 = & {
+            param($blockText, $CcsyncProfile)
+            $printed = New-Object System.Collections.ArrayList
+            function Write-Step  { param([string]$m) [void]$printed.Add("step: $m") }
+            function Write-Skip  { param([string]$m) [void]$printed.Add("skip: $m") }
+            function Write-Warn2 { param([string]$m) [void]$printed.Add("warn: $m") }
+            function Remove-Item { }
+            $DryRun = $false
+            $fullLeftovers = @()
+            Invoke-Expression $blockText
+            [pscustomobject]@{ Printed = @($printed); Carried = @($fullLeftovers).Count }
+        } $profileBlock $ProfSandbox
+        $out4 = ($run4.Printed) -join "`n"
+        if ($out4 -match "removed your sign-in and settings from") {
+            Bad "the ~/.ccsync block claimed a removal it never checked: $out4"
+        } else {
+            Ok "a ~/.ccsync delete that removed nothing never claims it did"
+        }
+        if ($out4 -match "could NOT remove 2") {
+            Ok "the survivors in ~/.ccsync are counted from the directory, not from the intent"
+        } else {
+            Bad "the ~/.ccsync block does not report what survived: $out4"
+        }
+        Check "the ~/.ccsync survivors reach the closing verdict" 2 $run4.Carried
+        if ($out4 -match [regex]::Escape((Join-Path $ProfSandbox "config.toml"))) {
+            Ok "the surviving config.toml is named where the editor can read it"
+        } else {
+            Bad "a surviving fleet credential is not named: $out4"
+        }
+        if ($out4 -match "KEPT") {
+            Ok "state\ is still kept and still said to be kept"
+        } else {
+            Bad "the KEPT state\ paragraph went with the fix: $out4"
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $ProfSandbox) {
+            Remove-Item -LiteralPath $ProfSandbox -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 

@@ -140,7 +140,9 @@ def _free_port() -> int:
 
 
 def _run(cmd: list[str], timeout: float | None = 60) -> tuple[int, str, str]:
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # server-tools-4 (2026-09-18): UTF-8 in, whatever the console codec is.
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=timeout)
     return proc.returncode, proc.stdout, proc.stderr
 
 

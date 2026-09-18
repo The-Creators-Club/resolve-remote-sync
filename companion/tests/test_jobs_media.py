@@ -34,11 +34,22 @@ import pytest
 
 from ccsync_companion import jobs_media
 
+from conftest import require_ffmpeg_or_skip
+
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
-needs_ffmpeg = pytest.mark.skipif(
-    not (FFMPEG and FFPROBE),
-    reason="no ffmpeg/ffprobe here -- an OPTIONAL dependency of this companion")
+_MISSING = "no ffmpeg/ffprobe here -- an OPTIONAL dependency of this companion"
+
+
+def _ffmpeg_gate() -> None:
+    """tests-1 (2026-09-18): a skip that a release script can turn into a
+    failure, the way CCSYNC_REQUIRE_RCLONE already can. Twenty tests behind a
+    bare `shutil.which` vanished silently on every CI and release runner."""
+    if not (FFMPEG and FFPROBE):
+        require_ffmpeg_or_skip(_MISSING)
+
+
+needs_ffmpeg = pytest.mark.usefixtures("ffmpeg_present")
 
 
 def _encoders() -> set[str]:
@@ -53,6 +64,14 @@ def _encoders() -> set[str]:
 HAS_NVENC = "h264_nvenc" in _encoders()
 
 
+@pytest.fixture
+def ffmpeg_present():
+    """The gate every `@needs_ffmpeg` test goes through now. A fixture rather
+    than a `skipif` mark because a mark cannot fail, and failing is the whole
+    point when CCSYNC_REQUIRE_FFMPEG=1 (tests-1)."""
+    _ffmpeg_gate()
+
+
 # ------------------------------------------------------------- test media
 @pytest.fixture(scope="module")
 def clips(tmp_path_factory):
@@ -64,7 +83,7 @@ def clips(tmp_path_factory):
     (a legitimate audio-extract input and an illegitimate proxy one).
     """
     if not (FFMPEG and FFPROBE):
-        pytest.skip("no ffmpeg here")
+        require_ffmpeg_or_skip(_MISSING)
     out = tmp_path_factory.mktemp("clips")
 
     def run(*args):

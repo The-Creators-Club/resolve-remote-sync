@@ -87,15 +87,48 @@ def _write_secret_file(path: Path, value: str) -> None:
     mode argument to os.open is accepted but not enforced, which is a no-op
     rather than a failure -- there is no admin-facing dev workflow on
     Windows that reads this file back, only tests, and tests never call this
-    function with a value worth protecting."""
+    function with a value worth protecting.
+
+    ATOMIC since dash-core-1 / dash-core-6 (2026-09-18). It used to be
+    `O_CREAT|O_TRUNC` in place with no rename and no fsync, so the good copy
+    was destroyed BEFORE the new bytes were written and a failure between the
+    two (ENOSPC on a full `/data`, a read-only dataset that faulted after the
+    creat, an OOM kill or a host power loss) left a ZERO-BYTE file. That was
+    not a loud failure: `ensure_secrets` swallows the OSError and carries on
+    with the in-memory value, `_read_secret_file` `.strip()`s an empty file to
+    `""`, and the DCORE-3 boot refusal only asked `is_file()` - so the
+    dashboard served happily on a secret that existed only in memory, and the
+    NEXT restart minted a different one and 401'd every browser session and
+    every non-expiring `cce1.` identity token in the fleet at once. The same
+    helper writes `internal.env` and `syncthing.env` on EVERY boot, where the
+    window is hit once per restart rather than once per install: a truncated
+    `CCSYNC_INTERNAL_TOKEN` is the dash-admin-2 outage by another road.
+
+    The temp file is a sibling, so `os.replace` is on one filesystem and is
+    therefore atomic; the mode is set on the fd before the rename, so the
+    secret is never briefly world-readable.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(value)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass  # best-effort on platforms without POSIX modes
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(value)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass  # best-effort on platforms without POSIX modes
+        os.replace(str(tmp), str(path))
+    except BaseException:
+        # The old file is still intact: that is the whole point. Take the
+        # temp with us so a failing volume does not fill with them.
+        try:
+            os.unlink(str(tmp))
+        except OSError:
+            pass
+        raise
 
 
 def write_secret_file(path: Path, value: str) -> None:

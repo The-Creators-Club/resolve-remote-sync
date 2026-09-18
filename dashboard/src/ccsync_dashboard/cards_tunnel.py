@@ -70,6 +70,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -94,6 +95,15 @@ POLL_MARGIN_SECONDS = 20.0
 POST_TIMEOUT_SECONDS = 90.0
 # The name the cards server shows in "the agent is away" text.
 MAX_NAME_CHARS = 96
+# dash-cards-1 (2026-09-18): how often the refusal path re-asks whether an
+# engine has appeared for this editor, and the seam a test drives it through.
+# The wait itself is what matters, not its granularity: the agent's pacing IS
+# this hold (`pull_loop` sleeps only in its `except` branch), so answering the
+# refusal immediately turned every idle agent into a request-rate loop against
+# a single-worker dashboard, each one a full fleet-credential check.
+NO_ENGINE_STEP_SECONDS = 0.5
+_sleep = time.sleep
+_monotonic = time.monotonic
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -134,6 +144,16 @@ def local_engine(request: Request, editor: str = "") -> Any:
     if pool is not None and editor:
         engine = pool.engine_for(editor)
         if engine is not None:
+            # security-1 (2026-09-18b mediums): an agent call is a LIVENESS
+            # signal for its editor, and it is the only one that survives the
+            # browser going offline. Without it, fifteen quiet minutes made
+            # their episode look empty and any other signed-in session could
+            # close the engine this agent is driving Resolve against. Best
+            # effort by contract: never let a seat stamp fail an agent call.
+            try:
+                pool.note_agent(editor)
+            except Exception:  # noqa: BLE001 - a seat is not worth a 500
+                pass
             return engine
     return getattr(request.app.state, "cards_engine", None)
 
@@ -164,6 +184,37 @@ def _routed(request: Request, editor: str) -> tuple[Any, Any]:
     if getattr(request.app.state, "cards_pool", None) is not None:
         return None, _no_engine(editor)
     return None, None
+
+
+def _wait_for_an_engine(request: Request, editor: str, seconds: float,
+                        answer: Any) -> tuple[Any, Any, float]:
+    """Hold the refusal for up to `seconds`, waking as soon as this editor's
+    engine appears. -> (engine, answer, the seconds LEFT of the hold).
+
+    The remainder matters: an agent that waited 20 of its 25 seconds here and
+    then found an engine must not be made to wait 25 more, or the answer
+    arrives after the companion's own read timeout.
+
+    dash-cards-1. An episode opened mid-wait attaches the agent within
+    NO_ENGINE_STEP_SECONDS rather than at the end of the hold, which is why
+    this is a poll and not one sleep.
+    """
+    if seconds <= 0:
+        return None, answer, 0.0
+    deadline = _monotonic() + seconds
+    while True:
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            return None, answer, 0.0
+        _sleep(min(NO_ENGINE_STEP_SECONDS, remaining))
+        engine, answer = _routed(request, editor)
+        remaining = max(0.0, deadline - _monotonic())
+        if engine is not None:
+            return engine, None, remaining
+        if answer is None:
+            # The pool went away under us (the mount was torn down): that is
+            # the forward-to-another-container shape, not a refusal.
+            return None, None, remaining
 
 
 def _local(engine: Any, what: str, *args: Any) -> Any:
@@ -364,7 +415,23 @@ def cards_agent_pending(
         # for whoever reads the companion log. An `error` here would put a
         # line a second in that log for an agent whose owner simply has no
         # page open.
-        return {"note": answer.get("error", "")}
+        #
+        # dash-cards-1 (2026-09-18): and it HOLDS for `wait` first. The
+        # companion's pull loop has no sleep of its own on a 200 -- its pacing
+        # was always this route's 25 s hold -- so answering immediately meant
+        # every machine with the cards role on polled continuously, from every
+        # container restart until somebody opened an episode, each request a
+        # token lookup plus an identity verify plus a barred-account query on
+        # a --workers 1 dashboard. Before the engine pool this path raised and
+        # the loop's own backoff caught it; the pool turned the exception into
+        # a 200. The wait is interruptible and the route stays a blocking
+        # `def`, so it is one threadpool worker asleep, not the event loop.
+        # Dashboard-only: the answer's shape is unchanged, so no companion
+        # needs republishing.
+        engine, answer, seconds = _wait_for_an_engine(
+            request, editor, seconds, answer)
+        if engine is None and answer is not None:
+            return {"note": answer.get("error", "")}
     if engine is not None:
         # `agent_pending` takes the RAW query value and parses it itself
         # (handler.py hands it `parse_qs(...)["wait"][0]`), so it is handed a

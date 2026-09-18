@@ -2249,7 +2249,8 @@ def _before_mutation(source: str) -> str:
 
 
 def replace_clip(media_pool_item, new_path: str, tries: int = 3, *,
-                 source: str = "manual", journal: bool = True) -> dict[str, Any]:
+                 source: str = "manual", journal: bool = True,
+                 force: bool = False) -> dict[str, Any]:
     """Relink `media_pool_item` to `new_path` via ReplaceClip.
 
     This preserves every timeline usage of the clip (per SPEC.md's fixer
@@ -2264,6 +2265,29 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3, *,
     actually changing -- re-read it, and retry (briefly, off-lock) through
     transient stalls. Same battle-tested pattern as resolve-relink's
     relink_one().
+
+    `force` is the REFRESH (comp-resolve-1, 2026-09-18), and it is a
+    different call in three ways that all follow from `new_path` being the
+    clip's OWN path. Phase 3's whole mechanism is `ReplaceClip(<the same
+    path>)`, the one call that makes Resolve re-read a file that changed
+    underneath a clip -- and the short-circuit below answered "Already
+    linked" to every one of them, so nothing was ever re-read while
+    `refreshed += 1` and the INFO line said it had been. With `force`:
+
+      * the short-circuit is skipped and ReplaceClip really runs;
+      * success is a GEOMETRY change (`Frames` / `Resolution`), never the
+        File Path, which is vacuously equal to the path asked for. A forced
+        call whose ReplaceClip raised every time would otherwise report
+        success;
+      * no save point and no undo-journal entry. There is nothing to undo:
+        old_path == new_path, so the journal's inverse edit is this same
+        call again, and a SaveProject + ExportProject on every 120 s pass is
+        part of the cost this finding is about. The bytes on disk are not
+        touched either way.
+
+    A forced call answers `changed` as well as `ok`: ok says Resolve took
+    the call, changed says the clip's geometry actually moved. The caller
+    needs both, or it re-plans the same op every pass.
     """
     if media_pool_item is None:
         return {"ok": False, "message": "no media pool item to relink"}
@@ -2277,17 +2301,36 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3, *,
         except Exception:
             return None
 
+    def _geometry_locked():
+        """(Frames, Resolution) as Resolve reports them now, or None.
+
+        comp-resolve-1: the only honest success test for a refresh. A clip
+        born from a stand-in reads 1920x1080 and the preview's frame count
+        over a 6K file, and both change when Resolve re-reads the file.
+        """
+        try:
+            props = media_pool_item.GetClipProperty() or {}
+            return (str(props.get("Frames") or ""),
+                    str(props.get("Resolution") or ""))
+        except Exception:
+            return None
+
     norm_new = _norm_path(new_path)
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
     with _bridge_call("replace_clip (read)"):
         before = _file_path_locked()
-    if before is not None and _norm_path(before) == norm_new:
-        return {"ok": True, "message": f"Already linked to {new_path}"}
+        before_geometry = _geometry_locked() if force else None
+    same_path = before is not None and _norm_path(before) == norm_new
+    if same_path and not force:
+        return {"ok": True, "message": f"Already linked to {new_path}",
+                "changed": False}
+    refresh = same_path and force
 
     # Save point BEFORE the first ReplaceClip of the burst, journal entry
     # after it takes -- the entry names the inverse edit, so it must not be
-    # written for a swap that never happened (item 9, 2026-08-17).
-    project_name = _before_mutation(source) if journal else ""
+    # written for a swap that never happened (item 9, 2026-08-17). Neither
+    # applies to a refresh: see `force` in the docstring.
+    project_name = "" if refresh else (_before_mutation(source) if journal else "")
 
     raised = 0
     for attempt in range(max(1, tries)):
@@ -2299,8 +2342,14 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3, *,
             except Exception as exc:
                 raised += 1
                 log.warning("resolve: ReplaceClip(%s) raised: %s", new_path, exc, exc_info=True)
-            after = _file_path_locked()
-            took = after is not None and _norm_path(after) == norm_new
+            if refresh:
+                after_geometry = _geometry_locked()
+                took = (after_geometry is not None
+                        and after_geometry != before_geometry)
+                after = before
+            else:
+                after = _file_path_locked()
+                took = after is not None and _norm_path(after) == norm_new
             # GetName() UNDER THE LOCK, not at the record() call below
             # (comp-resolve-3, 2026-08-21). It is a call into
             # fusionscript.dll like any other, and the journal line
@@ -2312,13 +2361,17 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3, *,
             if took and journal:
                 clip_name = _safe_clip_name(media_pool_item)
         if took:
-            if journal:
+            if journal and not refresh:
                 resolve_journal.record(
                     resolve_journal.KIND_REPLACE_CLIP, project_name,
                     clip_name=clip_name,
                     old_path=before or "", new_path=new_path, source=source,
                 )
-            return {"ok": True, "message": f"Relinked to {new_path}"}
+            if refresh:
+                return {"ok": True, "changed": True,
+                        "message": f"Re-read {new_path} from disk"}
+            return {"ok": True, "changed": True,
+                    "message": f"Relinked to {new_path}"}
         if attempt + 1 < max(1, tries):
             # Off-lock backoff: give Resolve's main thread room to finish the
             # swap (or recover) before the next attempt.
@@ -2326,10 +2379,37 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3, *,
 
     if raised == max(1, tries):
         # Every attempt raised -- Resolve went away, not a refusal.
-        return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE}
+        return {"ok": False, "changed": False, "message": _SCRIPTING_ERROR_MESSAGE}
+    if refresh:
+        # Resolve took the call and the geometry did not move: either the
+        # file really does match what the clip believes, or this build will
+        # not re-read it. Asking again next pass answers the same, so this is
+        # "asked, nothing changed" rather than a failure, and the caller
+        # remembers it instead of re-planning the op for ever
+        # (comp-resolve-1/-2).
+        #
+        # comp-resolve-2 (2026-09-18b mediums): unless SOME attempt raised.
+        # `raised == tries` above is the only case the counter covered, so a
+        # burst where one of three calls raised (mid-render, a script-server
+        # flap) and the surviving one did not move the geometry answered
+        # "settled" - and the caller remembers that for ever, because the
+        # file's (mtime, size) never changes again once its original has
+        # arrived. `retryable` says "ask again next pass" without making this
+        # a failure, which would push the clip into REASON_NO_ANSWER and
+        # change what the RES-3 channel reports.
+        if raised:
+            log.info("resolve: %s was re-read but %d of %d attempts raised - "
+                     "not a settled answer", new_path, raised, max(1, tries))
+            return {"ok": True, "changed": False, "retryable": True,
+                    "message": f"Re-read {new_path}; Resolve did not answer cleanly"}
+        log.info("resolve: %s was re-read and its geometry did not change",
+                 new_path)
+        return {"ok": True, "changed": False,
+                "message": f"Re-read {new_path}; its geometry did not change"}
     log.warning("resolve: ReplaceClip did not take for %s (path still %r)", new_path, before)
     return {
         "ok": False,
+        "changed": False,
         "message": (
             "Copied the file in, but Resolve wouldn't relink it. Close the clip's "
             f"timeline and use {ui_copy.SCAN_WHOLE_PROJECT} again."
@@ -2427,6 +2507,27 @@ def link_proxy_media(media_pool_item, proxy_path: str, *,
             old_path=old_proxy, new_path=proxy_path, source=source,
         )
     return {"ok": True, "message": f"Proxy relinked to {proxy_path}"}
+
+
+def clip_proxy_state(media_pool_item) -> str:
+    """The clip's `Proxy` property as Resolve reports it NOW, or "".
+
+    comp-resolve-6 (2026-09-18): `ReplaceClip` is the API's re-import path,
+    and nothing in the phase 0 spike says what it does to an attached proxy.
+    The cheap way to find out per clip is to look afterwards, which is what
+    `proxy_relink.apply_relinks` does with this: a refresh whose clip came
+    back with no proxy gets the one it had put back, and a refresh that left
+    it alone costs one property read. Takes the lock itself, like every other
+    public reader here; "" is "cannot tell" and every caller treats it as
+    "leave it alone".
+    """
+    if media_pool_item is None:
+        return ""
+    try:
+        with _bridge_call("clip_proxy_state"):
+            return _safe_clip_property(media_pool_item, "Proxy")
+    except Exception:
+        return ""
 
 
 def _safe_clip_property(media_pool_item, key: str) -> str:
@@ -2870,6 +2971,28 @@ def _find_or_create_bin(media_pool, root_folder, name: str):
     return created
 
 
+def _real_original_here(local_path: str) -> bool:
+    """Is the file this clip points at the REAL original on this machine?
+
+    False for a file that is not there, and false for a ledgered stand-in
+    (proxy-tiers-1): a stand-in IS the preview's bytes, so attaching the
+    preview beside it takes nothing away, and the background editing-proxy
+    upgrade is what gives that clip a real proxy. Filesystem and JSON only -
+    the caller holds _API_LOCK.
+    """
+    try:
+        if not os.path.isfile(local_path):
+            return False
+    except Exception:
+        return False
+    try:
+        from . import broll_standins
+
+        return not broll_standins.is_standin(local_path)
+    except Exception:
+        return True
+
+
 def _attach_adjacent_proxy(media_pool_item, local_path: str) -> None:
     """Attach `<dir>/Proxy/<stem>.*` to a freshly inserted clip. Best-effort.
 
@@ -2884,6 +3007,18 @@ def _attach_adjacent_proxy(media_pool_item, local_path: str) -> None:
     has one (KNOWN_BUGS R10 -- proven by remuxing the same bytes with
     -timecode, after which the identical link succeeds). The insert still
     stands; the editor just edits the original until the previews are fixed.
+
+    THE `.mp4` RULE (proxy-tiers-1, 2026-09-18). Phase 3's one behaviour
+    change for existing clips is that the 540p browser PREVIEW is no longer
+    attached as the proxy of a clip whose real file is on this machine
+    (plan section 6: "Original, with the good proxy or none"). Two readers
+    implement the offer of `Proxy/<stem>.{mov,mp4}` and only
+    `proxy_relink.plan_relinks` got the rule, so every insert still linked
+    the preview - and the 120 s pass can never take it back, because it
+    skips a clip whose proxy IS working (audit F1). The editor cut at 540p
+    under a full-quality original, permanently, on the machine the feature
+    exists for. Both questions are filesystem-only on purpose: this runs
+    with _API_LOCK held, so nothing here may be a bridge call.
     """
     try:
         props = media_pool_item.GetClipProperty() or {}
@@ -2891,9 +3026,19 @@ def _attach_adjacent_proxy(media_pool_item, local_path: str) -> None:
             return
     except Exception:
         return
+    original_here: Optional[bool] = None
     for candidate in proxy_relink.expected_proxy_paths(local_path):
         if not os.path.isfile(candidate):
             continue
+        if str(candidate).lower().endswith(".mp4"):
+            if original_here is None:
+                original_here = _real_original_here(local_path)
+            if original_here:
+                log.info(
+                    "resolve: not attaching %s as this clip's proxy -- that is "
+                    "the browser preview and the real file is on this computer "
+                    "(proxy-tiers-1)", candidate)
+                return
         try:
             if media_pool_item.LinkProxyMedia(candidate):
                 log.info("resolve: attached proxy %s", candidate)

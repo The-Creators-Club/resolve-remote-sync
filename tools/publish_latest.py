@@ -79,7 +79,13 @@ SOURCES = [
 
 def run(cmd, **kw):
     """Run and return (rc, stdout, stderr). Never raises on a non-zero rc."""
-    p = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    # server-tools-3 (2026-09-18b mediums): UTF-8, never the console codec.
+    # git and gh answer in UTF-8; a commit subject or a release note with one
+    # non-ASCII character otherwise raises UnicodeDecodeError out of a helper
+    # documented as never raising.
+    kw.setdefault("errors", "replace")
+    p = subprocess.run(cmd, capture_output=True, text=True,
+                       encoding=kw.pop("encoding", "utf-8"), **kw)
     return p.returncode, p.stdout, p.stderr
 
 

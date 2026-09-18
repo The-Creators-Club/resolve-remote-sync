@@ -1,0 +1,152 @@
+broll-indexer-1           medium  -> medium  CONFIRMED
+broll-indexer-2           medium  -> low     DOWNGRADED to low
+broll-indexer-3           medium  -> medium  CONFIRMED
+broll-indexer-4           low     -> low     CONFIRMED
+broll-indexer-5           low     -> low     CONFIRMED
+broll-indexer-6           low     -> low     REFUTED (as a live defect; the non-atomic write is real, the stated failure
+broll-1                   medium  -> medium  CONFIRMED
+broll-2                   medium  -> low     DOWNGRADED to low
+broll-3                   low     -> low     CONFIRMED (severity low, as reported; harm remains PLAUSIBLE)
+broll-4                   low     -> low     CONFIRMED
+broll-5                   low     -> low     CONFIRMED
+comp-app-1                medium  -> low     DOWNGRADED to low
+comp-app-2                medium  -> low     DOWNGRADED to low
+comp-app-3                medium  -> low     DOWNGRADED to low
+comp-app-4                medium  -> low     DOWNGRADED to low
+comp-app-5                low     -> low     CONFIRMED (low)
+comp-app-6                low     -> low     CONFIRMED (low)
+comp-app-7                low     -> low     REFUTED
+comp-broll-tiers-1        high    -> high    CONFIRMED (high)
+comp-broll-tiers-2        medium  -> medium  CONFIRMED (medium)
+comp-broll-tiers-3        medium  -> low     DOWNGRADED to low
+comp-broll-tiers-4        medium  -> medium  CONFIRMED (medium)
+comp-broll-tiers-5        low     -> low     CONFIRMED (low)
+comp-music-ytdl-jobs-1    medium  -> medium  CONFIRMED
+comp-music-ytdl-jobs-2    medium  -> medium  CONFIRMED (the cited test is the wrong one - see evidence)
+comp-music-ytdl-jobs-3    low     -> low     CONFIRMED (low, latent)
+comp-music-ytdl-jobs-4    low     -> low     CONFIRMED (low)
+comp-music-ytdl-jobs-5    low     -> low     CONFIRMED (low, latent - unreachable through today's only caller)
+comp-resolve-1            high    -> high    CONFIRMED (high)
+comp-resolve-2            high    -> high    CONFIRMED (high)
+comp-resolve-3            medium  -> low     DOWNGRADED to low
+comp-resolve-4            medium  -> medium  CONFIRMED (medium)
+comp-resolve-5            low     -> low     CONFIRMED (low)
+comp-resolve-6            low     -> low     NOT VERIFIED
+comp-resolve-7            low     -> low     CONFIRMED (low)
+comp-sync-1               high    -> high    CONFIRMED (high)
+comp-sync-2               medium  -> medium  CONFIRMED (medium)
+comp-sync-3               medium  -> low     DOWNGRADED to low
+comp-sync-4               low     -> low     CONFIRMED (low)
+comp-sync-5               low     -> low     CONFIRMED (low)
+comp-sync-6               low     -> low     CONFIRMED (low), with the hunter's own PLAUSIBLE confidence intact
+comp-ui-1                 medium  -> low     DOWNGRADED to low
+comp-ui-2                 medium  -> medium  CONFIRMED (medium)
+comp-ui-3                 low     -> low     CONFIRMED (low)
+comp-ui-4                 low     -> low     CONFIRMED (low)
+comp-ui-5                 low     -> low     CONFIRMED (low)
+comp-ui-6                 low     -> low     CONFIRMED (low)
+dash-api-1                high    -> high    CONFIRMED (high)
+dash-api-2                high    -> high    CONFIRMED (high)
+dash-api-3                medium  -> low     DOWNGRADED to low
+dash-api-4                low     -> low     CONFIRMED (low)
+dash-api-5                low     -> low     CONFIRMED (low)
+dash-api-6                low     -> low     CONFIRMED (low)
+dash-cards-1              high    -> high    CONFIRMED (high, as rated)
+dash-cards-2              medium  -> medium  CONFIRMED (medium, as rated)
+dash-cards-3              medium  -> medium  CONFIRMED (medium, as rated)
+dash-cards-4              medium  -> medium  CONFIRMED (medium, as rated)
+dash-cards-5              medium  -> medium  CONFIRMED (medium, as rated)
+dash-cards-6              medium  -> medium  CONFIRMED (medium, as rated)
+dash-cards-7              low     -> low     CONFIRMED (low, as rated)
+dash-cards-8              low     -> low     CONFIRMED (low, as rated)
+dash-cards-9              low     -> low     CONFIRMED (low, as rated)
+dash-collector-alerts-1   high    -> medium  DOWNGRADED to medium
+dash-collector-alerts-2   medium  -> medium  CONFIRMED (medium)
+dash-collector-alerts-3   medium  -> medium  CONFIRMED (medium)
+dash-collector-alerts-4   medium  -> medium  CONFIRMED (medium)
+dash-collector-alerts-5   low     -> low     CONFIRMED (low)
+dash-collector-alerts-6   low     -> low     CONFIRMED (low)
+dash-core-1               high    -> medium  DOWNGRADED to medium
+dash-core-2               medium  -> high    UPGRADED to high
+dash-core-3               medium  -> low     DOWNGRADED to low
+dash-core-4               low     -> low     CONFIRMED (low)
+dash-core-5               low     -> low     CONFIRMED (low)
+dash-core-6               low     -> low     CONFIRMED (low)
+dash-db-1                 medium  -> medium  CONFIRMED (medium)
+dash-db-2                 medium  -> medium  CONFIRMED (medium)
+dash-db-3                 medium  -> medium  CONFIRMED (medium as filed; the correct severity is high)
+dash-db-4                 low     -> low     CONFIRMED (low)
+dash-db-5                 low     -> low     CONFIRMED (low)
+dash-db-6                 low     -> low     NOT VERIFIED
+dash-mounts-ui-1          medium  -> low     DOWNGRADED to low
+dash-mounts-ui-2          medium  -> low     DOWNGRADED to low
+dash-mounts-ui-3          low     -> low     CONFIRMED (low, as rated)
+dash-mounts-ui-4          medium  -> medium  CONFIRMED (medium, as rated)
+dash-mounts-ui-5          medium  -> low     DOWNGRADED to low
+dash-mounts-ui-6          low     -> low     CONFIRMED (low, as rated)
+dash-release-jobs-1       medium  -> medium  CONFIRMED (medium), with two of the hunter's claims corrected
+dash-release-jobs-2       medium  -> low     DOWNGRADED to low
+dash-release-jobs-3       medium  -> low     DOWNGRADED to low
+dash-release-jobs-4       low     -> low     CONFIRMED (low), one claim corrected
+dash-release-jobs-5       low     -> low     CONFIRMED (low), with the hunter's scenario replaced
+dash-release-jobs-6       low     -> low     REFUTED
+install-onboard-1         medium  -> medium  CONFIRMED (medium)
+install-onboard-2         medium  -> medium  CONFIRMED (medium)
+install-onboard-3         low     -> low     CONFIRMED (low)
+install-onboard-4         low     -> low     CONFIRMED (low)
+install-onboard-5         low     -> low     CONFIRMED (low)
+music-1                   medium  -> medium  CONFIRMED (medium)
+music-2                   medium  -> medium  CONFIRMED (medium)
+music-3                   low     -> low     CONFIRMED (low)
+music-4                   low     -> low     CONFIRMED (low), with one leg of it weakened
+proxy-tiers-1             medium  -> medium  CONFIRMED
+proxy-tiers-2             high    -> medium  DOWNGRADED to medium
+proxy-tiers-3             high    -> medium  DOWNGRADED to medium
+proxy-tiers-4             high    -> medium  DOWNGRADED to medium
+proxy-tiers-5             medium  -> medium  CONFIRMED
+proxy-tiers-6             medium  -> medium  CONFIRMED (harm unverified, as the hunter says)
+proxy-tiers-7             low     -> low     CONFIRMED
+proxy-tiers-8             low     -> low     CONFIRMED
+regression-1              medium  -> medium  CONFIRMED (medium)
+regression-2              medium  -> medium  REFUTED
+regression-3              medium  -> low     DOWNGRADED to low
+regression-4              low     -> low     CONFIRMED (low)
+regression-5              low     -> low     CONFIRMED (low)
+regression-6              low     -> low     CONFIRMED (low)
+regression-7              low     -> low     CONFIRMED (low)
+res-companion-1           high    -> high    CONFIRMED (high)
+res-companion-2           high    -> high    CONFIRMED (high)
+res-companion-3           medium  -> medium  CONFIRMED (medium)
+res-companion-4           medium  -> medium  CONFIRMED (medium)
+res-companion-5           low     -> low     CONFIRMED (low)
+res-fleet-1               high    -> high    CONFIRMED
+res-fleet-2               medium  -> low     DOWNGRADED to low
+res-fleet-3               medium  -> medium  CONFIRMED
+res-fleet-4               medium  -> medium  CONFIRMED
+security-1                low     -> low     CONFIRMED (low)
+security-2                medium  -> medium  CONFIRMED (medium)
+security-3                low     -> low     CONFIRMED (low)
+security-4                low     -> low     DOWNGRADED to low-as-parse-cost only (severity stays low; the
+server-tools-1            medium  -> medium  CONFIRMED (medium)
+server-tools-2            medium  -> medium  CONFIRMED (medium)
+server-tools-3            low     -> low     CONFIRMED (low)
+server-tools-4            low     -> low     CONFIRMED (low)
+server-tools-5            low     -> low     CONFIRMED (low)
+tests-1                   medium  -> medium  CONFIRMED
+tests-2                   medium  -> low     DOWNGRADED to low
+tests-3                   low     -> low     CONFIRMED
+tests-4                   low     -> low     CONFIRMED
+tests-5                   low     -> low     CONFIRMED
+tests-6                   low     -> low     CONFIRMED
+wire-1                    high    -> high    CONFIRMED (high)
+wire-2                    medium  -> medium  CONFIRMED (medium)
+wire-3                    medium  -> medium  CONFIRMED (medium)
+wire-4                    low     -> low     CONFIRMED (low)
+ytdl-web-1                high    -> high    CONFIRMED (high)
+ytdl-web-2                medium  -> medium  CONFIRMED (medium)
+ytdl-web-3                medium  -> medium  CONFIRMED (medium)
+ytdl-web-4                medium  -> medium  CONFIRMED (medium)
+ytdl-web-5                medium  -> medium  CONFIRMED (medium)
+ytdl-web-6                low     -> low     CONFIRMED (low)
+ytdl-web-7                low     -> low     CONFIRMED (low)
+ytdl-web-8                low     -> low     CONFIRMED (low)

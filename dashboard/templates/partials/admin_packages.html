@@ -171,13 +171,22 @@
     <td class="mono-sm" data-label="VERSION">{{ p.version }}
       {% if p.git_dirty %}<span class="chip amber" title="built from uncommitted code">(+dirty, {{ p.git_sha or "no commit" }})</span>{% endif %}
       {% if p.state == "current" %}<span class="chip green">[ CURRENT HERE ]</span>
-      {% elif p.state == "held" %}<span class="chip">[ STAGED, NOT CURRENT ]</span>{% endif %}
+      {% elif p.state == "held" %}<span class="chip">[ STAGED, NOT CURRENT ]</span>
+      {# dash-mounts-ui-2 (2026-09-18): a version this server published from
+         different bytes is not "staged", and a recalled one must not read as
+         a build waiting to be switched on. #}
+      {% elif p.state == "conflict" %}<span class="chip amber" title="this server holds this version built from different bytes ({{ p.held_sha256 }}); see SAME VERSION, DIFFERENT BYTES below">[ SAME VERSION, DIFFERENT BYTES ]</span>
+      {% elif p.state == "recalled" %}<span class="chip amber">[ RECALLED ]</span>{% endif %}
     </td>
     <td class="muted" data-label="PUBLISHED">{{ p.published_at | ago if p.published_at else "" }}{% if p.notes %} · {{ p.notes }}{% endif %}</td>
     <td class="mono-sm muted" data-label="SIZE">{{ p.size_bytes | human_bytes }}</td>
     <td class="pkg-actions" data-label="">
       {% if p.state == "current" %}
         <span class="muted mono-sm">this server already hands this build to its fleet</span>
+      {% elif p.state == "conflict" %}
+        <span class="muted mono-sm">this server holds this version from a different build; ask the vendor for a new version number</span>
+      {% elif p.state == "recalled" %}
+        <span class="muted mono-sm">the vendor recalled this build; it cannot be made current</span>
       {% elif p.state == "held" %}
         {# Already downloaded here, waiting for a human: the action is the
            same MAKE CURRENT the section below it carries, offered where the
@@ -490,6 +499,15 @@
           <td class="mono-sm" data-label="UPDATE">
             {% if m.update_requested %}
               <span class="chip">asked for {{ m.update_requested }}</span>
+              {# CR-306 (dash-api-3, 2026-09-18b): a push this dashboard has
+                 decided it cannot send stays standing (the build may become
+                 offerable again), and nothing here said so - it rendered as
+                 "asked, waiting for its next report" for the full 14 days
+                 until the request expired. #}
+              {% if m.update_withheld %}
+                <span class="chip red" title="{{ m.update_withheld }}">[ CANNOT BE SENT ]</span>
+                <span class="muted">This computer is not being offered that build: {{ m.update_withheld }}. It still takes jobs. Withdraw the push or publish a build it can take.</span>
+              {% endif %}
               {# REL-8: "asked, waiting for its next report" and "has failed
                  this build eight times" used to render identically here. #}
               {% if m.upgrade and m.upgrade.upgrade_attempts %}

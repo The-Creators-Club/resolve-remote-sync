@@ -1109,6 +1109,14 @@ def test_without_an_insert_object_the_paths_are_the_stem_convention():
     assert tiers["edit_proxy_rel"] == "Creators_Club/ff5/Proxy/clip.mov"
     assert tiers["original_is_edit_weight"] is None
     assert tiers["geometry"] is None
+    # tests-2 (2026-09-18): and the field that actually changes the plan.
+    # `from_page` means "the dashboard LOOKED", and it was set for ANY dict
+    # before a field was read -- so an object like these made plan_insert
+    # treat a stem-convention GUESS at the editing proxy as the server's
+    # judgement that the original is too heavy, and place a stand-in for a
+    # clip nobody had weighed.
+    assert tiers["from_page"] is False
+    assert broll_server.plan_insert(False, False, tiers, wired=False)["action"]         == broll_server.PLAN_FETCH_ORIGINAL
     assert tiers["from_page"] is False
 
 
@@ -1174,15 +1182,21 @@ def test_a_malformed_insert_object_is_ignored_never_fatal(insert):
     assert tiers["geometry"] is None
 
 
-def test_an_insert_object_in_the_body_changes_nothing_about_the_insert(
+def test_an_insert_object_changes_nothing_when_the_original_is_here(
         tmp_path, worker_in_process, monkeypatch, resolve_process):
-    """Phase 3 is gated on the phase 0 spike: today the object is parsed,
-    derived and logged, and the worker is called with exactly what it was
-    called with before."""
+    """tests-3 (2026-09-18): this used to be called "an insert object changes
+    nothing about the insert" and carried a docstring saying phase 3 was
+    gated on the spike. Phase 3 shipped on 2026-09-17 and the object now
+    decides which file is fetched and imported; the test kept passing only
+    because `_mode_gate_body` writes the clip to disk, so both runs took the
+    `import_original` row of the table. That row IS still object-independent,
+    which is the thing worth pinning, and the decision table's own file
+    (test_broll_insert_tiers.py) owns the rest."""
     resolve_process(False)
     monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
 
     plain, mounts = _mode_gate_body(tmp_path)
+    assert (tmp_path / "clip.mov").is_file(), "the row this test is about"
     broll_server.build_insert_response(dict(plain), mounts)
     without = worker_in_process[0]
 
@@ -1191,6 +1205,24 @@ def test_an_insert_object_in_the_body_changes_nothing_about_the_insert(
     with_object = worker_in_process[0]
 
     assert with_object == without
+
+
+def test_an_absent_original_plus_an_insert_object_changes_the_fetch(tmp_path):
+    """The other half, and the one the old test was named after: with the
+    file NOT on disk, the object is what decides. Without it the companion
+    downloads the original (pre-phase-3 behaviour, which is the skew rule);
+    with it, the clip's own preview is placed at the original's path."""
+    rel = "Creators_Club/ff5/Day 1/clip.mov"
+    obj = _page_insert(original_rel=rel)
+
+    blind = broll_server.plan_insert(
+        False, False, broll_server.derive_insert_paths(None, rel), wired=False)
+    told = broll_server.plan_insert(
+        False, False, broll_server.derive_insert_paths(obj, rel), wired=False)
+
+    assert blind["action"] == broll_server.PLAN_FETCH_ORIGINAL
+    assert told["action"] == broll_server.PLAN_FETCH_STANDIN
+    assert told["fetch_rel"] == "Creators_Club/ff5/Day 1/Proxy/clip.mp4"
 
 
 def test_a_malformed_insert_object_does_not_400_the_request(
@@ -1206,13 +1238,20 @@ def test_a_malformed_insert_object_does_not_400_the_request(
     assert worker_in_process
 
 
-def _archive_clip_with_preview(tmp_path):
-    """A top-slot file with its adjacent Proxy/ preview, archive-style."""
+def _archive_clip_with_preview(tmp_path, ext=".mov"):
+    """A top-slot file with its adjacent Proxy/ sibling, archive-style.
+
+    `.mov` by default since proxy-tiers-1 (2026-09-18): that is the EDITING
+    proxy, and it is what the plan's table says a machine holding the
+    original should link. A `.mp4` there is the 540p browser preview, which
+    the insert must no longer attach over a real original -- the caller that
+    wants that case asks for it.
+    """
     clip = tmp_path / "clip.mov"
     clip.write_bytes(b"top slot")
     proxy_dir = tmp_path / "Proxy"
     proxy_dir.mkdir()
-    preview = proxy_dir / "clip.mp4"
+    preview = proxy_dir / f"clip{ext}"
     preview.write_bytes(b"preview")
     return clip, preview
 
@@ -1331,6 +1370,10 @@ def test_build_status_response_shape(monkeypatch):
         # what. The port comes from the socket at the route, and defaults
         # here to the one the whole product hardcodes in its URLs.
         "loopback": {"bound": True, "port": broll_server.PORT},
+        # comp-broll-tiers-5 (2026-09-18): the stand-ins whose editing proxy
+        # has given up. Empty here, and an ADDED key -- a page that has never
+        # heard of it is unaffected.
+        "standins_owed": [],
     }
 
 
@@ -1357,7 +1400,7 @@ def test_status_over_http(live_server):
     assert status == 200
     data = json.loads(body)
     assert set(data.keys()) == {"ok", "resolve_connected", "mounts", "version",
-                                "loopback"}
+                                "loopback", "standins_owed"}
     assert data["ok"] is True
     assert data["version"] == config_mod.VERSION
     # CMEDIA-3: the port is the LIVE socket's, not the configured one -- the

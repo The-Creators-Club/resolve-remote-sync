@@ -8,6 +8,7 @@ import logging
 import secrets
 import sqlite3
 from pathlib import Path
+from typing import Any, Mapping
 
 from urllib.parse import parse_qs, quote
 
@@ -321,10 +322,14 @@ CHIP_HELP: dict[str, str] = {
         "{lane} on this computer made no progress for {seconds} "
         "second(s) {killed}, {at}. A local drive that stops answering reads "
         "exactly like this."),
+    # dash-api-5 (2026-09-18): `{scope}` is the project prefix the companion
+    # scanned, prepared by `skipped_scope` below. The count is measured under
+    # ONE prefix and was stated of the whole computer, so an admin looking for
+    # four files could be looking in the wrong nine projects.
     "skipped_exists": (
         "{n} file(s) exist on the NAS under the same name at a different "
-        "size. Upload never overwrites a file already on the server, so this "
-        "computer's newer versions will never go up."),
+        "size{scope}. Upload never overwrites a file already on the server, so "
+        "this computer's newer versions will never go up."),
     "trash": (
         "{n} recoverable file(s) in this computer's .ccsync-trash. Pruned "
         "automatically after 14 days."),
@@ -389,6 +394,20 @@ def chip_help(key: str, **values) -> str:
         return text
 
 
+def skipped_scope(guard: Mapping[str, Any] | None) -> str:
+    """" (counted under Projects/FF5)", or "" when the scan said nothing.
+
+    dash-api-5 (2026-09-18). An older companion sends no subpath, and the
+    honest rendering of that is the sentence without a scope - never an
+    invented "the whole tree", which is the claim that was wrong.
+    """
+    subpath = str((guard or {}).get("skipped_exists_subpath") or "").strip()
+    if not subpath:
+        return ""
+    return f" (counted under {subpath})"
+
+
+templates.env.globals["skipped_scope"] = skipped_scope
 templates.env.globals["CHIP_HELP"] = CHIP_HELP
 templates.env.globals["chip_help"] = chip_help
 
@@ -3573,6 +3592,18 @@ def _kind_platform_groups(rows: list[dict]) -> list[dict]:
     return groups
 
 
+def _vendor_state(record: dict, mine: dict | None) -> str:
+    """One vendor record's state against what this server holds
+    (dash-mounts-ui-2, 2026-09-18). See _vendor_rows for why there are five."""
+    if mine is None:
+        return "available"
+    if mine.get("retracted"):
+        return "recalled"
+    if release_feed.sha_conflict(mine, record):
+        return "conflict"
+    return "current" if mine.get("is_current") else "held"
+
+
 def _vendor_rows(app_state, packages: dict) -> list[dict]:
     """What the vendor's channel carries, each record told apart by what THIS
     dashboard has already done with it (owner, 2026-09-11: "what is the
@@ -3615,8 +3646,26 @@ def _vendor_rows(app_state, packages: dict) -> list[dict]:
             # "available" is exactly build_feed_view's `available`: no row
             # here at all. The other two are the answer to the owner's
             # question, said on the row itself.
-            "state": ("current" if mine and mine.get("is_current")
-                      else "held" if mine else "available"),
+            #
+            # dash-mounts-ui-2 (2026-09-18): two more states, because "held"
+            # was being said of two things it is not.
+            #
+            # `conflict` is a version THIS server published from DIFFERENT
+            # bytes (release_feed.sha_conflict, the --allow-replace case).
+            # Calling that "staged, not current" says the vendor's binary is
+            # already here, which is the one thing it is not, and offers
+            # MAKE CURRENT on bytes nobody compared. `build_feed_view` has
+            # routed exactly this case into `sha_conflicts` since it was
+            # written; this row now agrees with it.
+            #
+            # `recalled` is belt and braces: `_valid_records` drops a record
+            # the channel has recalled before this can see it, so the only way
+            # here is a vendor UN-retracting a version (nothing clears
+            # `retracted_at`). Cheap, and MAKE CURRENT on a retracted row is a
+            # 409 from `package_store.make_current_refusal` anyway - a page
+            # must not offer an act it knows cannot work.
+            "state": _vendor_state(record, mine),
+            "held_sha256": str((mine or {}).get("sha256") or "")[:12],
         })
     return rows
 

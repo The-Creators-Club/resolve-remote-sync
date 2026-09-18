@@ -1022,6 +1022,31 @@ def create_url_job(req: NewUrlJob, request: Request):
                                                   else 'all of those videos'),
             'duplicates': skipped})
 
+    # ytdl-web-4 (2026-09-18): the paste door had no free-space check at all.
+    # YTWEB-9's guard lives in `start_download`, which a url job never passes
+    # through, and the worker's backstop was gated on a created-local job with
+    # YTDL_LOCAL_DOWNLOAD on - which is off in the shipped fleet. So 40 links
+    # into a project with 6 GB left produced N opaque per-clip ENOSPC
+    # failures, which is exactly what that one sentence replaced.
+    #
+    # Same helper, a different button: this page's control is GET LINKS.
+    # Measured only when the server is the executor for this paste, for the
+    # reason `start_download` gives: a created-local job is fetched onto the
+    # editor's own disk and sizing the container's mount would refuse a
+    # download that never touches it.
+    if not (config.LOCAL_DOWNLOAD and req.local):
+        try:
+            outdir = config.safe_join(config.PROJECTS_ROOT, project['label'],
+                                      db.YOUTUBE_DIR, term_dir)
+        except config.PathTraversalError:
+            outdir = None
+        if outdir is not None:
+            _refuse_if_full(
+                [v for v in videos if not v.get('duplicate_of')],
+                {'quality': req.quality, 'project_label': project['label'],
+                 'term_dir': term_dir, 'phase': 'queued'},
+                outdir, press='press GET LINKS again')
+
     job_id = db.create_url_job(
         c, user, URL_JOB_TERM, term_dir, project['slug'],
         project['label'], videos, quality=req.quality,
@@ -1152,6 +1177,17 @@ def get_job(job_id: int, request: Request):
     # same sentence. Two small counts, and only for the one phase that has a
     # wait to explain -- every other phase has counters of its own and nothing
     # to add.
+    # HOW MANY CLIPS ARE STILL OWED (ytdl-web-1, 2026-09-18b mediums). The
+    # retry offer used to be decided from the manifest the page holds, and a
+    # FAILED job never has one: `poll()` skips the manifest fetch for a
+    # terminal failure, and a page reloading onto `#job=<id>` has none at all.
+    # A job that failed before its first clip - no room, or the tree gone - was
+    # left with no retry button, which is exactly what its own failure sentence
+    # tells the editor to press. One count on the poll needs no manifest and
+    # survives a 404 from that endpoint. On the JOB dict, because
+    # `renderRetry(job)` is handed nothing else.
+    jd = db.job_dict(job)
+    jd['dl_pending'] = db.pending_download_count(c, job_id)
     wait = {}
     if job['phase'] == 'queued':
         wait = {'queued_behind': _queued_answer(c, user, job_id)['queued_behind'],
@@ -1163,7 +1199,7 @@ def get_job(job_id: int, request: Request):
         # "N terms (x en / y zh)" has always been built from (db.term_dict).
         'terms': [db.term_dict(t, hits.get(t['id'], 0))
                   for t in db.terms(c, job_id)],
-        'job': db.job_dict(job),
+        'job': jd,
         'counts': db.counts(c, job_id),
         'progress': worker.job_progress(job_id),
         'worker_alive': worker.is_alive(),
@@ -1379,6 +1415,34 @@ UNKNOWN_ESTIMATE_FLOOR = 2 * 1000 ** 3
 FREE_SPACE_FACTOR = 2
 
 
+# What ONE clip is assumed to cost when its row carries no duration. A paste
+# has no duration anywhere - `parse_url_list` produces `{video_id, url}` and a
+# KIND_URLS job runs with no enrich phase - so before this every paste, 1 link
+# or 40, collapsed to the flat UNKNOWN_ESTIMATE_FLOOR below and "40 links into
+# a project with 6 GB left" was accepted on both the press and the executor
+# (ytdl-web-2, 2026-09-18b mediums). Three minutes is the conservative end of
+# a YouTube clip, taken at the job's own rung, and it only ever RAISES the
+# need, so the flat floor still governs a single pasted link.
+TYPICAL_CLIP_SECONDS = 180
+
+
+def space_needed(rows, quality):
+    """-> (estimate_bytes, need_bytes). 0 estimate = nothing measurable.
+
+    ONE place, because both the press guard and the worker's backstop quote
+    these numbers and a floor added to only one of them is not a floor.
+    """
+    estimate = estimated_bytes(rows, quality)
+    if estimate:
+        return estimate, estimate * FREE_SPACE_FACTOR
+    rate = BYTES_PER_SECOND.get(str(quality or ''), BYTES_PER_SECOND['1080p'])
+    # Per CLIP, with no headroom factor on top: the count is already a guess,
+    # and doubling a guess is how a check that should refuse 40 links starts
+    # refusing 3 that would have fit.
+    return 0, max(UNKNOWN_ESTIMATE_FLOOR,
+                  len(rows) * rate * TYPICAL_CLIP_SECONDS)
+
+
 def estimated_bytes(rows, quality):
     """Roughly how much disk `rows` will take at `quality`. 0 = cannot tell."""
     rate = BYTES_PER_SECOND.get(str(quality or ''), BYTES_PER_SECOND['1080p'])
@@ -1491,18 +1555,21 @@ def _gb(n):
     return f'{gb:.1f} GB' if gb < 10 else f'{round(gb)} GB'
 
 
-def _refuse_if_full(rows, job, outdir):
+def _refuse_if_full(rows, job, outdir, press='press DOWNLOAD again'):
     """Raise the 409 that names the path and the two numbers, or return None.
 
     Fails OPEN on anything it cannot measure. The point is to turn "N opaque
     per-clip errors" into one sentence before a byte is fetched, not to become
     a new way for a download to be impossible.
+
+    `press` is the caller's own button (ytdl-web-4, 2026-09-18): the paste page
+    has no DOWNLOAD button, and a refusal that names a control the editor
+    cannot see is the same defect as ytdl-web-3 one screen over.
     """
     free = free_bytes_at(outdir)
     if free is None:
         return None
-    estimate = estimated_bytes(rows, job['quality'])
-    need = (estimate * FREE_SPACE_FACTOR) if estimate else UNKNOWN_ESTIMATE_FLOOR
+    estimate, need = space_needed(rows, job['quality'])
     if free >= need:
         return None
     # A REFUSAL is the one answer that must be measured against the tree
@@ -1534,7 +1601,7 @@ def _refuse_if_full(rows, job, outdir):
     raise HTTPException(409, {
         'detail': (f'there is only {_gb(free)} free where these clips go '
                    f'({where}), and {size}, so nothing was started. '
-                   f'Free some space and press DOWNLOAD again.'),
+                   f'Free some space and {press}.'),
         'phase': job['phase'], 'reason': 'disk_full',
         'free_bytes': int(free), 'estimate_bytes': int(estimate)})
 
@@ -1568,6 +1635,48 @@ def _named_under_the_root(label):
         return False
 
 
+def tree_is_gone(job):
+    """Is the destination NOT the footage tree? True only when it is PROVEN.
+
+    ytdl-web-2 / ytdl-web-5 (2026-09-18) pulled this out of
+    `_refuse_if_the_tree_is_gone` so the two answers that are not an
+    HTTPException can ask the same question: the worker (which runs on a
+    thread, where raising a 409 means nothing) and the download phase itself.
+
+    Fails CLOSED on the word "gone": everything it cannot measure answers
+    False, so an unreadable root, a traversal refusal or a listing that raises
+    is never a reason to stop a download.
+    """
+    try:
+        project_dir = config.safe_join(config.PROJECTS_ROOT, job['project_label'])
+    except config.PathTraversalError:
+        return False
+    try:
+        if project_dir.is_dir():
+            return False
+        # The ROOT itself has to be readable before its emptiness means
+        # anything: a container whose bind mount is simply not there yet
+        # (boot order) must not have its downloads refused.
+        if not Path(config.PROJECTS_ROOT).is_dir():
+            return False
+    except OSError:
+        return False
+    # CR-90: a label a Mac reported is NFD and the NAS writes NFC, so the
+    # is_dir() above answers False for a folder that is there.
+    return not _named_under_the_root(job['project_label'])
+
+
+def tree_missing_note(job):
+    """The sentence a vanished share earns, or None, for a caller that cannot
+    raise (ytdl-web-2, 2026-09-18). Same words as the 409, minus its button."""
+    if not tree_is_gone(job):
+        return None
+    return (f'the footage tree is not there: nothing at '
+            f'{config.PROJECTS_ROOT} looks like {job["project_label"]}, so '
+            f'nothing was fetched. This is the server having lost the share, '
+            f'not a full disk. Tell whoever runs the dashboard.')
+
+
 def _refuse_if_the_tree_is_gone(job):
     """Raise the 409 that names the MOUNT, or return None (ytdl-web-1).
 
@@ -1577,13 +1686,7 @@ def _refuse_if_the_tree_is_gone(job):
     impossible. What it prevents is the WRONG SENTENCE -- an editor sent to
     delete footage because a vanished share measured as a full disk.
     """
-    try:
-        project_dir = config.safe_join(config.PROJECTS_ROOT, job['project_label'])
-    except config.PathTraversalError:
-        return None
-    if project_dir.is_dir():
-        return None
-    if _named_under_the_root(job['project_label']):
+    if not tree_is_gone(job):
         # A path a Mac reported is not `==` a path anything else reported
         # (CR-90, CLAUDE.md): a label that reached this database from a Mac is
         # NFD, the NAS writes NFC, and is_dir() answers False for a folder that

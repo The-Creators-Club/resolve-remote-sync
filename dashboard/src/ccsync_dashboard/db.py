@@ -20,7 +20,7 @@ import secrets
 import sqlite3
 import unicodedata
 from pathlib import Path
-from typing import Any, Container, Iterable, Mapping
+from typing import Any, Container, Iterable, Mapping, Sequence
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
@@ -624,7 +624,26 @@ def parse_iso(ts: str) -> dt.datetime:
 
 
 def age_seconds(ts: str, now: str) -> float:
-    return (parse_iso(now) - parse_iso(ts)).total_seconds()
+    """How old `ts` is at `now`, in seconds. Raises ValueError on garbage.
+
+    live-3 (2026-09-18): a NAIVE timestamp on either side is read as UTC
+    rather than exploding. `datetime - datetime` across naive and aware
+    raises TypeError, which is NOT what any caller here guards against -
+    `sessions.validate` catches ValueError only - so one `auth_sessions` row
+    whose `created_at` had no timezone (the minted-session recipe writes one,
+    and so did older builds) turned EVERY request carrying that cookie into an
+    unhandled 500: the admin could not even reach /login, and the only way out
+    was clearing the browser cookie by hand. Seen live on 2026-09-17. Every
+    timestamp this product writes is UTC, so reading a naive one as UTC is the
+    truth in every case we can construct, and a second off is worth nothing
+    beside a page that will not load.
+    """
+    then, at = parse_iso(ts), parse_iso(now)
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=dt.timezone.utc)
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=dt.timezone.utc)
+    return (at - then).total_seconds()
 
 
 # SYS-4 / APP-13 (resilience sweep 2026-08-28). A companion's own wall clock
@@ -1771,6 +1790,105 @@ SCHEMA_V53 = """
 ALTER TABLE file_moves ADD COLUMN source TEXT NOT NULL DEFAULT 'admin';
 """
 
+# v54: THE THREE THINGS THE 2026-09-18 SECOND WAVE NEEDED, in ONE step,
+# because a schema number is a shared resource and three findings that each
+# take one is how a fleet ends up running four migrations for an afternoon's
+# work (the v50 precedent).
+#
+# `nas_media_pending_moves` is dash-collector-alerts-1. The collector walks at
+# most `inventory_projects_per_cycle` (8) projects a cycle through a rotating
+# cursor, and a hand move BETWEEN two projects is a vanish in one project's
+# walk and an appearance in another's: on a fleet with more than 8 active
+# projects the two halves fall in different passes, and `replace_nas_media`
+# has already destroyed the only record of the old paths by the time the
+# second half arrives. So the halves a pass cannot pair are kept HERE, keyed
+# by the same (basename, size, mtime_ns) a within-pass match uses, and paired
+# on a later cycle. Nothing here is evidence of a move on its own; it ages out
+# in `prune` after PENDING_MOVE_HALF_MAX_AGE_DAYS, which is why the table
+# carries `seen_at` and why the primary key is the half itself.
+#
+# `ix_nas_media_identity` is dash-collector-alerts-1's corroboration
+# (2026-09-18b): before a carried half is believed, the tree is asked whether
+# another file of the same (basename, size, mtime_ns) is sitting somewhere
+# else right now, which is what tells a hand MOVE from a COPY whose original
+# was deleted a day later. On the identity columns rather than on basename
+# because a full `nas_media` scan per half is what this query would otherwise
+# be, on the collector's own thread, with the report path waiting on the same
+# database.
+#
+# `broll_standins` is proxy-tiers-4's dashboard half: a stand-in is placed on
+# the REMOTE editor's machine and the ledger row is written there, so the
+# wired rig that later opens the project has no way to know a clip was born
+# from one. Keyed by the NFC ARCHIVE-relative path of the original
+# (`media_rel_key`), never an absolute path: the vault is a drive letter on
+# one machine and a container mount on another.
+#
+# `machine_state.skipped_exists_subpath` is dash-api-5: the count is measured
+# per project prefix by the companion and was stored and rendered as a fact
+# about the whole computer. The scope travels with the count from here on, so
+# the sentence an admin reads names what was actually scanned.
+SCHEMA_V54 = """
+CREATE TABLE IF NOT EXISTS nas_media_pending_moves (
+  half        TEXT NOT NULL,
+  base        TEXT NOT NULL,
+  size        INTEGER NOT NULL,
+  mtime_ns    INTEGER NOT NULL,
+  slug        TEXT NOT NULL,
+  project_rel TEXT NOT NULL,
+  rel_path    TEXT NOT NULL,
+  raw_path    TEXT NOT NULL,
+  seen_at     TEXT NOT NULL,
+  PRIMARY KEY (half, base, size, mtime_ns, slug, rel_path)
+);
+CREATE INDEX IF NOT EXISTS ix_pending_moves_key
+  ON nas_media_pending_moves(base, size, mtime_ns);
+CREATE INDEX IF NOT EXISTS ix_nas_media_identity
+  ON nas_media(size, mtime_ns);
+CREATE TABLE IF NOT EXISTS broll_standins (
+  archive_rel     TEXT NOT NULL,
+  editor_username TEXT NOT NULL,
+  machine         TEXT NOT NULL,
+  first_seen      TEXT NOT NULL,
+  last_seen       TEXT NOT NULL,
+  PRIMARY KEY (archive_rel, editor_username, machine)
+);
+CREATE INDEX IF NOT EXISTS ix_broll_standins_machine
+  ON broll_standins(editor_username, machine);
+ALTER TABLE machine_state ADD COLUMN skipped_exists_subpath TEXT;
+-- ...and `disk_floor_bytes`, which completes dash-collector-alerts-6 rather
+-- than guessing at it. `lane_guard.DiskFloorLatch.report()` has sent
+-- `floor_bytes` on `sync_guard.disk_floor` all along and `DiskFloorIn`
+-- declares it; nothing stored it, so the dashboard compared every machine's
+-- free space against its own DISK_RED_FREE_BYTES - the DEFAULT of a
+-- per-machine config key. An editor who raised the floor to 60 GB was parked
+-- and this server said nothing; one who lowered it to 5 GB was told proxy
+-- download had stopped itself while it was still downloading.
+ALTER TABLE machine_state ADD COLUMN disk_floor_bytes INTEGER;
+"""
+
+# v55: WHY A PUSHED UPDATE IS NOT BEING SENT (CR-306 / dash-api-3, bug hunt
+# 2026-09-18b). res-fleet-2 taught the report handler to WITHHOLD
+# `commands.upgrade` for a build this machine is not being offered (retracted,
+# needing a newer dashboard, built for another processor) and to leave the
+# request standing, because the build may become offerable again. But
+# `jobs.fleet_facts`/`machine_facts` read `upgrading` from
+# `update_requested_version` alone, and `policy()` refuses EVERY job kind to a
+# machine that is upgrading - so a push that could never be delivered took
+# that computer out of the whisper/proxy/audio-extract/peaks fleet for the
+# full 14 days of `MACHINE_UPDATE_REQUEST_MAX_AGE_DAYS`, and nothing said so.
+#
+# The verdict can only be computed where the report payload is (running
+# version, platform, arch - `machines` stores no arch), so it is computed
+# there and PERSISTED here. NULL or '' means "not decided", which every
+# reader takes as upgrading: fail CLOSED, because the upgrade the refusal
+# protects a job from may really be about to happen. A non-empty sentence is
+# the reason the build is not being offered, and it is what lifts the
+# refusal - and what the Packages page shows the admin so they can withdraw
+# the push.
+SCHEMA_V55 = """
+ALTER TABLE machines ADD COLUMN update_requested_withheld TEXT;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1906,6 +2024,14 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # 2026-09-11). One column with a default that reads every existing row
     # correctly, and gapless like every one before it.
     (53, SCHEMA_V53),
+    # 54: the second wave of the 2026-09-18 fix pass (the cross-cycle move
+    # halves, the fleet's stand-in facts, the scope of a skipped-exists
+    # count). ONE number for three findings, and gapless like every one
+    # before it.
+    (54, SCHEMA_V54),
+    # 55: why a pushed update is not being sent (CR-306 / dash-api-3,
+    # 2026-09-18b). One nullable column, and gapless like every one before it.
+    (55, SCHEMA_V55),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -3322,6 +3448,45 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
         "this server's own background tasks have crashed since it started",
         "href": "/admin/diagnostics/crash-reports.zip",
         "href_label": "[ DOWNLOAD CRASH REPORTS ]"},
+    # dash-db-2 = dash-collector-alerts-5 (2026-09-18). The 2026-09-17
+    # busy-database rework added two writers (`notices.record_db_busy`,
+    # `notices.record_slow_write`) and no registry rows, which is the mirror
+    # image of the finding this registry was BUILT for: not a false [ OK ],
+    # but a condition the server does check and never lists. The cost was
+    # visible: `ui.py`'s health rows take a row's TITLE from `notice_kinds()`
+    # and fall back to the raw key, so an operator under contention read a
+    # problem card headed `db_busy` with no [ TAKE ME THERE ]. Registered here
+    # WITH their check-time writers (CLAUDE.md's rule): `_timed` stamps all
+    # three on every clean collector pass, or a healthy fleet would read
+    # [ NOT CHECKED ] for ever.
+    "db_busy": {"severity": "warn", "what":
+        "a page or a companion was told to try again because the database was busy",
+        "href": "/fleet#fleet-diagnostics"},
+    "slow_write": {"severity": "warn", "what":
+        "one write held the database longer than a request waits, so others waited on it",
+        "href": "/fleet#fleet-diagnostics"},
+    # dash-db-1 = dash-collector-alerts-4 (2026-09-18): a collector pass that
+    # took a long time is NOT a write that held the lock - `_record_inventory`'s
+    # own docstring says every filesystem walk happens BEFORE the first write,
+    # deliberately, and the syncthing pass spends its time on HTTP. It used to
+    # be filed as a `slow_write` whose body asserted the lock claim as fact.
+    # Its own kind, its own words, and a pass under the threshold CLEARS it.
+    "slow_poll": {"severity": "warn", "what":
+        "one of this server's background passes is taking longer than a cycle",
+        "href": "/fleet#fleet-diagnostics"},
+    # dash-collector-alerts-2 (2026-09-18). Written by
+    # `notices.record_moves_dropped` from the inventory pass, whose
+    # `mark_notice_checked("file_move_detected")` is the evidence that the
+    # pass ran - this kind shares that pass, so it is stamped there too.
+    "file_moves_dropped": {"severity": "error", "what":
+        "more file moves were made on the server in one go than could be followed",
+        "href": "/projects"},
+    # proxy-tiers-3's dashboard half (2026-09-18, owed here by
+    # companion-media). Written by `notices._check_broll_archive`.
+    "broll_archive_unreadable": {"severity": "error", "what":
+        "this server cannot list the b-roll archive, so every clip sent to "
+        "Resolve is the small preview",
+        "href": "/broll"},
 }
 
 
@@ -3900,7 +4065,8 @@ def enforce_notes(
     ]
 
 
-def collector_health(conn: sqlite3.Connection, now: str | None = None) -> dict[str, Any]:
+def collector_health(conn: sqlite3.Connection, now: str | None = None,
+                     settings: Any | None = None) -> dict[str, Any]:
     """Per-kind last poll WITH its note, plus the alarms (DASH-14).
 
     `poll_runs.error` carries a note on a SUCCESSFUL run too (the mechanism
@@ -3909,7 +4075,11 @@ def collector_health(conn: sqlite3.Connection, now: str | None = None) -> dict[s
     nothing" outcomes that read as "I reconciled everything" when only `ok` is
     rendered. A kind with a note is amber, not green.
     """
-    status = fetch_collector_status(conn, now=now)
+    # regression-5 (2026-09-18): `settings` when the caller has it, so a site
+    # WITH Syncthing keeps the 180 s bound even before its Syncthing-backed
+    # kinds have run. None is the page renderers, which read it off the
+    # database instead (collector_stale_bound).
+    status = fetch_collector_status(conn, now=now, settings=settings)
     kinds = []
     for kind, run in sorted(status["kinds"].items()):
         note = (run.get("error") or "").strip() or None
@@ -4809,9 +4979,16 @@ def request_machine_update(
         if row is not None:
             from_version = str(row["companion_version"] or "")
     cur = conn.execute(
+        # `update_requested_withheld` NULLED here (CR-306, 2026-09-18b): a NEW
+        # push is UNDECIDED, and undecided reads as upgrading. The verdict
+        # belongs to the machine's next report, which is the only place that
+        # knows what it is running and on what processor; a stale one from a
+        # previous push would otherwise let a job start under a build that is
+        # about to be swapped under it.
         """UPDATE machines
               SET update_requested_version=?, update_requested_at=?,
-                  update_requested_by=?, update_requested_from=?
+                  update_requested_by=?, update_requested_from=?,
+                  update_requested_withheld=NULL
             WHERE editor_username=? AND machine=?""",
         (version, now, requested_by, str(from_version or "") or None,
          editor, machine),
@@ -4832,7 +5009,8 @@ def clear_machine_update_request(
     conn.execute(
         """UPDATE machines
               SET update_requested_version=NULL, update_requested_at=NULL,
-                  update_requested_by=NULL, update_requested_from=NULL
+                  update_requested_by=NULL, update_requested_from=NULL,
+                  update_requested_withheld=NULL
             WHERE editor_username=? AND machine=?""",
         (editor, machine),
     )
@@ -4844,7 +5022,8 @@ def machine_update_request(
     row = conn.execute(
         """SELECT update_requested_version AS version, update_requested_at AS at,
                   update_requested_by AS by_user,
-                  update_requested_from AS from_version
+                  update_requested_from AS from_version,
+                  update_requested_withheld AS withheld
              FROM machines WHERE editor_username=? AND machine=?""",
         (editor, machine),
     ).fetchone()
@@ -4855,7 +5034,32 @@ def machine_update_request(
     # pusher say where this machine was", and "the column is NULL" and "the
     # caller did not say" have to be the same answer - the old, safe one.
     out["from_version"] = str(out.get("from_version") or "")
+    # "" and not None here too (CR-306, 2026-09-18b): empty is "this dashboard
+    # has not decided that the push cannot be sent", which every job reader
+    # takes as upgrading. Only a sentence lifts the job refusal.
+    out["withheld"] = str(out.get("withheld") or "")
     return out
+
+
+def set_machine_update_withheld(
+    conn: sqlite3.Connection, editor: str, machine: str, reason: str
+) -> bool:
+    """Record (or clear) WHY the pushed update is not being sent to this
+    machine (CR-306 / dash-api-3, 2026-09-18b). Returns whether it wrote.
+
+    A sentence means the report handler asked `_machine_can_be_offered` and
+    the answer was no; '' means undecided or offerable again, which reads as
+    upgrading. Written only on a CHANGE, and deliberately NOT audited: the
+    report handler can reach this every 30 s for every machine with a standing
+    push, and an audit row per report cycle would bury the ledger."""
+    value = str(reason or "").strip() or None
+    cur = conn.execute(
+        """UPDATE machines SET update_requested_withheld=?
+            WHERE editor_username=? AND machine=?
+              AND COALESCE(update_requested_withheld,'') != COALESCE(?,'')""",
+        (value, editor, machine, value),
+    )
+    return cur.rowcount > 0
 
 
 def request_lane_b_resume(
@@ -5189,9 +5393,13 @@ def expire_machine_update_requests(conn: sqlite3.Connection, now: str) -> int:
     ).fetchall()
     for row in rows:
         conn.execute(
+            # `update_requested_withheld` goes with it (CR-306): the verdict
+            # is about the request, so a row that outlived its request would
+            # keep a machine's next push looking already-refused.
             """UPDATE machines
                   SET update_requested_version=NULL, update_requested_at=NULL,
-                      update_requested_by=NULL, update_requested_from=NULL
+                      update_requested_by=NULL, update_requested_from=NULL,
+                      update_requested_withheld=NULL
                 WHERE editor_username=? AND machine=?""",
             (row["editor_username"], row["machine"]),
         )
@@ -5459,11 +5667,31 @@ FILE_MOVE_UNDONE = "undone"        # a later move put it back (UX-11)
 # The states a MACHINE can be in beyond applied/not (v36, RES-1).
 FILE_MOVE_TARGET_RETRYING = "retrying"
 FILE_MOVE_TARGET_BLOCKED = "blocked"
+# res-fleet-3 (2026-09-18, HAND_MOVES_ON_THE_SERVER.md section 4b): the
+# machine holds the file and does NOT sync the destination project, so it
+# trashed its copy locally instead of creating a directory with no
+# `.ccsync-project` marker - a permanent invisible orphan that used to be
+# reported as done. TERMINAL and ok=True: the command is answered and must not
+# be re-sent, because nothing about that machine is going to change. It is not
+# `blocked` (that is a machine that ran out of attempts at something it should
+# have managed) and it is not a plain success (nothing arrived anywhere).
+FILE_MOVE_TARGET_NOT_SYNCED_HERE = "not_synced_here"
 # Who asked for the move (v53, docs/HAND_MOVES_ON_THE_SERVER.md). 'admin' is
 # the project page's button; 'detected' is a move somebody made by hand on the
 # NAS that the inventory walk recognised afterwards.
 FILE_MOVE_SOURCE_ADMIN = "admin"
 FILE_MOVE_SOURCE_DETECTED = "detected"
+
+
+def _like_prefix(value: str) -> str:
+    """A literal string, safe to use as the prefix of a LIKE pattern.
+
+    dash-db-4 (2026-09-18). Escape the escape character FIRST, or a path
+    containing a backslash escapes the character after it. Used with
+    `ESCAPE '\\'`.
+    """
+    return (str(value).replace("\\", "\\\\")
+            .replace("%", "\\%").replace("_", "\\_"))
 
 
 def file_move_target_machines(
@@ -5493,10 +5721,19 @@ def file_move_target_machines(
         if machine:
             targets.add((editor, machine))
     media_key = media_rel_key(from_rel)
+    # dash-db-4 (2026-09-18): the prefix is ESCAPED. `_` is a single-character
+    # wildcard in SQL LIKE and is in half the folder names this product
+    # handles (`Gold_Card_Meetup`, `A_001`), and `%` is legal in a filename
+    # too - so a directory move of `Gold_Card_Meetup` also matched any sibling
+    # of the same length differing only where an underscore sits, and that
+    # machine was sent a `commands.file_moves` entry for a file it does not
+    # hold. The companion's not-found arm answers harmlessly, but the move's
+    # per-machine progress row on the project page was wrong, and the next
+    # reader of this predicate would inherit the over-match.
     for row in conn.execute(
         """SELECT DISTINCT editor_username, machine FROM editor_media
-            WHERE project_slug=? AND (rel_path=? OR rel_path LIKE ?)""",
-        (from_slug, media_key, media_key + "/%"),
+            WHERE project_slug=? AND (rel_path=? OR rel_path LIKE ? ESCAPE '\\')""",
+        (from_slug, media_key, _like_prefix(media_key) + "/%"),
     ):
         targets.add((row["editor_username"], row["machine"]))
     return sorted(targets)
@@ -5614,9 +5851,76 @@ def unfinished_file_moves(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         "SELECT * FROM file_moves WHERE state=? ORDER BY id", (FILE_MOVE_PENDING,))]
 
 
+# dash-db-2 (2026-09-18b). How long a former hostname has to have been silent
+# before a command filed under it is read as THIS computer's. The value is
+# health.STALE_REPORT_SECONDS and is spelled again here because `health`
+# imports `db`, never the reverse; api.CLONE_ADOPTION_WINDOW_SECONDS is the
+# same window, and the two are the same rule seen from two sides.
+COMMAND_IDENTITY_QUIET_SECONDS = 5 * 60
+
+
+def machine_row_is_live(
+    row: Mapping[str, Any], now: str,
+    window: float = COMMAND_IDENTITY_QUIET_SECONDS,
+) -> bool:
+    """Did this registry row report inside the window (SYS-18a's predicate).
+
+    Measured on `last_seen`, which upsert_machine fills from the SERVER's
+    `received_at` and never from the companion's own clock (SYS-4): a machine
+    whose clock is set to 2098 must not be able to declare itself fresh, nor
+    one set to 1999 have a live twin read as quiet. An unreadable timestamp
+    is NOT live: "cannot tell" is not evidence of two running computers.
+    """
+    try:
+        age = age_seconds(str(row.get("last_seen") or ""), now)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age <= window
+
+
+def command_machine_names(
+    conn: sqlite3.Connection, editor: str, machine: str, machine_id: str | None = None,
+    now: str | None = None,
+) -> list[str]:
+    """Every hostname a command for THIS COMPUTER may be filed under.
+
+    res-fleet-4 (2026-09-18). `file_move_targets` and `resolve_undo_requests`
+    are keyed on the hostname, and a rename leaves them under the old one:
+    SYS-18a deliberately defers the adoption that re-keys them by a report or
+    two (a rename and a cloned disk look identical for the first minute), and
+    a lane A pass inside that window puts the file straight back at the path
+    the admin cleared. So the offer looks under the former names of the SAME
+    `machine_id` as well as under this one.
+
+    IDENTITY ONLY, never the editor's other computers: a machine that never
+    held the file must not be told to move it (the verifier's caution on
+    res-fleet-3). No `machine_id` - an older companion, or a report that could
+    not read its own id file - answers with this hostname alone, which is the
+    behaviour every build has had until now.
+
+    ONLY QUIET FORMER NAMES (dash-db-2, 2026-09-18b). SYS-18a's clone refusal
+    leaves TWO LIVE rows on one `machine_id` for as long as a copied disk
+    keeps reporting, by design, so "same identity" on its own hands each twin
+    the other's file moves and the other's Resolve undos - an editor's project
+    mutated by a command addressed to a different computer. A former name is
+    by definition silent; a twin is by definition not. Under-acting is the
+    SYS-18a rule, and it costs at most the few minutes before the old name
+    goes quiet and `adopt_renamed_machine` re-keys the rows properly - against
+    the fleet-wide damage of a command executed on the wrong machine.
+    """
+    names = [machine]
+    at = now or utcnow_iso()
+    for row in machines_by_machine_id(conn, editor, (machine_id or "").strip()):
+        other = str(row["machine"] or "")
+        if other and other not in names and not machine_row_is_live(row, at):
+            names.append(other)
+    return names
+
+
 def pending_file_moves(
     conn: sqlite3.Connection, editor: str, machine: str, now: str,
     max_age_days: int = FILE_MOVE_MAX_AGE_DAYS, limit: int = FILE_MOVE_COMMAND_LIMIT,
+    machine_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """The moves this computer has not yet reported applying, oldest first.
 
@@ -5635,15 +5939,21 @@ def pending_file_moves(
     telling a machine to follow it would be telling it to follow a move that
     may not have happened."""
     del max_age_days  # kept for callers; delivery, not age, is the bound now
+    # res-fleet-4: `target_machine` is the KEY the row is filed under, which
+    # after a rename is not the reporting hostname. Every writer that answers
+    # this offer has to stamp the row it was read from.
+    names = command_machine_names(conn, editor, machine, machine_id, now=now)
+    placeholders = ",".join("?" for _ in names)
     rows = conn.execute(
-        """SELECT m.id, m.from_slug, m.from_project_rel, m.from_rel,
+        f"""SELECT m.id, m.from_slug, m.from_project_rel, m.from_rel,
                   m.to_slug, m.to_project_rel, m.to_rel, m.is_dir,
-                  m.requested_by, m.requested_at
+                  m.requested_by, m.requested_at, t.machine AS target_machine
              FROM file_move_targets t JOIN file_moves m ON m.id = t.move_id
-            WHERE t.editor_username=? AND t.machine=? AND t.applied_at IS NULL
+            WHERE t.editor_username=? AND t.machine IN ({placeholders})
+              AND t.applied_at IS NULL
               AND t.expired_at IS NULL AND m.state IN (?, ?)
             ORDER BY m.id LIMIT ?""",
-        (editor, machine, FILE_MOVE_DONE, FILE_MOVE_PARTIAL, limit),
+        (editor, *names, FILE_MOVE_DONE, FILE_MOVE_PARTIAL, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -5724,10 +6034,31 @@ def mark_file_moves_delivered(
         )
 
 
+def file_move_answer_names(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    machine_id: str | None, now: str,
+) -> list[str]:
+    """The hostnames an ANSWER from this computer may retire a row under.
+
+    dash-db-1 / res-fleet-1 (2026-09-18b). res-fleet-4 taught the OFFER and
+    the delivery stamp to look under the former names of the same
+    `machine_id`; the three writers that record the machine's ANSWER still
+    matched the REPORTING hostname, so a command offered under the former
+    name was executed and its answer updated zero rows - the row kept
+    `applied_at IS NULL`, the same move rode every report for ever, and
+    `expire_delivered_file_moves` finally raised a warn for a move that HAD
+    been applied. Answer and offer have to read the same set or the command
+    can never be retired, so this is `command_machine_names` and nothing
+    else: one function, one liveness rule (dash-db-2), two directions.
+    """
+    return command_machine_names(conn, editor, machine, machine_id, now=now)
+
+
 def mark_file_move_applied(
     conn: sqlite3.Connection, move_id: int, editor: str, machine: str,
     ok: bool, detail: str | None, now: str, state: str | None = None,
     attempts: int | None = None, relink_pending: bool = False,
+    machine_id: str | None = None,
 ) -> bool:
     """The machine's answer.
 
@@ -5741,23 +6072,32 @@ def mark_file_move_applied(
     neither and keeps the original meaning: a failure is an answer.
 
     `relink_pending` (RES-10) means the copy moved but the project that
-    references it was not open, so Resolve has not been repointed yet."""
+    references it was not open, so Resolve has not been repointed yet.
+
+    `machine_id` (dash-db-1, 2026-09-18b) retires the row under whichever of
+    THIS computer's hostnames it is filed under - see
+    `file_move_answer_names`. Absent, the reporting hostname alone, which is
+    every companion older than the report that carries an id."""
+    names = file_move_answer_names(conn, editor, machine, machine_id, now)
+    placeholders = ",".join("?" for _ in names)
     if state == FILE_MOVE_TARGET_RETRYING:
         cur = conn.execute(
-            """UPDATE file_move_targets SET state=?, attempts=?, last_error=?, detail=?
-                WHERE move_id=? AND editor_username=? AND machine=? AND applied_at IS NULL""",
+            f"""UPDATE file_move_targets SET state=?, attempts=?, last_error=?, detail=?
+                WHERE move_id=? AND editor_username=? AND machine IN ({placeholders})
+                  AND applied_at IS NULL""",
             (state, int(attempts or 0), (detail or "")[:512] or None,
-             (detail or "")[:512] or None, move_id, editor, machine),
+             (detail or "")[:512] or None, move_id, editor, *names),
         )
         return cur.rowcount > 0
     cur = conn.execute(
-        """UPDATE file_move_targets
+        f"""UPDATE file_move_targets
               SET applied_at=?, ok=?, detail=?, state=?, attempts=?,
                   last_error=?, relink_pending=?, expired_at=NULL
-            WHERE move_id=? AND editor_username=? AND machine=? AND applied_at IS NULL""",
+            WHERE move_id=? AND editor_username=? AND machine IN ({placeholders})
+              AND applied_at IS NULL""",
         (now, int(bool(ok)), (detail or "")[:512] or None, state,
          int(attempts or 0), None if ok else (detail or "")[:512] or None,
-         int(bool(relink_pending)), move_id, editor, machine),
+         int(bool(relink_pending)), move_id, editor, *names),
     )
     return cur.rowcount > 0
 
@@ -5936,7 +6276,8 @@ def request_resolve_undo(
 
 def pending_resolve_undos(
     conn: sqlite3.Connection, editor: str, machine: str,
-    limit: int = RESOLVE_UNDO_COMMAND_LIMIT,
+    limit: int = RESOLVE_UNDO_COMMAND_LIMIT, machine_id: str | None = None,
+    now: str | None = None,
 ) -> list[dict[str, Any]]:
     """The undos this computer has not answered yet, oldest first.
 
@@ -5944,12 +6285,21 @@ def pending_resolve_undos(
     command is harmless because the companion refuses a journal that is not
     where the command says, and the machine that has not answered is exactly
     the one still holding the wrong clip paths."""
+    # res-fleet-4: the same former-hostname fallback pending_file_moves has.
+    # `now` is the SERVER's received_at on the report path (dash-db-2: the
+    # quiet test is measured against it); a caller with no clock of its own
+    # gets this one, which is the same instant to within a report.
+    names = command_machine_names(conn, editor, machine, machine_id,
+                                  now=now or utcnow_iso())
+    placeholders = ",".join("?" for _ in names)
     return [dict(r) for r in conn.execute(
-        """SELECT id, journal_id, project_name, requested_by, requested_at
+        f"""SELECT id, journal_id, project_name, requested_by, requested_at,
+                  machine AS target_machine
              FROM resolve_undo_requests
-            WHERE editor_username=? AND machine=? AND applied_at IS NULL
+            WHERE editor_username=? AND machine IN ({placeholders})
+              AND applied_at IS NULL
             ORDER BY id LIMIT ?""",
-        (editor, machine, int(limit)),
+        (editor, *names, int(limit)),
     )]
 
 
@@ -5967,7 +6317,7 @@ def mark_resolve_undos_delivered(
 def mark_resolve_undo_applied(
     conn: sqlite3.Connection, request_id: int, editor: str, machine: str,
     ok: bool, detail: str, now: str, state: str | None = None,
-    attempts: int | None = None,
+    attempts: int | None = None, machine_id: str | None = None,
 ) -> bool:
     """The machine's answer.
 
@@ -5981,20 +6331,30 @@ def mark_resolve_undo_applied(
     an honest label: the companion did not attempt anything because no
     project is open. A companion too old to say `parked` sends `retrying`
     with the reason in `detail`, which is why this is additive and not a
-    rename."""
+    rename.
+
+    `machine_id` (dash-db-1, 2026-09-18b) is the answer half of res-fleet-4:
+    an undo offered under this computer's former hostname is REPLAYED against
+    the editor's Resolve, so an answer that retires nothing means the admin's
+    undo is asked for again every thirty seconds. Same name set as the offer
+    (`file_move_answer_names`), same liveness rule."""
+    names = file_move_answer_names(conn, editor, machine, machine_id, now)
+    placeholders = ",".join("?" for _ in names)
     if state in RESOLVE_UNDO_OPEN_STATES:
         cur = conn.execute(
-            """UPDATE resolve_undo_requests SET state=?, attempts=?, detail=?
-                WHERE id=? AND editor_username=? AND machine=? AND applied_at IS NULL""",
+            f"""UPDATE resolve_undo_requests SET state=?, attempts=?, detail=?
+                WHERE id=? AND editor_username=? AND machine IN ({placeholders})
+                  AND applied_at IS NULL""",
             (state, int(attempts or 0), (detail or "")[:512],
-             int(request_id), editor, machine))
+             int(request_id), editor, *names))
         return cur.rowcount > 0
     cur = conn.execute(
-        """UPDATE resolve_undo_requests
+        f"""UPDATE resolve_undo_requests
               SET applied_at=?, ok=?, detail=?, state=?, attempts=?
-            WHERE id=? AND editor_username=? AND machine=? AND applied_at IS NULL""",
+            WHERE id=? AND editor_username=? AND machine IN ({placeholders})
+              AND applied_at IS NULL""",
         (now, int(bool(ok)), (detail or "")[:512], state or ("done" if ok else "failed"),
-         int(attempts or 0), int(request_id), editor, machine))
+         int(attempts or 0), int(request_id), editor, *names))
     return cur.rowcount > 0
 
 
@@ -6166,6 +6526,28 @@ def adopt_renamed_machine(
         )
         conn.execute(
             f"UPDATE {table} SET machine=? WHERE editor_username=? AND machine=?",
+            (new_machine, editor, old_machine),
+        )
+    # res-fleet-4 (2026-09-18): THE OUTSTANDING COMMANDS COME WITH IT. Both
+    # command tables are keyed on the HOSTNAME, and nothing re-keyed them, so
+    # a rename stranded every file move and Resolve undo this computer had
+    # been told about but not yet confirmed: never offered again (the offer
+    # asks under the new name), aged into `expired_at`, then a warn alert
+    # naming a computer the registry no longer has. Meanwhile that machine
+    # still held the file at the old path, and lane A never deletes - so the
+    # move undid itself on the NAS, which is the one failure the whole feature
+    # exists to prevent.
+    #
+    # Only on THIS identity, and only rows nobody has answered: the caller has
+    # already proved old_machine and new_machine are one `machine_id` (SYS-18a
+    # refuses while both look live). A fan-out to every machine of the editor
+    # would tell computers that never held the file to move it, which is
+    # res-fleet-3's gap made wider. OR IGNORE because the new name may already
+    # carry a row for the same move (it was offered there first).
+    for table in ("file_move_targets", "resolve_undo_requests"):
+        conn.execute(
+            f"""UPDATE OR IGNORE {table} SET machine=?
+                 WHERE editor_username=? AND machine=? AND applied_at IS NULL""",
             (new_machine, editor, old_machine),
         )
     conn.execute(
@@ -7106,7 +7488,7 @@ def upsert_machine_state(
               transport_at,
               breaker_tripped, breaker_reason, breaker_at, trash_bytes,
               trash_count, halt_active, halt_scope, halt_reason,
-              skipped_exists, guard_at,
+              skipped_exists, skipped_exists_subpath, disk_floor_bytes, guard_at,
               ingest_active, ingest_batch, ingest_state, ingest_gate,
               ingest_done, ingest_total, ingest_failed, ingest_clip,
               ingest_percent, ingest_tier, ingest_warning, ingest_at,
@@ -7124,7 +7506,7 @@ def upsert_machine_state(
               disk_system_free_bytes, disk_at, rotation_seconds,
               stalled_lane, stalled_seconds, stalled_killed, stalled_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -7184,6 +7566,22 @@ def upsert_machine_state(
              trash_count=COALESCE(excluded.trash_count, machine_state.trash_count),
              skipped_exists=COALESCE(excluded.skipped_exists,
                                      machine_state.skipped_exists),
+             -- dash-api-5 (2026-09-18): the SCOPE travels with the count, in
+             -- the same statement, so the two can never describe different
+             -- scans. The companion measures this per project prefix and the
+             -- sentence an admin reads used to state it of the whole
+             -- computer.
+             skipped_exists_subpath=CASE WHEN excluded.skipped_exists IS NULL
+                                         THEN machine_state.skipped_exists_subpath
+                                         ELSE excluded.skipped_exists_subpath END,
+             -- dash-collector-alerts-6: the machine's OWN floor. COALESCE,
+             -- like `trash_bytes` beside it and unlike the latch columns: a
+             -- floor is a SETTING on that computer, not an incident, so a
+             -- report that does not carry the section (an older build, or a
+             -- light tick) must keep the last number that computer told us
+             -- rather than send this server back to guessing.
+             disk_floor_bytes=COALESCE(excluded.disk_floor_bytes,
+                                       machine_state.disk_floor_bytes),
              guard_at=COALESCE(excluded.guard_at, machine_state.guard_at),
              -- Written on EVERY report (see the docstring): silence means
              -- "not indexing", never "keep the last answer".
@@ -7358,7 +7756,7 @@ def upsert_machine_state(
          g.get("breaker_tripped"), g.get("breaker_reason"), g.get("breaker_at"),
          g.get("trash_bytes"), g.get("trash_count"), g.get("halt_active"),
          g.get("halt_scope"), g.get("halt_reason"), g.get("skipped_exists"),
-         g.get("at"),
+         g.get("skipped_exists_subpath"), g.get("disk_floor_bytes"), g.get("at"),
          int(bool(i.get("active"))), i.get("batch"), i.get("state"), i.get("gate"),
          i.get("done"), i.get("total"), i.get("failed"), i.get("clip"),
          i.get("percent"), i.get("tier"), i.get("warning"), i.get("at"),
@@ -7409,6 +7807,8 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
             "halt_scope": r["halt_scope"],
             "halt_reason": r["halt_reason"],
             "skipped_exists": r["skipped_exists"],
+            "skipped_exists_subpath": r["skipped_exists_subpath"],
+            "disk_floor_bytes": r["disk_floor_bytes"],
             "at": r["guard_at"],
             # v30 (SYNC-8 / APP-6 / APP-13 / SYNC-x, resilience sweep
             # 2026-08-28). Every one of these was already on the wire and
@@ -7491,7 +7891,8 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
         for r in conn.execute(
             """SELECT editor_username, machine, breaker_tripped, breaker_reason,
                       breaker_at, trash_bytes, trash_count, halt_active, halt_scope,
-                      halt_reason, skipped_exists, guard_at,
+                      halt_reason, skipped_exists, skipped_exists_subpath,
+                      disk_floor_bytes, guard_at,
                       supervisor_down_since, supervisor_attempts,
                       supervisor_last_error, supervisor_supervising,
                       crash_count, crash_newest, folders_unfiltered,
@@ -7881,10 +8282,22 @@ def _machine_has_commitments(
 # transfer_history are deliberately not here: they are append-only logs with
 # their own age-out, and "what did that laptop upload last month" is a
 # question an admin may still ask after the laptop is gone.
+#
+# res-fleet-4 (2026-09-18): `file_move_targets` and `resolve_undo_requests`
+# are here now, and they are the two that were missing. Nothing in this module
+# ever deleted from either, so forgetting a computer left its outstanding move
+# commands behind with `applied_at IS NULL`: never offered again (the registry
+# has no such machine), aged into `expired_at`, and then raised a warn alert
+# whose fix line named a computer the dashboard no longer has. They are
+# COMMANDS for a computer, so they belong to the computer, and a command
+# nobody can deliver is worse than no command.
+#
+# proxy-tiers-4: `broll_standins` is per (editor, machine) too, and a
+# forgotten machine's stand-ins are not facts about the fleet any more.
 _MACHINE_STATE_TABLES = (
     "machines", "machine_state", "selections", "editor_prefs", "lane_report_current",
     "active_transfers", "editor_media_project", "editor_media", "media_tree_clips",
-    "report_auth",
+    "report_auth", "file_move_targets", "resolve_undo_requests", "broll_standins",
 )
 
 
@@ -8269,6 +8682,25 @@ def prune(conn: sqlite3.Connection, now: str, pin: bool = False) -> None:
         "DELETE FROM missing_files WHERE refreshed_at < ?",
         (cutoff(days=MISSING_FILES_MAX_AGE_DAYS),),
     )
+    # dash-collector-alerts-1 (2026-09-18): the halves of a move whose other
+    # end never turned up. Two days, and the reason the retention is here and
+    # not in the collector is that a container that stops running the
+    # inventory kind entirely must still not grow this table for ever. A
+    # deleted half is the OLD behaviour (the file reads as a deletion), never
+    # a loss of anything a machine was told.
+    conn.execute(
+        "DELETE FROM nas_media_pending_moves WHERE seen_at < ?",
+        (cutoff(days=PENDING_MOVE_HALF_MAX_AGE_DAYS),),
+    )
+    # proxy-tiers-4 (2026-09-18): the fleet's stand-in facts age out with the
+    # machine that reported them, on `machine_state`'s own 30 days. A machine
+    # that has stopped reporting is not a machine whose stand-ins are still
+    # there, and `record_standins_placed` replaces the set on every report, so
+    # a row this old can only belong to a computer nobody has heard from.
+    conn.execute(
+        "DELETE FROM broll_standins WHERE last_seen < ?",
+        (cutoff(days=MACHINE_STATE_MAX_AGE_DAYS),),
+    )
     # The audit ledger is append-only, so this is the ONLY statement in the
     # product that removes a row from it (SYS-11, 2026-08-28). 180 days: long
     # enough that "what changed the week an editor lost two days of syncing"
@@ -8467,6 +8899,188 @@ def replace_nas_media(
     return True
 
 
+# ------------------------------------------ the halves of a cross-cycle move
+#
+# dash-collector-alerts-1 (2026-09-18). The inventory walk is windowed (8
+# projects a cycle through a rotating cursor) and `replace_nas_media` above
+# destroys the only record of the old paths, so the vanish in project A and
+# the appearance in project B of one hand move land in DIFFERENT passes on any
+# fleet with more than 8 active projects - and the second half arrives with
+# nothing left to match it against. A half nobody can pair yet is kept here
+# instead of thrown away.
+#
+# Two rules this table lives by, both refusals:
+#   * a half is EVIDENCE, never a conclusion. Nothing acts on a row here; it
+#     is only ever paired with its opposite or aged out.
+#   * it ages out. Two days is long enough for the rotating cursor to make
+#     several full rounds of a big fleet (8 projects every 15 minutes) and
+#     short enough that a file which really was deleted, and whose bytes are
+#     later uploaded somewhere else entirely, is not paired with it weeks on.
+PENDING_MOVE_HALF_MAX_AGE_DAYS = 2
+PENDING_MOVE_HALF_LIMIT = 4000
+HALF_VANISHED = "vanished"
+HALF_APPEARED = "appeared"
+
+
+def media_key_elsewhere(
+    conn: sqlite3.Connection, base: str, size: int, mtime_ns: int,
+    exclude: Iterable[tuple[str, str]] = (), limit: int = 200,
+) -> tuple[str, str] | None:
+    """Another file of this identity in the CURRENT inventory, or None.
+
+    dash-collector-alerts-1 (2026-09-18b). A half is only evidence of a MOVE
+    if the file exists in one place. When the same (basename, size,
+    mtime_ns) is ALSO sitting somewhere else at the moment the half is seen,
+    what happened was a COPY - an editor duplicating a clip into a second
+    project, whose original is deleted hours or days later - and pairing the
+    two would tell every machine holding the original to move its copy and
+    relink Resolve, unattended, for a file the editor still wants where it
+    is. The size and mtime survive a copy, which is precisely why the key
+    cannot tell the two acts apart on its own.
+
+    `exclude` is [(slug, rel_path)] the caller already knows about: the
+    half's own end, and at pairing time both ends of the pair. Returns the
+    first other (slug, rel_path) found, for the log line.
+    """
+    skip = {(str(s), media_rel_key(r)) for s, r in exclude}
+    for row in conn.execute(
+            """SELECT p.slug AS slug, m.rel_path AS rel_path
+                 FROM nas_media m JOIN projects p ON p.id = m.project_id
+                WHERE m.size=? AND m.mtime_ns=? LIMIT ?""",
+            (int(size), int(mtime_ns), int(limit))):
+        rel = media_rel_key(str(row["rel_path"] or ""))
+        if rel.rsplit("/", 1)[-1] != base:
+            continue
+        if (str(row["slug"] or ""), rel) in skip:
+            continue
+        return (str(row["slug"] or ""), rel)
+    return None
+
+
+def record_pending_move_halves(
+    conn: sqlite3.Connection, halves: Sequence[Sequence[Any]], now: str,
+) -> int:
+    """Keep the halves a pass could not pair. halves: [(half, base, size,
+    mtime_ns, slug, project_rel, rel_path, raw_path)].
+
+    `seen_at` is the FIRST sighting: a project walked again before its partner
+    turns up must not refresh the age-out clock, or a vanish nobody can ever
+    pair rides for ever on an active project.
+    """
+    if not halves:
+        return 0
+    cur = conn.executemany(
+        """INSERT INTO nas_media_pending_moves
+             (half, base, size, mtime_ns, slug, project_rel, rel_path, raw_path, seen_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(half, base, size, mtime_ns, slug, rel_path) DO NOTHING""",
+        [(str(h[0]), str(h[1]), int(h[2]), int(h[3]), str(h[4]), str(h[5]),
+          media_rel_key(h[6]), str(h[7]), now) for h in halves],
+    )
+    return int(cur.rowcount or 0)
+
+
+def pending_move_halves(
+    conn: sqlite3.Connection, now: str,
+    max_age_days: int = PENDING_MOVE_HALF_MAX_AGE_DAYS,
+    limit: int = PENDING_MOVE_HALF_LIMIT,
+) -> list[dict[str, Any]]:
+    """The halves still worth pairing, oldest first.
+
+    Bounded twice: by age (a stale half is not evidence) and by count, because
+    a restore or a remount can leave tens of thousands of them and this list
+    is read into memory on the collector's own thread.
+    """
+    cutoff = (parse_iso(now) - dt.timedelta(days=max_age_days)).isoformat()
+    return [dict(r) for r in conn.execute(
+        """SELECT half, base, size, mtime_ns, slug, project_rel, rel_path,
+                  raw_path, seen_at
+             FROM nas_media_pending_moves
+            WHERE seen_at >= ?
+            ORDER BY seen_at, rowid LIMIT ?""",
+        (cutoff, int(limit)),
+    )]
+
+
+def delete_pending_move_halves(
+    conn: sqlite3.Connection, halves: Sequence[Sequence[Any]],
+) -> int:
+    """Forget halves that have been paired (or cancelled by the file coming
+    back). halves: [(half, base, size, mtime_ns, slug, rel_path)]."""
+    if not halves:
+        return 0
+    cur = conn.executemany(
+        """DELETE FROM nas_media_pending_moves
+            WHERE half=? AND base=? AND size=? AND mtime_ns=? AND slug=?
+              AND rel_path=?""",
+        [(str(h[0]), str(h[1]), int(h[2]), int(h[3]), str(h[4]), media_rel_key(h[5]))
+         for h in halves],
+    )
+    return int(cur.rowcount or 0)
+
+
+# -------------------------------------- what the FLEET knows about stand-ins
+
+def record_standins_placed(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    rels: Sequence[str], now: str,
+) -> None:
+    """This machine's whole stand-in set, replacing what it said last time
+    (proxy-tiers-4, 2026-09-18).
+
+    A full picture per report, like `editor_media`: the companion's ledger is
+    the truth about its own disk, so a rel it no longer lists has been
+    upgraded to the real editing proxy and must stop being reported as a
+    stand-in. `first_seen` survives a re-report of the same rel, because "how
+    long has this clip been standing in" is the question an operator asks.
+
+    `archive_rel` is the NFC archive-relative path of the ORIGINAL (CR-90).
+    """
+    keys = []
+    seen: set[str] = set()
+    for rel in rels:
+        key = media_rel_key(rel)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    conn.execute(
+        "DELETE FROM broll_standins WHERE editor_username=? AND machine=?",
+        (editor, machine),
+    )
+    if not keys:
+        return
+    conn.executemany(
+        """INSERT INTO broll_standins
+             (archive_rel, editor_username, machine, first_seen, last_seen)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(archive_rel, editor_username, machine) DO UPDATE SET
+             last_seen=excluded.last_seen""",
+        [(key, editor, machine, now, now) for key in keys],
+    )
+
+
+def standins_known(
+    conn: sqlite3.Connection, limit: int = 200,
+) -> list[str]:
+    """The archive rels SOME machine in this fleet has placed as a stand-in,
+    most recently seen first (proxy-tiers-4).
+
+    What the wired rig does with it: one cheap question per clip instead of an
+    ffprobe of every archive original. An empty list is "this dashboard knows
+    of none", which the companion must read as "demux as before" and never as
+    "there are none" - the absence of the reply key means the same thing, so
+    an older companion reading nothing loses nothing.
+    """
+    return [str(r["archive_rel"]) for r in conn.execute(
+        """SELECT archive_rel, MAX(last_seen) AS last_seen
+             FROM broll_standins
+            GROUP BY archive_rel
+            ORDER BY last_seen DESC, archive_rel LIMIT ?""",
+        (int(limit),),
+    )]
+
+
 def nas_inventory_sig(conn: sqlite3.Connection, project_id: int) -> str | None:
     row = conn.execute(
         "SELECT tree_sig FROM nas_inventory_state WHERE project_id=?", (project_id,)
@@ -8475,11 +9089,28 @@ def nas_inventory_sig(conn: sqlite3.Connection, project_id: int) -> str | None:
 
 
 def record_inventory_error(conn: sqlite3.Connection, project_id: int, error: str, now: str) -> None:
+    """Record why this project could not be inventoried, and FORCE the next
+    cycle to walk it again.
+
+    dash-api-2 (2026-09-18b mediums): `tree_sig` is cleared on purpose, the
+    same way the collapse refusal deliberately leaves it alone. The
+    collector's phase 1 skips the walk entirely when the directory signature
+    matches the stored one, and `_dir_signature` is directory mtimes only, so
+    an archived project whose contents never change produces the same
+    signature for ever. One transient error (a remount mid-walk, a share that
+    blinked) therefore stuck `last_error` on the row permanently, and
+    `locate`'s `COALESCE(s.last_error,'') = ''` filter then excluded the
+    project for ever - which reads to the companion's lane guard as "the
+    files are gone", parks the lane B breaker, and no admin route exists to
+    clear it. `last_error` is cleared in exactly one place, the successful
+    replace_nas_media upsert, so the row must be walkable again to get there.
+    The cost of re-walking a project that is genuinely still unmounted is one
+    is_dir() per cycle: the walk fails before any os.walk."""
     conn.execute(
         """INSERT INTO nas_inventory_state (project_id, walked_at, last_error)
            VALUES (?, ?, ?)
            ON CONFLICT(project_id) DO UPDATE SET walked_at=excluded.walked_at,
-             last_error=excluded.last_error""",
+             last_error=excluded.last_error, tree_sig=NULL""",
         (project_id, now, error),
     )
 
@@ -8952,8 +9583,41 @@ def fetch_lane_reports(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 COLLECTOR_STALE_BOUND_MAX_SECONDS = 2 * 3600.0
 
 
+def configured_stale_bound(settings: Any | None = None) -> float:
+    """The age at which "nothing has started" means STOPPED, read off the
+    CONFIGURED cadences of the kinds a Syncthing-less deployment runs.
+
+    THE NUMBER LIVES HERE NOW (regression-5, 2026-09-18). It was written in
+    `alerts._stale_after_seconds` and CR-256o declined to hand it to `db.py`
+    on the ground that it "cannot change the first verdict" - true of the
+    ALERT, and not true of the stored flag, which is what the home page and
+    /api/v1/health render. `db.py` must not import `alerts` (cycle), and
+    copying the arithmetic into both would be the third place this fleet's
+    cadence is written down. `settings.py` imports nothing of ours, so the one
+    copy belongs on this side and `alerts` calls it.
+
+    No settings object is the DEFAULTS, taken off the dataclass rather than
+    typed again: this is called from `collector_stale_bound`, which several
+    callers reach with no settings in hand.
+    """
+    from .settings import Settings         # local: settings imports none of ours
+    source = settings if settings is not None else Settings
+    cadences = []
+    for kind in SYNCTHING_FREE_KINDS:
+        try:
+            value = float(getattr(source, f"interval_{kind}", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            cadences.append(value)
+    if not cadences:
+        return COLLECTOR_STALE_SECONDS
+    return max(COLLECTOR_STALE_SECONDS, 2 * min(cadences))
+
+
 def collector_stale_bound(
     conn: sqlite3.Connection, floor_seconds: float = COLLECTOR_STALE_SECONDS,
+    settings: Any | None = None,
 ) -> float:
     """How old the newest cycle START may be before the collector counts as
     stopped, on THIS deployment.
@@ -8995,13 +9659,52 @@ def collector_stale_bound(
             continue
         shortest = gap if shortest is None else min(shortest, gap)
     if shortest is None:
-        return floor
+        # regression-5 (2026-09-18): NO REPEAT YET IS NOT 180 SECONDS. The
+        # observed rhythm needs a kind to have started twice, and until then
+        # this returned the caller's floor - which is the original bug's
+        # premise: on a Syncthing-less deployment the fastest kind that runs
+        # is `alerts` at 600 s, so between about t+3 min and the second alerts
+        # cycle a brand new zero-touch or vendor dashboard showed "the last
+        # collector cycle finished too long ago" on its home page and reported
+        # itself stale on /api/v1/health, on a collector that was perfectly
+        # healthy. The first impression of the product was a red banner, and
+        # the alert, the notice and the chip were all correctly silent - so
+        # the visible half was exactly the half CR-258B was written for.
+        #
+        # Which kinds this deployment runs is read from the DATABASE, not from
+        # a config this function's callers mostly do not hold: a poll_runs row
+        # for any kind OUTSIDE SYNCTHING_FREE_KINDS is the evidence that the
+        # Syncthing-backed kinds (60 s) are running here, and their second
+        # start arrives long before 180 s. No such row - a Syncthing-less
+        # site, or the first minutes of any site - takes the configured bound.
+        # The CONFIGURATION is the evidence when the caller has it: a site
+        # with `syncthing_url` runs the 60 s kinds and its second start
+        # arrives long before 180 s, so it keeps the tight bound even before
+        # those kinds have ever run - which is the one state where a
+        # collector that died at boot must still be noticed
+        # (test_bug_hunt_2026_09_11b_dash_collector_alerts pins exactly this).
+        if settings is not None:
+            if getattr(settings, "syncthing_url", ""):
+                return floor
+            return max(floor, configured_stale_bound(settings))
+        # No settings in hand (the page renderers): read it off the DATABASE
+        # instead. A poll_runs row for any kind OUTSIDE SYNCTHING_FREE_KINDS
+        # is the evidence that the Syncthing-backed kinds are running here.
+        placeholders = ",".join("?" for _ in SYNCTHING_FREE_KINDS)
+        backed = conn.execute(
+            f"SELECT 1 FROM poll_runs WHERE kind NOT IN ({placeholders}) LIMIT 1",
+            SYNCTHING_FREE_KINDS,
+        ).fetchone()
+        if backed is not None:
+            return floor
+        return max(floor, configured_stale_bound(settings))
     return max(floor, min(shortest * 2.0, COLLECTOR_STALE_BOUND_MAX_SECONDS))
 
 
 def fetch_collector_status(
     conn: sqlite3.Connection, now: str | None = None,
     stale_after_seconds: float = COLLECTOR_STALE_SECONDS,
+    settings: Any | None = None,
 ) -> dict[str, Any]:
     """Last poll_runs row per kind, plus overall syncthing reachability and
     any Syncthing folder-level errors.
@@ -9060,7 +9763,7 @@ def fetch_collector_status(
     if started:
         try:
             stale = age_seconds(started, now) >= collector_stale_bound(
-                conn, stale_after_seconds)
+                conn, stale_after_seconds, settings)
         except (ValueError, TypeError):
             stale = False
     folder_errors = [

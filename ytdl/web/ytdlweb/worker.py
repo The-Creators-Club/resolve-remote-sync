@@ -1525,6 +1525,18 @@ def _await_local_claim(c, job_id, sleep=time.sleep):
     return False
 
 
+def _is_url_job(job):
+    """A pasted-links job, whose press measured nothing (ytdl-web-4).
+
+    Read defensively: a row from a database older than the `kind` column
+    answers nothing, and a job this cannot classify keeps the old behaviour.
+    """
+    try:
+        return str(job['kind'] or '') == db.KIND_URLS
+    except (IndexError, KeyError, TypeError):
+        return False
+
+
 def _no_room_note(job, rows, outdir):
     """The sentence a full tree earns before a byte is fetched, or None.
 
@@ -1541,18 +1553,37 @@ def _no_room_note(job, rows, outdir):
     turns a pile of ENOSPC into one sentence, it is not a new way for a
     download to be impossible.
     """
-    if not (config.LOCAL_DOWNLOAD and db.created_widening_of(job)[1]):
-        return None                  # the press already measured this tree
     # Imported HERE and not at module scope: routes_api imports this module, so
     # the two can only meet inside a function. The helpers live there because
     # that is where the 409 that quotes the same two numbers is raised.
     from ytdlweb import routes_api
+    # ytdl-web-2 (2026-09-18): the tree guard, which `_refuse_if_full` has and
+    # this did not. A bind mount that has gone away leaves its mount POINT on
+    # the container overlay, so disk_usage answers with the overlay's couple of
+    # spare gigabytes and the job used to fail with "free some space" about a
+    # share with 900 GB on it - the exact sentence CR-263a exists to stop an
+    # admin acting on, emitted from the executor path instead of the press.
+    # First, because it is the truer diagnosis of the same measurement.
+    gone = routes_api.tree_missing_note(job)
+    if gone:
+        return gone
+    # ytdl-web-4 (2026-09-18): "the press already measured this tree" is untrue
+    # of a PASTE. `create_url_job` never called `_refuse_if_full` at all, and
+    # with the fleet's shipped default (`YTDL_LOCAL_DOWNLOAD` off) the
+    # created-local gate below never ran either, so a pasted job had no
+    # free-space check on either executor: N opaque ENOSPC failures, which is
+    # what YTWEB-9 replaced with one sentence.
+    if not (config.LOCAL_DOWNLOAD and db.created_widening_of(job)[1]) \
+            and not _is_url_job(job):
+        return None                  # the press already measured this tree
     free = routes_api.free_bytes_at(outdir)
     if free is None:
         return None
-    estimate = routes_api.estimated_bytes(rows, job['quality'])
-    need = ((estimate * routes_api.FREE_SPACE_FACTOR) if estimate
-            else routes_api.UNKNOWN_ESTIMATE_FLOOR)
+    # ytdl-web-2 (2026-09-18b mediums): through the SHARED helper, so a paste
+    # is sized by its clip COUNT here too. The two callers used to compute
+    # `need` themselves and the flat floor meant 1 pasted link and 40 asked for
+    # the same 2 GB.
+    estimate, need = routes_api.space_needed(rows, job['quality'])
     if free >= need:
         return None
     # The next press must re-stat, for the reason ytdl-web-2 gives: freeing
@@ -1638,6 +1669,23 @@ def _phase_download(c, job):
         db.set_phase(c, job_id, 'failed', note[:500])
 
     pending = db.pending_videos(c, job_id)
+    # ytdl-web-5 (2026-09-18): is the destination the TREE? Unconditionally,
+    # before anything is fetched. `_refuse_if_full` asks only on the way to a
+    # disk_full refusal by design ("a download that fits is a download that
+    # fits"), so on a host with room and a vanished bind mount the whole job
+    # SUCCEEDED into the container overlay: `ensure_outdir` makedirs the mount
+    # point's children, yt-dlp writes there, `ledger_add` records each clip at
+    # a NAS-relative path with no file behind it, and every later search or
+    # paste of those ids is skipped as "the fleet already has that video". The
+    # clips are lost on the next container recreate. Refusing is strictly
+    # better, and `tree_is_gone` answers False for everything it cannot prove.
+    from ytdlweb import routes_api as _routes_api   # circular at module scope
+    gone = _routes_api.tree_missing_note(job)
+    if gone:
+        log.warning('job %s: not starting the download phase: %s', job_id, gone)
+        _clear_progress(job_id)
+        db.set_phase(c, job_id, 'failed', gone[:500])
+        return
     # The disk this run is about to write, measured now that it is settled that
     # this worker is the executor (ytdl-web-b-2, 2026-09-11b). The rows keep
     # their `pending` state, so the retry after the admin frees space re-queues

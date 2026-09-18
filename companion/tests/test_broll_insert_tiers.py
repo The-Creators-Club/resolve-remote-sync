@@ -286,7 +286,50 @@ def test_a_download_in_flight_answers_the_page_the_shape_it_understands(
     assert status == 200
     assert body["state"] == "downloading"
     assert "40%" in body["message"]
-    assert broll_standins.all() == []
+    # comp-broll-tiers-1 (2026-09-18): the intent row is ALREADY there. This
+    # assertion used to read `broll_standins.all() == []`, which pinned the
+    # defect: the download runs on a daemon thread with no callback, so a page
+    # that stops polling left the preview's bytes at the original's name with
+    # nothing in the ledger. The row carries no size yet (nothing has landed),
+    # and `_entry_is_stale` reads that as "still a stand-in".
+    (entry,) = broll_standins.all()
+    assert entry["local_path"] == str(_archive(tmp_path, "cc", "ff5", "clip.mov"))
+    assert entry["size"] is None and entry["upgrade"] is None
+    assert broll_standins.is_standin(entry["local_path"]) is True
+
+
+def test_a_download_that_finishes_after_the_page_gave_up_is_still_ledgered(
+        tmp_path, worker):
+    """comp-broll-tiers-1 / res-companion-1: the editor closes the tab (or
+    switches to Resolve, or the companion restarts) after the "syncing 40%"
+    toast, and the rclone job finishes on its own. Nothing polls again, so
+    nothing reaches the `state == done` branch that used to be the ledger's
+    only writer - and the file lands under the ORIGINAL's 6K name holding the
+    1080p preview's bytes. The next Send to Resolve then imports it as the
+    original for ever, and a render on this machine renders the preview."""
+    cfg = _editor_cfg(tmp_path)
+    mounts = broll_server.resolve_mounts({}, cfg)
+    dest = _archive(tmp_path, "cc", "ff5", "clip.mov")
+    finish = {}
+
+    def fetcher(ccsync_cfg, rel_path, dest_path, **kwargs):
+        # The real job's shape: the answer comes back while the bytes are
+        # still arriving, and the thread finishes them later.
+        def land():
+            Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(dest_path).write_bytes(b"the preview's bytes")
+        finish["land"] = land
+        return {"state": broll_fetch.STATE_DOWNLOADING, "progress": {"percent": 40}}
+
+    broll_server.build_insert_response(
+        _body(insert=_page_insert()), mounts, ccsync_cfg=cfg,
+        fetcher=fetcher, caller=worker)
+    finish["land"]()                       # the page is gone; the job is not
+
+    assert broll_standins.is_standin(str(dest)) is True
+    entry = broll_standins.get(str(dest))
+    assert entry["preview_rel"] == "cc/ff5/Proxy/clip.mp4"
+    assert entry["geometry"]["frames"] == 1813
 
 
 def test_a_busy_lane_still_answers_busy_for_a_stand_in(tmp_path, worker):

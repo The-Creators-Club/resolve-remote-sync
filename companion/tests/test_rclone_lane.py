@@ -13,6 +13,7 @@ import json
 import subprocess
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1623,6 +1624,68 @@ def test_abort_run_kills_the_child_without_latching_the_lane_off(tmp_path):
     assert lane.stall_record()["lane"] == "B"
 
 
+# -- live-1: a stall the lane has since run past is not a current blockage ---
+
+
+def test_a_completed_pass_ends_the_stall_it_is_still_reporting(tmp_path):
+    """live-1 (2026-09-18): ruskin's lane A was killed once on 2026-09-11 and
+    every report since said `stalled` -- a red tray, a machine drawn as not
+    syncing on the grid and the same "still not fixed after N day(s)" mail
+    four days running, on a machine whose three lanes were idle and current.
+    SYNC-1 gave the record persistence and no way to end."""
+    proc = _StalledProc()
+    lane = _watchdog_lane(tmp_path, proc)
+    subpath = "Projects/2026/FF5/Animals"
+    (Path(lane.local_root) / subpath).mkdir(parents=True)
+    lane.run_once(subpath=subpath, max_duration_seconds=600)
+    assert lane.stall_report()["lane"] == "A"
+
+    # The same lane, a later pass, no kill.
+    good = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    good.run_once(subpath=subpath)
+
+    assert good.stall_report() is None, "a lane that has run since is not stalled"
+    # ...and the evidence is still on disk, which is why SYNC-1 persisted it.
+    record = rclone_lane.read_stall_record(
+        tmp_path / "state" / rclone_lane.LANE_STALL_FILENAME)
+    assert record["killed"] is True and record["recovered_at"]
+
+
+def test_the_other_lanes_pass_does_not_end_this_lanes_stall(tmp_path):
+    """live-1: lane A and lane B share one state dir and one record file, and
+    a lane B pass says nothing about a lane A upload."""
+    proc = _StalledProc()
+    lane = _watchdog_lane(tmp_path, proc)
+    subpath = "Projects/2026/FF5/Animals"
+    (Path(lane.local_root) / subpath).mkdir(parents=True)
+    lane.run_once(subpath=subpath, max_duration_seconds=600)
+
+    down = _make_lane(tmp_path, direction=DIRECTION_DOWN,
+                      popen_factory=_make_popen_factory([], 0, []))
+    down.run_once(subpath=subpath)
+    assert down.stall_report()["lane"] == "A"
+
+
+def test_a_stall_nothing_has_run_past_still_ages_out(tmp_path):
+    """live-1: 24 hours, so a machine whose lane never completes another pass
+    is not red for ever either."""
+    path = tmp_path / "state" / rclone_lane.LANE_STALL_FILENAME
+    old = datetime.now(timezone.utc) - timedelta(
+        seconds=rclone_lane.LANE_STALL_MAX_AGE_SECONDS + 60)
+    rclone_lane.write_stall_record(
+        path, {"lane": "A", "seconds": 1500, "killed": True,
+               "at": old.isoformat()})
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    assert lane.stall_report() is None
+    # A record of an hour ago is still current.
+    recent = datetime.now(timezone.utc) - timedelta(seconds=3600)
+    rclone_lane.write_stall_record(
+        path, {"lane": "A", "seconds": 1500, "killed": True,
+               "at": recent.isoformat()})
+    assert _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, [])
+                      ).stall_report()["lane"] == "A"
+
+
 def test_a_stall_record_survives_into_a_new_lane_object(tmp_path):
     path = tmp_path / "state" / rclone_lane.LANE_STALL_FILENAME
     rclone_lane.write_stall_record(
@@ -2099,7 +2162,11 @@ def _lane_with_trash(tmp_path, trashed, *, locator=None, projects=None,
     lane._last_backup_dir = str(backup)
     lane._remote_list_fn = lambda cmd, timeout: "\n".join(remote_lines)
     lane.locator = locator
-    lane.project_rel_fn = (projects or {}).get
+    # comp-sync-4 (2026-09-18): the lane asks with (slug, rel) now, because a
+    # BORROWED project is only partly on this disk. NOT `dict.get`: its second
+    # positional is a default, so it would answer the rel for every slug.
+    known = dict(projects or {})
+    lane.project_rel_fn = lambda slug, rel="": known.get(slug)
     return lane
 
 
@@ -2327,3 +2394,122 @@ def test_an_express_child_does_not_publish_progress(tmp_path):
     proc.wait = wait
     lane._wait_with_watchdog(["rclone"], proc, tally, 600, express=True)
     assert seen and all(s is None for s in seen)
+
+
+# -- comp-sync-1 (2026-09-18): "found elsewhere" means ELSEWHERE -------------
+
+
+def test_the_only_place_is_the_path_it_was_trashed_from_so_it_stays_deleted(tmp_path):
+    """The inventory is the last COMPLETED walk, so a file deleted on the NAS
+    since then is still listed at the path it was deleted from. Following that
+    renamed it back out of the trash onto its own path, every pass, for ever,
+    and counted as a relocation the breaker subtracts."""
+    lane = _lane_with_trash(
+        tmp_path, [("Proxy/gold.mp4", 7)],
+        locator=_locator(_answer([
+            _found("gold.mp4", 7, [("cct", "Proxy/gold.mp4")])])),
+        projects={"cct": "Projects/2026/CCT/Season 1"},
+    )
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    assert (Path(lane._last_backup_dir) / "Proxy" / "gold.mp4").is_file()
+    assert not (Path(lane.local_root) / "Projects/2026/CCT/Season 1"
+                / "Proxy" / "gold.mp4").exists()
+    assert lane._moved_out_of_trash == 0
+    # And the breaker must see the deletion it is there to catch.
+    assert lane._count_relocations("Projects/2026/CCT/Season 1") == 0
+
+
+def test_the_old_path_beside_a_real_new_one_still_follows_the_move(tmp_path):
+    """A walk that caught the copy but not the delete lists BOTH paths. That
+    is not ambiguity: one of the two is where we just trashed it from."""
+    lane = _lane_with_trash(
+        tmp_path, [("Proxy/gold.mp4", 7)],
+        locator=_locator(_answer([
+            _found("gold.mp4", 7, [("cct", "Proxy/gold.mp4"),
+                                   ("ff5", "Interviewees/Proxy/gold.mp4")])])),
+        projects={"cct": "Projects/2026/CCT/Season 1",
+                  "ff5": "Projects/2026/FF5/Talent Gap"},
+    )
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    dest = (Path(lane.local_root) / "Projects/2026/FF5/Talent Gap"
+            / "Interviewees/Proxy/gold.mp4")
+    assert dest.is_file() and dest.stat().st_size == 7
+    assert lane._moved_out_of_trash == 1
+
+
+def test_a_differently_spelled_own_path_is_still_the_own_path(tmp_path):
+    """The server's spelling of the relative path need not match the local
+    one byte for byte (case on Windows, NFC/NFD from a Mac). The comparison
+    folds both, or the whole guard is one path separator away from useless."""
+    lane = _lane_with_trash(
+        tmp_path, [("Proxy/gold.mp4", 7)],
+        locator=_locator(_answer([
+            _found("gold.mp4", 7, [("cct", "Proxy\\gold.mp4")])])),
+        projects={"cct": "Projects/2026/CCT/Season 1"},
+    )
+    lane._relocate_trashed("Projects/2026/CCT/Season 1")
+    assert (Path(lane._last_backup_dir) / "Proxy" / "gold.mp4").is_file()
+    assert lane._moved_out_of_trash == 0
+
+
+def test_the_projects_the_server_could_not_read_are_carried_and_logged(caplog):
+    """dash-api-1's half of the wire, parsed by the companion: optional on
+    read, so a dashboard that does not send it behaves exactly as before."""
+    import logging
+
+    from ccsync_companion.sync import server_locate as sl
+
+    def request(method, url, body, headers, timeout):
+        return 200, {"walked": True, "as_of": "", "unreadable": ["cct-s1", ""],
+                     "files": [{"name": "gold.mp4", "size": 7, "found": []}]}
+
+    locator = sl.ServerLocator({"dashboard_url": "http://d", "dashboard_token": "t"},
+                               request_fn=request)
+    with caplog.at_level(logging.INFO, logger="ccsync.sync.locate"):
+        answer = locator.locate([("gold.mp4", 7)])
+    assert answer is not None and answer.unreadable == ["cct-s1"]
+    assert any("could not read the inventory" in r.message for r in caplog.records)
+
+    def old_dashboard(method, url, body, headers, timeout):
+        return 200, {"walked": True, "as_of": "",
+                     "files": [{"name": "gold.mp4", "size": 7, "found": []}]}
+
+    older = sl.ServerLocator({"dashboard_url": "http://d", "dashboard_token": "t"},
+                             request_fn=old_dashboard)
+    assert older.locate([("gold.mp4", 7)]).unreadable == []
+
+
+# -- comp-sync-4: one shared record slot, two lanes --------------------------
+
+
+def test_a_lane_b_recovery_does_not_erase_a_later_lane_a_stall(tmp_path):
+    """comp-sync-4 (2026-09-18b): `_note_stall_recovered` used to read
+    `stall_record()`, which prefers this lane's OWN in-memory copy, check the
+    label against that stale copy and then write it back over the file both
+    lanes share. Lane B killed at 10:00, lane A killed at 10:20, lane B's
+    10:30 pass completes: from then on the machine reported no stall at all,
+    with lane A still uploading nothing. The lane B object is REUSED here
+    (`_last_stall` set) - a fresh one reads the file and never sees this."""
+    subpath = "Projects/2026/FF5/Animals"
+    down = _watchdog_lane(tmp_path, _StalledProc(), direction=DIRECTION_DOWN)
+    (Path(down.local_root) / subpath).mkdir(parents=True)
+    down.run_once(subpath=subpath, max_duration_seconds=600)
+    assert down.stall_record()["lane"] == "B"
+
+    up = _watchdog_lane(tmp_path, _StalledProc())
+    up.run_once(subpath=subpath, max_duration_seconds=600)
+    path = tmp_path / "state" / rclone_lane.LANE_STALL_FILENAME
+    assert rclone_lane.read_stall_record(path)["lane"] == "A"
+
+    # The SAME lane B object completes a pass.
+    down.popen_factory = _make_popen_factory([], 0, [])
+    down._monotonic = _fake_clock(1.0)
+    down.run_once(subpath=subpath)
+
+    record = rclone_lane.read_stall_record(path)
+    assert record["lane"] == "A", "lane B must not write its own record over lane A's"
+    assert not record.get("recovered_at"), "lane A is still stalled"
+    # ...and lane B's report - the only one that reaches the wire - carries it.
+    assert down.stall_report()["lane"] == "A"
+    assert _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, [])
+                      ).stall_report()["lane"] == "A"

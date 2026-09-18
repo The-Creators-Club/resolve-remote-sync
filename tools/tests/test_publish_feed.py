@@ -224,7 +224,8 @@ class FakeGh:
     `rc_by_verb` (default 0). `on_call` fires before the answer, which is how
     the sign-before-upload ordering is observed."""
 
-    def __init__(self, *, release_exists=True, rc_by_verb=None, on_call=None, assets=None):
+    def __init__(self, *, release_exists=True, rc_by_verb=None, on_call=None, assets=None,
+                 asset_state="uploaded", asset_digests=None, omit_state=False):
         self.calls: list[list[str]] = []
         self.release_exists = release_exists
         self.rc_by_verb = dict(rc_by_verb or {})
@@ -232,6 +233,13 @@ class FakeGh:
         # {asset name: size} the fake release already holds, answered to
         # `release view --json assets` (2026-09-11, upload only what changed).
         self.assets = dict(assets or {})
+        # dash-release-jobs-3 (2026-09-18): the same answer carries `state` and
+        # `digest` now. `asset_state` is what every asset reports ("starter" is
+        # an upload that was cut off), `asset_digests` overrides per name, and
+        # `omit_state` is an OLDER gh that sends neither field.
+        self.asset_state = asset_state
+        self.asset_digests = dict(asset_digests or {})
+        self.omit_state = omit_state
 
     def __call__(self, argv):
         self.calls.append(list(argv))
@@ -242,7 +250,12 @@ class FakeGh:
             if not self.release_exists:
                 return 1, "", "release not found"
             if "--json" in argv:
-                return 0, "".join(f"{n}\t{sz}\n" for n, sz in self.assets.items()), ""
+                if self.omit_state:
+                    return 0, "".join(f"{n}\t{sz}\n" for n, sz in self.assets.items()), ""
+                return 0, "".join(
+                    f"{n}\t{sz}\t{self.asset_state}\t"
+                    f"{self.asset_digests.get(n, 'null')}\n"
+                    for n, sz in self.assets.items()), ""
             return 0, "", ""
         rc = self.rc_by_verb.get(verb, 0)
         return rc, "", ("gh says no" if rc else "")
@@ -355,7 +368,7 @@ def test_assets_the_release_already_holds_are_not_re_uploaded(key, artifact, tmp
     argv = gh.upload_argv()
     assert [Path(a).name for a in argv[4:-3]] == [
         pf.CHANNEL_FILENAME, pf.SIG_FILENAME, "ccsync-companion-0.8.0"]
-    assert "1 asset(s) already on the release" in capsys.readouterr().out
+    assert "1 asset(s) already uploaded to the release" in capsys.readouterr().out
 
     # Same name, DIFFERENT size: stale on the release, so it goes up again.
     gh2 = FakeGh(assets={"ccsync-companion-0.8.0.exe": win_size + 1})
@@ -372,6 +385,111 @@ def test_assets_the_release_already_holds_are_not_re_uploaded(key, artifact, tmp
                   "--allow-replace"], runner=gh3)
     assert rc == pf.EXIT_OK
     assert "ccsync-companion-0.8.0" in [Path(a).name for a in gh3.upload_argv()[4:-3]]
+
+
+def test_an_interrupted_upload_is_not_mistaken_for_a_published_asset(
+        key, artifact, tmp_path, capsys):
+    """dash-release-jobs-3. A GitHub asset whose upload was cut off keeps its
+    declared NAME and SIZE while sitting in state `starter`, and a `starter`
+    asset serves nothing usable. The 2026-09-11 skip compared name and size
+    only, so it left that asset broken FOR EVER: before the speed-up every run
+    pushed everything with --clobber and an interrupted upload healed itself
+    on the next release. Fail-closed for the customer (their dashboard refuses
+    the bytes with FeedHashMismatch) but permanent and self-inflicted, and the
+    only trace is a last_error on each customer's feed page.
+    """
+    feed_dir = tmp_path / "feed"
+    assert _build(feed_dir, artifact) == pf.EXIT_OK
+    win = feed_dir / "windows" / "ccsync-companion-0.8.0.exe"
+    mac = tmp_path / "ccsync-companion"
+    mac.write_bytes(b"\xcf\xfa\xed\xfe" + b"y" * 5000)
+    held = {"ccsync-companion-0.8.0.exe": win.stat().st_size,
+            pf.CHANNEL_FILENAME: 1, pf.SIG_FILENAME: 1}
+
+    gh = FakeGh(assets=held, asset_state="starter")
+    rc = pf.main(["--artifact", str(mac), "--platform", "macos", "--version", "0.8.0",
+                  "--feed-dir", str(feed_dir), "--github-repo", GH_REPO, "--github-upload"],
+                 runner=gh)
+
+    assert rc == pf.EXIT_OK
+    assert "ccsync-companion-0.8.0.exe" in [
+        Path(a).name for a in gh.upload_argv()[4:-3]], "the half-uploaded asset was skipped"
+    assert "already uploaded" not in capsys.readouterr().out
+    # ...and still ONE `gh release view --json` call: this path is pinned verb
+    # for verb elsewhere in this file and must stay one round trip.
+    assert gh.verbs().count("release view") == 2   # the existence probe + the asset list
+
+    # THE CONTROL, and the half that fails on the unfixed source: the same
+    # answer with `state: uploaded` is still skipped. Without it this case
+    # passes on the old code for the wrong reason - the old parser reads the
+    # last tab-separated field as the size, sees "null", and quietly holds
+    # nothing at all, so everything is uploaded whatever the state says.
+    ok = FakeGh(assets=held, asset_state="uploaded")
+    rc = pf.main(["--artifact", str(mac), "--platform", "macos", "--version", "0.8.0",
+                  "--feed-dir", str(feed_dir), "--github-repo", GH_REPO,
+                  "--github-upload", "--allow-replace"], runner=ok)
+    assert rc == pf.EXIT_OK
+    assert "ccsync-companion-0.8.0.exe" not in [
+        Path(a).name for a in ok.upload_argv()[4:-3]]
+
+
+def test_the_asset_list_is_asked_for_the_state_and_the_digest():
+    """The jq is the whole mechanism: a field nobody asked for cannot be read.
+    Pinned as a string because the runner argv is what the other cases here
+    assert on, and a silent revert to the name-and-size jq would put the
+    finding back with every test still green."""
+    import inspect
+
+    src = inspect.getsource(pf.published_assets)
+    assert ".state" in src and ".digest" in src
+    assert src.count("runner(") == 1
+
+
+def test_a_digest_the_bytes_do_not_match_is_re_uploaded(key, artifact, tmp_path):
+    """Where GitHub offers a digest, it is the check the customer's dashboard
+    will make anyway - made here, before the skip rather than after the
+    release."""
+    feed_dir = tmp_path / "feed"
+    assert _build(feed_dir, artifact) == pf.EXIT_OK
+    win = feed_dir / "windows" / "ccsync-companion-0.8.0.exe"
+    mac = tmp_path / "ccsync-companion"
+    mac.write_bytes(b"\xcf\xfa\xed\xfe" + b"y" * 5000)
+    held = {"ccsync-companion-0.8.0.exe": win.stat().st_size}
+
+    wrong = FakeGh(assets=held, asset_digests={
+        "ccsync-companion-0.8.0.exe": "sha256:" + "0" * 64})
+    assert pf.main(["--artifact", str(mac), "--platform", "macos", "--version", "0.8.0",
+                    "--feed-dir", str(feed_dir), "--github-repo", GH_REPO,
+                    "--github-upload"], runner=wrong) == pf.EXIT_OK
+    assert "ccsync-companion-0.8.0.exe" in [
+        Path(a).name for a in wrong.upload_argv()[4:-3]]
+
+    # The RIGHT digest is a skip, as the size alone used to be.
+    right = FakeGh(assets=held, asset_digests={
+        "ccsync-companion-0.8.0.exe": "sha256:" + pf._sha256_file(win)})
+    assert pf.main(["--artifact", str(mac), "--platform", "macos", "--version", "0.8.0",
+                    "--feed-dir", str(feed_dir), "--github-repo", GH_REPO,
+                    "--github-upload", "--allow-replace"], runner=right) == pf.EXIT_OK
+    assert "ccsync-companion-0.8.0.exe" not in [
+        Path(a).name for a in right.upload_argv()[4:-3]]
+
+
+def test_a_gh_that_sends_no_state_uploads_everything(key, artifact, tmp_path):
+    """"Cannot tell" is the pre-2026-09-11 behaviour, which is always correct
+    and costs only bandwidth. An older gh must not be read as "uploaded"."""
+    feed_dir = tmp_path / "feed"
+    assert _build(feed_dir, artifact) == pf.EXIT_OK
+    win = feed_dir / "windows" / "ccsync-companion-0.8.0.exe"
+    mac = tmp_path / "ccsync-companion"
+    mac.write_bytes(b"\xcf\xfa\xed\xfe" + b"y" * 5000)
+
+    gh = FakeGh(assets={"ccsync-companion-0.8.0.exe": win.stat().st_size},
+                omit_state=True)
+    assert pf.main(["--artifact", str(mac), "--platform", "macos", "--version", "0.8.0",
+                    "--feed-dir", str(feed_dir), "--github-repo", GH_REPO,
+                    "--github-upload"], runner=gh) == pf.EXIT_OK
+    assert "ccsync-companion-0.8.0.exe" in [
+        Path(a).name for a in gh.upload_argv()[4:-3]]
 
 
 def test_release_is_created_when_absent_and_the_run_still_succeeds(key, artifact, tmp_path):

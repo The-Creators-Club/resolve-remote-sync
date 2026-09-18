@@ -217,6 +217,16 @@ DEFAULT_STALL_BUDGET_SECONDS = 600.0
 # killing a wedged rclone would otherwise erase the only evidence that it
 # happened, which is precisely the evidence CR-91 spent a day not having.
 LANE_STALL_FILENAME = "lane_stall.json"
+# live-1 (2026-09-18): how long a stall stays CURRENT with nothing else to
+# say. SYNC-1 made the record persistent so a restart could not erase the
+# evidence and gave it neither an expiry nor a "the lane has run since"
+# condition, so ruskin's 2026-09-11 kill was still `blocked_reason=lane_stalled
+# since 2026-09-11` on the 18th: a red tray, a machine drawn as not syncing,
+# and the same "still not fixed after N days" mail four days running, with
+# nothing an editor or an admin could do about it. The record itself is kept
+# (stamped `recovered_at`); what expires is the CLAIM that sync is blocked
+# now.
+LANE_STALL_MAX_AGE_SECONDS = 24 * 3600.0
 # What a killed child's exit code is reported as when it cannot be reaped at
 # all -- a process in an uninterruptible kernel wait cannot be killed, and
 # waiting on it is the hang we are escaping.
@@ -311,6 +321,39 @@ def write_stall_record(path, record: dict) -> None:
         os.replace(tmp, target)
     except Exception:
         log.warning("could not persist the lane stall record to %s", path, exc_info=True)
+
+
+def _stall_age_seconds(record: dict) -> float:
+    """How long ago the stall was recorded, or 0.0 when it cannot be told
+    (live-1). Unparseable is NOT old: a record we cannot date must keep
+    whatever claim it already has rather than be silently discarded."""
+    try:
+        at = str(record.get("at") or "")
+        if not at:
+            return 0.0
+        when = datetime.fromisoformat(at)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - when).total_seconds())
+    except Exception:
+        return 0.0
+
+
+def _stall_when(record: dict) -> float:
+    """When this stall was recorded, as an epoch, or 0.0 when it cannot be
+    told (comp-sync-4). Undateable sorts oldest, so a record that CAN be
+    dated always wins the comparison rather than a malformed one shadowing
+    the lane that is really stalled."""
+    try:
+        at = str(record.get("at") or "")
+        if not at:
+            return 0.0
+        when = datetime.fromisoformat(at)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return when.timestamp()
+    except Exception:
+        return 0.0
 
 
 def read_stall_record(path) -> Optional[dict]:
@@ -572,6 +615,24 @@ def nfc_key(text: str) -> str:
     renames or deletes a file: there the bytes on disk are the truth.
     """
     return unicodedata.normalize("NFC", str(text or ""))
+
+
+def _is_same_local_path(a: Optional[Path], b: Optional[Path]) -> bool:
+    """Do these two local paths name the same file? COMPARISON ONLY.
+
+    comp-sync-1 (2026-09-18). Folded to NFC (a Mac's disk spells the name
+    decomposed, the server's answer composed -- CR-90) and through
+    os.path.normcase, because the same file is spelled with a capital drive letter and
+    backslashes on one side and lower case with forward slashes on the other and neither string equals the other. Never
+    feed the result of this to anything that opens or renames a file.
+    """
+    if a is None or b is None:
+        return False
+    try:
+        return (os.path.normcase(nfc_key(os.path.normpath(str(a))))
+                == os.path.normcase(nfc_key(os.path.normpath(str(b)))))
+    except (OSError, ValueError):                             # pragma: no cover
+        return False
 
 
 def build_filter_rules_up(exclude_paths: Optional[Iterable[str]] = None) -> list[str]:
@@ -2362,6 +2423,7 @@ class RcloneLane(LaneAdapter):
         extra_excludes_fn: Optional[Callable[[Optional[str]], list[str]]] = None,
         locator: Optional["server_locate.ServerLocator"] = None,
         project_rel_fn: Optional[Callable[[str], Optional[str]]] = None,
+        on_relocated: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         assert direction in (DIRECTION_UP, DIRECTION_DOWN)
         self.direction = direction
@@ -2411,6 +2473,17 @@ class RcloneLane(LaneAdapter):
         # is what every machine in the fleet does until it is upgraded.
         self.locator = locator
         self.project_rel_fn = project_rel_fn
+        # res-companion-2 (2026-09-18): called with (old_local, new_local)
+        # for every file this lane carries to the place the server says it
+        # moved to. Lane B renames the file itself, minutes before the
+        # dashboard's own detection delivers the same move as a `file_moves`
+        # command -- and that command then finds nothing at the old path,
+        # answers ok with no paths, and app.py skips the Resolve relink, so
+        # every clip under a hand-moved folder is Media Offline while the
+        # MOVES history says the machine followed. This is the evidence
+        # `file_moves.apply_move` resumes from. Optional: without it lane B
+        # behaves exactly as 0.9.74 did.
+        self.on_relocated = on_relocated
         # Filled once per pass by _relocate_trashed, read by
         # _count_relocations: the files the SERVER says are still on the NAS
         # somewhere, keyed (NFC basename, size), and how many of them this
@@ -3644,6 +3717,7 @@ class RcloneLane(LaneAdapter):
         # BEFORE the lock: _take_pending_stall takes _lock itself, and
         # threading.Lock is not reentrant.
         stall_detail = self._take_pending_stall()
+        pass_completed = False
         with self._lock:
             self._status.transferring = 0
             self._status.queued = 0
@@ -3740,6 +3814,10 @@ class RcloneLane(LaneAdapter):
                 self._status.last_error = None
                 self._status.last_sync = datetime.now(timezone.utc)
                 self._status.detail = f"transferred {result.transferred} file(s)"
+                pass_completed = True
+        if pass_completed:
+            # live-1: OUTSIDE the lock -- _note_stall_recovered takes it.
+            self._note_stall_recovered()
         self._notify_trash(result)
         if tripped:
             # The pass itself is over and its status was just published; the
@@ -3995,6 +4073,11 @@ class RcloneLane(LaneAdapter):
             as likely a copy as a move, and a wrong rename is the one way
             this feature could lose an editor a file.
           * NONE, or no usable answer at all -> exactly what 0.9.72 does.
+          * The only place the server knows is the path this pass trashed the
+            file FROM (comp-sync-1, 2026-09-18) -> that is not "elsewhere", it
+            is an inventory older than the deletion, and it reads as NONE.
+            Following it restored a deleted file to its own path every pass
+            and hid the event from the breaker.
 
         Never raises: this is decoration on a pass that has already run.
         """
@@ -4013,16 +4096,36 @@ class RcloneLane(LaneAdapter):
             if answer is None or not answer.usable:
                 return
             base = Path(backup_dir)
-            moved = duplicate = not_synced = ambiguous = 0
+            local_sub = _local_subpath(subpath)
+            moved = duplicate = not_synced = ambiguous = own_path = 0
             for name, size, rel in trashed:
                 places = answer.places(name, size)
                 if not places:
                     continue
+                # comp-sync-1 (2026-09-18): the server's inventory is the last
+                # COMPLETED walk, so a file deleted (or moved) since then is
+                # still listed at the path it was deleted FROM -- and a walk
+                # that keeps collapsing keeps those rows for ever (DASH-5).
+                # Following such a place renames the file straight back out of
+                # .ccsync-trash onto the path rclone just emptied, every pass,
+                # while counting as a relocation the breaker discounts: the
+                # deletion never lands and a wiped NAS folder raises nothing.
+                # Section 4a of HAND_MOVES_ON_THE_SERVER.md says "found
+                # ELSEWHERE"; a place that is where the file already was is not
+                # elsewhere, and this pass's own path is the one thing we know
+                # the server's picture is out of date about.
+                origin = self._trashed_from(local_sub, rel)
+                resolved = [(place, self._local_destination(place)) for place in places]
+                kept = [(place, dest) for place, dest in resolved
+                        if not _is_same_local_path(dest, origin)]
+                if not kept:
+                    own_path += 1
+                    continue
                 self._server_relocated_keys.add((nfc_key(name), int(size)))
-                if len(places) != 1:
+                if len(kept) != 1:
                     ambiguous += 1
                     continue
-                dest = self._local_destination(places[0])
+                dest = kept[0][1]
                 if dest is None:
                     not_synced += 1
                     continue
@@ -4031,6 +4134,7 @@ class RcloneLane(LaneAdapter):
                 if outcome == "moved":
                     moved += 1
                     self._moved_out_of_trash += 1
+                    self._note_relocated(origin, dest)
                 else:
                     duplicate += 1
             deleted = len(trashed) - len(
@@ -4040,13 +4144,61 @@ class RcloneLane(LaneAdapter):
                 "lane B: the server was asked about %d trashed file(s) (inventory "
                 "as of %s): moved %d, trashed-as-duplicate %d, "
                 "trashed-not-synced-here %d, found in more than one place %d, "
-                "deleted %d",
+                "still listed at the path it was trashed from %d, deleted %d",
                 len(trashed), answer.as_of or "unknown", moved, duplicate,
-                not_synced, ambiguous, deleted,
+                not_synced, ambiguous, own_path, deleted,
             )
+            unreadable = list(getattr(answer, "unreadable", ()) or ())
+            if unreadable:
+                # comp-sync-1/dash-api-1: an answer of "not found" for a file
+                # that lives in one of these projects is the server saying it
+                # could not tell, not that the file is gone. Nothing is done
+                # differently here (the safe direction is already "leave it in
+                # the trash"); the log has to be able to say why.
+                log.info(
+                    "lane B: the server could not read the inventory of %d "
+                    "project(s) (%s) - files that moved into one of them read "
+                    "as deletions this pass",
+                    len(unreadable), ", ".join(str(s) for s in unreadable[:5]))
         except Exception:
             log.exception("%s: following the server's moves failed -- this pass's "
                           "trashed files keep the old behaviour", self.name)
+
+    def _note_relocated(self, origin: Optional[Path], dest: Path) -> None:
+        """Tell the file-move ledger this lane followed a move itself.
+
+        res-companion-2 (2026-09-18). Never raises and never blocks the pass:
+        the rename has already happened, and a lane that could not write a
+        note must not undo it.
+        """
+        if self.on_relocated is None or origin is None:
+            return
+        try:
+            self.on_relocated(str(origin), str(dest))
+        except Exception:
+            log.debug("lane B: could not note the relocation of %s", dest.name,
+                      exc_info=True)
+
+    def _trashed_from(self, local_sub: Optional[str], rel: str) -> Optional[Path]:
+        """The local path a trashed file was moved out of, or None.
+
+        comp-sync-1 (2026-09-18). rclone's `--backup-dir` keeps each file's
+        path relative to the DESTINATION of the run, and `_backup_dir` puts
+        that directory under `local_root/.ccsync-trash/<stamp>/<local_sub>` --
+        so the file came from `local_root/<local_sub>/<rel>`, computed here
+        the same way round rather than read off the disk (it is not there any
+        more, which is the whole point).
+        """
+        try:
+            parts = [p for p in str(rel or "").replace("\\", "/").split("/") if p]
+            if not parts:
+                return None
+            root = Path(self.local_root)
+            if local_sub:
+                root = root / Path(*[p for p in str(local_sub).replace("\\", "/").split("/") if p])
+            return root / Path(*parts)
+        except (OSError, ValueError):                         # pragma: no cover
+            return None
 
     def _local_destination(self, place: dict) -> Optional[Path]:
         """Where a file the server found at `place` belongs on THIS disk, or
@@ -4066,7 +4218,15 @@ class RcloneLane(LaneAdapter):
         if not slug or not rel:
             return None
         try:
-            project_rel = self.project_rel_fn(slug)
+            # comp-sync-4 (2026-09-18): the rel goes WITH the slug now. A
+            # borrowed project is only partly on this disk, so "do I sync
+            # project X?" cannot be answered for it without knowing which
+            # file. A callable that takes the slug alone (an older double,
+            # an injected test stub) still works.
+            try:
+                project_rel = self.project_rel_fn(slug, rel)
+            except TypeError:
+                project_rel = self.project_rel_fn(slug)
         except Exception:
             log.debug("lane B: could not resolve the local path of %r", slug,
                       exc_info=True)
@@ -4094,9 +4254,21 @@ class RcloneLane(LaneAdapter):
         have left it anyway: something is already at the destination (the
         local copy is then a duplicate, and lane B will re-check it next pass
         like any other file), or the rename failed. NOTHING here overwrites
-        and nothing here deletes -- os.rename, never os.replace, so a
-        destination that appeared between the check and the rename is a
-        refusal rather than a file lost.
+        and nothing here deletes.
+
+        comp-sync-3 (2026-09-18): that used to be spelled "os.rename, never
+        os.replace, so a destination that appeared between the check and the
+        rename is a refusal rather than a file lost" - which is true on
+        WINDOWS only. On POSIX (every Mac in the fleet) rename(2) replaces an
+        existing destination silently, so `dest.exists()` was a TOCTOU check
+        selling a guarantee the call could not keep: lane B's own express run
+        for the other project, Syncthing or the editor landing that path in
+        the window destroyed the fresh copy with the trashed one. os.link +
+        unlink is the POSIX answer - it fails with EEXIST instead, and the
+        trash lives under local_root so it is always the same volume - with
+        the plain rename kept as the fallback for a filesystem that refuses
+        hard links (exFAT, an SMB mount) and on Windows, where rename is
+        already the refusal this function wants.
         """
         try:
             if dest.exists():
@@ -4110,6 +4282,23 @@ class RcloneLane(LaneAdapter):
                         "size -- the copy stays in %s", dest.name, TRASH_DIR_NAME)
                 return "kept"
             dest.parent.mkdir(parents=True, exist_ok=True)
+            if os.name != "nt":
+                try:
+                    os.link(str(src), str(dest))
+                except FileExistsError:
+                    log.warning(
+                        "lane B: %s appeared at the destination while it was being "
+                        "moved -- the copy stays in %s", dest.name, TRASH_DIR_NAME)
+                    return "kept"
+                except OSError:
+                    # No hard links here (exFAT, SMB, a cross-device trash):
+                    # the race is back, and that is still better than leaving
+                    # the file in the trash for ever.
+                    log.debug("lane B: hard link refused for %s; falling back to "
+                              "rename", dest.name, exc_info=True)
+                else:
+                    os.unlink(str(src))
+                    return "moved"
             os.rename(str(src), str(dest))
             return "moved"
         except OSError as exc:
@@ -4558,6 +4747,57 @@ class RcloneLane(LaneAdapter):
                 self._pending_stall_detail = detail
         write_stall_record(self._stall_file, record)
 
+    def _note_stall_recovered(self, express: bool = False) -> None:
+        """A pass of THIS lane finished without a kill, so its stall is over
+        (live-1). Never raises.
+
+        The record is stamped rather than deleted: the evidence of what was
+        killed, when, and after how long is the reason SYNC-1 persisted it,
+        and an admin reading `~/.ccsync/state/lane_stall.json` after the fact
+        must still find it. `stall_report` is what stops claiming it.
+
+        Only this lane's own label: lane A and lane B share one state dir and
+        one file, and a lane B pass says nothing about a lane A upload.
+        """
+        try:
+            label = self._stall_lane_label(express)
+            # comp-sync-4 (2026-09-18b mediums): the PERSISTED record, not
+            # `stall_record()`. That helper prefers this lane's own in-memory
+            # copy, so lane B checked the label against its stale lane B
+            # record, passed, and then wrote that record back over the file
+            # both lanes share - destroying a lane A stall that had landed
+            # since, on disk and on the wire (only lane B's
+            # sync_guard_report() reaches it). The file is the shared truth
+            # here, and the label is re-checked against what it actually
+            # holds.
+            record = read_stall_record(self._stall_file)
+            if record is None:
+                with self._lock:
+                    record = dict(self._last_stall) if self._last_stall else None
+            if not record or record.get("recovered_at"):
+                return
+            if str(record.get("lane") or "") != label:
+                # Another lane's stall is in the shared slot. Leave the file
+                # alone, but this lane HAS run past its own stall, so its
+                # memory must not keep shadowing the file with it.
+                with self._lock:
+                    mine = self._last_stall or {}
+                    if str(mine.get("lane") or "") == label and not mine.get("recovered_at"):
+                        mine = dict(mine)
+                        mine["recovered_at"] = datetime.now(timezone.utc).isoformat()
+                        self._last_stall = mine
+                return
+            record = dict(record)
+            record["recovered_at"] = datetime.now(timezone.utc).isoformat()
+            with self._lock:
+                self._last_stall = record
+            write_stall_record(self._stall_file, record)
+            log.info("%s: lane %s has completed a pass since the stall of %s -- "
+                     "no longer reporting it as a current blockage",
+                     self.name, label, record.get("at"))
+        except Exception:
+            log.debug("%s: could not clear the stall record", self.name, exc_info=True)
+
     def _take_pending_stall(self) -> Optional[str]:
         with self._lock:
             detail, self._pending_stall_detail = self._pending_stall_detail, None
@@ -4571,9 +4811,15 @@ class RcloneLane(LaneAdapter):
         lane A: both lanes share the state dir, and the report has one
         `stalled` slot."""
         with self._lock:
-            if self._last_stall:
-                return dict(self._last_stall)
-        return read_stall_record(self._stall_file)
+            mine = dict(self._last_stall) if self._last_stall else None
+        persisted = read_stall_record(self._stall_file)
+        if mine and persisted:
+            # comp-sync-4: the NEWER of the two, file first on a tie. The
+            # unconditional preference for memory meant lane B's report
+            # carried its own old stall while a fresh lane A kill sat in the
+            # file unread - the same shared slot, the other way round.
+            return persisted if _stall_when(persisted) >= _stall_when(mine) else mine
+        return mine or persisted
 
     def stall_report(self) -> Optional[dict]:
         """`sync_guard.stalled` for the report: the wire's four keys only.
@@ -4582,6 +4828,16 @@ class RcloneLane(LaneAdapter):
         carry the sentence; the dashboard gets the machine-readable half."""
         record = self.stall_record()
         if not record:
+            return None
+        # live-1: recovered, or simply old. Absent is how "nothing is stalled"
+        # is spelled on this wire, and it is what makes the dashboard's chip,
+        # the daily mail and the red tray line clear themselves on a
+        # companion deploy alone -- a 0.7.49 dashboard reads any record it is
+        # sent as a current blockage, so a `recovered_at` ON the wire would
+        # have fixed nothing until every dashboard was updated.
+        if record.get("recovered_at"):
+            return None
+        if _stall_age_seconds(record) > LANE_STALL_MAX_AGE_SECONDS:
             return None
         out = {key: record.get(key) for key in ("lane", "seconds", "killed", "at")}
         return out if out.get("at") else None
@@ -5546,6 +5802,10 @@ class RcloneLane(LaneAdapter):
             self._express_status["last_files"] = transferred
             self._express_status["last_error"] = error
             self._express_status["last_run"] = datetime.now(timezone.utc).isoformat()
+        if error is None:
+            # live-1: an express run that finished is this lane's evidence
+            # that the express stall is over.
+            self._note_stall_recovered(express=True)
 
     def _raise_if_express_stopping(self) -> None:
         """Stand down if _express_stop() has landed. Caller holds

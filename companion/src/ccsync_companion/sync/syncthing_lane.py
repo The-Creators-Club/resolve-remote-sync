@@ -40,7 +40,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 from urllib.parse import urlencode
 
-from . import syncthing_admin as syncthing_admin_mod
 from .base import (
     STATE_ERROR,
     STATE_IDLE,
@@ -69,6 +68,13 @@ PATH_HEAL_COOLDOWN_SECONDS = 300.0
 
 def default_http_post(url: str, api_key: str, timeout: float) -> Any:
     """A body-less Syncthing REST POST, through the same no-redirect opener."""
+    # syncthing_admin imports three helpers back out of this module, so a
+    # top-level import here made `import syncthing_lane` FIRST an
+    # ImportError -- the cycle resolves only when syncthing_admin happens to
+    # be imported first, which is how the suite hid it (found 2026-09-18,
+    # CR-283's fix pass). Both uses are inside functions, so the import is
+    # here rather than at module scope.
+    from . import syncthing_admin as syncthing_admin_mod
     return syncthing_admin_mod.http_request("POST", url, api_key, None, timeout)
 
 # Syncthing's connection "type" values that mean "not a direct path". A
@@ -194,6 +200,7 @@ def default_http_get(url: str, api_key: str, timeout: float) -> Any:
     """One Syncthing REST read. NO REDIRECTS (security-4, 2026-09-11b): the
     `X-API-Key` header would be re-sent to the redirect target, and it is
     lane C's full admin credential. See syncthing_admin._opener."""
+    from . import syncthing_admin as syncthing_admin_mod  # see default_http_post
     headers = {"X-API-Key": api_key} if api_key else {}
     req = urllib.request.Request(url, headers=headers)
     with syncthing_admin_mod._opener().open(req, timeout=timeout) as resp:
@@ -392,6 +399,14 @@ class SyncthingLane(LaneAdapter):
                 path = str(folder.get("path") or "")
                 if not fid or not path or folder.get("paused"):
                     continue
+                # comp-sync-6 (2026-09-18): the marker name is a per-folder
+                # config field and was a plain FILE before Syncthing 1.0, and
+                # Syncthing stores the path as configured, `~` included. This
+                # covers the HEAL only: rclone_lane's filters and tray.py
+                # still assume `.stfolder`, so a site with a custom marker is
+                # not markerName-aware anywhere else.
+                path = os.path.expanduser(path)
+                marker = str(folder.get("markerName") or ".stfolder")
                 if now - self._path_heal_asked.get(fid, -1e18) < PATH_HEAL_COOLDOWN_SECONDS:
                     continue
                 db_status = self._get(f"/rest/db/status?{urlencode({'folder': fid})}") or {}
@@ -399,7 +414,7 @@ class SyncthingLane(LaneAdapter):
                     continue
                 if FOLDER_PATH_MISSING not in str(db_status.get("error") or ""):
                     continue
-                if not os.path.isdir(os.path.join(path, ".stfolder")):
+                if not os.path.exists(os.path.join(path, marker)):
                     continue
                 self._path_heal_asked[fid] = now
                 self._post(f"/rest/db/scan?{urlencode({'folder': fid})}")
@@ -668,6 +683,24 @@ class SyncthingLane(LaneAdapter):
         # a slow lane C look identical without this.
         path_detail = self._path_detail(self._refresh_connection_summary())
 
+        # comp-sync-2 (2026-09-18): the heal is about EVERY configured folder,
+        # which is the shape its docstring names -- an editor between projects
+        # whose only path-missing folder is a shared asset library. It used to
+        # sit below the `if not expected:` return, i.e. exactly that machine
+        # could never run it. Read the config here, once, and let the verdict
+        # below reuse it; a config read that fails is carried to the verdict
+        # (which is where a failure becomes a lane error) so the no-selection
+        # branch keeps answering "no project folders to check yet".
+        config_folders: list[dict[str, Any]] = []
+        config_error: Optional[Exception] = None
+        try:
+            config = self._get("/rest/config")
+            config_folders = list(config.get("folders", []) or []) if isinstance(config, dict) else []
+        except Exception as exc:
+            config_error = exc
+        if config_folders:
+            self._heal_missing_paths(config_folders)
+
         expected = self._effective_folder_ids()
         if not expected:
             # NOTHING was checked, so nothing may be claimed. Reporting
@@ -687,8 +720,9 @@ class SyncthingLane(LaneAdapter):
         missing_folders: list[str] = []
         paused_folders: list[str] = []
         try:
-            config = self._get("/rest/config")
-            folders = config.get("folders", []) if isinstance(config, dict) else []
+            if config_error is not None:
+                raise config_error
+            folders = config_folders
             by_id = {f.get("id"): f for f in folders}
             for fid in expected:
                 folder = by_id.get(fid)
@@ -707,10 +741,6 @@ class SyncthingLane(LaneAdapter):
             )
             self._set_status(self._with_problems(status))  # comp-sync-3
             return self.status()
-
-        # Before any verdict, so a folder missing from the selection cannot
-        # keep an unrelated folder's stale path error alive (CR-278).
-        self._heal_missing_paths(folders)
 
         if missing_folders:
             # A folder the server has OFFERED but the sequencer hasn't

@@ -52,7 +52,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import RedirectResponse
 
-from . import auth
+from . import auth, db
 from .settings import Settings
 
 log = logging.getLogger("ccsync.dashboard.oidc")
@@ -291,6 +291,24 @@ def username_from_claims(settings: Settings, claims: dict[str, Any]) -> str:
         raise OidcError(
             f"claim {settings.oidc_username_claim!r} is {username!r}, which is not a NAS "
             f"username; point DASH_OIDC_USERNAME_CLAIM at the login-name claim")
+    # dash-core-3 (2026-09-18): the shape the REST of the dashboard enforces.
+    # `db._USERNAME_RE` and `local_users._USERNAME_RE` gate four write paths on
+    # exactly this regex, so a claim that passes only the three tests above (a
+    # space, a colon, a plus, non-ASCII, a leading digit, 200 characters) used
+    # to mint a perfectly valid session for a name `db.record_known_editor`,
+    # `db.set_selection` and friends silently REFUSE. On a deployment that lets
+    # the IdP decide membership (`DASH_OIDC_ALLOWED_GROUPS`) with the username
+    # claim pointed at a display name, that editor appears signed in to a
+    # dashboard where every tick and every Syncthing join does nothing, with no
+    # sentence anybody can read. A 403 an admin can act on beats a session that
+    # half-works. Imported rather than copied: db.py, local_users.py and
+    # nas.base already say they mirror one another.
+    if db._USERNAME_RE.match(username) is None:
+        raise OidcError(
+            f"claim {settings.oidc_username_claim!r} is {username!r}, which is not "
+            f"a NAS username (letters, digits, dot, dash and underscore, "
+            f"starting with a letter, up to 32 characters); point "
+            f"DASH_OIDC_USERNAME_CLAIM at the login-name claim")
     return username
 
 

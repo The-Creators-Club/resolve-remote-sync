@@ -115,6 +115,29 @@ def resolve(roots: dict[str, str], root: str, rel: str) -> Path:
     return Path(base).joinpath(*parts)
 
 
+# res-fleet-1 (2026-09-18): is there a drain thread in this process at all?
+#
+# A module-level fact for `mount_status`'s reason verbatim: DDIAG-6 runs on the
+# collector thread with a connection and no app object, and the shape it could
+# not see is the one that shipped -- `PinnedExecutor.start()` was un-gated for
+# the lazy pool, but its caller in `app.py` still asked `available()` first,
+# which at boot asks a pool with no engines. So the thread was never created,
+# `release_pinned_jobs()` never ran, and `jobs.can_pin` (asked LATER, after an
+# editor has opened an episode) happily answered yes: rows went `pinned` into a
+# queue nothing drains, on no lease and with no expiry, and the check's two
+# existing shapes both need "not mounted" or a claimed machine to fire.
+_RUNNING = threading.Event()
+
+
+def _note_running(running: bool) -> None:
+    _RUNNING.set() if running else _RUNNING.clear()
+
+
+def is_running() -> bool:
+    """Has a pinned-job drain thread been started and not stopped here?"""
+    return _RUNNING.is_set()
+
+
 class PinnedExecutor:
     """The thread that drains `pinned`. Never raises out of tick()."""
 
@@ -172,6 +195,13 @@ class PinnedExecutor:
 
     def why_not(self) -> str:
         if self.engine is None:
+            # res-fleet-1 (2026-09-18): "no engine right now" is not "not
+            # mounted". With the lazily built pool there is no engine at boot
+            # on EVERY container, and this sentence went into the boot log as
+            # a statement about the mount, which was simply untrue.
+            if callable(self._engine_src):
+                return ("no episode is open yet, so there is no Timeline Cards "
+                        "engine to hand a pinned job to")
             return "Timeline Cards is not mounted in this dashboard"
         if not self.available():
             return (f"the mounted Timeline Cards checkout has no "
@@ -204,11 +234,13 @@ class PinnedExecutor:
         self._thread = threading.Thread(target=self._loop, name="ccsync-pinned",
                                         daemon=True)
         self._thread.start()
+        _note_running(True)
 
     def stop(self) -> None:
         # dash-release-jobs-1 (2026-09-11b): keep the handle when the join
         # times out; `join(timeout)` cannot be asked whether it worked.
         self._stop.set()
+        _note_running(False)
         thread = self._thread
         if thread is None:
             return

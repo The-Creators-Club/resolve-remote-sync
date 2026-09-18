@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import subprocess
 from functools import lru_cache
@@ -250,7 +251,19 @@ def probe_video(path: str | Path) -> dict:
         "height": video_stream.get("height"),
         "codec": video_stream.get("codec_name"),
         "shot_date": shot_date,
-        "frames": _int_or_none(video_stream.get("nb_frames")),
+        # broll-indexer-2 / proxy-tiers-7 (2026-09-18): `nb_frames` is the
+        # container's claim, and count_frames_cmd's own docstring fifty lines
+        # below says the field "is absent or a lie in exactly the cases that
+        # matter (an mp4 written by a killed encoder still carries the count
+        # it intended)". This column decides an OFFLINE clip's length on every
+        # remote machine (migration 012's own comment), so a confident wrong
+        # number is worse than the NULL every reader already handles: it is a
+        # timeline whose tail is empty with nothing saying why. Cross-checked
+        # against duration * fps, which this probe has in hand for nothing --
+        # NOT against count_frames, which would be a second full read of every
+        # original on the one path tuned to read each once (broll-indexer-3).
+        "frames": _plausible_frames(
+            _int_or_none(video_stream.get("nb_frames")), duration_s, fps),
         "start_tc": timecode_from_probe(info)[0],
         "bitrate": bitrate,
     }
@@ -337,6 +350,75 @@ def parse_frame_count(stdout_text: str | None) -> int | None:
         return None
 
 
+# How far duration * fps may sit from a real packet count before the estimate
+# stops being evidence (broll-indexer-3, 2026-09-18). A container's duration is
+# a rounded number of seconds in some muxers, so one or two frames of
+# disagreement says nothing.
+#
+# It is NOT a licence to skip the source count (broll-indexer-1, 2026-09-18b):
+# the failure mode being screened for is a proxy 1-18 frames short, and an
+# estimate carrying two frames of slack cannot see a one-frame difference. No
+# proxy verification consults this any more; it survives for callers that want
+# a plausibility figure, never for a verdict.
+FRAME_SLACK = 2
+
+
+def expected_frames(info: dict) -> int | None:
+    """duration * fps from a probe already taken, or None if it cannot be had.
+
+    Deliberately NOT `nb_frames`: fifty lines below, count_frames_cmd explains
+    that the container field "is absent or a lie in exactly the cases that
+    matter". An ESTIMATE: nothing may fail or pass a proxy on it (see
+    FRAME_SLACK, broll-indexer-1).
+    """
+    try:
+        duration = float((info.get("format") or {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    rate = video_fps(info) or 0
+    if duration <= 0 or rate <= 0:
+        return None
+    return int(round(duration * rate))
+
+
+def frames_match(src_frames: int, dst_frames: int) -> bool:
+    """Is a proxy's frame count acceptable against its source's?
+
+    EXACT, and one predicate rather than three copies of `!=`, because three
+    producers have to agree: this module's build_proxy, the b-roll indexer's
+    make_own_proxies and the companion's ingest.
+
+    comp-broll-tiers-3 asked whether a VFR source needs a tolerance here and
+    the answer, taken in this same fix pass (2026-09-18), is NO: the
+    companion now carries the twin of this rule, exact, so all three producers
+    refuse the same file. A tolerance introduced later belongs in this
+    function and in the companion's twin in the SAME change, or the fleet
+    grows two rules about one file - which is how the Reproductive Rights
+    proxies (1-18 frames short, refused by Resolve, reported as "sync is
+    stuck") got past three checks that each thought another had looked.
+    """
+    return src_frames == dst_frames
+
+
+def _plausible_frames(claimed, duration_s, fps):
+    """`claimed` if duration * fps agrees with it, else None (broll-indexer-2).
+
+    "Cannot tell" is the answer when there is nothing to check it against: a
+    container with no duration or no rate leaves the claim as it stands, which
+    is the behaviour every reader had before this check existed.
+    """
+    if claimed is None or claimed <= 0:
+        return None
+    if not duration_s or not fps:
+        return claimed
+    expected = duration_s * fps
+    # One frame of slack for a rounded container duration, plus 1% for the
+    # rate being an average over a VFR file.
+    if abs(claimed - expected) <= max(1.0, expected * 0.01):
+        return claimed
+    return None
+
+
 def count_frames(path: str | Path) -> int | None:
     """How many video frames a file actually contains, or None.
 
@@ -354,6 +436,55 @@ def count_frames(path: str | Path) -> int | None:
     if result.returncode != 0:
         return None
     return parse_frame_count(result.stdout)
+
+
+# broll-indexer-1 (2026-09-18b): the source's packet count, memoised per
+# (path, size, mtime_ns). CR-286B tried to buy back the second full read of
+# every original with a cheap `duration * fps` screen, and that screen let a
+# proxy 1 or 2 frames short through: a CFR camera original's real count IS its
+# duration * fps, so the short proxy landed inside the window and the exact
+# comparison never ran. frames_match has ONE rule for three producers, so the
+# screen is gone and the comparison is always exact; what is left of the
+# saving is this memo, which is what keeps an original from being demuxed
+# again by the libx264 fallback's second verification pass, by a second clip
+# built from the same source, or by a rerun inside one process. Keyed on the
+# bytes, never the path alone: a re-encoded file at the same path is a
+# different file.
+_FRAME_COUNT_MEMO: dict[tuple[str, int, int], int] = {}
+_FRAME_COUNT_MEMO_MAX = 512
+
+
+def clear_frame_count_cache() -> None:
+    _FRAME_COUNT_MEMO.clear()
+
+
+def count_frames_cached(path: str | Path) -> int | None:
+    """count_frames, paid for once per version of a file (see the memo above).
+
+    A file that cannot be stat'ed is not cacheable and is simply counted: a
+    memo must never be the reason a count is wrong.
+
+    Only a real count is remembered (CR-290A, 2026-09-18b). `count_frames`
+    answers None for a transient failure too - an SMB blip, a NAS too busy to
+    serve the demux - and remembering that None would pin "cannot tell" on
+    that original for the life of the process, sending every later proxy of it
+    down the "both known or skip" branch unchecked. A failed count is
+    retried, and costs at worst the read it was always going to cost.
+    """
+    try:
+        st = os.stat(path)
+        key = (str(path), st.st_size, st.st_mtime_ns)
+    except OSError:
+        return count_frames(path)
+    if key in _FRAME_COUNT_MEMO:
+        return _FRAME_COUNT_MEMO[key]
+    value = count_frames(path)
+    if value is None:
+        return None
+    if len(_FRAME_COUNT_MEMO) >= _FRAME_COUNT_MEMO_MAX:
+        _FRAME_COUNT_MEMO.pop(next(iter(_FRAME_COUNT_MEMO)), None)
+    _FRAME_COUNT_MEMO[key] = value
+    return value
 
 
 def verify_decodes(path: str | Path, max_errors: int = 0) -> int:
@@ -475,8 +606,24 @@ def build_proxy(
         errs = verify_decodes(dest)
         if errs > 0:
             return f"{errs} decode errors"
-        src_frames, dst_frames = count_frames(src), count_frames(dest)
-        if src_frames and dst_frames and src_frames != dst_frames:
+        # broll-indexer-1 (2026-09-18b): the comparison is EXACT again. The
+        # SOURCE count is a second full network read of the original
+        # (`-count_packets` demuxes the whole file), and CR-286B skipped it
+        # whenever the proxy's count sat within FRAME_SLACK of the source's
+        # `duration * fps`. A CFR camera original's real count IS its
+        # duration * fps, so a proxy 1 or 2 frames short of it fell inside
+        # that window and the source was never counted: the low end of the
+        # very class this check exists for (Reproductive Rights, 1-18 frames
+        # short) passed. An estimate with slack cannot screen for a
+        # difference smaller than its own slack. What survives of CR-286B is
+        # count_frames_cached: one demux per version of an original, whatever
+        # asks. Nothing about the argv changes -- the parity tests and the
+        # companion's loader pin it.
+        dst_frames = count_frames(dest)
+        # Both known or skip, so an unknowable comparison does not pay for the
+        # expensive half of itself.
+        src_frames = count_frames_cached(src) if dst_frames else None
+        if src_frames and dst_frames and not frames_match(src_frames, dst_frames):
             return f"{dst_frames} frames of the source's {src_frames}"
         try:
             src_d = probe_video(src).get("duration_s")

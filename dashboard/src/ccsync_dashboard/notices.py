@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import logging
+import os
 import shutil
 import sqlite3
 import time
@@ -161,6 +162,18 @@ def run_checks(
         _check_feature_mounts,
         _check_alerts_sink,
         _check_server_crashes,
+        # dash-db-2 (2026-09-18): the check-time evidence for the three
+        # contention kinds. They are registered in db.NOTICE_KINDS now, and a
+        # registered kind whose writer only fires under contention would read
+        # [ NOT CHECKED ] for ever on a healthy server - the false negative
+        # the registry exists to prevent, worn the other way round. This pass
+        # runs on the notices cycle, not on every poll: stamping from `_timed`
+        # was a write transaction per poll per kind, and that is how the
+        # collector starts holding the write lock it is written not to hold.
+        _check_contention,
+        # proxy-tiers-3's dashboard half (2026-09-18): an archive this
+        # container cannot list turns every Send to Resolve into a preview.
+        _check_broll_archive,
     )
     ran = 0
     for check in checks:
@@ -721,6 +734,146 @@ def _check_feature_mounts(conn, settings, now: str) -> None:
 
 # --------------------------------------------------------------- the sink
 
+MOVES_DROPPED_KIND = "file_moves_dropped"
+
+
+def record_moves_dropped(
+    conn, found: int, dropped: int, now: str | None = None,
+) -> None:
+    """One pass found more hand moves than it may record (dash-collector-alerts-2).
+
+    An ERROR, not a warning: the dropped moves are not deferred, they are
+    lost. `replace_nas_media` has already overwritten the only record of the
+    old paths, so every machine that holds those files treats them as
+    deletions - lane A puts them back at the old path, lane B's breaker parks
+    proxy download - and no later cycle can see the move again. The operator
+    has to finish the job with the project page's MOVE button.
+    """
+    stamp = now or db.utcnow_iso()
+    db.notice(
+        conn, MOVES_DROPPED_KIND, "error", "the last inventory pass",
+        body=(f"{found} file moves were found on the server in one pass and "
+              f"only {found - dropped} could be recorded, so {dropped} were "
+              f"dropped. Those files are a deletion as far as every editor's "
+              f"computer is concerned: their copies go back up to the old "
+              f"paths, and proxy download stops itself on the computers that "
+              f"held them."),
+        fix=("Find what changed on the server (a restore, a remount, or a big "
+             "reorganisation), then move the rest with [ MOVE ON THE SERVER "
+             "AND ON EVERY MACHINE ] on the project page so every computer "
+             "follows."),
+        now=stamp)
+    conn.commit()
+
+
+BROLL_ARCHIVE_KIND = "broll_archive_unreadable"
+
+
+def _broll_archive_problem(root: str, witness: str) -> str:
+    """Why this server cannot read the b-roll archive, or "" (it can).
+
+    dash-collector-alerts-2 (2026-09-18b). Three ways it is gone and only one
+    of them is an OSError on the root:
+
+      * the WITNESS is missing. A bind mount that goes away leaves its mount
+        point behind, so the witness (b-roll records its proxies directory)
+        is the only path whose absence proves the data went with it. Probed
+        for EXISTENCE, not directory-ness, because another mount's witness is
+        allowed to be a file (`mount_status.record_root`).
+      * the root cannot be listed at all.
+      * the root lists EMPTY. Not healthy: an empty archive is the same
+        answer an unmounted dataset gives, and the canary the inventory pass
+        and `alerts._check_nas_tree` already read it as.
+
+    The words come back rather than a notice, because the notice half and the
+    alert half of this check are deliberately separate copies.
+    """
+    try:
+        if witness and not os.path.exists(witness):
+            return "the archive folder is there but its contents are not"
+    except OSError as exc:
+        return exc.strerror or str(exc)
+    try:
+        with os.scandir(root) as it:
+            if next(it, None) is None:
+                return "the folder is there but completely empty"
+    except OSError as exc:
+        return exc.strerror or str(exc)
+    return ""
+
+
+def _check_broll_archive(conn, settings, now: str) -> None:
+    """Can this container still LIST the b-roll archive?
+
+    proxy-tiers-3's dashboard half (2026-09-18, owed here by companion-media).
+    `insert_target_detail` discovers a clip's original and its editing proxy
+    by listing the archive folder inside this container, and an OSError there
+    (the dataset unmounted, an SMB hiccup, `BROLL_DATA_ROOT` wrong after an
+    image update) used to be swallowed into "no entries" - byte for byte the
+    answer for "this clip has no original". Ten minutes of that turned every
+    Send to Resolve in the window into a preview-only insert with a stand-in
+    ledger row on the editor's machine and a Resolve project pointing at a
+    540p file, damage that outlives the outage for ever on projects nobody
+    re-checks. The companion half now answers `known: false` and falls back;
+    this is the other half of the promise, which is that somebody is TOLD.
+
+    Nothing recorded means no b-roll mount in this build: not evidence that
+    the archive is fine, so nothing is written and nothing is cleared.
+
+    dash-collector-alerts-2 (2026-09-18b): the first version of this check
+    scandir'd the recorded ROOT and called success healthy, which is the one
+    question that cannot answer the outage it was written for.
+    `mount_status.record_root`'s docstring says why: a bind mount that goes
+    away LEAVES ITS MOUNT POINT BEHIND, so the root lists fine (empty) with
+    the dataset gone - and that is precisely when `insert_target_detail`
+    starts answering `known: false` for every clip. So the WITNESS the mount
+    recorded is probed first (b-roll's is its proxies directory), and an
+    empty root is unreadable rather than healthy, the same canary
+    `collector._record_inventory` and `alerts._check_nas_tree` already use.
+    The witness may be a FILE on other mounts, hence existence, not scandir.
+    """
+    root_of = getattr(mount_status, "root_of", None) if mount_status else None
+    if root_of is None:
+        return
+    recorded = root_of("broll")
+    if not recorded or not recorded[0]:
+        return
+    root = recorded[0]
+    # A build that recorded a root with no witness must still be checkable.
+    witness = (recorded[1] if len(recorded) > 1 else "") or root
+    reason = _broll_archive_problem(root, witness)
+    if reason:
+        db.notice(
+            conn, BROLL_ARCHIVE_KIND, "error", root,
+            body=(f"This server cannot read the b-roll archive at {root} "
+                  f"({reason}). Until it can, every clip an "
+                  f"editor sends to Resolve is the small preview instead of "
+                  f"the editing proxy, and their Resolve project keeps "
+                  f"pointing at it afterwards."),
+            fix=("On the NAS, check that the b-roll dataset is mounted and "
+                 "that this container's bind mount for it is still there "
+                 "(docs/DOCKER.md), then reload this page."),
+            now=now)
+        return
+    db.clear_notice(conn, BROLL_ARCHIVE_KIND, root, now=now)
+
+
+def _check_contention(conn, settings, now: str) -> None:
+    """Evidence that this build watches for a busy database (dash-db-2).
+
+    The three kinds are EVENT-shaped: `record_db_busy` fires from the 503
+    handler, `record_slow_write` from a report or a publish that really held
+    the lock, and `record_slow_poll` from a pass that overran. None of them
+    has a per-cycle re-assert, so `mark_notice_checked` is what stops the
+    WHAT THE SERVER CHECKS panel reading [ NOT CHECKED ] on a fleet that has
+    simply never been contended - the same reason `file_move_detected` is
+    stamped from the inventory pass. Stamping only, never a clear: closing a
+    contention card that nobody has read is not this pass's business.
+    """
+    for kind in (DB_BUSY_KIND, SLOW_WRITE_KIND, SLOW_POLL_KIND):
+        db.mark_notice_checked(conn, kind, now)
+
+
 def _check_alerts_sink(conn, settings, now: str) -> None:
     """SYS-1(c): the mechanism that delivers every other diagnosis.
 
@@ -1015,10 +1168,17 @@ def redact_path(path: str, route: str = "") -> str:
 
     `route` is the matched ROUTE TEMPLATE (`/api/v1/jobs/{id}/why`) when the
     caller has one: it is bounded by the number of routes this server has and
-    carries no value anybody typed. It is absent for an exception raised
-    inside a MOUNTED SUB-APP, because the parent matched a Mount and not a
-    route, which is exactly the `/broll/share/<token>/` case - so the
-    fallback keeps the first two segments and nothing else.
+    carries no value anybody typed. It is absent only for a request nothing
+    matched, and then the fallback keeps the first two segments and nothing
+    else - which is what keeps a `/broll/share/<token>/` 404 from writing a
+    client's live credential into a row a page will show.
+
+    dash-core-2 (2026-09-18b mediums): this used to say the route is absent
+    inside a MOUNTED SUB-APP. It is not, since wire-2 put the handler in the
+    sub-app: what arrives there is the sub-app's own INNER template, which
+    names no path on this dashboard and is shared verbatim by /broll and
+    /music. `app.unhandled_error` prefixes it with the mount's `root_path`
+    before calling this, so the caller's contract is unchanged.
 
     Why it matters twice over: `notices` is upserted on (kind, subject), so a
     raw path with an id in it is an unbounded row count in a table nothing
@@ -1172,6 +1332,60 @@ def record_slow_write(
              "projects it does not need; if it is the collector, send Diagnostics "
              "to support with the time."),
         now=stamp)
+    conn.commit()
+
+
+SLOW_POLL_KIND = "slow_poll"
+
+# How long a background PASS may take before it is worth a card. Deliberately
+# not `db.BUSY_TIMEOUT_MS`: that number is how long a request waits for the
+# write LOCK, and a pass holds no lock over its network work, so reusing it was
+# the whole of dash-db-1's wrong claim. One collector cycle is the honest bar -
+# a pass that cannot finish inside one is a pass that is falling behind.
+SLOW_POLL_SECONDS = 60.0
+
+
+def record_slow_poll(
+    conn, kind: str, seconds: float, now: str | None = None,
+) -> None:
+    """A background pass that took longer than a cycle.
+
+    dash-db-1 = dash-collector-alerts-4 (2026-09-18). This used to be filed as
+    a `slow_write` whose body stated, as fact, that the poll "held the
+    database's write lock for longer than a request waits" - on a pass that
+    deliberately does not: `_record_inventory`'s own docstring says every
+    filesystem walk happens BEFORE the first write, because an os.walk of a
+    ZFS/NFS tree inside an open SQLite write transaction is what made editors'
+    POST /api/v1/report 500. So on any site whose inventory walk takes more
+    than five seconds - which is normal for a tree of any size - the home page
+    grew a permanent, un-dismissable card blaming an innocent pass, and the
+    real culprit of a `db_busy` became indistinguishable from that noise.
+
+    `clear_slow_poll` is the other half: a fleet that has stopped being slow
+    stops being told that it is.
+    """
+    stamp = now or db.utcnow_iso()
+    subject = f"collector poll {kind}"[:120]
+    seen = _seen_before(conn, SLOW_POLL_KIND, subject)
+    db.notice(
+        conn, SLOW_POLL_KIND, "warn", subject,
+        body=(f"{seen} time(s) the {kind} pass took longer than a cycle; the "
+              f"last one took {seconds:.0f} s. Most of a pass is a walk of the "
+              f"NAS tree or a Syncthing round trip, which happen outside any "
+              f"database transaction, so on its own this does not mean anything "
+              f"waited on the database."),
+        fix=("If the fleet also shows 'database busy', look for a 'slow write' "
+             "notice from the same minute: that is the writer that held the "
+             "lock. If this is the inventory pass alone, the tree it walks has "
+             "grown; archive the projects nobody syncs any more."),
+        now=stamp)
+    conn.commit()
+
+
+def clear_slow_poll(conn, kind: str, now: str | None = None) -> None:
+    """That pass finished inside a cycle: close its card (dash-db-1)."""
+    db.clear_notice(conn, SLOW_POLL_KIND, f"collector poll {kind}"[:120],
+                    now=now or db.utcnow_iso())
     conn.commit()
 
 

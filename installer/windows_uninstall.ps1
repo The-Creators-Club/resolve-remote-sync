@@ -206,6 +206,31 @@ function Get-BinDirLeftovers {
     catch { return @() }
 }
 
+function Get-FullRemovalLeftovers {
+    <#
+      .SYNOPSIS
+        What is still inside %LOCALAPPDATA%\ccsync after the -Full delete
+        (install-onboard-2, 2026-09-18).
+      .DESCRIPTION
+        Section 4 re-reads the bin dir after its delete; section 5's -Full
+        removal of the whole tree -- which CONTAINS that bin dir plus
+        syncthing-config, the device identity -- did not, and reported
+        "removed" and "your identity is gone" without looking. Top level only,
+        and never throws: the uninstall is over by the time this is asked.
+    #>
+    param([string]$CcsyncLocal)
+    if (-not $CcsyncLocal -or -not (Test-Path -LiteralPath $CcsyncLocal)) { return @() }
+    try {
+        $kids = @(Get-ChildItem -LiteralPath $CcsyncLocal -Force -ErrorAction SilentlyContinue |
+                  ForEach-Object { $_.FullName })
+        # The directory itself surviving with nothing in it is not a leftover
+        # anybody has to act on; an empty folder holds no identity.
+        if ($kids.Count -eq 0) { return @() }
+        return $kids
+    }
+    catch { return @($CcsyncLocal) }
+}
+
 function Get-UninstallClosingAdvice {
     <#
       .SYNOPSIS
@@ -228,11 +253,40 @@ function Get-UninstallClosingAdvice {
         [int]$LeftoverCount,
         [string]$BinDir,
         [string]$SelfPath,
-        [switch]$DryRun
+        [switch]$DryRun,
+        # install-onboard-2 (2026-09-18): what survived the -Full delete of
+        # %LOCALAPPDATA%\ccsync. The verdict was computed from $binLeftovers
+        # alone, which is measured BEFORE section 5 runs and says nothing
+        # about syncthing-config -- so "complete" could be printed over a
+        # device identity still on the disk. Optional and empty by default:
+        # a run without -Full has nothing to say here.
+        [string[]]$IdentityLeftovers = @(),
+        # install-onboard-4 (2026-09-18b mediums): the ONE identity verdict,
+        # measured by the caller as Test-Path on the Syncthing home. It used
+        # to be measured twice from different inputs: section 5 asked
+        # Test-Path, this paragraph called every surviving child of
+        # %LOCALAPPDATA%\ccsync (bin\, a stray Temp\) an item "of your sign-in
+        # and Syncthing identity". The ordinary shape - bin\ survives because
+        # it is the CWD of the powershell host Apps & features launched, while
+        # syncthing-config really did go - therefore printed "your device
+        # identity is gone, ask for a new device ID" and "your identity is
+        # still on this machine" in one paragraph. The admin cannot act on
+        # both, and re-approving a device ID that never changed is the
+        # stuck-lane-C incident.
+        [bool]$IdentityPresent = $false
     )
     $lines = @()
+    $identityCount = @($IdentityLeftovers | Where-Object { $_ }).Count
     if ($LeftoverCount -gt 0) {
         $lines += [pscustomobject]@{ Kind = "warn"; Text = "CCSync uninstall NOT complete: $LeftoverCount program file(s) are still in $BinDir. Sign out and back in, then run this uninstaller again from Apps & features." }
+    }
+    elseif ($identityCount -gt 0) {
+        $what = if ($IdentityPresent) {
+            "$identityCount item(s) could not be removed, and your Syncthing device identity is among them. A reinstall reuses the SAME device ID, so do not ask the admin to approve a new one."
+        } else {
+            "$identityCount item(s) of the CC Sync app folder are still on this machine. Your sign-in and Syncthing device identity did go, so a reinstall generates a NEW device ID."
+        }
+        $lines += [pscustomobject]@{ Kind = "warn"; Text = "CCSync uninstall NOT complete: $what Sign out and back in, then run this uninstaller again with -Full, or delete the item(s) listed above by hand." }
     }
     else {
         $lines += [pscustomobject]@{ Kind = "step"; Text = "CCSync uninstall complete$(if ($DryRun) { ' (dry run -- nothing changed)' })." }
@@ -241,8 +295,16 @@ function Get-UninstallClosingAdvice {
     # This script is installed INTO $BinDir by windows_bootstrap.ps1 (OPS-17),
     # and Windows will not always let a running script delete itself.
     if ($SelfPath -and $BinDir -and $SelfPath.StartsWith($BinDir, [StringComparison]::OrdinalIgnoreCase)) {
-        if ($LeftoverCount -gt 0) {
-            $lines += [pscustomobject]@{ Kind = "step"; Text = "LEAVE this uninstaller where it is at $SelfPath - it is what Apps & features runs when you retry, and the folder it is in still holds the program files listed above." }
+        # install-onboard-1 (2026-09-18b mediums): this arm was keyed on
+        # $LeftoverCount alone, while the identity branch above is keyed on
+        # $identityCount. On that branch $LeftoverCount is 0 - Get-BinDirLeftovers
+        # deliberately excludes this script - so an unfinished -Full run said
+        # "run this uninstaller again with -Full" and, two lines later, "delete
+        # that file, and the folder it is in, whenever you like". Following the
+        # second sentence destroys the only thing that can carry out the first.
+        if ($LeftoverCount -gt 0 -or $identityCount -gt 0) {
+            $why = if ($LeftoverCount -gt 0) { "the folder it is in still holds the program files listed above" } else { "the uninstall above did not finish" }
+            $lines += [pscustomobject]@{ Kind = "step"; Text = "LEAVE this uninstaller where it is at $SelfPath - it is what you run to retry, and $why." }
         }
         else {
             $lines += [pscustomobject]@{ Kind = "step"; Text = "this uninstaller is still on disk at $SelfPath (it was running). Delete that file, and the folder it is in, whenever you like." }
@@ -531,6 +593,14 @@ if (Test-Path -LiteralPath $driveIconsKey) {
 # when the directory is actually clear, and left in place, with an
 # explanation, when it is not.
 $binLeftovers = @()
+# install-onboard-2 (2026-09-18): declared beside $binLeftovers so the closing
+# verdict can ask about the -Full tree on every path, including the runs that
+# never enter section 5.
+$fullLeftovers = @()
+# install-onboard-4 (2026-09-18b mediums): ONE identity verdict for section 5's
+# paragraph and for the closing line. False on a run without -Full, where the
+# identity is kept on purpose and the closing line never speaks about it.
+$identityStillThere = $false
 if (Test-Path -LiteralPath $BinDir) {
     if ($DryRun) { Write-Step "[dry-run] would delete $BinDir (rclone, syncthing, companion exe)" }
     else {
@@ -624,7 +694,29 @@ if ($Full) {
         if ($DryRun) { Write-Step "[dry-run] would delete $CcsyncLocal" }
         else {
             Remove-Item -LiteralPath $CcsyncLocal -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Step "removed $CcsyncLocal"
+            # install-onboard-2 (2026-09-18): LOOK, the way section 4 does.
+            # PowerShell 5.1's Remove-Item -Recurse deletes NOTHING when one
+            # child is locked, and section 1's Stop-Process -Force is never
+            # waited on -- so a syncthing.exe still holding a handle left the
+            # whole tree, including syncthing-config (the device identity),
+            # while this printed "removed" and the paragraph below told the
+            # editor their device ID was gone. They reinstall, Syncthing comes
+            # up on the OLD id, and the admin waits for a new one that will
+            # never appear on the pending list. That is the stuck-lane-C
+            # incident pointing the other way.
+            $fullLeftovers = @(Get-FullRemovalLeftovers -CcsyncLocal $CcsyncLocal)
+            if ($fullLeftovers.Count -eq 0) {
+                Write-Step "removed $CcsyncLocal"
+            }
+            else {
+                Write-Warn2 "could NOT remove all of $CcsyncLocal - $($fullLeftovers.Count) item(s) are still there, most likely still open by a running app:"
+                foreach ($leftover in ($fullLeftovers | Select-Object -First 8)) {
+                    Write-Warn2 "    $leftover"
+                }
+                if ($fullLeftovers.Count -gt 8) {
+                    Write-Warn2 "    ...and $($fullLeftovers.Count - 8) more"
+                }
+            }
         }
     }
     else { Write-Skip "already absent: $CcsyncLocal" }
@@ -648,14 +740,56 @@ if ($Full) {
             else { Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction SilentlyContinue }
         }
         if (-not $DryRun) {
-            Write-Step "removed your sign-in and settings from $CcsyncProfile ($($doomed.Count) item(s))"
+            # install-onboard-3 (2026-09-18b mediums): LOOK, the way section 4
+            # and the -Full block above it do. This printed $doomed.Count - the
+            # count it INTENDED to delete - without re-reading the directory,
+            # and $fullLeftovers scans %LOCALAPPDATA%\ccsync only, so the
+            # closing verdict could not catch it either: a run that removed
+            # nothing here ended "CCSync uninstall complete". config.toml holds
+            # the per-editor cce1. fleet credential and dashboard_token, and
+            # companion.log is held open by the companion section 1 killed
+            # without waiting - on a machine handed to someone else that is a
+            # live credential the editor was told was gone. state\ stays
+            # excluded: it is KEPT on purpose (the paragraph below says so).
+            $profileSurvivors = @(Get-ChildItem -LiteralPath $CcsyncProfile -Force -ErrorAction SilentlyContinue |
+                Where-Object { $keepNames -notcontains $_.Name } |
+                ForEach-Object { $_.FullName })
+            if ($profileSurvivors.Count -eq 0) {
+                Write-Step "removed your sign-in and settings from $CcsyncProfile ($($doomed.Count) item(s))"
+            }
+            else {
+                $removedCount = $doomed.Count - $profileSurvivors.Count
+                if ($removedCount -lt 0) { $removedCount = 0 }
+                Write-Warn2 "removed $removedCount item(s) from $CcsyncProfile, but could NOT remove $($profileSurvivors.Count) - most likely still open by a running app. These can hold your sign-in (config.toml):"
+                foreach ($survivor in ($profileSurvivors | Select-Object -First 8)) {
+                    Write-Warn2 "    $survivor"
+                }
+                if ($profileSurvivors.Count -gt 8) {
+                    Write-Warn2 "    ...and $($profileSurvivors.Count - 8) more"
+                }
+                $fullLeftovers = @($fullLeftovers) + $profileSurvivors
+            }
         }
         if (Test-Path -LiteralPath (Join-Path $CcsyncProfile "state")) {
             Write-Step "KEPT $CcsyncProfile\state -- the prompts you have already answered stay answered after a reinstall (no identity or credentials live there)."
         }
     }
     else { Write-Skip "already absent: $CcsyncProfile" }
-    Write-Warn2 "FULL uninstall: your saved sign-in and Syncthing device identity are gone. A reinstall generates a NEW device ID -- send it to the admin so they can re-approve this machine on the dashboard before anything syncs again. Your media was not touched."
+    # install-onboard-2 (2026-09-18): this paragraph used to be unconditional.
+    # "Your device identity is gone, expect a new device ID" is a statement of
+    # fact the admin acts on, so it is printed only when the identity really
+    # did go; when it did not, the editor is told the opposite, which is the
+    # thing that saves the admin chasing a device ID that never changes.
+    $identityStillThere = [bool](Test-Path -LiteralPath $SyncthingHome)
+    if ($DryRun) {
+        Write-Step "[dry-run] -Full would also remove your saved sign-in and the Syncthing device identity, so a reinstall would need the admin to approve a NEW device ID."
+    }
+    elseif ($identityStillThere) {
+        Write-Warn2 "your Syncthing device identity is STILL on this machine at $SyncthingHome. A reinstall reuses the SAME device ID, so do not ask the admin to approve a new one. Delete that folder by hand, or run this uninstaller again with -Full, to finish."
+    }
+    else {
+        Write-Warn2 "FULL uninstall: your saved sign-in and Syncthing device identity are gone. A reinstall generates a NEW device ID -- send it to the admin so they can re-approve this machine on the dashboard before anything syncs again. Your media was not touched."
+    }
     $sshKey = "$env:USERPROFILE\.ssh\ccsync_ed25519"
     if (Test-Path -LiteralPath $sshKey) {
         Write-Step "NOTE: the rclone SSH key remains at $sshKey (left in place -- delete it manually if you want it gone; the admin would then re-run setup_editor_account.py)."
@@ -681,7 +815,8 @@ Write-Host "=================================================================="
 $selfOnDisk = ""
 if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) { $selfOnDisk = $PSCommandPath }
 foreach ($line in (Get-UninstallClosingAdvice -LeftoverCount $binLeftovers.Count `
-                     -BinDir $BinDir -SelfPath $selfOnDisk -DryRun:$DryRun)) {
+                     -BinDir $BinDir -SelfPath $selfOnDisk -DryRun:$DryRun `
+                     -IdentityLeftovers $fullLeftovers -IdentityPresent ([bool]$identityStillThere))) {
     if ($line.Kind -eq "warn") { Write-Warn2 $line.Text } else { Write-Step $line.Text }
 }
 Write-Host "=================================================================="

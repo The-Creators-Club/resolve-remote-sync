@@ -83,8 +83,18 @@ BATCH_STATE_TEXT = {
 # SAME state are allowed (that is how progress is reported); going backwards is
 # not, or a late-arriving retry of an earlier POST would un-index a clip that
 # has already been described.
+#
+# `proxies_live` is the FIRST of the two `/uploaded` posts (wire-1,
+# 2026-09-18b): the proxies, poster and sprite are on the NAS, the clip is
+# visible and searchable, and the ORIGINAL is still going up. It is deliberately
+# NOT terminal. Before it, that post wrote `live`, which is terminal, so an original
+# whose upload then failed left an item nothing could retry, a batch that said
+# `done`, and a clip advertising an original the archive does not hold, with
+# the failure visible nowhere. Every reader that means "this clip is published"
+# reads `videos.status`, never this column, which is why the clip stays visible
+# throughout: that is the whole point of the two stages (CR-288D).
 ITEM_PROGRESS = ("pending", "proxying", "framing", "describing", "indexed",
-                 "uploading", "live")
+                 "uploading", "proxies_live", "live")
 _ITEM_ORDER = {name: i for i, name in enumerate(ITEM_PROGRESS)}
 # Ends the item, whatever it was doing. `failed` is the ONE terminal state that
 # can be left again (retry, plan §2), because a proxy that did not decode is
@@ -92,8 +102,17 @@ _ITEM_ORDER = {name: i for i, name in enumerate(ITEM_PROGRESS)}
 ITEM_ENDINGS = ("duplicate", "failed", "cancelled", "skipped")
 ITEM_STATES = ITEM_PROGRESS + ITEM_ENDINGS
 ITEM_TERMINAL = frozenset({"live", "duplicate", "cancelled", "skipped"})
-# What "nothing left to do with this clip" means, for n_done.
+# What "nothing left to do with this clip" means, for n_done. `proxies_live` is
+# in neither set on purpose: an original is still owed, and counting it done
+# would put the batch back at the `done` it must not reach (wire-1).
 ITEM_FINISHED = ITEM_TERMINAL | {"failed"}
+# The states whose media is ALREADY in the archive. A cancel may not relabel
+# one or delete its `videos` row: an editor may have cut with it (plan
+# section 6, "Cancel").
+ITEM_PUBLISHED = frozenset({"live", "proxies_live"})
+# What a cancel leaves alone: the published states plus the two endings that
+# already mean "this clip was never ours to index".
+_CANCEL_KEEPS = tuple(sorted(ITEM_PUBLISHED | {"duplicate", "skipped", "cancelled"}))
 
 # The status a `videos` row wears between its claim and its upload. Excluded
 # from browse/tree/search exactly as 'skipped'/'excluded' are (app/search.py
@@ -389,7 +408,15 @@ def batch_state_text(batch: sqlite3.Row | dict, now: datetime | None = None) -> 
     return template.format(machine=machine, n_failed=batch["n_failed"])
 
 
-def batch_public(batch: sqlite3.Row) -> dict:
+def count_proxies_live(conn: sqlite3.Connection, batch_uid: str) -> int:
+    """Items published but still owing their original (wire-1, 2026-09-18b)."""
+    row = conn.execute(
+        "SELECT COUNT(*) n FROM ingest_items WHERE batch_uid = ? "
+        "AND state = 'proxies_live'", (batch_uid,)).fetchone()
+    return int(row["n"] if row else 0)
+
+
+def batch_public(batch: sqlite3.Row, conn: sqlite3.Connection | None = None) -> dict:
     """One batch as both APIs report it. Scalars only: this is polled every few
     seconds by the SPA and rides the fleet grid, and a nested blob here becomes
     a payload the reporter has to shed."""
@@ -401,6 +428,13 @@ def batch_public(batch: sqlite3.Row) -> dict:
     # gets for free (BROLL-22). The panel re-derives it so its "3h ago" ages
     # between polls, against the same table.
     out["state_text"] = batch_state_text(batch)
+    # Published, original still owed (wire-1, 2026-09-18b). Derived per call
+    # rather than stored: the panel draws its retry button from it and there is
+    # no column, so a caller with no connection to hand reports 0 and the page
+    # reads a missing key as 0 - both of which are what every caller but the
+    # two browser routes wants anyway.
+    out["n_proxies_live"] = (0 if conn is None
+                             else count_proxies_live(conn, batch["uid"]))
     return out
 
 
@@ -422,7 +456,7 @@ def list_batches(conn: sqlite3.Connection, editor: str | None = None,
         params.append(editor)
     sql += " ORDER BY created_at DESC, uid DESC LIMIT ?"
     params.append(limit)
-    return [batch_public(r) for r in conn.execute(sql, params).fetchall()]
+    return [batch_public(r, conn) for r in conn.execute(sql, params).fetchall()]
 
 
 def taxonomy(conn: sqlite3.Connection) -> list[dict]:
@@ -450,6 +484,10 @@ def _recount(conn: sqlite3.Connection, batch_uid: str) -> dict[str, int]:
         "n_failed": by_state.get("failed", 0),
         "n_live": by_state.get("live", 0),
         "n_duplicate": by_state.get("duplicate", 0),
+        # Published, original still owed (wire-1, 2026-09-18b). Not a column on
+        # ingest_batches: it is derived here, carried on the API payload, and
+        # nothing older than this build asks for it.
+        "n_proxies_live": by_state.get("proxies_live", 0),
     }
     conn.execute(
         "UPDATE ingest_batches SET n_items = ?, n_done = ?, n_failed = ?, n_live = ?, "
@@ -553,9 +591,20 @@ def retry_failed(conn: sqlite3.Connection, batch: sqlite3.Row) -> dict:
 
     Three deliberate limits:
 
-      * only `failed` items move. `live`/`duplicate`/`cancelled` are terminal
-        for a reason (_check_transition), and a clip already in the archive
-        that somebody has cut with must not be re-indexed underneath them.
+      * only `failed` and `proxies_live` items move.
+        `live`/`duplicate`/`cancelled` are terminal for a reason
+        (_check_transition), and a clip already in the archive that somebody
+        has cut with must not be re-indexed underneath them. `proxies_live`
+        is the item that owes an ORIGINAL (wire-1, 2026-09-18b): its proxies
+        are up and it stays visible the whole way through, but nothing else
+        in the system will ever send that original, so this button is its one
+        way back. It re-enters at `pending` rather than at `uploading`
+        because only the companion knows whether it still holds the bytes,
+        and `uploading` is the one state `_next_item` skips - an item parked
+        there that no local queue carries is a dead end. The re-run is
+        idempotent on this side: `record_result` replaces the segments,
+        themes and flags rather than adding to them, and the archive slot is
+        the one already allocated.
       * the items' `video_id`, archive_dir and archive_stem STAY. The name is
         already allocated and the row already exists; claim skips an item that
         has one, so a retry re-uses the slot rather than allocating `_2`.
@@ -569,11 +618,13 @@ def retry_failed(conn: sqlite3.Connection, batch: sqlite3.Row) -> dict:
     now = now_iso()
     with conn:
         item_uids = [r["uid"] for r in conn.execute(
-            "SELECT uid FROM ingest_items WHERE batch_uid = ? AND state = 'failed' "
+            "SELECT uid FROM ingest_items WHERE batch_uid = ? "
+            "AND (state = 'failed' OR state = 'proxies_live') "
             "ORDER BY ord, uid", (batch["uid"],))]
         conn.execute(
             "UPDATE ingest_items SET state = 'pending', stage_percent = NULL, "
-            "error = NULL, updated_at = ? WHERE batch_uid = ? AND state = 'failed'",
+            "error = NULL, updated_at = ? WHERE batch_uid = ? "
+            "AND (state = 'failed' OR state = 'proxies_live')",
             (now, batch["uid"]),
         )
         retried = len(item_uids)
@@ -601,7 +652,7 @@ def retry_failed(conn: sqlite3.Connection, batch: sqlite3.Row) -> dict:
 
 
 def cancel(conn: sqlite3.Connection, uid: str, by: str) -> None:
-    """Ask for a stop, and take the lease away in the same breath.
+    """Ask for a stop. The lease is LEFT ALONE.
 
     A REQUEST, not a kill (plan §2): the companion is mid-ffmpeg somewhere and
     learns about this on its next heartbeat (410) or from the report reply,
@@ -609,14 +660,22 @@ def cancel(conn: sqlite3.Connection, uid: str, by: str) -> None:
     would leave a machine crunching a batch the server has forgotten -- and,
     worse, uploading into archive paths nothing has reserved any more.
 
-    Expiring the lease at the same time is what makes the NEXT fleet call 410
-    even if the heartbeat is the call that lands first; the two checks are
-    belt and braces (YTDL-WEB-1's lesson, 2026-08-14).
+    music-1's twin (2026-09-18b mediums, owed in by the music group): this
+    used to null `lease_expires_at` in the same UPDATE, which wedged the row
+    whenever the companion never came back - `state='running'` with a NULL
+    lease is outside `expire_stale_leases`'s predicate (it requires the column
+    NOT NULL), so no sweep could reach it, `claim` 410d for ever on
+    `cancel_requested`, and the batch held every `dest_name` in
+    `reserved_names` for ever. The expiry stays, so a dead companion's row is
+    reaped by the sweep. Nothing is lost by it: the YTDL-WEB-1 property (the
+    next fleet call 410s even if the heartbeat is the call that lands first,
+    2026-08-14) is delivered by `cancel_requested`, which
+    `_leaseholder_or_410` checks FIRST and unconditionally.
     """
     with conn:
         conn.execute(
             "UPDATE ingest_batches SET cancel_requested = 1, cancel_by = ?, "
-            "lease_expires_at = NULL, updated_at = ? WHERE uid = ?",
+            "updated_at = ? WHERE uid = ?",
             (by, now_iso(), uid),
         )
     log.info("b-roll ingest: batch %s cancel requested by %s", uid, by)
@@ -680,6 +739,22 @@ def expire_stale_leases(conn: sqlite3.Connection, now: datetime | None = None) -
     does, it writes it that way or this stops working silently.
     """
     cutoff = (now or datetime.now(timezone.utc)).isoformat()
+    # music-1's twin (2026-09-18b mediums, owed in by the music group): a batch
+    # the editor CANCELLED is not wanted any more, so handing it back to
+    # `queued` would leave it asking to be claimed while `_leaseholder_or_410`
+    # refuses every claim - a row that never finishes and never lets go of its
+    # `dest_name` reservations. The companion that was asked to stop is also
+    # the one that may never answer (crash, Stop-Process, power cut), which is
+    # exactly when the sweep is the only thing left, so finalise it here
+    # instead. `release` runs its own `with conn:` block.
+    stopped = conn.execute(
+        "SELECT * FROM ingest_batches WHERE cancel_requested = 1 "
+        "AND state IN ('claimed', 'running') AND lease_expires_at IS NOT NULL "
+        "AND lease_expires_at < ?",
+        (cutoff,),
+    ).fetchall()
+    for batch in stopped:
+        release(conn, batch, state="cancelled")
     with conn:
         cur = conn.execute(
             "UPDATE ingest_batches SET state = 'queued', lease_expires_at = NULL, "
@@ -691,7 +766,10 @@ def expire_stale_leases(conn: sqlite3.Connection, now: datetime | None = None) -
     if cur.rowcount:
         log.info("b-roll ingest: %d batch lease(s) expired and went back to queued",
                  cur.rowcount)
-    return cur.rowcount
+    if stopped:
+        log.info("b-roll ingest: %d cancelled batch(es) whose lease expired were "
+                 "finalised as cancelled", len(stopped))
+    return cur.rowcount + len(stopped)
 
 
 def claim(conn: sqlite3.Connection, *, batch_uid: str, editor: str, machine: str,
@@ -1162,11 +1240,22 @@ def mark_uploaded(conn: sqlite3.Connection, batch: sqlite3.Row, item: sqlite3.Ro
         except OSError:
             missing.append(rel)
             continue
-        if actual == 0 and rel == edit_rel:
+        if actual == 0:
             # A zero-byte file is a transfer that died, not an upload: rclone
             # writes a `.partial` and renames, so an empty `.mov` in the
             # archive is an ffmpeg that wrote nothing. Counted as missing so
             # the companion re-sends that one file rather than the clip.
+            #
+            # broll-5 (2026-09-18): this used to read `and rel == edit_rel`,
+            # so it covered only the DECLARED editing proxy. The preview and
+            # the original are added to `required` by this route itself with
+            # no declared size (`declared.setdefault(rel, None)`), and the
+            # size-mismatch arm below skips a `want is None` entry -- so an
+            # empty preview passed both checks and the clip went live with the
+            # one file the search UI plays being 0 bytes. The rule stays
+            # `actual == 0` and never "the size must be declared": a queue
+            # entry rebuilt after a restart legitimately carries no size, and
+            # demanding one would 409-loop it for ever.
             missing.append(rel)
             continue
         sizes[rel] = actual
@@ -1218,10 +1307,27 @@ def mark_uploaded(conn: sqlite3.Connection, batch: sqlite3.Row, item: sqlite3.Ro
                 "UPDATE videos SET original_path = ?, original_size_bytes = ?, "
                 "original_verified_at = ? WHERE id = ?",
                 (slots.original, sizes.get(slots.original), now, item["video_id"]))
+        # wire-1 (2026-09-18b): terminal ONLY when the original has landed.
+        # The first of the two posts publishes the clip and leaves the item
+        # owing its original; the second one ends it. An item left at
+        # `proxies_live` is what `retry_failed` re-queues and what makes
+        # `release` say `done_with_errors`.
+        #
+        # ...unless this batch was never going to send one: `upload_originals`
+        # off is a deliberate proxies-only ingest (the companion's
+        # `_upload_plan` omits the original entirely), so its ONE post is the
+        # end of the item. Without this arm such a batch would end
+        # `done_with_errors` for ever and offer a retry that cannot succeed -
+        # found while writing overseer-1, 2026-09-18b.
+        wants_original = bool(load_settings(batch).get("upload_originals", True))
+        state = "live" if (original_uploaded or not wants_original) else "proxies_live"
+        # `error` stays NULL in both stages: owing an original is a STATE, not
+        # a failure message, and the panel words the state itself. A red line
+        # here would also outlive the second post that clears it.
         conn.execute(
-            "UPDATE ingest_items SET state = 'live', stage_percent = 100, error = NULL, "
+            "UPDATE ingest_items SET state = ?, stage_percent = 100, error = NULL, "
             "original_uploaded = ?, updated_at = ? WHERE uid = ?",
-            (1 if original_uploaded else 0, now, item["uid"]))
+            (state, 1 if original_uploaded else 0, now, item["uid"]))
         conn.execute(
             "UPDATE ingest_batches SET current_item_uid = NULL, updated_at = ? "
             "WHERE uid = ?", (now, batch["uid"]))
@@ -1229,8 +1335,14 @@ def mark_uploaded(conn: sqlite3.Connection, batch: sqlite3.Row, item: sqlite3.Ro
         # (count, MAX(rowid)) cannot see a status flip.
         bump_search_generation(conn)
         counts = _recount(conn, batch["uid"])
-    log.info("b-roll ingest: item %s is live at %s", item["uid"], slots.proxy)
-    return {"ok": True, "live": True, "archive_path": slots.proxy, **counts}
+    log.info("b-roll ingest: item %s is %s at %s", item["uid"], state, slots.proxy)
+    # `live` keeps its wire meaning, "the clip is published and searchable",
+    # which is true of both stages -- a companion older than this server reads
+    # it and must see no change (wire-1). `state` and `original_uploaded` are
+    # the new words, and nothing older looks at them.
+    return {"ok": True, "live": True, "state": state,
+            "original_uploaded": bool(original_uploaded),
+            "archive_path": slots.proxy, **counts}
 
 
 # --- finishing ----------------------------------------------------------------
@@ -1255,16 +1367,22 @@ def release(conn: sqlite3.Connection, batch: sqlite3.Row, *, state: str,
     with conn:
         counts = _recount(conn, batch["uid"])
         final = state
-        if state == "done" and counts["n_failed"]:
+        # wire-1 (2026-09-18b): an item still at `proxies_live` when the batch
+        # ends is an original that never arrived. Nothing more is coming, so it
+        # counts exactly as a failure does here: the batch must never say
+        # `done` while the archive holds a clip whose original it was promised.
+        if state == "done" and (counts["n_failed"] or counts["n_proxies_live"]):
             final = "done_with_errors"
         if state == "cancelled":
             conn.execute(
                 "UPDATE ingest_items SET state = 'cancelled', updated_at = ? "
-                "WHERE batch_uid = ? AND state NOT IN "
-                "('live', 'duplicate', 'skipped', 'cancelled')",
-                (now, batch["uid"]))
+                "WHERE batch_uid = ? AND state NOT IN ({})".format(
+                    ", ".join("?" * len(_CANCEL_KEEPS))),
+                (now, batch["uid"], *_CANCEL_KEEPS))
             conn.execute(
-                "DELETE FROM videos WHERE status = ? AND id IN "
+                # Only the rows that never got media: a `proxies_live` clip's
+            # `videos.status` is already 'indexed', so this cannot reach it.
+            "DELETE FROM videos WHERE status = ? AND id IN "
                 "(SELECT video_id FROM ingest_items WHERE batch_uid = ? "
                 "AND video_id IS NOT NULL)",
                 (VIDEO_STATUS_INGESTING, batch["uid"]))
@@ -1274,8 +1392,9 @@ def release(conn: sqlite3.Connection, batch: sqlite3.Row, *, state: str,
             "WHERE uid = ?",
             (final, _summary_text(summary), now, now, batch["uid"]))
         counts = _recount(conn, batch["uid"])
-    log.info("b-roll ingest: batch %s released as %s (%d live, %d failed)",
-             batch["uid"], final, counts["n_live"], counts["n_failed"])
+    log.info("b-roll ingest: batch %s released as %s (%d live, %d failed, "
+             "%d owing an original)", batch["uid"], final, counts["n_live"],
+             counts["n_failed"], counts["n_proxies_live"])
     return {"ok": True, "state": final, **counts}
 
 

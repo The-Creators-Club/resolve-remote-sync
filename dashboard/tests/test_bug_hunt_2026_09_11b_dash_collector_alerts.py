@@ -67,8 +67,16 @@ def test_a_syncthing_less_site_whose_collector_is_turning_is_not_stopped(env):
     client, conn, settings = env
     assert not settings.syncthing_url
     _free_kind_runs(conn, (30, 15, 8))
-    status = dbmod.fetch_collector_status(conn, now=NOW)
-    assert status["collector_stale"] is True, "the flag under test is not raised"
+    # regression-5 (2026-09-18): THE STORED FLAG IS SILENT HERE TOO NOW. This
+    # line asserted `is True` as the PRECONDITION - the residue this test's
+    # own docstring describes, which CR-258B narrowed and regression-5 closed:
+    # with no kind having started twice the bound fell back to the 180 s
+    # constant, so the home page and /api/v1/health called a healthy collector
+    # STOPPED for the first minutes of every new deployment while the alert,
+    # the notice and the chip were correctly quiet. The contract this test is
+    # named for is unchanged and is now met at both layers.
+    status = dbmod.fetch_collector_status(conn, now=NOW, settings=settings)
+    assert status["collector_stale"] is False
     kinds = {f["kind"] for f in alerts.scan(conn, settings, NOW)}
     assert "collector_stale" not in kinds
 

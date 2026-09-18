@@ -1366,7 +1366,10 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
     is unreachable" would read as "the dashboard is down". The container
     healthcheck reads `ok` out of the body instead (DASH-2, 2026-08-14)."""
     settings = request.app.state.settings
-    collector = db.fetch_collector_status(conn)
+    # regression-5 (2026-09-18): with `settings`, so a Syncthing-less
+    # deployment is judged against the cadence it can actually meet and a
+    # deployment WITH Syncthing keeps the 180 s bound.
+    collector = db.fetch_collector_status(conn, settings=settings)
     # A DEAD collector thread is not a healthy dashboard, whatever the last
     # poll said (ops-efficiency-6, 2026-08-21). db.fetch_collector_status only
     # sees poll_runs, so a thread that died between two cycles reads as
@@ -2826,30 +2829,16 @@ def move_project_files(settings, conn: sqlite3.Connection, from_slug: str,
     # mode: an upload-only machine is exactly the one holding a card dump at
     # the old path), plus any computer whose manifest says it holds the file
     # even though its plan no longer does.
-    targets: set[tuple[str, str]] = set()
-    # for_enforce=True (dash-db-1, 2026-09-11): this reader decides what a
-    # COMPUTER is told to do with its own copy, not what an admin is shown.
-    # A wired machine's tree root IS the NAS share, so the rename the
-    # dashboard has already made is the only one there is, and a `move your
-    # copy` command to it is the same file moved twice. A wired machine that
-    # really does hold the file is still picked up below, off its manifest.
-    for editor, machine in db.fetch_machine_selections(
-            conn, for_enforce=True).get(from_slug, []):
-        if machine:
-            targets.add((editor, machine))
-    # bug-hunt-2026-09-03 dash-api-6: THIS query only. editor_media.rel_path is
-    # written through db.media_rel_key (NFC), and the admin's box carries
-    # whatever bytes they pasted - an NFD spelling off a Mac matched nothing
-    # here, so machines holding the file outside their plan were never told and
-    # re-uploaded it to the old path the next day (CR-90). `src`, `dest` and
-    # the file_moves row stay the raw bytes: there the disk is the truth.
-    media_key = db.media_rel_key(from_rel)
-    for row in conn.execute(
-        """SELECT DISTINCT editor_username, machine FROM editor_media
-            WHERE project_slug=? AND (rel_path=? OR rel_path LIKE ?)""",
-        (from_slug, media_key, media_key + "/%"),
-    ):
-        targets.add((row["editor_username"], row["machine"]))
+    # dash-db-3 (2026-09-18b mediums): ONE predicate, not two copies. This
+    # route carried a byte-for-byte duplicate of db.file_move_target_machines
+    # (the plan pass with for_enforce=True, the NFC media_rel_key, the
+    # manifest query), so dash-db-4's LIKE escaping landed on the helper the
+    # DETECTED hand-move path calls and missed the query the admin's MOVE
+    # button actually runs: a folder named `Gold_Card_Meetup` still matched
+    # `Gold-Card-Meetup` and sent a move command to a machine that does not
+    # hold the file. Two copies of a predicate drift; the helper is the one.
+    targets: set[tuple[str, str]] = set(
+        db.file_move_target_machines(conn, from_slug, from_rel))
     now = db.utcnow_iso()
     # DASH-1 (resilience sweep 2026-08-28): the record FIRST, committed, and
     # only then the rename. It used to be the other way round, so a rename
@@ -3036,7 +3025,9 @@ def api_reissue_project_move(
 
 
 def _file_move_answer(conn: sqlite3.Connection, move_id: int,
-                      editor: str, machine: str) -> tuple[str | None, str | None]:
+                      editor: str, machine: str,
+                      machine_id: str | None = None,
+                      now: str | None = None) -> tuple[str | None, str | None]:
     """What this computer last said about this move, as (state, detail).
 
     comp-app-2 (2026-09-11b): the de-dupe key for the report's file-move
@@ -3045,12 +3036,24 @@ def _file_move_answer(conn: sqlite3.Connection, move_id: int,
     cannot be made is answered as "no previous answer", i.e. log it: the
     logging is not worth failing a report over, and the safe direction for a
     de-dupe is to say it twice.
+
+    dash-db-1 / dash-api-1 (2026-09-18b): read under the same names the
+    answer is WRITTEN under, or the de-dupe this exists for is dead for
+    exactly the rows res-fleet-4 newly offers - a move filed under the former
+    hostname would answer `retrying` every thirty seconds and log every one
+    of them, which is the flood comp-app-2 was written to stop. The reporting
+    hostname sorts first: after a rename both rows can exist, and the one
+    this computer is answering under now is the truer previous answer.
     """
     try:
+        names = db.file_move_answer_names(
+            conn, editor, machine, machine_id, now or db.utcnow_iso())
+        placeholders = ",".join("?" for _ in names)
         row = conn.execute(
-            "SELECT state, detail FROM file_move_targets "
-            " WHERE move_id=? AND editor_username=? AND machine=?",
-            (move_id, editor, machine)).fetchone()
+            f"SELECT state, detail FROM file_move_targets "
+            f" WHERE move_id=? AND editor_username=? AND machine IN ({placeholders})"
+            f" ORDER BY (machine=?) DESC, applied_at IS NULL DESC LIMIT 1",
+            (move_id, editor, *names, machine)).fetchone()
     except sqlite3.Error:
         return (None, None)
     if row is None:
@@ -5713,10 +5716,48 @@ def targeted_staged_package(
     return db.get_package(conn, plat, wanted, kind="companion")
 
 
+def _machine_can_be_offered(
+    conn: sqlite3.Connection, payload: Any, editor: str, machine: str,
+    version: str, withheld: list[str] | None = None,
+) -> bool:
+    """Would `_upgrade_info` hand THIS machine the build a push names?
+
+    res-fleet-2 (2026-09-18). The answer is computed by asking the same
+    function the offer comes from rather than by copying its three refusals,
+    which is the only way the two doors cannot drift. Fails OPEN: anything
+    unexpected here means the command is sent exactly as it was before, so a
+    defect in this check can never take the push channel away.
+
+    CR-306 (2026-09-18b): `withheld` is the same one-element sink
+    `_upgrade_info` takes, forwarded so the caller can PERSIST the real reason
+    rather than a generic one. It is only ever appended to when the answer is
+    False; the fail-OPEN path above leaves it empty, so nothing is persisted
+    from a check that could not be made.
+    """
+    try:
+        if withheld is None:
+            withheld = []
+        running = str(getattr(payload, "companion_version", "") or "").strip()
+        offer = _upgrade_info(conn, payload.platform, running,
+                              getattr(payload, "arch", None),
+                              editor=editor, machine=machine, withheld=withheld)
+        if offer is None:
+            # No `withheld` reason means "there is nothing NEW to offer" (no
+            # build, or this machine already runs it), which is not a refusal
+            # of the pushed version - the clear above owns that case. A reason
+            # means the build exists and this machine may not have it.
+            return not withheld
+        return str(offer.get("version") or "") == str(version or "")
+    except Exception:  # noqa: BLE001 - never lose the push channel to this
+        log.exception("could not decide whether %s/%s may be offered v%s",
+                      editor, machine, version)
+        return True
+
+
 def _upgrade_info(
     conn: sqlite3.Connection, platform: str | None, running: str | None,
     arch: str | None = None, editor: str | None = None,
-    machine: str | None = None,
+    machine: str | None = None, withheld: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """The conditional `upgrade` key for report/verify responses.
 
@@ -5735,6 +5776,17 @@ def _upgrade_info(
 
     An absent or unknown `platform` offers NOTHING (see X-5): coercing it to
     "windows" is how a macOS companion got handed a Windows .exe.
+
+    comp-app-3 (2026-09-18): `withheld` is an optional one-element sink for
+    the reason a build EXISTS and is not being offered. There are three of
+    those below and each has always been silent to the companion on purpose,
+    which is right for the OFFER - there is no "refused offer" shape in the
+    protocol - but the companion also clears a standing upgrade refusal on
+    every reply that carries no `upgrade` key, because it cannot tell "there
+    is no build" from "there is a build, we are just not offering it to you".
+    Passing a list here lets the caller put `upgrade_none_reason` on the reply
+    beside it: additive, a plain sentence, ignored by every build in the field
+    that does not read it. Dashboard deploys first.
     """
     plat = (platform or "").strip().lower()
     if plat not in _PACKAGE_PLATFORMS:
@@ -5758,14 +5810,20 @@ def _upgrade_info(
     if _row_str(current, "retracted_at"):
         # REL-3: the vendor recalled this build. Machines already running it
         # are rolled back by [ ROLL THE FLEET BACK TO x ], not by silence.
+        if withheld is not None:
+            withheld.append('that build was recalled by the vendor')
         return None
     if package_store.blocks_on_dashboard_version(
             "companion", _row_str(current, "requires_dashboard")):
         # REL-4 / SYS-13: this build needs a newer dashboard than the one
         # answering. Offering it is the ordering violation that CR-22, CR-27a,
         # CR-49, CR-55, CR-83, CR-85 and CR-87 all are.
+        if withheld is not None:
+            withheld.append('that build needs a newer dashboard than this one')
         return None
     if not _arch_matches(_row_str(current, "arch"), arch or ""):
+        if withheld is not None:
+            withheld.append('that build was made for a different processor than this computer')
         return None
     # MIGRATION SHAPE (item 4, 2026-08-17): version/url/sha256/size_bytes are
     # exactly what they were, in the same places, because 0.7.11 companions
@@ -5903,11 +5961,20 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
     # Which of these already has a pushed update outstanding (v25), so the
     # page can say "asked, waiting for its next report" instead of offering
     # the same button again.
-    pending_updates = {
-        (r["editor_username"], r["machine"]): r["update_requested_version"]
-        for r in db.fetch_machines(conn)
-        if r.get("update_requested_version")
-    }
+    #
+    # CR-306 (dash-api-3, 2026-09-18b): `withheld_updates` is which of those
+    # this dashboard has decided it CANNOT send. The request is deliberately
+    # left standing (the build may become offerable again), so without this
+    # the page shows a push as outstanding for 14 days while nothing can ever
+    # apply it and only the admin can withdraw it.
+    pending_updates: dict[tuple[str, str], Any] = {}
+    withheld_updates: dict[tuple[str, str], str] = {}
+    for r in db.fetch_machines(conn):
+        if not r.get("update_requested_version"):
+            continue
+        key = (r["editor_username"], r["machine"])
+        pending_updates[key] = r["update_requested_version"]
+        withheld_updates[key] = str(r.get("update_requested_withheld") or "")
     # REL-6 / REL-3 (usability sweep 2026-09-04): the adoption numbers, and
     # which machines are REFUSING the build they are being offered. One read
     # for the page, the API and the drift doctor, so the three cannot disagree.
@@ -5924,6 +5991,9 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
             "received_at": e["received_at"],
             "update_requested": pending_updates.get(
                 (e["editor_username"], e["machine"])),
+            # CR-306: the reason that push is not being sent, '' when it is.
+            "update_withheld": withheld_updates.get(
+                (e["editor_username"], e["machine"]), ""),
             # REL-8 (resilience sweep 2026-08-28): what happened when this
             # machine last TRIED. Beside the request, because "asked, waiting
             # for its next report" and "has failed this build 8 times" looked
@@ -5956,6 +6026,8 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
             "companion_version": e["companion_version"],
             "update_requested": pending_updates.get(
                 (e["editor_username"], e["machine"])),
+            "update_withheld": withheld_updates.get(
+                (e["editor_username"], e["machine"]), ""),
         })
     # REL-16: (platform, arch) pairs machines are reporting that the current
     # build does not cover. `arch` on machine_state is v35's column, so this
@@ -6866,12 +6938,13 @@ def _previous_row_is_live(previous: dict[str, Any], now: str) -> bool:
     make every rename look like a clone, nor set itself to 1999 and have a
     live clone read as quiet. An unreadable timestamp is NOT live -- "cannot
     tell" is not evidence of two running computers, and the adoption path is
-    the one that keeps a renamed machine syncing."""
-    try:
-        age = db.age_seconds(str(previous.get("last_seen") or ""), now)
-    except (TypeError, ValueError):
-        return False
-    return 0 <= age <= CLONE_ADOPTION_WINDOW_SECONDS
+    the one that keeps a renamed machine syncing.
+
+    The predicate itself lives in `db` since dash-db-2 (2026-09-18b), because
+    `db.command_machine_names` has to make the SAME judgement about the same
+    rows: a name live enough to refuse the adoption is live enough to be a
+    second computer, and must not be handed this one's commands."""
+    return db.machine_row_is_live(previous, now, CLONE_ADOPTION_WINDOW_SECONDS)
 
 
 def _note_identity_clone(
@@ -6931,6 +7004,25 @@ def _note_identity_clone(
     except sqlite3.Error:
         log.warning("could not record the duplicate_machine_id notice for %s",
                     machine_id, exc_info=True)
+
+
+def _by_target_machine(
+    rows: list[dict[str, Any]], machine: str
+) -> dict[str, list[int]]:
+    """Move ids grouped by the machine key their target row is filed under
+    (res-fleet-4, 2026-09-18).
+
+    Normally one group, this computer's own hostname. After a rename whose
+    adoption has not been confirmed yet, a command still sits under the former
+    name, and a delivery stamp written against the reporting hostname would
+    update nothing: the row would keep being offered and would age into
+    `expired_at` with the machine having been told every thirty seconds.
+    """
+    out: dict[str, list[int]] = {}
+    for row in rows:
+        target = str(row.get("target_machine") or machine)
+        out.setdefault(target, []).append(int(row["id"]))
+    return out
 
 
 def _register_machine(
@@ -7502,6 +7594,13 @@ class ProxyAttachIn(_BoundedSectionIn):
     failed: int | None = Field(default=None, ge=0)
     why: str | None = Field(default=None, max_length=500)
     at: str | None = Field(default=None, max_length=64)
+    # comp-resolve-5 (2026-09-18, owed here by companion-core): the companion
+    # counts REFRESHED clips beside attached/failed now - a pass that
+    # re-ReplaceClip'd a clip whose proxy was already linked used to report
+    # "nothing to do" and `attached: 0`. Undeclared, it would be one more
+    # `ignored_report_sections` warn (the live-4 shape); declared, it is a
+    # number the fleet grid can show later. Dashboard deploys first.
+    refreshed: int | None = Field(default=None, ge=0)
 
 
 class ProxyGapsIn(_BoundedSectionIn):
@@ -7564,6 +7663,49 @@ class ResolveHealthIn(_BoundedSectionIn):
     # one level down, and "we know about this and do not store it" is better
     # said in the model than in a log nobody can silence.
     skipped_ever: int | None = Field(default=None, ge=0)
+    # comp-broll-tiers-5 (2026-09-18, owed here by companion-core).
+    standins_owed: "StandinsOwedIn | None" = None
+
+
+class StandinsOwedIn(_BoundedSectionIn):
+    """Clips on this machine that are still standing in for their real proxy.
+
+    comp-broll-tiers-5 (2026-09-18, owed here by companion-core). Bounded and
+    declared BEFORE the companion half ships, which is this file's standing
+    rule for the direction where the sender is newer than the reader: an
+    undeclared key inside a reported sub-model is invisible to `model_extra`
+    and becomes a daily `ignored_report_sections` warning nobody can clear
+    (live-4 is that exact failure, open on this fleet since 2026-09-11).
+    Declaring it is the contract; storing it is a later decision.
+    """
+    count: int | None = Field(default=None, ge=0)
+    why: str | None = Field(default=None, max_length=300)
+
+
+class StandinsPlacedIn(_BoundedSectionIn):
+    """The archive originals this machine has a STAND-IN for (proxy-tiers-4,
+    2026-09-18).
+
+    A stand-in is written on the machine doing the insert, and its ledger
+    lives there: `<log dir>/state/broll_standins.json`, per machine. So the
+    wired rig that opens the project afterwards - the machine the whole tier
+    design is for - has an empty ledger for those clips and no cheap way to
+    know a clip was born from one. What it did instead was ffprobe every
+    archive clip every two minutes and "refresh" each one without refreshing
+    anything.
+
+    So the fact travels with the FLEET. Each `rel` is the ARCHIVE-relative
+    path of the ORIGINAL the stand-in stands in for, in NFC
+    (`db.media_rel_key`), never an absolute path: the vault is a drive letter
+    on one machine and a container mount on another. On `sync_guard` rather
+    than `resolve_health` because it is about what this machine did to the
+    archive, not about Resolve.
+
+    Declared before the companion half ships, this file's standing rule
+    (live-4). DASHBOARD FIRST.
+    """
+    rels: list[str] | None = Field(default=None, max_length=200)
+    checked_at: str | None = Field(default=None, max_length=64)
 
 
 class StrayProjectsIn(_BoundedSectionIn):
@@ -7576,6 +7718,18 @@ class StrayProjectsIn(_BoundedSectionIn):
     count: int | None = Field(default=None, ge=0)
     bytes: int | None = Field(default=None, ge=0)
     paths: list[str] | None = Field(default=None, max_length=20)
+    # live-4 (2026-09-18): the companion's `stray_projects()` has carried
+    # `slugs` and `checked_at` since the 2026-09-11 fix pass, and this model
+    # never declared them - so `ignored_report_sections`, the notice that
+    # exists to catch exactly "the companions are ahead of the dashboard", has
+    # been open as a warn since 2026-09-11 with the fix line "Update the
+    # dashboard", on a dashboard that IS current. An admin who followed it
+    # found nothing to update, and a real future event of that kind would have
+    # been invisible behind a week-old warn. `slugs` is bounded like `paths`
+    # (the companion sends at most MAX_REPORTED_PROJECT_DIRS of each);
+    # `checked_at` says how fresh the count is.
+    slugs: list[str] | None = Field(default=None, max_length=20)
+    checked_at: str | None = Field(default=None, max_length=64)
 
 
 class MovedProjectDirIn(_BoundedSectionIn):
@@ -7775,6 +7929,10 @@ class SyncGuardIn(BaseModel):
     # in the ignored-sections banner and then dropped, which is the third
     # repeat of SYS-3 and not a home for an alarm.
     ytdlp: YtdlpIn | None = None
+    # proxy-tiers-4 (2026-09-18): the stand-ins this machine has placed in the
+    # b-roll archive, so the rest of the fleet can ask one cheap question per
+    # clip instead of demuxing it.
+    standins_placed: StandinsPlacedIn | None = None
     # CYT-3 (usability sweep 2026-09-04): declared for the same reason
     # loopback and ytdlp are. An extra is accepted, named in the
     # ignored-sections banner and then dropped, which is SYS-3 again and not
@@ -7837,6 +7995,23 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
         "halt_reason": (halt.reason if halt is not None and halt.active else None),
         "skipped_exists": (
             guard.skipped_exists.count if guard.skipped_exists is not None else None
+        ),
+        # dash-api-5 (2026-09-18): the project prefix that count was measured
+        # under. The companion has sent it since 0.9.5x and CR-267a declared
+        # it so the nested-key audit would stop flagging every 0.9.7x
+        # companion; nothing read it, so a per-project figure was rendered as
+        # a fact about the whole computer, and on a machine syncing several
+        # projects each scan overwrote the last - project Y's zero hiding
+        # project X's four.
+        "skipped_exists_subpath": (
+            guard.skipped_exists.subpath if guard.skipped_exists is not None else None
+        ),
+        # dash-collector-alerts-6 (2026-09-18): the floor THIS machine parks
+        # at. `lane_guard.DiskFloorLatch.report()` has sent it on every report
+        # since SYNC-7 and nothing stored it, so every sentence about a parked
+        # lane B was said from this server's own default.
+        "disk_floor_bytes": (
+            guard.disk_floor.floor_bytes if guard.disk_floor is not None else None
         ),
         # v30 (SYS-3 / SYNC-8 / APP-6, resilience sweep 2026-08-28). Every one
         # of these is None when the section was absent, and the upsert writes
@@ -8640,8 +8815,42 @@ class FileMoveResultIn(BaseModel):
     # THE DASHBOARD DEPLOYS FIRST. A companion sending "applying" to a
     # dashboard below 0.7.44 fails this Literal, and `file_moves_applied` is
     # not a tolerant section: it would 422 the whole report.
-    state: Literal["done", "failed", "retrying", "blocked", "applying"] | None = None
+    # "not_synced_here" (res-fleet-3, 2026-09-18): this machine holds the file
+    # and does not sync the DESTINATION project, so it trashed its copy rather
+    # than filing it into a directory with no `.ccsync-project` marker. ok is
+    # True and the answer is TERMINAL: re-sending it would ask the same
+    # machine the same impossible question every thirty seconds.
+    state: Literal["done", "failed", "retrying", "blocked", "applying",
+                   "not_synced_here"] | None = None
     attempts: int | None = Field(default=None, ge=0, le=1000)
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def _unknown_state_is_no_state(cls, value):
+        """A word this build does not know reads as NO state, not as a 422.
+
+        res-fleet-3 (2026-09-18). Until now this Literal was the whole
+        validation and `file_moves_applied` is not one of ReportIn's tolerant
+        sections, so a companion that grew a state word ahead of its dashboard
+        422'd the WHOLE report - the lanes, the presence, the alarms - once
+        every thirty seconds, for a field that decides only how one line on
+        one page is worded. The comment beside `applying` says exactly that
+        and answers it with "THE DASHBOARD DEPLOYS FIRST", which is a rule
+        about people rather than a property of the code.
+
+        An unknown word keeps `ok` and `detail` and stores no state, which is
+        the pre-RES-1 meaning: answered, terminal, say what the machine said.
+        THIS CANNOT HELP A DASHBOARD OLDER THAN THIS BUILD: 0.7.49 and below
+        still 422 on `not_synced_here`, so that word must not reach a fleet
+        until this dashboard is live. It stops the NEXT one from being an
+        outage.
+        """
+        if value is None:
+            return None
+        known = {"done", "failed", "retrying", "blocked", "applying",
+                 "not_synced_here"}
+        text = str(value).strip()
+        return text if text in known else None
     # RES-10: moved on disk, but no media pool has been walked yet that
     # references it, so Resolve is not repointed.
     relink_pending: bool = False
@@ -9222,6 +9431,18 @@ def api_report(
     # worse than silence.
     db.store_resolve_health_detail(
         conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
+    # proxy-tiers-4 (2026-09-18): the archive originals this machine is
+    # holding a STAND-IN for, so the wired rig can be told. A FULL PICTURE per
+    # report, like `editor_media`: a rel this machine no longer lists has been
+    # upgraded to the real editing proxy, and a stale row would send a wired
+    # rig looking for a stand-in that is not there any more. An absent section
+    # is a companion that does not send it (every build in the field today)
+    # and changes nothing - never an empty set, which would erase what a
+    # newer build told us last tick.
+    standins_placed = getattr(payload.sync_guard, "standins_placed", None)         if payload.sync_guard is not None else None
+    if standins_placed is not None and standins_placed.rels is not None:
+        db.record_standins_placed(
+            conn, editor, machine, standins_placed.rels, received_at)
     # CMEDIA-3 (usability sweep 2026-09-04): whether the 8899 loopback is
     # actually held on that machine. Same shape and the same latch rule as
     # the three above -- a Send-to-Resolve button that cannot work must not
@@ -9272,11 +9493,20 @@ def api_report(
         # de-dupe is a read rather than state in this process (which a
         # container restart would lose). Terminal answers cannot repeat:
         # mark_file_move_applied only matches `applied_at IS NULL`.
-        previous = _file_move_answer(conn, outcome.id, editor, machine)
+        #
+        # dash-db-1 (2026-09-18b): the ANSWER half of res-fleet-4. The row
+        # may be filed under this computer's FORMER hostname (the offer looks
+        # there, and the delivery stamp already goes on the row's own key), so
+        # the write has to look there too or the command is re-sent for ever
+        # and finally expires as unanswered - on a machine that applied it.
+        answer_id = (payload.machine_id or "").strip() or None
+        previous = _file_move_answer(conn, outcome.id, editor, machine,
+                                     answer_id, received_at)
         if db.mark_file_move_applied(conn, outcome.id, editor, machine,
                                      outcome.ok, outcome.detail, received_at,
                                      state=state, attempts=outcome.attempts,
-                                     relink_pending=outcome.relink_pending):
+                                     relink_pending=outcome.relink_pending,
+                                     machine_id=answer_id):
             if previous != (state, outcome.detail or None):
                 (log.info if outcome.ok else log.warning)(
                     "%s/%s file move #%s: %s%s", editor, machine, outcome.id,
@@ -9292,7 +9522,11 @@ def api_report(
         undo_state = db.RESOLVE_UNDO_PARKED if undo.parked else undo.state
         if db.mark_resolve_undo_applied(
                 conn, undo.id, editor, machine, undo.ok, undo.detail or "",
-                received_at, state=undo_state, attempts=undo.attempts):
+                received_at, state=undo_state, attempts=undo.attempts,
+                # dash-db-1: the same former-hostname answer the file moves
+                # take. An undo is REPLAYED against the editor's Resolve, so a
+                # dropped answer means asking for it again every 30 s.
+                machine_id=(payload.machine_id or "").strip() or None):
             (log.info if undo.ok else log.warning)(
                 "%s/%s resolve undo #%s: %s%s", editor, machine, undo.id,
                 "done" if undo.ok else (undo_state or "failed").upper(),
@@ -9408,7 +9642,19 @@ def api_report(
             except Exception:  # noqa: BLE001 - never fail a report over its own record
                 log.exception("could not record a slow-write notice")
     result: dict[str, Any] = {
-        "ok": True, "lanes": len(payload.lanes), "received_at": received_at}
+        "ok": True, "lanes": len(payload.lanes), "received_at": received_at,
+        # WHICH DASHBOARD IS ANSWERING (res-fleet-3, 2026-09-18). The report
+        # reply has never said, so a companion that grows a wire word has
+        # nothing to gate it on - and `file_moves_applied` is not one of
+        # ReportIn's tolerant sections, so an unknown `state` fails the model
+        # and 422s the WHOLE report: the lanes, the presence and the alarms,
+        # every thirty seconds, for a field that decides how one line on one
+        # page is worded. `not_synced_here` is the first word to need it: a
+        # companion sends a state word only to a dashboard that has told it
+        # its version is 0.7.50 or newer, and answers every older one with
+        # `ok` plus the sentence and NO state, which those builds record as
+        # done. Additive, and ignored by every companion in the field today.
+        "dashboard_version": VERSION}
     # B6: tell the companion what was dropped so the truncation is visible on
     # BOTH sides -- the companion logs this and can shed the section itself
     # next tick rather than resending something the server will trim again.
@@ -9423,11 +9669,20 @@ def api_report(
     # an admin has pushed to it (CR-191). It has to be this reply anyway:
     # `commands.upgrade` below names a version and nothing else, and the bytes
     # come from the offer in this same block.
+    withheld: list[str] = []
     upgrade = _upgrade_info(conn, payload.platform, payload.companion_version,
                             getattr(payload, "arch", None),
-                            editor=editor, machine=machine)
+                            editor=editor, machine=machine, withheld=withheld)
     if upgrade is not None:
         result["upgrade"] = upgrade
+    elif withheld:
+        # comp-app-3 (2026-09-18): "there IS a build, we are just not offering
+        # it to you." Without this the companion reads a reply with no
+        # `upgrade` key as "nothing to offer" and clears the refusal it is
+        # standing on, so a machine that cannot take the current build asks
+        # for it again on the next cycle, for ever. Additive: a build too old
+        # to read the key sees exactly the reply it saw yesterday.
+        result["upgrade_none_reason"] = withheld[0]
     # New-project onboarding: the auto-match above already ran, so this is
     # authoritative -- the reported Resolve project has no root mapping and
     # nothing matched. Echo the NAME (not a bool) so the companion's prompt
@@ -9462,6 +9717,7 @@ def api_report(
     # version and nothing else; the bytes still come from the signed offer
     # the companion already holds.
     update_request = db.machine_update_request(conn, editor, machine)
+    push_withheld: list[str] = []
     if update_request:
         running = (payload.companion_version or "").strip()
         # AT OR PAST the version asked for, not just exactly it (dash-core-6,
@@ -9488,7 +9744,56 @@ def api_report(
             conn.commit()
             log.info("%s/%s is on v%s (asked for v%s) -- the pushed update is done",
                      editor, machine, running, update_request["version"])
+        elif not _machine_can_be_offered(conn, payload, editor, machine,
+                                         update_request["version"],
+                                         withheld=push_withheld):
+            # res-fleet-2 (2026-09-18): DO NOT ASK for a build this machine is
+            # not being offered. The push and the OFFER were computed
+            # independently: `machine_update_request` emitted the command
+            # whenever a request existed, while `_upgrade_info` withholds the
+            # offer - silently, by design - for a retracted build, one needing
+            # a newer dashboard, or one built for another processor. The
+            # companion then logged "this machine is not being offered that
+            # build" once, in a log on somebody else's PC, and reported
+            # nothing; meanwhile `jobs.machine_facts` turned "has an update
+            # waiting" into a blanket refusal of every job kind, so that
+            # computer was out of the whisper/proxy/peaks fleet until
+            # `expire_machine_update_requests` dropped the row 14 days later.
+            # The request is LEFT STANDING (the build may become offerable
+            # again - an un-retraction, a dashboard update), and the reason
+            # rides the reply beside it so the tray and the Packages page can
+            # both say why.
+            log.info("%s/%s asked for v%s, and this dashboard is not offering "
+                     "that build to it: not sending the command",
+                     editor, machine, update_request["version"])
+            reason = (push_withheld[0] if push_withheld else
+                      "the update you were sent cannot be installed on "
+                      "this computer")
+            result.setdefault("upgrade_none_reason", reason)
+            # CR-306 (dash-api-3, 2026-09-18b): PERSIST the verdict. Leaving
+            # the request standing is right - the build may become offerable
+            # again - but `jobs.fleet_facts`/`machine_facts` read "upgrading"
+            # from `update_requested_version` alone and `policy()` refuses
+            # EVERY job kind to a machine that is upgrading, so this computer
+            # was out of the whisper/proxy/audio-extract/peaks fleet for the
+            # full 14 days until the request expired. This is the one place
+            # that can answer "can it be offered" (the payload has the running
+            # version, the platform and the arch; `machines` has no arch at
+            # all), so the answer is written down here and the job readers
+            # read it, failing CLOSED on an undecided row.
+            if db.set_machine_update_withheld(conn, editor, machine, reason):
+                # Committed HERE for the same reason the done arm above is:
+                # the report's own commit is above us.
+                conn.commit()
         else:
+            # ...and the verdict is LIFTED the moment the build is offerable
+            # again (CR-306): an un-retraction or a dashboard upgrade makes
+            # this arm reachable, the command rides on this very reply, and
+            # the machine is back to upgrading - which is the fail-closed
+            # direction, since the upgrade really is about to happen.
+            if update_request["withheld"] and \
+                    db.set_machine_update_withheld(conn, editor, machine, ""):
+                conn.commit()
             result["commands"]["upgrade"] = {
                 "apply": True,
                 "version": update_request["version"],
@@ -9581,7 +9886,14 @@ def api_report(
     # answers through `file_moves_applied` -- a lost reply must not leave a
     # local copy at the old path re-uploading itself for ever, which is the
     # whole problem this exists to end. Bounded by db.pending_file_moves.
-    pending_moves = db.pending_file_moves(conn, editor, machine, received_at)
+    # res-fleet-4 (2026-09-18): `machine_id` is passed so a move outstanding
+    # under this computer's FORMER hostname is still offered in the window
+    # before the rename is adopted (SYS-18a defers that by a report or two),
+    # and the delivery stamp goes on the row's OWN key rather than on the
+    # reporting hostname.
+    pending_moves = db.pending_file_moves(
+        conn, editor, machine, received_at,
+        machine_id=(payload.machine_id or "").strip() or None)
     if pending_moves:
         result["commands"]["file_moves"] = [
             {
@@ -9595,8 +9907,8 @@ def api_report(
             }
             for m in pending_moves
         ]
-        db.mark_file_moves_delivered(
-            conn, [m["id"] for m in pending_moves], editor, machine, received_at)
+        for target, ids in _by_target_machine(pending_moves, machine).items():
+            db.mark_file_moves_delivered(conn, ids, editor, target, received_at)
         conn.commit()
     # AN ADMIN'S RESOLVE UNDO (v40, SYS-15b, 2026-08-29). Present only while
     # one is outstanding, and it keeps riding every report until the machine
@@ -9605,7 +9917,25 @@ def api_report(
     # while a standing UNDO is idempotent (the companion refuses to replay a
     # journal it has already replayed) and the failure that matters here is an
     # admin clicking, Resolve being closed, and nothing ever happening.
-    pending_undos = db.pending_resolve_undos(conn, editor, machine)
+    # WHAT THE FLEET KNOWS ABOUT STAND-INS (proxy-tiers-4, 2026-09-18). On the
+    # reply, not a new route: the machine that needs the answer is already
+    # sending the list the answer is about, and a second route is a second
+    # credential path for a question that is not a secret. Bounded to the same
+    # 200 the report section is.
+    #
+    # ABSENT MEANS "THIS DASHBOARD DOES NOT KNOW", which the companion must
+    # read as "demux as before" and never as "there are none": an empty list
+    # is sent for the same reason, so the two shapes cannot be confused. Best
+    # effort - a stand-in hint is not worth failing a report over.
+    try:
+        known = db.standins_known(conn)
+        if known:
+            result["standins_known"] = {"rels": known}
+    except Exception:  # noqa: BLE001 - a hint, never the report
+        log.exception("could not read the fleet's stand-in set")
+    pending_undos = db.pending_resolve_undos(
+        conn, editor, machine,
+        machine_id=(payload.machine_id or "").strip() or None, now=received_at)
     if pending_undos:
         result["commands"]["resolve_undo"] = [
             {"id": u["id"], "journal": u["journal_id"], "project": u["project_name"],

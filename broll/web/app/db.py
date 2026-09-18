@@ -43,7 +43,11 @@ Migration steps (PRAGMA user_version):
              `videos.start_tc`, `videos.bitrate` -- what the detail route's
              `insert` object needs and cannot ffprobe off the NAS per
              request, docs/BROLL_PROXY_TIERS_PLAN.md §5)
-    12 -> 12 no-op, already current
+    12 -> 13 apply migrations/013_proxies_live.sql (rebuilds `ingest_items`
+             for one more word in its state CHECK: `proxies_live`, the item
+             whose proxies are in the archive and whose original is still
+             uploading -- wire-1, 2026-09-18b)
+    13 -> 13 no-op, already current
 
 A DB is stepped through every migration in this chain in one ensure_schema()
 call regardless of its starting version -- e.g. a real v1 production DB goes
@@ -60,7 +64,7 @@ from pathlib import Path
 from app import config
 
 # Highest schema version this codebase knows how to run against.
-CURRENT_SCHEMA_VERSION = 12
+CURRENT_SCHEMA_VERSION = 13
 
 # Maps "user_version found" -> migration filename that advances it to the
 # next version. Resolved via find_migration_path() (repo-root-first, then
@@ -84,6 +88,7 @@ _MIGRATIONS: dict[int, str] = {
     9: "010_search_generation.sql",
     10: "011_ingest_batches.sql",
     11: "012_geometry.sql",
+    12: "013_proxies_live.sql",
 }
 
 # The `meta` key holding the search-cache generation counter (migration 010).

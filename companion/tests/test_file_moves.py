@@ -32,6 +32,258 @@ def _tree(tmp_path):
     return root
 
 
+# -- res-fleet-3: section 4b, a destination this machine does not sync -------
+
+
+def _plan(*rels):
+    """The shape app._synced_project_rels() hands in: every Projects-relative
+    path this machine syncs, borrowed subtrees included."""
+    return list(rels)
+
+
+def test_a_move_into_a_project_this_machine_does_not_sync_is_trashed(tmp_path):
+    """res-fleet-3 / HAND_MOVES_ON_THE_SERVER.md section 4b: the dashboard
+    picks its target machines from the SOURCE project's ticks, so a move
+    between two projects reaches machines that do not sync the destination.
+    `mkdir(parents=True)` there built a directory with no `.ccsync-project`
+    marker - invisible to fixer.list_project_dirs, to the manifest and to both
+    lanes - and the MOVES history said that computer had followed."""
+    root = _tree(tmp_path)
+    cmd = file_moves.parse_command(_cmd())
+    ledger = file_moves.FileMoveLedger(tmp_path / "state" / "file_moves.json")
+
+    ok, detail, paths = file_moves.apply_move(
+        cmd, str(root), ledger, project_rels=_plan(DRONE))
+
+    assert ok is True, "nothing failed: the file is safe, just not here"
+    assert detail == file_moves.DETAIL_NOT_SYNCED_HERE
+    assert paths is None, "nothing to relink Resolve to"
+    # It is NOT at the old path, NOT at the new one, and the destination
+    # project directory was never created.
+    assert not (root / "Projects" / DRONE / "B-roll" / "A001_0512.braw").exists()
+    assert not (root / "Projects" / ANIMALS).exists()
+    # It IS in the lane B trash, under its own project path, recoverable.
+    trashed = list((root / file_moves.TRASH_DIR_NAME).rglob("A001_0512.braw"))
+    assert len(trashed) == 1
+    assert trashed[0].read_bytes() == b"braw"
+    assert DRONE.split("/")[-1] in str(trashed[0])
+
+
+def test_the_trashed_outcome_is_recorded_with_its_own_word(tmp_path):
+    """res-fleet-3: `ok` and the sentence are the wire as it was - a dashboard
+    that drops the word still records the move as done with an honest detail -
+    and the WORD is what lets the project page say "trashed locally"."""
+    root = _tree(tmp_path)
+    cmd = file_moves.parse_command(_cmd())
+    ledger = file_moves.FileMoveLedger(tmp_path / "state" / "file_moves.json")
+
+    ok, detail, _paths = file_moves.apply_move(
+        cmd, str(root), ledger, project_rels=_plan(DRONE))
+    ledger.record(cmd, ok, detail, state=file_moves.STATE_NOT_SYNCED_HERE)
+
+    entry = ledger.entry(cmd["id"])
+    assert entry["state"] == file_moves.STATE_NOT_SYNCED_HERE
+    assert entry["ok"] is True
+    assert entry["detail"] == file_moves.DETAIL_NOT_SYNCED_HERE
+    # ...and it survives a restart, so a redelivery re-answers the same way.
+    again = file_moves.FileMoveLedger(tmp_path / "state" / "file_moves.json")
+    assert again.entry(cmd["id"])["state"] == file_moves.STATE_NOT_SYNCED_HERE
+
+
+def test_a_move_into_a_BORROWED_folder_is_carried_out_normally(tmp_path):
+    """res-fleet-3's other end (comp-sync-4): a borrowed subtree is on this
+    disk, and judging by the selection alone would trash a file that has a
+    perfectly good home here. The plan map is
+    `sequencer.rel_to_slug_with_borrowed()`, whose borrowed keys are the
+    LENDER's subpath."""
+    root = _tree(tmp_path)
+    cmd = file_moves.parse_command(_cmd())
+    borrowed_sub = ANIMALS + "/Interviewees"
+
+    ok, detail, paths = file_moves.apply_move(
+        cmd, str(root), None, project_rels=_plan(DRONE, borrowed_sub))
+
+    assert ok is True and detail.startswith("moved")
+    assert paths is not None
+    assert (root / "Projects" / ANIMALS / "Interviewees" / "Pangolin"
+            / "A001_0512.braw").read_bytes() == b"braw"
+    assert not list((root / file_moves.TRASH_DIR_NAME).rglob("*.braw"))
+
+
+def test_the_rest_of_a_lenders_project_is_still_not_synced_here(tmp_path):
+    """res-fleet-3: borrowing one folder of a project does not put the rest of
+    it on this disk."""
+    root = _tree(tmp_path)
+    cmd = file_moves.parse_command(_cmd(to_rel="Camera B/A001_0512.braw"))
+    ok, detail, _ = file_moves.apply_move(
+        cmd, str(root), None, project_rels=_plan(DRONE, ANIMALS + "/Interviewees"))
+    assert ok is True and detail == file_moves.DETAIL_NOT_SYNCED_HERE
+
+
+def test_no_plan_at_all_keeps_the_old_behaviour(tmp_path):
+    """res-fleet-3: None is not an empty plan. An unmanaged companion has no
+    sequencer, and reading that as "nothing is synced here" would trash every
+    moved file on a machine whose whole tree is local - which is also what
+    keeps the positional signature every existing caller uses working."""
+    root = _tree(tmp_path)
+    ok, detail, paths = file_moves.apply_move(
+        file_moves.parse_command(_cmd()), str(root))
+    assert ok is True and detail.startswith("moved") and paths is not None
+
+
+def test_the_app_answers_a_not_synced_destination_with_its_own_state_word(tmp_path):
+    """res-fleet-3, through the real command path: the answer keeps ok=True
+    and the sentence (a 0.7.49 dashboard reads both unchanged) and ADDS
+    `state: not_synced_here`, which is what lets the project page say
+    "trashed locally" instead of "moved"."""
+    from ccsync_companion import app as app_mod
+
+    root = _tree(tmp_path)
+    answers: list = []
+
+    class _Sequencer:
+        def rel_to_slug_with_borrowed(self):
+            return {DRONE: "d"}
+
+    class _Stub:
+        config = {"local_root": str(root)}
+        _root_absent = False
+        sequencer = _Sequencer()
+
+        def __init__(self):
+            self.file_moves = file_moves.FileMoveLedger(
+                tmp_path / "state" / "file_moves.json")
+
+        def _relink_moved_result(self, *a):            # never reached here
+            raise AssertionError("nothing moved to a path Resolve should follow")
+
+        def _notify_tray(self, *a, **k):
+            pass
+
+        def _queue_file_move_answer(self, move_id, ok, detail, state=None,
+                                    attempts=0, relink_pending=False):
+            answers.append({"id": move_id, "ok": ok, "detail": detail,
+                            "state": state})
+
+        _apply_file_moves = app_mod.CompanionApp._apply_file_moves
+
+    stub = _Stub()
+    stub._apply_file_moves({"commands": {"file_moves": [_cmd()]},
+                            "dashboard_version": "0.7.50"})
+
+    assert answers == [{"id": 1, "ok": True,
+                        "detail": file_moves.DETAIL_NOT_SYNCED_HERE,
+                        "state": file_moves.STATE_NOT_SYNCED_HERE}]
+    assert not (root / "Projects" / ANIMALS).exists()
+    assert list((root / file_moves.TRASH_DIR_NAME).rglob("A001_0512.braw"))
+
+    # ...and a redelivery re-answers with the same word rather than a plain
+    # "moved", which is what the dashboard records the second time.
+    answers.clear()
+    stub._apply_file_moves({"commands": {"file_moves": [_cmd()]},
+                            "dashboard_version": "0.7.50"})
+    assert answers[0]["state"] == file_moves.STATE_NOT_SYNCED_HERE
+
+
+# The five words `FileMoveResultIn.state` accepted BEFORE res-fleet-3's
+# dashboard half (dashboard/src/ccsync_dashboard/api.py). Copied rather than
+# imported: the dashboard is a separate package with its own venv, and this
+# suite runs on machines that have never installed it. `file_moves_applied`
+# is not one of ReportIn's tolerant sections, so an unknown word here is not
+# a dropped field - it is a 422 for the WHOLE report, every thirty seconds,
+# until somebody upgrades the dashboard.
+PRE_RES_FLEET_3_STATES = frozenset(
+    {"done", "failed", "retrying", "blocked", "applying"})
+
+
+def _answers_from(reply, tmp_path):
+    from ccsync_companion import app as app_mod
+
+    root = _tree(tmp_path)
+    answers: list = []
+
+    class _Sequencer:
+        def rel_to_slug_with_borrowed(self):
+            return {DRONE: "d"}
+
+    class _Stub:
+        config = {"local_root": str(root)}
+        _root_absent = False
+        sequencer = _Sequencer()
+
+        def __init__(self):
+            self.file_moves = file_moves.FileMoveLedger(
+                tmp_path / "state" / "file_moves.json")
+
+        def _relink_moved_result(self, *a):
+            raise AssertionError("nothing moved to a path Resolve should follow")
+
+        def _notify_tray(self, *a, **k):
+            pass
+
+        def _queue_file_move_answer(self, move_id, ok, detail, state=None,
+                                    attempts=0, relink_pending=False):
+            answers.append({"id": move_id, "ok": ok, "detail": detail,
+                            "state": state})
+
+        _apply_file_moves = app_mod.CompanionApp._apply_file_moves
+
+    stub = _Stub()
+    payload = {"commands": {"file_moves": [_cmd()]}}
+    payload.update(reply)
+    stub._apply_file_moves(payload)
+    return answers, stub, root
+
+
+def test_the_state_word_is_withheld_from_a_dashboard_that_would_422_on_it(tmp_path):
+    """res-fleet-3, the wire half: a word an older dashboard does not know is
+    not a dropped field, it is a 422 for the whole report - so 0.9.75 against
+    a 0.7.49 dashboard would lose the lanes, the presence and the alarms of
+    every machine, twice a minute, for one line on one page. The answer stays
+    ok=True with the honest sentence, which every dashboard in the field
+    already reads."""
+    for reply in ({"dashboard_version": "0.7.49"},
+                  {},                                  # older than the key
+                  {"dashboard_version": "nightly"}):   # unrankable
+        answers, _stub, root = _answers_from(reply, tmp_path / str(hash(str(reply))))
+        assert len(answers) == 1
+        assert answers[0]["ok"] is True
+        assert answers[0]["detail"] == file_moves.DETAIL_NOT_SYNCED_HERE
+        assert answers[0]["state"] is None
+        assert answers[0]["state"] in (None, *PRE_RES_FLEET_3_STATES), (
+            "this is what the pre-fix Literal would have to accept")
+        # The file is still trashed and still not in a directory that is not
+        # a project here: the WIRE is what is held back, never the fix.
+        assert not (root / "Projects" / ANIMALS).exists()
+        assert list((root / file_moves.TRASH_DIR_NAME).rglob("A001_0512.braw"))
+
+
+def test_a_dashboard_that_knows_the_word_is_told(tmp_path):
+    """res-fleet-3: and from 0.7.50 on, the project page can say "trashed
+    locally" instead of "moved"."""
+    for version in ("0.7.50", "0.7.51", "0.8.0"):
+        answers, stub, _root = _answers_from(
+            {"dashboard_version": version}, tmp_path / version)
+        assert answers[0]["state"] == file_moves.STATE_NOT_SYNCED_HERE
+        # The LEDGER records the word whatever the dashboard knows: it is this
+        # machine's own record and nothing validates it.
+        assert stub.file_moves.entry(1)["state"] == file_moves.STATE_NOT_SYNCED_HERE
+
+
+def test_the_ledger_keeps_the_word_even_when_the_wire_cannot(tmp_path):
+    """res-fleet-3: withholding the word from an old dashboard must not make
+    this machine forget what it did - the redelivery has to answer the same
+    way, and the day the dashboard is upgraded it should start saying so."""
+    answers, stub, _root = _answers_from({"dashboard_version": "0.7.49"}, tmp_path)
+    assert answers[0]["state"] is None
+    assert stub.file_moves.entry(1)["state"] == file_moves.STATE_NOT_SYNCED_HERE
+
+    answers.clear()
+    stub._apply_file_moves({"commands": {"file_moves": [_cmd()]},
+                            "dashboard_version": "0.7.50"})
+    assert answers[0]["state"] == file_moves.STATE_NOT_SYNCED_HERE
+
+
 # -- the command ------------------------------------------------------------
 
 

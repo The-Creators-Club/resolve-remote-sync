@@ -564,7 +564,14 @@ def probe_video(ffmpeg_path: str, path: str | Path) -> dict:
         # a property of a proxy written against it. They travel to the server
         # in the ingest checkpoint's `probe` dict, so the indexer's
         # probe_video and this one have to agree on all three.
-        "frames": _int_or_none(video_stream.get("nb_frames")),
+        # broll-indexer-2 / proxy-tiers-7 (2026-09-18): NOT the raw
+        # `nb_frames`. This module's own count_frames docstring says a
+        # container's claim is not a count, and this column is what decides an
+        # offline clip's LENGTH on a remote editor's timeline. The indexer's
+        # twin got the same cross-check in the same pass (CR-286R); the two
+        # producers of one wire field have to agree about how confident it is.
+        "frames": _plausible_frames(
+            _int_or_none(video_stream.get("nb_frames")), duration_s, fps),
         "start_tc": start_tc,
         "bitrate": bitrate,
     }
@@ -935,6 +942,53 @@ def parse_frame_count(stdout_text: Optional[str]) -> Optional[int]:
         return _int_or_none((streams[0] or {}).get("nb_read_packets"))
     except (ValueError, AttributeError, IndexError, TypeError):
         return None
+
+
+def frames_match(src_frames: int, dst_frames: int) -> bool:
+    """Is a proxy's frame count acceptable against its source's?
+
+    The companion's half of `broll/indexer/broll_index/ffmpeg_tools.
+    frames_match`, and a VERBATIM twin of it on purpose: three producers make
+    proxies for this archive (this module, the indexer's build_proxy, and
+    make_own_proxies) and a tolerance on one of them is a fleet with two
+    rules about the same file.
+
+    EXACT, and comp-broll-tiers-3 (2026-09-18) is the decision, not an
+    omission. The VFR mechanism that finding proposed was measured and
+    refuted (a filtered encode passes VFR timestamps through: 200 packets in,
+    200 out, both containers), and the Reproductive Rights clips were 1 to 18
+    frames short with Resolve refusing every one - so "a frame rate's worth"
+    of slack would readmit exactly the defect this check was written for.
+    What comp-broll-tiers-3 changed is the BLAST RADIUS: a mismatch on the
+    editing proxy drops that tier instead of failing the whole clip.
+    """
+    return src_frames == dst_frames
+
+
+def _plausible_frames(claimed: Optional[int], duration_s: Any,
+                      fps: Any) -> Optional[int]:
+    """`claimed` if duration x fps agrees with it, else None.
+
+    broll-indexer-2 / proxy-tiers-7, and a verbatim twin of the indexer's
+    helper of the same name. "Cannot tell" is the answer when there is
+    nothing to check the claim against: a container with no duration or no
+    rate leaves it as it stands, which is what every reader had before.
+    """
+    if claimed is None or claimed <= 0:
+        return None
+    try:
+        duration = float(duration_s or 0.0)
+        rate = float(fps or 0.0)
+    except (TypeError, ValueError):
+        return claimed
+    if not duration or not rate:
+        return claimed
+    expected = duration * rate
+    # One frame of slack for a rounded container duration, plus 1% for the
+    # rate being an average over a VFR file.
+    if abs(claimed - expected) <= max(1.0, expected * 0.01):
+        return claimed
+    return None
 
 
 def count_frames(ffmpeg_path: str, path: str | Path) -> Optional[int]:

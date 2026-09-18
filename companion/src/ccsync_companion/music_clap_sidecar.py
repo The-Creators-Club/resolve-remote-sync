@@ -36,6 +36,7 @@ that never ingests music never pays for them.
 from __future__ import annotations
 
 import fnmatch
+import ipaddress
 import logging
 import os
 import shutil
@@ -214,21 +215,56 @@ def feed_base(cfg: Optional[dict[str, Any]] = None,
     return base.rstrip("/")
 
 
-def host_allowed(url: str) -> bool:
+def host_allowed(url: str, cfg: Optional[dict[str, Any]] = None,
+                 site: Optional[dict[str, Any]] = None) -> bool:
     """Is `url` on the feed's host, or one it is allowed to redirect to?
 
     The feed's OWN host is trusted by definition -- it is the one the site
     manifest named -- and the rest of the list is the GitHub Releases redirect
     chain (docs/RELEASE_FEED.md §3.1). fnmatch, never a bare `endswith`:
     "evil-githubusercontent.com" ends with the suffix too.
+
+    comp-music-ytdl-jobs-1 (2026-09-18): the first half of that paragraph was
+    a description of code that did not exist. The list was the four GitHub
+    patterns and nothing else, while `feed_base` honours both
+    `music_clap_feed_base` and the manifest's `release_feed_base` -- so a
+    fleet publishing from a self-hosted feed, an S3/R2 bucket or the
+    dashboard's own Tailscale Serve host got `refusing to download the music
+    indexing model: <their own host> is not one of the hosts this build is
+    allowed to fetch from` on every ingest tick, for ever, with no action
+    short of a new companion build. The sha256 pin is what makes an artefact
+    safe, on this host exactly as on GitHub's; the allow-list is here to stop
+    a URL nobody configured, so the configured one belongs in it.
+
+    https stays a condition for a remote host. The override's docstring
+    offers "a local directory server" for a dev loop, so plain http is
+    allowed for loopback ONLY, where there is no network to listen on.
     """
     parts = urlsplit(url)
-    if parts.scheme != "https":
-        return False
     host = (parts.hostname or "").lower()
     if not host:
         return False
-    return any(fnmatch.fnmatch(host, pattern) for pattern in ALLOWED_HOST_PATTERNS)
+    if parts.scheme != "https":
+        if not (parts.scheme == "http" and _is_loopback(host)):
+            return False
+    if any(fnmatch.fnmatch(host, pattern) for pattern in ALLOWED_HOST_PATTERNS):
+        return True
+    try:
+        base_host = (urlsplit(feed_base(cfg, site)).hostname or "").lower()
+    except Exception:  # noqa: BLE001 - an unreadable manifest allows nothing new
+        return False
+    return bool(base_host) and host == base_host
+
+
+def _is_loopback(host: str) -> bool:
+    """127.0.0.0/8, ::1 and `localhost`, and nothing else. No DNS."""
+    text = (host or "").strip().strip("[]").lower()
+    if text == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(text).is_loopback
+    except ValueError:
+        return False
 
 
 def planned_urls(cfg: Optional[dict[str, Any]] = None,
@@ -462,7 +498,7 @@ def ensure(cfg: Optional[dict[str, Any]] = None,
                    "release feed URL and the tray will fetch it")
         _clear_download(message)
         return False, message
-    bad = [u for u in urls.values() if not host_allowed(u)]
+    bad = [u for u in urls.values() if not host_allowed(u, cfg, site)]
     if bad:
         message = (f"refusing to download the music indexing model: "
                    f"{urlsplit(bad[0]).hostname} is not one of the hosts this "

@@ -117,13 +117,25 @@ def test_a_corrupt_file_is_an_empty_ledger_and_one_warning(led, tmp_path, caplog
 
 def test_a_write_that_cannot_land_is_not_an_exception(led, tmp_path, monkeypatch):
     """A ledger that cannot be persisted costs a forgotten stand-in, never
-    an insert."""
-    monkeypatch.setattr(broll_standins.StandinLedger, "_persist_locked",
-                        lambda self: False)
+    an insert.
+
+    tests-4 (2026-09-18): this used to monkeypatch `_persist_locked` -- the
+    exact function whose failure it claims to cover -- with
+    `lambda self: False`, so it proved only that a False return is tolerated.
+    The real one catches OSError and nothing else, and `json.dumps` sits
+    inside that try. Raise from the things that raise.
+    """
+    import os as os_mod
+
+    def boom(*args, **kwargs):
+        raise OSError("the disk is full")
+
+    monkeypatch.setattr(os_mod, "replace", boom)
 
     entry = led.record(_standin(tmp_path))
 
     assert entry["local_path"].endswith("clip.mov")
+    assert led.all() == [], "a write that did not land left nothing behind"
 
 
 def test_record_logs_the_warning_that_names_the_stand_in(led, tmp_path, caplog):

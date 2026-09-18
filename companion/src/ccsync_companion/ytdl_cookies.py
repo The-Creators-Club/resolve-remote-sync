@@ -196,8 +196,29 @@ def install_text(text: Any, dest: Optional[Path] = None) -> tuple[bool, str]:
         # one file here that is a logged-in account. harden() sets an
         # owner-only ACL there and 0600 on posix, and hardens the TEMP file
         # before the rename so the secret is never briefly world-readable.
+        # comp-music-ytdl-jobs-4 (2026-09-18): CREATED, then hardened, then
+        # written. The order used to be write -> harden -> replace, so the
+        # bytes of a live Google session existed on disk under the inherited
+        # ACL (Windows) or the umask (posix) for the length of the write --
+        # which is precisely what the comment above says does not happen.
+        # O_CREAT|O_EXCL with 0o600 does it in one step on posix; on Windows
+        # the mode argument is ignored, so the empty file is hardened before
+        # a byte goes into it. A `.new` left by a killed write is removed
+        # first, or O_EXCL would fail every install from then on.
         tmp = target.with_suffix(target.suffix + ".new")
-        tmp.write_text(text, encoding="utf-8")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            secretfile.harden(tmp)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                fd = -1
+                handle.write(text)
+        finally:
+            if fd != -1:
+                os.close(fd)
         secretfile.harden(tmp)
         os.replace(tmp, target)
     except OSError as exc:

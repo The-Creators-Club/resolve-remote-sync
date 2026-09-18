@@ -415,6 +415,53 @@ else
         *—*) bad "the closing verdict contains an em dash" ;;
         *) ok "the closing verdict has no em dash" ;;
     esac
+
+    # install-onboard-3 (2026-09-18): the two cases above extract ONE function
+    # each and call it with a hand-picked argument, so the only thing the
+    # 09-11b fix changed about the script's FLOW -- which branch a real run
+    # reaches -- was untested, and install-onboard-1 (a dry run ending "CCSync
+    # uninstall NOT complete") was green in CI. This case runs section 3
+    # wholesale over a populated fake tree with DRY_RUN=1 and reads the
+    # closing verdict the section computes.
+    SECTION3_SRC="$(uslice 'REMOVAL_INCOMPLETE=0' '4. rclone remote stanza')"
+    if [ -z "$SECTION3_SRC" ]; then
+        bad "macos_uninstall.sh section 3 could not be sliced (install-onboard-3)"
+    else
+        DOUT="$(
+            step() { echo "STEP: $1"; }
+            warn() { echo "WARN: $1"; }
+            skip() { echo "SKIP: $1"; }
+            dry()  { echo "DRY: $1"; }
+            DRY_RUN=1
+            CCSYNC_LOCAL="${TMPDIR:-/tmp}/ccsync-test-dry-$$"
+            BIN_DIR="$CCSYNC_LOCAL/bin"
+            SYNCTHING_HOME="$CCSYNC_LOCAL/syncthing-config"
+            mkdir -p "$BIN_DIR" "$SYNCTHING_HOME"
+            echo x > "$BIN_DIR/ccsync-companion"
+            eval "$SECTION3_SRC"
+            eval "$VERDICT_SRC"
+            closing_verdict "$REMOVAL_INCOMPLETE"
+            [ -d "$BIN_DIR" ] && echo "STILL-THERE"
+            command rm -rf "$CCSYNC_LOCAL"
+        )"
+        case "$DOUT" in
+            *"NOT complete"*) bad "a dry run over an installed Mac ends 'uninstall NOT complete' (install-onboard-1): $DOUT" ;;
+            *"(dry run"*) ok "a dry run ends with the nothing-changed sentence" ;;
+            *) bad "a dry run's closing verdict says neither: $DOUT" ;;
+        esac
+        case "$DOUT" in
+            *"remove it by hand"*) bad "a dry run tells the editor to hand-delete a tree it never touched (install-onboard-1): $DOUT" ;;
+            *) ok "a dry run asks nobody to delete anything" ;;
+        esac
+        case "$DOUT" in
+            *"that included the Syncthing identity"*) bad "a dry run claims in the past tense that the Syncthing identity was deleted (install-onboard-5): $DOUT" ;;
+            *) ok "a dry run does not claim the device identity is gone" ;;
+        esac
+        case "$DOUT" in
+            *STILL-THERE*) ok "the dry run really did leave the tree alone" ;;
+            *) bad "the dry run DELETED the fake tree" ;;
+        esac
+    fi
 fi
 
 echo ""

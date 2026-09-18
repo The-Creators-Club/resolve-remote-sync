@@ -929,13 +929,40 @@ def _resolve_section(app: "CompanionApp", guard: dict) -> list:
             offered_scan = True
 
     attach = health.get("proxy_attach") or {}
-    if isinstance(attach, dict) and (attach.get("attached") or attach.get("failed")):
+    if isinstance(attach, dict) and (attach.get("attached") or attach.get("failed")
+                                     or attach.get("refreshed")):
         line = (f"Proxies attached to clips: {int(attach.get('attached') or 0)}")
         failed = int(attach.get("failed") or 0)
+        # CR-283W (comp-resolve-5): a pass that only re-read clips whose file
+        # changed under them attached nothing, and this line was either absent
+        # or a bare "0" about a pass that did work.
+        try:
+            refreshed = int(attach.get("refreshed") or 0)
+        except (TypeError, ValueError):
+            refreshed = 0
+        if refreshed:
+            line += (f", {ui_copy.count(refreshed, 'clip')} re-read after the "
+                     "file changed")
         if failed:
             why = str(attach.get("why") or "").strip()
             line += f", {failed} could not be attached" + (f": {why}" if why else "")
         items.append(Line(line, style="warning" if failed else "normal"))
+    # CR-283X (comp-broll-tiers-5): the editor is cutting on a 1080p preview
+    # under the original's name and nothing they can see said so.
+    owed = health.get("standins_owed") or {}
+    if isinstance(owed, dict) and owed.get("count"):
+        try:
+            count = int(owed.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count:
+            why = str(owed.get("why") or "").strip()
+            items.append(Line(
+                f"{ui_copy.count(count, 'clip')} still on the preview copy: the "
+                "editing proxy did not arrive"
+                + (f" ({why})" if why else "")
+                + ". Send them to Resolve again to ask for it.",
+                style="warning"))
     gaps = health.get("proxy_gaps") or {}
     if isinstance(gaps, dict):
         for key, phrase in (("low_space", "this disk is low on space"),

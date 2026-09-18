@@ -114,12 +114,29 @@ def remux(preview: Path, tc: str) -> str | None:
             pass
         return f"{preview}: ffmpeg exited {r.returncode}: {(r.stderr or '').strip()[:160]}"
     # The remux must round-trip the timecode, or the replace buys nothing.
-    if not ffmpeg_tools.read_timecode(tmp):
+    #
+    # broll-indexer-5 (2026-09-18): the VALUE, not merely SOME timecode. Since
+    # audit F6 the separator is the whole point of this tool - a colon and a
+    # semicolon at the same numbers are different absolute frames, and writing
+    # the wrong one is what makes Resolve refuse the proxy. `plan()` compares
+    # `read_timecode(preview) == wanted` one function above, so the
+    # post-condition was weaker than the precondition it closes: if ffmpeg
+    # normalised the form on a given container, every file was reported
+    # "fixed" and replaced while still carrying the form plan() rejected, the
+    # next run re-planned all of them, and each run exited 0. The mp4 tmcd box
+    # stores a drop-frame FLAG rather than a separator, which is exactly where
+    # such a normalisation happens silently. Two distinguishable messages: a
+    # DROPPED timecode and a REWRITTEN one are different faults.
+    written = ffmpeg_tools.read_timecode(tmp)
+    if not written or written != tc:
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
-        return f"{preview}: remux dropped the timecode"
+        if not written:
+            return f"{preview}: remux dropped the timecode"
+        return (f"{preview}: remux wrote {written}, not {tc} "
+                f"(the container normalised it)")
     # Retried once: the web app (or a browsing editor's range request) can
     # hold an SMB read handle on exactly the preview being fixed, and Windows
     # answers os.replace with a sharing violation. One locked file must cost

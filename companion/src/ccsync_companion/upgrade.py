@@ -1559,7 +1559,8 @@ class UpgradeManager:
                 self._log_refusal(info.get("version"), reason)
                 info = None
         if (not offered and isinstance(resp, dict)
-                and not resp.get("upgrade")):
+                and not resp.get("upgrade")
+                and not resp.get("upgrade_none_reason")):
             # comp-ytdl-jobs-1 (2026-09-11b): THE OTHER WAY OUT of a standing
             # refusal, and until now the only one was `_accept_offer`
             # succeeding on a later offer -- which a machine already running
@@ -1575,6 +1576,19 @@ class UpgradeManager:
             # being refused: a still-current refused build is re-offered and
             # re-refused on the very next report, so nothing true is lost. An
             # `upgrade` key we could not parse is NOT this case, and keeps it.
+            #
+            # comp-app-3 (2026-09-18): ...and neither is a reply carrying
+            # `upgrade_none_reason`. api._upgrade_info withholds the offer in
+            # four further states in which a package EXISTS - it is
+            # retracted, it needs a newer dashboard, its arch does not match
+            # the reporter, the reported platform is unknown - and its own
+            # comment calls three of them "silent to the companion on
+            # purpose". In all four the build is not re-offered, so a
+            # refusal cleared here could never be restored and the operator
+            # was told nothing was wrong about a machine that is refusing to
+            # upgrade and will never be offered anything. The key is
+            # ADDITIVE: a dashboard that does not send it behaves exactly as
+            # before, which is why the dashboard deploys first.
             self._clear_refusal()
         newly: Optional[dict[str, Any]] = None
         if info is not None:

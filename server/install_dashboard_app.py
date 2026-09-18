@@ -4463,14 +4463,26 @@ def ship_dashboard_docs(root: str, dry_run: bool, staging_parent: str) -> bool:
     """
     import tempfile
 
-    missing = [n for n in SHIPPED_DOCS if not (LOCAL_DOCS_DIR / n).is_file()]
-    missing += [n for n in SHIPPED_DOC_TREES if not (LOCAL_DOCS_DIR / n).is_dir()]
-    if missing:
-        print(f"NOTE: not shipping {', '.join(missing)} -- absent from "
+    # server-tools-5 (2026-09-18): SHIP WHAT IS PRESENT, note what is not.
+    # `missing` used to be both lists together and any member returned False,
+    # so after dash-core-6 promoted EDITOR_SETUP.md into SHIPPED_DOCS an
+    # absent GUIDE also withheld the `legal/` tree -- the EULA the first-run
+    # wizard gates on. A hand-trimmed bind-mode checkout deployed fine and
+    # every editor was told no licence agreement is included in this build,
+    # while the operator was pointed at a guide. Only the legal tree is worth
+    # refusing for: it is the one document the product cannot do without.
+    missing_docs = [n for n in SHIPPED_DOCS if not (LOCAL_DOCS_DIR / n).is_file()]
+    missing_trees = [n for n in SHIPPED_DOC_TREES if not (LOCAL_DOCS_DIR / n).is_dir()]
+    if missing_trees:
+        print(f"NOTE: not shipping {', '.join(missing_trees)} -- absent from "
               f"{LOCAL_DOCS_DIR}. The first-run wizard will say no licence "
-              f"agreement is included in this build, and /help will say the "
-              f"guide is not installed.", file=sys.stderr)
+              f"agreement is included in this build.", file=sys.stderr)
         return False
+    if missing_docs:
+        print(f"NOTE: {', '.join(missing_docs)} is absent from "
+              f"{LOCAL_DOCS_DIR} and will not be shipped; /help will say that "
+              f"guide is not installed. Everything else, including the "
+              f"licence agreement, is being shipped.", file=sys.stderr)
     staging_local = tempfile.mkdtemp(prefix="ccsync-docs-")
     try:
         # server-tools-b-5 (2026-09-11b): this runs at step 2a, AFTER the code

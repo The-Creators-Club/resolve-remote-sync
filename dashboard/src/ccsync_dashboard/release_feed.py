@@ -449,6 +449,11 @@ def _record_key(record: dict[str, Any]) -> tuple[str, str, str]:
             str(record.get("version", "")).strip())
 
 
+# The `published_by` value the feed's own auto-publish writes (as against an
+# admin's username, which the [ PUBLISH ] button on the feed page writes).
+FEED_PUBLISHER = "release-feed"
+
+
 def channel_retractions(channel: Any) -> list[dict[str, str]]:
     """The channel's `retracted` list: builds the vendor has RECALLED
     (REL-3, resilience sweep 2026-08-28).
@@ -471,7 +476,15 @@ def channel_retractions(channel: Any) -> list[dict[str, str]]:
     for item in raw:
         if not isinstance(item, dict):
             continue
-        kind = str(item.get("kind") or "").strip()
+        # dash-release-jobs-4 (2026-09-18): `kind` is FOLDED, like `platform`
+        # beside it and like `_record_key` everywhere else. `companion_packages`
+        # stores kind folded, and `db.retract_package` -> `get_package` matches
+        # it exactly, so a recall entry spelled `"kind": "Companion"` un-currented
+        # nothing and `retract_package` answered False - indistinguishable from
+        # "we never published that", with nothing logged either way. The module's
+        # own comment calls a recall "the one channel message whose SUPPRESSION
+        # is the attack"; this was suppression by a capital letter.
+        kind = str(item.get("kind") or "").strip().lower()
         platform = str(item.get("platform") or "").strip().lower()
         version = str(item.get("version") or "").strip()
         if not (kind and platform and version):
@@ -753,13 +766,27 @@ def repair_provenance(conn, valid_records: list[dict[str, Any]]) -> list[str]:
         existing = db.get_package(conn, platform, version, kind)
         if existing is None or sha_conflict(existing, record):
             continue
+        # dash-release-jobs-2 (2026-09-18): ONE correction, in ONE direction,
+        # and `git_sha` is never written. Both fields are outside the Ed25519
+        # record signature by design (REL-13 - they are advisory), so a feed
+        # host can edit them freely without breaking any signature, and a sha
+        # match proves only that the BYTES agree, not that the story about them
+        # does: the docstring's argument does not cover the two fields it was
+        # rewriting. A build published here by `ship.cmd -AllowDirty` and
+        # correctly stamped `+dirty` could therefore have that chip cleared,
+        # and its commit rewritten, by whoever serves the feed's static files -
+        # on the one day the chip exists for. The bug this function was written
+        # for is exactly and only "0.7.44 read the string "0" as truthy and
+        # stamped every clean CI build dirty", so that is all it repairs: a row
+        # that says dirty where the feed record says clean. Making a row LOOK
+        # DIRTY is not a repair anybody needs, and a rewritten commit string is
+        # not a repair at all.
         dirty = _feed_flag(record.get("git_dirty"))
-        sha = str(record.get("git_sha") or "")
-        if bool(existing["git_dirty"]) == dirty and (not sha or existing["git_sha"] == sha):
+        if dirty or not bool(existing["git_dirty"]):
             continue
         db.update_package_provenance(conn, int(existing["id"]),
-                                     git_sha=sha or str(existing["git_sha"] or ""),
-                                     git_dirty=dirty)
+                                     git_sha=str(existing["git_sha"] or ""),
+                                     git_dirty=False)
         fixed.append(f"{kind}/{platform} {version}")
     if fixed:
         conn.commit()
@@ -996,7 +1023,7 @@ def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]]
             view = publish_from_feed(
                 conn, settings, app_state, kind=kind, platform=platform, version=version,
                 make_current=(policy == "current" and not stage_only),
-                published_by="release-feed",
+                published_by=FEED_PUBLISHER,
             )
         except package_store.PackageStoreError as exc:
             log.warning("release feed auto-publish of %s/%s %s failed: %s",

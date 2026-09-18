@@ -210,6 +210,15 @@ def test_the_preview_only_fallback_reports_no_original(client, conn, data_root):
     assert insert["preview_rel"] == "Creators_Club/ff5/Day 1/Proxy/alone.mp4"
     # ...and the fields the page has always POSTed are unchanged.
     assert video["insert_rel_path"] == "Creators_Club/ff5/Day 1/Proxy/alone.mp4"
+    # This is a JUDGED answer, not a failed look (proxy-tiers-3): the folder
+    # was read and holds no sibling. The two must not wear the same shape --
+    # that is the whole of CR-284G.
+    assert insert["known"] is True
+    # broll-1 / proxy-tiers-2: an explicit null is an ANSWER. A reader that
+    # falls back to the posted rel_path here places the PREVIEW at the
+    # original's own path and ledgers the archive's own preview as a
+    # stand-in, which nothing can ever retire.
+    assert "original_rel" in insert and insert["original_rel"] is None
 
 
 def test_an_unarchived_clip_still_gets_an_insert_object(client, conn):
@@ -250,3 +259,13 @@ def test_a_missing_archive_directory_answers_without_a_proxy(client, conn):
     assert insert["original_rel"] is None
     assert insert["edit_proxy_rel"] is None
     assert insert["preview_rel"] == "Creators_Club/ff3/Nowhere/Proxy/b.mp4"
+    # proxy-tiers-3 (2026-09-18): ...and it says it could not LOOK. A listing
+    # that raised used to be swallowed into "no entries", which is byte for
+    # byte the answer for "this clip has no original" -- so an unmounted
+    # dataset or a wrong BROLL_DATA_ROOT turned every Send to Resolve in the
+    # window into a preview-only insert with a stand-in ledger row that
+    # outlives the outage. The keys stay PRESENT and null: an absent
+    # preview_rel/edit_proxy_rel means "use the stem convention" to the
+    # companion, which is the same wrong answer by another road.
+    assert insert["known"] is False
+    assert "preview_rel" in insert and "edit_proxy_rel" in insert

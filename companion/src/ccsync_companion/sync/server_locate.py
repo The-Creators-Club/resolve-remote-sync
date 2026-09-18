@@ -59,10 +59,17 @@ class LocateAnswer:
     """
 
     def __init__(self, walked: bool, as_of: str,
-                 found: dict[tuple[str, int], list[dict[str, str]]]) -> None:
+                 found: dict[tuple[str, int], list[dict[str, str]]],
+                 unreadable: Optional[list[str]] = None) -> None:
         self.walked = bool(walked)
         self.as_of = str(as_of or "")
         self._found = found
+        # dash-api-1 (2026-09-18): the projects the dashboard knows it could
+        # not walk this cycle, so a file that lives in one of them is absent
+        # from `found` for a reason that is NOT "it was deleted". Optional on
+        # the wire: a dashboard older than 0.7.50 does not send the key, and
+        # this build then behaves exactly as 0.9.74 did.
+        self.unreadable = [str(s) for s in (unreadable or []) if str(s or "").strip()]
 
     @property
     def usable(self) -> bool:
@@ -180,8 +187,15 @@ class ServerLocator:
                 if slug and rel:
                     places.append({"project_slug": slug, "rel_path": rel})
             found[key] = places
-        answer = LocateAnswer(bool(parsed.get("walked")), str(parsed.get("as_of") or ""),
-                              found)
+        raw_unreadable = parsed.get("unreadable")
+        answer = LocateAnswer(
+            bool(parsed.get("walked")), str(parsed.get("as_of") or ""), found,
+            list(raw_unreadable) if isinstance(raw_unreadable, list) else None)
+        if answer.unreadable:
+            log.info("locate: the dashboard could not read the inventory of %d "
+                     "project(s) (%s) - a file that moved into one of them reads "
+                     "as deleted here",
+                     len(answer.unreadable), ", ".join(answer.unreadable[:5]))
         if not answer.walked:
             # An inventory that has never run cannot tell a deletion from a
             # move, and saying so is the whole reason the flag is on the wire.

@@ -60,6 +60,14 @@ MAX_REARM_TRACKED = 2000
 # machine that produces refusals in bulk.
 MAX_NON_CANONICAL_REFUSED = 200
 
+# comp-resolve-7 (2026-09-18): how long the archive exemption's verdict about
+# one path stands. Long enough that a 3 s poll asks the filesystem about a
+# clip once a minute instead of twenty times, short enough that a proxy
+# landing (or being deleted) shows up in the missing count while the editor
+# still remembers doing it.
+EXEMPT_TTL_SECONDS = 60.0
+EXEMPT_MEMO_MAX = 4000
+
 
 def _norm_key(path: str) -> str:
     return resolve_bridge._norm_path(path)
@@ -140,6 +148,20 @@ class TimelineWatcher:
         # "N missing on disk". Every proxy-only b-roll insert would add one.
         # The test is per path and cached per poll; see _archive_exempt.
         self._archive_exempt_fn = archive_exempt_fn
+        # comp-resolve-7 (2026-09-18): the archive exemption's answer, kept
+        # ACROSS polls with a short TTL.
+        #
+        # The verdict was cached per poll only, and the poll is every 3 s. A
+        # remote rig with a proxy-only b-roll timeline is the designed steady
+        # state in which every archive clip is MISSING on every poll, so a
+        # 200-clip timeline cost the ledger's stat plus the media file's stat
+        # plus up to four find_proxy_on_disk probes each -- roughly a
+        # thousand filesystem probes every three seconds, on the thread the
+        # popup and fixer latency depend on, for a diagnostic count. The TTL
+        # is deliberately short: the answer flips when a proxy lands or is
+        # deleted, and a long memory would keep a genuinely missing clip out
+        # of the count.
+        self._exempt_memo: dict[str, tuple[float, bool]] = {}
         # Last NON-None project name seen -- deliberately NOT cleared when
         # the bridge flaps to None (Resolve restarting, transient failure),
         # so name -> None -> same name never refires on_project_changed.
@@ -518,6 +540,11 @@ class TimelineWatcher:
             key = _norm_key(path)
             if key in cache:
                 return cache[key]
+            now = time.monotonic()
+            remembered = self._exempt_memo.get(key)
+            if remembered is not None and now - remembered[0] < EXEMPT_TTL_SECONDS:
+                cache[key] = remembered[1]
+                return remembered[1]
             if self._archive_exempt_fn is not None:
                 answer = bool(self._archive_exempt_fn(path))
             else:
@@ -529,6 +556,12 @@ class TimelineWatcher:
                              path, self.local_root, self.canonical_prefix)))
                 )
             cache[key] = answer
+            self._exempt_memo[key] = (now, answer)
+            if len(self._exempt_memo) > EXEMPT_MEMO_MAX:
+                # A timeline can hold thousands; this is a cache, not a
+                # ledger. Dropping it whole is cheaper than an LRU and the
+                # next poll refills what it actually asks about.
+                self._exempt_memo.clear()
             return answer
         except Exception:
             log.debug("watcher: could not judge %s against the archive", path,

@@ -1051,6 +1051,11 @@ def test_probe_video_reports_frames_and_bitrate(monkeypatch):
     _patch_probe(monkeypatch, stdout=_probe_json(
         fmt_tags={"timecode": "12:05:55:26"},
         fmt_extra={"bit_rate": "162699853"},
+        # 1674 frames at 23.976 is 69.8 s, and the duration has to agree:
+        # broll-indexer-2 / proxy-tiers-7 (2026-09-18) cross-checks the
+        # container's CLAIM against duration x fps, because this column
+        # decides an offline clip's length on a remote editor's timeline.
+        duration="69.82",
         streams=[_video_stream(nb_frames="1674", bit_rate="140972921")],
     ))
 
@@ -1061,6 +1066,18 @@ def test_probe_video_reports_frames_and_bitrate(monkeypatch):
     # otherwise decide whether the clip counts as edit-weight.
     assert info["bitrate"] == 140972921
     assert info["start_tc"] == "12:05:55:26"
+
+
+def test_a_frame_claim_the_duration_does_not_support_is_not_reported(monkeypatch):
+    """broll-indexer-2 / proxy-tiers-7 (2026-09-18): `nb_frames` is a claim,
+    not a count (this module's own count_frames docstring says so), and a
+    claim nothing supports is "cannot tell" -- which every reader of the
+    column already handles -- rather than a length the archive will show a
+    remote editor."""
+    _patch_probe(monkeypatch, stdout=_probe_json(
+        duration="12.5", streams=[_video_stream(nb_frames="1674")]))
+
+    assert ft.probe_video("ffmpeg", "x.mov")["frames"] is None
 
 
 def test_probe_video_falls_back_to_the_container_bitrate(monkeypatch):

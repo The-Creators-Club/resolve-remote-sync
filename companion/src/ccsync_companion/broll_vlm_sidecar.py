@@ -398,9 +398,25 @@ class _Stopped(Exception):
 
 
 def host_allowed(url: str) -> bool:
-    """Is `url`'s host on the allow-list? Exact match or an explicit wildcard;
-    never a suffix test."""
-    host = (urlsplit(url).hostname or "").lower()
+    """Is `url`'s host on the allow-list, over https? Exact match or an
+    explicit wildcard; never a suffix test.
+
+    comp-music-ytdl-jobs-3 (2026-09-18): the scheme test is here because its
+    music sibling (`music_clap_sidecar.host_allowed`) has always had one and
+    this gate tested the hostname alone, so a catalogue entry spelled
+    `http://github.com/...` would have been fetched in clear. Nothing today
+    can reach that -- the catalogue is vendored and every pin is https -- and
+    the sha256 pin means the exposure would be confidentiality rather than a
+    swapped artefact. The asymmetry is the defect: the weaker of two gates
+    doing the same job is the one that ships the day these URLs become
+    site-derived, as the CLAP ones already are.
+    """
+    parts = urlsplit(url)
+    if parts.scheme != "https":
+        return False
+    host = (parts.hostname or "").lower()
+    if not host:
+        return False
     if host in ALLOWED_HOSTS:
         return True
     return any(fnmatch.fnmatch(host, pattern) for pattern in ALLOWED_HOST_PATTERNS)

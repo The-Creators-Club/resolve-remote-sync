@@ -247,7 +247,7 @@
       {% endif %}
       {% for t in m.targets %}
         <div class="muted mono-sm" style="margin-left:1.5rem">{{ t.editor_username }} on {{ t.machine }}:
-          {% if t.expired_at %}NOT APPLIED, this computer may re-upload the old path{% elif not t.applied_at %}{% if t.state == "retrying" %}still trying here ({{ t.attempts }} attempt{{ 's' if t.attempts != 1 }}){% else %}{{ "told, not done yet" if t.delivered_at else "waiting for its next report" }}{% endif %}{% elif t.state == "blocked" %}BLOCKED here after {{ t.attempts }} attempts{% elif t.ok %}moved{% if t.relink_pending %}, Resolve not repointed yet{% endif %}{% else %}FAILED{% endif %}{% if t.detail %} ({{ t.detail }}){% endif %}</div>
+          {% if t.expired_at %}NOT APPLIED, this computer may re-upload the old path{% elif not t.applied_at %}{% if t.state == "retrying" %}still trying here ({{ t.attempts }} attempt{{ 's' if t.attempts != 1 }}){% else %}{{ "told, not done yet" if t.delivered_at else "waiting for its next report" }}{% endif %}{% elif t.state == "blocked" %}BLOCKED here after {{ t.attempts }} attempts{# res-fleet-3 (2026-09-18): the machine holds the file and does not sync the destination project, so it trashed its copy instead of filing it where nothing would ever see it. Its own words: "moved" would be untrue and "FAILED" would send an admin looking for a fault. #}{% elif t.state == "not_synced_here" %}trashed on this computer: it does not sync the destination project{% elif t.ok %}moved{% if t.relink_pending %}, Resolve not repointed yet{% endif %}{% else %}FAILED{% endif %}{% if t.detail %} ({{ t.detail }}){% endif %}</div>
       {% endfor %}
     </div>
   {% endfor %}

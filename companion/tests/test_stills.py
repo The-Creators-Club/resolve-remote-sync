@@ -154,6 +154,26 @@ def test_on_a_mac_the_gallery_entry_carries_the_canonical_mapping(tmp_path, reso
     assert gallery["mapped_path"] == "P:\\Assets\\Stills\\.gallery"
 
 
+def test_the_gallery_moved_line_is_a_path_the_editor_can_open(tmp_path, resolve_quit):
+    """comp-ui-6 (2026-09-18): the one line telling an editor where their
+    gallery went hard-coded a backslash, so a Mac editor was sent to a
+    "/Users/.../Assets/Stills" joined to ".gallery" with a backslash - a
+    path that exists in no spelling. It reaches them through
+    app._note_stills -> stills_state()["instruction"] -> Settings."""
+    mac = _manager(tmp_path, _prefs_dir(tmp_path, MAC_CONFIG_DAT, MAC_CONFIG_DATA),
+                   windows=False).check()
+    assert mac["message"].endswith("/" + stills.GALLERY_FOLDER)
+
+    (tmp_path / "w").mkdir(parents=True, exist_ok=True)
+    win = _manager(tmp_path / "w", _prefs_dir(tmp_path / "w", WINDOWS_CONFIG_DAT,
+                                              WINDOWS_CONFIG_DATA),
+                   windows=True).check()
+    # On Windows `root` is the canonical P:\ spelling, where the backslash
+    # was always right.
+    assert win["message"].endswith("P:" + chr(92) + "Assets" + chr(92)
+                                   + "Stills" + chr(92) + stills.GALLERY_FOLDER)
+
+
 def test_waits_until_the_shared_folder_has_synced(tmp_path, resolve_quit):
     """Repointing the gallery at a directory that isn't there would take an
     editor's stills offline -- worse than the mismatch warning."""

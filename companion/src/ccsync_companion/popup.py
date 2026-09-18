@@ -85,7 +85,8 @@ class RateEstimator:
 
 
 def format_file_progress(name: str, done: int, total: int, speed_bps: Optional[float],
-                         eta_seconds: Optional[float], placeholder: bool = False) -> str:
+                         eta_seconds: Optional[float], placeholder: bool = False,
+                         rehearsal: bool = False) -> str:
     """e.g. Copying "A001_C012.braw": 4.1 GB of 12.7 GB · 33 MB/s · ~4 min left
 
     While a cloud placeholder is still hydrating (`placeholder` set and no
@@ -94,6 +95,13 @@ def format_file_progress(name: str, done: int, total: int, speed_bps: Optional[f
     display that destroys trust and gets the window force-quit."""
     if not name:
         return ""
+    if rehearsal:
+        # comp-ui-5 (2026-09-18): a rehearsal (`fixer_dry_run`) copies
+        # nothing, so `_on_bytes` never fires and this said
+        # `Copying "A001_C012.braw": 0 B of 12.7 GB` for every clip in turn.
+        # A FLAG rather than an edit to the one string: the same function
+        # draws the real copy, and test_popup pins that wording.
+        return f'Checking "{name}"'
     if placeholder and done <= 0:
         size = f" ({human_bytes(total)})" if total else ""
         return (f'Waiting for your cloud drive to download "{name}"{size}. '
@@ -516,6 +524,13 @@ def call_fix_clip(
     return fix_clip_fn(*args)
 
 
+# comp-ui-1 (2026-09-18b mediums): the object perform_fix_all's `fix_clip_fn`
+# default is bound to. A test that monkeypatches `fixer.fix_clip` leaves the
+# bound default pointing at the original, so the rehearsal seed has to accept
+# either spelling of "the caller injected nothing".
+_FIX_CLIP_DEFAULT = fixer.fix_clip
+
+
 def perform_fix_all(
     rows: list[dict[str, Any]],
     selections: dict[str, str],
@@ -569,6 +584,23 @@ def perform_fix_all(
     total = len(rows)
     batch_total = batch_total_bytes(rows)
     batch_done = 0
+    # comp-ui-5 (2026-09-18): set by the first `dry_run` answer. A rehearsal
+    # copies nothing, so every byte figure in the progress keys is a zero
+    # dressed as a measurement.
+    # comp-ui-1 (2026-09-18b mediums): the first answer arrives AFTER file 1's
+    # progress keys are published, so file 1 of every rehearsal - and the whole
+    # run when there is a single dead link, the common case - still drew the
+    # `Copying "A001_C012.braw": 0 B of 12.7 GB` screen comp-ui-5 replaced.
+    # Seed it from the same cached `fixer_dry_run` answer fixer.fix_clip reads
+    # (resolved once per process, so the screen cannot disagree with the run),
+    # and only for the real fixer: an injected fix_clip_fn decides its own
+    # dry-run, and the first-answer latch below stays its fallback.
+    rehearsing = False
+    if fix_clip_fn is fixer.fix_clip or fix_clip_fn is _FIX_CLIP_DEFAULT:
+        try:
+            rehearsing = bool(fixer.dry_run_default())
+        except Exception:
+            log.debug("fix all: could not read the rehearsal setting", exc_info=True)
     stopped = False
     cancelled = False
 
@@ -628,9 +660,20 @@ def perform_fix_all(
                     batch_bytes_done=_before + copied, batch_bytes_total=batch_total,
                     placeholder=_ph, stopped=False)
 
+        # comp-ui-5 (2026-09-18): comp-resolve-b-1 stopped a rehearsal
+        # CREDITING bytes it never copied and left the totals alone, so the
+        # bar sat at 0 of 800 GB for the whole run with "Copying" beside it
+        # and RateEstimator never saw a moving sample. On a rehearsal the
+        # progress keys carry no byte totals at all and the bar is drawn off
+        # index/total instead. PROGRESS keys only: the final publish below
+        # still carries the real `rehearsal`/`fixed`/`skipped` counts that
+        # _fix_done and summarize_fix_results read.
         publish(index=index, total=total, name=name, file_bytes_done=0,
-                file_bytes_total=file_total, batch_bytes_done=batch_done,
-                batch_bytes_total=batch_total, placeholder=placeholder, stopped=False)
+                file_bytes_total=0 if rehearsing else file_total,
+                batch_bytes_done=batch_done,
+                batch_bytes_total=0 if rehearsing else batch_total,
+                placeholder=placeholder, stopped=False,
+                rehearsing=rehearsing)
 
         outcome = call_fix_clip(
             fix_clip_fn, (path, dest_rel, local_root, media_pool_items),
@@ -642,6 +685,10 @@ def perform_fix_all(
         outcome = dict(outcome)
         outcome["file_path"] = path
         results.append(outcome)
+        if outcome.get("dry_run"):
+            # comp-ui-5: the loop cannot know before the first answer, and
+            # fixer.fix_clip's dry-run arm returns before any I/O.
+            rehearsing = True
         if outcome.get("ok") and not outcome.get("dry_run"):
             batch_done += file_total
         # comp-resolve-b-1 (2026-09-11b): comp-resolve-2 taught
@@ -1344,15 +1391,25 @@ class PopupDialog:
         file_done = int(info.get("file_bytes_done") or 0)
         file_total = int(info.get("file_bytes_total") or 0)
         file_eta = self._rate.eta_seconds(file_done, file_total)
+        rehearsing = bool(info.get("rehearsing"))
+        index = int(info.get("index") or 0)
+        count = int(info.get("total") or 0)
         self._file_label.config(
             text=format_file_progress(info.get("name", ""), file_done, file_total,
-                                      speed, file_eta, bool(info.get("placeholder"))))
+                                      speed, file_eta, bool(info.get("placeholder")),
+                                      rehearsal=rehearsing))
         self._batch_label.config(
-            text=format_batch_progress(int(info.get("index") or 0),
-                                       int(info.get("total") or 0),
-                                       batch_done, batch_total))
+            text=format_batch_progress(index, count, batch_done, batch_total))
         self._file_bar["value"] = int(1000 * file_done / file_total) if file_total else 0
-        self._batch_bar["value"] = int(1000 * batch_done / batch_total) if batch_total else 0
+        if rehearsing and count:
+            # comp-ui-5: a rehearsal has no bytes to measure, so the bar
+            # counts CLIPS. One misleading screen (a bar that fills instantly)
+            # was swapped for another (a bar that never moves, under the word
+            # "Copying") by the accounting fix; this is the third answer.
+            self._batch_bar["value"] = int(1000 * index / count)
+        else:
+            self._batch_bar["value"] = (
+                int(1000 * batch_done / batch_total) if batch_total else 0)
 
     def _deliver_results(self) -> None:
         """Run the finisher once, on the Tk thread, whoever got here first.
@@ -1801,6 +1858,33 @@ class ProgressWindow:
         except Exception:
             pass
 
+    @staticmethod
+    def _rehearsing(info: dict[str, Any]) -> bool:
+        """Is the run behind this window a rehearsal (`fixer_dry_run`)?
+
+        comp-ui-4 (2026-09-18b mediums): comp-ui-5 taught PopupDialog (FIX
+        ALL) to say `Checking "x"` and count clips, and left the CONSOLIDATE
+        window drawing `File 7 of 412: 0 B of 800 GB done` with the word
+        "Copying" beside every clip for a run that copies nothing. The
+        publisher (consolidate.run_consolidation) sends no `rehearsing` key,
+        so an ABSENT key falls back to the same cached `fixer_dry_run` answer
+        every copy in this process obeys; an explicit key always wins, so the
+        publisher can start sending one without a second mechanism appearing.
+        A phase with its own `headline` (the lane A upload, which a rehearsal
+        never reaches - app.py skips it when nothing was copied) is left
+        alone: its bytes are real.
+        """
+        if "rehearsing" in info:
+            return bool(info.get("rehearsing"))
+        if info.get("headline"):
+            return False
+        try:
+            return bool(fixer.dry_run_default())
+        except Exception:
+            log.debug("progress window: could not read the rehearsal setting",
+                      exc_info=True)
+            return False
+
     def _tick(self) -> None:
         root = self.root
         if root is None:
@@ -1819,17 +1903,26 @@ class ProgressWindow:
                 if eta is None:
                     eta = self._rate.eta_seconds(file_done, file_total)
                 headline = info.get("headline")
+                index = int(info.get("index") or 0)
+                count = int(info.get("total") or 0)
+                rehearsing = self._rehearsing(info)
                 self._file_label.config(
                     text=headline or format_file_progress(
                         info.get("name", ""), file_done, file_total, speed, eta,
-                        bool(info.get("placeholder"))))
+                        bool(info.get("placeholder")), rehearsal=rehearsing))
                 self._batch_label.config(
-                    text=format_batch_progress(int(info.get("index") or 0),
-                                               int(info.get("total") or 0),
-                                               batch_done, batch_total))
-                self._file_bar["value"] = int(1000 * file_done / file_total) if file_total else 0
-                self._batch_bar["value"] = (
-                    int(1000 * batch_done / batch_total) if batch_total else 0)
+                    text=format_batch_progress(index, count, batch_done,
+                                               0 if rehearsing else batch_total))
+                self._file_bar["value"] = (
+                    0 if rehearsing or not file_total
+                    else int(1000 * file_done / file_total))
+                if rehearsing and count:
+                    # comp-ui-4: no bytes to measure, so the batch bar counts
+                    # CLIPS - the answer _render_progress got for FIX ALL.
+                    self._batch_bar["value"] = int(1000 * index / count)
+                else:
+                    self._batch_bar["value"] = (
+                        int(1000 * batch_done / batch_total) if batch_total else 0)
         except Exception:
             log.exception("progress window tick failed")
         if self._done.is_set():

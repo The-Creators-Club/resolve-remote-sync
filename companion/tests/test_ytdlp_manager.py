@@ -49,6 +49,37 @@ def _isolate_tools_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
 
 
+@pytest.fixture(autouse=True)
+def _no_real_sidecar_install(monkeypatch):
+    """No test in this file may reach GitHub through sidecar_tools.
+
+    comp-music-ytdl-jobs-2 (2026-09-18). Six tests here start a REAL
+    `YtDlpManager`, whose `_loop` calls `sidecar_tools.ensure` /
+    `ensure_ffmpeg_pair` -- both of which take the module-level
+    `sidecar_tools._work_lock` and then do real network I/O. `stop()` only
+    sets an event and `join(timeout=5)` cannot be asked whether it worked, so
+    a daemon thread parked in that call outlived the file WITH THE LOCK HELD,
+    and the next test in the same process that called `sidecar_tools.ensure`
+    blocked on it: nine files measured at ~40 s apart and 660 s in one pytest
+    process, which is how the whole companion suite runs in the gate. It was
+    also the test suite reaching the public internet, which 3c7cf8e and
+    214869b exist to stop.
+
+    Stubbed for EVERY test here, not for the one that noticed: the leak is a
+    property of starting the manager at all, and the tests that want to see
+    the sidecar's own behaviour (`test_the_sidecar_status_is_recorded...`)
+    monkeypatch these two themselves afterwards, which still wins.
+    """
+    monkeypatch.setattr(
+        sidecar_tools, "ensure",
+        lambda *a, **kw: {"ok": True, "action": "none",
+                          "message": "stubbed: no sidecar install in tests"})
+    monkeypatch.setattr(
+        sidecar_tools, "ensure_ffmpeg_pair",
+        lambda *a, **kw: {"ok": True, "action": "none",
+                          "message": "stubbed: no sidecar install in tests"})
+
+
 @pytest.fixture
 def tools(tmp_path):
     """The (isolated) tools dir this test's manager will use."""
@@ -1258,3 +1289,29 @@ def test_the_app_report_block_never_raises(tmp_path, inert_resolve):
     app.ytdlp = _Boom()
     assert app.ytdlp_report() == {}
     assert "ytdlp" not in app.sync_guard()
+
+
+# ---------------------------------------------------------------------------
+# comp-music-ytdl-jobs-2 (2026-09-18): nothing this file started is still
+# running when it ends. Last in the file on purpose.
+# ---------------------------------------------------------------------------
+
+def test_no_sidecar_thread_this_file_started_outlives_it():
+    """`stop()` only sets an event and `join(timeout=5)` cannot be asked
+    whether it worked, so a manager thread parked inside a REAL
+    `sidecar_tools.ensure` survived this file holding the module-level
+    `_work_lock` -- and the next test in the same pytest process that called
+    `sidecar_tools.ensure({})` blocked on it until GitHub answered. Measured
+    at 660 s for nine files in one process, which is how the gate runs them.
+
+    Two assertions, because either alone can lie: no `ccsync-ytdlp` thread is
+    alive, and the lock those threads take is free right now.
+    """
+    leaked = [t.name for t in threading.enumerate() if t.name == "ccsync-ytdlp"]
+    assert leaked == [], f"a manager thread outlived its test: {leaked}"
+    got = sidecar_tools._work_lock.acquire(timeout=0.5)
+    try:
+        assert got, "something is still holding sidecar_tools._work_lock"
+    finally:
+        if got:
+            sidecar_tools._work_lock.release()

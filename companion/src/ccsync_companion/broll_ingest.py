@@ -164,6 +164,10 @@ EDIT_PROXY_EXT = ".mov"
 # without re-encoding.
 EDIT_PROXY_EDIT_WEIGHT = "original is edit-weight"
 EDIT_PROXY_NEEDS_RESOLVE = "needs Resolve"
+# comp-broll-tiers-3 (2026-09-18): the encode was tried and did not
+# produce a usable file. The clip is fine and goes to the archive with
+# its preview; only the editing-proxy tier is missing.
+EDIT_PROXY_NOT_MADE = "the editing proxy could not be encoded"
 
 # What ffmpeg cannot decode at any quality, by the codec name a probe might
 # still print for it. The EXTENSIONS are proxy_scan.NEEDS_RESOLVE_EXTS (BRAW,
@@ -276,6 +280,20 @@ def _detail_of(parsed: Any) -> str:
         if isinstance(detail, dict):
             return str(detail.get("detail") or detail)
         return str(detail or "")
+    except Exception:
+        return ""
+
+
+def _reason_of(parsed: Any) -> str:
+    """The machine-readable `reason` beside a refusal, or "". Never raises.
+
+    wire-1 (2026-09-18): this API's deliberate non-409 refusals of
+    `/items/{uid}/uploaded` carry one (`wrong_edit_proxy`, `outside_root`),
+    and the companion had no reader for it at all.
+    """
+    try:
+        detail = parsed.get("detail") if isinstance(parsed, dict) else None
+        return str(detail.get("reason") or "") if isinstance(detail, dict) else ""
     except Exception:
         return ""
 
@@ -2406,7 +2424,24 @@ class BrollIngestor:
             return True
         made = self._make_edit_proxy(item, source, out_dir, probe)
         if made is None:
-            return False
+            if self._should_stop():
+                return False
+            # comp-broll-tiers-3 (2026-09-18): the TIER drops, the item does
+            # not. An editing proxy that will not encode (or whose frame
+            # count does not match the source) used to call `_fail_item` and
+            # take the whole clip with it: no preview, no stills, no
+            # original uploaded, for a file whose preview had already
+            # verified. The reason field exists for exactly this - an
+            # edit-weight original and a BRAW both reach the archive with no
+            # editing proxy and nothing is wrong with them - and a remote
+            # editor then cuts on the preview, which is what they did before
+            # the tier existed.
+            item["edit_proxy"] = None
+            item["edit_proxy_reason"] = (item.get("edit_proxy_reason")
+                                         or EDIT_PROXY_NOT_MADE)
+            self.log.warning("%s gets no editing proxy: %s", item.get("name"),
+                             item["edit_proxy_reason"])
+            return True
         item["edit_proxy"] = made
         item["edit_proxy_reason"] = ""
         return True
@@ -2452,11 +2487,11 @@ class BrollIngestor:
                 timecode=(probe or {}).get("timecode"))
 
         return self._encode_verified(item, source, dest, build, probe,
-                                     "editing proxy")
+                                     "editing proxy", required=False)
 
     def _encode_verified(self, item: dict, source: str, dest: Path,
                          build_cmd: Callable[[Path, bool], list], probe: dict,
-                         what: str) -> Optional[str]:
+                         what: str, required: bool = True) -> Optional[str]:
         """Encode to `<dest>.partial`, verify it, publish it -- or fail the item.
 
         ONE loop for the preview and the editing proxy (2026-09-17, plan
@@ -2479,9 +2514,9 @@ class BrollIngestor:
                         try:
                             os.replace(str(partial), str(dest))
                         except OSError as exc:
-                            self._fail_item(
-                                item, f"the {what} could not be published: {exc}")
-                            return None
+                            return self._encode_gave_up(
+                                item, f"the {what} could not be published: {exc}",
+                                required)
                         return str(dest)
                     why = short
                     self.log.warning("%s: %s on %s", item.get("name"), short,
@@ -2493,7 +2528,21 @@ class BrollIngestor:
             _unlink(partial)
             if self._should_stop():
                 return None
-        self._fail_item(item, why)
+        return self._encode_gave_up(item, why, required)
+
+    def _encode_gave_up(self, item: dict, why: str,
+                        required: bool) -> None:
+        """Always None; what differs is whether the ITEM ends with the tier.
+
+        comp-broll-tiers-3 (2026-09-18): `required=False` is the editing
+        proxy, which is an addition to a clip and not the clip. Failing the
+        whole item for it throws away a verified preview, the stills and the
+        original upload.
+        """
+        if required:
+            self._fail_item(item, why)
+        else:
+            item["edit_proxy_reason"] = why
         return None
 
     def _frames_missing(self, source: str, made: Path,
@@ -2511,7 +2560,13 @@ class BrollIngestor:
         except Exception:  # noqa: BLE001 - see docstring
             self.log.debug("could not count frames for %s", made, exc_info=True)
             return None
-        if not src_frames or not made_frames or src_frames == made_frames:
+        # ONE predicate, three producers (comp-broll-tiers-3, 2026-09-18):
+        # `ffmpeg_tools.frames_match` is the companion's half of the
+        # indexer's twin of the same name, so a tolerance can never be
+        # introduced on one side alone. It is EXACT, and that is the
+        # decision - see that function's docstring.
+        if not src_frames or not made_frames or ffmpeg_tools.frames_match(
+                int(src_frames), int(made_frames)):
             return None
         return (f"the {what} has {made_frames} frames, the original has "
                 f"{src_frames} - Resolve would refuse it")
@@ -2933,6 +2988,7 @@ class BrollIngestor:
                 continue
             missing = [rel for rel in rels if rel not in landed]
             if missing:
+                self._maybe_stage_live(batch, item, rels, landed, missing)
                 broken = [rel for rel in missing if rel in failures]
                 if broken:
                     # An rclone that exited non-zero used to leave the item at
@@ -3011,8 +3067,40 @@ class BrollIngestor:
                     continue
                 self._enqueue_uploads(item)
             else:
-                self.log.warning("the server would not mark %s live "
-                            "(HTTP %s)", item.get("name"), status)
+                # wire-1 (2026-09-18): every other status used to be a log
+                # line and nothing else. The item kept `uploading` with all
+                # its rels landed, so the next pump recomputed `missing = []`
+                # and posted the IDENTICAL body again, for ever, with no
+                # attempt counter and the batch lease heartbeated the whole
+                # time -- and this week the server grew its first non-409
+                # refusals of this route (`400 wrong_edit_proxy`, `400
+                # outside_root`), whose own comments say no retry can make
+                # them right.
+                why = _detail_of(parsed) or _reason_of(parsed)
+                if 400 <= int(status) < 500:
+                    # Terminal, and it says why: a 4xx here is a statement
+                    # about THIS clip (the wrong editing proxy, a path
+                    # outside the archive root), not about the moment.
+                    item["error"] = why or (
+                        f"the archive refused this clip (HTTP {status})")
+                    self._fail_item(item, item["error"])
+                    continue
+                # 5xx, or anything else: the moment, not the clip. Counted on
+                # the 409 branch's counter and ceiling, so a server that is
+                # down for an hour costs a retry and a server that is broken
+                # ends the item instead of wedging it. wire-2 is deliberately
+                # NOT fixed here: a 503 (or the mounted app's 500 for a busy
+                # database) must stay retryable, or the loss would only move.
+                tries = int(item.get("upload_attempts") or 0) + 1
+                item["upload_attempts"] = tries
+                self.log.warning("the server would not mark %s live (HTTP %s%s) "
+                                 "-- retry %d of %d", item.get("name"), status,
+                                 f": {why}" if why else "", tries,
+                                 MAX_UPLOAD_ATTEMPTS)
+                if tries >= MAX_UPLOAD_ATTEMPTS:
+                    item["error"] = why or (
+                        f"the archive would not take this clip (HTTP {status})")
+                    self._fail_item(item, item["error"])
         self._save()
 
     def _final_state(self, item: dict) -> str:
@@ -3024,6 +3112,61 @@ class BrollIngestor:
         the shared pump hardcode a happy ending it cannot always deliver.
         """
         return ITEM_LIVE
+
+    def _maybe_stage_live(self, batch: dict, item: dict, rels: dict,
+                          landed: dict, missing: list) -> None:
+        """Take the clip LIVE as soon as everything but the original is up.
+
+        proxy-tiers-5 (2026-09-18). Plan section 5 item 5 says "an editor can
+        use a clip from the moment its editing proxy lands, long before a
+        multi-GB original finishes", and the upload ORDER was built for it
+        (`broll_upload.UPLOAD_ORDER` puts the original last). Nothing consumed
+        the order: `/uploaded` was posted once, after the LAST file landed,
+        and `videos.status` leaves `ingesting` only there - so a day of 6K
+        material showed nothing in the archive for eight hours while its
+        proxies sat on the NAS.
+
+        The server has always been ready for the two-stage report:
+        `mark_uploaded` requires the original slot only when
+        `original_uploaded` is true and stores the flag on the row, and the
+        route has no item-state guard, so the second post with the original
+        is accepted and flips it. This posts the first stage once, leaves the
+        item in `uploading`, and changes nothing else about the pass.
+
+        It only makes sense WITH the insert-side half (broll-1 /
+        proxy-tiers-2): a clip live before its original is on the NAS answers
+        `original_rel: null`, which used to make the companion place the
+        preview at the original's path and ledger it as a stand-in.
+        """
+        if item.get("staged_live"):
+            return
+        originals = [rel for rel, kind in rels.items()
+                     if kind == broll_upload.KIND_ORIGINAL]
+        if not originals:
+            return  # nothing is being held back; the ordinary post covers it
+        if [rel for rel in missing if rel not in originals]:
+            return  # a still or a proxy is still going up
+        files = [{"rel": rel, "size": landed[rel].get("size")}
+                 for rel in rels if rel in landed]
+        try:
+            status, _parsed = self._post_uploaded(batch["uid"], item, files,
+                                                  False)
+        except LeaseLost:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.log.debug("could not stage %s live early (%s)",
+                           item.get("name"), exc)
+            return
+        if status != 200:
+            # Not an error and not a retry: the original is still uploading
+            # and the ordinary post at the end of it is the one that counts.
+            self.log.debug("the server did not take %s live early (HTTP %s)",
+                           item.get("name"), status)
+            return
+        item["staged_live"] = True
+        item["original_uploaded"] = False
+        self.log.info("%s is live with its proxies; its original is still "
+                      "uploading", item.get("name"))
 
     def _post_uploaded(self, batch_uid: str, item: dict, files: list,
                        original_uploaded: bool) -> tuple[int, Any]:
@@ -3050,16 +3193,37 @@ class BrollIngestor:
         later, nothing more."""
         archive = self.archive_root()
         outputs = item.get("outputs") or {}
-        if archive is None or not outputs.get("proxy"):
+        if archive is None:
             return
-        rel = f"{item.get('archive_dir') or ''}/Proxy/{item.get('archive_stem') or ''}.mp4"
+        stem = item.get("archive_stem") or ""
+        directory = item.get("archive_dir") or ""
+        if outputs.get("proxy"):
+            self._mirror_one(archive, f"{directory}/Proxy/{stem}.mp4",
+                             str(outputs.get("proxy")), outputs, "proxy")
+        # proxy-tiers-8 (2026-09-18): the EDITING proxy, the same way. Only
+        # the preview was mirrored, so the machine that encoded all three
+        # files answered `fetch_standin` on its own clips: it downloaded its
+        # own preview from the NAS onto the original's archive path, ledgered
+        # that as a stand-in, and then downloaded its own editing proxy
+        # behind it. Hundreds of MB back down a link that had just sent them
+        # up. (The clip still fetches a stand-in, because the ORIGINAL's
+        # archive path is not on this machine - it was dropped from outside
+        # the tree - but it no longer re-downloads a file it made.)
+        if item.get("edit_proxy"):
+            self._mirror_one(archive, f"{directory}/Proxy/{stem}{EDIT_PROXY_EXT}",
+                             str(item.get("edit_proxy")), item, "edit_proxy")
+
+    def _mirror_one(self, archive: Path, rel: str, source: str,
+                    holder: dict, key: str) -> None:
+        """Move one output into the archive and re-point its owner at it.
+        Best effort: a failure costs a download later, nothing more."""
         dest = archive / rel
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             if dest.exists():
                 return
-            shutil.move(outputs["proxy"], str(dest))
-            outputs["proxy"] = str(dest)
+            shutil.move(source, str(dest))
+            holder[key] = str(dest)
         except Exception:
             self.log.debug("could not mirror %s locally", rel, exc_info=True)
 
@@ -3102,6 +3266,19 @@ class BrollIngestor:
         failed = sum(1 for i in items if i.get("stage") == ITEM_FAILED)
         summary = {"done": sum(1 for i in items if i.get("stage") == ITEM_LIVE),
                    "failed": failed, "total": len(items)}
+        # wire-1 (2026-09-18b): a clip taken live with its proxies whose
+        # original then failed is not in `failed` and never can be (the
+        # server's item state is terminal), so without this the batch ends as
+        # a plain "done" and the missing original is in nobody's view. The
+        # summary is the batch's `error` text on the dashboard, which is the
+        # one surface this side can still write to.
+        owed = [str(i.get("name") or "") for i in items if i.get("original_failed")]
+        if owed:
+            summary["originals_failed"] = len(owed)
+            summary["originals_owed"] = owed[:10]
+            self.log.warning("batch %s finished with %d clip(s) live whose "
+                             "original never reached the archive: %s",
+                             batch["uid"], len(owed), ", ".join(owed[:3]))
         self._client().release(batch["uid"], "failed" if failed == len(items) else "done",
                                summary)
         self.log.info("batch %s finished -- %s", batch["uid"], summary)
@@ -3285,6 +3462,18 @@ class BrollIngestor:
                 "probe": item.get("probe")}
 
     def _fail_item(self, item: dict, why: str) -> None:
+        if item.get("staged_live"):
+            # wire-1 (2026-09-18b): this item is ALREADY LIVE on the server.
+            # `/uploaded` is not a partial-progress route: the first stage
+            # (proxy-tiers-5 / CR-284I) writes `ingest_items.state = 'live'`,
+            # which is in the server's ITEM_TERMINAL, so every later state
+            # write is refused with `400 illegal_transition` and used to be
+            # swallowed at DEBUG on both sides. The clip really is usable -
+            # its proxies are on the NAS and an editor may already be cutting
+            # with it - so what failed is the ORIGINAL, and that is what gets
+            # reported.
+            self._note_original_failed(item, why)
+            return
         item["stage"] = ITEM_FAILED
         item["error"] = why
         self.log.warning("%s -- %s", item.get("name"), why)
@@ -3299,6 +3488,38 @@ class BrollIngestor:
                 raise
             except Exception:
                 self.log.debug("could not report the failure", exc_info=True)
+        self._save()
+
+    def _note_original_failed(self, item: dict, why: str) -> None:
+        """The clip is live and its ORIGINAL never reached the archive.
+
+        wire-1 (2026-09-18b). Three things have to be true of this ending, and
+        none of them was: it must be SAID (a WARNING naming the clip, not a
+        DEBUG line about a refused transition), it must be VISIBLE on the
+        batch (`_maybe_finish` carries the count into the release summary,
+        which is the batch's own `error` text), and the bytes must still be
+        there to send again - so the staged drop is HELD, exactly as a file
+        only the base rig can finish is held, rather than being pruned by the
+        retention clock with the archive's only copy still missing.
+
+        The item is left LIVE, which is what the server believes and what the
+        editor sees: forcing `failed` here would take a clip people are
+        already cutting with out of the archive, and the server refuses it
+        anyway.
+        """
+        item["stage"] = ITEM_LIVE
+        item["error"] = why
+        item["original_uploaded"] = False
+        item["original_failed"] = why
+        self.log.warning(
+            "%s is live with its proxies, but its original never reached the "
+            "archive (%s). The clip can be cut now; its original has to be "
+            "uploaded again.", item.get("name"), why)
+        with self._lock:
+            batch = self._batch
+        if batch:
+            self._hold_staging(str(batch.get("staging_id") or ""),
+                               str(item.get("name") or ""))
         self._save()
 
     def _space_refusal(self, directory: Path,

@@ -909,17 +909,28 @@ class _SupervisedThread:
     A plain value object on purpose -- the whole restart policy is then
     testable with no threads, no clock and no CompanionApp."""
 
-    __slots__ = ("name", "died", "silent_for", "bound", "error", "restart")
+    __slots__ = ("name", "died", "silent_for", "bound", "error", "restart",
+                 "abandon")
 
     def __init__(self, name: str, *, died: bool, silent_for: float,
                  bound: float, error: Optional[str],
-                 restart: Callable[[], Any]) -> None:
+                 restart: Callable[[], Any],
+                 abandon: Optional[Callable[[], Any]] = None) -> None:
         self.name = name
         self.died = died
         self.silent_for = silent_for
         self.bound = bound
         self.error = error
         self.restart = restart
+        # res-companion-4 (2026-09-18): how to retire a thread that is still
+        # ALIVE but silent, or None when there is no way to. A "restart" of a
+        # live thread is not a restart: the sequencer refuses it outright
+        # (sequencer.start: "start() while a sequencer thread is still alive
+        # -- ignoring") and the media tree used to get a SECOND thread on the
+        # same shared stop event, both walking the media pool and both
+        # writing into Resolve through apply_relinks, while the new thread's
+        # heartbeat made the wedge read as healed.
+        self.abandon = abandon
 
 
 class LaneWatchdog:
@@ -1019,7 +1030,34 @@ class LaneWatchdog:
                     log.debug("thread watchdog: still NOT restarting the %s -- %s (%s)",
                               target.name, held, reason)
                 continue
+            if not target.died and target.abandon is None:
+                # res-companion-4 / CR-279 (2026-09-18): a thread that is
+                # alive cannot be replaced without a way to retire it first,
+                # and calling restart() anyway is how leso's Mac earned an
+                # ERROR line and a `sync_guard.restarts` record every backoff
+                # for a sequencer that was healthy and uploading 32.7 GB. No
+                # restart happened then either -- what changed is that the
+                # log and the fleet alert now say so. Not recorded, because
+                # the record is what the thread_restarts alert counts.
+                if self._held_logged.get(target.name) != "alive":
+                    self._held_logged[target.name] = "alive"
+                    log.warning(
+                        "thread watchdog: the %s is silent (%s) but its thread is "
+                        "still running, and there is no way to retire it without "
+                        "stopping the companion; not restarting it (a second one "
+                        "would run beside it)", target.name, reason)
+                else:
+                    log.debug("thread watchdog: the %s is still silent and still "
+                              "alive (%s)", target.name, reason)
+                continue
             self._held_logged.pop(target.name, None)
+            if not target.died:
+                try:
+                    target.abandon()
+                except Exception:  # noqa: BLE001
+                    log.exception("thread watchdog: could not retire the wedged %s; "
+                                  "not starting a second one", target.name)
+                    continue
             log.error("thread watchdog: restarting the %s -- %s", target.name, reason)
             if self._restart(target):
                 restarted.append(target.name)
@@ -1145,7 +1183,8 @@ class LaneWatchdog:
         return _SupervisedThread(
             "media_tree", died=died, silent_for=silent, bound=self.wedged_after,
             error=getattr(app, "_media_tree_thread_error", None),
-            restart=app._start_media_tree_thread)
+            restart=app._start_media_tree_thread,
+            abandon=getattr(app, "_abandon_media_tree_thread", None))
 
     def _silence(self, owner: Any, attribute: str) -> float:
         """Seconds since `owner.<attribute>` was stamped, or 0.0 when there is
@@ -1276,6 +1315,82 @@ def _file_move_drive_state(app: Any) -> dict[int, float]:
         state = {}
         app._file_move_drive_answered_at = state
     return state
+
+
+# res-fleet-3 (2026-09-18): the first dashboard that knows the word
+# `not_synced_here`. `FileMoveResultIn.state` is a Literal and
+# `file_moves_applied` is NOT one of ReportIn's tolerant sections, so a word an
+# older dashboard has never heard of 422s the WHOLE report - the lanes, the
+# presence, the alarms - every thirty seconds, for a field that decides how
+# one line on one page is worded. The same trap `applying` walked into and
+# answered with "THE DASHBOARD DEPLOYS FIRST", which is a rule about people.
+# This one asks instead.
+FILE_MOVE_STATE_WORD_MIN_DASHBOARD = (0, 7, 50)
+
+
+def _note_dashboard_version(app: Any, resp: Any) -> str:
+    """Remember the dashboard version off a report reply (res-fleet-3).
+
+    Additive on the wire: an ABSENT `dashboard_version` means a dashboard
+    older than the one that started sending it, which is the safe reading.
+    Module-level and getattr-based for the reason the block above gives: the
+    file-move path is driven UNBOUND in the tests and in the redelivery
+    harness. Never raises.
+
+    comp-app-1 (2026-09-18b): an absent key FORGETS, which is what the
+    paragraph above always claimed and the code did not do. A deploy rollback
+    is a scripted, documented operation (`install_dashboard_app.py
+    --rollback-on-unhealthy`, docs/RELEASE.md), and the dashboard it puts back
+    sends no `dashboard_version` at all - so a companion that had once seen
+    0.7.50 kept the word `not_synced_here` on the wire against a Literal that
+    rejects it, i.e. a 422 for the WHOLE report every thirty seconds, with no
+    shedding path on either side and nothing that recovers but a tray
+    restart. A reply that is not a dict is not an answer and says nothing."""
+    try:
+        if isinstance(resp, dict):
+            app._dashboard_version = str(
+                resp.get("dashboard_version") or "").strip()
+        return str(getattr(app, "_dashboard_version", "") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _dashboard_knows_state_word(app: Any) -> bool:
+    """May this companion put `not_synced_here` on the wire yet?
+
+    False for anything we cannot rank - an absent version, a version string
+    that is not plain dotted-numeric - because the cost of guessing wrong is
+    every report from this machine 422'd until somebody upgrades the
+    dashboard, and the cost of guessing right-but-late is one word on one
+    page. Never raises."""
+    try:
+        parsed = upgrade_mod.parse_version(
+            getattr(app, "_dashboard_version", "") or "")
+        return bool(parsed) and parsed >= FILE_MOVE_STATE_WORD_MIN_DASHBOARD
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _synced_project_rels(app: Any) -> Optional[list[str]]:
+    """Every Projects-relative path this machine syncs, borrowed subtrees
+    included, or None when there is no plan to read (res-fleet-3).
+
+    A module function for the reason the block above gives: `_apply_file_moves`
+    is called UNBOUND on objects that never ran CompanionApp.__init__, so
+    everything it reaches for goes through getattr.
+
+    None is NOT an empty plan. An unmanaged companion has no sequencer at all,
+    and reading that as "nothing is synced here" would trash every moved file
+    on a machine whose whole tree is local. Never raises."""
+    try:
+        sequencer = getattr(app, "sequencer", None)
+        reader = getattr(sequencer, "rel_to_slug_with_borrowed", None)
+        if sequencer is None or not callable(reader):
+            return None
+        return [str(rel) for rel in (reader() or {})]
+    except Exception:  # noqa: BLE001
+        log.debug("could not read this machine's project rels", exc_info=True)
+        return None
 
 
 def _file_move_answers_lock(app: Any) -> threading.Lock:
@@ -1744,6 +1859,15 @@ class CompanionApp:
         self._media_tree_stop_event = threading.Event()
         self._media_tree_thread: Optional[threading.Thread] = None
         self._media_tree_thread_error: Optional[str] = None
+        # res-companion-4 (2026-09-18): which media-tree thread is the
+        # current one. The stop event is shared by every generation, so
+        # clearing it (which _start_media_tree_thread must, for the ordinary
+        # restart-after-death case) left an orphaned wedged thread looping
+        # for ever once it unblocked -- two walkers of the same media pool,
+        # two callers of apply_relinks into one Resolve project. The loop
+        # carries the generation it was born with and exits when it is no
+        # longer this one.
+        self._media_tree_generation = 0
         # Stamped at the top of every media-tree iteration, for the same
         # reason the sequencer stamps one (SYS-2): a thread that is alive but
         # wedged inside one call is a different fault from a thread that died.
@@ -2174,6 +2298,16 @@ class CompanionApp:
                 self.broll_ingestor.note_report_response(resp)
             except Exception:
                 log.exception("broll_ingest.note_report_response failed")
+        try:
+            # proxy-tiers-4 (2026-09-18): `standins_known` is the dashboard's
+            # answer about the archive rels this machine listed - "these were
+            # placed as a stand-in by SOME machine in this fleet". It is the
+            # cheap first question `proxy_relink._geometry_disagrees` asks,
+            # and the only one that can work on a wired rig. An ABSENT key
+            # means this dashboard does not know and changes nothing.
+            proxy_relink.note_fleet_standins(resp)
+        except Exception:
+            log.exception("proxy_relink.note_fleet_standins failed")
         # Which fleet jobs this machine has been OFFERED (phase 0). Ids only:
         # the claim is a separate call whose compare-and-set is what actually
         # decides, so a duplicated or stale reply costs nothing.
@@ -2341,6 +2475,13 @@ class CompanionApp:
             # quietly" case. Deferred, because the sequencer is built after
             # the lanes.
             project_rel_fn=self._project_rel_for_slug if self._managed else None,
+            # res-companion-2 (2026-09-18): a file lane B carries to the
+            # server's new path is noted in the file-move ledger, so the
+            # dashboard's own detection of the same hand move -- which
+            # arrives minutes later as a `file_moves` command and finds
+            # nothing at the old path -- can still repoint Resolve instead of
+            # recording a followed move with every clip under it offline.
+            on_relocated=self.file_moves.record_relocation,
         )
         lane_c = SyncthingLane(
             base_url=cfg.get("syncthing_url", "http://127.0.0.1:8384"),
@@ -4007,7 +4148,7 @@ class CompanionApp:
             return None
         return set(self.sequencer.rel_to_slug.keys())
 
-    def _project_rel_for_slug(self, slug: str) -> Optional[str]:
+    def _project_rel_for_slug(self, slug: str, rel_path: str = "") -> Optional[str]:
         """Where this machine keeps `slug`, local_root-relative, or None.
 
         Lane B's answer to "the server says this file moved into project X --
@@ -4018,13 +4159,55 @@ class CompanionApp:
 
         Reads the SELECTION, both modes: an upload-only project is still a
         folder on this disk, and a file that moved into one belongs in it.
+
+        comp-sync-4 (2026-09-18): ...and a BORROWED folder, which is on this
+        disk too. `rel_to_slug` deliberately holds selected projects only
+        (sequencer.py:800-808, the manifest and proxy-scan scope), so a file
+        the owner dragged into a project this machine borrows from resolved
+        to None and was left in `.ccsync-trash` as "no home on this disk"
+        while lane C downloaded it again - the exact cost CR-268b exists to
+        avoid. `rel_to_slug_with_borrowed()` is NOT the accessor for this:
+        it maps the LENDER's subpath to the BORROWER's slug, so a lookup by
+        the slug the server named would answer somebody else's directory.
+        The lender's own rel is in `borrowed_lenders()`, and the place is
+        accepted only when the file's project-relative path falls under one
+        of the subtrees this machine actually borrows.
         """
         if self.sequencer is None or not slug:
             return None
         for rel, known in self.sequencer.rel_to_slug.items():
             if known == slug:
                 return f"{PROJECTS_PREFIX}{rel}"
-        return None
+        return self._borrowed_rel_for_slug(slug, rel_path)
+
+    def _borrowed_rel_for_slug(self, slug: str, rel_path: str = "") -> Optional[str]:
+        """The lender project's local rel when `slug` is a lender this
+        machine borrows from AND `rel_path` is inside a borrowed subtree
+        (comp-sync-4). None otherwise. Never raises."""
+        try:
+            lenders = self.sequencer.borrowed_lenders() if self.sequencer else {}
+            entry = lenders.get(slug)
+            if not isinstance(entry, dict):
+                return None
+            lender_rel = str(entry.get("rel") or "").replace("\\", "/").strip("/")
+            if not lender_rel:
+                return None
+            wanted = str(rel_path or "").replace("\\", "/").strip("/")
+            if not wanted:
+                # No path to judge: a borrowed project is only PARTLY on this
+                # disk, so "somewhere in it" is not an answer.
+                return None
+            for sub in entry.get("subs") or []:
+                sub_rel = str(sub or "").replace("\\", "/").strip("/")
+                if not sub_rel:
+                    continue
+                if wanted == sub_rel or wanted.startswith(sub_rel + "/"):
+                    return f"{PROJECTS_PREFIX}{lender_rel}"
+            return None
+        except Exception:
+            log.debug("could not resolve a borrowed destination for %r", slug,
+                      exc_info=True)
+            return None
 
     # -- media pool BIN tree (dashboard reporting) -----------------------------------------------
     @staticmethod
@@ -4442,11 +4625,23 @@ class CompanionApp:
                 frames_fn=proxy_relink.stored_frames,
                 count_frames_fn=proxy_relink.frame_counter(
                     str(self.config.get("ffmpeg_path") or "ffmpeg")),
+                # comp-resolve-2 (2026-09-18): the cheap questions first. The
+                # exact count is a full demux with a 60 s timeout, serial, on
+                # this thread -- on the wired rig, whose local_root is the SMB
+                # share and whose pool IS the archive, it read every original
+                # in the pool every 120 s. The ledger short-circuit is free,
+                # the header estimate is one open, and the verdict is
+                # remembered per (path, mtime, size) so an agreeing clip is
+                # never asked twice.
+                header_frames_fn=proxy_relink.header_frame_estimate(
+                    str(self.config.get("ffmpeg_path") or "ffmpeg")),
+                is_stale_fn=broll_standins.is_stale,
+                # ...and while a probe run IS needed, the watchdog's 30-minute
+                # wedge test must be able to tell it from a dead thread. The
+                # heartbeat is stamped at the top of the loop, which is per
+                # PASS; this stamps it per clip.
+                on_probe=self._stamp_media_tree_heartbeat,
             )
-            # ...and the editing proxies a restart, or a Resolve that was
-            # closed when the download finished, left owing. This is the
-            # cycle that already means "Resolve is open".
-            self._resume_broll_proxy_upgrades()
             if not ops:
                 return
             log.info("proxy relink: %d clip(s) need their proxy repointed", len(ops))
@@ -4476,8 +4671,26 @@ class CompanionApp:
         except Exception:
             log.exception("proxy relink pass failed")
 
-    def _media_tree_loop(self) -> None:
+    def _stamp_media_tree_heartbeat(self) -> None:
+        """The media-tree thread is alive and working (comp-resolve-2).
+
+        Called from inside the relink pass's probe loop: a serial run of
+        ffprobes over a slow share looks exactly like a wedged thread to
+        LaneWatchdog, which restarts it mid-probe, so neither the library
+        walk nor the relink ever completes."""
+        self._media_tree_heartbeat = time.monotonic()
+
+    def _media_tree_loop(self, generation: Optional[int] = None) -> None:
+        # generation=None is "whatever is current", for the older callers and
+        # the tests that drive this loop directly (res-companion-4).
+        if generation is None:
+            generation = self._media_tree_generation
         while not self._media_tree_stop_event.is_set():
+            if generation != self._media_tree_generation:
+                log.info("media tree: this thread was retired by the watchdog "
+                         "(generation %s, current %s); exiting",
+                         generation, self._media_tree_generation)
+                return
             self._media_tree_heartbeat = time.monotonic()
             try:
                 self._refresh_media_tree_once()
@@ -4497,6 +4710,20 @@ class CompanionApp:
                 self.retry_loopback_bind()
             except Exception:
                 log.exception("loopback rebind failed")
+            # comp-app-2 (2026-09-18b mediums): the resume runs on THIS tick,
+            # not inside _refresh_media_tree_once. comp-app-1 took it out of
+            # `proxy_relink_enabled` but left it below the pass's two early
+            # returns (get_media_pool_items() not ok, and an ignored project),
+            # so a closed or ignored Resolve still stranded a stand-in at
+            # `pending` for ever - the exact case the ledger lives on disk
+            # for. It needs no Resolve connection, so it belongs beside
+            # retry_loopback_bind(), which already runs every tick regardless.
+            self._resume_broll_proxy_upgrades()
+            if generation != self._media_tree_generation:
+                # Checked again after the pass, not only before it: the pass
+                # is the slow part, and it is where the wedge happens.
+                log.info("media tree: retired mid-pass; exiting")
+                return
             if self._media_tree_stop_event.wait(self.media_tree_refresh_interval):
                 break
 
@@ -4854,6 +5081,13 @@ class CompanionApp:
             "non_canonical_refused": self._watcher_list("non_canonical_refused"),
             # RES-3 / RES-11 / RES-17.
             "proxy_attach": dict(self._proxy_attach),
+            # CR-283X (comp-broll-tiers-5, owed in by companion-media
+            # 2026-09-18): the clips whose editing-proxy upgrade has given up.
+            # An editor in that state is cutting on the 1080p preview
+            # believing it is the editing proxy, and the only trace of it was
+            # a log line and `GET /status`, which nothing an editor sees
+            # reads. RES-3's shape: a count and one sentence, never the list.
+            "standins_owed": self.standins_owed(),
             "proxy_gaps": self.proxy_gaps(),
             "stills": self.stills_state(),
             "ignored_this_session": self.ignore_tracker.session_count(),
@@ -4932,8 +5166,15 @@ class CompanionApp:
         closed when the download landed, leaves the row `pending` -- which is
         the whole reason the state is on disk. Fault-isolated: an upgrade that
         cannot start must never cost the relink pass.
+
+        comp-app-1 (2026-09-18): called from the media-pool cycle directly
+        now. The local_root gate came WITH it - the download lands under
+        local_root, so a blank or absent one is a reason to wait - but the
+        `proxy_relink_enabled` flag did not: this is not a relink.
         """
         try:
+            if self._local_root_is_broken():
+                return
             broll_server_mod.resume_pending_upgrades(self.config)
         except Exception:
             log.exception("b-roll proxy upgrade: resume failed")
@@ -4954,12 +5195,41 @@ class CompanionApp:
                          "usual cause.")
             self._proxy_attach = {
                 "attached": int(summary.get("relinked") or 0),
+                # CR-283W (comp-resolve-5's other half, owed in by
+                # companion-media 2026-09-18): a pass that only REFRESHED
+                # clips - the phase 3 geometry re-read after a stand-in was
+                # replaced by the real file - attached nothing, so this block
+                # said `attached: 0` and every surface read it as "nothing to
+                # do" about a pass that did work. ADDED key, never replacing
+                # the two above.
+                "refreshed": int(summary.get("refreshed") or 0),
                 "failed": failed,
                 "why": why,
                 "at": datetime.now(timezone.utc).isoformat(),
             }
         except Exception:
             log.exception("could not record the proxy attach summary")
+
+    def standins_owed(self) -> dict[str, Any]:
+        """{"count", "why"} for the stand-ins whose editing proxy will not
+        arrive without a new ask, or {} when there are none (CR-283X).
+
+        Empty, not a zero: {} is "nothing is owed", which is what clears the
+        tray line. Never raises - a diagnostic must not be able to fail the
+        health read it rides on.
+        """
+        try:
+            owed = broll_standins.given_up_upgrades()
+            if not owed:
+                return {}
+            first = owed[0] if isinstance(owed[0], dict) else {}
+            return {
+                "count": len(owed),
+                "why": str(first.get("upgrade_note") or "")[:300],
+            }
+        except Exception:
+            log.debug("could not read the given-up stand-in upgrades", exc_info=True)
+            return {}
 
     def _note_stills(self, result: Optional[dict[str, Any]]) -> None:
         """Keep stills.check()'s verdict (RES-17). Never raises."""
@@ -6652,6 +6922,22 @@ class CompanionApp:
         except Exception:
             log.exception("repath_events report failed")
         try:
+            # proxy-tiers-4 (2026-09-18): which archive ORIGINALS this machine
+            # has stood in for, so the fact leaves the machine that lied. A
+            # stand-in is placed on the REMOTE editor's machine and its ledger
+            # row is written there and nowhere else, so the wired rig - the
+            # only machine the plan's last table row is for - had no mechanism
+            # but a demux of the whole archive. ALWAYS SENT, empty list
+            # included: the dashboard REPLACES this machine's set from it, so
+            # an absent section could never clear a stand-in that has been
+            # replaced. Bounded at 200 by the producer
+            # (broll_standins.FLEET_REPORT_MAX) and never an absolute path.
+            guard["standins_placed"] = broll_standins.placed_report(
+                self.config.get("local_root", ""),
+                self.config.get("canonical_prefix", ""))
+        except Exception:
+            log.exception("standins_placed report failed")
+        try:
             guard["halt"] = self.halt.report()
         except Exception:
             log.exception("halt.report() failed")
@@ -7141,6 +7427,18 @@ class CompanionApp:
         if reason == "lane_stalled":
             stalled = guard.get("stalled") or self._lane_stall_record()
             if not isinstance(stalled, dict) or not stalled.get("lane"):
+                return None
+            # live-1 (2026-09-18): the guard's own `stalled` is already
+            # filtered by RcloneLane.stall_report, but this FALLBACK reads the
+            # file, where a recovered or week-old record still lives as
+            # evidence. A stall the lane has since run past is not why this
+            # machine is not syncing -- ruskin's tray was red for a week over
+            # one killed upload on 2026-09-11.
+            if stalled.get("recovered_at"):
+                return None
+            from .sync import rclone_lane as _rclone_lane_mod
+            if (_rclone_lane_mod._stall_age_seconds(stalled)
+                    > _rclone_lane_mod.LANE_STALL_MAX_AGE_SECONDS):
                 return None
             try:
                 minutes = max(1, int(float(stalled.get("seconds") or 0) // 60))
@@ -7759,6 +8057,9 @@ class CompanionApp:
             raw_moves = commands.get("file_moves") if isinstance(commands, dict) else None
             if not isinstance(raw_moves, list) or not raw_moves:
                 return
+            # res-fleet-3: the freshest word on what this dashboard can be
+            # told, from the reply in hand.
+            _note_dashboard_version(self, resp)
             local_root = str(self.config.get("local_root", "")).strip()
             if local_root and not self._root_absent:
                 # comp-app-2: the drive is here, so the next outage is a new
@@ -7792,9 +8093,15 @@ class CompanionApp:
                             move["id"], False, done["detail"], state="retrying",
                             attempts=int(done.get("attempts") or 0))
                     else:
+                        # res-fleet-3: a redelivered section 4b move re-answers
+                        # with its own word too, or the second delivery would
+                        # record the same outcome as a plain "moved".
                         self._queue_file_move_answer(
                             move["id"], done["ok"], done["detail"],
                             state=("blocked" if state == file_moves_mod.STATE_BLOCKED
+                                   else file_moves_mod.STATE_NOT_SYNCED_HERE
+                                   if (state == file_moves_mod.STATE_NOT_SYNCED_HERE
+                                       and _dashboard_knows_state_word(self))
                                    else None),
                             attempts=int(done.get("attempts") or 0),
                             relink_pending=bool(done.get("relink_pending")))
@@ -7838,7 +8145,15 @@ class CompanionApp:
                 # and whose ledger says it never happened, and the redelivery
                 # answers "nothing at the old path".
                 ok, detail, paths = file_moves_mod.apply_move(
-                    move, local_root, ledger=self.file_moves)
+                    move, local_root, ledger=self.file_moves,
+                    # res-fleet-3 (2026-09-18): section 4b needs to know what
+                    # this machine actually syncs. rel_to_slug_with_borrowed,
+                    # never rel_to_slug: a borrowed subtree is on this disk
+                    # too, and the selection-only map would trash a file with
+                    # a perfectly good home here (comp-sync-4, the same
+                    # lookup missed from the other end). None on an unmanaged
+                    # companion, which keeps the old behaviour.
+                    project_rels=_synced_project_rels(self))
                 relink_pending = False
                 if ok and paths is not None:
                     matched, relinked = self._relink_moved_result(
@@ -7854,10 +8169,27 @@ class CompanionApp:
                     if relinked:
                         detail = f"{detail}; {relinked}"
                 if ok:
-                    self.file_moves.record(move, True, detail, paths=paths,
-                                           relink_pending=relink_pending)
-                    self._queue_file_move_answer(move["id"], True, detail,
-                                                 relink_pending=relink_pending)
+                    # res-fleet-3: section 4b's outcome is a DONE move with
+                    # its own word. `ok` and the sentence are unchanged, so a
+                    # dashboard that drops the word still records the move as
+                    # done with an honest detail; the word is what lets the
+                    # project page say "trashed locally" instead of "moved".
+                    not_synced = (detail == file_moves_mod.DETAIL_NOT_SYNCED_HERE)
+                    # res-fleet-3: the LEDGER always records the word (it is
+                    # this machine's own honest record and nothing validates
+                    # it); the WIRE carries it only to a dashboard that knows
+                    # it, or the report is 422'd whole.
+                    say_word = not_synced and _dashboard_knows_state_word(self)
+                    self.file_moves.record(
+                        move, True, detail, paths=paths,
+                        state=(file_moves_mod.STATE_NOT_SYNCED_HERE
+                               if not_synced else None),
+                        relink_pending=relink_pending)
+                    self._queue_file_move_answer(
+                        move["id"], True, detail,
+                        state=(file_moves_mod.STATE_NOT_SYNCED_HERE
+                               if say_word else None),
+                        relink_pending=relink_pending)
                 else:
                     entry = self.file_moves.record_attempt_failed(move, detail)
                     blocked = entry.get("state") == file_moves_mod.STATE_BLOCKED
@@ -9107,12 +9439,20 @@ class CompanionApp:
             path = machine_mod.machine_path()
             log.warning("this computer cannot read its id file (%s): it reports no "
                         "machine id until the file is repaired", path)
+            # comp-app-6 (2026-09-18): the repair BUTTON shipped in the same
+            # fix pass as this warning and the copy never mentioned it, so an
+            # editor was told to mail their log and wait for somebody else
+            # while the fix was two clicks away. It names where the repair
+            # lives; it does not tell them to press it, and it keeps the
+            # dialog's own "wait for your admin" tone, because a one-click
+            # identity change is not a decision to take from a notification.
             self._notify_tray(
                 f"CCSync cannot read this computer's id file ({path.name}). "
                 "Syncing is not affected, but this computer cannot be "
-                "recognised again if it is renamed. Send your log to your "
-                "admin: the file is repairable and CCSync will not overwrite "
-                "it on its own.",
+                "recognised again if it is renamed. The file is repairable "
+                "and CCSync will not overwrite it on its own: your tray's "
+                "Settings window offers the repair, and your admin may want "
+                "to look at the old file first.",
                 site_mod.notify_title("this computer's id"))
         except Exception:
             log.exception("could not check this computer's id file")
@@ -9156,14 +9496,30 @@ class CompanionApp:
         self._media_tree_stop_event.clear()
         self._media_tree_thread_error = None
         self._media_tree_heartbeat = time.monotonic()
+        self._media_tree_generation += 1
+        generation = self._media_tree_generation
         self._media_tree_thread = threading.Thread(
-            target=self._media_tree_thread_target, name="ccsync-media-tree", daemon=True
+            target=self._media_tree_thread_target, args=(generation,),
+            name="ccsync-media-tree", daemon=True
         )
         self._media_tree_thread.start()
 
-    def _media_tree_thread_target(self) -> None:
+    def _abandon_media_tree_thread(self) -> None:
+        """Retire the media-tree thread that is running now (res-companion-4).
+
+        Cheap and non-blocking: the wedged thread is inside a call we cannot
+        interrupt (an ffprobe over a share that stopped answering, the SYNC-2
+        shape), so all we can do is make sure it exits instead of looping
+        beside its replacement. It is not joined: joining here would park the
+        watchdog thread for as long as the wedge lasts."""
+        self._media_tree_generation += 1
+        log.warning("media tree: retiring the wedged thread (generation %s); it "
+                    "will exit when its current pass returns",
+                    self._media_tree_generation - 1)
+
+    def _media_tree_thread_target(self, generation: Optional[int] = None) -> None:
         try:
-            self._media_tree_loop()
+            self._media_tree_loop(generation)
         except BaseException as exc:
             self._media_tree_thread_error = f"{type(exc).__name__}: {exc}"
             raise
@@ -10869,6 +11225,18 @@ def run() -> None:
     # raises, so nothing below it changes (2026-08-17, COMMERCIAL_READINESS.md
     # item 13).
     crash_report.install(cfg)
+    # CR-280 (2026-09-18): before any HTTPS fetch in this process. The frozen
+    # macOS build has no CA bundle of its own, so every sidecar download, the
+    # yt-dlp checksum list, the upgrade channel and the release feed fail
+    # certificate verification on leso's Mac. One SSL_CERT_FILE covers every
+    # urllib caller here; it is never overridden if the environment already
+    # names one. Not verified on a Mac yet -- this rig has no macOS build.
+    try:
+        from . import sidecar_tools as _sidecar_tools
+
+        _sidecar_tools.ensure_ca_bundle()
+    except Exception:
+        log.debug("could not set this process's CA bundle", exc_info=True)
     errors, _warnings = config_mod.validate_config(cfg)
     if errors:
         log.error(

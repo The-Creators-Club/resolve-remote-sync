@@ -225,14 +225,58 @@ def data_dir_for(settings: Settings, slug: str = "") -> str | None:
     """
     from pathlib import Path as _Path
 
-    data = _Path(settings.db_path).parent / "cards"
-    if slug:
-        data = data / slug
+    flat = _Path(settings.db_path).parent / "cards"
+    data = flat / slug if slug else flat
     try:
         os.makedirs(data, exist_ok=True)
     except OSError:
         return None
+    if slug:
+        _say_where_the_old_state_went(flat, data)
     return str(data)
+
+
+_SAID_WHERE: set[str] = set()
+
+# The flat files the pre-0.7.47 single engine wrote straight into
+# `<data>/cards`. Named, not globbed, so a stray file cannot make this shout.
+_FLAT_STATE = ("cards_mirror.json", "cards_pick.json", "cards_lane_keys.json",
+               "cards_ui.json", "library_backups")
+
+
+def _say_where_the_old_state_went(flat: Any, data: Any) -> None:
+    """One log line naming BOTH paths when flat state is orphaned.
+
+    dash-cards-6 (2026-09-18). Moving the engine's data_dir from
+    `<data>/cards` to `<data>/cards/<slug>` orphaned every episode's
+    `cards_mirror.json`, `cards_pick.json`, `cards_lane_keys.json`,
+    `cards_ui.json`, the EN-index / translation caches and - the one that
+    matters - `library_backups`, the safety net for the cut list itself.
+    Nothing moved them and nothing said so.
+
+    We do NOT adopt them. Which episode the flat files belonged to is not
+    recorded anywhere (§11 removed the boot root in the same change), so an
+    automatic adopt is a guess, and guessing wrong writes another episode's
+    pick and mirror into this one - worse than the loss. The files are only
+    orphaned, not deleted, so naming both paths once is the honest fix: an
+    operator who wants the backups can copy them across by hand.
+    """
+    try:
+        orphans = [n for n in _FLAT_STATE if (flat / n).exists()]
+    except OSError:  # pragma: no cover - a data dir we cannot stat
+        return
+    if not orphans:
+        return
+    key = str(data)
+    if key in _SAID_WHERE:
+        return
+    _SAID_WHERE.add(key)
+    log.warning(
+        "Timeline Cards: this engine's state now lives in %s, but %s still "
+        "holds %s from before one directory per episode (dashboard 0.7.47). "
+        "Nothing reads them there and nothing has deleted them; copy them "
+        "across by hand if you want that episode's library_backups.",
+        data, flat, ", ".join(orphans))
 
 
 def build_engine(project_agent_mod: Any, settings: Settings,
@@ -458,9 +502,38 @@ class CardsDispatch:
         # threads and its own idea of the cut -- for the life of the container.
         was, gate = self._gates.get(slug, (None, None))
         if gate is None or was is not asgi:
+            self._evict(slug)
             gate = self.make_gate(asgi)
             self._gates[slug] = (asgi, gate)
         await gate(self._child(scope, rel, slug, tail), receive, send)
+
+    def evict(self, slug: str) -> None:
+        """Forget a closed episode's gate. Called by the pool (dash-cards-5).
+
+        `_gates` had no deletion path at all, so an admin closing an episode
+        left the a2wsgi middleware - and the ThreadPoolExecutor(max_workers=24)
+        it builds in its own __init__ - reachable from this dispatcher for the
+        life of the container, with whatever WSGI threads that episode had
+        already spun up still alive. Closing one to free a seat therefore made
+        the thread count worse than docs/CARDS_TWO_PROJECTS.md §12's accounting
+        says it is. Never raises: this is tidy-up, and it runs from `drop()`.
+        """
+        self._evict(slug)
+
+    def _evict(self, slug: str) -> None:
+        asgi, _gate = self._gates.pop(slug, (None, None))
+        executor = getattr(asgi, "executor", None)
+        if executor is None:
+            return
+        try:
+            # `wait=False`: a request may still be in flight on one of those
+            # threads, and shutdown(wait=False) lets it finish while refusing
+            # new work. The threads are the thing being reclaimed, not the
+            # request.
+            executor.shutdown(wait=False)
+        except Exception:  # noqa: BLE001 - never raise out of a close
+            log.exception("Timeline Cards: the WSGI pool for %s did not shut "
+                          "down cleanly", slug)
 
     def _note(self, scope: dict, slug: str) -> None:
         """Who is in this episode -- for the cap's sentence, and for phase 1a.
@@ -644,7 +717,12 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
     # added, which is the same reason cards_tunnel's router is registered
     # ahead of this (app.py).
     app.include_router(cards_landing.router)
-    app.mount(MOUNT_PATH, CardsDispatch(pool, CardsGate))
+    dispatch = CardsDispatch(pool, CardsGate)
+    # dash-cards-5 (2026-09-18): the pool is built before the dispatcher (it is
+    # the dispatcher's argument), so the eviction hook is wired here rather
+    # than passed to the constructor.
+    pool.set_evict_hook(dispatch.evict)
+    app.mount(MOUNT_PATH, dispatch)
     log.info("Timeline Cards mounted at %s (vault %s, from %s, up to %d "
              "episode(s) at once)", MOUNT_PATH, root, src, pool.cap)
     return _detail(MOUNTED, f"serving {root}")

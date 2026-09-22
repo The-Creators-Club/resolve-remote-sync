@@ -30013,6 +30013,88 @@ treats every standing push as undecided, i.e. upgrading.
 ### Owner decisions
 None needed.
 
+## CR-308 - Timeline Cards captions a paragraph or two ahead of their audio, and cut-list links to the paragraph before - FIXED and LIVE 2026-09-22 (library_engine.start_translation / _tx_chunk / _slice_en; Editing f20e785, on /cards with e719c21)
+
+Reported by Alex 2026-09-22 from the lane of `Framing Formosa - E1 V1`
+(李遠 Li, Yuan, section "Thaw: New Cinema Begins"): lane clips 218 and 219
+looked swapped. They were not swapped. Each clip's English was further down
+the interview than its Mandarin, and the gap grew along the run. 218 played
+"...write a fake one... Poland... that was our method too" and read "That was
+our method too. After that success... the party-state... controlling it".
+219 played "After that success... social taboos" and read "Those were the
+subjects the Nationalists feared most... Huang Chun-ming". The clip after
+that was two paragraphs ahead.
+
+The audio, the cut spans, the transcript and its EN index were all right.
+The wrong data was the `card_translations.json` entries, stored as EXACT by
+the haiku run of 2026-09-21 02:11. Those "translations" were the transcript's
+own English, word for word. `start_translation` sends a stack of adjacent
+cuts as one statement, with the stack's whole `paragraph_en` labelled
+"human-approved, reuse it". Haiku copied from it and dealt the sentences out
+to the parts in order. Two things push that ahead of the audio. These cuts
+were made to the index's paragraph spans, which overlap their neighbours by
+about 5 s, so every part repeats the tail of the one before. And the first
+part's context also carries the previous paragraph. CR-277's dedup (a
+paragraph appears once) was in place and did not prevent it. This is the
+same symptom from a different cause.
+
+Found beside it: `_slice_en` took the FIRST overlapping block as the card's
+`ref`. Because of the same 5 s overlaps, a cut of exactly one paragraph
+grazed the paragraph before it by more than the 0.35 s bar and took that
+paragraph's `^id`. About 1,050 of the episode's 2,316 cut-list bullets
+linked the paragraph before the one they play (1,038 of them strictly the
+previous paragraph, per the review's recount against the local EN index).
+
+Fix (MulticamPipeline, `multicam_pipeline/cards/`):
+- `_tx_chunk` checks every answer with `_tx_misplaced`. Each sentence of at
+  least `TX_COPY_MIN` chars that is found verbatim in the clip's EN index is
+  placed time-proportionally inside its paragraph. When at least
+  `TX_COPY_OUT_MIN` chars, and more than `TX_COPY_OUT_MAX` of all copied
+  chars, fall outside the part's span (+-`TX_COPY_PAD_S`), the part is
+  dropped like an empty answer. `_tx_chunk_full` asks once more, and a
+  second miss leaves the card on its dimmed paragraph slice and counts in
+  the run's "came back empty" line. A real translation copies nothing and is
+  never judged. The part's span rides as `_span`, which is stripped from the
+  prompt.
+- Each untranslated part carries `en_near`: the build's own time slice of
+  that cut (the text the card showed dimmed). `TX_PROMPT` explains it and
+  says a seam's repeated words are no reason to move on to a later sentence.
+- `_slice_en`'s ref is the block the cut overlaps MOST. On the live cut this
+  changes 1,181 bullets' `[[transcript#^ref]]` on the next save (more than
+  the drifted count: the tie and grazing cases move too). The cut
+  writer is generative, so expect one large diff in that file.
+
+Audit and thresholds: every stored answer in the episode (1,412 matched to a
+span through the cut and its `.history`) was run through the check. With no
+minimum it refused 10. Six were real drifts, all Li Yuan (02:11-02:13), each
+carrying 175 or more chars of another stretch's text. Two were correct
+translations (a Li Yuan and a 張雅婷 Chang Ya-Ting) that shared one 22-31 char
+phrase with another paragraph. Hence `TX_COPY_OUT_MIN = 60`, which keeps
+exactly the six. The last two, both 陳亮材 Chen Liang-Tsai, were confirmed
+wrong by eye, but not because of the copying: at 1699 s the English is about
+Halley's Comet over Mandarin about the crew outside the frame, and at 2959 s
+it is "this quiet spell" over the Life of Pi / Taichung studio passage. Each
+shared only one short phrase with another paragraph. The check cannot catch
+that shape, and should not try on a single short phrase.
+
+Data: the eight wrong entries were deleted from the episode's
+`card_translations.json` (backup beside it), which returns those cards to
+their paragraph slice until the next translate run. That run should happen
+AFTER the fix is deployed to `/cards`, or the old code may repeat it. It
+was deployed the same day (Cards e719c21), so the translate button is safe
+to press for those eight.
+
+Tests: `tests/test_claude_seam.py` (CR-308 block): `en_near` per part, the
+refusal and its four passes (own paragraph, real translation, short shared
+phrase, no index), `_tx_chunk` dropping the refused part with `_span` absent
+from the prompt, and the most-overlapped ref. `run_all.py --fast`: one red
+suite, a different one on each run (`test_ui_pass.js` layout with the change;
+`test_interview_angles.py` on the untouched tree), neither touching this code.
+Reviewed by an independent Fable agent the same day: diagnosis, every
+caller of the changed code, the thresholds (60 sits between the largest
+false positive, 31 chars, and the smallest drift, 175) and the data fix
+all confirmed; only the bullet count above was corrected.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

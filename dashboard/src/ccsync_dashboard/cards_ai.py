@@ -22,7 +22,7 @@ FIVE DECISIONS, each of which is a whole class of bug or a policy:
 1. **Claude, or nothing.** The chain can resolve to Codex, OpenAI or
    DeepSeek. Timeline Cards passes MODEL NAMES (`claude-haiku-4-5-20251001`
    for the translations, and since 2026-09-14 whichever of `claude-sonnet-5`
-   / `claude-opus-5` / `claude-fable-5-1` the editor picked on the page) and
+   / `claude-opus-5-5` / `claude-fable-5-1` the editor picked on the page) and
    prompts written against them, so a resolved provider that is not one of
    the two Claude ones is refused with a sentence naming what the site chose
    -- not silently answered by a model nobody picked for this. THE NAME IS
@@ -465,6 +465,31 @@ class Runner:
                  usage["cache_read_input_tokens"],
                  usage["cache_creation_input_tokens"], usage["output_tokens"])
         return _text_of(response), usage
+
+    def model_ids(self) -> list[str]:
+        """Every model id the site's key may call, from the Models API.
+
+        2026-09-23, Alex: Timeline Cards should move to the newest
+        sonnet/opus/fable as they ship. Its `cards/models.py` owns WHICH id
+        a family resolves to (decision 4 there); this only answers the one
+        question it cannot, what exists, and it is handed over by the mount
+        as `models.set_catalogue(runner.model_ids)`. Still no list of models
+        HERE (decision 1): this is a listing, not a choice.
+
+        Raises when there is no key or the listing fails; the caller runs
+        it on a background thread and keeps its own table when it does. A
+        site on the CLI door with no key therefore stays on the table, which
+        is the floor the other repo ships, never something older.
+        """
+        key = self._key()
+        if not key:
+            raise ClaudeError("no ANTHROPIC_API_KEY to list models with")
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=key)
+        # The SDK's list auto-paginates; 30 s because a listing is small and
+        # nothing waits on it but a daemon thread.
+        return [m.id for m in client.with_options(timeout=30.0).models.list()]
 
     def _cli(self, prompt: str, timeout: float, session: Any = None,
              model: str = "") -> str:

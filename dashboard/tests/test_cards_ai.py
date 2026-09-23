@@ -945,3 +945,62 @@ def test_a_long_selection_keeps_every_id_and_stops_labelling(sdk):
     assert "...and 3 more" in prompt
     for row in many:
         assert "[%s]" % row["id"] in prompt
+
+
+# -- the model listing Timeline Cards follows its families with (2026-09-23) --
+
+def test_model_ids_needs_a_key(monkeypatch):
+    runner = cards_ai.Runner(types.SimpleNamespace())
+    monkeypatch.setattr(runner, "_key", lambda: "")
+    with pytest.raises(cards_ai.ClaudeError):
+        runner.model_ids()
+
+
+def test_model_ids_lists_through_the_sdk(monkeypatch):
+    import sys
+
+    seen = {}
+
+    class _Models:
+        def list(self):
+            return [types.SimpleNamespace(id="claude-opus-5-5"),
+                    types.SimpleNamespace(id="claude-sonnet-5")]
+
+    class _Client:
+        def __init__(self, api_key):
+            seen["key"] = api_key
+            self.models = _Models()
+
+        def with_options(self, **kw):
+            seen["timeout"] = kw.get("timeout")
+            return self
+
+    monkeypatch.setitem(sys.modules, "anthropic",
+                        types.SimpleNamespace(Anthropic=_Client))
+    runner = cards_ai.Runner(types.SimpleNamespace())
+    monkeypatch.setattr(runner, "_key", lambda: "sk-test")
+    assert runner.model_ids() == ["claude-opus-5-5", "claude-sonnet-5"]
+    assert seen == {"key": "sk-test", "timeout": 30.0}
+
+
+def test_mount_hands_the_listing_to_cards_models(monkeypatch):
+    import sys
+
+    from ccsync_dashboard import cards
+
+    handed = []
+    fake = types.SimpleNamespace(set_catalogue=handed.append)
+    monkeypatch.setitem(sys.modules, "multicam_pipeline.cards.models", fake)
+    runner = cards_ai.Runner(types.SimpleNamespace())
+    cards._hand_models_catalogue(runner)
+    assert handed == [runner.model_ids]
+
+
+def test_mount_survives_a_checkout_without_the_catalogue(monkeypatch):
+    import sys
+
+    from ccsync_dashboard import cards
+
+    monkeypatch.setitem(sys.modules, "multicam_pipeline.cards.models",
+                        types.SimpleNamespace())
+    cards._hand_models_catalogue(cards_ai.Runner(types.SimpleNamespace()))

@@ -193,6 +193,26 @@ def import_cards(src: str):
     return handler, project_agent
 
 
+def _hand_models_catalogue(runner: Any) -> None:
+    """Let Timeline Cards' model picker follow each family to its newest model.
+
+    2026-09-23: `cards/models.py` resolves "sonnet"/"opus"/"fable" to the
+    newest id the host can call, given a listing (its decision 4), and the
+    listing is the one thing only this side can make, because the key is
+    here. A checkout older than that has no `set_catalogue` and keeps its
+    table, and nothing about a listing may stop the mount: best-effort,
+    and the listing itself runs on the other side's background thread.
+    """
+    try:
+        models = importlib.import_module("multicam_pipeline.cards.models")
+        set_catalogue = getattr(models, "set_catalogue", None)
+        if set_catalogue is not None and hasattr(runner, "model_ids"):
+            set_catalogue(runner.model_ids)
+    except Exception as e:  # noqa: BLE001 - see the docstring
+        log.warning("Timeline Cards will use its own model table (%s: %s)",
+                    type(e).__name__, e)
+
+
 # ---------------------------------------------------------------- the engine
 
 class _NoServer:
@@ -673,6 +693,7 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
         return _detail(ABSENT, f"a2wsgi is not installed ({type(e).__name__}: {e})")
 
     runner = cards_ai.make_runner(settings)
+    _hand_models_catalogue(runner)
 
     def build(episode_root: str) -> tuple[Any, Any]:
         """One episode -> (engine, asgi). Raises; the pool holds the failure.

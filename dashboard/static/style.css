@@ -298,6 +298,30 @@ a { color: inherit; text-decoration: none; }
 }
 .banner.alarm .muted { color: var(--bg); opacity: 0.75; }
 
+/* The action INSIDE a banner (2026-09-21). `.btn` is `color: var(--red)` and
+   `.banner.alarm` is `background: var(--red)`, so every [ DISMISS ] on an
+   ERROR notice was red on red: invisible, unfindable, and there is no other
+   way to close one. Five notices on the live dashboard - three of them
+   diagnoses of bugs fixed days earlier - could not be got rid of by anyone.
+   On the amber banner it was dark-on-amber and merely poor. The banner paints
+   its own text `var(--bg)`, so its buttons and links do the same, underlined
+   so they still read as something to click. */
+.banner .btn,
+.banner a,
+.banner.alarm .btn,
+.banner.alarm a {
+  color: var(--bg);
+  text-decoration: underline;
+}
+.banner .btn:hover,
+.banner a:hover,
+.banner.alarm .btn:hover,
+.banner.alarm a:hover {
+  color: var(--bg);
+  opacity: 0.7;
+  text-shadow: none;
+}
+
 /* THE horizontal rule, a border since 2026-08-30 (MOBILE_PLAN.md 3.2). It
    used to be a run of 100-120 box-drawing characters in the markup, clipped
    by this overflow: about a thousand pixels of text laid out on every page to

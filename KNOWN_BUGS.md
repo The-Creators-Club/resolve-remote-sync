@@ -30013,6 +30013,81 @@ treats every standing push as undecided, i.e. upgrading.
 ### Owner decisions
 None needed.
 
+## CR-307 - the five notices on the live dashboard that nothing could close - FIXED (dashboard/static/style.css, dashboard/src/ccsync_dashboard/db.py)
+
+The home page's PROBLEMS THE SERVER FOUND panel on 2026-09-21 carried five
+cards. Every condition behind them had already been fixed in the build that
+was serving the page (0.7.50, live since 2026-09-19), and the live rows prove
+it - not one had been re-asserted since the deploy:
+
+| card | last seen | fixed by |
+|---|---|---|
+| `/api/v1/report` OperationalError, "database is locked" at `clear_report_refused` | 2026-09-14 | 2026-09-17: a busy timeout is answered 503 + Retry-After and counted as `db_busy`, never a server error |
+| `/api/v1/...` TypeError, "can't subtract offset-naive and offset-aware" at `age_seconds` | 2026-09-17 | live-3: `age_seconds` reads a naive stamp as UTC, and `sessions.validate` catches TypeError too |
+| `/api/v1/admin/feed/publish` IntegrityError, UNIQUE on `companion_packages` | 2026-09-17 | dash-api-6: `store_verified_package` asks `get_package` BEFORE anything on disk moves, so the loser of two overlapping publishes 409s instead of 500ing |
+| `slow_write` "collector poll alerts" | 2026-09-17 | dash-db-1: a pass holds no lock over its network work; the condition became `slow_poll`, with its own words |
+| `slow_write` "collector poll inventory" | 2026-09-18 | dash-db-1, as above |
+
+So the defect that was left is not any of the five: it is that a card can
+outlive its cause with no way out. Two ways, both fixed here.
+
+**1. [ DISMISS ] on an ERROR notice was invisible.** `.btn` is
+`color: var(--red)`; `.banner.alarm` - what every `severity = error` notice
+renders as - is `background: var(--red)`. Red on red. The button was in the
+markup, focusable, clickable by anyone who knew where to aim, and unreadable,
+and it is the ONLY way to close a notice: `db.notice` re-asserts a live
+condition and NULLs `cleared_at`, so dismissing is safe by construction and
+was meant to be the normal ending of a card that has been acted on. The three
+error cards could not be ended by anybody. (On the amber warn banner the same
+rule was dark-red-on-amber: legible, which is why this survived every mobile
+and layout sweep.) Banner text is already painted `var(--bg)`; its buttons and
+links now are too, underlined so they still read as something to click. The
+same rule covers every other alarm banner's action - the fleet grid's
+[ RESUME ], the halt banner's buttons - which had the same problem.
+
+**2. A renamed notice kind orphans the cards the old name already opened.**
+dash-db-1 stopped the collector filing `slow_write` per slow pass and gave the
+condition its own kind, `slow_poll`, whose `clear_slow_poll` closes the card
+when a pass finishes inside a cycle. `clear_slow_poll` clears
+(`slow_poll`, subject). The two rows already open under (`slow_write`,
+"collector poll ...") were therefore orphans of a writer that no longer
+exists: never re-asserted, never cleared, still asserting as fact the lock
+claim that finding exists to deny. Nothing in the product can retire a card
+whose writer has been renamed, so schema v56 does it once, and only for the
+collector's own subjects - `record_slow_write` is still the live writer for a
+genuinely slow report or publish, and one of those open now is a true
+statement about a real writer.
+
+The three `server_error` cards are deliberately NOT cleared by the migration.
+They are diagnoses an admin has not read yet; the fix is that the button that
+ends them can now be seen.
+
+### Verification
+- `tests/test_live_notices_2026_09_21.py` - the dismiss button on an error
+  banner is not red on red and still reads as clickable; the migration retires
+  the two orphaned collector cards while leaving a live `slow_write` subject
+  and the `slow_poll` card alone; replaying the step is a no-op.
+- Live evidence: the `notices` table read read-only from the running
+  container, and `GET /api/v1/health` reporting 0.7.50.
+- 2026-09-23: still open live and still mailed as "not fixed after 6
+  day(s)" (the owner forwarded the digest). None re-asserted since
+  2026-09-18, so all five were dismissed through `db.dismiss_notice` as
+  `alex` (audited), before 0.7.51 shipped the visible button. The four
+  `proxy_pairs` warnings beside them were real: 12 orphaned proxies in four
+  FF5 Film 1 + 2 interviewee Proxy folders, each with a complete proxy at
+  its footage's new home. Only those 12 files were deleted (snapshot
+  `tank/TheCreatorsPool@ccsync-pre-orphan-proxies-ff5-film12-20260923-234329`);
+  the folders themselves hold ~41 GB of proxies still paired with footage.
+
+### Deploy order
+Dashboard only. No wire change, no companion change. Schema v56 is one
+idempotent UPDATE; an older image reading a v56 database refuses to boot by
+the usual `user_version` rule, which is the existing contract for any
+rollback.
+
+### Owner decisions
+None needed.
+
 ## CR-308 - Timeline Cards captions a paragraph or two ahead of their audio, and cut-list links to the paragraph before - FIXED and LIVE 2026-09-22 (library_engine.start_translation / _tx_chunk / _slice_en; Editing f20e785, on /cards with e719c21)
 
 Reported by Alex 2026-09-22 from the lane of `Framing Formosa - E1 V1`

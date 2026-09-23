@@ -1889,6 +1889,29 @@ SCHEMA_V55 = """
 ALTER TABLE machines ADD COLUMN update_requested_withheld TEXT;
 """
 
+# v56: the cards a RENAMED notice kind left behind (2026-09-21).
+#
+# dash-db-1 (2026-09-18) stopped the collector filing a `slow_write` per slow
+# pass and gave the condition its own kind, `slow_poll`, with its own words and
+# its own `clear_slow_poll`. What it could not do is reach the rows already
+# open: `clear_slow_poll` clears (`slow_poll`, subject), so the two
+# (`slow_write`, 'collector poll inventory' / 'collector poll alerts') cards on
+# this studio's dashboard were orphans of a kind nothing writes any more --
+# never re-asserted, never cleared, and asserting as fact the lock claim that
+# finding exists to deny. Nothing in the product can retire a card whose writer
+# has been renamed, so the migration does it once.
+#
+# ONLY the collector's own subjects: `record_slow_write` is still the live
+# writer for a genuinely slow report or publish (api.py's report handler), and
+# one of those open right now is a true statement about a real writer.
+SCHEMA_V56 = """
+UPDATE notices
+   SET cleared_at = strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
+ WHERE kind = 'slow_write'
+   AND cleared_at IS NULL
+   AND subject LIKE 'collector poll %';
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -2032,6 +2055,10 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # 55: why a pushed update is not being sent (CR-306 / dash-api-3,
     # 2026-09-18b). One nullable column, and gapless like every one before it.
     (55, SCHEMA_V55),
+    # 56: retire the cards dash-db-1's kind rename left open (2026-09-21).
+    # A data step rather than a column, and gapless like every one before it:
+    # replaying it is a no-op, which is what a migration has to be.
+    (56, SCHEMA_V56),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]

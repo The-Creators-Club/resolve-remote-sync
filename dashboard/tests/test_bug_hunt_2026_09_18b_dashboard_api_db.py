@@ -309,5 +309,8 @@ def test_v55_adds_the_withheld_column(tmp_path):
     dbmod.migrate(c)
     cols = {r["name"] for r in c.execute("PRAGMA table_info(machines)")}
     assert "update_requested_withheld" in cols
-    assert dbmod.SCHEMA_VERSION == 55
+    # `>=`, the form every other schema test here uses: this test is about
+    # v55's column, and a later migration (v56 retired the orphaned notice
+    # cards, 2026-09-21) is not a failure of it.
+    assert dbmod.SCHEMA_VERSION >= 55
     c.close()

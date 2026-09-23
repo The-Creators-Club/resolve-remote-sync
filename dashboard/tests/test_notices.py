@@ -135,6 +135,8 @@ def test_run_checks_never_raises_with_every_check_broken(conn, monkeypatch):
                 # dash-db-2 (2026-09-18): the contention kinds' check-time
                 # stamp is a check in the tuple like any other.
                 "_check_contention", "_check_broll_archive",
+                # CR-309 (2026-09-24): the unattended CLI updater's card.
+                "_check_ai_cli_update",
                 "_check_pending_devices", "_check_plan_without_share"):
         monkeypatch.setattr(notices, name, boom)
     ran = notices.run_checks(conn, settings, NOW, pending_devices={}, folder_devices={})

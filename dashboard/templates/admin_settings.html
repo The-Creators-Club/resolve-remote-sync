@@ -149,6 +149,11 @@
       <label><input type="checkbox" disabled
                     {{ "checked" if manifest.features.ai_cli_providers }}> AI CLI providers
         <span class="muted">set on <a href="#ai-providers">AI providers</a> below, where accepting the notice turns it on</span></label>
+      {# CR-309 (2026-09-24): every flag the manifest carries is on this page
+         (product-surface-5), so the unattended Claude Code updater is too. #}
+      <label><input type="checkbox" name="features.ai_cli_auto_update"
+                    {{ "checked" if manifest.features.ai_cli_auto_update }}> Keep Claude Code up to date
+        <span class="muted">once a day, this server installs the publisher's newer Claude Code (checked against the publisher's checksum) so new Claude models work without anyone clicking UPDATE</span></label>
 
       <div class="side-head" style="margin-top:1.2rem">[ B-ROLL INDEXING MODEL ]
         <span class="muted">The indexer on your wired computer reads this choice from the dashboard;

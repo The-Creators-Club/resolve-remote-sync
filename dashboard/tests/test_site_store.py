@@ -211,11 +211,26 @@ def test_features_block_shape(conn):
     # ai_cli_providers joined the block 2026-08-18 (ai_providers.py) and is
     # false unless a site says otherwise, like both YouTube flags. It is NOT
     # in `GET /api/v1/site` -- see test_site.py, which pins that the open
-    # manifest still carries exactly the two.
+    # manifest still carries exactly the two. ai_cli_auto_update (CR-309,
+    # 2026-09-24) is the same kind of site-only flag, off in the vendor build.
     assert manifest["features"] == {"youtube_download": True,
                                     "youtube_unblock": False,
                                     "ai_cli_providers": False,
+                                    "ai_cli_auto_update": False,
                                     "auto_update": False}
+
+
+def test_the_cli_auto_update_flag_round_trips_through_site_toml(conn):
+    """CR-309: settable by import, exported under [features], read by the one
+    feature gate, and never published to the fleet."""
+    settings = Settings()
+    values = site_store.import_toml("[features]\nai_cli_auto_update = true\n")
+    assert values == {"features.ai_cli_auto_update": "1"}
+    site_store.set_many(conn, values, updated_by="admin")
+    conn.commit()
+    assert site_store.feature_enabled(conn, settings, "ai_cli_auto_update") is True
+    assert "ai_cli_auto_update = true" in site_store.export_toml(conn, settings)
+    assert site_store.feature_enabled(conn, Settings(), "no_such_flag") is False
 
 
 # ------------------------------------------------------------------- seed

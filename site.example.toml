@@ -333,6 +333,14 @@ org_name = "Your Studio"
 #   API keys (Anthropic / OpenAI / DeepSeek, entered on the same page) are the
 #   supported path and need no flag. docs/CONFIG.md 2.5a.
 #
+# ai_cli_auto_update -- keeps a Claude Code the dashboard's SET UP wizard
+#   installed up to date by itself (CR-309, 2026-09-24): at most once a day it
+#   runs the same checksum-verified install the wizard's UPDATE button runs,
+#   never installs an older build, and never touches a CLI whose path an
+#   admin typed. Timeline Cards asks Claude Code for "the newest opus/sonnet/
+#   fable", and a CLI older than a new model refuses it. Needs
+#   ai_cli_providers; on its own it does nothing.
+#
 # auto_update -- editors' companions apply a published build as soon as this
 #   dashboard offers it, without anyone clicking "Update now" in their tray
 #   (2026-08-18). OFF by default, because it changes who decides when an
@@ -347,6 +355,7 @@ org_name = "Your Studio"
 youtube_download = false
 youtube_unblock = false
 ai_cli_providers = false
+ai_cli_auto_update = false
 auto_update = false
 
 [stack]

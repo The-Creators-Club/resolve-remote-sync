@@ -732,12 +732,14 @@ def cli(tmp_path, monkeypatch):
 
 
 def test_the_cli_is_told_which_model(cli):
+    """A family id goes as its alias since CR-309 (2026-09-24), and the reply
+    format is JSON so the runner can learn what the alias resolved to."""
     runner, argvs = cli
     out = runner.run("stage the pangolin cards", model="claude-fable-5-1")
     assert out["ok"] is True
     assert argvs[0] == ["/data/tools/claude-code/bin/claude", "-p",
-                        "--output-format", "text",
-                        "--model", "claude-fable-5-1"]
+                        "--output-format", "json",
+                        "--model", "fable"]
 
 
 def test_the_model_follows_the_flags_and_precedes_the_session(cli):
@@ -746,8 +748,8 @@ def test_the_model_follows_the_flags_and_precedes_the_session(cli):
     runner, argvs = cli
     runner.run(MARKED, model="claude-fable-5-1", session=FakeSession())
     argv = argvs[0]
-    assert argv[argv.index("--output-format") + 1] == "text"
-    assert argv[argv.index("--model") + 1] == "claude-fable-5-1"
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert argv[argv.index("--model") + 1] == "fable"
     assert argv.index("--model") < argv.index("--session-id")
     assert argv[argv.index("--session-id") + 1] == "1a2b-3c4d"
 
@@ -773,7 +775,7 @@ def test_no_model_is_the_clis_own_default(cli):
     runner.run("summarise this section")
     assert "--model" not in argvs[0]
     assert argvs[0] == ["/data/tools/claude-code/bin/claude", "-p",
-                        "--output-format", "text"]
+                        "--output-format", "json"]
 
 
 def test_the_sdk_path_is_unchanged_by_the_model_flag(sdk):
@@ -949,11 +951,14 @@ def test_a_long_selection_keeps_every_id_and_stops_labelling(sdk):
 
 # -- the model listing Timeline Cards follows its families with (2026-09-23) --
 
-def test_model_ids_needs_a_key(monkeypatch):
+def test_model_ids_without_a_key_is_an_empty_answer_not_a_raise(monkeypatch):
+    """CR-309: without a key the listing is what the CLI has been seen to
+    serve, which on a settings object with no data dir at all is nothing -
+    an answer, never an exception (the other repo would retry a raise every
+    ten minutes for ever on the studio's key-less dashboard)."""
     runner = cards_ai.Runner(types.SimpleNamespace())
     monkeypatch.setattr(runner, "_key", lambda: "")
-    with pytest.raises(cards_ai.ClaudeError):
-        runner.model_ids()
+    assert runner.model_ids() == []
 
 
 def test_model_ids_lists_through_the_sdk(monkeypatch):
@@ -1004,3 +1009,235 @@ def test_mount_survives_a_checkout_without_the_catalogue(monkeypatch):
     monkeypatch.setitem(sys.modules, "multicam_pipeline.cards.models",
                         types.SimpleNamespace())
     cards._hand_models_catalogue(cards_ai.Runner(types.SimpleNamespace()))
+
+
+# -- CR-309 (2026-09-24): the CLI door follows each family by its ALIAS ------
+# The studio's dashboard has no API key, so the Models API listing the mount
+# hands Timeline Cards could never answer and the picker never moved; and a
+# CLI one release too old refused `claude-opus-5-5` by id while answering
+# `opus`. The door now passes the alias, reads which model answered out of
+# the CLI's JSON reply, and lists THAT as the catalogue when there is no key.
+
+def reply(result="an answer", served=("claude-opus-5-5",), is_error=False,
+          **extra):
+    """The CLI's `--output-format json` object, as measured 2026-09-23."""
+    body = {"type": "result",
+            "subtype": "error_during_execution" if is_error else "success",
+            "is_error": is_error, "duration_ms": 2100,
+            "result": result, "session_id": "5c1d-0000",
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 12, "output_tokens": 3},
+            "modelUsage": {mid: {"inputTokens": 12, "outputTokens": 3}
+                           for mid in served}}
+    body.update(extra)
+    return json.dumps(body)
+
+
+def answers(monkeypatch, stdout, code=0, stderr=""):
+    """Make the fake CLI answer `stdout`; returns the argv list it records."""
+    argvs: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        argvs.append(list(argv))
+        return types.SimpleNamespace(returncode=code, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(cards_ai.subprocess, "run", fake_run)
+    return argvs
+
+
+def model_flag(argv):
+    return argv[argv.index("--model") + 1] if "--model" in argv else None
+
+
+@pytest.mark.parametrize("model,flag", [
+    ("claude-opus-5-5", "opus"),
+    ("claude-sonnet-5", "sonnet"),
+    ("claude-fable-5-1", "fable"),
+    ("claude-opus-6", "opus"),          # newer than anything seen: still the alias
+    # NOT a family id: a dated snapshot is a deliberate choice of snapshot,
+    # and the translations depend on theirs.
+    ("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"),
+    ("claude-opus-5-5-20260901", "claude-opus-5-5-20260901"),
+    ("some-other-model", "some-other-model"),
+])
+def test_a_family_id_goes_as_its_alias_and_nothing_else_does(cli, monkeypatch,
+                                                              model, flag):
+    runner, _ = cli
+    argvs = answers(monkeypatch, reply(served=()))
+    assert runner.run("hello", model=model)["ok"] is True
+    assert model_flag(argvs[0]) == flag
+
+
+def test_an_id_older_than_what_the_alias_served_is_a_pin(cli, monkeypatch):
+    """`CARDS_CHAT_MODEL=claude-opus-5` once the alias is known to serve 5.5:
+    nothing asks for an older model by accident, so the id is kept."""
+    runner, _ = cli
+    argvs = answers(monkeypatch, reply(served=("claude-opus-5-5",)))
+    runner.run("first", model="claude-opus-5-5")
+    runner.run("pinned", model="claude-opus-5")
+    runner.run("same as served", model="claude-opus-5-5")
+    assert [model_flag(a) for a in argvs] == ["opus", "claude-opus-5", "opus"]
+
+
+def test_a_pin_in_one_family_does_not_pin_another(cli, monkeypatch):
+    runner, _ = cli
+    argvs = answers(monkeypatch, reply(served=("claude-opus-5-5",)))
+    runner.run("learn opus", model="claude-opus-5-5")
+    runner.run("sonnet, never seen", model="claude-sonnet-5")
+    assert model_flag(argvs[1]) == "sonnet"
+
+
+def test_the_json_reply_is_the_same_text_the_caller_got_before(cli, monkeypatch):
+    runner, _ = cli
+    answers(monkeypatch, reply(result='{"cards": ["cut:aaa111"]}'))
+    out = runner.run("stage it", model="claude-opus-5-5")
+    assert out["ok"] is True
+    assert out["text"] == '{"cards": ["cut:aaa111"]}'
+
+
+def test_json_out_still_lands_from_the_json_reply(cli, monkeypatch, tmp_path):
+    """`_land_json` reads the TEXT, and the text is `result`, not the CLI's
+    envelope: an envelope would parse as JSON too, and be the wrong object."""
+    runner, _ = cli
+    answers(monkeypatch, reply(result='Here:\n{"en": "we were ready"}'))
+    target = tmp_path / "out" / "tx.json"
+    out = runner.run("translate", model="claude-haiku-4-5-20251001",
+                     json_out=str(target))
+    assert out["ok"] is True
+    assert out["data"] == {"en": "we were ready"}
+    assert json.loads(target.read_text(encoding="utf-8")) == {"en": "we were ready"}
+
+
+def test_a_reply_that_is_not_the_json_object_is_used_as_text(cli, monkeypatch):
+    """An older CLI, or one that ignored the flag: stdout exactly as before."""
+    runner, _ = cli
+    answers(monkeypatch, "plain words\n")
+    out = runner.run("hello", model="claude-opus-5-5")
+    assert out["ok"] is True and out["text"] == "plain words\n"
+
+
+def test_a_hand_set_text_argv_is_honoured_and_learns_nothing(cli, monkeypatch):
+    runner, _ = cli
+    monkeypatch.setenv("YTDL_CLAUDE_CODE_ARGS", "-p --output-format text")
+    body = reply(result="x", served=("claude-opus-6",))
+    argvs = answers(monkeypatch, body)
+    out = runner.run("hello", model="claude-opus-5-5")
+    assert argvs[0][1:4] == ["-p", "--output-format", "text"]
+    # text mode: what the CLI printed IS the answer, as it always was
+    assert out["text"] == body
+    assert cards_ai.read_learned(runner._settings) == {}
+
+
+def test_is_error_with_exit_zero_is_a_failure_not_an_answer(cli, monkeypatch):
+    runner, _ = cli
+    answers(monkeypatch, reply(result="API Error: 529 overloaded", is_error=True))
+    out = runner.run("hello", model="claude-opus-5-5")
+    assert out["ok"] is False
+    assert "529 overloaded" in out["error"]
+    assert "modelUsage" not in out["error"]
+
+
+def test_a_non_zero_exit_names_the_replys_words_not_its_envelope(cli, monkeypatch):
+    runner, _ = cli
+    words = "claude-opus-9 is not described by this version's model catalog"
+    answers(monkeypatch, reply(result=words, is_error=True), code=1)
+    out = runner.run("hello", model="claude-opus-9")
+    assert out["ok"] is False
+    assert out["error"] == "Claude Code exited 1: " + words
+
+
+def test_no_such_session_on_stderr_is_still_session_lost(cli, monkeypatch):
+    runner, _ = cli
+    session = FakeSession()
+    answers(monkeypatch, reply())
+    runner.run(MARKED, session=session)             # opens it in our store
+    session.turns = 1
+    answers(monkeypatch, "", code=1,
+            stderr="Error: No conversation found with session ID: 1a2b-3c4d")
+    out = runner.run("and again", session=session)
+    assert out["error"] == cards_ai.SESSION_LOST
+
+
+def test_no_such_session_inside_the_reply_is_session_lost_too(cli, monkeypatch):
+    runner, _ = cli
+    answers(monkeypatch, reply(result="Session ID 1a2b-3c4d is already in use",
+                               is_error=True), code=1)
+    out = runner.run(MARKED, session=FakeSession())
+    assert out["error"] == cards_ai.SESSION_LOST
+
+
+def test_what_the_alias_served_is_recorded_and_listed_without_a_key(
+        cli, monkeypatch, tmp_path):
+    runner, _ = cli
+    monkeypatch.setattr(cards_ai.Runner, "_key", lambda self: "")
+    assert runner.model_ids() == []
+    # A decorated key (a context-window tag) is the plain id underneath.
+    answers(monkeypatch, reply(served=("claude-opus-6[1m]",)))
+    runner.run("hello", model="claude-opus-5-5")
+    answers(monkeypatch, reply(served=("claude-sonnet-5",)))
+    runner.run("hello", model="claude-sonnet-5")
+    assert runner.model_ids() == ["claude-opus-6", "claude-sonnet-5"]
+    # ...and it lives where REMOVE takes it with the CLI it describes.
+    path = cards_ai.learned_path(runner._settings)
+    assert path.parent == tmp_path / "tools" / "claude-code"
+    stored = json.loads(path.read_text(encoding="utf-8"))["families"]
+    assert stored["opus"]["id"] == "claude-opus-6" and stored["opus"]["seen_at"]
+
+
+def test_the_served_key_of_another_family_teaches_nothing(cli, monkeypatch):
+    """A small model the CLI spends a few tokens on inside the call is not
+    what the alias resolved to."""
+    runner, _ = cli
+    answers(monkeypatch, reply(served=("claude-haiku-4-5-20251001",
+                                       "claude-sonnet-5")))
+    runner.run("hello", model="claude-opus-5-5")
+    assert cards_ai.read_learned(runner._settings) == {}
+
+
+def test_a_snapshot_id_call_teaches_nothing(cli, monkeypatch):
+    runner, _ = cli
+    answers(monkeypatch, reply(served=("claude-haiku-4-5-20251001",)))
+    runner.run("translate", model="claude-haiku-4-5-20251001")
+    assert cards_ai.read_learned(runner._settings) == {}
+
+
+def test_a_corrupt_record_reads_as_nothing_learned(cli, monkeypatch):
+    runner, _ = cli
+    path = cards_ai.learned_path(runner._settings)
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json", encoding="utf-8")
+    assert cards_ai.read_learned(runner._settings) == {}
+    argvs = answers(monkeypatch, reply(served=("claude-opus-5-5",)))
+    assert runner.run("hello", model="claude-opus-5")["ok"] is True
+    assert model_flag(argvs[0]) == "opus"          # nothing to pin against yet
+    assert cards_ai.read_learned(runner._settings)["opus"]["id"] == "claude-opus-5-5"
+
+
+def test_a_record_that_cannot_be_written_never_fails_the_call(cli, monkeypatch):
+    runner, _ = cli
+
+    def refuse(*_a, **_k):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(cards_ai.os, "replace", refuse)
+    answers(monkeypatch, reply(result="fine", served=("claude-opus-5-5",)))
+    out = runner.run("hello", model="claude-opus-5-5")
+    assert out["ok"] is True and out["text"] == "fine"
+
+
+def test_the_record_is_only_rewritten_when_the_resolution_changes(cli, monkeypatch):
+    runner, _ = cli
+    answers(monkeypatch, reply(served=("claude-opus-5-5",)))
+    runner.run("one", model="claude-opus-5-5")
+    path = cards_ai.learned_path(runner._settings)
+    first = path.read_text(encoding="utf-8")
+    writes = []
+    real = cards_ai.os.replace
+
+    def spy(a, b):
+        writes.append(b)
+        return real(a, b)
+
+    monkeypatch.setattr(cards_ai.os, "replace", spy)
+    runner.run("two", model="claude-opus-5-5")
+    assert writes == [] and path.read_text(encoding="utf-8") == first

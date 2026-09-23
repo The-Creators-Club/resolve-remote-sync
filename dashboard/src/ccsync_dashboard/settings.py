@@ -375,6 +375,15 @@ class Settings:
     # path and need no flag at all.
     site_feature_ai_cli_providers: bool = False
 
+    # Whether the dashboard keeps a wizard-installed Claude Code CLI current
+    # by itself (CR-309, 2026-09-24): once shortly after boot and at most once
+    # a day, through the admin's own verified install path, never a
+    # downgrade. OFF in the vendor build like every optional feature, and
+    # inert without site_feature_ai_cli_providers. What it buys: Timeline
+    # Cards passes the CLI a family alias (`opus`), and an alias is only as
+    # new as the CLI that resolves it.
+    site_feature_ai_cli_auto_update: bool = False
+
     # UNATTENDED UPDATES (2026-08-18). Off by default and per site, because
     # it changes who decides when an editing machine restarts its companion.
     # ON: a companion applies any build this dashboard offers as soon as
@@ -847,6 +856,7 @@ class Settings:
             site_feature_youtube_download=env.get("DASH_SITE_YOUTUBE_DOWNLOAD", "") == "1",
             site_feature_youtube_unblock=env.get("DASH_SITE_YOUTUBE_UNBLOCK", "") == "1",
             site_feature_ai_cli_providers=env.get("DASH_SITE_AI_CLI_PROVIDERS", "") == "1",
+            site_feature_ai_cli_auto_update=env.get("DASH_SITE_AI_CLI_AUTO_UPDATE", "") == "1",
             site_feature_auto_update=env.get("DASH_SITE_AUTO_UPDATE", "") == "1",
             broll_enabled=env.get("DASH_BROLL_ENABLED", "") == "1",
             broll_ingest_token=env.get("BROLL_INGEST_TOKEN", "").strip(),

@@ -88,6 +88,12 @@ KEYS: dict[str, str] = {
     # use for it, and the open manifest gains a field only when a client
     # needs one.
     "features.ai_cli_providers": "bool",
+    # Whether the dashboard keeps the Claude Code CLI the SET UP wizard
+    # installed up to date by itself, at most once a day, through the same
+    # checksum-verified install the UPDATE button runs (CR-309, 2026-09-24).
+    # Means nothing without ai_cli_providers. Not published by `api_site`,
+    # for the reason ai_cli_providers is not: no client acts on it.
+    "features.ai_cli_auto_update": "bool",
     # Whether editors' companions apply a published build without anyone
     # clicking (2026-08-18). Published by api_site, unlike ai_cli_providers:
     # the companion is exactly the client that needs to read it.
@@ -501,6 +507,7 @@ def seed_from_env_once(conn: sqlite3.Connection, settings: Any) -> bool:
         "features.youtube_download": "1" if settings.site_feature_youtube_download else "0",
         "features.youtube_unblock": "1" if settings.site_feature_youtube_unblock else "0",
         "features.ai_cli_providers": "1" if settings.site_feature_ai_cli_providers else "0",
+        "features.ai_cli_auto_update": "1" if settings.site_feature_ai_cli_auto_update else "0",
         "features.auto_update": "1" if settings.site_feature_auto_update else "0",
         "indexer_model_tier": settings.site_indexer_model_tier,
     }
@@ -602,6 +609,7 @@ def _shape(db_values: Mapping[str, str], settings: Any) -> dict[str, Any]:
             "youtube_download": as_bool("features.youtube_download"),
             "youtube_unblock": as_bool("features.youtube_unblock"),
             "ai_cli_providers": as_bool("features.ai_cli_providers"),
+            "ai_cli_auto_update": as_bool("features.ai_cli_auto_update"),
             "auto_update": as_bool("features.auto_update"),
         },
         # A NEW top-level object (2026-08-18), not another flat key -- same
@@ -650,6 +658,7 @@ FEATURE_SETTINGS_ATTRS = {
     "youtube_download": "site_feature_youtube_download",
     "youtube_unblock": "site_feature_youtube_unblock",
     "ai_cli_providers": "site_feature_ai_cli_providers",
+    "ai_cli_auto_update": "site_feature_ai_cli_auto_update",
     "auto_update": "site_feature_auto_update",
 }
 
@@ -773,6 +782,7 @@ def _settings_fallback(key: str, settings: Any) -> str:
         "features.youtube_download": "1" if settings.site_feature_youtube_download else "0",
         "features.youtube_unblock": "1" if settings.site_feature_youtube_unblock else "0",
         "features.ai_cli_providers": "1" if settings.site_feature_ai_cli_providers else "0",
+        "features.ai_cli_auto_update": "1" if settings.site_feature_ai_cli_auto_update else "0",
         "features.auto_update": "1" if settings.site_feature_auto_update else "0",
         "indexer_model_tier": settings.site_indexer_model_tier,
         "template_folders": "",
@@ -806,7 +816,8 @@ _SECTIONS: list[tuple[str, list[str]]] = [
     ("site", ["org_name", "org_short", "product_name", "brand_logo",
               "canonical_prefix"]),
     ("features", ["features.youtube_download", "features.youtube_unblock",
-                  "features.ai_cli_providers", "features.auto_update"]),
+                  "features.ai_cli_providers", "features.ai_cli_auto_update",
+                  "features.auto_update"]),
     ("indexer", ["indexer_model_tier"]),
     # The Android app rides the same export/import/history path as every other
     # manifest field (MOBILE_PLAN.md §4 M5, 2026-08-30) -- a NAS migration
@@ -825,6 +836,7 @@ _TOML_KEY_NAMES = {
     "features.youtube_download": "youtube_download",
     "features.youtube_unblock": "youtube_unblock",
     "features.ai_cli_providers": "ai_cli_providers",
+    "features.ai_cli_auto_update": "ai_cli_auto_update",
     "features.auto_update": "auto_update",
     "indexer_model_tier": "model_tier",
     "android.package_name": "package_name",
@@ -869,6 +881,7 @@ def export_toml(conn: sqlite3.Connection, settings: Any) -> str:
         "features.youtube_download": manifest["features"]["youtube_download"],
         "features.youtube_unblock": manifest["features"]["youtube_unblock"],
         "features.ai_cli_providers": manifest["features"]["ai_cli_providers"],
+        "features.ai_cli_auto_update": manifest["features"]["ai_cli_auto_update"],
         "features.auto_update": manifest["features"]["auto_update"],
         "indexer_model_tier": manifest["indexer"]["model_tier"],
         "android.package_name": manifest["android"]["package_name"],

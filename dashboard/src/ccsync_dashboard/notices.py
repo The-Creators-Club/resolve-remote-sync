@@ -174,6 +174,9 @@ def run_checks(
         # proxy-tiers-3's dashboard half (2026-09-18): an archive this
         # container cannot list turns every Send to Resolve into a preview.
         _check_broll_archive,
+        # CR-309 (2026-09-24): the unattended Claude Code updater's last
+        # outcome. Registered in db.NOTICE_KINDS with this writer.
+        _check_ai_cli_update,
     )
     ran = 0
     for check in checks:
@@ -1033,6 +1036,51 @@ def _check_release_feed(conn, settings, now: str) -> None:
             now=now)
     else:
         db.clear_notice(conn, "feed_runtime_mismatch", "dashboard image", now=now)
+
+
+# ------------------------------------------------------- the AI CLI updater
+
+AI_CLI_UPDATE_KIND = "ai_cli_update_failed"
+
+
+def _check_ai_cli_update(conn, settings, now: str) -> None:
+    """The last unattended Claude Code update failed (CR-309, 2026-09-24).
+
+    The updater itself (`cli_tools.auto_update_tick`) runs on the collector
+    and writes its outcome to `<data>/tools/claude-code/auto_update.json`;
+    this reads that file every cycle, so the card is open exactly while the
+    latest look says "failed" and closes on the next look that does not (an
+    install that went through, a publisher that answers again, or the admin
+    updating by hand - whose install the next look finds up to date). With
+    the feature off there is nothing to report and anything open is closed:
+    a site that switched it off must not keep a card nothing can now clear.
+    """
+    from . import ai_providers, cli_tools, site_store
+
+    enabled = (site_store.feature_enabled(conn, settings, cli_tools.AUTO_UPDATE_FEATURE)
+               and ai_providers.cli_enabled(conn, settings))
+    record = cli_tools.read_auto_update(settings) if enabled else {}
+    if str(record.get("result") or "") != "failed":
+        db.clear_notices_of_kind(conn, AI_CLI_UPDATE_KIND, (), now=now)
+        return
+    installed = str(record.get("installed") or "")
+    latest = str(record.get("latest") or "")
+    detail = str(record.get("detail") or "no reason was recorded").strip()[:300]
+    if not detail.endswith("."):
+        detail += "."
+    versions = ""
+    if installed and latest:
+        versions = f" from {installed} to {latest}"
+    elif installed:
+        versions = f" (it has {installed})"
+    db.notice(
+        conn, AI_CLI_UPDATE_KIND, "warn", "Claude Code",
+        body=(f"This server tried to update Claude Code{versions} by itself and "
+              f"could not: {detail} Timeline Cards keeps working on the version it "
+              f"has, but a new Claude model may be refused until it is updated."),
+        fix=("Open Settings, AI providers and press UPDATE beside Claude Code. The "
+             "server tries again by itself tomorrow."),
+        now=now)
 
 
 # ---------------------------------------------------------------- accounts

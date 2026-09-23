@@ -378,6 +378,20 @@ class Collector:
             api_mod.reconcile_file_moves(self.settings, conn)
         except Exception:  # noqa: BLE001 - a cycle must never die here
             log.exception("file-move reconciliation failed; continuing")
+        # CR-309 (2026-09-24): keep a wizard-installed Claude Code current,
+        # and sweep the version an install replaced once its grace is up.
+        # Here rather than in a kind of its own because it must run on a
+        # Syncthing-less deployment too, and because a new kind would put a
+        # CLI's update on the collector health panel as if it were a fleet
+        # job. A few comparisons when nothing is due; the publisher round
+        # trip and the download run on their own threads, never on this one.
+        # Never raises (see its docstring), and wrapped anyway.
+        try:
+            from . import cli_tools
+
+            cli_tools.auto_update_tick(conn, self.settings)
+        except Exception:  # noqa: BLE001 - a cycle must never die here
+            log.exception("the Claude Code auto-update tick failed; continuing")
         # Completion/remoteneed need the config caches; hydrate first if empty.
         if not self._project_ids and any(k in kinds for k in ("completion", "remoteneed")):
             if "config" not in kinds:

@@ -30176,6 +30176,121 @@ caller of the changed code, the thresholds (60 sits between the largest
 false positive, 31 chars, and the smallest drift, 175) and the data fix
 all confirmed; only the bullet count above was corrected.
 
+## CR-309 - Timeline Cards' picker could never move to a newer Claude on a CLI-door site, and a CLI older than a model refuses it by name - FIXED in repo, unshipped (dashboard 0.7.52: cards_ai.py, cli_tools.py, notices.py, site_store.py)
+
+Two defects behind one promise. On 2026-09-23 Timeline Cards learned to
+follow each model family forward (`cards/models.py` in MulticamPipeline:
+its table is a FLOOR, moved forward by a listing the host hands in with
+`set_catalogue`), and the dashboard mount handed it `Runner.model_ids`,
+which lists through the Anthropic Models API with `ANTHROPIC_API_KEY`.
+
+**1. On a site with no API key the listing always raised, so nothing ever
+moved.** The studio's dashboard is exactly that site: every Cards Claude call
+goes through the Claude Code CLI door (`Runner._cli`, the OAuth subscription,
+the binary `cli_tools` installed under `<data>/tools/claude-code/`). The
+other repo kept its table and retried the failed listing every ten minutes
+for ever. The picker's labels could never name a model newer than the table.
+
+**2. The CLI door passed the exact id, and a CLI older than the id refuses
+it.** Measured live the same day: Claude Code 2.1.267 answered
+`claude-opus-5-5` with "isn't described by this version's model catalog;
+update Claude Code" until it was updated by hand to 2.1.280 (by calling
+`cli_tools._install_claude(settings)` inside the container). The same CLI
+resolves the bare aliases itself: `claude -p --model opus --output-format
+json` reports `modelUsage` key `claude-opus-5-5`, `sonnet` ->
+`claude-sonnet-5`, `fable` -> `claude-fable-5-1`.
+
+Alex approved the shape: "the dashboard passes plain opus/sonnet/fable to
+Claude Code so it picks the newest it knows, and Claude Code is kept updated
+automatically, so new models arrive with no action from you."
+
+### Fix (dashboard only; the other repo needs no change)
+
+- **The alias, with two exceptions** (`cards_ai.cli_model_arg`). A family
+  id (`claude-(sonnet|opus|fable)-N[-M]`, the same shape as `models.py`'s
+  `_ID_RE`) goes to the CLI as `--model <family>`. A non-family id
+  (`claude-haiku-4-5-20251001`, the translations) keeps its exact id. So does
+  a family id OLDER than what this runner has already seen the alias
+  resolve to: nothing asks for an older model by accident, so that is a pin
+  (`CARDS_CHAT_MODEL=claude-opus-5`) and an alias would overrule it. The SDK
+  door is unchanged; it needs exact ids and already follows through the
+  listing.
+- **The Cards CLI door reads JSON** (`_cli_args` default `-p
+  --output-format json`, was `text`). `result` is the text callers got
+  before, so `_land_json`, the session store and every caller see the same
+  answer. `modelUsage` names the model that answered. A reply that is not
+  that object (an older CLI, or `YTDL_CLAUDE_CODE_ARGS` set by hand to
+  `text`) is returned as raw stdout, byte for byte what text mode gave.
+  `is_error: true` with exit 0 is now a failure with the CLI's own sentence,
+  where text mode handed the error text back as if it were the answer. A
+  non-zero exit names `result`'s words, never the JSON envelope.
+  `session_lost` is still read from stderr, and from `result` as well.
+- **What an alias served is recorded** in
+  `<data>/tools/claude-code/model_aliases.json` (family -> id, seen_at).
+  Atomic write, only when a resolution changes, a corrupt file reads as
+  empty, and a failed write never fails the call. It sits beside the
+  install record, so REMOVE takes it along with the CLI it describes.
+- **`model_ids()` without a key returns those ids** (possibly none) instead
+  of raising. The loop closes: the CLI serves `opus` as Opus 6 once, the
+  listing says `claude-opus-6`, `newest_of` moves the picker's label and id,
+  the id comes back as a family id, and it goes to the CLI as `opus` again.
+- **The CLI keeps itself current** (`cli_tools.auto_update_tick`, called
+  from `Collector.run_cycle`, so it runs on a Syncthing-less deployment too).
+  The first look is about five minutes after boot (skipped if the last one
+  was under an hour ago, so a restart loop does not ask on every lap), then
+  at most once per 24 h. It compares the publisher's `latest` with the
+  installed version and, if newer, calls `start_install`, the admin's own
+  UPDATE path. So the manifest checksum is still a CONDITION (trust-model-7):
+  no checksum means refused and nothing installed. The one-install latch
+  makes a running manual install win. `newer_than` is re-checked inside the
+  worker, so a `latest` that moves backwards is refused, never installed.
+  It only installs over a WIZARD install, and the probe cache is reset by
+  the worker as before. The look and the download run on their own threads.
+- **The replaced version is no longer deleted at the flip.** On Linux,
+  unlinking a running executable does not disturb it: the inode lives until
+  the last mapping goes, and ETXTBSY is only raised for writing. But Claude
+  Code re-executes itself by `process.execPath` for helpers, and that path is
+  ENOENT after an rmtree. So `_finish_install` keeps the previous version and
+  `sweep_superseded` removes it after `PRUNE_GRACE_SECONDS` (1 h, against a
+  900 s longest call). The admin's button gets the same protection.
+- **Gated** behind `[features] ai_cli_auto_update` (site_store,
+  `DASH_SITE_AI_CLI_AUTO_UPDATE`, a checkbox on Settings), OFF in the
+  vendor build, and inert without `ai_cli_providers`. Not published in
+  `GET /api/v1/site`.
+- **A failure is a notice**: `ai_cli_update_failed` (warn), registered in
+  `db.NOTICE_KINDS` with its writer `notices._check_ai_cli_update`. The writer
+  reads the updater's record (`<data>/tools/claude-code/auto_update.json`),
+  so the card is open exactly while the latest look says "failed", and it
+  closes when the feature is switched off.
+
+### Verification
+- `tests/test_cards_ai.py` (CR-309 block): alias mapping incl. snapshot ids,
+  the pin, per-family pins; JSON `result` as the caller's text, `json_out`
+  landing from it, a non-JSON reply used as text, a hand-set `text` argv
+  honoured; `is_error` at exit 0 and non-zero; session_lost from stderr and
+  from `result`; learned resolutions persisted (decorated `[1m]` keys
+  normalised, other families and snapshot calls teach nothing), corrupt and
+  unwritable records, `model_ids()` without a key.
+- `tests/test_cli_auto_update.py`: a newer release installs through the real
+  `_install_claude` (manifest checksum recorded as the source); same and
+  older versions do nothing; `latest` moving backwards mid-install is
+  refused; no checksum and a wrong checksum are refused with nothing moved;
+  either feature off (and the vendor default) does nothing and spends no
+  look; a typed-path CLI is left alone; a running manual install wins;
+  failures are recorded, never raised, and open then close the notice; at
+  most once per interval, the boot delay, the restart-loop floor, no second
+  concurrent look; the replaced version outlives the flip and is swept after
+  the grace.
+
+### Deploy order
+Dashboard only (0.7.52). No wire change, no schema change, no companion
+change. After deploy nothing updates until the site turns the flag on.
+
+### Owner decisions
+- The flag is off until set on the live site (Settings, the "Keep Claude
+  Code up to date" box, or `[features] ai_cli_auto_update = true` pasted
+  into the site.toml import).
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

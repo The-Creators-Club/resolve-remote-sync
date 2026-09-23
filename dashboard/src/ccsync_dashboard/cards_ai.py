@@ -95,6 +95,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -476,14 +477,24 @@ class Runner:
         as `models.set_catalogue(runner.model_ids)`. Still no list of models
         HERE (decision 1): this is a listing, not a choice.
 
-        Raises when there is no key or the listing fails; the caller runs
-        it on a background thread and keeps its own table when it does. A
-        site on the CLI door with no key therefore stays on the table, which
-        is the floor the other repo ships, never something older.
+        Raises when the listing fails; the caller runs it on a background
+        thread and keeps its own table when it does.
+
+        WITHOUT A KEY (CR-309, 2026-09-24) the answer is what the Claude Code
+        CLI has been SEEN to serve for each family alias (`read_learned`),
+        which may be nothing yet. It used to raise here, and the studio's
+        dashboard has no key - every Cards call goes through the CLI door - so
+        the picker never moved past the other repo's table. Now: the CLI
+        serves `opus` as Opus 6 once, this lists `claude-opus-6`, the other
+        repo's `newest_of` moves the picker's label and id to it, the id comes
+        back here as a family id, and `cli_model_arg` sends it as `opus`
+        again. An empty list is an ANSWER, not a failure: the table stands,
+        and the listing is not retried every ten minutes for nothing. One
+        small file read, on the listing's daemon thread.
         """
         key = self._key()
         if not key:
-            raise ClaudeError("no ANTHROPIC_API_KEY to list models with")
+            return [row["id"] for _family, row in sorted(read_learned(self._settings).items())]
         import anthropic
 
         client = anthropic.Anthropic(api_key=key)
@@ -510,20 +521,39 @@ class Runner:
         for it here would move three shipped features onto a model nobody
         picked. The flag goes after the flags and BEFORE the session args so a
         hand-set `YTDL_CLAUDE_CODE_ARGS` still reads as one block.
+
+        Since 2026-09-24 (CR-309) the flag carries the family ALIAS for a
+        family id (`cli_model_arg`), and the reply is the CLI's JSON object,
+        whose `result` is what this returns and whose `modelUsage` says which
+        model answered (`_learn`). Why JSON is safe on the session paths:
+        `--session-id` and `--resume` are independent of the output format in
+        `-p` mode, the two refusals `_says_no_such_session` reads are looked
+        for where they always were (stderr, which is where the CLI printed
+        them in text mode) AND in the reply's `result`, in case a CLI build
+        reports them inside the object instead, and a reply that is not the expected object -
+        an older CLI, or an argv set by hand to `text` - is handed back as raw
+        stdout, which is the pre-CR-309 behaviour byte for byte.
         """
         path = self._cli_path()
         if not path:
             raise ClaudeError("Claude Code is the site's provider but this "
                               "container has no such executable")
         env = cli_tools.cli_env(self._settings, ai_providers.CLAUDE_CODE)
+        # CR-309 (2026-09-24): a family id goes as its ALIAS, so the CLI runs
+        # the newest of the family it knows (`cli_model_arg` has the two
+        # exceptions). On 2026-09-23 the id itself was refused by a CLI one
+        # release too old to know it, while `opus` on the same CLI answered.
+        model_arg, family = cli_model_arg(self._settings, model) if model else ("", "")
         # The CLI keeps its OWN conversation store, keyed by the id we hand
         # it, so a session on this path is `--session-id` then `--resume`
         # (§12.2) and never our transcript re-sent as text. Our store is
         # still what answers "has this id ever existed", because the CLI's
         # lives in a HOME this container may not even have.
-        argv = ([path] + _cli_args()
-                + (["--model", model] if model else [])
+        flags = _cli_args()
+        argv = ([path] + flags
+                + (["--model", model_arg] if model_arg else [])
                 + _cli_session_args(session))
+        started = time.monotonic()
         try:
             proc = subprocess.run(  # noqa: S603 - argv, never a shell
                 argv, input=prompt, capture_output=True, text=True,
@@ -539,12 +569,43 @@ class Runner:
         except (OSError, ValueError) as e:
             raise ClaudeError(f"could not run Claude Code ({type(e).__name__}: "
                               f"{str(e)[:160]})") from None
+        # JSON only when the argv asked for it, and even then only when the
+        # reply IS that object: anything else is stdout exactly as text mode
+        # handed it back before CR-309.
+        reply = _cli_reply(proc.stdout) if _wants_json(flags) else None
+        said = ""
+        if reply is not None:
+            said = reply.get("result")
+            said = said if isinstance(said, str) else ""
         if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()[:300]
-            if session is not None and _says_no_such_session(detail):
+            # stderr first, as before: it is where the CLI puts "No
+            # conversation found" and "already in use", which refuse before a
+            # reply object exists. The reply's own words next, never the raw
+            # JSON, which would put a usage table in the page's error line.
+            detail = (proc.stderr or said
+                      or ("" if reply is not None else proc.stdout) or "").strip()[:300]
+            if session is not None and (_says_no_such_session(detail)
+                                        or _says_no_such_session(said)):
                 raise ClaudeError(SESSION_LOST)
             raise ClaudeError(f"Claude Code exited {proc.returncode}: {detail}")
-        return proc.stdout or ""
+        if reply is None:
+            return proc.stdout or ""
+        if reply.get("is_error"):
+            # A failed turn the CLI still exited 0 for. Text mode printed the
+            # error sentence as if it were the answer, and the caller then
+            # failed on it as an answer ("the model returned no JSON: API
+            # Error ..."); it is named as what it is instead.
+            detail = (said or str(reply.get("subtype") or "an error")).strip()[:300]
+            if session is not None and _says_no_such_session(detail):
+                raise ClaudeError(SESSION_LOST)
+            raise ClaudeError(f"Claude Code reported an error: {detail}")
+        served = _served_by(reply, family)
+        log.info("Timeline Cards AI (Claude Code): asked %s as --model %s, served "
+                 "by %s, %.1fs", model or "(default)", model_arg or "(default)",
+                 served or "(not reported)", time.monotonic() - started)
+        if family and served:
+            _learn(self._settings, family, served)
+        return said
 
     def _cli_path(self) -> str:
         """Where the CLI is, by `ai_providers`' own three-step answer: the
@@ -654,11 +715,199 @@ def _fail(why: str, provider: str = "") -> dict[str, Any]:
 
 def _cli_args() -> list[str]:
     """The non-interactive flags, from the same env var the ytdl app and the
-    Settings probe read -- one correction fixes all three."""
+    Settings probe read -- one correction fixes all three.
+
+    The default is `--output-format json` since 2026-09-24 (CR-309), where it
+    was `text`: the JSON reply names the model that ANSWERED (`modelUsage`),
+    which is the only way this side learns what a family alias resolved to.
+    Its `result` field is the text `text` mode printed, and `_cli_reply` falls
+    back to the raw stdout whenever the reply is not that JSON, so a caller
+    sees the same answer either way. A hand-set `YTDL_CLAUDE_CODE_ARGS` is
+    still used exactly as written; with `text` in it nothing is learned and
+    nothing else changes.
+    """
     import shlex
 
     raw = os.environ.get("YTDL_CLAUDE_CODE_ARGS", "").strip()
-    return shlex.split(raw) if raw else ["-p", "--output-format", "text"]
+    return shlex.split(raw) if raw else ["-p", "--output-format", "json"]
+
+
+def _wants_json(args: list[str]) -> bool:
+    """Does this argv ask the CLI for the one-object JSON reply? Both
+    spellings the CLI's option parser accepts. The LAST one wins, as it does
+    for the CLI."""
+    fmt = ""
+    for i, arg in enumerate(args):
+        if arg == "--output-format" and i + 1 < len(args):
+            fmt = args[i + 1]
+        elif arg.startswith("--output-format="):
+            fmt = arg.split("=", 1)[1]
+    return fmt.strip().lower() == "json"
+
+
+# -- the family alias (CR-309, 2026-09-24) ------------------------------------
+#
+# The shape `cards/models.py` in the other repo calls a FAMILY id:
+# `claude-opus-5`, `claude-opus-5-5`, `claude-sonnet-5`, and nothing after the
+# minor. A dated snapshot (`claude-haiku-4-5-20251001`) is not one, which is
+# what keeps the translations on their exact id. Kept in step with that
+# module's `_ID_RE` by hand: the two repos share no code, only the shape.
+_FAMILY_RE = re.compile(r"^claude-(sonnet|opus|fable)-(\d{1,2})(?:-(\d{1,2}))?$")
+# What the CLI may decorate a model id with in `modelUsage`: a context-window
+# tag (`claude-opus-5-5[1m]`) or a snapshot date. Stripped before the id is
+# judged, so a decoration never costs a resolution.
+_DECORATION_RE = re.compile(r"(\[[^\]]*\])+$")
+_SNAPSHOT_RE = re.compile(r"-\d{8}$")
+
+
+def _family_of(model: str) -> tuple[str, tuple[int, int]] | None:
+    """-> (family, (major, minor)) for a family id, else None."""
+    m = _FAMILY_RE.match(str(model or "").strip().lower())
+    if not m:
+        return None
+    return m.group(1), (int(m.group(2)), int(m.group(3) or 0))
+
+
+def _served_id(key: str) -> str:
+    """A `modelUsage` key as a plain family id, or "" if it is not one."""
+    plain = _SNAPSHOT_RE.sub("", _DECORATION_RE.sub("", str(key or "").strip().lower()))
+    return plain if _family_of(plain) else ""
+
+
+# The learned resolutions: which concrete id each alias was last answered by.
+# ONE small JSON file beside the wizard's install record, so REMOVE takes it
+# with the CLI it describes; written only when a resolution CHANGES, so a
+# chat turn does not cost a disk write. `_learned_lock` serialises this
+# process's writers (Cards runs its calls on several worker threads); the
+# tmp name carries the pid so a second process cannot collide on it.
+_learned_lock = threading.Lock()
+
+
+def learned_path(settings: Any) -> Path:
+    return cli_tools.tool_root(settings, ai_providers.CLAUDE_CODE) / "model_aliases.json"
+
+
+def read_learned(settings: Any) -> dict[str, dict[str, Any]]:
+    """family -> {"id", "seen_at"}. {} for no file, a corrupt one, or a
+    settings object with no data dir: this is read on every CLI call and by
+    the model listing's daemon thread, and neither may fail because of it."""
+    try:
+        with open(learned_path(settings), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+    families = data.get("families") if isinstance(data, dict) else None
+    if not isinstance(families, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for family, row in families.items():
+        if (isinstance(row, dict) and _family_of(str(row.get("id") or ""))
+                and _family_of(str(row["id"]))[0] == family):
+            out[str(family)] = dict(row)
+    return out
+
+
+def _learn(settings: Any, family: str, served: str) -> None:
+    """Record that the `family` alias was answered by `served`. Never raises.
+
+    The LATEST answer is kept, not the highest ever seen: this record is what
+    the picker's label says, and a label must name what served. Normally the
+    two are the same (the CLI only moves forward); an alias that ever resolves
+    backwards (a withdrawn model) is logged, because it also moves the pin
+    line in `cli_model_arg` back with it.
+    """
+    try:
+        with _learned_lock:
+            learned = read_learned(settings)
+            held = learned.get(family) or {}
+            if held.get("id") == served:
+                return
+            before = _family_of(str(held.get("id") or ""))
+            after = _family_of(served)
+            if before and after and after[1] < before[1]:
+                log.warning("Claude Code now answers the %s alias with %s, older "
+                            "than the %s it answered with before", family, served,
+                            held.get("id"))
+            learned[family] = {"id": served, "seen_at": _now_iso()}
+            path = learned_path(settings)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(f"{path}.{os.getpid()}.partial")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"families": learned}, fh, indent=2, sort_keys=True)
+            os.replace(tmp, path)
+        log.info("Claude Code resolves the %s alias to %s", family, served)
+    except Exception as e:  # noqa: BLE001 - a record, never a failed call
+        log.warning("could not record what the %s alias resolved to (%s: %s)",
+                    family, type(e).__name__, e)
+
+
+def cli_model_arg(settings: Any, model: str) -> tuple[str, str]:
+    """(what `--model` gets, the family it names or "").
+
+    A FAMILY id goes to the CLI as its alias (`claude-opus-5-5` -> `opus`),
+    so the CLI runs the newest of that family IT knows, and a new model needs
+    nothing from either repo. Two exceptions keep the exact id:
+
+      * anything that is not a family id (`claude-haiku-4-5-20251001`, the
+        translations): a snapshot is a deliberate choice of snapshot.
+      * a family id OLDER than what this runner has already seen the alias
+        resolve to: nobody gets an older model by accident (the other repo
+        never resolves below its table, and the listing only moves it up), so
+        an older id is a PIN, e.g. `CARDS_CHAT_MODEL=claude-opus-5`, and an
+        alias would quietly overrule it. Until the alias has been seen to
+        resolve once there is nothing to compare with, so the very first call
+        of a family on a fresh data volume goes as its alias.
+    """
+    got = _family_of(model)
+    if got is None:
+        return model, ""
+    family, version = got
+    held = _family_of(str((read_learned(settings).get(family) or {}).get("id") or ""))
+    if held is not None and version < held[1]:
+        return model, ""
+    return family, family
+
+
+def _served_by(reply: dict[str, Any], family: str) -> str:
+    """Which model answered, from the reply's `modelUsage` keys.
+
+    With a `family`: the newest id of THAT family among them, or "". The CLI
+    may spend a few tokens on a small model of its own inside one call
+    (measured 2026-09-23 it did not, but nothing promises that), so the key
+    that counts is the one the alias could have resolved to, never simply the
+    first. With none (a snapshot id, or no model at all): every key, for the
+    log line only - nothing is learned from a call that named no family.
+    """
+    usage = reply.get("modelUsage")
+    keys = [str(k) for k in usage] if isinstance(usage, dict) else []
+    if not family:
+        return ", ".join(keys)[:120]
+    best, best_version = "", None
+    for key in keys:
+        plain = _served_id(key)
+        got = _family_of(plain)
+        if got and got[0] == family and (best_version is None or got[1] > best_version):
+            best, best_version = plain, got[1]
+    return best
+
+
+def _cli_reply(stdout: str) -> dict[str, Any] | None:
+    """The CLI's one-object JSON reply, or None when stdout is not one.
+
+    None is not an error: it is a CLI (or a hand-set argv) answering in text,
+    and the caller then uses stdout exactly as it did before CR-309.
+    """
+    raw = (stdout or "").strip()
+    if not raw.startswith("{"):
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or ("result" not in data and "is_error" not in data
+                                      and "modelUsage" not in data):
+        return None
+    return data
 
 
 def _cli_session_args(session: Any) -> list[str]:

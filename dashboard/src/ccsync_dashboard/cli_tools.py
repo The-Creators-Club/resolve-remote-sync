@@ -34,6 +34,10 @@ volume the customer already backs up and which survives an image update:
     <data>/tools/claude-code/current         a POINTER FILE (see below)
     <data>/tools/claude-code/2.1.234/claude  the binary itself, 0755
     <data>/tools/claude-code/home/           $HOME for every run of it, 0700
+    <data>/tools/claude-code/auto_update.json   the unattended updater's last
+                                             look and its outcome (CR-309)
+    <data>/tools/claude-code/model_aliases.json what each family alias was
+                                             last served by (cards_ai, CR-309)
 
 `current` is a file holding a relative path, NOT a symlink. Two reasons: a
 DSM/Synology data volume can be on a filesystem where the container's uid
@@ -789,6 +793,18 @@ def validate_version(version: str) -> str:
     return version
 
 
+def version_tuple(version: str) -> tuple[int, ...]:
+    """`2.1.280` -> (2, 1, 280); anything unparseable -> (). Compared as ints
+    because "2.1.99" < "2.1.280" is false as a string. () sorts below every
+    real version, and every caller that decides to INSTALL something treats
+    () as "cannot tell" and does nothing."""
+    parts = str(version or "").strip().split(".")
+    try:
+        return tuple(int(p) for p in parts) if all(parts) else ()
+    except ValueError:
+        return ()
+
+
 def claude_platform_entry(manifest: Any, key: str) -> dict:
     """{binary, checksum, size} for one platform, or a refusal that names the
     platforms the manifest DOES carry (which is what tells an operator whether
@@ -909,7 +925,10 @@ _install_running: str = ""
 def _blank_status(name: str) -> dict:
     return {"tool": name, "state": "idle", "step": "", "detail": "", "version": "",
             "bytes": 0, "total": 0, "percent": 0, "error": "",
-            "started_at": "", "finished_at": "", "checksum_source": ""}
+            "started_at": "", "finished_at": "", "checksum_source": "",
+            # "" for the admin's button, "auto-update" for the unattended
+            # updater (CR-309), so the wizard's running bar can say which.
+            "started_by": ""}
 
 
 def _set_status(name: str, **fields) -> None:
@@ -974,11 +993,20 @@ def install_status(settings: Any, name: str) -> dict:
     return status
 
 
-def start_install(settings: Any, name: str) -> dict:
+def start_install(settings: Any, name: str, *, newer_than: str = "",
+                  started_by: str = "", on_finish=None) -> dict:
     """Kick off an install on a background thread. Raises ToolError/ToolBusy.
 
     The refusals happen HERE, on the request thread, so an admin gets a 4xx
     with a sentence in it rather than a spinner that ends in an error field.
+
+    The three keywords are the unattended updater's (CR-309, 2026-09-24) and
+    change nothing for the admin's button, which passes none of them:
+    `newer_than` is a version the install REFUSES to go to or below (checked
+    against what the publisher answers inside the worker, so a `latest` that
+    moved backwards between the updater's look and the download is a refusal,
+    never a downgrade); `started_by` is shown on the status; `on_finish` is
+    called with the final status once the worker ends any way at all.
     """
     global _install_running
     spec(name)
@@ -992,7 +1020,8 @@ def start_install(settings: Any, name: str) -> dict:
         _install_running = name
         _install_status[name] = _blank_status(name)
         _install_status[name].update({"state": "running", "step": "checking the publisher",
-                                      "started_at": _utcnow()})
+                                      "started_at": _utcnow(),
+                                      "started_by": str(started_by or "")})
         started_at = _install_status[name]["started_at"]
     # REL-15: on disk BEFORE the thread starts, so a container killed one
     # second later still knows an install was in flight. Cleared by the
@@ -1003,16 +1032,24 @@ def start_install(settings: Any, name: str) -> dict:
         "step": "checking the publisher", "total": 0,
     })
     thread = threading.Thread(target=_install_worker, args=(settings, name),
+                              kwargs={"newer_than": newer_than, "on_finish": on_finish},
                               name=f"install-{name}", daemon=True)
     thread.start()
     return install_status(settings, name)
 
 
-def _install_worker(settings: Any, name: str) -> None:
+def _install_worker(settings: Any, name: str, newer_than: str = "",
+                    on_finish=None) -> None:
     global _install_running
     try:
         if name == CLAUDE_CODE:
-            _install_claude(settings)
+            # Called with the floor only when there is one, so a stand-in
+            # installer with the one-argument signature still fits the
+            # admin's path (the tests replace this function).
+            if newer_than:
+                _install_claude(settings, newer_than=newer_than)
+            else:
+                _install_claude(settings)
         else:
             _install_codex(settings)
     except ToolError as exc:
@@ -1048,6 +1085,14 @@ def _install_worker(settings: Any, name: str) -> None:
         # A new binary means every cached "is it installed / signed in" answer
         # is stale.
         _reset_probe_cache()
+        if on_finish is not None:
+            try:
+                with _install_lock:
+                    final = dict(_install_status.get(name) or _blank_status(name))
+                on_finish(final)
+            except Exception:                                         # noqa: BLE001
+                log.warning("the %s install's completion hook failed", name,
+                            exc_info=True)
 
 
 def _reset_probe_cache() -> None:
@@ -1056,11 +1101,19 @@ def _reset_probe_cache() -> None:
     ai_providers.reset_probe_cache()
 
 
-def _install_claude(settings: Any) -> None:
+def _install_claude(settings: Any, newer_than: str = "") -> None:
     name = CLAUDE_CODE
     key = platform_key()
     _set_status(name, step="asking the publisher for the latest version")
     version = latest_claude_version()
+    if newer_than and version_tuple(version) <= version_tuple(newer_than):
+        # CR-309: the unattended updater NEVER downgrades. It looked at
+        # `latest` a moment ago and saw something newer; this is the second
+        # look, and a publisher that moved `latest` back in between (a
+        # withdrawn release) gets a refusal rather than an older binary.
+        raise ToolError(
+            f"the publisher now offers Claude Code {version}, which is not newer "
+            f"than the {newer_than} already installed. Nothing was changed.")
     _set_status(name, version=version, step="reading the publisher's manifest")
     manifest = _fetch_json(f"{CLAUDE_BASE}/{version}/manifest.json")
     entry = claude_platform_entry(manifest, key)
@@ -1170,7 +1223,14 @@ def _finish_install(settings: Any, name: str, *, version: str, rel: str, sha: st
     """Record it, THEN flip the pointer. In that order: a pointer flipped
     before the record exists is an installed binary nobody can name a version
     for, and the flip is the single atomic act that makes a version live."""
-    _write_state(settings, name, {
+    # CR-309: the version this install REPLACES stays on disk for
+    # PRUNE_GRACE_SECONDS rather than being deleted with the flip, because a
+    # call already running it may still need its file - see
+    # `_prune_old_versions`. Recorded here so the sweep that removes it later
+    # knows which directory and since when.
+    prior = read_state(settings, name)
+    previous = str(prior.get("installed_version") or "")
+    record = {
         "installed_version": version,
         "sha256": sha,
         "size": size,
@@ -1179,12 +1239,19 @@ def _finish_install(settings: Any, name: str, *, version: str, rel: str, sha: st
         "checksum_source": checksum_source,
         "checksum_verified": checksum_source != "downloaded_bytes",
         "binary": rel,
-    })
+    }
+    keep_previous = ""
+    if (previous and previous != version and _VERSION_RE.match(previous)
+            and (tool_root(settings, name) / previous).is_dir()):
+        keep_previous = previous
+        record["previous_version"] = previous
+        record["superseded_at_epoch"] = time.time()
+    _write_state(settings, name, record)
     pointer = pointer_path(settings, name)
     tmp = pointer.with_name("current.tmp")
     tmp.write_text(f"{version}/{rel}", encoding="utf-8")
     os.replace(tmp, pointer)
-    _prune_old_versions(settings, name, keep=version)
+    _prune_old_versions(settings, name, keep=version, previous=keep_previous)
     home_dir(settings, name).mkdir(parents=True, exist_ok=True)
     try:
         home_dir(settings, name).chmod(0o700)
@@ -1196,17 +1263,80 @@ def _finish_install(settings: Any, name: str, *, version: str, rel: str, sha: st
              checksum_source)
 
 
-def _prune_old_versions(settings: Any, name: str, *, keep: str) -> None:
-    """One version on disk. These are 100-330 MB each and the appliance target
-    is a NAS with tens of gigabytes free, so keeping every version an admin
-    ever clicked UPDATE for is how the data volume fills up."""
+# How long the version an install replaced stays on disk (CR-309). The longest
+# call anything here makes on the CLI is Timeline Cards' 900 s
+# (`cards_ai.DEFAULT_TIMEOUT`); an hour is four of those with room to spare.
+PRUNE_GRACE_SECONDS = 3600.0
+
+
+def _prune_old_versions(settings: Any, name: str, *, keep: str,
+                        previous: str = "") -> None:
+    """One version on disk, plus - for PRUNE_GRACE_SECONDS - the one it
+    replaced. These are 100-330 MB each and the appliance target is a NAS
+    with tens of gigabytes free, so keeping every version an admin ever
+    clicked UPDATE for is how the data volume fills up.
+
+    WHY THE PREVIOUS ONE WAITS (CR-309, 2026-09-24). Once updates happen
+    unattended they land while Timeline Cards, the ytdl app and the probe
+    may be running the old binary by its absolute path. On Linux, unlinking
+    the file of a running executable does not disturb the process that is
+    executing it: the kernel holds the inode until the last mapping goes, and
+    ETXTBSY is only ever raised for WRITING an executing file, never for
+    unlinking it (`os.replace` over it would be fine too; that is not what
+    happens here, each version has its own directory). What CAN break is the
+    running program opening ITS OWN PATH again: Claude Code is a
+    single-file bundled executable that re-executes itself by
+    `process.execPath` for helpers (its embedded ripgrep, subagents), and
+    after an rmtree that path is ENOENT. `/proc/self/exe` would still
+    resolve, but nothing obliges the CLI to use it. Nothing in this module
+    can see every caller of the binary (the ytdl app runs it through its own
+    `ai_backend`), so rather than count running calls, the replaced version
+    is left where it is and swept by `sweep_superseded` once nothing started
+    before the flip can still be running. Every call started after the flip
+    reads the new pointer.
+    """
     root = tool_root(settings, name)
     children = list(root.iterdir()) if root.is_dir() else []
+    spared = {keep, "home", ".staging"} | ({previous} if previous else set())
     for child in children:
-        if (child.is_dir() and child.name not in (keep, "home", ".staging")
+        if (child.is_dir() and child.name not in spared
                 and _VERSION_RE.match(child.name)):
             shutil.rmtree(child, ignore_errors=True)
     shutil.rmtree(root / ".staging", ignore_errors=True)
+
+
+def sweep_superseded(settings: Any, name: str, now: float | None = None) -> str:
+    """Delete the version an install replaced, once PRUNE_GRACE_SECONDS have
+    passed (CR-309). -> the version removed, or "". Never raises.
+
+    Called from the collector's cycle (`auto_update_tick`), so a replaced
+    version goes at most one cycle after its grace, whether or not the
+    unattended updater is on - the admin's UPDATE button defers the same way.
+    """
+    try:
+        state = read_state(settings, name)
+        previous = str(state.get("previous_version") or "")
+        if not previous:
+            return ""
+        now = time.time() if now is None else now
+        try:
+            since = float(state.get("superseded_at_epoch") or 0.0)
+        except (TypeError, ValueError):
+            since = 0.0
+        if since and 0 <= now - since < PRUNE_GRACE_SECONDS:
+            return ""
+        current = str(state.get("installed_version") or "")
+        if (previous != current and _VERSION_RE.match(previous)):
+            shutil.rmtree(tool_root(settings, name) / previous, ignore_errors=True)
+        state.pop("previous_version", None)
+        state.pop("superseded_at_epoch", None)
+        _write_state(settings, name, state)
+        log.info("removed %s %s, replaced %s ago", name, previous,
+                 f"{int((now - since) / 60)} min" if since else "a while")
+        return previous
+    except Exception:                                                 # noqa: BLE001
+        log.warning("could not sweep the replaced %s version", name, exc_info=True)
+        return ""
 
 
 def remove_install(settings: Any, name: str) -> dict:
@@ -1228,6 +1358,242 @@ def remove_install(settings: Any, name: str) -> dict:
     _reset_probe_cache()
     log.info("removed the %s install and its home directory", name)
     return install_status(settings, name)
+
+
+# ------------------------------------------------ the unattended updater
+# CR-309 (2026-09-24). Timeline Cards passes the CLI a family alias (`opus`)
+# so a new model arrives with no redeploy (cards_ai.cli_model_arg), and an
+# alias is only as new as the CLI resolving it: on 2026-09-23 the installed
+# 2.1.267 refused `claude-opus-5-5` outright ("isn't described by this
+# version's model catalog") until it was updated by hand. Alex, the same day:
+# "Claude Code is kept updated automatically, so new models arrive with no
+# action from you."
+#
+# WHAT IT IS: the admin's UPDATE button, pressed by the collector at most once
+# a day. The SAME `start_install` -> `_install_claude` path, so the publisher's
+# manifest checksum stays a CONDITION (a release with none is refused and
+# nothing is installed), the in-flight record and the one-install-at-a-time
+# latch are the ones the wizard already honours, and a manual install that is
+# running makes this a no-op. It never downgrades (`newer_than`), it installs
+# only over a wizard install (a CLI the customer typed a path to is theirs to
+# update), and it is off unless the site turned on BOTH `ai_cli_providers` and
+# `ai_cli_auto_update` - the second is off in the vendor build, like every
+# optional feature.
+#
+# WHERE IT RUNS: `Collector.run_cycle` calls `auto_update_tick`, which is a few
+# comparisons when nothing is due. The publisher round trip and the download
+# run on their own threads, never on the collector's.
+
+AUTO_UPDATE_FEATURE = "ai_cli_auto_update"
+AUTO_UPDATE_INTERVAL = 24 * 3600.0
+# How long after this process starts before its first look. Not at once: the
+# boot is when the collector, the Cards engines and the feed poller all start,
+# and nothing about a CLI update is urgent enough to join them.
+AUTO_UPDATE_BOOT_DELAY = 5 * 60.0
+# ...and the first look after a boot is skipped if the last one was this
+# recent, so a container in a restart loop does not ask the publisher on
+# every lap.
+AUTO_UPDATE_BOOT_FLOOR = 3600.0
+# How often the deferred prune (`sweep_superseded`) is looked at. It reads
+# state.json, and `run_cycle` comes round every few seconds.
+SUPERSEDED_SWEEP_EVERY = 300.0
+
+_auto_lock = threading.Lock()
+_auto_running = False
+_auto_checked_this_process = False
+_auto_last_checked = 0.0          # epoch; max of this and the file's
+_auto_process_started = time.time()
+_auto_last_sweep = 0.0
+# When a due look found the feature off or nothing installed, the next time
+# that is asked again. Those two answers are SQL reads, and run_cycle comes
+# round every few seconds.
+AUTO_UPDATE_RECONSIDER = 60.0
+_auto_reconsider_at = 0.0
+
+
+def auto_update_path(settings: Any) -> Path:
+    """`<data>/tools/claude-code/auto_update.json`: the last look and its
+    outcome. Beside state.json, so REMOVE takes it with the install."""
+    return tool_root(settings, CLAUDE_CODE) / "auto_update.json"
+
+
+def read_auto_update(settings: Any) -> dict:
+    """The updater's record, or {}. Corrupt reads as {} (never a 500, never
+    a crash in the collector)."""
+    try:
+        data = json.loads(auto_update_path(settings).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_auto_update(settings: Any, **fields) -> None:
+    """Merge `fields` into the record. Best effort: a record that cannot be
+    written costs the notice and the "last checked" line, never the update,
+    and `_auto_last_checked` still bounds the cadence in memory."""
+    with _auto_lock:
+        try:
+            data = read_auto_update(settings)
+            data.update(fields)
+            path = auto_update_path(settings)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f"auto_update.json.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            log.warning("could not record the Claude Code auto-update outcome",
+                        exc_info=True)
+
+
+def _auto_due(settings: Any, now: float) -> bool:
+    """Is a look due? Time alone, so a site with the feature off pays two
+    comparisons per cycle and one file read per process."""
+    global _auto_last_checked
+    if now - _auto_process_started < AUTO_UPDATE_BOOT_DELAY:
+        return False
+    if not _auto_checked_this_process and not _auto_last_checked:
+        try:
+            _auto_last_checked = float(
+                read_auto_update(settings).get("last_checked_epoch") or 0.0)
+        except (TypeError, ValueError):
+            _auto_last_checked = 0.0
+    gap = now - _auto_last_checked
+    if gap < 0:
+        # The clock moved backwards past the last stamp. A stamp in the
+        # future would otherwise hold every look off until the clock caught
+        # up; asking once is the cheaper mistake.
+        return True
+    floor = AUTO_UPDATE_INTERVAL if _auto_checked_this_process else AUTO_UPDATE_BOOT_FLOOR
+    return gap >= floor
+
+
+def auto_update_tick(conn, settings: Any, now: float | None = None,
+                     spawn=None) -> str:
+    """The collector's hook. -> a word for the log/tests: "", "off",
+    "not installed", "running", "started". Never raises.
+
+    `spawn(fn)` runs the look; a daemon thread by default, synchronous in
+    the tests.
+    """
+    global _auto_running, _auto_checked_this_process, _auto_last_checked
+    global _auto_last_sweep, _auto_reconsider_at
+    try:
+        now = time.time() if now is None else now
+        if now - _auto_last_sweep >= SUPERSEDED_SWEEP_EVERY:
+            _auto_last_sweep = now
+            for name in TOOLS:
+                sweep_superseded(settings, name, now)
+        if now < _auto_reconsider_at or not _auto_due(settings, now):
+            return ""
+        from . import ai_providers, site_store
+
+        # Asked only when a look is due, and NOT stamped as a look when off:
+        # an admin who turns the feature on gets the check on the next cycle,
+        # not a day later.
+        if not (site_store.feature_enabled(conn, settings, AUTO_UPDATE_FEATURE)
+                and ai_providers.cli_enabled(conn, settings)):
+            _auto_reconsider_at = now + AUTO_UPDATE_RECONSIDER
+            return "off"
+        if not installed_binary(settings, CLAUDE_CODE):
+            _auto_reconsider_at = now + AUTO_UPDATE_RECONSIDER
+            return "not installed"
+        with _auto_lock:
+            if _auto_running:
+                return "running"
+            _auto_running = True
+            _auto_checked_this_process = True
+            _auto_last_checked = now
+        # Stamped BEFORE the round trip: a look that hangs or fails is still
+        # a look, and the next one is a day away, not a cycle away.
+        _write_auto_update(settings, last_checked_epoch=now,
+                           last_checked_at=_utcnow())
+        run = spawn or _spawn_daemon
+        try:
+            run(lambda: _auto_update_run(settings))
+        except Exception:
+            with _auto_lock:
+                _auto_running = False
+            raise
+        return "started"
+    except Exception:                                                 # noqa: BLE001
+        log.warning("the Claude Code auto-update check failed to run", exc_info=True)
+        return ""
+
+
+def _spawn_daemon(fn) -> None:
+    threading.Thread(target=fn, name="cli-auto-update", daemon=True).start()
+
+
+def _auto_update_run(settings: Any) -> None:
+    """One look: the publisher's `latest` against what is installed, and the
+    verified install if it is newer. Every outcome is written to the record;
+    a failure is written, logged and surfaced as a notice, never raised."""
+    global _auto_running
+    name = CLAUDE_CODE
+    try:
+        installed = str(read_state(settings, name).get("installed_version") or "")
+        if not version_tuple(installed):
+            # Cannot compare, so cannot promise "never older". The admin's
+            # button still works; this does nothing.
+            _auto_outcome(settings, "skipped", installed=installed, detail=(
+                "the installed version is not recorded, so an automatic update "
+                "cannot tell whether the publisher's build is newer"))
+            return
+        try:
+            latest = latest_claude_version()
+        except ToolError as exc:
+            _auto_outcome(settings, "failed", installed=installed,
+                          detail=_redact(str(exc)))
+            return
+        if version_tuple(latest) <= version_tuple(installed):
+            _auto_outcome(settings, "up_to_date", installed=installed, latest=latest,
+                          detail="")
+            return
+        log.warning("Claude Code auto-update: %s is installed and the publisher "
+                    "offers %s; installing it through the verified path",
+                    installed, latest)
+        # Recorded BEFORE the start, so a worker that fails in its first
+        # millisecond (its `on_finish` writes "failed") is never overwritten
+        # by a late "started".
+        _auto_outcome(settings, "started", installed=installed, latest=latest,
+                      detail="")
+        try:
+            start_install(settings, name, newer_than=installed,
+                          started_by="auto-update",
+                          on_finish=lambda status: _auto_finished(settings, installed,
+                                                                  latest, status))
+        except ToolBusy:
+            _auto_outcome(settings, "skipped", installed=installed, latest=latest,
+                          detail="an install was already running (most likely one "
+                                 "an admin started); nothing more to do")
+        except ToolError as exc:
+            _auto_outcome(settings, "failed", installed=installed, latest=latest,
+                          detail=_redact(str(exc)))
+    except Exception as exc:                                          # noqa: BLE001
+        log.exception("the Claude Code auto-update crashed")
+        _auto_outcome(settings, "failed", detail=(
+            f"the automatic update stopped with an unexpected error "
+            f"({type(exc).__name__}); nothing was installed"))
+    finally:
+        with _auto_lock:
+            _auto_running = False
+
+
+def _auto_finished(settings: Any, installed: str, latest: str, status: dict) -> None:
+    if status.get("state") == "done":
+        _auto_outcome(settings, "updated", installed=str(status.get("version") or latest),
+                      previous=installed, latest=latest, detail="")
+    else:
+        _auto_outcome(settings, "failed", installed=installed, latest=latest,
+                      detail=str(status.get("error") or "the install did not finish"))
+
+
+def _auto_outcome(settings: Any, result: str, **fields) -> None:
+    fields = {k: v for k, v in fields.items() if v is not None}
+    level = logging.WARNING if result == "failed" else logging.INFO
+    log.log(level, "Claude Code auto-update: %s%s", result,
+            f" ({fields.get('detail')})" if fields.get("detail") else "")
+    _write_auto_update(settings, result=result, result_at=_utcnow(), **fields)
 
 
 # ------------------------------------------------------------- the sign-in

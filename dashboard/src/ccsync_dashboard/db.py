@@ -3514,6 +3514,13 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
         "this server cannot list the b-roll archive, so every clip sent to "
         "Resolve is the small preview",
         "href": "/broll"},
+    # CR-309 (2026-09-24). Written by `notices._check_ai_cli_update` from the
+    # unattended Claude Code updater's record (`cli_tools.auto_update_tick`).
+    # A warn: the CLI that is installed still works; what fails is a model
+    # newer than it knows.
+    "ai_cli_update_failed": {"severity": "warn", "what":
+        "this server could not keep Claude Code up to date by itself",
+        "href": "/admin/settings#ai-providers"},
 }
 
 

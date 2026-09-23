@@ -30078,6 +30078,12 @@ ends them can now be seen.
   its footage's new home. Only those 12 files were deleted (snapshot
   `tank/TheCreatorsPool@ccsync-pre-orphan-proxies-ff5-film12-20260923-234329`);
   the folders themselves hold ~41 GB of proxies still paired with footage.
+  Six more were flagged after 0.7.51 booted: `.braw` clips whose `.sidecar`
+  had stayed behind (so a stem-only look saw a pair). Their footage had
+  moved and no other copy of those proxies existed anywhere, so they were
+  MOVED with their sidecars to the footage's new folders (C088-C091 to
+  王思靜 Justine O, C075/C076 to 張雅婷 Chang Ya-Ting; snapshot
+  `...@ccsync-pre-braw-proxies-follow-ff5-film12-20260924-000043`).
 
 ### Deploy order
 Dashboard only. No wire change, no companion change. Schema v56 is one

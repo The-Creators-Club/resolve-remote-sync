@@ -926,12 +926,12 @@ def downloaded(tmp_path, monkeypatch):
 
 def _missing_paths(caplog):
     return [r.getMessage() for r in caplog.records
-            if "missing on disk, not under" in r.getMessage()]
+            if "original is not on this computer and no usable proxy" in r.getMessage()]
 
 
 def _missing_summaries(caplog):
     return [r.getMessage() for r in caplog.records
-            if "clip paths missing on disk (" in r.getMessage()]
+            if "with neither the original nor a usable proxy on this computer (" in r.getMessage()]
 
 
 def test_a_clip_that_stays_missing_logs_its_path_once_and_a_count_per_poll(
@@ -951,12 +951,15 @@ def test_a_clip_that_stays_missing_logs_its_path_once_and_a_count_per_poll(
     assert (first["missing"], first["missing_new"]) == (1, 1)
     assert (second["missing"], second["missing_new"]) == (1, 0)
     assert _missing_paths(caplog) == [
-        f"clip path missing on disk, not under local_root/prefix: {clip}"
+        # CR-317 (2026-09-24): reworded -- the old line said "not under
+        # local_root/prefix", the opposite of what MISSING means.
+        f"clip's original is not on this computer and no usable proxy for it "
+        f"is either: {clip}"
     ]
     # The count still shows up every poll -- that is the signal worth keeping.
     assert _missing_summaries(caplog) == [
-        "1 clip paths missing on disk (1 new)",
-        "1 clip paths missing on disk (0 new)",
+        "1 clip(s) with neither the original nor a usable proxy on this computer (1 new)",
+        "1 clip(s) with neither the original nor a usable proxy on this computer (0 new)",
     ]
 
 
@@ -979,7 +982,7 @@ def test_a_newly_missing_clip_still_gets_its_own_line(tmp_path, downloaded, capl
 
     assert (summary["missing"], summary["missing_new"]) == (2, 1)
     assert [m.rsplit(": ", 1)[-1] for m in _missing_paths(caplog)] == [a, b]
-    assert _missing_summaries(caplog)[-1] == "2 clip paths missing on disk (1 new)"
+    assert _missing_summaries(caplog)[-1] == "2 clip(s) with neither the original nor a usable proxy on this computer (1 new)"
 
 
 def test_a_clip_that_syncs_down_and_vanishes_again_re_logs(tmp_path, downloaded, caplog):
@@ -1003,8 +1006,8 @@ def test_a_clip_that_syncs_down_and_vanishes_again_re_logs(tmp_path, downloaded,
 
     assert len(_missing_paths(caplog)) == 2
     assert _missing_summaries(caplog) == [
-        "1 clip paths missing on disk (1 new)",
-        "1 clip paths missing on disk (1 new)",
+        "1 clip(s) with neither the original nor a usable proxy on this computer (1 new)",
+        "1 clip(s) with neither the original nor a usable proxy on this computer (1 new)",
     ]
 
 

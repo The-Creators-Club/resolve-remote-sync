@@ -43,6 +43,7 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 import shutil
 import smtplib
 import sqlite3
@@ -211,6 +212,12 @@ ALERT_CYCLE_BUDGET_SECONDS = 120.0
 
 MAX_SETTING_CHARS = 400
 MAX_PASSWORD_CHARS = 400
+
+# The server triage agent's two mailbox settings (2026-09-24). Deliberately
+# narrow: the reply address is quoted into an IMAP SEARCH, so nothing that
+# could close the quote or add a second criterion may get past the save.
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$")
 MAX_BODY_CHARS = 60000
 # One machine cannot fill a mail queue: a fleet where every check fires on
 # every machine still sends a bounded number of messages per cycle.
@@ -271,6 +278,17 @@ SETTING_KEYS: dict[str, str] = {
     # per sink, and a site that has never touched this must follow the sink it
     # picks rather than a value frozen the day it saved the form.
     "alerts_digest": "tri",
+    # The server triage agent (2026-09-24, docs/SERVER_TRIAGE_AGENT.md). Here
+    # and not in site_store.KEYS for the reason above: the reply address and
+    # the IMAP host are this site's mailbox, not manifest fields, and must not
+    # be published in `GET /api/v1/site`. Off by default: it runs Claude Code
+    # twice a day on this server's bill, which is a cost the owner opts into.
+    "alerts_triage": "bool",
+    "alerts_triage_hours": "hours",
+    # Blank disables replies; the report is still sent.
+    "alerts_triage_reply_to": "email",
+    # Blank is DERIVED from alerts_smtp_host (triage_mail.imap_host).
+    "alerts_imap_host": "host",
 }
 
 _DEFAULTS = {
@@ -280,7 +298,13 @@ _DEFAULTS = {
     "alerts_smtp_verify_tls": "1",
     "alerts_weekly": "1",
     "alerts_heartbeat": "0",
+    "alerts_triage": "0",
+    "alerts_triage_hours": "6,18",
 }
+
+# 2026-09-24: at most four checks a day. Each one is a Claude Code run over
+# the whole fleet's state, and the owner asked for two.
+TRIAGE_MAX_HOURS = 4
 
 
 def _validate(key: str, raw: str) -> str:
@@ -321,6 +345,32 @@ def _validate(key: str, raw: str) -> str:
         if value and not value.lower().startswith("https://"):
             raise AlertError("the webhook URL must start with https:// "
                              "(an alert body names your editors and computers)")
+        return value
+    if kind == "hours":
+        # Blank is the default rather than "never": the on/off box is what
+        # turns the check off, and a cleared field silently doing that would
+        # be a second switch nobody can see.
+        if not value:
+            return _DEFAULTS["alerts_triage_hours"]
+        parts = [p.strip() for p in value.split(",") if p.strip()]
+        if not parts or not all(p.isdigit() and 0 <= int(p) <= 23 for p in parts):
+            raise AlertError(f"{key}: hours of the day from 0 to 23, separated "
+                             f"by commas (for example 6,18)")
+        hours = sorted({int(p) for p in parts})
+        if len(hours) > TRIAGE_MAX_HOURS:
+            raise AlertError(f"{key}: at most {TRIAGE_MAX_HOURS} checks a day")
+        return ",".join(str(h) for h in hours)
+    if kind == "email":
+        # One plain address, because it is quoted into an IMAP SEARCH: a
+        # quote, a space or a second address here would change what that
+        # search matches, and the search is the fence around the owner's inbox.
+        if value and not _EMAIL_RE.match(value):
+            raise AlertError(f"{key}: one email address, such as "
+                             f"you+ccsync@example.com")
+        return value
+    if kind == "host":
+        if value and not _HOST_RE.match(value):
+            raise AlertError(f"{key}: a host name such as imap.gmail.com")
         return value
     if key == "alerts_timezone" and value:
         _zone(value)                       # raises AlertError on a bad name
@@ -1612,12 +1662,50 @@ def _check_lane_error(ctx: Ctx) -> list[Finding]:
     return out
 
 
+# CR-318 (2026-09-24): how long a JUST-ticked folder may sit unfiltered before
+# it is an alert. A fresh tick is unfiltered by construction for one sync
+# turn: Syncthing accepts the share before the companion's next turn confirms
+# the .stignore, and the sequencer keeps the folder PAUSED meanwhile (AUDIT_2
+# L-3) - the latch doing its job, not a fault. Ticking Film 1 + 2 for ruskin
+# on 2026-09-24 mailed the owner "a shared folder has no filter" at 11:27 and
+# "cleared" at 11:37. Thirty minutes is three of that machine's rotations.
+UNFILTERED_FRESH_TICK_SECONDS = 1800
+
+
+def _unfiltered_are_fresh_ticks(ctx: Ctx, e: Mapping[str, Any],
+                                g: Mapping[str, Any], count: int) -> bool:
+    """True only when EVERY folder the machine names as unfiltered was ticked
+    for it inside the grace window. Anything that cannot be shown - no names
+    (an older build), more folders than the ten names the report carries, a
+    name with no tick row, an unreadable stamp - is not fresh, and alerts."""
+    names = [n.strip() for n in str(g.get("folders_unfiltered_names") or "").split(",")
+             if n.strip()]
+    if not names or len(names) < int(count):
+        return False
+    editor, machine = e.get("editor_username"), e.get("machine") or ""
+    for slug in names:
+        try:
+            row = ctx.conn.execute(
+                "SELECT MAX(CASE WHEN changed_at > created_at THEN changed_at "
+                "ELSE created_at END) AS at FROM selections "
+                "WHERE editor_username=? AND project_slug=? AND machine IN (?, '')",
+                (editor, slug, machine)).fetchone()
+        except sqlite3.Error:
+            return False
+        age = _age(row["at"] if row else None, ctx.now)
+        if age is None or age >= UNFILTERED_FRESH_TICK_SECONDS:
+            return False
+    return True
+
+
 def _check_folders_unfiltered(ctx: Ctx) -> list[Finding]:
     out = []
     for e in ctx.editors:
         g = ctx.guard(e)
         count = g.get("folders_unfiltered")
         if not count:
+            continue
+        if _unfiltered_are_fresh_ticks(ctx, e, g, count):
             continue
         who = ctx.name(_who(e))
         out.append(_f(
@@ -4009,7 +4097,7 @@ def _tls_context(verify: bool) -> ssl.SSLContext:
 
 
 def _send_smtp(values: Mapping[str, str], password: str,
-               subject: str, text: str) -> str:
+               subject: str, text: str, *, reply_to: str = "") -> str:
     host = (values.get("alerts_smtp_host") or "").strip()
     sender = (values.get("alerts_smtp_from") or "").strip()
     recipients = [a.strip() for a in
@@ -4028,6 +4116,11 @@ def _send_smtp(values: Mapping[str, str], password: str,
     message["Subject"] = subject
     message["From"] = sender
     message["To"] = ", ".join(recipients)
+    if reply_to:
+        # The server triage agent (2026-09-24): replies to its report go to a
+        # filtered address in the owner's own inbox, which is the ONLY mail
+        # the reply poller ever looks at (triage_mail.poll).
+        message["Reply-To"] = reply_to
     message.set_content(text)
 
     try:
@@ -4067,9 +4160,12 @@ def _send_smtp(values: Mapping[str, str], password: str,
 
 def _transmit(
     conn: sqlite3.Connection, settings: Any, subject: str, text: str,
-    *, label: str,
+    *, label: str, reply_to: str = "",
 ) -> dict[str, Any]:
     """Hand ONE message to this site's sink. No dedup, no ledger row.
+
+    `reply_to` (the server triage agent, 2026-09-24) becomes a Reply-To header
+    on the smtp sink and is ignored by the webhook sink, which has no reply.
 
     Split out of `send()` for the digest (CR-190, 2026-09-04): one message can
     now carry many findings, so "deliver this text" and "write down what
@@ -4095,7 +4191,13 @@ def _transmit(
             detail = _send_webhook(url, subject, text)
         else:
             password, _source = read_password(settings)
-            sent_to = _send_smtp(values, password, subject, text)
+            if reply_to:
+                sent_to = _send_smtp(values, password, subject, text,
+                                     reply_to=reply_to)
+            else:
+                # The four-argument call every other sender has always made,
+                # so a stand-in written against it still stands in.
+                sent_to = _send_smtp(values, password, subject, text)
             detail = "sent"
     except AlertError as exc:
         log.warning("alerts: %s alert could not be delivered: %s", label, exc)
@@ -4521,6 +4623,21 @@ def run_cycle(
     # disagrees with.
     db.meta_set_json(conn, db.META_ALERTS_OPEN, counts)
     conn.commit()
+    # The server triage agent (2026-09-24, docs/SERVER_TRIAGE_AGENT.md), AFTER
+    # the heartbeat and after the commit above. `maybe_start` only DECIDES and
+    # starts a daemon thread with its own connection: the run takes minutes,
+    # and this is the collector's thread, which the watchdog replaces when a
+    # cycle stalls. Never allowed to cost the alerts pass its note.
+    try:
+        from . import triage
+
+        triage.maybe_start(settings, now, conn=conn)
+    except Exception:                                               # noqa: BLE001
+        log.exception("alerts: the server check could not be scheduled")
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
     note = None
     sink = get_settings(conn).get("alerts_sink") or SINK_NONE
     if result.get("undelivered"):

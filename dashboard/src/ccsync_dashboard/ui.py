@@ -410,6 +410,10 @@ def skipped_scope(guard: Mapping[str, Any] | None) -> str:
 templates.env.globals["skipped_scope"] = skipped_scope
 templates.env.globals["CHIP_HELP"] = CHIP_HELP
 templates.env.globals["chip_help"] = chip_help
+# CR-317 (2026-09-24): the RESOLVE row's missing-clips group is labelled by
+# what the reporting companion build put in the list (health.py says why).
+templates.env.globals["missing_clips_label"] = health.missing_clips_label
+templates.env.globals["missing_clips_help"] = health.missing_clips_help
 
 
 def safe_to_close(transfers_view: dict | None, editor: str | None) -> dict | None:
@@ -1816,9 +1820,23 @@ def _alerts_context(request: Request, conn, error: str = "",
         "alerts_log_groups": alerts.group_log(db.fetch_alerts(conn, limit=200)),
         "alerts_interval_minutes": int(
             max(1.0, getattr(settings, "interval_alerts", 600.0)) // 60),
+        # The SERVER CHECK block (the server triage agent, 2026-09-24).
+        # `status_view` never raises: this page is where somebody comes to
+        # find out why mail is not arriving.
+        "triage": _triage_status(conn, settings),
         "error": error,
         "notice": notice,
     }
+
+
+def _triage_status(conn, settings) -> dict:
+    try:
+        from . import triage
+
+        return triage.status_view(conn, settings)
+    except Exception as exc:  # noqa: BLE001 - an import failure costs the block, not the page
+        log.exception("the SERVER CHECK block could not be built")
+        return {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
 
 
 @router.get("/admin/alerts")
@@ -2265,6 +2283,44 @@ def partial_admin_alerts_test(request: Request,
         error = f"the test could not be sent: {result['detail']}"
     return _render(request, "partials/admin_alerts.html",
                    _alerts_context(request, conn, error, notice))
+
+
+@router.post("/partials/admin/alerts/triage/run")
+def partial_admin_triage_run(request: Request,
+                             conn: sqlite3.Connection = Depends(get_conn)):
+    """SERVER CHECK [ RUN NOW ] (the server triage agent, 2026-09-24).
+
+    Starts a check regardless of the schedule, still one at a time, and
+    answers at once: the run itself takes minutes on a daemon thread and
+    mails its report like a scheduled one."""
+    user = _require_admin_page(request)
+    from . import triage
+
+    started, why = triage.start_run(request.app.state.settings, conn)
+    if started:
+        db.audit(conn, user, "alerts.triage_run", "alerts", {})
+        conn.commit()
+        notice, error = ("Server check started. The report arrives by mail in a "
+                         "few minutes."), ""
+    else:
+        notice, error = "", f"the server check did not start: {why}"
+    return _render(request, "partials/admin_alerts.html",
+                   _alerts_context(request, conn, error, notice))
+
+
+@router.get("/admin/alerts/triage/{run_id}", response_class=PlainTextResponse)
+def page_admin_triage_report(run_id: int, request: Request,
+                             conn: sqlite3.Connection = Depends(get_conn)):
+    """One server check's report exactly as it was mailed. Text, like the
+    weekly preview: the thing being shown IS the text. Admin only: it names
+    every computer and what is wrong with it."""
+    _require_admin_page(request)
+    from . import triage
+
+    text = triage.report_text(conn, run_id)
+    if text is None:
+        raise HTTPException(status_code=404, detail="no such server check")
+    return PlainTextResponse(text)
 
 
 @router.get("/partials/project/{slug}/bins")

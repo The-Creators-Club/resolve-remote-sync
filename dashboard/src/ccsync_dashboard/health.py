@@ -620,6 +620,14 @@ def _stamp_age(stamp: Any, now: str) -> float | None:
         return None
 
 
+def _lane_letter(value: Any) -> str:
+    """`A` / `a` / `lane_a_video_up` -> `a`; anything else lower-cased as is."""
+    key = str(value or "").strip().lower()
+    if key.startswith("lane_") and len(key) > 5:
+        return key[5]
+    return key
+
+
 def stall_is_current(row: Mapping[str, Any], now: str = "") -> bool:
     """Is this machine's reported stall a blockage NOW, or a healed scar?
 
@@ -645,13 +653,18 @@ def stall_is_current(row: Mapping[str, Any], now: str = "") -> bool:
     age = _stamp_age(at, now)
     if age is not None and age > STALL_CURRENT_SECONDS:
         return False
-    lane = str(_why_get(row, "stalled_lane") or "").strip().lower()
+    lane = _lane_letter(_why_get(row, "stalled_lane"))
     for entry in row.get("lanes") or []:
         if not isinstance(entry, Mapping):
             continue
-        name = str(entry.get("lane") or entry.get("name") or "").strip().lower()
+        name = _lane_letter(entry.get("lane") or entry.get("name"))
         label = str(entry.get("label") or "").strip().lower()
-        if lane and lane not in (name, label) and not name.endswith(f"_{lane}"):
+        # CR-313 (2026-09-24): compared as LANE LETTERS. The stall record says
+        # `A` and the lane rows say `lane_a_video_up`, and the old test
+        # (`name.endswith("_a")`) matched neither spelling of the other, so
+        # "that lane has completed a pass since" never fired on a live row:
+        # only the day-old ceiling ever retired a stall.
+        if lane and lane not in (name, label):
             continue
         synced = entry.get("last_sync")
         if not synced:
@@ -792,6 +805,21 @@ def _why_first(
     be rendered as a green claim; it is the absence of a sentence.
     """
     reported = str(_why_get(row, "blocked_reason") or "").strip()
+    # CR-313 (2026-09-24): the companion's own answer wins - EXCEPT a stall
+    # this server can show is a healed scar. live-1 gave `stall_is_current`
+    # its day-old and "lane has passed since" tests, but only the fallback
+    # derivation below and the alert asked it; a 0.9.74 companion re-sends
+    # its persistent lane_stall.json as `blocked.reason = lane_stalled` on
+    # every report, so ruskin's row read "Not syncing: upload has been busy
+    # for 25 minutes" in red for 13 days after one stall on 2026-09-11 that
+    # healed the same day. Skipped, not rewritten: the derivation below then
+    # says whatever else is true, or nothing. Only when the report carries
+    # the stall record that PROVES it healed: a bare `lane_stalled` with no
+    # record is "cannot tell", and cannot-tell never turns a stall green.
+    if (reported == "lane_stalled"
+            and (_why_get(row, "stalled_lane") or _why_get(row, "stalled_seconds"))
+            and not stall_is_current(row, now or "")):
+        reported = ""
     if reported:
         code = reported if reported in WHY_ORDER else "blocked"
         sentence = _why_sentence(code, row)
@@ -944,6 +972,46 @@ def why_not_syncing(
         [causes[0][1]] + [_clause(s) for _c, s in causes[1:]])
 
 
+# CR-311 (2026-09-24): which of the companion's own `blocked.reason` codes
+# hold a queued row in which lane. leso's 52 Elections originals sat on the
+# transfers page as a plain amber "upload" for three days while machine_state
+# said `root_absent` since 09-21: the drive holding them was unplugged, and
+# the queue, which never read that column, looked exactly like a queue that
+# was draining. Only the COMPANION's reported reason counts here, never a
+# derivation: a queue row labelled "on hold" on this server's guess is the
+# CR-269 false sentence moved to another page. `lane_stalled` is deliberately
+# absent - a watchdog kill restarts the lane, so it is not a hold.
+_QUEUE_HOLDS: dict[str, frozenset[str]] = {
+    code: frozenset("abc") for code in (
+        "not_signed_in", "licence_pending", "root_absent", "root_not_answering",
+        "root_misplaced", "fleet_halt", "local_halt", "paused",
+        "transport_offline")
+}
+_QUEUE_HOLDS.update({
+    "clock_skew": frozenset("b"),
+    "disk_full": frozenset("b"),
+    "breaker_tripped": frozenset("b"),
+    "syncthing_down": frozenset("c"),
+})
+
+
+def queue_hold(
+    guard: Mapping[str, Any] | None, lane: str,
+) -> dict[str, Any] | None:
+    """{reason, sentence, since} when this machine's last report says lane
+    `lane` ("a"/"b"/"c") cannot move, else None.
+
+    None is "no reported hold", not "moving": the row keeps its ordinary
+    rendering, exactly as before this existed."""
+    if not guard:
+        return None
+    code = str(guard.get("blocked_reason") or "").strip()
+    if str(lane or "") not in _QUEUE_HOLDS.get(code, frozenset()):
+        return None
+    return {"reason": code, "sentence": _why_sentence(code, guard),
+            "since": guard.get("blocked_since")}
+
+
 def why_causes(
     row: Mapping[str, Any], now: str | None = None
 ) -> list[tuple[str, str]]:
@@ -1090,6 +1158,60 @@ def fleet_headline(row: Mapping[str, Any]) -> dict[str, Any]:
             "level": HEADLINE_MUTED}
 
 
+# CR-317 (2026-09-24): what `resolve_health.missing_clips` MEANS depends on
+# the build that sent it. Up to companion 0.9.75 it is every timeline clip
+# whose ORIGINAL is not on the machine, including clips playing their proxy,
+# which on a remote rig is the designed steady state (lane B brings proxies
+# only): ruskin's row said "57 clips Resolve cannot find" over a timeline that
+# played perfectly. From 0.9.76 the companion leaves out a clip whose proxy is
+# on disk and not refused by Resolve, so the list is the clips with NOTHING to
+# play. The wire did not change, so the label is the only place the
+# difference can be told. The old label must be true of the old list, which
+# is why it names the original only; a version that cannot be parsed gets it
+# too, because it is true of both lists.
+MISSING_CLIPS_PROXY_AWARE_FROM = (0, 9, 76)
+MISSING_CLIPS_LABEL_ORIGINAL_ONLY = "whose original is not on this computer"
+MISSING_CLIPS_LABEL_NOTHING_TO_PLAY = (
+    "with neither the original nor a proxy on this computer")
+MISSING_CLIPS_HELP_ORIGINAL_ONLY = (
+    "This CC Sync build lists every clip whose original file is not on this "
+    "computer, including clips that are playing their proxy. A clip playing "
+    "its proxy is fine: on a remote computer the originals stay on the "
+    "server by design. Update the companion to 0.9.76 or later to see only "
+    "the clips that have nothing to play.")
+MISSING_CLIPS_HELP_NOTHING_TO_PLAY = (
+    "Neither the original file nor a proxy for these clips is on this "
+    "computer, so Resolve has nothing to play for them. Clips playing their "
+    "proxy are not listed here.")
+
+
+def _companion_is_proxy_aware(companion_version: Any) -> bool:
+    """Does this build's `missing_clips` leave out clips playing a proxy?
+
+    The suffix a dev or hotfix build carries (`0.9.76+dirty`, `-rc1`) is
+    dropped before the compare; anything still unreadable answers False,
+    whose label is true of either list."""
+    text = re.split(r"[+\-\s]", str(companion_version or "").strip(), maxsplit=1)[0]
+    parts = text.split(".")
+    if not text or not all(part.isdigit() for part in parts):
+        return False
+    return tuple(int(part) for part in parts) >= MISSING_CLIPS_PROXY_AWARE_FROM
+
+
+def missing_clips_label(companion_version: Any) -> str:
+    """The words after "N clips" for a row's `missing_clips` (CR-317)."""
+    if _companion_is_proxy_aware(companion_version):
+        return MISSING_CLIPS_LABEL_NOTHING_TO_PLAY
+    return MISSING_CLIPS_LABEL_ORIGINAL_ONLY
+
+
+def missing_clips_help(companion_version: Any) -> str:
+    """The hover text beside that label (CR-317)."""
+    if _companion_is_proxy_aware(companion_version):
+        return MISSING_CLIPS_HELP_NOTHING_TO_PLAY
+    return MISSING_CLIPS_HELP_ORIGINAL_ONLY
+
+
 def detail_notes(row: Mapping[str, Any]) -> list[str]:
     """The things behind [ DETAILS ] that are actually WRONG, in words.
 
@@ -1182,8 +1304,11 @@ def detail_notes(row: Mapping[str, Any]) -> list[str]:
     if missing:
         # UX-10 (usability sweep 2026-09-03): "(s)" is not a word, and the
         # count is known here.
+        # CR-317 (2026-09-24): "Resolve cannot find" was false for every
+        # clip playing its proxy; the words now depend on what the reporting
+        # build put in the list (missing_clips_label).
         notes.append(f"{len(missing)} clip{'' if len(missing) == 1 else 's'} "
-                     "Resolve cannot find")
+                     f"{missing_clips_label(row.get('companion_version'))}")
     if resolve.get("wedged_seconds"):
         notes.append("Resolve is wedged on a call")
     return notes

@@ -10350,6 +10350,10 @@ class CompanionApp:
                 # SIGTERM alone (a handler with nothing to call would swallow it
                 # and hang the bootout) -- so this argument is the whole feature.
                 on_shutdown=self.shutdown,
+                # CR-316 (2026-09-24): Windows ending the session is a
+                # deliberate exit, not a crash. The marker only - see
+                # shutdown_guard._WindowsShutdownGuard.handle_end_session.
+                on_session_end=lambda: crash_report.mark_clean_exit(self.config),
             )
             self._shutdown_guard.start()
         except Exception:

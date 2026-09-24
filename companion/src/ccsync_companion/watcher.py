@@ -14,7 +14,13 @@ item's "File Path" clip property and classifies it (see paths.py):
                  still classified MISSING and is counted and listed
                  NOWHERE -- it is the designed steady state of a
                  proxy-only b-roll insert, and the count rides every
-                 report and the tray's diagnostics line.
+                 report and the tray's diagnostics line. CR-317
+                 (2026-09-24) widened that to every in-tree clip: an
+                 original that is not on this computer but whose proxy is
+                 (and Resolve has not refused that proxy) is the designed
+                 steady state on a remote rig, and is counted and listed
+                 nowhere either. MISSING in the count now means "neither
+                 the original nor a usable proxy is here".
 
 The watcher never raises: resolve_bridge already returns friendly dicts on
 every Resolve-side failure, and this module wraps its own loop body in
@@ -119,6 +125,7 @@ class TimelineWatcher:
         moved_lookup: Optional[Callable[[str], Optional[dict[str, Any]]]] = None,
         on_moved_clip: Optional[Callable[[dict[str, Any], dict[str, Any]], None]] = None,
         archive_exempt_fn: Optional[Callable[[str], bool]] = None,
+        proxy_held_fn: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self.local_root = local_root
         self.canonical_prefix = canonical_prefix
@@ -162,6 +169,23 @@ class TimelineWatcher:
         # deleted, and a long memory would keep a genuinely missing clip out
         # of the count.
         self._exempt_memo: dict[str, tuple[float, bool]] = {}
+        # CR-317 (2026-09-24): the same question for PROJECT footage. Seen
+        # live on ruskin's DESKTOP-LQQ41TC ("Reproductive Rights Fight",
+        # timeline "Ordered V7"): the fleet grid said "57 clips Resolve cannot
+        # find", and every one was a camera or YouTube original that a remote
+        # editor by design never holds (lane B brings proxies only, lane C
+        # excludes video), each with its proxy attached, playing, and on his
+        # disk at the NAS size. Audit F4 exempted the ARCHIVE only, so the
+        # count every remote rig reported was simply "the timeline", and the
+        # one clip with nothing to play was hidden among fifty that were
+        # fine. Asked of the FILESYSTEM for the reason _archive_exempt gives
+        # (a timeline item carries no proxy state; the media pool walk that
+        # reads it runs every 120 s, not every 3 s), plus the relink pass's
+        # refusal memory, so a proxy Resolve would not attach does not count
+        # as one. Remembered with the same TTL and cap as the archive answer.
+        # None = the default rule below; tests inject.
+        self._proxy_held_fn = proxy_held_fn
+        self._proxy_memo: dict[str, tuple[float, bool]] = {}
         # Last NON-None project name seen -- deliberately NOT cleared when
         # the bridge flaps to None (Resolve restarting, transient failure),
         # so name -> None -> same name never refires on_project_changed.
@@ -337,6 +361,10 @@ class TimelineWatcher:
         # One answer per path per poll: a timeline item appears twice (video
         # and audio) and the test stats a file.
         exempt_cache: dict[str, bool] = {}
+        # CR-317: the proxy question's own per-poll answers. NOT exempt_cache:
+        # both are keyed by path, and the archive's False for a project clip
+        # would be read back as "no proxy here".
+        held_cache: dict[str, bool] = {}
         resolve_project_name = result.get("project_name", "")
         # Did anything under the canonical prefix classify as healthy this
         # poll? See the _warned_mapping reset below.
@@ -439,6 +467,13 @@ class TimelineWatcher:
                     # can read (audit F4). The CLASSIFICATION is untouched --
                     # the file really is not on this disk.
                     continue
+                if self._proxy_held(path, held_cache):
+                    # CR-317 (2026-09-24): the same rule for project footage.
+                    # The original is not here and is not meant to be (a
+                    # remote rig syncs proxies down, never originals); its
+                    # proxy is, and Resolve plays it. Nothing to report and,
+                    # like the archive case, nothing to log every poll.
+                    continue
                 missing_now.add(key)
                 if len(missing_items) < MAX_MISSING_REPORTED:
                     missing_items.append({
@@ -447,7 +482,15 @@ class TimelineWatcher:
                     })
                 if key not in self._missing_logged:
                     new_missing += 1
-                    log.debug("clip path missing on disk, not under local_root/prefix: %s", path)
+                    # CR-317 (2026-09-24): this line used to say "not under
+                    # local_root/prefix", the opposite of the class -- MISSING
+                    # means the prefix DOES resolve under local_root and the
+                    # file is simply absent. It also never said whether the
+                    # proxy was here, which is the question that decides
+                    # whether the editor can cut. Reaching this line means it
+                    # is not (the exemption above would have taken the clip).
+                    log.debug("clip's original is not on this computer and "
+                              "no usable proxy for it is either: %s", path)
                 # RES-10: FIXABLE, not merely missing -- we know exactly where
                 # the file went, because this machine is the one that moved
                 # it. Asked on every poll while the clip is missing; the
@@ -467,7 +510,8 @@ class TimelineWatcher:
             # The count is the signal worth having every poll ("is the sync
             # catching up?"); the paths are not. Silent when nothing is
             # missing, so a healthy rig writes nothing here at all.
-            log.debug("%d clip paths missing on disk (%d new)", len(missing_now), new_missing)
+            log.debug("%d clip(s) with neither the original nor a usable proxy "
+                      "on this computer (%d new)", len(missing_now), new_missing)
         # Assignment, not update(): dropping the keys that did NOT come back
         # missing this pass is what re-arms a recovered (or switched-away)
         # path and what bounds the set. Only reached on a full poll -- an
@@ -568,6 +612,60 @@ class TimelineWatcher:
                       exc_info=True)
             return False
 
+    def _proxy_held(self, path: str, cache: dict[str, bool]) -> bool:
+        """Is this MISSING project clip playing a proxy that IS on this disk?
+
+        CR-317 (2026-09-24). True when the clip's proxy is at the tree's
+        convention (`Proxy/<stem>.mov|.mp4` beside the original, by either
+        spelling -- proxy_relink.find_proxy_on_disk, the same probe the
+        archive rule and the relink pass use) AND Resolve has not already
+        refused that exact file for this clip (proxy_relink.is_refused, the
+        relink pass's in-memory ledger keyed on the proxy's mtime and size).
+        That is the relink pass's own contract: a conventional proxy on disk
+        is attached by it or by Resolve's adjacent auto-link, and one it
+        could not attach is remembered -- the case ruskin's short A004
+        proxies were in on 2026-09-17, which must stay in the count.
+
+        The b-roll archive is NOT judged here: its `Proxy/<stem>.mp4` is the
+        browser preview, and _archive_exempt already carries the archive's
+        own rule (stand-ins included). A clip that rule counted stays counted.
+
+        Deliberately not a Resolve read: see _archive_exempt, and CR-68 --
+        nothing on this thread gets a scripting call it did not already
+        make. A proxy attached somewhere OTHER than the convention is not
+        seen, so such a clip is still counted: the safe direction for
+        evidence.
+
+        Never raises: a question that cannot be answered counts the clip.
+        """
+        try:
+            key = _norm_key(path)
+            if key in cache:
+                return cache[key]
+            now = time.monotonic()
+            remembered = self._proxy_memo.get(key)
+            if remembered is not None and now - remembered[0] < EXEMPT_TTL_SECONDS:
+                cache[key] = remembered[1]
+                return remembered[1]
+            if self._proxy_held_fn is not None:
+                answer = bool(self._proxy_held_fn(path))
+            elif broll_standins.is_under_archive(
+                    path, self.local_root, self.canonical_prefix):
+                answer = False
+            else:
+                proxy = proxy_relink.find_proxy_on_disk(
+                    path, self.local_root, self.canonical_prefix)
+                answer = bool(proxy) and not proxy_relink.is_refused(path, proxy)
+            cache[key] = answer
+            self._proxy_memo[key] = (now, answer)
+            if len(self._proxy_memo) > EXEMPT_MEMO_MAX:
+                self._proxy_memo.clear()
+            return answer
+        except Exception:
+            log.debug("watcher: could not tell whether %s has its proxy here",
+                      path, exc_info=True)
+            return False
+
     def bridge_is_connected(self) -> Optional[bool]:
         """Whether the last poll reached Resolve. None until the first poll
         has run, and that is load-bearing: "we have not looked" must not
@@ -577,7 +675,10 @@ class TimelineWatcher:
     # -- what the last pass saw, for a surface to render (RES-19) ----------
     def missing_clips(self) -> list[dict[str, str]]:
         """[{"name", "path"}] for the clips whose media is not on this
-        computer, as of the last FULL pass. Capped at MAX_MISSING_REPORTED;
+        computer, as of the last FULL pass. Since CR-317 (2026-09-24) that
+        means neither the original nor a usable proxy: a clip playing its
+        proxy is not listed, and this list rides the report as
+        `resolve_health.missing_clips` with its shape unchanged. Capped at MAX_MISSING_REPORTED;
         `last_counts["missing"]` is the true count. A copy, because the
         caller is the tray/report thread and this list is replaced wholesale
         by the poll thread."""

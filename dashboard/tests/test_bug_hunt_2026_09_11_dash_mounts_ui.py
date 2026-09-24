@@ -520,7 +520,9 @@ def test_the_machine_panel_shows_what_resolve_last_said(fleet):
     assert "stills: add-by-hand (point it at P:)" in line
     # The two lists are behind a count, because either can be fifty clips
     # long and this is a cell in a grid.
-    assert "1 clip Resolve cannot find" in line
+    # CR-317 (2026-09-24): a 0.9.70 companion lists every clip whose ORIGINAL
+    # is absent, proxies playing or not, so it is labelled as exactly that.
+    assert "1 clip whose original is not on this computer" in line
     assert "1 clip refused: the path is not the canonical one" in line
     assert "P:/x/a.mov" in line and "P:/x/b.mov" in line
 
@@ -534,4 +536,4 @@ def test_a_machine_that_has_not_sent_them_renders_nothing(fleet):
     assert page.status_code == 200
     line = " ".join(page.text.split())
     assert "<dt>RESOLVE</dt>" not in line
-    assert "clip Resolve cannot find" not in line
+    assert "whose original is not on this computer" not in line

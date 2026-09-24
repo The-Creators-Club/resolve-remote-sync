@@ -837,6 +837,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                       session_store.prune_attempts()))
         collector.start()
         app.state.collector = collector
+        # The server triage agent's `nudge_collector` action (2026-09-24): the
+        # reply poller runs on its own thread with no request, so it cannot
+        # reach app.state the way api._nudge_collector does.
+        from . import triage_actions
+        triage_actions.set_collector(collector)
         # ...and the thing that notices when it stops (ops-efficiency-6,
         # 2026-08-21). Started after the collector and stopped before it, so a
         # shutdown is never read as a death.
@@ -872,6 +877,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             watchdog.stop()
             if collector is not None:
                 collector.stop()
+                triage_actions.set_collector(None)
             # The Timeline Cards engine's threads (the library sweep, the
             # ffmpeg worker, the translation runs). They are daemons, so this
             # is not what ends the process -- it is what stops a sweep from

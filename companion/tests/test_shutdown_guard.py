@@ -1613,3 +1613,58 @@ def test_live_busy_never_raises():
 
     tracker = PendingTracker(clock=boom)
     assert tracker.live_busy([object()]) == []
+
+
+# --- CR-316: a Windows shutdown is a deliberate exit ----------------------
+
+def test_a_session_that_is_ending_records_a_deliberate_exit():
+    ended = []
+    guard = _WindowsShutdownGuard(lambda: None, on_session_end=lambda: ended.append(1))
+    guard.handle_end_session(True)
+    assert ended == [1]
+
+
+def test_a_cancelled_shutdown_records_nothing():
+    """WM_ENDSESSION with wParam FALSE: somebody (maybe us) said no, and the
+    companion carries on - the marker must stay, or a later real crash in
+    this run would go unreported."""
+    ended = []
+    guard = _WindowsShutdownGuard(lambda: None, on_session_end=lambda: ended.append(1))
+    guard.handle_end_session(False)
+    assert ended == []
+
+
+def test_a_failing_session_end_callback_never_raises():
+    def boom():
+        raise RuntimeError("disk gone")
+    _WindowsShutdownGuard(lambda: None, on_session_end=boom).handle_end_session(True)
+
+
+def test_windows_keeps_the_window_when_the_warning_is_off(monkeypatch):
+    """Switching the warning off must not turn evening shutdowns back into
+    crash reports: the window stays for WM_ENDSESSION, and never blocks."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    guard = make_shutdown_guard(lambda: "syncing", enabled=False,
+                                on_session_end=lambda: None)
+    assert isinstance(guard, _WindowsShutdownGuard)
+    calls = []
+    guard._block_fn = lambda hwnd, reason: calls.append(reason)
+    assert guard.handle_query_end_session(7) == 1
+    assert calls == []
+
+
+def test_the_app_wires_session_end_to_the_run_marker():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "src/ccsync_companion/app.py").read_text(
+        encoding="utf-8")
+    assert "on_session_end=lambda: crash_report.mark_clean_exit(self.config)" in src
+
+
+def test_session_end_really_removes_the_run_marker(tmp_path, monkeypatch):
+    from ccsync_companion import crash_report
+    monkeypatch.setattr(crash_report, "crash_dir", lambda cfg=None: tmp_path)
+    assert crash_report.write_run_marker() is not None
+    guard = _WindowsShutdownGuard(
+        lambda: None, on_session_end=lambda: crash_report.mark_clean_exit())
+    guard.handle_end_session(True)
+    assert not (tmp_path / crash_report.RUN_MARKER_FILENAME).exists()

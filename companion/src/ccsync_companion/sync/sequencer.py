@@ -36,7 +36,12 @@ from ..selection import SelectionClient
 # A LANE's error state, not one of this module's own STATE_* (which describe
 # the sequencer itself) -- hence the alias.
 from .base import STATE_ERROR as STATE_ERROR_LANE
-from .rclone_lane import clone_directory_tree, hard_ceiling_seconds
+from .rclone_lane import (
+    RUN_OUTCOME_NOTHING,
+    RUN_OUTCOME_WORK_REMAINED,
+    clone_directory_tree,
+    hard_ceiling_seconds,
+)
 from .borrowed_folders import BorrowedFolderManager
 from .repath import ProjectRepather, _default_move, normalized_safe_rel
 from .shared_folders import SharedFolderManager
@@ -110,6 +115,27 @@ DEFAULT_LANE_C_SETTLE_SECONDS = 30
 # tray action). Capped rather than open-ended: lane B has no NAS-side change
 # signal, so the backoff is also the worst-case latency of a proxy arriving.
 IDLE_BACKOFF_STEPS = (1, 2, 5)
+
+# The skip-ahead (CR-319, 2026-09-24). ruskin's Film 1 + 2 had 97.5 GB of
+# proxies to fetch and every other ticked project had none, yet each round
+# spent ~2 of its ~12 minutes re-checking those others (lane B turn ends at
+# 11:30:11, 11:42:16, 11:54:35, 12:07:03, ...). A project whose lane B turn
+# ends with files left gets another turn straight away -- but ONLY while
+# every other project in the plan had a whole turn that found nothing, in
+# both directions, no longer than this many seconds before the turn that
+# just ended STARTED. Measured from the start and not from "now" on purpose:
+# at the defaults the busy project's turn is itself 600 s, so every other
+# project's check is always more than 600 s old by the END of it and a
+# now-based rule could never fire -- ruskin's rounds would be unchanged.
+# The cost of measuring from the start, stated exactly: a turn that started
+# inside the window can earn one more, so a quiet project's next turn
+# starts at most the window plus two of the busy project's turns after its
+# last one began. At the defaults (turn == window) that is ONE extra turn
+# per round: ruskin goes from "Film 1 + 2, the rest" every ~12 min (10 of
+# 12 on the backlog) to "Film 1 + 2 twice, the rest" every ~22 min (20 of
+# 22), and a raised window buys more repeats at a longer re-check. 0
+# disables it and restores the plain rotation exactly.
+DEFAULT_LANE_B_IDLE_RECHECK_SECONDS = 600
 
 # What a per-turn read of a folder's .stignore found (SYNC-6, 2026-08-14).
 # "missing" deliberately covers a read that failed as well as one that came
@@ -239,6 +265,15 @@ def _include_is_valid(entry: object) -> Optional[dict]:
     lender_rel = sub[: -(len(sub_rel) + 1)]
     return {"subpath": sub, "sub_rel": sub_rel, "lender_rel": lender_rel,
             "lender_slug": lender_slug.strip()}
+
+
+def _all_nothing(outcomes: Any) -> bool:
+    """Every lane run of a turn answered RUN_OUTCOME_NOTHING (CR-319). An
+    empty or missing list is False: a turn with no evidence found nothing
+    only in the sense that it did not look."""
+    if not isinstance(outcomes, list) or not outcomes:
+        return False
+    return all(outcome == RUN_OUTCOME_NOTHING for outcome in outcomes)
 
 
 def _accepts_kw(fn: Any, name: str) -> bool:
@@ -386,6 +421,11 @@ class Sequencer:
         self.orphan_scan_every_n_passes = config_mod.coerce_count(
             cfg, "orphan_scan_every_n_passes", 20
         )
+        # CR-319: see DEFAULT_LANE_B_IDLE_RECHECK_SECONDS. coerce_count for
+        # the same reason as lane_c_settle_seconds: 0 is legal ("off").
+        self.lane_b_idle_recheck_seconds = config_mod.coerce_count(
+            cfg, "lane_b_idle_recheck_seconds", DEFAULT_LANE_B_IDLE_RECHECK_SECONDS
+        )
         self.folder_status_poll_seconds = folder_status_poll_seconds
         self._now = now
         self._clone_tree_fn = clone_tree_fn
@@ -528,6 +568,21 @@ class Sequencer:
         # needed instead of a blind sweep over the whole selection (each one
         # makes Syncthing commit its config and restart the folder).
         self._paused_by_us: set[str] = set()
+        # CR-319 (2026-09-24): what each project's last COMPLETE turn on this
+        # machine learned -- slug -> {"started", "at", "a": [...], "b": [...],
+        # "upload_only"}, one RUN_OUTCOME_* (or None) per lane run in the
+        # turn -- and the projects the watcher has seen a file change in
+        # since their turn last started. Both feed _skip_ahead_reason and
+        # nothing else.
+        #
+        # IN MEMORY ONLY, deliberately, and this is one of the places where
+        # that is the safe direction rather than a latch being lost: a
+        # restart forgets every "found nothing", so no project is skippable
+        # until each has had a fresh turn -- the first round after a restart
+        # is the plain rotation. Persisting it could only ever make the
+        # rotation skip MORE, on evidence from before the restart.
+        self._turn_records: dict[str, dict] = {}
+        self._lane_a_dirty: set[str] = set()
 
     @staticmethod
     def _state_dir_for(cfg: dict[str, Any]) -> Optional[Path]:
@@ -1061,6 +1116,13 @@ class Sequencer:
             # borrower's turn that runs the borrowed subpath's lanes.
             slug = (self._rel_to_slug.get(rel_path)
                     or self._borrowed_rel_to_slug.get(rel_path))
+            if slug:
+                # CR-319: BEFORE both early returns below. A change in the
+                # project whose turn it is, or in one already done this pass,
+                # is still an upload lane A has not been handed yet, and a
+                # project with one is never skipped over (_skip_ahead_reason).
+                # Cleared when that project's next turn starts.
+                self._lane_a_dirty.add(slug)
             if not slug or slug == self._current_slug:
                 return
             if slug in self._processed_slugs:
@@ -1649,6 +1711,11 @@ class Sequencer:
                 for key in [k for k in ages
                             if k.split("::", 1)[0] not in live_slugs]:
                     ages.pop(key, None)
+            # CR-319: an unticked project's record must not outlive it; a
+            # re-tick then starts from "never checked", which is the safe end.
+            for key in [k for k in self._turn_records if k not in live_slugs]:
+                self._turn_records.pop(key, None)
+            self._lane_a_dirty &= live_slugs
 
     def _ignores_unconfirmed_for(self, slug: str) -> bool:
         """Whether this folder's .stignore is NOT known to be in place, so no
@@ -1908,6 +1975,24 @@ class Sequencer:
                             restart_selection = new_selection
                             break
 
+                    # CR-319 (2026-09-24): AFTER the selection check, so a
+                    # tick or an untick always wins over a skip-ahead (a new
+                    # project has never been checked, so it could not be
+                    # skipped anyway). The project goes back to the HEAD of
+                    # the live queue rather than being run from here, so a
+                    # notify_change landing now still reorders around it and
+                    # everything that stops a turn stops this one too.
+                    reason = self._skip_ahead_reason(item, ordered)
+                    if reason is not None:
+                        log.info("sequencer: %s", reason)
+                        with self._lock:
+                            if self._queue is not None:
+                                self._queue.appendleft(item)
+                                self._queue_slugs = [i.get("slug") for i in self._queue]
+                        # Same position on the tray line: "(1/5)" again, not
+                        # "(2/5)" for a turn that is the same project's.
+                        processed -= 1
+
                 if restart_selection is None:
                     return
                 selection = restart_selection
@@ -1943,6 +2028,14 @@ class Sequencer:
         slug = str(item.get("slug"))
         subpath = f"{PROJECTS_PREFIX}{rel_path}"
         upload_only = _item_upload_only(item)
+        # CR-319: this project's previous record and its watcher mark go the
+        # moment its turn starts. A turn that does not reach its end (stop,
+        # pause) then leaves NO record, which reads as "never checked".
+        turn_started = self._now()
+        with self._lock:
+            self._turn_records.pop(slug, None)
+            self._lane_a_dirty.discard(slug)
+        lane_runs: list[dict[str, Optional[str]]] = []
 
         # A mid-pass selection refresh may have re-ordered/changed rels --
         # re-check this project's local path right before its lanes run.
@@ -1974,7 +2067,7 @@ class Sequencer:
         self._release_paused_folders()
 
         budget = self.project_rotation_seconds if self.project_rotation_seconds > 0 else None
-        self._run_lanes_a_and_b(subpath, budget, upload_only=upload_only)
+        lane_runs.append(self._run_lanes_a_and_b(subpath, budget, upload_only=upload_only))
         if self._stop_event.is_set() or not self._resume_event.is_set():
             return
 
@@ -1985,6 +2078,7 @@ class Sequencer:
             # shares the folder with an upload-only machine, so there is
             # nothing to accept, unpause or wait for.
             self._maybe_scan_orphans(subpath, slug)
+            self._record_turn(slug, turn_started, lane_runs, upload_only=True)
             return
 
         # Borrowed folders (SHARED_FOLDERS_PLAN.md D3/§3.1): each ok include
@@ -1999,17 +2093,198 @@ class Sequencer:
             self._maybe_clone_structure(sub, key, forced=False)
             if self._stop_event.is_set() or not self._resume_event.is_set():
                 return
-            self._run_lanes_a_and_b(sub, budget)
+            lane_runs.append(self._run_lanes_a_and_b(sub, budget))
             if self._stop_event.is_set() or not self._resume_event.is_set():
                 return
             self._maybe_scan_orphans(sub, key)
 
         self._maybe_scan_orphans(subpath, slug)
         self._lane_c_turn(item, ordered_selected)
+        if self._stop_event.is_set() or not self._resume_event.is_set():
+            # A lane C turn cut short is not a turn that happened.
+            return
+        self._record_turn(slug, turn_started, lane_runs, upload_only=False)
+
+    def _record_turn(self, slug: str, started: float,
+                     lane_runs: list[dict[str, Optional[str]]], upload_only: bool) -> None:
+        """Keep what this complete turn learned (CR-319). Never raises."""
+        try:
+            record = {
+                "started": started,
+                "at": self._now(),
+                "a": [run.get("a") for run in lane_runs],
+                "b": [run.get("b") for run in lane_runs],
+                "upload_only": upload_only,
+            }
+            with self._lock:
+                self._turn_records[slug] = record
+        except Exception:
+            log.debug("sequencer: could not record %s's turn", slug, exc_info=True)
+
+    # -- the skip-ahead (CR-319, 2026-09-24) -------------------------------
+    def _skip_ahead_reason(self, item: dict,
+                           ordered_selected: list[dict]) -> Optional[str]:
+        """The log sentence for giving `item` another turn now instead of
+        moving on, or None for the plain rotation. Never raises: a failure
+        in here is None, i.e. the rotation it would have been anyway.
+
+        THE RULE. `item` just finished a complete turn in which a lane B run
+        stopped at the per-project budget with files left, AND every other
+        usable project in the plan had a complete turn that started no more
+        than `lane_b_idle_recheck_seconds` before this turn started and in
+        which every lane run (lane A up, lane B down, each borrowed subpath)
+        answered "found nothing" -- and nothing below says otherwise.
+
+        What the skip never costs, and why:
+
+          * Lane A. A project the watcher has seen a file change in since
+            its turn started is never skipped over (notify_change marks it
+            even when it is current or already done this pass, which are
+            the two cases that reorder nothing). A project whose last lane
+            A run moved files, ran out of budget or failed is not "found
+            nothing" either. Express uploads run on their own thread and
+            are not held by the rotation at all.
+          * Lane C. Under the default pause scheme ("none") no folder is
+            ever paused by the rotation: every project's Syncthing folder
+            syncs continuously, paced by maxFolderConcurrency, whoever's
+            turn it is. What a project's own lane C turn adds is the
+            re-assert of its .stignore/versioning/ignoreDelete, the accept
+            of a newly offered folder and the release of a folder something
+            else left paused -- so a project whose ignores are unconfirmed,
+            or whose folder is waiting in pending_folders(), is not
+            skippable, and every other one still gets that whole turn at
+            most one window plus two of the busy project's turns after its
+            last began (DEFAULT_LANE_B_IDLE_RECHECK_SECONDS). Under "rotate"
+            the current project's turn pauses every other folder for up to
+            project_rotation_seconds, and repeating one project's turn
+            would repeat that pause; the skip is OFF there, and the rotate
+            scheme keeps exactly the rotation it always had.
+          * Everything that stops a turn: a stop, a pause, a halt, a
+            missing drive, an offline pass, lane B disabled (base mode) or
+            walked away from, an upload-only tick. Each is checked here and
+            each answers None; none of them is bypassed, because the
+            project only goes back into the queue and its next turn runs
+            through every one of the usual gates again.
+
+        One project alone is never repeated from here: the pass-level work
+        (shared and borrowed folder reconcile, the trash prune, the
+        unpause sweep) runs between passes, and a pass that never ends would
+        starve it. The skip always ends because the other projects' records
+        only age while it runs."""
+        try:
+            return self._skip_ahead_reason_inner(item, ordered_selected)
+        except Exception:
+            log.debug("sequencer: the skip-ahead check failed -- rotating as usual",
+                      exc_info=True)
+            return None
+
+    def _skip_ahead_reason_inner(self, item: dict,
+                                 ordered_selected: list[dict]) -> Optional[str]:
+        window = self.lane_b_idle_recheck_seconds
+        if window <= 0 or not self.lane_b_enabled:
+            return None
+        if self.lane_c_pause_scheme != PAUSE_SCHEME_NONE:
+            return None
+        if self._stop_event.is_set() or not self._resume_event.is_set():
+            return None
+        if self._offline_pass or self._is_halted():
+            return None
+        if not self._local_root_is_present():
+            return None
+        if not _item_is_valid(item) or _item_upload_only(item):
+            return None
+        slug = str(item.get("slug"))
+        with self._lock:
+            mine = self._turn_records.get(slug)
+            records = dict(self._turn_records)
+            dirty = set(self._lane_a_dirty)
+            abandoned = self._lane_b_abandoned
+        if abandoned is not None:
+            return None
+        if mine is None or RUN_OUTCOME_WORK_REMAINED not in (mine.get("b") or []):
+            return None
+
+        others: dict[str, dict] = {}
+        for other in ordered_selected:
+            # An invalid item is never run (_process_project refuses it), so
+            # it has nothing to check and could never earn a record.
+            if not _item_is_valid(other):
+                continue
+            other_slug = str(other.get("slug"))
+            if other_slug != slug:
+                others[other_slug] = other
+        if not others:
+            return None
+
+        since = float(mine["started"]) - window
+        oldest = float(mine["started"])
+        needs_folder_check = False
+        for other_slug, other in others.items():
+            if other_slug in dirty:
+                return None
+            record = records.get(other_slug)
+            if record is None or float(record.get("started", 0.0)) < since:
+                return None
+            upload_only = _item_upload_only(other)
+            if bool(record.get("upload_only")) != upload_only:
+                return None  # the tick's mode changed since that turn
+            if not _all_nothing(record.get("a")):
+                return None
+            if not upload_only:
+                if not _all_nothing(record.get("b")):
+                    return None
+                if self._ignores_unconfirmed_for(other_slug):
+                    return None
+                needs_folder_check = True
+            oldest = min(oldest, float(record["started"]))
+
+        if needs_folder_check:
+            pending = self._pending_folder_ids()
+            if pending is None:
+                return None
+            full_others = {s for s, o in others.items() if not _item_upload_only(o)}
+            if full_others & pending:
+                return None
+
+        minutes = max(1, int(round((self._now() - oldest) / 60.0)))
+        label = self.label_for_slug(slug)
+        count = len(others)
+        noun = "project" if count == 1 else "projects"
+        return (f"{label} still has files to fetch and the other {count} {noun} "
+                f"found nothing in the last {minutes} min -- giving it another turn")
+
+    def _is_halted(self) -> bool:
+        """The halt predicate app.py hands in. "Cannot tell" is halted: the
+        answer that costs a skip, never one that bypasses a halt."""
+        halted = self._halted
+        if halted is None:
+            return False
+        try:
+            return bool(halted())
+        except Exception:
+            return True
+
+    def _pending_folder_ids(self) -> Optional[set[str]]:
+        """Folders Syncthing is holding in pending_folders(), or None when
+        that could not be read. One local REST GET per skip decision, i.e.
+        at most once per lane B budget -- no rclone, no NAS. A 404 is "no
+        such endpoint", which _maybe_auto_accept already reads as "nothing
+        pending"."""
+        try:
+            pending = self.admin.pending_folders() or {}
+        except Exception as exc:
+            if _is_not_found(exc):
+                return set()
+            log.debug("sequencer: pending_folders() failed for the skip-ahead",
+                      exc_info=True)
+            return None
+        if not isinstance(pending, dict):
+            return None
+        return {str(key) for key in pending}
 
     def _run_lanes_a_and_b(
         self, subpath: str, budget: Optional[float], upload_only: bool = False,
-    ) -> None:
+    ) -> dict[str, Optional[str]]:
         """Lane A (up) and lane B (down) for one project.
 
         Concurrent by default: they are opposite directions over disjoint
@@ -2024,7 +2299,11 @@ class Sequencer:
         `upload_only` (docs/UPLOAD_ONLY_TICK.md) is the per-PROJECT switch
         for lane B, beside the per-machine `lane_b_enabled`: an upload-only
         tick downloads no proxies. A lone lane A failure is then not
-        offline evidence either (_note_transport)."""
+        offline evidence either (_note_transport).
+
+        Returns {"a": ..., "b": ...}: each lane's RUN_OUTCOME_* for this
+        subpath, or None for a lane that did not run, raised, was walked
+        away from, or cannot say (CR-319)."""
         run_b = self.lane_b_enabled and not upload_only
         # comp-sync-7: a lane B the rotation walked away from still holds
         # RcloneLane's _run_lock. Starting another thread here only queues it
@@ -2058,6 +2337,7 @@ class Sequencer:
         def _a() -> None:
             try:
                 outcomes["a"] = self._run_lane(self.lane_a, subpath, budget)
+                outcomes["a_outcome"] = self._lane_outcome(self.lane_a, subpath)
             except Exception:
                 log.exception("sequencer: lane A run_once failed for %s", subpath)
             finally:
@@ -2067,6 +2347,7 @@ class Sequencer:
             try:
                 outcomes["b"] = self._run_lane(
                     self.lane_b, subpath, budget, rotation_pass=True)
+                outcomes["b_outcome"] = self._lane_outcome(self.lane_b, subpath)
             except Exception:
                 log.exception("sequencer: lane B run_once failed for %s", subpath)
             finally:
@@ -2085,7 +2366,7 @@ class Sequencer:
             if run_b and not (self._stop_event.is_set() or not self._resume_event.is_set()):
                 _b()
             self._note_transport(outcomes, run_b)
-            return
+            return self._turn_outcomes(outcomes)
 
         thread = threading.Thread(
             target=_b, name="ccsync-sequencer-lane-b", daemon=True
@@ -2150,6 +2431,31 @@ class Sequencer:
                             "sequencer: the lane B pass on %s ended while it was "
                             "being marked abandoned -- not latching it", subpath)
         self._note_transport(outcomes, run_b)
+        return self._turn_outcomes(outcomes)
+
+    @staticmethod
+    def _turn_outcomes(outcomes: dict[str, Any]) -> dict[str, Optional[str]]:
+        """The CR-319 half of a lanes A+B run. A lane B thread still
+        running (the abandoned join) has written nothing yet, so it reads as
+        None -- "don't know" -- which is the answer it deserves."""
+        return {"a": outcomes.get("a_outcome"), "b": outcomes.get("b_outcome")}
+
+    @staticmethod
+    def _lane_outcome(lane: Any, subpath: str) -> Optional[str]:
+        """What the lane's run_once just learned about `subpath` (CR-319).
+        Read on the lane's own thread straight after run_once returned.
+        `last_run_outcome` is not part of the LaneAdapter contract, so an
+        adapter without it (every test double that predates CR-319) answers
+        None and the rotation is the plain one. Never raises."""
+        getter = getattr(lane, "last_run_outcome", None)
+        if getter is None:
+            return None
+        try:
+            value = getter(subpath)
+        except Exception:
+            log.debug("sequencer: could not read a lane's run outcome", exc_info=True)
+            return None
+        return value if isinstance(value, str) else None
 
     # -- comp-sync-7: the abandoned lane B latch --------------------------
     def _subpath_is_current(self, subpath: str) -> bool:

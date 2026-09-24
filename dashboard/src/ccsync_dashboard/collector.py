@@ -1691,6 +1691,17 @@ class Collector:
                           "this cycle still ran", slug, exc)
                 continue
             applied += 1
+            # CR-310 (2026-09-24): the share this pass just made goes into the
+            # folder snapshot too. A tick's nudge runs config (the snapshot),
+            # then enforce (the share), then the self-diagnosis pass against
+            # the snapshot -- which predates the share, so every ordinary tick
+            # raised a severity-error `plan_without_share` that the next
+            # config read (up to interval_config later) cleared again. Only a
+            # folder the snapshot already carries: a shared asset library is
+            # kept out of it on purpose (see _run_config).
+            if slug in self._folder_devices:
+                self._folder_devices[slug] = sorted(
+                    d for d in desired if d != self._my_id)
             added = sorted(desired - actual - unplanned)
             removed = sorted(actual - desired)
             log.info("enforced shares on %s: +%s -%s", slug, added or "[]", removed or "[]")

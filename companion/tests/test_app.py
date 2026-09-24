@@ -2897,13 +2897,30 @@ def test_a_lane_that_cannot_report_status_never_blocks_shutdown(tmp_path):
     assert app._shutdown_block_reason() is None
 
 
-def test_shutdown_warning_can_be_switched_off(tmp_path):
+def test_shutdown_warning_can_be_switched_off(tmp_path, monkeypatch):
+    """Off means the warning never blocks. Since CR-316 (2026-09-24) the
+    Windows guard still exists when it is off, for WM_ENDSESSION's clean-exit
+    record, so what is pinned is the policy, not the class - and the factory
+    is faked so no real window outlives this test (a leaked window class
+    breaks the window-class tests that run after it)."""
     from ccsync_companion import shutdown_guard as sg
 
     app = _make_app(tmp_path, shutdown_warning_enabled=False)
+    captured: dict = {}
+
+    def _fake_make(reason_fn, enabled=True, on_shutdown=None, on_session_end=None):
+        captured.update(enabled=enabled, on_session_end=on_session_end)
+        return sg.ShutdownGuard()
+
+    monkeypatch.setattr(sg, "make_shutdown_guard", _fake_make)
     app._start_shutdown_guard()
-    assert type(app._shutdown_guard) is sg.ShutdownGuard
-    assert app._shutdown_guard.active is False
+    assert captured["enabled"] is False
+    assert callable(captured["on_session_end"])
+    # ...and the Windows guard that factory builds for "off" never blocks.
+    guard = sg._WindowsShutdownGuard(lambda: None, on_session_end=lambda: None)
+    blocked = []
+    guard._block_fn = lambda hwnd, reason: blocked.append(reason)
+    assert guard.handle_query_end_session(7) == 1 and blocked == []
 
 
 def test_shutdown_releases_the_guard(tmp_path):
@@ -3733,7 +3750,7 @@ def test_the_shutdown_guard_is_given_the_apps_shutdown_path(tmp_path, monkeypatc
     app = _make_app(tmp_path)
     captured: dict = {}
 
-    def _fake_make(reason_fn, enabled=True, on_shutdown=None):
+    def _fake_make(reason_fn, enabled=True, on_shutdown=None, on_session_end=None):
         captured["on_shutdown"] = on_shutdown
         return sg.ShutdownGuard()
 

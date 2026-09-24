@@ -161,6 +161,9 @@ def test_default_toml_text_documents_every_default_key():
         # The sync-drive reminder cadence (CR-92): same class, a field knob
         # whose shipped value must stay re-tunable.
         "drive_reminder_minutes",
+        # The CR-319 skip-ahead window: same class, a field knob whose
+        # shipped value must stay re-tunable.
+        "lane_b_idle_recheck_seconds",
         # The proxy generator's tuning, same class again -- plus
         # proxy_gen_enabled, which CANNOT be written live at all: its default
         # is None ("derive it from lane_b_enabled"), TOML has no null, and an

@@ -152,7 +152,7 @@ log = logging.getLogger("ccsync.config")
 # and this loop claims it BY ID through a closed idle gate, and a whisper pass
 # finally reports progress -- its stdout is read on a drain thread instead of
 # being buffered until exit, so the fleet chip moves while the GPU works.
-VERSION = "0.9.75"
+VERSION = "0.9.76"
 
 # The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
 # resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy
@@ -397,6 +397,14 @@ DEFAULTS: dict[str, Any] = {
     "selection_poll_interval": 60,
     "project_rotation_seconds": 600,
     "sequencer_idle_seconds": 60,
+    # CR-319 (2026-09-24): a project whose proxy download (lane B) ran out of
+    # its project_rotation_seconds budget with files left gets another turn
+    # at once, instead of waiting a whole round, while every OTHER ticked
+    # project's last turn (started within this many seconds) found nothing
+    # to fetch or upload. A quiet project's next turn then starts at most this
+    # long plus two of the busy project's turns after its last one (at the
+    # defaults: the busy project goes twice per round). 0 = off.
+    "lane_b_idle_recheck_seconds": 600,
     # How long selection.SelectionClient may serve the last dashboard
     # response from memory before going back to the network, and the longer
     # TTL for the sticky project_roots destination mapping. Both were read
@@ -1103,6 +1111,10 @@ project_rotation_seconds = 600
 # selected project is caught up (small edits still trickle during this
 # window -- every selected folder is unpaused while idle):
 sequencer_idle_seconds = 60
+# A project whose proxy download ran out of its turn with files left gets
+# another turn straight away while every other ticked project found nothing
+# in its last turn (within this many seconds). 0 = plain rotation.
+# lane_b_idle_recheck_seconds = 600
 # How long (seconds) the last selection response is served from memory
 # before the companion asks the dashboard again, and the longer TTL for the
 # sticky per-project destination mapping (project_roots) inside it:
@@ -2097,6 +2109,22 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
             f"drive_reminder_minutes must be a number >= 0 (0 disables the "
             f"reminders), got {cfg.get('drive_reminder_minutes')!r} -- using the "
             f"default ({DEFAULTS['drive_reminder_minutes']})"
+        )
+    # CR-319: a WARNING, like the two above, and never an error. A bad value
+    # here crashes nothing (coerce_count falls back to the default) and
+    # scopes nothing that syncs -- it only decides whether a busy project may
+    # go again before a quiet one is re-checked -- so it must not become a
+    # config_problems entry, which stops every lane (DEL-3).
+    try:
+        value = float(cfg.get("lane_b_idle_recheck_seconds",
+                              DEFAULTS["lane_b_idle_recheck_seconds"]))
+        if value < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        warnings.append(
+            f"lane_b_idle_recheck_seconds must be a number >= 0 (0 disables the "
+            f"skip-ahead), got {cfg.get('lane_b_idle_recheck_seconds')!r} -- using the "
+            f"default ({DEFAULTS['lane_b_idle_recheck_seconds']})"
         )
 
     # A WARNING, and it must never become an error. Errors stop every sync

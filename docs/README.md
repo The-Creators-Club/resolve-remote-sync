@@ -62,6 +62,7 @@ line above is machine-checkable and nothing was checking it.
 |---|---|
 | [`SYNC_SAFETY.md`](SYNC_SAFETY.md) | The lane B circuit breaker, `.ccsync-trash` retention, the remove-project gate, and the halt |
 | [`SELF_DIAGNOSIS.md`](SELF_DIAGNOSIS.md) | The server's own diagnosis: the `notices` panel, the alert registry and its sink (none/smtp/webhook), the weekly report, and how to add a check |
+| [`SERVER_TRIAGE_AGENT.md`](SERVER_TRIAGE_AGENT.md) | The twice-daily server check: a read-only Claude Code run over the dashboard's own evidence, emailed with numbered actions, and a reply that carries them out through a fixed catalogue of dashboard actions |
 | [`BACKUP_RESTORE.md`](BACKUP_RESTORE.md) | Snapshots, restoring a file / a project / the fleet database, and publishing a search index safely |
 | [`RESOLVE_EDIT_SAFETY.md`](RESOLVE_EDIT_SAFETY.md) | Undoing a clip-path change CC Sync made |
 | [`delete-protection-ignoredelete.md`](delete-protection-ignoredelete.md) | Why Syncthing runs with `ignoreDelete` on the server side |

@@ -11,6 +11,7 @@ comparison correct in SQL and in Python.
 from __future__ import annotations
 
 import datetime as dt
+import fnmatch
 import hashlib
 import hmac
 import json
@@ -33,7 +34,7 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 log = logging.getLogger("ccsync.dashboard.db")
 
 # Caps + retention for the media-presence tables.
-EDITOR_MEDIA_CAP = 2000          # per-file disk-manifest rows per (editor, machine, project)
+EDITOR_MEDIA_CAP = 2000          # per-file disk-manifest rows per (editor, machine, project) PER KIND
 MEDIA_TREE_CAP = 4000            # Resolve-bin clip rows per (editor, machine, project)
 MEDIA_REPORT_MAX_AGE_DAYS = 14   # drop an editor's media rows after it stops reporting
 ACTIVE_TRANSFER_STALE_SECONDS = 120  # a transfer row is "live" only this long past updated_at
@@ -1912,6 +1913,54 @@ UPDATE notices
    AND subject LIKE 'collector poll %';
 """
 
+# v57: the server triage agent's ledger (2026-09-24, docs/SERVER_TRIAGE_AGENT.md).
+#
+# Three tables, one feature. `triage_runs` is one scheduled (or RUN NOW) check:
+# its reply token is stored ONLY as a sha256, because the token in the email is
+# the whole of the authority a reply carries once the sender has been
+# authenticated, and a database backup must not be a way to mint one.
+# `triage_actions` is what each run OFFERED; `state` is a compare-and-set
+# (offered -> done/refused/failed/expired) so "each action runs once" holds
+# even if two replies land in the same poll. `triage_replies` is keyed on the
+# Message-ID, UNIQUE, so a message is never acted on twice even if the IMAP
+# \Seen flag is lost (a client that marks mail unread, a second mailbox view).
+SCHEMA_V57 = """
+CREATE TABLE IF NOT EXISTS triage_runs (
+  id               INTEGER PRIMARY KEY,
+  started_at       TEXT NOT NULL,
+  finished_at      TEXT,
+  status           TEXT NOT NULL DEFAULT 'running',
+  token_hash       TEXT,
+  token_expires_at TEXT,
+  report_json      TEXT,
+  email_ok         INTEGER,
+  detail           TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_triage_runs_token ON triage_runs(token_hash);
+CREATE TABLE IF NOT EXISTS triage_actions (
+  id               INTEGER PRIMARY KEY,
+  run_id           INTEGER NOT NULL,
+  n                INTEGER NOT NULL,
+  action           TEXT NOT NULL,
+  params_json      TEXT NOT NULL DEFAULT '{}',
+  why              TEXT,
+  state            TEXT NOT NULL DEFAULT 'offered',
+  result           TEXT,
+  reply_message_id TEXT,
+  acted_at         TEXT,
+  UNIQUE (run_id, n)
+);
+CREATE TABLE IF NOT EXISTS triage_replies (
+  id          INTEGER PRIMARY KEY,
+  message_id  TEXT NOT NULL UNIQUE,
+  received_at TEXT NOT NULL,
+  from_addr   TEXT,
+  run_id      INTEGER,
+  verdict     TEXT NOT NULL,
+  detail      TEXT
+);
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -2059,6 +2108,10 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # A data step rather than a column, and gapless like every one before it:
     # replaying it is a no-op, which is what a migration has to be.
     (56, SCHEMA_V56),
+    # 57: the server triage agent's runs, offered actions and handled replies
+    # (2026-09-24, docs/SERVER_TRIAGE_AGENT.md). One step for the three
+    # tables, which are one feature, and gapless like every one before it.
+    (57, SCHEMA_V57),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -3521,6 +3574,15 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
     "ai_cli_update_failed": {"severity": "warn", "what":
         "this server could not keep Claude Code up to date by itself",
         "href": "/admin/settings#ai-providers"},
+    # The server triage agent (2026-09-24, docs/SERVER_TRIAGE_AGENT.md).
+    # Written by `triage_mail._refuse` for a reply that failed one of the three
+    # checks (sender, the receiving server's DKIM/DMARC verdict, the run's
+    # reference). A card rather than an answering email on purpose: answering
+    # a forged sender is backscatter. Event-shaped like file_move_detected, so
+    # its evidence is stamped by `triage.maybe_start` on every alerts pass.
+    "triage_reply_refused": {"severity": "warn", "what":
+        "a reply to the server check email was not acted on because it failed a check",
+        "href": "/admin/alerts"},
 }
 
 
@@ -9173,17 +9235,34 @@ def replace_editor_media(
     conn: sqlite3.Connection, editor: str, machine: str, slug: str,
     files: list[tuple[str, str, int | None]], now: str,
 ) -> None:
-    """files: [(rel_path, kind, size)], capped at EDITOR_MEDIA_CAP."""
+    """files: [(rel_path, kind, size)], capped at EDITOR_MEDIA_CAP PER KIND.
+
+    CR-314 (2026-09-24): the cap used to be on the whole list, which the
+    report handler builds originals first. The companion caps each kind at
+    2000 on its own (manifest.MAX_PER_FILE_ENTRIES) and so never reports the
+    project as truncated, so a project with 827 originals and 1,696 proxies
+    lost its last 523 proxies HERE, silently, and fetch_sync_backlog listed
+    them as a proxy download owed for ever (ruskin, Energy Transition; 100 in
+    Civil Defence) while every one of them was on his drive.
+    """
     conn.execute(
         "DELETE FROM editor_media WHERE editor_username=? AND machine=? AND project_slug=?",
         (editor, machine, slug),
     )
+    kept: list[tuple[str, str, int | None]] = []
+    per_kind: dict[str, int] = {}
+    for rel, kind, size in files:
+        n = per_kind.get(kind, 0)
+        if n >= EDITOR_MEDIA_CAP:
+            continue
+        per_kind[kind] = n + 1
+        kept.append((rel, kind, size))
     conn.executemany(
         """INSERT OR REPLACE INTO editor_media
              (editor_username, machine, project_slug, rel_path, kind, size, refreshed_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         [(editor, machine, slug, media_rel_key(rel), kind, size, now)
-         for rel, kind, size in files[:EDITOR_MEDIA_CAP]],
+         for rel, kind, size in kept],
     )
 
 
@@ -9501,6 +9580,36 @@ def fetch_transfer_history(
     return [dict(r) for r in conn.execute(q, params)]
 
 
+# CR-315 (2026-09-24): the basenames lane A will NEVER upload, mirrored from
+# the companion's own rule list (companion sync/rclone_lane.py:
+# APPLEDOUBLE_EXCLUDE_RULE, YTDL_WORK_EXCLUDE_RULES, MOVE_STAGING_EXCLUDE_RULE;
+# pinned against it by tests/test_cr315_owed_uploads_follow_lane_a.py). The
+# companion's manifest counts every video file it holds, so without this a
+# yt-dlp fragment (`... [id].f137.mp4`, `... [id].temp.mp4`) that lane A
+# skips on purpose sat in [ QUEUED ] as an upload owed for ever: ruskin's
+# 31.7 GB "2 files" in Civil Defence, left by a download that died on
+# 2026-09-14 whose finished .mp4 had been on the NAS since.
+LANE_A_SKIP_GLOBS = (
+    "._*",
+    "*.editready.*",
+    "*.original.*",
+    "*.temp.*",
+    "*.f[0-9][0-9][0-9]*.*",
+    "*.failed",
+    ".ccsync-move-*",
+)
+_LANE_A_SKIP_RE = re.compile(
+    "|".join("(?:%s)" % fnmatch.translate(g) for g in LANE_A_SKIP_GLOBS),
+    re.IGNORECASE)
+
+
+def lane_a_skips(rel_path: str) -> bool:
+    """Would lane A refuse to upload this file? Decided on the basename, as
+    rclone decides a rule with no `/` in it."""
+    base = str(rel_path or "").replace("\\", "/").rsplit("/", 1)[-1]
+    return bool(_LANE_A_SKIP_RE.match(base))
+
+
 def fetch_sync_backlog(
     conn: sqlite3.Connection, editor: str | None = None, files_per_group: int = 50
 ) -> list[dict[str, Any]]:
@@ -9575,11 +9684,26 @@ def fetch_sync_backlog(
                 # lacks are not a backlog -- listing them would show a
                 # download that is never going to start (the CR-28 shape).
                 continue
-            n_files, total_bytes = conn.execute(totals_q, args).fetchone()
-            if not n_files:
-                continue
-            files = [{"name": r[0], "size": r[1]}
-                     for r in conn.execute(files_q, (*args, files_per_group))]
+            if direction == "up":
+                # CR-315: the owed uploads are what lane A WILL send, so its
+                # skip rules are applied here, in Python (a basename glob is
+                # not expressible in the NOT EXISTS above). Bounded: at most
+                # EDITOR_MEDIA_CAP originals per (editor, machine, project).
+                owed = [(r[0], r[1]) for r in conn.execute(
+                            files_q.rsplit(" LIMIT ?", 1)[0], args)
+                        if not lane_a_skips(r[0])]
+                n_files = len(owed)
+                total_bytes = sum(int(size or 0) for _name, size in owed)
+                if not n_files:
+                    continue
+                files = [{"name": name, "size": size}
+                         for name, size in owed[:files_per_group]]
+            else:
+                n_files, total_bytes = conn.execute(totals_q, args).fetchone()
+                if not n_files:
+                    continue
+                files = [{"name": r[0], "size": r[1]}
+                         for r in conn.execute(files_q, (*args, files_per_group))]
             out.append({
                 "editor": pair["editor"], "machine": pair["machine"],
                 "slug": pair["slug"], "label": pair["label"],

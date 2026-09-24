@@ -537,8 +537,10 @@ class _WindowsShutdownGuard(ShutdownGuard):
         reason_fn: Callable[[], Optional[str]],
         block_fn: Optional[Callable[[int, str], None]] = None,
         unblock_fn: Optional[Callable[[int], None]] = None,
+        on_session_end: Optional[Callable[[], None]] = None,
     ) -> None:
         self._reason_fn = reason_fn
+        self._on_session_end = on_session_end
         self._block_fn = block_fn
         self._unblock_fn = unblock_fn
         self._thread: Optional[threading.Thread] = None
@@ -584,6 +586,32 @@ class _WindowsShutdownGuard(ShutdownGuard):
 
         log.warning("shutdown requested while syncing -- blocking: %s", reason)
         return 0
+
+    def handle_end_session(self, ending: bool) -> None:
+        """WM_ENDSESSION. `ending` is its wParam: TRUE means the session IS
+        ending (shutdown, restart, log-off), FALSE that the shutdown was
+        cancelled - by us or by anybody else - and nothing happens.
+
+        CR-316 (2026-09-24): this answered 0 and did nothing, so Windows
+        ended the process with the run marker still on disk and the next
+        start filed an UncleanExit for an ordinary evening shutdown. Four of
+        ruskin's nine "crashes" (09-01..09-17) were exactly that, and they
+        sat on the fleet grid's [ CRASHES ] chip beside the five real
+        unexpected reboots, making the real ones harder to see. Only the
+        marker: after this returns Windows may end the process at any
+        moment, so the full shutdown() - lane teardown, thread joins - is
+        not something to start here.
+        """
+        if not ending:
+            return
+        log.info("Windows is ending the session: recording a deliberate exit")
+        fn = self._on_session_end
+        if fn is None:
+            return
+        try:
+            fn()
+        except Exception:
+            log.exception("shutdown guard: session-end callback failed")
 
     def _set_block(self, hwnd: int, reason: str) -> bool:
         fn = self._block_fn
@@ -806,6 +834,7 @@ class _WindowsShutdownGuard(ShutdownGuard):
                     if msg == WM_QUERYENDSESSION:
                         return self.handle_query_end_session(hwnd)
                     if msg == WM_ENDSESSION:
+                        self.handle_end_session(bool(wparam))
                         return 0
                     if msg == WM_DESTROY:
                         user32.PostQuitMessage(0)
@@ -1213,17 +1242,27 @@ def make_shutdown_guard(
     reason_fn: Callable[[], Optional[str]],
     enabled: bool = True,
     on_shutdown: Optional[Callable[[], None]] = None,
+    on_session_end: Optional[Callable[[], None]] = None,
 ) -> ShutdownGuard:
     """The guard for this platform. Always returns something startable.
 
     `on_shutdown` is the companion's own shutdown path. macOS uses it to turn
     SIGTERM (logout, ``launchctl bootout``) into a graceful stop; Windows
     ignores it, because WM_ENDSESSION arrives at the window instead.
+
+    `on_session_end` (Windows, CR-316) runs when WM_ENDSESSION says the
+    session really is ending. It is why a DISABLED guard on Windows still
+    gets its window: switching the shutdown warning off must not turn every
+    evening shutdown back into a crash report, so the window is built with a
+    reason that never blocks.
     """
+    if sys.platform == "win32":
+        if not enabled and on_session_end is None:
+            return ShutdownGuard()
+        return _WindowsShutdownGuard(reason_fn if enabled else (lambda: None),
+                                     on_session_end=on_session_end)
     if not enabled:
         return ShutdownGuard()
-    if sys.platform == "win32":
-        return _WindowsShutdownGuard(reason_fn)
     if sys.platform == "darwin":
         return _DarwinShutdownGuard(reason_fn, on_shutdown=on_shutdown)
     return ShutdownGuard()

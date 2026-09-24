@@ -179,7 +179,8 @@ def test_the_home_page_still_polls_every_two_seconds_and_only_when_visible(env):
 def test_the_transfers_tables_stack_and_keep_the_whole_file_name(env):
     client, _ = env
     body = page(client, "/transfers")
-    assert '<table class="editors stack">' in body
+    # CR-312 (2026-09-24): `transfers` is what scopes the wrapping FILE cell.
+    assert '<table class="editors stack transfers">' in body
     for label in ("EDITOR", "DIRECTION", "FILE", "PROGRESS", "SPEED", "ETA"):
         assert f'data-label="{label}"' in body
     # The path wraps rather than scrolling the page, and the untruncated

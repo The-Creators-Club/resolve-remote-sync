@@ -304,6 +304,20 @@ project_rotation_seconds = 600
 # the queue. 0 restores the old behaviour (wait the full rotation either way),
 # and this is ignored entirely under lane_c_pause_scheme = "rotate":
 lane_c_settle_seconds = 30
+# The skip-ahead (CR-319). When a project's proxy download (lane B) runs out
+# of its project_rotation_seconds turn with files still to fetch, and every
+# OTHER ticked project's last turn -- started no more than this many seconds
+# before -- found nothing to download AND nothing to upload, the busy project
+# gets another turn straight away instead of the rotation spending minutes
+# re-checking the quiet ones. A quiet project's next turn starts at most this
+# long plus two of the busy project's turns after its last one began (at the
+# defaults, where a turn is 600 s too, the busy project simply goes twice per
+# round, ~20 of every ~22 minutes instead of 10 of 12); a file changed in it, an
+# unconfirmed .stignore, a Syncthing folder waiting to be accepted, or any
+# check that did not finish cleanly gives it its normal turn. Never skips
+# under lane_c_pause_scheme = "rotate", on a halt, with the drive absent, or
+# for an upload-only tick. 0 restores the plain rotation exactly:
+lane_b_idle_recheck_seconds = 600
 # How long (seconds) the sequencer idles between full passes once every
 # selected project is caught up (small edits still trickle during this
 # window -- every selected folder is unpaused while idle):

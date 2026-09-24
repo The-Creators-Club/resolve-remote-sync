@@ -125,13 +125,13 @@ def test_an_archive_original_with_no_proxy_is_still_counted(tmp_path, mapped):
     assert [entry["path"] for entry in watcher.missing_clips()] == [ARCHIVE_CLIP]
 
 
-def test_project_footage_is_counted_exactly_as_before(tmp_path, mapped):
-    """The exemption is the ARCHIVE's alone: a project clip whose media has
-    not synced down is the thing the count was added for."""
-    proxy = _local(tmp_path, r"P:\Projects\Energy Transition\Proxy\a.mov")
-    proxy.parent.mkdir(parents=True, exist_ok=True)
-    proxy.write_bytes(b"proxy")
-
+def test_project_footage_with_no_proxy_is_counted_exactly_as_before(
+        tmp_path, mapped):
+    """A project clip with nothing to play is the thing the count was added
+    for. (Until CR-317, 2026-09-24, this test pinned that a project clip WITH
+    its proxy on disk was counted too: the exemption was the archive's
+    alone. That is the bug ruskin's fleet row showed as "57 clips Resolve
+    cannot find"; test_cr317_proxy_held_not_missing.py pins the new rule.)"""
     watcher = _watcher(tmp_path, make_timeline_item(PROJECT_CLIP))
     summary = watcher.poll_once()
 

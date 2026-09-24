@@ -122,8 +122,55 @@
     <label title="https only. The body is {subject, text} as JSON.">WEBHOOK URL<br>
       <input type="text" name="alerts_webhook_url" value="{{ alerts_settings.alerts_webhook_url }}" placeholder="https://"></label>
 
+    {# The server triage agent (2026-09-24, docs/SERVER_TRIAGE_AGENT.md). In the
+       same form as the rest so one [ SAVE ] validates everything together:
+       alerts.set_settings refuses the whole form on one bad field. #}
+    <div class="side-head" style="margin-top:0.8rem">[ SERVER CHECK ]
+      <span class="muted">Claude Code reads everything this server knows is open, stuck
+        or failing and mails you what needs a person, at these hours in the time zone
+        above. It only reads; a reply to its email can carry out the actions it offers.</span></div>
+    <label title="Off by default. It runs Claude Code on this server, so it needs Claude Code set up on Settings, AI providers.">SERVER CHECK<br>
+      <select name="alerts_triage">
+        <option value="1" {% if alerts_settings.alerts_triage == "1" %}selected{% endif %}>on</option>
+        <option value="0" {% if alerts_settings.alerts_triage != "1" %}selected{% endif %}>off</option>
+      </select>
+    </label>
+    <label title="Hours of the day, 0 to 23, separated by commas. At most four.">AT THESE HOURS<br>
+      <input type="text" name="alerts_triage_hours" value="{{ alerts_settings.alerts_triage_hours }}" placeholder="6,18"></label>
+    <label title="Replies to the check's email go here, and this is the only mail the server ever reads. Blank means the email cannot be replied to.">REPLY ADDRESS<br>
+      <input type="text" name="alerts_triage_reply_to" value="{{ alerts_settings.alerts_triage_reply_to }}" placeholder="you+ccsync@example.com"></label>
+    <label title="Where replies are read from, with the SMTP user and password above. Blank works it out from the SMTP host.">IMAP HOST<br>
+      <input type="text" name="alerts_imap_host" value="{{ alerts_settings.alerts_imap_host }}" placeholder="{{ triage.imap_host or 'imap.example.com' }}"></label>
+
     <div style="margin-top:0.6rem"><button class="btn tap" type="submit">[ SAVE ]</button></div>
   </form>
+
+  <div style="margin-top:0.8rem">
+    {% if triage.error %}
+      <div class="muted">The server check's state could not be read: {{ triage.error }}</div>
+    {% else %}
+      <div class="muted">
+        SERVER CHECK is {{ "on" if triage.enabled else "off" }}.
+        {% if not triage.cli_ok %}It cannot run its analysis: {{ triage.cli_why }}. Each check will mail a plain summary instead.{% endif %}
+        {% if triage.enabled and not triage.replies_enabled %}Replies are not being read (they need a reply address and mail as the channel).{% endif %}
+      </div>
+      {% if triage.running_since %}<div class="muted">A check has been running since {{ triage.running_since }}.</div>{% endif %}
+      {% if triage.last_run %}
+        <div class="muted">Last check: {{ triage.last_run.started_at }},
+          {{ triage.last_run.status }}{% if not triage.last_run.email_ok %}, the email did not go out{% endif %}.
+          <a href="/admin/alerts/triage/{{ triage.last_run.id }}" target="_blank" rel="noopener">[ READ ITS REPORT ]</a></div>
+      {% else %}
+        <div class="muted">No check has run yet.</div>
+      {% endif %}
+      {% if triage.last_poll %}
+        <div class="muted">Replies last read {{ triage.last_poll.at }}: {{ triage.last_poll.detail }}</div>
+      {% endif %}
+      <form class="inline-form" style="margin-top:0.4rem" hx-post="/partials/admin/alerts/triage/run"
+            hx-target="#admin-alerts" hx-swap="outerHTML">
+        <button class="btn tap" type="submit">[ RUN NOW ]</button>
+      </form>
+    {% endif %}
+  </div>
 
   {# The password has its own form because it has its own store: a file under
      <data>/secrets/, 0600, never in the database and never in a response. #}

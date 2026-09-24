@@ -245,7 +245,7 @@
               {# SYNC-1 / SYS-17: the stall the COMPANION found and killed,
                  which is the machine that had the evidence. The server's own
                  detector is the lane chip above. #}
-              {% if e.guard.stalled_lane %}<span class="chip red" title="{{ chip_help('stalled', lane=e.guard.stalled_lane | lane_word, seconds=e.guard.stalled_seconds, killed=("and was killed" if e.guard.stalled_killed else "and was reported without being killed"), at=e.guard.stalled_at | ago) }}">[ STALLED: {{ e.guard.stalled_lane | lane_word | upper }}{{ ", KILLED" if e.guard.stalled_killed }} ]</span>{% endif %}
+              {% if e.guard.stalled_lane and e.guard.stall_current %}<span class="chip red" title="{{ chip_help('stalled', lane=e.guard.stalled_lane | lane_word, seconds=e.guard.stalled_seconds, killed=("and was killed" if e.guard.stalled_killed else "and was reported without being killed"), at=e.guard.stalled_at | ago) }}">[ STALLED: {{ e.guard.stalled_lane | lane_word | upper }}{{ ", KILLED" if e.guard.stalled_killed }} ]</span>{% endif %}
               {# DASH-2: this computer is talking to us and we are refusing
                  it. On the row as well as in the banner, because the fix is
                  on THAT machine. #}
@@ -321,11 +321,15 @@
               <span class="mono-sm muted">{% if rd.get('connected') is not none %}{{ "connected" if rd.get('connected') else "not connected" }}{% else %}not checked{% endif %}{% if rd.get('project_open') %} · project open: <span class="who">{{ rd.get('project_open') }}</span>{% endif %}{% if rd.get('wedged_seconds') %} · <span class="red">wedged {{ rd.get('wedged_seconds') | round | int }} s{% if rd.get('wedged_call') %} in {{ rd.get('wedged_call') }}{% endif %}</span>{% endif %}{% set pa = rd.get('proxy_attach') or {} %}{% if pa.get('attached') is not none or pa.get('failed') is not none %} · proxies attached {{ pa.get('attached') or 0 }}, failed {{ pa.get('failed') or 0 }}{% if pa.get('why') %} ({{ pa.get('why') }}){% endif %}{% endif %}{% set pg = rd.get('proxy_gaps') or {} %}{% if pg.get('capped') %} · proxy queue capped at {{ pg.get('capped') }}{% endif %}{% if pg.get('low_space') %} · {{ pg.get('low_space') }}{% endif %}{% set st = rd.get('stills') or {} %}{% if st.get('ok') is not none and not st.get('ok') %} · stills: {{ st.get('status') or "not ok" }}{% if st.get('instruction') %} ({{ st.get('instruction') }}){% endif %}{% endif %}</span>
               {# Behind a count of their own, because either list can be fifty
                  clips long and this is still a grid cell. #}
-              {% for group in [('missing_clips', 'Resolve cannot find'), ('non_canonical_refused', 'refused: the path is not the canonical one')] %}
+              {# CR-317 (2026-09-24): the missing-clips words depend on the
+                 reporting build. Up to 0.9.75 the list includes clips playing
+                 their proxy, so "Resolve cannot find" was false for all of
+                 them on a remote rig; health.missing_clips_label says why. #}
+              {% for group in [('missing_clips', missing_clips_label(e.companion_version)), ('non_canonical_refused', 'refused: the path is not the canonical one')] %}
                 {% set clips = rd.get(group[0]) or [] %}
                 {% if clips %}
                 <details class="proj-group" data-key="rh:{{ group[0] }}:{{ e.editor_username }}:{{ e.machine }}">
-                  <summary><span class="marker">&#9656;</span> {{ clips | length }} clip{{ "s" if clips | length != 1 }} {{ group[1] }}</summary>
+                  <summary{% if group[0] == 'missing_clips' %} title="{{ missing_clips_help(e.companion_version) }}"{% endif %}><span class="marker">&#9656;</span> {{ clips | length }} clip{{ "s" if clips | length != 1 }} {{ group[1] }}</summary>
                   <ul class="mono-sm">
                     {% for c in clips %}<li>{{ c.get('name') or c.get('path') or "?" }}{% if c.get('name') and c.get('path') %} <span class="muted">{{ c.get('path') }}</span>{% endif %}</li>{% endfor %}
                   </ul>

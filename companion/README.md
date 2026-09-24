@@ -264,6 +264,7 @@ of what either of those produces. Restart the app after editing.
 | `selection_poll_interval` | `60` | How often the sequencer refreshes the editor's project selection from the dashboard. |
 | `project_rotation_seconds` | `600` | Max time the sequencer spends on one project's lane-C turn before rotating to the next (starvation guard). |
 | `sequencer_idle_seconds` | `60` | Idle sleep between full passes over the queue. |
+| `lane_b_idle_recheck_seconds` | `600` | CR-319 skip-ahead: a project whose proxy download ran out of its turn with files left goes again at once while every other ticked project's last turn (started within this window) found nothing up or down. `0` = plain rotation. Off under `lane_c_pause_scheme = "rotate"`. |
 | `selection_fetch_ttl` | `30` | How long the last selection response is served from memory before the dashboard is asked again (the sequencer consults it from a 5-second poll loop). |
 | `project_roots_ttl` | `300` | Longer TTL for the sticky per-Resolve-project destination mapping (`project_roots`) carried in the same response. |
 | `lane_b_enabled` | `true` | Set `false` on the base rig (direct LAN access to the NAS): proxies are read straight off the share, so the local proxy mirror is skipped in both managed and legacy modes. |

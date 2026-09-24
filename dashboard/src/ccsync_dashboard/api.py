@@ -758,6 +758,16 @@ def build_transfers_view(
                 "upload_only": True,
             })
     queues.sort(key=lambda q: (q["editor"] or "", q["label"], q["lane"]))
+    # CR-311: a backlog its own machine has said it cannot move (drive
+    # unplugged, halted, not signed in, ...) says so on the row, instead of
+    # reading as one that is draining. The pending rows are left alone: their
+    # sentence is already about what has not started yet.
+    guard_map = db.fetch_sync_guard_map(conn)
+    for q in queues:
+        if q.get("pending") or not q.get("machine"):
+            continue
+        q["held"] = health.queue_hold(
+            guard_map.get((q["editor"] or "", q["machine"])), q["lane"])
 
     # Editors pushing lane C content TO the server (the NAS folder's own
     # need) -- a 400 MB mp3 uploading via Syncthing was invisible in every
@@ -1012,6 +1022,11 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         # answer is on the page the owner opens rather than in a message to
         # the editor whose machine is the broken one.
         entry["guard"]["diagnostics_requested"] = key in pending_asks
+        # CR-313 (2026-09-24): the [ STALLED ] chip asks the same question the
+        # why-sentence does. It read `stalled_lane` alone, so a stall record
+        # that healed on 2026-09-11 kept a red chip on ruskin's row for 13
+        # days, beside lanes that had completed passes since.
+        entry["guard"]["stall_current"] = health.stall_is_current(entry, now or "")
         refusal = refusals.get(key)
         if refusal:
             entry["guard"]["report_refused_at"] = refusal.get("at")

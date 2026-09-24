@@ -522,6 +522,15 @@ table.editors th {
 }
 table.editors td { padding: 0.45rem 0.8rem 0.45rem 0; vertical-align: baseline; }
 tr.editor-row { border-bottom: 1px dotted #2a2a31; }
+/* CR-312 (2026-09-24): the transfers tables' FILE cell wraps. `.mono-sm` is
+   nowrap, and a b-roll path like `B-roll/_國家影視聽中心 TFAI archive
+   (YouTube)/.../《愛情萬歲》數位修復預告片 ... [G0yXiMJo0lI].mov` set the
+   table's width, pushing PROGRESS / SPEED / ETA off the panel behind a
+   sideways scroll - the three columns the table exists for. `anywhere`
+   (not `break-word`) is what lets the min-content width shrink, and CJK
+   text breaks between characters anyway. The full name stays in `title`. */
+table.editors.transfers td.path { white-space: normal; overflow-wrap: anywhere; width: 100%; }
+table.editors.transfers td:not(.path) { white-space: nowrap; }
 
 /* ---------------- Settings -> Packages ----------------
    One set of column roles for all three lists on that page (owner,

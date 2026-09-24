@@ -30291,6 +30291,393 @@ change. After deploy nothing updates until the site turns the flag on.
   Code up to date" box, or `[features] ai_cli_auto_update = true` pasted
   into the site.toml import).
 
+## CR-310 - every fresh tick raised a red "not sending that project" notice for up to two minutes - FIXED in repo, unshipped (dashboard/src/ccsync_dashboard/collector.py)
+
+Seen 2026-09-24: the owner ticked `2026-ff5-film-1-2` for
+ruskin/DESKTOP-LQQ41TC and eleven seconds later the home page carried a
+severity-error `plan_without_share` card saying the server was not sending
+the project and the tick "looks exactly like it is working".
+
+The tick is right; the card was wrong. A tick nudges the collector, which
+runs `config` (snapshots every folder's devices into `_folder_devices`),
+then `enforce` (makes the share), then the self-diagnosis pass, which checks
+the plan against `_folder_devices` - the snapshot from BEFORE the share. The
+card cleared at the next config read (`interval_config`, 120 s), so the one
+person who ever saw it was the admin who had just ticked, told that what
+they did had failed, with a fix ("untick and re-tick") that reproduces it.
+
+Fix: `_enforce_loop` writes each folder it successfully PUTs back into
+`_folder_devices` (server id excluded, shared asset libraries left out as
+`_run_config` leaves them out). A share enforce could not make - the device
+is not approved, Syncthing refused the PUT - never reaches the snapshot, so
+the card still fires for exactly the case it exists for.
+
+### Verification
+- `dashboard/tests/test_cr310_tick_is_not_plan_without_share.py`: tick, then
+  `config` + `enforce` in the nudge's order against the fake Syncthing -> the
+  share exists and no card (fails without the fix with the card open); an
+  unapproved device still gets the card.
+
+### Deploy order
+Dashboard only. No schema, wire or companion change.
+
+## CR-311 - a queued backlog its own machine could not move looked exactly like one that was draining - FIXED in repo, unshipped (dashboard/src/ccsync_dashboard/health.py, api.py, templates/partials/transfers.html)
+
+Seen 2026-09-24: the transfers page's [ QUEUED ] list had carried
+"leso · 2026/FF5/Elections ⇡ 52 file(s) · 23.5 GB [upload]" for days. The
+files were real (the `0918沈伯洋掃街` shoot, none on the NAS) and the row
+was right about that; what it left out was that leso's machine had reported
+`blocked_reason=root_absent` since 2026-09-21 10:10Z. The drive holding them
+(SAMDISK) was unplugged, the Mac was reminding him every 30 minutes, and the
+page the owner reads gave no hint - an amber upload chip, same as one moving
+at full speed.
+
+`build_transfers_view` now tags each non-pending queue row with
+`health.queue_hold(guard, lane)`: the machine's OWN reported reason (never a
+derivation here - see CR-269), mapped to the lanes it stops. Every lane for
+the drive/sign-in/licence/halt/pause/offline reasons; lane B alone for
+`clock_skew`, `disk_full`, `breaker_tripped`; lane C alone for
+`syncthing_down`. `lane_stalled` is not a hold (the watchdog restarts it).
+The row renders `[ ON HOLD ]` with the fleet grid's own sentence and
+"since <ago>".
+
+### Verification
+- `dashboard/tests/test_cr311_queue_says_on_hold.py`: root_absent holds both
+  lanes with its since stamp; breaker_tripped holds B, not A; no reason
+  changes nothing; a stall is not a hold; the partial renders it with no em
+  dash.
+
+### Deploy order
+Dashboard only, together with CR-310. No schema, wire or companion change.
+
+## CR-312 - a long clip name on LIVE TRANSFERS hid progress, speed and ETA behind a sideways scroll - FIXED in repo, unshipped (dashboard/static/style.css, templates/partials/transfers.html)
+
+Seen 2026-09-24 on ruskin's b-roll proxy downloads: names like
+`B-roll/_國家影視聽中心 TFAI archive (YouTube)/06 Restored 國片 trailers &
+clips 修復版預告/Proxy/TFAI ... 《愛情萬歲》數位修復預告片 ... [G0yXiMJo0lI].mov`.
+The FILE cell is `.mono-sm`, which is `white-space: nowrap`, so its text set
+the table's width and the three columns the table exists for sat off the
+right edge of the panel.
+
+Both transfers tables (live and history) carry `transfers` now; there the
+FILE cell wraps (`overflow-wrap: anywhere`, which is what shrinks the
+min-content width; `break-word` does not) and takes the slack, and every
+other cell stays on one line. The full name is still in `title`.
+
+### Verification
+- Rendered in Chrome at 1600 / 1100 / 390 px with the live names and a
+  140-character unbroken one: `.scroll-x` scrollWidth == clientWidth at all
+  three, every SPEED cell inside the box.
+- `dashboard/tests/test_cr312_transfer_names_wrap.py` pins the class and the
+  two rules.
+
+### Deploy order
+Dashboard only, with CR-310 and CR-311.
+
+## CR-313 / CR-314 / CR-315 - three untrue things on ruskin's fleet row and queue - FIXED in repo, unshipped (dashboard/src/ccsync_dashboard/health.py, api.py, db.py, templates/partials/fleet_grid.html)
+
+Found 2026-09-24 by checking DESKTOP-LQQ41TC itself (read-only over SSH)
+against what the dashboard said about it. Nothing on the machine was stuck.
+
+**CR-313 - a stall that healed on 09-11 stayed red for 13 days.** The row
+read "Not syncing: upload has been busy for 25 minutes with nothing moving"
+with a red `[ STALLED: A, KILLED ]` chip. The only stall record was
+`lane_stall.json` from 2026-09-11 16:26Z; lane A had completed passes every
+day since. Three gaps, all fixed:
+- `_why_first` let the companion's reported `lane_stalled` win without asking
+  `stall_is_current` (live-1 wired it into the fallback and the alert only),
+  and a 0.9.74 companion re-sends the record on every report. It is now
+  skipped when the report carries a stall record that proves it healed; a
+  bare `lane_stalled` with no record still wins (cannot-tell stays red).
+- The chip read `stalled_lane` alone; it now needs `guard.stall_current`.
+- `stall_is_current`'s "the lane has passed since" test compared `A` against
+  `lane_a_video_up` with `endswith("_a")`, which matched neither spelling, so
+  on a live row only the 24 h ceiling ever retired a stall. Compared as lane
+  letters now (`_lane_letter`).
+0.9.75 stops re-sending a healed stall on its own; this makes the dashboard
+right for every build.
+
+**CR-314 - originals pushed proxies out of the manifest.** The report
+handler builds one list, originals then proxies, and `replace_editor_media`
+kept `files[:2000]`. The companion caps each kind at 2000 separately
+(`manifest.MAX_PER_FILE_ENTRIES`) so it never flagged the project truncated.
+ruskin: Civil Defence 251 + 1,849 = 2,100 (100 proxies dropped), Energy
+Transition 827 + 1,696 = 2,523 (523 dropped) - exactly the two "proxy
+download" rows that never cleared, while an rclone listing showed every NAS
+proxy on his drive at the right size. The cap is per kind now. The two rows
+clear on his first report after the deploy.
+
+**CR-315 - files lane A skips on purpose were owed uploads.** Two yt-dlp
+leftovers from a download that died on 09-14 (`[xfe3X3yeVaw].f137.mp4`,
+`.temp.mp4`, 31.7 GB) sat in [ QUEUED ] as "upload, 2 files" for ever: the
+manifest counts every video file, lane A's `YTDL_WORK_EXCLUDE_RULES` never
+send them. `fetch_sync_backlog` now drops what `db.lane_a_skips` says lane A
+will not send; `LANE_A_SKIP_GLOBS` is pinned to the companion's rule strings
+by a parity test. (The two files were deleted from his drive the same day,
+after checking the finished `.mp4` and its proxy were on the NAS; the
+`.f140.m4a` audio part was left, as it is also on the NAS and in Syncthing's
+scope, where a local delete would propagate.)
+
+Not fixed here, companion side: a normal Windows shutdown is recorded as an
+UncleanExit (4 of ruskin's 9 "crashes"; the other 5 were unexpected reboots).
+
+### Verification
+- `dashboard/tests/test_cr313_315_ruskin_phantoms.py`: healed / fresh /
+  passed-since stall, the chip gate, ruskin's measured 827 + 1,696 manifest,
+  per-kind cap, the two leftovers not owed beside a real original, parity
+  with `rclone_lane.py`.
+- `tests/test_health.py` (every reported reason still gets its sentence).
+
+### Deploy order
+Dashboard only, with CR-310..312. No schema, wire or companion change.
+
+## CR-316 - an ordinary Windows shutdown was filed as a companion crash - FIXED in repo, unshipped (companion 0.9.76: shutdown_guard.py, app.py)
+
+Seen 2026-09-24 on ruskin's DESKTOP-LQQ41TC: `[ CRASHES: 9 ]` on the fleet
+grid. All nine were `UncleanExit` reports (09-01..09-17). Matched against the
+Windows System log: five were unexpected reboots (real), and four were
+ordinary shutdowns (09-02, 09-08, 09-11, 09-17).
+
+The run marker (`crash_report.write_run_marker`, CR-93) is removed only by
+`shutdown()`. Windows ending the session sends WM_ENDSESSION to the shutdown
+guard's hidden window, which answered 0 and did nothing; Windows then ended
+the process with the marker on disk, and the next start reported a crash.
+The four false ones sat beside the five real ones and made the real ones
+harder to see.
+
+Fix: `_WindowsShutdownGuard.handle_end_session(ending)` - on WM_ENDSESSION
+with wParam TRUE, the app's `on_session_end` removes the marker
+(`crash_report.mark_clean_exit`, which already leaves a newer build's marker
+alone). The marker ONLY: after WM_ENDSESSION returns Windows may end the
+process at any moment, so the full `shutdown()` is not started there. wParam
+FALSE (a cancelled shutdown) records nothing. And the window now exists even
+with `shutdown_warning_enabled = false` (with a reason that never blocks),
+or switching the warning off would bring the false crashes back. A real
+power loss or a hard reset sends no WM_ENDSESSION and is still reported.
+
+### Verification
+- `companion/tests/test_shutdown_guard.py` (CR-316 block): ending records,
+  cancelled does not, a raising callback never escapes, the window survives
+  the warning being off and never blocks, app.py wires the marker, and a
+  real marker file is removed.
+
+### Deploy order
+Companion only (0.9.76). Nothing on the dashboard reads it differently; the
+[ CRASHES ] chip simply stops counting shutdowns from the first 0.9.76 run.
+
+## CR-318 - every fresh tick mailed "a shared folder has no filter" ten minutes before mailing "cleared" - FIXED in repo, unshipped (dashboard/src/ccsync_dashboard/alerts.py)
+
+Seen 2026-09-24: the owner ticked Film 1 + 2 for ruskin/DESKTOP-LQQ41TC;
+the server mailed `folders_unfiltered` at 03:27Z and `folders_unfiltered.ok`
+at 03:37Z. Checked on his machine at 04:33Z: the folder configured, NOT
+paused, 29 of 29 ignore patterns, syncing (1,049 of 3,292 files to go).
+
+Nothing was wrong. Syncthing accepts a new share before the companion's
+next sync turn confirms its `.stignore`, and for that one turn the sequencer
+keeps the folder paused (AUDIT_2 L-3) and reports it as unfiltered - the
+latch working. The alert could not tell that from a folder that has been
+unfiltered for a day.
+
+`_check_folders_unfiltered` now skips a machine whose unfiltered folders are
+ALL ticks for that machine (or its unassigned bucket) made or changed within
+`UNFILTERED_FRESH_TICK_SECONDS` (30 minutes, three rotations). Anything it
+cannot show is fresh still alerts at once: no names reported, more folders
+than the ten names the report carries, a name with no tick row, an old tick
+among fresh ones, an unreadable stamp. The fleet grid chip is unchanged: it
+states the fact; only the mail waits.
+
+### Verification
+- `dashboard/tests/test_cr318_unfiltered_grace.py`: fresh tick silent;
+  alerts after the grace; old tick at once; one old among fresh; no names;
+  more folders than names; a name with no tick.
+
+### Deploy order
+Dashboard only (0.7.53).
+
+## CR-317 - "57 clips Resolve cannot find" on a timeline that played perfectly - FIXED in repo, unshipped (companion 0.9.76: watcher.py; dashboard: health.py, ui.py, templates/partials/fleet_grid.html)
+
+Seen 2026-09-24 on ruskin's DESKTOP-LQQ41TC, project "Reproductive Rights
+Fight", timeline "Ordered V7": the fleet grid's RESOLVE row said "57 clips
+Resolve cannot find". All 58 were camera originals and YouTube originals on
+`P:\Projects\...` that a remote editor never holds by design (lane B brings
+proxies only, lane C excludes video). Every one had its proxy attached in
+Resolve (`Proxy Media Path` set, `Proxy` showing a resolution), with the
+proxy file on his disk at the NAS size. Nothing was missing for editing.
+
+Cause: `paths.classify_path` answers MISSING for an absent file whose P:
+prefix resolves under local_root. Its docstring calls that the designed
+steady state on a remote rig, and it is. But the watcher counted and listed
+every MISSING clip (`last_counts["missing"]`, `missing_clips`, capped at 50
+by `MAX_MISSING_REPORTED`) and only ever asked whether the ORIGINAL existed.
+The one proxy-aware exemption (audit F4, `_archive_exempt`) covers the
+b-roll archive and nothing else. So on every remote rig the count was the
+whole timeline, and a clip with nothing to play was lost among the clips
+that were fine. The watcher's per-path DEBUG line said "not under
+local_root/prefix", which is the opposite of what MISSING means.
+
+Fix, companion: `TimelineWatcher._proxy_held`. A MISSING project clip is
+counted and listed only when neither the original nor a usable proxy is on
+this computer. "Usable proxy" means `proxy_relink.find_proxy_on_disk`
+finds the conventional `Proxy/<stem>.mov|.mp4` (by either spelling) AND
+`proxy_relink.is_refused` has no record of Resolve refusing that exact file
+for this clip. That second check keeps the case from ruskin's short A004
+proxies on 2026-09-17 in the count. No Resolve call: a timeline item carries
+no proxy state, and the pool walk that reads it runs every 120 s (same
+reasoning as `_archive_exempt`, and CR-68). The answer is remembered with the
+archive's TTL and cap (comp-resolve-7) in its own per-poll cache. The archive
+is still judged only by its own rule, because there `Proxy/<stem>.mp4` is the
+browser preview. A proxy attached somewhere other than the convention is not
+seen, so such a clip is still counted, which is the safe direction for
+evidence. The log lines now say "clip's original is not on this computer
+and no usable proxy for it is either" and "N clip(s) with neither the
+original nor a usable proxy on this computer". **The wire did not change**:
+same `resolve_health.missing` / `missing_clips` keys and shape. Only what
+goes into them changed.
+
+Fix, dashboard: the label depends on the reporting build, because only the
+build knows what its list means. From 0.9.76 the list is "clips with neither
+the original nor a proxy on this computer". Older builds, and any version
+string that cannot be parsed, get "clips whose original is not on this
+computer", which is true of both lists. Each label has its own hover text
+(`health.missing_clips_help`); the old one says a clip playing its proxy is
+fine and names the update. The `detail_notes` count beside [ DETAILS ] uses
+the same words.
+
+### Verification
+- `companion/tests/test_cr317_proxy_held_not_missing.py`: an absent original
+  with its proxy present is still classified MISSING but counted and listed
+  nowhere; original and proxy both absent is counted and listed; ruskin's
+  shape (camera + YouTube with proxies, one with neither) lists only the one;
+  a refused proxy stays counted; the archive keeps its own rule; a raising
+  check counts the clip; the TTL memo; the reworded log line.
+- `companion/tests/test_watcher.py` (log wording) and
+  `test_watcher_broll_archive.py`. That file pinned the old "project
+  footage with a proxy is counted" behaviour; it now pins "project footage
+  with no proxy is counted".
+- `dashboard/tests/test_cr317_missing_clips_label.py`: the version gate
+  (0.9.75 / 0.9.76 / 0.10.0 / `+dirty` / unparseable), the note and the
+  rendered group for an old and a new build, no em dash;
+  `test_bug_hunt_2026_09_11_dash_mounts_ui.py` updated to the new words.
+
+### Deploy order
+Either order is safe, since there is no wire change: companion 0.9.76 +
+dashboard 0.7.53. A 0.9.76 companion reporting to an older dashboard is
+labelled "Resolve cannot find" over a list that is now actually that. A
+0.9.75 companion reporting to 0.7.53 is labelled by its originals only.
+ruskin's row drops to the clips with nothing to play once his companion
+runs 0.9.76.
+
+## CR-319 - one project with a big proxy backlog waited ~2 minutes of every round while the quiet projects were re-checked - FIXED in repo, unshipped (companion 0.9.76: sync/sequencer.py, sync/rclone_lane.py, config.py)
+
+Seen 2026-09-24 on ruskin's DESKTOP-LQQ41TC: Film 1 + 2 had 89 proxies
+(97.5 GB) still to come down, and every other ticked project had nothing to
+fetch. His log shows Film 1 + 2's lane B turn ending with "hit the 600s
+per-project budget for ... -- remaining files resume next pass" at 11:30:11,
+11:42:16, 11:54:35, 12:07:03, 12:19:24 and 12:32:01: a ~12-minute round, of
+which ~2 minutes went on the other projects' turns, each finding nothing.
+
+Cause: the rotation gives every ticked project a turn in order, whatever
+the last turn found. A project that has just been checked and had nothing
+to fetch costs a full turn again (structure-clone check, lanes A and B
+listings over SFTP, the lane C turn) while the project with work waits.
+
+The rule (`Sequencer._skip_ahead_reason`): when a project's turn ends with a
+lane B run cut off by the budget (rclone exit 10 with a budget, i.e. files
+left), and EVERY other usable project in the plan had a complete turn that
+started no more than `lane_b_idle_recheck_seconds` (default 600) before the
+turn that just ended started, in which every lane run - lane A up, lane B
+down, and each borrowed subpath - completed and moved nothing, then the
+busy project goes back to the head of the queue instead of the rotation
+advancing. It logs one INFO line: "Film 1 + 2 still has files to fetch and
+the other N projects found nothing in the last M min -- giving it another
+turn". `lane_b_idle_recheck_seconds = 0` is the old rotation exactly.
+
+The window is measured from the START of the busy project's turn, not from
+the moment of the decision. At the defaults a turn is itself 600 s, so every
+other project's check is always more than 600 s old at the end of it, and a
+rule measured from "now" would never fire. The cost, stated exactly: a quiet
+project's next turn starts at most the window plus two of the busy project's
+turns after its last one began. At the defaults that is ONE extra turn per
+round: ruskin goes from "Film 1 + 2, the rest" every ~12 minutes (10 of 12
+on the backlog) to "Film 1 + 2 twice, the rest" every ~22 minutes (20 of
+22). A larger window buys more repeats, at a longer re-check of the others.
+
+The outcome comes from what the pass already knows, with no extra listing:
+`RcloneLane.last_run_outcome(subpath)` answers `work_remained` (budget exit),
+`nothing` (completed, moved 0, trashed counted as moved), `moved`, or None
+for anything else (failed, stall kill, delete cap, tripped breaker, disk
+floor, missing root, stopped lane, a stale queued pass). A lane A project
+folder that was never on this computer is `nothing`. The sequencer keeps
+the per-project records in memory only: a restart forgets every "found
+nothing", so the first round after a restart is the plain rotation (the
+safe direction). A turn cut short by a stop or pause leaves no record.
+
+What is deliberately NOT skipped:
+- Lane A. A project the watcher saw a file change in since its turn started
+  is never skipped over, including a change in the project whose turn it is
+  or in one already done this pass (the two cases `notify_change` reorders
+  nothing for). A project whose last lane A run moved files, hit its budget
+  or failed is not "found nothing". Express uploads run on their own thread
+  and are not held by the rotation at all.
+- Lane C. Under the default pause scheme ("none") the rotation never pauses
+  any folder, so every project's Syncthing folder syncs all the time. What a
+  project's own lane C turn adds is the `.stignore`/versioning/ignoreDelete
+  re-assert, the accept of a newly offered folder, and the release of a
+  folder something else left paused. So a project with unconfirmed ignores,
+  or with its folder waiting in `pending_folders()` (one local REST GET per
+  decision; unreadable means no skip), always gets its turn, and every other
+  one gets its whole turn inside the bound above. Under
+  `lane_c_pause_scheme = "rotate"` the busy project's turn pauses every other
+  folder for up to `project_rotation_seconds`, and repeating the turn would
+  repeat that pause. The skip is OFF under "rotate".
+- The existing gates: a stop, a pause, a halt (a halt predicate that raises
+  counts as halted), local_root absent, an offline pass, lane B disabled
+  (base mode) or latched as abandoned, and an upload-only busy project all
+  mean no skip. An upload-only OTHER project counts by its lane A alone. The
+  busy project is only put back in the queue, so its next turn passes every
+  usual gate again. A selection change is checked first and always wins.
+- A project that is ALONE in the plan is never repeated inside one pass.
+  The pass-level work (shared and borrowed folder reconcile, trash prune,
+  the unpause sweep) runs between passes, and one project alone never ends
+  its pass. With others, the pass always ends, because their records only
+  age while the busy project repeats.
+
+`lane_b_idle_recheck_seconds` is a config.py DEFAULT (commented out in the
+first-run template like the other field knobs, live in config.example.toml),
+read through `coerce_count` (0 legal). A bad value is a validate_config
+WARNING, never an error: an error stops every lane (DEL-3), and this knob
+scopes nothing that syncs.
+
+### Verification
+- `companion/tests/test_cr319_skip_ahead.py` (37): ruskin's shape (round 1
+  plain, then Film 1 + 2 repeats, with the log line); checked too long ago
+  (700 s turns: two Film turns, then the others); the lane C bound (400 s
+  turns: three Film turns, each quiet project's turn and folder unpause
+  recur within the window plus two turns); feature off; no work left;
+  another project moved / failed / hit its own budget, on lane B and on lane
+  A; a lane with no outcome accessor; a watcher change in a project done
+  this pass and in the current project; upload-only quiet project (skips by
+  its uploads, and does not when uploads are left); unconfirmed ignores;
+  a pending folder; unreadable pending folders; rotate scheme; halt and a
+  raising halt; missing drive; upload-only busy project; lane B disabled;
+  a lone project; a fresh sequencer (in-memory state); the config warning;
+  and the lane side (budget exit, nothing, moved, failure, exit 10 without
+  a budget, subpath keying, an early return forgetting the last outcome, a
+  never-local project folder, lane B down). Each guard was removed in turn
+  and its test failed; the upload-only and lane-B-disabled guards are
+  backstops already covered by the outcome check.
+- Existing: `test_sequencer.py`, `test_sequencer_perf.py`,
+  `test_sync_sequencer_policy.py`, `test_lane_b_resume_requests.py`,
+  `test_rclone_lane.py`, `test_rclone_lane_races.py`,
+  `test_rclone_express.py`, `test_config.py` (the template test lists the
+  new key as commented out): 539 passed together.
+
+### Deploy order
+Companion only (0.9.76). No wire change: nothing new is reported and the
+dashboard reads nothing differently. The first round after the upgrade is
+the plain rotation; from the second on, ruskin's Film 1 + 2 gets two turns
+per round.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

@@ -287,6 +287,18 @@ run alongside the tray app — it would hold port 8899.
   `dashboard_url` does not match the URL editors actually browse, every
   Send-to-Resolve call 403s — the companion log names both the refused
   origin and the list it holds. `docs/LOOPBACK_API.md`.
+- **The server triage agent** (2026-09-24, `docs/SERVER_TRIAGE_AGENT.md`,
+  schema v57): `triage.py` runs Claude Code at `alerts_triage_hours` in the
+  site zone, READ-ONLY (Read/Grep/Glob over a scrubbed `evidence.json` and
+  the package source; every writing tool denied), and always mails a report,
+  a fallback, or a failure. A reply (`triage_mail.py`, IMAP fenced to
+  `alerts_triage_reply_to`) is acted on only if From is in `alerts_smtp_to`,
+  the topmost Authentication-Results passes DKIM/DMARC, and it carries an
+  unexpired `CCT-` reference; it can only choose from
+  `triage_actions.CATALOGUE`, whose executors call the button's own function.
+  A new reply action is a catalogue row that calls an existing route's
+  function, never a new mutation path and never a shell. Gated by
+  `alerts_triage` (off in the vendor build) and the Claude Code CLI door.
 
 ## Running tests
 

@@ -156,6 +156,18 @@ LANE_B_MAX_DELETE_SIZE = "20G"
 # a lane failure, so it must not paint the lane red.
 RCLONE_EXIT_MAX_DURATION = 10
 
+# What the last run_once learned about its subpath (CR-319, 2026-09-24), for
+# the sequencer's skip-ahead: a project whose lane B turn ended with files
+# still to fetch may be given another turn at once, but only while every
+# OTHER project's last check found nothing. Deliberately three words and an
+# absence, read straight off what the pass already knows (exit code, moved
+# count) -- no extra listing. Anything that is not clearly one of these
+# three is None, "don't know", and the sequencer reads that as "needs its
+# normal turn".
+RUN_OUTCOME_WORK_REMAINED = "work_remained"  # --max-duration cut it off
+RUN_OUTCOME_NOTHING = "nothing"              # completed, moved 0 files
+RUN_OUTCOME_MOVED = "moved"                  # completed, moved some
+
 # How many stderr lines of a periodic run are retained (the TAIL). rclone
 # with --use-json-log --verbose emits a record per file, so keeping the whole
 # stream to re-parse at the end held hundreds of MB in the companion's RSS
@@ -2706,6 +2718,11 @@ class RcloneLane(LaneAdapter):
         # nothing to do, which is what its idle backoff keys on
         # (ops-efficiency-2, 2026-08-21).
         self._last_run_moved = 0
+        # (subpath, RUN_OUTCOME_*) of the last run, or None (CR-319). Keyed
+        # by subpath because consolidate / FIX ALL call run_once on this
+        # same object: a reader that finds another subpath here learns
+        # nothing, which is the safe answer.
+        self._last_run_outcome: Optional[tuple[str, str]] = None
         # Has `remote_root` itself been confirmed to hold the marker dirs
         # this process? In managed mode every pass names a project subpath,
         # so the breaker's root probe never ran at all (sync-safety-5,
@@ -3293,6 +3310,10 @@ class RcloneLane(LaneAdapter):
             with self._lock:
                 self._status.state = STATE_IDLE
                 self._status.detail = f"project dir not yet local: {subpath}"
+            # CR-319: no folder here and never has been, so nothing to upload
+            # -- a definite answer. The "was here, has gone" branch below is
+            # not: that is an editor's work that may be sitting elsewhere.
+            self._note_run_outcome(subpath, RUN_OUTCOME_NOTHING)
             return self.status()
 
         label = key.split("/")[-1] or key
@@ -3465,6 +3486,8 @@ class RcloneLane(LaneAdapter):
         # (breaker, stopped lane, missing root) reads as "this pass moved
         # nothing" instead of repeating the last real pass's count.
         self._last_run_moved = 0
+        # CR-319: and as "don't know" rather than as the last pass's outcome.
+        self._note_run_outcome(subpath, None)
         # Same reasoning for the stall sentence: a pass that ended down one
         # of the early-return paths must not hand its predecessor's stall to
         # the NEXT pass as that pass's error.
@@ -3718,6 +3741,9 @@ class RcloneLane(LaneAdapter):
         # threading.Lock is not reentrant.
         stall_detail = self._take_pending_stall()
         pass_completed = False
+        # CR-319: set only on the two branches that say something definite
+        # about the subpath; every other ending stays None ("don't know").
+        run_outcome: Optional[str] = None
         with self._lock:
             self._status.transferring = 0
             self._status.queued = 0
@@ -3761,6 +3787,7 @@ class RcloneLane(LaneAdapter):
                     f"transferred {result.transferred} file(s), paused at the "
                     f"{int(max_duration_seconds)}s project budget"
                 )
+                run_outcome = RUN_OUTCOME_WORK_REMAINED
             elif returncode != 0 and _is_max_delete_abort(result.errors):
                 # The --max-delete/--max-delete-size safety valve tripped:
                 # rclone exits FATAL, but this is the cap doing its job --
@@ -3815,6 +3842,11 @@ class RcloneLane(LaneAdapter):
                 self._status.last_sync = datetime.now(timezone.utc)
                 self._status.detail = f"transferred {result.transferred} file(s)"
                 pass_completed = True
+                run_outcome = (RUN_OUTCOME_MOVED if self._last_run_moved > 0
+                               else RUN_OUTCOME_NOTHING)
+        # A tripped breaker is not "found nothing", whatever the counts say:
+        # the lane is parked, and a parked lane knows nothing about the tree.
+        self._note_run_outcome(subpath, None if tripped else run_outcome)
         if pass_completed:
             # live-1: OUTSIDE the lock -- _note_stall_recovered takes it.
             self._note_stall_recovered()
@@ -4420,6 +4452,29 @@ class RcloneLane(LaneAdapter):
     def last_run_moved(self) -> int:
         """Files the last run transferred or trashed (ops-efficiency-2)."""
         return self._last_run_moved
+
+    def last_run_outcome(self, subpath: Optional[str]) -> Optional[str]:
+        """RUN_OUTCOME_* of the last run IF it was a run of `subpath`, else
+        None (CR-319, 2026-09-24). Never raises. None covers every early
+        return (breaker, disk floor, missing root, stopped lane, a queued
+        pass dropped as stale), a failure, a stall kill, a delete-cap stop
+        and a tripped breaker -- the sequencer treats all of them as "this
+        project needs its normal turn"."""
+        try:
+            record = self._last_run_outcome
+            if record is None:
+                return None
+            want = str(subpath or "").replace("\\", "/").strip("/")
+            return record[1] if record[0] == want else None
+        except Exception:
+            return None
+
+    def _note_run_outcome(self, subpath: Optional[str], outcome: Optional[str]) -> None:
+        if outcome is None:
+            self._last_run_outcome = None
+            return
+        self._last_run_outcome = (
+            str(subpath or "").replace("\\", "/").strip("/"), outcome)
 
     def _account_pass(
         self, result: RcloneRunResult, subpath: Optional[str], local_proxies: int

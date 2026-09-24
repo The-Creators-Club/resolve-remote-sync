@@ -1,0 +1,298 @@
+/* The /cards picker (2026-09-24). The vault viewer's look carried into the
+   dashboard's palette: a terminal search line, chip rows, and the vault's
+   own folders as a concertina of <details> with dashed guide rails. Every
+   colour is a style.css token so the page follows the theme it sits in. */
+
+.cl { max-width: 1100px; }
+/* Every element this page hides with the attribute stays hidden, whatever
+   display its own rule gives it (a tile is flex, the fold buttons are flex). */
+.cl [hidden] { display: none !important; }
+.cl-lede { max-width: 70ch; margin: 0.4rem 0 0.8rem; }
+.cl-refusal { max-width: 70ch; color: var(--amber); margin: 0.6rem 0; }
+.cl-opening { color: var(--amber); max-width: 70ch; margin: 0.4rem 0 0.8rem; }
+.cl-carry {
+  display: inline-block;
+  color: var(--green);
+  border: 1px solid var(--green);
+  padding: 0.45rem 0.9rem;
+  letter-spacing: 0.06em;
+  box-shadow: 0 0 12px rgba(43, 255, 136, 0.18);
+}
+.cl-carry:hover { box-shadow: 0 0 18px rgba(43, 255, 136, 0.4); }
+
+/* ---------------------------------------------------------- find */
+.cl-panel {
+  border: 1px solid var(--red-dim);
+  background: linear-gradient(180deg, rgba(255, 33, 64, 0.05), rgba(255, 33, 64, 0.01));
+  margin: 0.9rem 0 1.2rem;
+}
+.cl-search {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.8rem;
+  border-bottom: 1px solid rgba(255, 33, 64, 0.22);
+}
+.cl-search.is-active { background: rgba(255, 33, 64, 0.06); }
+.cl-prompt { color: var(--red); font-size: 16px; line-height: 1; user-select: none; }
+.cl-q {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(255, 33, 64, 0.25);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  letter-spacing: 0.03em;
+  padding: 0.3rem 0.1rem;
+  outline: none;
+  caret-color: var(--red);
+}
+.cl-q::placeholder { color: var(--muted); }
+.cl-q:focus { border-bottom-color: var(--red); box-shadow: 0 1px 0 0 rgba(255, 33, 64, 0.4); }
+.cl-q::-webkit-search-cancel-button { display: none; }
+.cl-kbd {
+  font: inherit;
+  font-size: 10px;
+  color: var(--muted);
+  border: 1px solid rgba(255, 33, 64, 0.3);
+  padding: 2px 6px;
+}
+.cl-clear {
+  background: none;
+  border: 1px solid var(--red-dim);
+  color: var(--red);
+  width: 26px;
+  height: 26px;
+  font: inherit;
+  cursor: pointer;
+}
+.cl-clear:hover, .cl-clear:focus-visible { border-color: var(--red); color: var(--red-hot); outline: none; }
+
+.cl-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.4rem;
+  padding: 0.55rem 0.8rem;
+}
+.cl-group { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
+.cl-glabel { font-size: 10px; letter-spacing: 0.14em; color: var(--muted); margin-right: 0.2rem; }
+.cl-chip {
+  background: none;
+  border: 1px solid rgba(255, 33, 64, 0.28);
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  padding: 0.22rem 0.55rem;
+  cursor: pointer;
+}
+/* Transitions only once the script has set the chips from what you chose
+   last time, so arriving does not fade the defaults out in front of you. */
+.cl-live .cl-chip { transition: color 0.15s, border-color 0.15s, box-shadow 0.15s; }
+.cl-chip:hover { color: var(--text); border-color: var(--red-dim); }
+.cl-chip[aria-pressed="true"] {
+  color: var(--red-hot);
+  border-color: var(--red);
+  background: rgba(255, 33, 64, 0.1);
+  box-shadow: 0 0 10px rgba(255, 33, 64, 0.25);
+}
+.cl-chip:focus-visible, .cl-sum:focus-visible, .cl-btn:focus-visible, .cl-tile:focus-visible {
+  outline: 1px solid var(--red-hot);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------- recent */
+.cl-recent { margin-bottom: 1.4rem; }
+.cl-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 0.6rem;
+}
+.cl-tile-form { display: contents; }
+.cl-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  text-align: left;
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid rgba(255, 33, 64, 0.22);
+  border-left: 2px solid var(--red);
+  padding: 0.6rem 0.75rem;
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s, border-color 0.15s;
+}
+.cl-tile:hover { background: rgba(255, 33, 64, 0.08); box-shadow: 0 0 14px rgba(255, 33, 64, 0.2); }
+.cl-tile[disabled] { cursor: default; opacity: 0.75; }
+.cl-tile-name { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cl-tile-path { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cl-tile-when { font-size: 11px; color: var(--muted); }
+
+/* ---------------------------------------------------------- the tree */
+.cl-head { display: flex; align-items: baseline; gap: 0.8rem; flex-wrap: wrap; }
+.cl-head .cl-count { font-size: 12px; }
+.cl-fold { margin-left: auto; display: flex; gap: 0.8rem; }
+.cl-tree, .cl-list {
+  border: 1px solid rgba(255, 33, 64, 0.18);
+  background: var(--panel);
+  /* The concertina's slide, where the browser can animate to `auto`. */
+  interpolate-size: allow-keywords;
+}
+.cl-tree[hidden], .cl-list[hidden] { display: none; }
+
+.cl-folder > .cl-sum {
+  display: grid;
+  grid-template-columns: 14px 1fr auto auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.8rem;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  border-bottom: 1px solid rgba(255, 33, 64, 0.08);
+  transition: background 0.15s;
+}
+.cl-folder > .cl-sum::-webkit-details-marker { display: none; }
+.cl-folder > .cl-sum:hover { background: rgba(255, 33, 64, 0.07); }
+.cl-folder[open] > .cl-sum { background: rgba(255, 33, 64, 0.04); }
+.cl-chev {
+  color: var(--amber);
+  font-size: 11px;
+  text-align: center;
+  transition: transform 0.2s ease;
+}
+.cl-folder[open] > .cl-sum .cl-chev { transform: rotate(90deg); }
+.cl-fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.cl-depth-0 > .cl-sum .cl-fname { letter-spacing: 0.12em; color: var(--red-hot); font-size: 15px; }
+.cl-depth-1 > .cl-sum .cl-fname { letter-spacing: 0.06em; color: var(--text); }
+.cl-folder[open] > .cl-sum .cl-fname { color: var(--red-hot); }
+.cl-fcount {
+  font-size: 11px;
+  color: var(--red);
+  border: 1px solid rgba(255, 33, 64, 0.3);
+  padding: 0 0.4rem;
+  min-width: 1.6rem;
+  text-align: center;
+}
+.cl-fsize { font-size: 11px; color: var(--muted); min-width: 4.5rem; text-align: right; }
+
+.cl-kids {
+  margin-left: 1.15rem;
+  border-left: 1px dashed rgba(255, 33, 64, 0.3);
+}
+.cl-folder::details-content {
+  block-size: 0;
+  overflow-y: clip;
+  transition: block-size 0.22s ease, content-visibility 0.22s allow-discrete;
+}
+.cl-folder[open]::details-content { block-size: auto; }
+@media (prefers-reduced-motion: reduce) {
+  .cl-folder::details-content, .cl-chev { transition: none; }
+}
+
+/* ---------------------------------------------------------- an episode */
+.cl-ep {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.55rem 0.8rem;
+  border-bottom: 1px solid rgba(255, 33, 64, 0.07);
+  transition: background 0.15s;
+}
+.cl-ep:hover { background: rgba(255, 33, 64, 0.05); }
+.cl-ep[hidden] { display: none; }
+.cl-ep[data-state="ready"] { border-left: 2px solid var(--green); padding-left: calc(0.8rem - 2px); }
+.cl-ep[data-state="loading"] { border-left: 2px solid var(--amber); padding-left: calc(0.8rem - 2px); }
+.cl-ep[data-state="failed"] { border-left: 2px solid var(--red); padding-left: calc(0.8rem - 2px); }
+.cl-ico { color: var(--red-dim); font-size: 11px; text-align: center; }
+.cl-ep[data-state="ready"] .cl-ico { color: var(--green); text-shadow: 0 0 8px rgba(43, 255, 136, 0.6); }
+.cl-ep[data-state="loading"] .cl-ico { color: var(--amber); animation: cl-spin 1.4s linear infinite; }
+.cl-ep[data-state="failed"] .cl-ico { color: var(--red); }
+@keyframes cl-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .cl-ep[data-state="loading"] .cl-ico { animation: none; } }
+
+.cl-info { min-width: 0; }
+.cl-name { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.cl-name-text { font-size: 14px; color: var(--text); overflow-wrap: anywhere; }
+a.cl-name-text:hover { color: var(--red-hot); }
+.cl-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.9rem;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 0.1rem;
+}
+.cl-meta > span + span::before { content: "\00b7"; margin-right: 0.9rem; margin-left: -0.45rem; color: var(--red-dim); }
+.cl-tree .cl-path { display: none; }
+.cl-list .cl-path { color: var(--text); opacity: 0.7; }
+.cl-note { font-size: 11px; color: var(--muted); margin-top: 0.15rem; }
+.cl-note-bad { color: var(--red); }
+.cl-badge {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  padding: 0 0.35rem;
+  border: 1px solid currentColor;
+}
+.cl-badge-ready { color: var(--green); }
+.cl-badge-loading { color: var(--amber); }
+.cl-badge-failed { color: var(--red); }
+mark.cl-hl { color: var(--amber); background: rgba(255, 176, 46, 0.16); }
+
+.cl-act { display: flex; gap: 0.5rem; align-items: center; }
+.cl-act form { display: inline; }
+.cl-btn {
+  display: inline-block;
+  background: none;
+  border: 1px solid var(--red-dim);
+  color: var(--red);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+.cl-btn:hover { color: var(--red-hot); border-color: var(--red); box-shadow: 0 0 12px rgba(255, 33, 64, 0.35); }
+.cl-btn-go { color: var(--green); border-color: rgba(43, 255, 136, 0.5); }
+.cl-btn-go:hover { color: var(--green); border-color: var(--green); box-shadow: 0 0 12px rgba(43, 255, 136, 0.35); }
+.cl-btn-wait { color: var(--amber); border-color: rgba(255, 176, 46, 0.4); cursor: default; }
+.cl-btn-close { border-color: transparent; color: var(--muted); }
+
+.cl-none { padding: 1rem 0.8rem; color: var(--muted); }
+.cl-foot { margin-top: 1.2rem; }
+
+/* ---------------------------------------------------------- phone */
+@media (max-width: 600px) {
+  .cl-controls { padding: 0.5rem; gap: 0.5rem; }
+  .cl-group { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; scrollbar-width: none; }
+  .cl-group::-webkit-scrollbar { display: none; }
+  .cl-chip { padding: 0.4rem 0.6rem; flex: 0 0 auto; }
+  .cl-kbd { display: none; }
+  .cl-q { font-size: 16px; }  /* below 16 px iOS zooms the page on focus */
+  .cl-folder > .cl-sum { min-height: var(--tap); grid-template-columns: 14px 1fr auto; }
+  .cl-fsize { display: none; }
+  .cl-kids { margin-left: 0.6rem; }
+  .cl-ep { grid-template-columns: 14px 1fr; row-gap: 0.4rem; }
+  .cl-act { grid-column: 2; }
+  .cl-btn { min-height: var(--tap); display: inline-flex; align-items: center; }
+  .cl-fold { margin-left: 0; }
+  /* Recent is a strip you swipe, not a stack that pushes the folders a
+     screen down. */
+  .cl-tiles {
+    display: flex;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+    padding-bottom: 0.2rem;
+  }
+  .cl-tiles::-webkit-scrollbar { display: none; }
+  .cl-tile { flex: 0 0 78%; scroll-snap-align: start; }
+  .cl-tile-form > .cl-tile { flex: 0 0 78%; }
+}

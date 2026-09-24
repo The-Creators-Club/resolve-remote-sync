@@ -23,6 +23,9 @@
      owns the tokens, the class vocabulary and the chrome, this one carries the
      rules for the fleet grid and the admin pages. Second, so it wins ties. #}
   <link rel="stylesheet" href="/static/mobile.css">
+  {# One page's own stylesheet/script (2026-09-24, the /cards picker first).
+     After mobile.css so a page's rules win ties with the shared ones. #}
+  {% block head %}{% endblock %}
   {# The installable-app half (MOBILE_PLAN.md 3.3, exact lines by contract).
      The targets are served by the PWA package; a browser that finds any of
      them missing simply does not offer the install, so these are safe to ship

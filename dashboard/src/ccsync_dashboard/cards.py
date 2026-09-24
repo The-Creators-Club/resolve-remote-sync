@@ -478,6 +478,10 @@ class CardsDispatch:
         self.make_gate = make_gate
         # slug -> (the app it was built around, the gate). See __call__.
         self._gates: dict[str, tuple[Any, Any]] = {}
+        # (slug, user) -> None when a person ENTERS an episode page: the
+        # picker's "last opened" (cards_catalog, 2026-09-24). Set by
+        # mount_cards; None in tests that build a dispatcher by hand.
+        self.on_enter: Callable[[str, str], None] | None = None
 
     async def __call__(self, scope, receive, send) -> None:
         if scope.get("type") != "http":
@@ -515,7 +519,16 @@ class CardsDispatch:
         if asgi is None:
             await self._not_open(scope, send, slug)
             return
-        self._note(scope, slug)
+        user = self._note(scope, slug)
+        if (user and not tail and self.on_enter is not None
+                and scope.get("method") == "GET" and _wants_html(scope)):
+            # The page itself, as a navigation: that is "opened", where a
+            # media range request (several a second) is only "still here".
+            try:
+                self.on_enter(slug, user)
+            except Exception:  # noqa: BLE001 - a recency note is never a 500
+                log.exception("Timeline Cards: could not note %s entering %s",
+                              user, slug)
         # KEYED ON THE APP, NOT JUST THE SLUG. An episode that is closed and
         # opened again is a NEW engine behind the same slug, and a gate cached
         # by slug alone would go on serving the dead one -- with its stopped
@@ -555,7 +568,7 @@ class CardsDispatch:
             log.exception("Timeline Cards: the WSGI pool for %s did not shut "
                           "down cleanly", slug)
 
-    def _note(self, scope: dict, slug: str) -> None:
+    def _note(self, scope: dict, slug: str) -> str:
         """Who is in this episode -- for the cap's sentence, and for phase 1a.
 
         `login_gate` has already resolved the session by the time a request
@@ -567,9 +580,10 @@ class CardsDispatch:
             session = (scope.get("state") or {}).get("ccsync_session")
             user = session[0] if session else ""
         except Exception:  # noqa: BLE001 - a visit note is never worth a 500
-            return
+            return ""
         if user:
             self.pool.note_visit(slug, user)
+        return user or ""
 
     @staticmethod
     def _child(scope: dict, rel: str, slug: str, tail: str) -> dict:
@@ -743,6 +757,10 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
     # the dispatcher's argument), so the eviction hook is wired here rather
     # than passed to the constructor.
     pool.set_evict_hook(dispatch.evict)
+    from . import cards_catalog
+
+    dispatch.on_enter = (
+        lambda slug, user: cards_catalog.note_opened(settings, slug, user))
     app.mount(MOUNT_PATH, dispatch)
     log.info("Timeline Cards mounted at %s (vault %s, from %s, up to %d "
              "episode(s) at once)", MOUNT_PATH, root, src, pool.cap)

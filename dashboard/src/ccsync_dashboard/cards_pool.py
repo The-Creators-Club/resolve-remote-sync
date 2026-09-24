@@ -145,6 +145,21 @@ def has_transcripts(path: str) -> bool:
                for d in ("Interviewees", "Clips"))
 
 
+def _mtime(entry: Any) -> float | None:
+    """The folder's own mtime for the picker's DATE sort, or None.
+
+    2026-09-24: one stat per EPISODE (not per file), read while the scan is
+    already standing in the parent folder. cards_catalog's walker replaces it
+    with the newest mtime anywhere under the episode once it has sized it.
+    """
+    try:
+        if isinstance(entry, str):
+            return os.stat(entry).st_mtime
+        return entry.stat().st_mtime
+    except OSError:
+        return None
+
+
 def episodes(vault: str, depth: int = 4) -> list[dict]:
     """Every episode root under the vault: [{root, name, show, slug}, ...].
 
@@ -184,6 +199,7 @@ def episodes(vault: str, depth: int = 4) -> list[dict]:
                         "name": entry.name,
                         "show": os.path.basename(os.path.dirname(entry.path)),
                         "slug": slug_for(entry.path),
+                        "mtime": _mtime(entry),
                     }
             elif left > 1:
                 walk(entry.path, left - 1)
@@ -197,6 +213,7 @@ def episodes(vault: str, depth: int = 4) -> list[dict]:
             "name": os.path.basename(os.path.abspath(vault)),
             "show": os.path.basename(os.path.dirname(os.path.abspath(vault))),
             "slug": slug_for(vault),
+            "mtime": _mtime(vault),
         }
     walk(vault, max(1, int(depth)))
     return sorted(found.values(),

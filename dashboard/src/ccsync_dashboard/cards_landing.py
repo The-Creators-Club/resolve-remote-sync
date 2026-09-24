@@ -42,7 +42,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from . import auth, cards_pool
+from . import auth, cards_catalog, cards_pool
 
 log = logging.getLogger("ccsync.dashboard.cards")
 
@@ -63,6 +63,10 @@ LAST_MAX_AGE = 90 * 24 * 3600
 SCAN_TTL_SECONDS = 30.0
 
 _scan: dict[str, Any] = {"at": 0.0, "vault": "", "rows": []}
+
+# How many of the reader's own most recent episodes the picker lists above
+# the folders (2026-09-24).
+RECENT_COUNT = 5
 
 
 def _pool(request: Request) -> Any:
@@ -113,6 +117,7 @@ def _state(request: Request) -> dict:
     # asks for, widened to everyone because there is nothing to take away.
     me = auth.get_session_user(request) or ""
     admin = auth.is_admin(request.app.state.settings, me)
+    _catalogue(request, rows, me)
     for row in rows:
         # security-1 (2026-09-18b mediums): the presser is TOLD who was last
         # in and when. The idle release measures served requests, so an editor
@@ -135,6 +140,59 @@ def _state(request: Request) -> dict:
         "ready": [r["slug"] for r in rows if r.get("state") == cards_pool.READY],
         "me": auth.get_session_user(request) or "",
     }
+
+
+def _catalogue(request: Request, rows: list[dict], me: str) -> None:
+    """Add what the picker sorts, filters and folds on. Never raises.
+
+    2026-09-24 (cards_catalog's docstring): the folder path under the vault
+    (less the levels every episode shares), the year, when THIS person and
+    when anybody last opened it, its size once the walker has one, and its
+    newest modification. A failure here leaves the rows as they were, and
+    the page still draws: every field below has a blank the template reads.
+    """
+    from . import cards
+
+    try:
+        settings = request.app.state.settings
+        vault = cards.vault_root(settings)
+        anyone, mine = cards_catalog.opened(settings, me)
+        sizes = cards_catalog.sizes(settings, [r for r in rows if r.get("root")])
+        paths = [cards_catalog.folder_parts(vault, r.get("root") or "")
+                 for r in rows]
+        cut = cards_catalog.strip_common(paths)
+        now = time.time()
+        me_key = (me or "").strip().lower()
+        for row, parts in zip(rows, paths):
+            slug = row.get("slug", "")
+            parts = parts[cut:]
+            size = sizes.get(slug) or {}
+            modified = size.get("newest") or row.get("mtime")
+            last = anyone.get(slug) or {}
+            by = str(last.get("by") or "")
+            row["parts"] = parts
+            row["path_label"] = " / ".join(parts)
+            row["year"] = cards_catalog.year_of(parts, modified)
+            row["opened_mine"] = mine.get(slug)
+            row["opened_any"] = last.get("at")
+            if row["opened_mine"]:
+                row["opened_phrase"] = ("you opened it "
+                                        + cards_catalog.ago_phrase(now - row["opened_mine"]))
+            elif row["opened_any"]:
+                who = "you" if by == me_key else (by or "somebody")
+                row["opened_phrase"] = (f"{who} opened it "
+                                        + cards_catalog.ago_phrase(now - row["opened_any"]))
+            else:
+                row["opened_phrase"] = "never opened"
+            row["bytes"] = size.get("bytes") if "bytes" in size else None
+            row["size_label"] = (cards_catalog.human_bytes(row["bytes"])
+                                 if row["bytes"] is not None else "")
+            row["size_partial"] = bool(size.get("partial"))
+            row["modified"] = modified
+            row["modified_label"] = (time.strftime("%d %b %Y", time.localtime(modified))
+                                     .lstrip("0") if modified else "")
+    except Exception:  # noqa: BLE001 - the picker must draw regardless
+        log.exception("Timeline Cards picker: could not read its catalogue")
 
 
 def _close_prompt(name: str, last_in_phrase: str) -> str:
@@ -179,9 +237,17 @@ def cards_landing(request: Request) -> Response:
     want = str(request.query_params.get("want") or "")
     refusal = str(request.query_params.get("refused") or "")
     by_slug = {row["slug"]: row for row in state["episodes"]}
+    episodes = state["episodes"]
+    recent = sorted((r for r in episodes if r.get("opened_mine")),
+                    key=lambda r: r["opened_mine"], reverse=True)[:RECENT_COUNT]
+    years = sorted({r.get("year") for r in episodes if r.get("year")},
+                   reverse=True)
     return ui._render(request, "cards_landing.html", {
         "nav_current": "cards",
-        "episodes": state["episodes"],
+        "episodes": episodes,
+        "tree": cards_catalog.build_tree(episodes),
+        "recent": recent,
+        "years": years,
         "cap": state["cap"],
         "open_count": state["open"],
         "carry_on": by_slug.get(last) if last in by_slug else None,
@@ -222,6 +288,8 @@ async def cards_open(request: Request) -> Response:
         return RedirectResponse(f"/cards/?refused={quote(refusal)}",
                                 status_code=303)
     pool.note_visit(entry.slug, auth.get_session_user(request) or "")
+    cards_catalog.note_opened(request.app.state.settings, entry.slug,
+                              auth.get_session_user(request) or "")
     response = RedirectResponse(f"/cards/?want={entry.slug}", status_code=303)
     # security-3 (2026-09-18): ONE helper decides `secure` for every cookie
     # this server sets. `request.url.scheme` is `http` behind a TLS terminator

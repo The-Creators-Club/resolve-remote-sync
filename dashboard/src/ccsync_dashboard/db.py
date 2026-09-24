@@ -3803,6 +3803,55 @@ def dismiss_notice(
     return dict(row)
 
 
+# CR-320 (2026-09-24). The owner: "for errors in future if they are resolved
+# they should go away without needing dismiss to be clicked". The state-shaped
+# kinds always did (their pass re-asserts or clears them every cycle); the
+# EVENT-shaped ones - a 500, a refused triage reply, a slow write - had no pass
+# that could ever say "that is over", so they sat open until somebody pressed
+# [ DISMISS ]. `notices.RESOLVE_RULES` now says, per kind, what counts as over,
+# and this is the one function those rules close a card through.
+#
+# The record is the AUDIT LEDGER, the same place `dismiss_notice` writes its
+# own, rather than a `cleared_by` column: a column would have been a schema
+# step for a fact the ledger already carries with an actor, a time and a
+# detail, and it is where the admin's own dismissals already are, so the two
+# ways a card went away read side by side. The actor is `auto` and the detail
+# carries `cleared_by: "auto: <reason>"`.
+NOTICE_AUTO_ACTOR = "auto"
+NOTICE_AUTO_CLEAR_ACTION = "notice.auto_clear"
+
+
+def auto_clear_notice(
+    conn: sqlite3.Connection, kind: str, subject: str, reason: str,
+    now: str | None = None,
+) -> bool:
+    """Close one open notice because its condition is evidenced as OVER, and
+    say why in the audit ledger. True when a card was open and is now closed.
+
+    Deliberately does NOT stamp notice-check evidence for `kind`
+    (`_mark_notice_checked`): the resolution sweep is not the pass that looks
+    for the condition, and letting it stamp would make a kind whose real
+    writer never runs read as checked - the false [ OK ] finding 1 of the
+    2026-08-28 fix pass exists to prevent. A condition that recurs reopens the
+    card through `notice()` exactly as a dismissed one does."""
+    stamp = now or utcnow_iso()
+    row = conn.execute(
+        "SELECT id, severity, first_seen, last_seen FROM notices "
+        "WHERE kind=? AND subject=? AND cleared_at IS NULL",
+        (str(kind), str(subject or "")),
+    ).fetchone()
+    if row is None:
+        return False
+    conn.execute("UPDATE notices SET cleared_at=? WHERE id=? AND cleared_at IS NULL",
+                 (stamp, int(row["id"])))
+    audit(conn, NOTICE_AUTO_ACTOR, NOTICE_AUTO_CLEAR_ACTION, str(kind),
+          {"subject": str(subject or ""), "severity": row["severity"],
+           "first_seen": row["first_seen"], "last_seen": row["last_seen"],
+           "cleared_by": f"auto: {reason}"[:300]},
+          now=stamp)
+    return True
+
+
 # ------------------------------------------------------ invariant results
 #
 # SYS-9 (resilience sweep 2026-08-28, wave 5). The registry, the checks and

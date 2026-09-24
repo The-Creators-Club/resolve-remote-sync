@@ -385,6 +385,8 @@ def status_report(status: Any, now_ts: Optional[float] = None) -> dict[str, Any]
         # different alarm on the dashboard (no binary at all, versus one that
         # is old): folding them here would cost the difference.
         "stale": action == ACTION_STALE,
+        # CR-321: set only when the daily check confirmed nothing newer exists.
+        "latest": bool(status.get("latest")) or None,
         "age_days": version_age_days(version_str, now_ts),
         "message": str(status.get("message") or "")[:300] or None,
         "checked_at": _iso_utc(checked),
@@ -744,9 +746,11 @@ class YtDlpManager:
         return record
 
     def _publish(self, ok: bool, version_str: Optional[str], action: str,
-                 message: str) -> dict[str, Any]:
+                 message: str, latest: bool = False) -> dict[str, Any]:
         status = {"ok": bool(ok), "version": version_str, "action": action,
                   "message": message, "checked_at": self._clock()}
+        if latest:
+            status["latest"] = True
         with self._lock:
             self._status = dict(status)
         return status
@@ -869,10 +873,18 @@ class YtDlpManager:
             )
         ok = after is not None and not (floor and version_is_older(after, floor))
         if after == current:
+            # CR-321 (2026-09-24): -U ran and found nothing newer, so this IS
+            # the newest release, and "stale" was a false alarm. It went to
+            # the dashboard as ACTION_STALE and raised `ytdlp_stale` on every
+            # machine once yt-dlp went 21 days without a release (2026.08.19,
+            # 36 days on 09-24, on Creator_1, Razer and ruskin). Published as
+            # current, with `latest` set so the dashboard can tell "checked,
+            # newest" from "never checked". Age alone is not staleness.
             return self._publish(
-                True, current, ACTION_STALE,
-                f"yt-dlp {current} is {age} days old and it is already the "
-                f"newest release -- nothing newer to take",
+                True, current, ACTION_NONE,
+                f"yt-dlp {current} is the newest release ({age} days old; "
+                f"checked with -U, nothing newer to take)",
+                latest=True,
             )
         return self._publish(
             ok, after, ACTION_UPDATED,

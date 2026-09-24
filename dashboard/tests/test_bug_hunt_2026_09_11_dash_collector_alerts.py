@@ -318,9 +318,13 @@ def test_a_failed_weekly_is_still_found_under_a_wall_of_other_alerts(env):
     client, conn, settings = env
     dbmod.record_alert(conn, alerts.KIND_WEEKLY, "weekly", "", False,
                        "smtp refused", NOW)
+    # The wall is FAILED sends (2026-09-24, CR-320): a later SUCCESSFUL
+    # delivery now proves the channel works and recovers weekly_send_failed
+    # by design, so a wall of "sent" rows would test that rule instead of
+    # this one - that volume must not hide the failure.
     for i in range(250):
         dbmod.record_alert(conn, "machine_silent", f"e{i}/PC", "b@example",
-                           True, "sent", NOW)
+                           False, "smtp refused", NOW)
     conn.commit()
     kinds = {f["kind"] for f in alerts.scan(conn, settings, LATER)}
     assert "weekly_send_failed" in kinds

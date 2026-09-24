@@ -751,17 +751,26 @@ def test_an_update_that_cannot_happen_is_named_stale_and_not_called_current():
     assert "—" not in status["message"]        # house rule
 
 
-def test_an_update_that_finds_nothing_newer_says_exactly_that():
+def test_an_update_that_finds_nothing_newer_is_current_and_says_latest():
     """`-U` on the newest release exits 0 and changes nothing. Reporting
-    ACTION_UPDATED there would claim a version bump that did not happen, and
-    reporting "current" would hide a binary that is three release cycles old
-    because yt-dlp itself has not shipped."""
+    ACTION_UPDATED there would claim a version bump that did not happen.
+
+    CR-321 (2026-09-24): it used to be ACTION_STALE, reasoning that "current"
+    would hide a binary old only because yt-dlp had not shipped. In practice
+    that raised `ytdlp_stale` on every machine whenever yt-dlp went three
+    weeks without a release (2026.08.19 on Creator_1, Razer and ruskin), an
+    alarm nobody could act on - there was nothing to install. A binary YouTube
+    actually breaks is caught by the download-failure alerts instead."""
     world = _World(installed=_days_ago(40))          # update_to=None: no change
     status = _manager(world, min_version=None).ensure()
     assert world.updated
-    assert status["action"] == ytdlp_mod.ACTION_STALE
+    assert status["action"] == ytdlp_mod.ACTION_NONE
+    assert status["latest"] is True
     assert status["version"] == _days_ago(40)
     assert "newest release" in status["message"]
+    assert "—" not in status["message"]
+    report = ytdlp_mod.status_report(status, _NOW)
+    assert report["stale"] is False and report["latest"] is True
 
 
 def test_the_max_age_never_touches_a_hand_managed_binary(tmp_path):

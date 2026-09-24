@@ -1078,6 +1078,13 @@ class AlertKind:
     title: str
     what: str
     check: Callable[["Ctx"], list[Finding]]
+    # CR-320 (2026-09-24): evidence that a finding the check still produces
+    # is OVER, for the kinds whose check reads a record of an EVENT that
+    # nothing later overwrites. (ctx, finding) -> reason, or "" for "not
+    # evidenced". A finding it resolves leaves the scan, which is how
+    # `deliver` spells RECOVERED (the `.ok` record). None for every kind
+    # whose check already reads the present.
+    resolved: Callable[["Ctx", Finding], str] | None = None
 
 
 class Ctx:
@@ -2540,6 +2547,42 @@ def _check_weekly_send(ctx: Ctx) -> list[Finding]:
         str(row.get("detail") or ""))]
 
 
+def _weekly_channel_delivered_since(ctx: Ctx, finding: Finding) -> str:
+    """CR-320: the channel the failed weekly report used has since DELIVERED
+    something - a test, an alert, a recovery - so it works again.
+
+    The check reads only the last weekly row, and the next one is a week
+    away: an owner who fixed the mail settings on Tuesday and pressed
+    [ SEND A TEST ] (which arrived) kept an error saying "nobody is being
+    told anything by mail" until the following Monday. Only a row that
+    really reached somebody counts: ok, a recipient, and neither the no-sink
+    record nor a dedup skip."""
+    weekly = _rows(ctx.conn,
+                   "SELECT id FROM alert_log WHERE kind=? ORDER BY id DESC LIMIT 1",
+                   (KIND_WEEKLY,))
+    if not weekly:
+        return ""
+    later = _rows(ctx.conn,
+                  "SELECT at, kind FROM alert_log WHERE id > ? AND ok=1 "
+                  "AND sent_to <> '' AND detail <> ? ORDER BY id LIMIT 1",
+                  (int(weekly[0]["id"]), NO_SINK_DETAIL))
+    if not later:
+        return ""
+    return (f"the alert channel delivered a {later[0]['kind']} message at "
+            f"{later[0]['at']}")
+
+
+def _is_resolved(ctx: Ctx, kind: AlertKind, finding: Finding) -> bool:
+    """A kind's `resolved` evidence for one finding. A resolver that raises
+    has evidenced nothing, so the finding STAYS (never "could not check"
+    read as "fine")."""
+    try:
+        return bool(kind.resolved(ctx, finding)) if kind.resolved else False
+    except Exception:                                               # noqa: BLE001
+        log.exception("alerts: resolution evidence for %s failed", kind.kind)
+        return False
+
+
 def _check_invariants(ctx: Ctx) -> list[Finding]:
     """A fact this system relies on has stopped being true (SYS-9, wave 5).
 
@@ -3015,6 +3058,67 @@ def _check_platform_channel_stale(ctx: Ctx) -> list[Finding]:
 
 # ------------------------------------------- each computer's own tools (CYT-7)
 
+# CR-321 (2026-09-24). The companion marks its yt-dlp stale by AGE alone
+# (older than 21 days), even when its own update check has just found nothing
+# newer to take - and yt-dlp does not always release inside three weeks. On
+# 2026-09-24 three computers (alex/Creator_1, alex/Razer and ruskin's
+# DESKTOP-LQQ41TC) raised "out of date and could not update itself" on
+# 2026.08.19, which WAS the newest release; their own message said so.
+#
+# The phrase the companions already in the field write for that case. Used
+# ONLY for a record with no `latest` field (a companion older than the one
+# that sends it), and only together with the version check below, so a
+# reworded message can at worst leave the old false alarm in place, never
+# silence a real one.
+_YTDLP_NEWEST_PHRASE = "already the newest release"
+
+
+def _ytdlp_version_key(version: str) -> tuple:
+    """yt-dlp versions are dates, `2026.08.19` or `2026.08.19.1` for a same-day
+    fix. Compared as integers so `2026.9.1` is not below `2026.08.19`; a
+    component that is not a number sorts below every one that is."""
+    parts = []
+    for piece in str(version or "").strip().split("."):
+        parts.append((1, int(piece)) if piece.isdigit() else (0, 0))
+    return tuple(parts)
+
+
+def _newest_known_ytdlp(ctx: Ctx) -> str:
+    """The newest yt-dlp version this server has any evidence of: the highest
+    `version` any computer reported, and this server's own copy when the
+    /ytdl stack is mounted. "" when nothing reported a version."""
+    versions = [str((r or {}).get("version") or "").strip()
+                for r in ctx.ytdlp.values() if isinstance(r, dict)]
+    own = (ctx.ytdl or {}).get("yt_dlp_version") if isinstance(ctx.ytdl, dict) else None
+    if own:
+        versions.append(str(own).strip())
+    versions = [v for v in versions if v]
+    return max(versions, key=_ytdlp_version_key) if versions else ""
+
+
+def _ytdlp_is_newest(record: Mapping[str, Any], newest_known: str) -> bool:
+    """Whether a `stale` verdict is really "old, and nothing newer exists".
+
+    The structured answer wins: `latest` True or False, which the companion
+    sends from the build that stopped marking this case stale. A record
+    without it (every companion already in the field) counts as newest only
+    when BOTH hold: its version is the newest any computer or this server
+    knows about, AND its own message says it is the newest release. Either
+    alone is not enough: a fleet all on the same old build has nothing newer
+    among it, and the message is prose."""
+    latest = record.get("latest")
+    if latest is True:
+        return True
+    if latest is not None:
+        return False
+    version = str(record.get("version") or "").strip()
+    if not version or not newest_known:
+        return False
+    if _ytdlp_version_key(version) < _ytdlp_version_key(newest_known):
+        return False
+    return _YTDLP_NEWEST_PHRASE in str(record.get("message") or "").lower()
+
+
 def _check_ytdlp_stale(ctx: Ctx) -> list[Finding]:
     """A computer whose yt-dlp is old and could not update itself.
 
@@ -3025,9 +3129,13 @@ def _check_ytdlp_stale(ctx: Ctx) -> list[Finding]:
     are looked at: a stored verdict for a forgotten computer alarms nobody.
     """
     out = []
+    newest = _newest_known_ytdlp(ctx)
     for e in ctx.editors:
         record = ctx.ytdlp.get(_who(e)) or {}
         if not record.get("stale"):
+            continue
+        if _ytdlp_is_newest(record, newest):
+            # CR-321: old by the calendar, but nothing newer exists.
             continue
         who = ctx.name(_who(e))
         message = str(record.get("message") or "").strip() or (
@@ -3497,7 +3605,8 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
     AlertKind("key_drain", SEV_WARN, "computers are still on the old sign-in key",
               "the sign-in key rotation drain", _check_key_drain),
     AlertKind("weekly_send_failed", SEV_ERROR, "the weekly report could not be sent",
-              "the alert channel itself", _check_weekly_send),
+              "the alert channel itself", _check_weekly_send,
+              resolved=_weekly_channel_delivered_since),
     AlertKind("invariant_broken", SEV_ERROR, "something this system relies on is not true",
               "the invariant checks (SYS-9)", _check_invariants),
     AlertKind("protection_missing", SEV_ERROR, "a safety net is not there",
@@ -3631,6 +3740,8 @@ def scan(conn: sqlite3.Connection, settings: Any, now: str,
                 "detail": f"{type(exc).__name__}: {str(exc)[:200]}",
             })
             continue
+        if kind.resolved is not None:
+            results = [f for f in results if not _is_resolved(ctx, kind, f)]
         for finding in results[:MAX_FINDINGS_PER_KIND]:
             findings.append({
                 "kind": kind.kind, "severity": kind.severity, "title": kind.title,

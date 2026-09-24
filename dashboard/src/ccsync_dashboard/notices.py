@@ -90,6 +90,9 @@ _PROCESS_STARTED = time.time()
 # The newest N crash files the download hands over. crash_report keeps at most
 # MAX_CRASH_FILES on disk anyway; this states the ceiling at the route.
 CRASH_ZIP_MAX_FILES = 20
+# CR-320: a server whose newest crash (since this boot) is older than this has
+# been running cleanly for a day, and the card closes by itself.
+SERVER_CRASH_QUIET_HOURS = 24
 
 
 def _hours_since(ts: str, now: str) -> float | None:
@@ -177,6 +180,11 @@ def run_checks(
         # CR-309 (2026-09-24): the unattended Claude Code updater's last
         # outcome. Registered in db.NOTICE_KINDS with this writer.
         _check_ai_cli_update,
+        # CR-320 (2026-09-24): the event-shaped kinds, which no pass above
+        # re-asserts or clears, closed when `RESOLVE_RULES` says they are over.
+        # LAST on purpose: it only ever reads what the checks above have
+        # already written this cycle.
+        _check_resolved,
     )
     ran = 0
     for check in checks:
@@ -423,7 +431,10 @@ def _check_tree(conn, settings, now: str) -> None:
             fix="Mount the server's storage at that path. Nothing else is needed.",
             now=now)
         return
-    db.clear_notice(conn, "projects_dir_missing", projects_dir, now=now)
+    # Every subject, not just this path (CR-320): a card about a projects
+    # folder this server was configured with before is about a path nothing
+    # reads any more, and `clear_notice` on the current one never reached it.
+    db.clear_notices_of_kind(conn, "projects_dir_missing", (), now=now)
     _check_inventory(conn, now)
 
 
@@ -858,7 +869,9 @@ def _check_broll_archive(conn, settings, now: str) -> None:
                  "(docs/DOCKER.md), then reload this page."),
             now=now)
         return
-    db.clear_notice(conn, BROLL_ARCHIVE_KIND, root, now=now)
+    # Every subject (CR-320): the archive root is the subject, and a root
+    # this server no longer mounts left its card open for ever.
+    db.clear_notices_of_kind(conn, BROLL_ARCHIVE_KIND, (), now=now)
 
 
 def _check_contention(conn, settings, now: str) -> None:
@@ -871,7 +884,9 @@ def _check_contention(conn, settings, now: str) -> None:
     WHAT THE SERVER CHECKS panel reading [ NOT CHECKED ] on a fleet that has
     simply never been contended - the same reason `file_move_detected` is
     stamped from the inventory pass. Stamping only, never a clear: closing a
-    contention card that nobody has read is not this pass's business.
+    contention card that nobody has read is not this pass's business. (Since
+    CR-320 `RESOLVE_RULES` closes `db_busy` and `slow_write` after a day with
+    no recurrence; `slow_poll` still clears on its own next fast pass.)
     """
     for kind in (DB_BUSY_KIND, SLOW_WRITE_KIND, SLOW_POLL_KIND):
         db.mark_notice_checked(conn, kind, now)
@@ -942,15 +957,39 @@ def _check_server_crashes(conn, settings, now: str) -> None:
     Editors' crash counts ride the report channel and become an alert; this
     server's own were visible only to somebody with a shell in the container.
     `collector_stale` and `watchdog_restart` report the symptom and never
-    point at the file that holds the cause."""
+    point at the file that holds the cause.
+
+    CR-320 (2026-09-24): "since it started" used to be the card's whole life,
+    so one crash on a server that then ran cleanly for a month kept an error
+    card open until a restart or a [ DISMISS ]. The count is still every
+    crash since this boot, but once the NEWEST of them is older than
+    `SERVER_CRASH_QUIET_HOURS` the card closes, recorded in the audit ledger
+    with why. The files stay on disk for the download either way, and a new
+    crash reopens it."""
     recent = 0
+    newest = 0.0
     for path in crash_files(settings, limit=CRASH_ZIP_MAX_FILES):
         try:
-            if path.stat().st_mtime >= _PROCESS_STARTED:
-                recent += 1
+            mtime = path.stat().st_mtime
         except OSError:
             continue
+        if mtime >= _PROCESS_STARTED:
+            recent += 1
+            newest = max(newest, mtime)
     if not recent:
+        db.clear_notice(conn, "server_crash_report", "this server", now=now)
+        return
+    try:
+        quiet = db.parse_iso(now).timestamp() - newest
+    except (TypeError, ValueError):
+        quiet = 0.0
+    if quiet >= SERVER_CRASH_QUIET_HOURS * 3600:
+        db.auto_clear_notice(
+            conn, "server_crash_report", "this server",
+            f"no new crash for {SERVER_CRASH_QUIET_HOURS} h (newest "
+            f"{dt.datetime.fromtimestamp(newest, dt.timezone.utc).isoformat(timespec='seconds')})",
+            now=now)
+        # The evidence stamp: this pass did look.
         db.clear_notice(conn, "server_crash_report", "this server", now=now)
         return
     db.notice(
@@ -992,7 +1031,9 @@ def _check_dashboard_space(conn, settings, now: str) -> None:
                  "volume more room."),
             now=now)
         return
-    db.clear_notice(conn, "dashboard_disk_low", subject, now=now)
+    # Every subject (CR-320): a card about a data volume this server no
+    # longer writes to is not a condition anybody can fix.
+    db.clear_notices_of_kind(conn, "dashboard_disk_low", (), now=now)
 
 
 # ------------------------------------------------------------ release feed
@@ -1476,3 +1517,187 @@ def record_server_error(
              "loses the server log, so this notice is the copy that survives."),
         now=stamp)
     conn.commit()
+
+
+# ------------------------------------------- CR-320: event-shaped resolution
+#
+# The owner, 2026-09-24: "for errors in future if they are resolved they
+# should go away without needing dismiss to be clicked". Every STATE-shaped
+# kind already does - its pass re-asserts it while true and clears it the
+# first pass it is not (`clear_notices_of_kind`). What stayed open were the
+# kinds written when something HAPPENED (a 500, a refused triage reply, a
+# write that held the lock), which no pass re-evaluates, so nothing was ever
+# in a position to say they were over. The live example was
+# `triage_reply_refused`, open after the owner's next reply from the same
+# address had been accepted and acted on.
+#
+# One row per event-shaped kind, data rather than a chain of ifs (the
+# ALERT_KINDS rule). A row can name:
+#
+#   * `evidence`: a function (conn, notice_row, now) -> reason or "" that
+#     looks for the SAME THING HAVING SINCE SUCCEEDED. The strongest answer,
+#     and tried first.
+#   * `min_hours`: how long a card must have been on the page before its
+#     evidence may close it (an FYI nobody has had a chance to read).
+#   * `quiet_hours`: the fallback where no success signal exists - the event
+#     has not recurred for that long. Measured from the notice's `last_seen`,
+#     which every recurrence re-stamps (`db.notice`), so a still-happening
+#     event can never age out.
+#
+# A kind with NEITHER is not listed, and stays until [ DISMISS ] on purpose:
+# `file_moves_dropped` names moves this server has already lost the record of,
+# and nothing it can observe says the operator has finished them by hand (the
+# NOT CHECKED rule: could-not-check is not resolved).
+#
+# `evidence` that cannot read its table answers "" - no evidence - and only
+# the quiet period can then apply; a function that RAISES is logged and
+# treated the same way. Neither is ever read as "resolved".
+#
+# `server_crash_report` is not here: its own check re-evaluates it every
+# cycle, so its quiet period lives there (`SERVER_CRASH_QUIET_HOURS`).
+
+SERVER_ERROR_QUIET_HOURS = 24
+DB_BUSY_QUIET_HOURS = 24
+SLOW_WRITE_QUIET_HOURS = 24
+WATCHDOG_RESTART_QUIET_HOURS = 24
+# Event cards whose success signal may never come (a stranger's refused mail,
+# a move with no computer to follow it): long enough that an owner who looks
+# at the page once a week still meets it.
+TRIAGE_REFUSED_QUIET_HOURS = 7 * 24
+FILE_MOVE_DETECTED_QUIET_HOURS = 7 * 24
+FILE_MOVE_DETECTED_MIN_HOURS = 24
+
+
+def _triage_reply_accepted(conn, row: dict[str, Any], now: str) -> str:
+    """`triage_reply_refused`: the refused sender has since had a reply ACTED
+    on. The subject is the check that failed (sender / authentication /
+    reference) and the card describes the newest refusal under it, so that
+    refusal's sender is the one whose later success counts; a success from a
+    DIFFERENT address says nothing about the one that was turned away.
+
+    `triage_mail._refuse` writes the ledger row's detail as "<check>: <why>",
+    which is what the LIKE matches."""
+    check = str(row.get("subject") or "")
+    try:
+        refused = conn.execute(
+            "SELECT id, from_addr FROM triage_replies WHERE verdict='refused' "
+            "AND detail LIKE ? ORDER BY id DESC LIMIT 1", (f"{check}:%",),
+        ).fetchone()
+        if refused is None or not str(refused["from_addr"] or "").strip():
+            return ""
+        sender = str(refused["from_addr"]).strip().casefold()
+        acted = conn.execute(
+            "SELECT received_at FROM triage_replies WHERE verdict='acted' "
+            "AND id > ? AND lower(trim(from_addr)) = ? ORDER BY id LIMIT 1",
+            (int(refused["id"]), sender),
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    if acted is None:
+        return ""
+    return (f"a later reply from {sender} was accepted and acted on "
+            f"({acted['received_at']})")
+
+
+def _file_move_followed(conn, row: dict[str, Any], now: str) -> str:
+    """`file_move_detected`: every computer the move was sent to has moved
+    its own copy. The subject is the move's destination, so the newest
+    DETECTED move to that path is the one the card describes. A move with no
+    targets, or one a computer failed or never answered, is not evidenced
+    here (a never-answered one is `file_move_expired`'s business) and waits
+    for the quiet period."""
+    subject = str(row.get("subject") or "")
+    try:
+        move = conn.execute(
+            "SELECT id FROM file_moves WHERE source=? "
+            "AND to_project_rel || '/' || to_rel = ? ORDER BY id DESC LIMIT 1",
+            (db.FILE_MOVE_SOURCE_DETECTED, subject),
+        ).fetchone()
+        if move is None:
+            return ""
+        targets = conn.execute(
+            "SELECT applied_at, ok FROM file_move_targets WHERE move_id=?",
+            (int(move["id"]),),
+        ).fetchall()
+    except sqlite3.Error:
+        return ""
+    if not targets:
+        return ""
+    if all(t["applied_at"] and t["ok"] for t in targets):
+        return f"all {len(targets)} computer(s) moved their copy"
+    return ""
+
+
+RESOLVE_RULES: dict[str, dict[str, Any]] = {
+    # A 500 keyed on (route, exception class). No request-level success
+    # signal is recorded anywhere, so: a day with no recurrence. A route that
+    # still fails re-stamps `last_seen` the next time anybody calls it and
+    # the card comes back with its count.
+    "server_error": {"quiet_hours": SERVER_ERROR_QUIET_HOURS},
+    # A request that waited the busy timeout out, per route: contention, not
+    # a defect, and a day without it is a day without it.
+    DB_BUSY_KIND: {"quiet_hours": DB_BUSY_QUIET_HOURS},
+    # A writer (a computer's report) that held the lock too long. Its fast
+    # writes are not recorded, so the same day-long quiet period.
+    SLOW_WRITE_KIND: {"quiet_hours": SLOW_WRITE_QUIET_HOURS},
+    # Written only by the watchdog when it restarts the collector thread, and
+    # this sweep runs ON that thread: a day of sweeps with no restart is a day
+    # the thread stayed up.
+    "collector_watchdog_restart": {"quiet_hours": WATCHDOG_RESTART_QUIET_HOURS},
+    "triage_reply_refused": {"evidence": _triage_reply_accepted,
+                             "quiet_hours": TRIAGE_REFUSED_QUIET_HOURS},
+    # An INFO card whose whole value is being read ("files were moved by
+    # hand" is how the owner learns of a move nobody meant): every computer
+    # following it usually takes minutes, so the evidence only counts once
+    # the card has been on the page for `min_hours`.
+    "file_move_detected": {"evidence": _file_move_followed,
+                           "min_hours": FILE_MOVE_DETECTED_MIN_HOURS,
+                           "quiet_hours": FILE_MOVE_DETECTED_QUIET_HOURS},
+}
+
+
+def resolved_reason(conn, kind: str, row: dict[str, Any], now: str) -> str:
+    """Why this open notice is over, or "" when nothing says it is."""
+    rule = RESOLVE_RULES.get(str(kind))
+    if not rule:
+        return ""
+    age = _hours_since(str(row.get("last_seen") or ""), now)
+    evidence = rule.get("evidence")
+    min_hours = float(rule.get("min_hours") or 0)
+    if evidence is not None and (not min_hours or (age is not None and age >= min_hours)):
+        try:
+            reason = str(evidence(conn, row, now) or "")
+        except Exception:  # noqa: BLE001 - no evidence, never "resolved"
+            log.exception("resolution evidence for %s could not be read", kind)
+            reason = ""
+        if reason:
+            return reason
+    hours = rule.get("quiet_hours")
+    if hours:
+        if age is not None and age >= float(hours):
+            return (f"not seen again for {int(hours)} h (last seen "
+                    f"{row.get('last_seen')})")
+    return ""
+
+
+def _check_resolved(conn, settings, now: str) -> int:
+    """Close every open event-shaped notice `RESOLVE_RULES` says is over.
+    Returns how many it closed. Reads first and writes after (the
+    one-commit-per-check rule in `run_checks`)."""
+    closing: list[tuple[str, str, str]] = []
+    for kind in RESOLVE_RULES:
+        rows = conn.execute(
+            "SELECT kind, subject, first_seen, last_seen FROM notices "
+            "WHERE kind=? AND cleared_at IS NULL", (kind,),
+        ).fetchall()
+        for raw in rows:
+            row = dict(raw)
+            reason = resolved_reason(conn, kind, row, now)
+            if reason:
+                closing.append((kind, str(row["subject"]), reason))
+    closed = 0
+    for kind, subject, reason in closing:
+        if db.auto_clear_notice(conn, kind, subject, reason, now=now):
+            closed += 1
+            log.info("notice %s / %s closed by itself: %s", kind, subject, reason)
+    return closed

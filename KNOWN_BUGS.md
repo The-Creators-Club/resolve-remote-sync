@@ -30678,6 +30678,233 @@ dashboard reads nothing differently. The first round after the upgrade is
 the plain rotation; from the second on, ruskin's Film 1 + 2 gets two turns
 per round.
 
+## CR-320 - a problem that had gone away stayed on the home page until somebody pressed [ DISMISS ] - FIXED in repo, unshipped (dashboard 0.7.56: notices.py, db.py, alerts.py)
+
+The owner, 2026-09-24: "for errors in future if they are resolved they should
+go away without needing dismiss to be clicked". Seen the same day:
+`triage_reply_refused` stayed open on PROBLEMS THE SERVER FOUND after the
+owner's next reply from the same address had been accepted and acted on.
+
+Cause: the notice kinds come in two shapes. A STATE-shaped kind has a pass
+that re-asserts it every cycle while it is true and clears it the first
+cycle it is not (`clear_notice` / `clear_notices_of_kind`). An EVENT-shaped
+kind is written when something happens (a 500, a refused reply, a write that
+held the lock), and no pass ever re-evaluates it, so nothing was in a
+position to say it was over. Those sat open until [ DISMISS ].
+
+### Inventory: every notice kind (db.NOTICE_KINDS, 49)
+
+| kind | shape | clears automatically today? |
+|---|---|---|
+| project_container_marker | state | yes: provision pass, `_notice_open` -> `clear_notices_of_kind` |
+| project_nested_marker | state | yes: same |
+| duplicate_syncthing_folder | state | yes: same |
+| duplicate_slug_dirs | state | yes: same |
+| unreadable_project_marker | state | yes: provision pass keep-list |
+| provision_failed | state | yes: provision pass keep-list |
+| shared_assets_failed | state | yes: `clear_notice` on the next successful step |
+| project_links_failed | state | yes: same |
+| collector_cycle_failed | state | yes: `_check_collector_jobs`, cleared when the job's last run is ok |
+| collector_db_write_failed | state | yes: same |
+| collector_watchdog_restart | event | NO -> CR-320 rule: 24 h with no further restart |
+| syncthing_unreachable | state | yes: cleared when Syncthing answers (not when unknown) |
+| projects_dir_missing | state | yes, current path only -> CR-320: a healthy pass clears every subject |
+| inventory_refused | state | yes: `_check_inventory` keep-list |
+| file_move_detected | event (info) | NO -> CR-320 rule: every computer moved its copy, once the card is 24 h old; else 7 days quiet |
+| enforce_refusal | state | yes: the brake's meta is deleted by the next enforce pass under the limit |
+| deactivation_refusal | state | yes: same, for the deactivation brake |
+| ignored_report_sections | state (accumulating) | yes: the record is dropped at the boot of a different dashboard build, which is the fix it names |
+| duplicate_machine_id | state | yes: `_check_identity_collisions`, and the report route on a settled rename |
+| duplicate_device_id | state | yes: same pass |
+| pending_device_approval | state | yes: keep-list (nothing cleared when Syncthing cannot be asked) |
+| plan_without_share | state | yes: keep-list (nothing when there is no folder snapshot) |
+| share_without_plan | state | yes: cleared with enforce_refusal |
+| editor_without_machine | state | yes: keep-list |
+| invariant_broken | state | yes: invariants pass keep-list (kept on check_failed) |
+| invariant_check_failed | state | yes: same |
+| protection_missing | state | yes: protection pass keep-list |
+| protection_unverifiable | state | yes: same |
+| dashboard_disk_low | state | yes, current volume only -> CR-320: a healthy pass clears every subject |
+| machine_disk_low | state | yes: keep-list, a stale reading also clears |
+| machine_trash_oversize | state | yes: same |
+| machine_forgotten | state | yes: keep-list (reports again, or forgotten) |
+| feature_not_mounted | state (boot verdict) | yes: keep-list over mount_status.NAMES |
+| feed_unreachable | state | yes: next successful feed read |
+| feed_publish_refused | state | yes: feed poller keep-list |
+| feed_runtime_mismatch | state | yes: next feed read |
+| insecure_secret | state (boot config) | yes: at boot, the only time the value can change |
+| dev_insecure | state (boot config) | yes: same |
+| server_error | event | NO -> CR-320 rule: 24 h with no recurrence of the same route + exception |
+| alerts_delivery_slow | state | yes: every alerts pass |
+| alerts_sink_none | state | yes: once a sink is set |
+| server_crash_report | event (since boot) | only at a restart -> CR-320 rule: 24 h after the newest crash |
+| db_busy | event | NO -> CR-320 rule: 24 h with no recurrence on that route |
+| slow_write | event | NO -> CR-320 rule: 24 h with no recurrence from that writer |
+| slow_poll | event | yes: `clear_slow_poll` on that pass's next run inside a cycle |
+| file_moves_dropped | event | NO, and KEPT that way (below) |
+| broll_archive_unreadable | state | yes, current root only -> CR-320: a healthy pass clears every subject |
+| ai_cli_update_failed | state | yes: every notices pass reads the updater's record |
+| triage_reply_refused | event | NO -> CR-320 rule: a later reply from the same sender was acted on; else 7 days quiet |
+
+### Inventory: every alert kind (alerts.ALERT_KINDS, 62, plus check_failed)
+
+Every alert kind is evaluated from the present on every scan, and a subject
+that leaves the scan is RECOVERED by `deliver` (the `<kind>.ok` record). So
+every kind clears automatically when what its check reads stops being true:
+
+| kind(s) | what the check reads | clears automatically? |
+|---|---|---|
+| breaker_tripped, disk_park, disk_low, machine_silent, clock_skew, engine_down, lane_stalled, lane_error, thread_restarts, crashes, upgrade_failed, upgrade_reverted, upgrade_refused, versions_behind, retracted_running, ytdlp_stale, ytdlp_failed, media_sidecar_failed, loopback_down, red_unexplained | each computer's latest report (sync_guard, lanes, versions) | yes: the next report without it (ytdlp_stale: see CR-321) |
+| report_refused | `machines.report_refused_at` | yes: `clear_report_refused` on the next accepted report |
+| fleet_halt | the halt flag | yes: when the halt is lifted |
+| fleet_halt_expired | an active halt past its expiry | when an admin stops the fleet again or lifts the halt; it asks a question only a person can answer, by design |
+| nas_engine_down, collector_kind_failed, collector_stale, enforce_refusal, deactivation_refusal, enforce_plan, ignored_sections, feed_stale, feed_runtime_mismatch, data_disk, nas_tree, broll_archive_unreadable, code_not_applied, platform_channel_stale, ytdl_worker_dead, ytdl_pot_provider_unreachable, ytdl_plugin_install_failed, ytdl_stale | this server's own current state | yes: next scan |
+| watchdog_restart | the in-memory restart count since the last alerts pass | yes: one pass, then recovered |
+| notice_error | open error NOTICES | yes, through the notice rules above (a mirror, no rule of its own) |
+| invariant_broken, protection_missing, protection_unverifiable | the stored invariant / protection verdicts | yes: next pass |
+| folders_unfiltered, out_of_tree, stray_projects, moved_project_dir, ingest_staging, key_drain, soak_failed, rollout_stalled, jobs_starved, jobs_pinned_no_executor, broll_batch_stuck, broll_share_expiring, ytdl_downloads_failing | current tables / windows | yes: next scan |
+| jobs_abandoned | jobs abandoned in the last day | yes: the window |
+| file_move_expired | expired `file_move_targets` | yes: the machine's answer or a re-issue clears `expired_at` |
+| weekly_send_failed | the LAST weekly row only | only at the next weekly report, a week later -> CR-320 rule |
+| check_failed | a check that raised | yes: the next scan where it runs |
+
+### The rules
+
+`notices.RESOLVE_RULES`, one row per event-shaped kind, data and not ifs.
+A row names `evidence` (the same thing has since SUCCEEDED; tried first),
+`min_hours` (how long a card must have been on the page before its evidence
+may close it) and/or `quiet_hours` (no recurrence for that long, measured
+from the notice's `last_seen`, which every recurrence re-stamps, so an event
+still happening never ages out). `notices._check_resolved` runs LAST in
+`run_checks` (the notices pass on every collector cycle).
+
+- `server_error`: 24 h with no recurrence of the same route + exception.
+  Nothing records a successful request per route, so there is no success
+  signal to use. A route that fails again reopens the card, and the count
+  carries on ("2 time(s)"), because the row keeps its body.
+- `db_busy`: 24 h with no recurrence on that route.
+- `slow_write`: 24 h with no recurrence from that writer (a computer's
+  report). Fast writes are not recorded, so no success signal.
+- `collector_watchdog_restart`: 24 h with no further restart. The sweep runs
+  on the collector thread, so a day of sweeps is a day the thread stayed up.
+- `triage_reply_refused`: evidence first: the newest refusal under that check
+  (`triage_replies`, detail "<check>: ...") was followed by an ACTED reply
+  from the SAME address (case-folded). A success from a different address
+  says nothing about the one turned away. With no such reply (a stranger's
+  forged mail), 7 days quiet.
+- `file_move_detected` (info): evidence: every computer the newest detected
+  move to that path was sent to applied it OK, and the card has been up for
+  24 h (it is how the owner learns of a hand move nobody meant; followers
+  usually finish in minutes, and an FYI nobody could read is not a
+  resolution). Otherwise 7 days quiet. A computer that never answers is
+  `file_move_expired`'s alert.
+- `server_crash_report` (in its own check, which already runs every cycle):
+  the card still counts every crash since this boot, and closes once the
+  newest of them is 24 h old. A new crash reopens it; the files stay for
+  [ DOWNLOAD CRASH REPORTS ].
+- `projects_dir_missing`, `dashboard_disk_low`, `broll_archive_unreadable`:
+  the healthy branch cleared only the CURRENT path's card, so a card about a
+  path the configuration no longer names stayed for ever. A healthy pass now
+  clears every subject of the kind.
+- Alert `weekly_send_failed`: `AlertKind` has a new optional `resolved`
+  field ((ctx, finding) -> reason). This kind's: a later `alert_log` row
+  that really reached somebody (ok, a recipient, not the no-sink record),
+  e.g. a [ SEND A TEST ] that arrived. Before, a fixed mail setting kept
+  "nobody is being told anything by mail" up until the next Monday. A
+  resolver that raises keeps the finding.
+
+Kept dismiss-only on purpose: `file_moves_dropped`. It names moves whose old
+paths this server has already overwritten, and nothing it can observe says
+the operator finished them by hand. Could-not-check is not resolved
+(docs/SELF_DIAGNOSIS.md). Also untouched: every state-shaped kind, whose pass
+already decides.
+
+Every auto-clear goes through `db.auto_clear_notice`, which sets
+`cleared_at` and writes a `fleet_audit` row beside the admin's own
+`notice.dismiss` ones: actor `auto`, action `notice.auto_clear`, detail
+`{subject, severity, first_seen, last_seen, cleared_by: "auto: <reason>"}`.
+The ledger rather than a `cleared_by` column: a schema step for a fact the
+ledger already holds with an actor and a time. It does NOT stamp
+notice-check evidence (the sweep is not the pass that looks for the
+condition). An evidence function that cannot read its table, or raises, is
+no evidence. [ DISMISS ] is unchanged.
+
+### Verification
+- `dashboard/tests/test_notices_auto_resolve_cr320.py` (27): the audit
+  record and its reason; no evidence stamp; a recurrence reopens; each quiet
+  period clears at the period and not half an hour before (server_error,
+  db_busy, slow_write, collector_watchdog_restart); a server_error that
+  keeps recurring never ages out; the count survives an auto-clear; state
+  kinds and file_moves_dropped are never touched; the sweep runs inside
+  `run_checks`; triage: same sender acted -> cleared with the address in the
+  reason, a different sender -> stays, acted BEFORE the refusal -> stays, 7
+  days quiet; file moves: all followed -> stays for 24 h then clears, one
+  not followed -> stays until 7 days, one failed -> stays; crash card closes
+  24 h after the newest crash and not at 23 h, one audit row only; an old
+  projects path is cleared by a healthy pass, a missing one is not;
+  weekly_send_failed recovers after a delivered test, stays after a failed
+  test or a no-sink record; a raising resolver keeps the finding.
+- `test_notices.py`: the every-check-raises test lists `_check_resolved`.
+- `tests/test_notices*.py`, `test_alerts*.py`, `test_health_page*.py`,
+  `test_no_em_dash.py`: 326 passed (with CR-321's file).
+
+### Deploy
+Dashboard only, 0.7.56. No schema change (the record is `fleet_audit`), no
+wire change. On the first notices pass after the deploy, open cards that
+already qualify close by themselves (a server_error last seen more than a
+day ago, the triage refusal the owner's accepted reply answered), each with
+an `auto` audit row.
+
+## CR-321 - three computers alarmed "YouTube downloader out of date" on the newest yt-dlp there was - FIXED in repo (dashboard half), unshipped (dashboard 0.7.56: alerts.py)
+
+Seen 2026-09-24: `ytdlp_stale` open for alex/Creator_1, alex/Razer and
+ruskin/DESKTOP-LQQ41TC, each stored record (`meta` `ytdlp:<editor>/<machine>`)
+reading `{"action": "stale", "age_days": 36, "stale": true, "version":
+"2026.08.19", "message": "yt-dlp 2026.08.19 is 36 days old and it is already
+the newest release -- nothing newer to take"}`. 2026.08.19 was the newest
+yt-dlp release; nothing was wrong. The alert told the owner each computer
+"is out of date and could not update itself".
+
+Cause: the companion marks yt-dlp stale by AGE alone (older than 21 days),
+even when its own update check has just found nothing newer. yt-dlp does not
+always release inside three weeks. The companion half (a structured `latest`
+field, and no `stale` in that case) is a separate change;
+`api.YtdlpIn.latest` declares the field.
+
+The dashboard rule (`alerts._ytdlp_is_newest`, read by
+`_check_ytdlp_stale`), for the records already in the field:
+- `latest` True: not stale. `latest` False: stale. The structured answer
+  wins whenever the companion sends one.
+- No `latest` (every companion in the field today): not stale only when BOTH
+  the record's version is the newest yt-dlp this server knows of (the
+  highest `version` across every `ytdlp:*` record, plus this server's own
+  copy when the /ytdl stack is mounted) AND the computer's own message says
+  "already the newest release". Either alone is not enough: a fleet all on
+  the same old build has nothing newer among it, and the message is prose.
+  The phrase match is the last resort for old companions only, and can at
+  worst leave the old false alarm in place, never silence a real one.
+- Versions compare as dates, component by component (`2026.9.1` is above
+  `2026.08.19`, `2026.08.19.1` above `2026.08.19`).
+
+A finding that stops being raised leaves the scan, which `deliver` records
+as RECOVERED (`ytdlp_stale.ok`): the three open ones clear themselves on the
+first alerts pass after the deploy, no click.
+
+### Verification
+- `dashboard/tests/test_alerts_ytdlp_newest_cr321.py` (9): the three live
+  record shapes do not fire; beside them a genuinely stale computer
+  (2026.07.04, "could not update itself") still fires; a "newest release"
+  message on 2026.08.19 fires when another computer reports 2026.09.22; the
+  newest known version WITHOUT the message still fires on all three;
+  `latest` True silences and `latest` False fires regardless of the message;
+  a finding raised before the rule is recovered (`.ok`) by the next pass;
+  date-wise version ordering.
+
+### Deploy
+Dashboard 0.7.56, with CR-320. No schema change. Works with every companion
+in the field; the companion half, when it ships, sends `latest` and stops
+marking this case stale at the source.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

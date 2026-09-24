@@ -7823,6 +7823,10 @@ class YtdlpIn(_BoundedSectionIn):
     action: str | None = Field(default=None, max_length=32)
     ok: bool | None = None
     stale: bool | None = None
+    # CR-321 (2026-09-24): companion 0.9.77+ sets this when its daily -U found
+    # nothing newer - the installed build IS the newest release, whatever its
+    # age. Absent (older builds) is "not said", never "not latest".
+    latest: bool | None = None
     age_days: int | None = Field(default=None, ge=0)
     message: str | None = Field(default=None, max_length=500)
     checked_at: str | None = Field(default=None, max_length=64)

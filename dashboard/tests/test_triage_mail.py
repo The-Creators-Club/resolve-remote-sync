@@ -162,6 +162,57 @@ def test_no_authentication_results_at_all_fails_closed(site):
     assert "added no Authentication-Results" in refused_notices(site[1])["authentication"]["body"]
 
 
+def test_the_owners_own_reply_with_no_header_passes_by_its_sent_copy(site):
+    """The first live reply (2026-09-24): Google adds no
+    Authentication-Results to mail from a Workspace account to its own
+    +address. The same Message-ID in that account's Sent folder is the proof
+    instead - but only for the mailbox account itself."""
+    seed_machine(site[1])
+    seed_run(site[1])
+    out = handle(site, reply(ar=()), in_own_sent=True,
+                 interpreter=lambda *a, **k: {"do": []})
+    assert out["verdict"] == "acted"
+
+
+def test_a_sent_copy_does_not_vouch_for_a_different_sender(site):
+    """Sent Mail proves authorship by the MAILBOX account only; another
+    allowed recipient's address still needs the header."""
+    settings, conn = site
+    alerts.set_settings(conn, {"alerts_smtp_to": f"{OWNER}, second@example.com"}, "t")
+    conn.commit()
+    seed_run(conn)
+    out = handle(site, reply(ar=(), sender="second@example.com"), in_own_sent=True)
+    assert out["verdict"] == "refused"
+
+
+class _SentIMAP:
+    def __init__(self, sent_ids):
+        self.sent_ids, self.selected, self.calls = sent_ids, None, []
+
+    def list(self):
+        return "OK", [rb'(\HasNoChildren) "/" "INBOX"',
+                      rb'(\HasNoChildren \Sent) "/" "[Gmail]/Sent Mail"']
+
+    def select(self, box, readonly=False):
+        self.selected = box
+        self.calls.append(("select", box, readonly))
+        return "OK", [b"1"]
+
+    def search(self, charset, *criteria):
+        mid = criteria[-1].strip('"')
+        hit = self.selected == '"[Gmail]/Sent Mail"' and mid in self.sent_ids
+        return "OK", [b"7" if hit else b""]
+
+
+def test_in_sent_finds_the_folder_by_its_flag_and_goes_back_to_the_inbox():
+    raw = reply(message_id="<mine@mail.gmail.com>")
+    client = _SentIMAP({"<mine@mail.gmail.com>"})
+    assert triage_mail._in_sent(client, raw) is True
+    assert client.calls[0] == ("select", '"[Gmail]/Sent Mail"', True)
+    assert client.calls[-1][1] == "INBOX" and client.calls[-1][2] is False
+    assert triage_mail._in_sent(_SentIMAP(set()), raw) is False
+
+
 def test_a_pass_for_another_domain_or_inside_a_comment_is_not_a_pass():
     import email as email_mod
     import email.policy

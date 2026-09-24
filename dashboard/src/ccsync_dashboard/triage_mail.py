@@ -444,8 +444,12 @@ def handle_message(
     conn: sqlite3.Connection, settings: Any, raw: bytes, *, now: str,
     values: Mapping[str, str] | None = None,
     interpreter: Callable[..., dict[str, Any]] | None = None,
+    in_own_sent: bool = False,
 ) -> dict[str, Any]:
     """Everything one reply causes, except the network.
+
+    `in_own_sent`: the poll found this exact Message-ID in the mailbox
+    account's own Sent folder - see the authentication step below.
 
     -> {"verdict", "mark_seen", "confirmation": (subject, body) | None}. The
     caller commits, sets \\Seen when told to, and sends the confirmation.
@@ -482,6 +486,18 @@ def handle_message(
                 "it came from an address this server does not send its alerts to")
         return {"verdict": "refused", "mark_seen": True, "confirmation": None}
     ok, auth_why = auth_results_pass(msg, sender.rsplit("@", 1)[-1])
+    # 2026-09-24, found on the first live reply: Google adds NO
+    # Authentication-Results to mail sent from a Workspace account to its
+    # own +address - it never leaves Google - so the owner's reply, the one
+    # this feature exists for, could never pass the header test. The
+    # equivalent proof for that case: the same Message-ID is in the SAME
+    # account's Sent folder. Only someone signed in to that account can put a
+    # message there (the credential this poll already holds could too, which
+    # is no new trust), and a forged message from outside lands in the inbox
+    # only. So it counts only when the sender IS the mailbox account.
+    account = (values.get("alerts_smtp_user") or "").strip().casefold()
+    if not ok and in_own_sent and account and sender == account:
+        ok, auth_why = True, ""
     if not ok:
         _refuse(conn, mid, now, from_addr, run_id, CHECK_AUTH, auth_why)
         return {"verdict": "refused", "mark_seen": True, "confirmation": None}
@@ -559,6 +575,40 @@ def _raw_of(parts: Any) -> bytes | None:
     return None
 
 
+def _in_sent(client: Any, raw: bytes) -> bool:
+    """Is this message's exact Message-ID in the account's Sent folder?
+
+    The folder is found by its IMAP special-use flag (Sent), never by name
+    ("[Gmail]/Sent Mail" is localised). INBOX is re-selected afterwards,
+    read-write, because the caller still sets the Seen flag there. Any failure is
+    "not found", which leaves the header test as the only way in."""
+    found = False
+    try:
+        mid = str(email.message_from_bytes(raw).get("Message-ID") or "").strip()
+        if not mid or '"' in mid or "\\" in mid:
+            return False
+        _typ, boxes = client.list()
+        sent = None
+        for line in boxes or []:
+            text = line.decode("utf-8", "replace") if isinstance(line, bytes) else str(line)
+            if r"\Sent" in text:
+                sent = text.rsplit(' "/" ', 1)[-1].strip()
+                break
+        if sent:
+            client.select(sent, readonly=True)
+            _typ, data = client.search(None, "HEADER", "Message-ID", f'"{mid}"')
+            found = bool(data and data[0] and data[0].split())
+    except Exception:                                               # noqa: BLE001
+        log.debug("triage: could not look in the Sent folder", exc_info=True)
+        found = False
+    finally:
+        try:
+            client.select("INBOX")
+        except Exception:                                           # noqa: BLE001
+            pass
+    return found
+
+
 def poll(settings: Any, now: str | None = None) -> dict[str, Any]:
     """One look at the inbox. Never raises; the outcome is stored in
     META_POLL for the settings page and returned."""
@@ -616,7 +666,8 @@ def poll(settings: Any, now: str | None = None) -> dict[str, Any]:
             if raw is None:
                 continue
             try:
-                result = handle_message(conn, settings, raw, now=now, values=values)
+                result = handle_message(conn, settings, raw, now=now, values=values,
+                                        in_own_sent=_in_sent(client, raw))
                 conn.commit()
             except Exception:                                       # noqa: BLE001
                 conn.rollback()

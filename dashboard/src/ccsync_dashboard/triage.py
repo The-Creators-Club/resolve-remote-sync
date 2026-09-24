@@ -837,6 +837,10 @@ def start_run(settings: Any, conn: sqlite3.Connection,
         return False, "the server check is off. Turn it on and save first."
     if (values.get("alerts_sink") or alerts.SINK_NONE) == alerts.SINK_NONE:
         return False, "no alert channel is set up, so the report would go nowhere."
+    # 2026-09-24: the reply poller used to start only on the next alerts pass
+    # (up to interval_alerts later), so the first reply to a RUN NOW report
+    # could sit unread for ten minutes on a freshly switched-on site.
+    _ensure_poller(settings, values)
     return _try_start(conn, settings, now, forced=True)
 
 

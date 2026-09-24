@@ -2226,6 +2226,13 @@ async def partial_admin_alerts_save(request: Request,
         db.audit(conn, user, "alerts.settings", "alerts",
                  {"sink": values.get("alerts_sink", "")})
         conn.commit()
+        # 2026-09-24: switching replies on starts the reply poller now, not
+        # at the next alerts pass. Never lets a poller hiccup fail a save.
+        try:
+            from . import triage
+            triage._ensure_poller(request.app.state.settings, alerts.get_settings(conn))
+        except Exception:                                           # noqa: BLE001
+            log.exception("could not start the server check's reply poller")
         turned_on = (before == alerts.SINK_NONE
                      and (saved.get("alerts_sink") or before) != alerts.SINK_NONE)
         notice = ("Saved. The next check will send everything that is "

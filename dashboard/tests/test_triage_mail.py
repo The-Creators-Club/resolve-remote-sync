@@ -462,10 +462,11 @@ def test_the_poll_is_fenced_marks_what_it_handled_and_confirms(site, monkeypatch
     assert ("login", OWNER, "app-password-1234") in imap.calls
     assert ("select", "INBOX") in imap.calls
     search = next(c for c in imap.calls if c[0] == "search")[1]
-    assert search == ("UNSEEN", "TO", f'"{REPLY_TO}"', "SINCE", "22-Sep-2026")
+    # No UNSEEN: Gmail files the owner's own reply already \Seen (2026-09-24).
+    assert search == ("TO", f'"{REPLY_TO}"', "SINCE", "22-Sep-2026")
     stores = [c for c in imap.calls if c[0] == "store"]
     assert stores == [("store", b"11", "+FLAGS", "\\Seen")]     # 12 is not ours
-    assert all(c[2] == "(BODY.PEEK[])" for c in imap.calls if c[0] == "fetch")
+    assert all(c[2].startswith("(BODY.PEEK[") for c in imap.calls if c[0] == "fetch")
     [(subject, text, label, reply_to)] = sent
     assert label == "triage_reply" and reply_to == REPLY_TO
     assert subject.startswith("Re: [CC Sync] Server check")
@@ -474,6 +475,30 @@ def test_the_poll_is_fenced_marks_what_it_handled_and_confirms(site, monkeypatch
     assert dbmod.last_alert_at(conn, triage.KIND_TRIAGE, ok_only=False) is None
     assert dbmod.meta_get_json(conn, triage_mail.META_POLL)["ok"]
     assert "app-password-1234" not in json.dumps(dbmod.meta_get_json(conn, triage_mail.META_POLL))
+
+
+def test_a_reply_already_read_is_handled_once_and_never_again(site, monkeypatch):
+    """The first live reply (2026-09-24) arrived already read, because it was sent
+    from the owner's own account. It must be handled; and because nothing
+    filters on the flag any more, the next poll must recognise it by its
+    Message-ID and neither act on it nor download it again."""
+    settings, conn = site
+    seed_machine(conn)
+    seed_run(conn)
+    alerts.set_password(settings, "app-password-1234")
+    FakeIMAP.instances = []
+    FakeIMAP.messages = {b"21": reply(message_id="<seen@x>")}
+    monkeypatch.setattr(triage_mail, "_imap_class", lambda: FakeIMAP)
+    sent = []
+    monkeypatch.setattr(alerts, "_transmit",
+                        lambda c, s, subject, text, *, label="", reply_to="": sent.append(1)
+                        or {"ok": True, "sink": "smtp", "sent_to": OWNER, "detail": "sent"})
+    assert triage_mail.poll(settings, now=NOW)["handled"] == 1
+    assert len(sent) == 1
+    second = triage_mail.poll(settings, now=NOW)
+    assert second["handled"] == 0 and len(sent) == 1
+    fetches = [c[2] for c in FakeIMAP.instances[-1].calls if c[0] == "fetch"]
+    assert fetches == ["(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"]
 
 
 def test_the_poll_does_nothing_when_replies_are_off(site, monkeypatch):

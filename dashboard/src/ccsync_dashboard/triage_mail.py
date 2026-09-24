@@ -593,9 +593,24 @@ def poll(settings: Any, now: str | None = None) -> dict[str, Any]:
         # Read-write on purpose: a handled reply is marked \Seen.
         client.select("INBOX")
         since = _imap_date(db.parse_iso(now) - dt.timedelta(days=SEARCH_DAYS))
-        _typ, data = client.search(None, "UNSEEN", "TO", f'"{reply_to}"', "SINCE", since)
-        numbers = (data[0] if data and data[0] else b"").split()[:MAX_MESSAGES_PER_POLL]
+        # NOT `UNSEEN` (2026-09-24, found on the first live reply): Gmail
+        # files a message you send from your own account to your own
+        # +address already \Seen, so the owner's reply - the only reply this
+        # feature exists for - was never looked at. Every message to the
+        # reply address in the window is considered; `triage_replies`
+        # (Message-ID UNIQUE) is what makes each one handled once, and a
+        # header-only peek keeps the known ones from being downloaded again.
+        _typ, data = client.search(None, "TO", f'"{reply_to}"', "SINCE", since)
+        numbers = (data[0] if data and data[0] else b"").split()[-MAX_MESSAGES_PER_POLL:]
         for num in numbers:
+            _typ, head = client.fetch(num, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+            head_raw = _raw_of(head)
+            if head_raw is not None:
+                known_id = str(email.message_from_bytes(head_raw).get("Message-ID") or "").strip()[:400]
+                if known_id and conn.execute(
+                        "SELECT 1 FROM triage_replies WHERE message_id=?",
+                        (known_id,)).fetchone():
+                    continue
             _typ, parts = client.fetch(num, "(BODY.PEEK[])")
             raw = _raw_of(parts)
             if raw is None:

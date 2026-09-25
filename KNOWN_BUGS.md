@@ -31260,6 +31260,35 @@ the collector panel shows "Retention last ran <ago>"; the new
 "recovered" when things got worse) complements `collector_kind_failed`.
 Tests: `test_legal_db.py`, `test_legal_alerts.py`.
 
+## CR-346 - the computers grid drew over itself, and called the base rig's retired sync engine "down" - FIXED, dashboard 0.7.65
+
+Owner, 2026-09-25, looking at the live 0.7.64 grid: "this is still a mess.
+text disorderly, overlaying things. creator 1 reports sync engine down when
+it's wired".
+
+- **Sync engine down on Creator_1 (the base rig), red, for 28 days.** A base
+  rig runs no lanes, so its Syncthing is retired, and the supervisor's
+  `supervisor_down_since` is never cleared. `alerts._is_base_machine` stopped
+  the ALERT on 2026-09-03; `health._why_first` (the row headline) and the
+  grid's `sync engine down` chip never got the same exemption. Both skip it
+  now for `mode == "base"`; an editor's computer still says it.
+- **Lane labels under the meter.** The label column was 6ch; the labels are
+  "proxy download" and "folder sync". Now 14ch, the meter max-content, and a
+  container query drops the meter (never the state word) when the sync
+  column is under 330 px.
+- **Issues in a fixed four-line box with its own scrollbar**, so a fifth chip
+  was half drawn and a long one was cut with an ellipsis. The box grows to
+  its content and a chip wraps.
+- **A Mac hostname with no break point** (`liaoshaoxuandeMacBook-Pro.local`)
+  ran into the sync column: `overflow-wrap: anywhere`.
+- **"Not reported" under the version** was the licence line (LG-5) and read
+  as "version not reported". Moved into the row's details as `licence`.
+
+Verified by rendering the seeded grid in headless Chromium at 1700, 1173 and
+390 px (the owner's three rows reproduced). Files: `health.py`,
+`templates/partials/fleet_grid.html`, `static/cc/home.css`; test
+`test_health.py::test_a_base_rig_has_no_sync_engine_to_be_down`.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

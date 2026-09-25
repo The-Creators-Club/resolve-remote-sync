@@ -112,7 +112,7 @@
 {% set errs %}
   {% if e.guard.breaker_tripped %}{{ hm.tag('err', 'proxy download stopped itself', chip_help('breaker', reason=e.guard.breaker_reason, at=e.guard.breaker_at | ago)) }}{% endif %}
   {% if e.guard.halt_active %}{{ hm.tag('err', 'stopped by your admin' if e.guard.halt_scope == 'fleet' else 'syncing paused on this computer', e.guard.halt_reason) }}{% endif %}
-  {% if e.guard.supervisor_down_since %}{% set engine_extra = (("; " ~ e.guard.supervisor_attempts ~ (" automatic restart attempt has failed" if e.guard.supervisor_attempts == 1 else " automatic restart attempts have failed")) if e.guard.supervisor_attempts else "") ~ ("; automatic restarts are switched off or suppressed on this computer, so nothing is trying" if (e.guard.supervisor_supervising is not none and not e.guard.supervisor_supervising) else "") ~ ((". Last error: " ~ e.guard.supervisor_last_error) if e.guard.supervisor_last_error else "") %}{{ hm.tag('err', 'sync engine down ' ~ (e.guard.supervisor_down_since | ago) ~ ((', ' ~ e.guard.supervisor_attempts ~ ' restart' ~ ('s' if e.guard.supervisor_attempts != 1 else '') ~ ' failed') if e.guard.supervisor_attempts else ''), chip_help('sync_engine_down', since=e.guard.supervisor_down_since, extra=engine_extra)) }}{% endif %}
+  {% if e.guard.supervisor_down_since and (e.mode or "") | lower != "base" %}{% set engine_extra = (("; " ~ e.guard.supervisor_attempts ~ (" automatic restart attempt has failed" if e.guard.supervisor_attempts == 1 else " automatic restart attempts have failed")) if e.guard.supervisor_attempts else "") ~ ("; automatic restarts are switched off or suppressed on this computer, so nothing is trying" if (e.guard.supervisor_supervising is not none and not e.guard.supervisor_supervising) else "") ~ ((". Last error: " ~ e.guard.supervisor_last_error) if e.guard.supervisor_last_error else "") %}{{ hm.tag('err', 'sync engine down ' ~ (e.guard.supervisor_down_since | ago) ~ ((', ' ~ e.guard.supervisor_attempts ~ ' restart' ~ ('s' if e.guard.supervisor_attempts != 1 else '') ~ ' failed') if e.guard.supervisor_attempts else ''), chip_help('sync_engine_down', since=e.guard.supervisor_down_since, extra=engine_extra)) }}{% endif %}
   {% if e.guard.clock_skew_dir %}{{ hm.tag('err', 'clock ' ~ (e.guard.clock_skew_abs | eta) ~ ' ' ~ (e.guard.clock_skew_dir | lower), chip_help('clock', abs=e.guard.clock_skew_abs | eta, direction=("ahead of" if e.guard.clock_skew_dir == "AHEAD" else "behind"))) }}{% endif %}
   {% if e.guard.stalled_lane and e.guard.stall_current %}{{ hm.tag('err', 'stalled: ' ~ (e.guard.stalled_lane | lane_word) ~ (', killed' if e.guard.stalled_killed else ''), chip_help('stalled', lane=e.guard.stalled_lane | lane_word, seconds=e.guard.stalled_seconds, killed=("and was killed" if e.guard.stalled_killed else "and was reported without being killed"), at=e.guard.stalled_at | ago)) }}{% endif %}
   {% if e.guard.report_refused_at %}{{ hm.tag('err', 'being refused: sign in on its tray', chip_help('report_refused', at=e.guard.report_refused_at | ago, reason=e.guard.report_refused_reason)) }}{% endif %}
@@ -185,12 +185,7 @@
     {% if errs | trim or warns | trim %}{{ errs }}{{ warns }}{% else %}<span class="none">nothing wrong</span>{% endif %}
     {% if work | trim %}{{ work }}{% endif %}
   </div>
-  <div class="ver num">{{ e.companion_version or "?" }}{% if e.companion_outdated %}<br><span class="dim">current {{ e.current_companion_version }}</span>{% endif %}
-    {#- LG-5 (LEGAL_GAP_FEATURES_PLAN.md 5), carried from the classic grid: the
-        licence this computer's companion says was accepted. The version alone
-        is judged (health.eula_status); the sha is shown, never compared.
-        "Not reported" is muted and is never "not accepted". #}
-    {%- if e.eula %}<div class="eula-line" title="{% if e.eula.accepted_at %}accepted {{ e.eula.accepted_at }}{% endif %}{% if e.eula.eula_sha256 %} &middot; sha256 {{ e.eula.eula_sha256[:12] }}{% endif %}"><span class="{{ {'green': 'ok', 'amber': 'warn'}.get(e.eula.colour, 'dim') }}">{{ e.eula.text }}</span>{% if e.eula.accepted_at %} <span class="dim">{{ e.eula.accepted_at | ago }}</span>{% endif %}</div>{% endif %}</div>
+  <div class="ver num">{{ e.companion_version or "?" }}{% if e.companion_outdated %}<br><span class="dim">current {{ e.current_companion_version }}</span>{% endif %}</div>
   <div class="seen">{{ e.received_at | ago }}</div>
   <details class="more" data-key="fleet:details:{{ e.editor_username }}:{{ e.machine }}">
     <summary><span class="caret" aria-hidden="true">&#9656;</span> details{% if e.notes %} <span class="dim" title="{{ e.notes | join('; ') }}">&middot; {{ e.notes | length }} note{{ "s" if e.notes | length != 1 }}</span>{% endif %}</summary>
@@ -227,6 +222,13 @@
       <dd>{% if e.capabilities.gpu_present %}<span title="{{ chip_help('gpu', name=(e.capabilities.gpu_name or "an NVIDIA GPU"), nvenc=(", with nvenc" if e.capabilities.nvenc else ""), at=((" - reported " ~ (e.capabilities.at | ago)) if e.capabilities.at else "")) }}">GPU{% if e.capabilities.gpu_vram_gb %} {{ e.capabilities.gpu_vram_gb | round | int }}G{% endif %}{% if e.capabilities.nvenc %}, nvenc{% endif %}</span>{% endif %}{% if e.capabilities.whisper %} <span title="{{ chip_help('whisper') }}">whisper</span>{% endif %}</dd>
       {% endif %}
       <dt>version</dt><dd>{{ e.platform or "?" }}, running {{ e.companion_version or "?" }}{% if e.current_companion_version %}, current is {{ e.current_companion_version }}{% endif %}</dd>
+      {#- LG-5 (LEGAL_GAP_FEATURES_PLAN.md 5), carried from the classic grid: the
+          licence this computer's companion says was accepted. The version alone
+          is judged (health.eula_status); the sha is shown, never compared.
+          "Not reported" is muted and is never "not accepted". In the details,
+          not under the version (2026-09-25): a bare "Not reported" under
+          "0.9.77" read as the version not being reported. #}
+      {%- if e.eula %}<dt>licence</dt><dd class="eula-line" title="{% if e.eula.accepted_at %}accepted {{ e.eula.accepted_at }}{% endif %}{% if e.eula.eula_sha256 %} &middot; sha256 {{ e.eula.eula_sha256[:12] }}{% endif %}"><span class="{{ {'green': 'ok', 'amber': 'warn'}.get(e.eula.colour, 'dim') }}">{{ e.eula.text }}</span>{% if e.eula.accepted_at %} <span class="dim">{{ e.eula.accepted_at | ago }}</span>{% endif %}</dd>{% endif %}
     </dl>
     {% if session_is_admin %}
     <div class="acts row-actions">

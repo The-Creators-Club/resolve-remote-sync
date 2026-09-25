@@ -28,6 +28,30 @@
 .home-page .pc .kv { margin-top: 8px; }
 .home-page .cliplist { margin: 4px 0 0; padding-left: 2ch; }
 
+/* The row grows to its content (owner, 2026-09-25: "text disorderly,
+   overlaying things"). Three things drew over each other on the live grid:
+   - the lane label column was 6ch while the labels are "proxy download" and
+     "folder sync", so the label ran under the meter; the meter column is
+     max-content so the bars still line up row to row;
+   - the issues sat in a fixed four-line box with its own scrollbar, so a
+     fifth chip was half drawn under the row's edge; every issue is listed
+     now and a long one wraps instead of being cut;
+   - a hostname with no break point (a Mac's `...MacBook-Pro.local`) ran into
+     the sync column. */
+.home-page .pc .name { min-width: 0; overflow-wrap: anywhere; }
+.home-page .pc .lane { grid-template-columns: 14ch max-content minmax(0, 1fr); }
+.home-page .pc .lane .k { overflow: hidden; text-overflow: ellipsis; }
+/* When the sync column is narrow the meter goes, never the words: the state
+   ("idle", "syncing") is the answer and the bar only repeats its colour. */
+.home-page .pc .lanes-wrap { container-type: inline-size; min-width: 0; }
+@container (max-width: 330px) {
+  .home-page .pc .lane { grid-template-columns: 14ch minmax(0, 1fr); }
+  .home-page .pc .lane .m { display: none; }
+}
+.home-page .pc.home-pc > .issues { height: auto; max-height: none; overflow: visible; padding-right: 0; column-gap: 14px; }
+.home-page .pc .issues .tag { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
+.home-page .pc .issues .tag::before { align-self: flex-start; margin-top: 0.45em; }
+
 /* A row's issues scroll inside their slot on a fine pointer only (5.1, wave
    5): on a phone or a touch screen a swipe that starts on them moves the
    page, and every issue is simply listed. */

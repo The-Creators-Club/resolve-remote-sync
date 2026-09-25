@@ -921,7 +921,12 @@ def _why_first(
                 f"Not syncing: {_lane_words(lane.get('lane') or lane.get('label'))} "
                 f"has been busy for {_duration_words(stalled)} with nothing moving")
 
-    if _why_get(row, "supervisor_down_since"):
+    # Not on a base rig (2026-09-25, owner: "creator 1 reports sync engine down
+    # when it's wired"): it runs no lanes, so its Syncthing is retired, not
+    # down, and the supervisor's record of it going away is never cleared.
+    # alerts._is_base_machine made the same call for the alert on 2026-09-03;
+    # the grid headline kept saying it in red for 28 days.
+    if _why_get(row, "supervisor_down_since") and not is_base:
         return "syncthing_down", _why_sentence("syncthing_down", row)
 
     return None

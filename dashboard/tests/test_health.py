@@ -462,6 +462,15 @@ def test_a_dead_sync_engine_is_the_last_thing_derived():
     assert "sync engine" in sentence
 
 
+def test_a_base_rig_has_no_sync_engine_to_be_down():
+    """2026-09-25, Creator_1 read "Not syncing: the sync engine on this
+    computer is down" in red for 28 days: a base rig runs no lanes, and the
+    supervisor's record of its retired Syncthing is never cleared."""
+    assert health.why_not_syncing(
+        _row(mode="base", plan={"count": 0},
+             guard={"supervisor_down_since": OLD}), NOW) is None
+
+
 def test_unfiltered_folders_beat_an_upload_only_explanation():
     """A folder with no ignore filter carries camera originals both ways; that
     is a fault, and an explanation must not hide it."""

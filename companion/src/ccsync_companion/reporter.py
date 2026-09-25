@@ -471,6 +471,7 @@ class DashboardReporter:
         get_capabilities: Optional[Callable[[], dict[str, Any]]] = None,
         get_resolve_journals: Optional[Callable[[], list[dict[str, Any]]]] = None,
         get_resolve_undo_applied: Optional[Callable[[], list[dict[str, Any]]]] = None,
+        get_machine_settings: Optional[Callable[[], dict[str, Any]]] = None,
         notify: Optional[Callable[[str], None]] = None,
         state_dir: Optional[Path] = None,
     ) -> None:
@@ -492,6 +493,12 @@ class DashboardReporter:
         # it changes second by second, and a suppressed-because-unchanged
         # section would hand work to a machine somebody came back to.
         self._get_capabilities = get_capabilities
+        # Account page 2026-09-25 (docs/ACCOUNT_PAGE_FEATURES.md 4.3): the
+        # settings the dashboard may ask this computer to change, what it
+        # runs with, and its answer to the last ask. Every tick, light ones
+        # included: the answer is what stops the standing command being
+        # re-sent, and it must not wait for a heavy cycle.
+        self._get_machine_settings = get_machine_settings
         self.cfg = cfg
         self._http_post = http_post or default_http_post
         self.timeout = timeout
@@ -1014,6 +1021,17 @@ class DashboardReporter:
             # about hardware that may have changed.
             if caps is not None:
                 payload["capabilities"] = caps
+        if self._get_machine_settings is not None:
+            try:
+                machine_settings = self._get_machine_settings()
+            except Exception:
+                log.exception("get_machine_settings() failed")
+                machine_settings = None
+            # Omitted when empty (the getter's own failure answer): an absent
+            # section leaves the dashboard's last copy alone, which is right
+            # for "could not tell" and costs only a late answer.
+            if isinstance(machine_settings, dict) and machine_settings:
+                payload["machine_settings"] = machine_settings
         if self._get_broll_ingest is not None:
             try:
                 ingest = self._get_broll_ingest()

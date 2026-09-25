@@ -2091,3 +2091,49 @@ form.htmx-request input { pointer-events: none; }
 .settings-result { margin-left: 0.6rem; }
 .settings-result.ok { color: var(--green); }
 .settings-result.bad { color: var(--red-hot); }
+
+/* ===== the account page (account page 2026-09-25) ======================
+   ACCOUNT_PAGE_FEATURES.md 6.1: the CURRENT look, built from the existing
+   vocabulary (side-head, chips, [ BRACKET ] buttons, row-detail-list). The
+   design bench's account.css is deliberately NOT copied: the redesign port
+   brings the new look later. */
+.account-page .account-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.6rem; }
+.account-panel,
+.account-pc { border: 1px solid var(--red-dim); background: var(--panel); padding: 0.7rem 0.9rem; margin: 0 0 1rem; }
+.account-pc.lost { border-style: dashed; }
+.account-pcs { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 0.8rem; }
+.account-sec { color: var(--red); font-size: 13px; letter-spacing: 0.06em; font-weight: normal; margin: 1.4rem 0 0.2rem; }
+.account-lede { max-width: 80ch; font-size: 12px; margin: 0 0 0.7rem; }
+.account-note { border: 1px solid var(--red-dim); padding: 0.4rem 0.7rem; margin: 0 0 1rem; font-size: 12px; }
+.account-note.ok { border-color: var(--green); color: var(--green); }
+.account-empty { color: var(--muted); border: 1px dashed #2a2a31; padding: 0.9rem; font-size: 12px; }
+.account-who { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.6rem; margin-bottom: 0.5rem; }
+.account-shown { font-size: 16px; color: var(--text); }
+.account-name-form { display: grid; grid-template-columns: minmax(10rem, 16rem) 1fr; gap: 0.4rem 0.8rem; align-items: start; margin-bottom: 0.4rem; }
+.account-name-form input[type="text"] { min-width: 12rem; }
+.account-kv { margin-left: 0; }
+.account-h3 { color: var(--muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; margin: 0.8rem 0 0.3rem; }
+/* The one result slot per control: always the same place, so an answer
+   never pushes the form it answers. */
+.account-result { font-size: 12px; padding: 0.2rem 0; }
+.account-result.red { color: var(--red-hot); }
+.account-result.amber { color: var(--amber); }
+.account-result.green { color: var(--green); }
+.account-result.muted { color: var(--muted); }
+.field-hint.ok { color: var(--green); }
+.field-hint.amber { color: var(--amber); }
+.account-pw-form { display: grid; grid-template-columns: minmax(10rem, 16rem) 1fr; gap: 0.5rem 0.8rem; align-items: start; margin: 0.6rem 0; max-width: 46rem; }
+.account-pw-form input[type="password"],
+.account-pw-form input[type="text"] { width: 100%; max-width: 22rem; }
+.account-jobs-form { margin: 0.3rem 0; }
+.account-kinds label { display: block; margin: 0.15rem 0 0.15rem 1.2rem; font-size: 12px; }
+.account-add { display: flex; flex-wrap: wrap; gap: 0.3rem 0.5rem; align-items: center; margin-top: 0.4rem; }
+.account-add select { max-width: 100%; }
+.account-where,
+.account-foot { font-size: 11px; margin-top: 0.5rem; }
+.account-sess-acts { display: flex; flex-wrap: wrap; gap: 0.4rem 0.8rem; align-items: center; margin-top: 0.6rem; }
+.account-grp td { color: var(--red); font-size: 11px; letter-spacing: 0.04em; padding-top: 0.8rem; }
+.account-grp td .muted { letter-spacing: 0; margin-left: 0.4rem; }
+.account-link { color: inherit; text-decoration: none; }
+.account-link:hover { color: var(--red-hot); }
+/* ===== END the account page ============================================ */

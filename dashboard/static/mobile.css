@@ -390,4 +390,19 @@ html {
 }
 
 
+/* The account page's phone stack (account page 2026-09-25,
+   ACCOUNT_PAGE_FEATURES.md 6.1): one column of computers, and the two
+   label-plus-field forms become one column, so nothing scrolls sideways at
+   390 px. */
+@media (max-width: 600px) {
+  .account-pcs { grid-template-columns: 1fr; }
+  .account-name-form,
+  .account-pw-form { grid-template-columns: 1fr; }
+  .account-name-form input[type="text"] { min-width: 0; width: 100%; }
+  .account-add select { width: 100%; }
+}
+@media (max-width: 900px) {
+  .account-pcs { grid-template-columns: 1fr; }
+}
+
 /* ============================== == end == ================================= */

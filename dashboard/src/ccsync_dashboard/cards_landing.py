@@ -74,6 +74,36 @@ def _pool(request: Request) -> Any:
     return getattr(request.app.state, "cards_pool", None)
 
 
+# Words the phrases below already use for somebody who is not a name. A
+# display name spelt like one of them would read as the phrase's own word
+# ("you opened it 3 min ago" about somebody else), so it falls back to the
+# sign-in name instead (account page 2026-09-25).
+_PHRASE_WORDS = frozenset({"you", "somebody", "nobody", "someone"})
+
+
+def _display_names(request: Request) -> dict[str, str]:
+    """account_api's cached display-name map (account page 2026-09-25,
+    ACCOUNT_PAGE_FEATURES.md 6.2). {} on any failure: this page must draw
+    regardless, and a sign-in name is the D-6 default anyway."""
+    try:
+        from . import account_api
+
+        return dict(account_api.display_names_for(request.app) or {})
+    except Exception:  # noqa: BLE001 - a label must never fail a page
+        log.exception("Timeline Cards picker: could not read display names")
+        return {}
+
+
+def _label(names: dict[str, str], username: str) -> str:
+    """The display name for the phrases a PERSON reads. The JSON fields
+    (`occupants`, `last_in`) stay sign-in names: they are keys."""
+    who = str(username or "")
+    shown = names.get(who) or names.get(who.strip().lower()) or ""
+    if not shown or shown.strip().casefold() in _PHRASE_WORDS:
+        return who
+    return shown
+
+
 def _episodes(request: Request) -> list[dict]:
     from . import cards
 
@@ -119,15 +149,20 @@ def _state(request: Request) -> dict:
     # asks for, widened to everyone because there is nothing to take away.
     me = auth.get_session_user(request) or ""
     admin = auth.is_admin(request.app.state.settings, me)
-    _catalogue(request, rows, me)
+    names = _display_names(request)
+    _catalogue(request, rows, me, names)
     for row in rows:
+        # account page 2026-09-25: "in it now" by display name; the sign-in
+        # names stay in `occupants` (and in the row's title) as the keys.
+        row["occupants_shown"] = [_label(names, o)
+                                  for o in (row.get("occupants") or [])]
         # security-1 (2026-09-18b mediums): the presser is TOLD who was last
         # in and when. The idle release measures served requests, so an editor
         # working offline in Cards looks like nobody at all after fifteen
         # minutes; naming the last occupant is the fact that turns a blind
         # press into a judgement. "" when nobody has ever been in it.
-        row["last_in_phrase"] = _last_in_phrase(row.get("last_in") or "",
-                                                row.get("last_in_seconds"))
+        row["last_in_phrase"] = _last_in_phrase(
+            _label(names, row.get("last_in") or ""), row.get("last_in_seconds"))
         row["opening_phrase"] = _opening_phrase(row.get("state") or "",
                                                 row.get("opening_seconds"))
         # logic-cards-1 (2026-09-25): the CONFIRM names the person the press
@@ -136,8 +171,10 @@ def _state(request: Request) -> dict:
         # the confirm read "ruskin is in it now" to ruskin while alex was
         # editing in it.
         other = pool.get(row.get("slug", "")) if pool is not None else None
-        other_phrase = (_last_in_phrase(*other.last_in_other_than(me))
-                        if other is not None else "")
+        other_phrase = ""
+        if other is not None:
+            other_who, other_ago = other.last_in_other_than(me)
+            other_phrase = _last_in_phrase(_label(names, other_who), other_ago)
         row["close_prompt"] = _close_prompt(row.get("name") or "this episode",
                                             other_phrase)
         row["may_close"] = bool(
@@ -154,7 +191,8 @@ def _state(request: Request) -> dict:
     }
 
 
-def _catalogue(request: Request, rows: list[dict], me: str) -> None:
+def _catalogue(request: Request, rows: list[dict], me: str,
+               names: dict[str, str] | None = None) -> None:
     """Add what the picker sorts, filters and folds on. Never raises.
 
     2026-09-24 (cards_catalog's docstring): the folder path under the vault
@@ -186,14 +224,16 @@ def _catalogue(request: Request, rows: list[dict], me: str) -> None:
         # with an unset clock) cannot strip the catalogue from every row
         # after it (Fable review, 2026-09-25).
         try:
-            _catalogue_row(row, full, cut, sizes, anyone, mine, now, me_key)
+            _catalogue_row(row, full, cut, sizes, anyone, mine, now, me_key,
+                           names or {})
         except Exception:  # noqa: BLE001
             log.exception("Timeline Cards picker: could not describe %s",
                           row.get("slug", "?"))
 
 
 def _catalogue_row(row: dict, full: list[str], cut: int, sizes: dict,
-                   anyone: dict, mine: dict, now: float, me_key: str) -> None:
+                   anyone: dict, mine: dict, now: float, me_key: str,
+                   names: dict[str, str] | None = None) -> None:
     slug = row.get("slug", "")
     parts = full[cut:]
     size = sizes.get(slug) or {}
@@ -208,11 +248,14 @@ def _catalogue_row(row: dict, full: list[str], cut: int, sizes: dict,
     row["year"] = cards_catalog.year_of(full, modified)
     row["opened_mine"] = mine.get(slug)
     row["opened_any"] = last.get("at")
+    # The sign-in name behind "who opened it", for the row's title (account
+    # page 2026-09-25): the phrase carries the display name.
+    row["opened_by"] = "" if row["opened_mine"] else by
     if row["opened_mine"]:
         row["opened_phrase"] = ("you opened it "
                                 + cards_catalog.ago_phrase(now - row["opened_mine"]))
     elif row["opened_any"]:
-        who = "you" if by == me_key else (by or "somebody")
+        who = "you" if by == me_key else (_label(names or {}, by) or "somebody")
         row["opened_phrase"] = (f"{who} opened it "
                                 + cards_catalog.ago_phrase(now - row["opened_any"]))
     else:

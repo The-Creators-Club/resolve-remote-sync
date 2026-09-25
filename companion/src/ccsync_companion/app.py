@@ -42,6 +42,7 @@ from . import supervisor
 from . import eula as eula_mod
 from . import file_moves as file_moves_mod
 from . import machine as machine_mod
+from . import machine_settings as machine_settings_mod
 from . import idle as idle_mod
 from . import luts as luts_mod
 from . import music_worker
@@ -2367,6 +2368,11 @@ class CompanionApp:
             # journals themselves name this editor's own paths and stay here.
             get_resolve_journals=self._resolve_journals,
             get_resolve_undo_applied=self._resolve_undo_results,
+            # Account page 2026-09-25 (docs/ACCOUNT_PAGE_FEATURES.md 4.3):
+            # which fleet-jobs settings the dashboard may ask for, the values
+            # this process runs with, those waiting on disk for a restart,
+            # and the answer to the last ask. Every tick, light ones included.
+            get_machine_settings=lambda: machine_settings_mod.report_section(self),
             # APP-1 (resilience sweep 2026-08-28): the ONE thing the reporter
             # says out loud. A revoked credential is a human's problem, and
             # nothing else on this machine can tell the editor about it -- the
@@ -2515,6 +2521,9 @@ class CompanionApp:
         # bundle, uploaded on the report channel, with no inbound connection
         # to this PC and nobody having to click anything on it.
         self._apply_diagnostics_request(resp)
+        # ...and the owner or an admin asking this computer, from the account
+        # page, to change its fleet-jobs settings (account page 2026-09-25).
+        self._apply_machine_settings_request(resp)
         # A lane that has just fallen into `error` uploads its own bundle,
         # once per lane per hour (SYS-7). Here rather than in the lane because
         # this is the one place that runs on every report cycle and holds the
@@ -8496,6 +8505,62 @@ class CompanionApp:
             )
         except Exception:
             log.exception("could not apply the dashboard's resume-proxy-download request")
+
+    def _apply_machine_settings_request(self, resp: Any) -> None:
+        """The owner of this computer, or an admin, asked it from the
+        dashboard's account page to change `jobs_enabled` / `jobs_kinds`
+        (account page 2026-09-25, docs/ACCOUNT_PAGE_FEATURES.md 4.2, 5.3).
+
+        The command is STANDING, like `diagnostics` and unlike
+        `resume_lane_b`: it rides every reply until a report carries this
+        computer's answer, because the failure that matters is a click that
+        evaporates while a laptop sleeps. So applying must be idempotent, and
+        it is: machine_settings.apply_request answers a redelivered id from
+        its ledger and writes nothing, and the balloon fires only for an id
+        that was not already applied before this call (owner decision D-9:
+        one balloon naming who asked). Nothing restarts (D-8): the write goes
+        to config.toml, exactly as the tray's own control does.
+
+        Never raises: this runs on the reporter thread."""
+        try:
+            command = None
+            if isinstance(resp, dict):
+                commands = resp.get("commands")
+                if isinstance(commands, dict):
+                    command = commands.get("machine_settings")
+            if not isinstance(command, dict):
+                return
+            ledger = machine_settings_mod.ledger_path_of(self)
+            if ledger is None:
+                log.warning("machine settings: no state dir, so the dashboard's "
+                            "request cannot be recorded and is not applied")
+                return
+            request_id = command.get("id")
+            prior = (machine_settings_mod.answer_for(ledger, request_id)
+                     if isinstance(request_id, str) else None)
+            answer = machine_settings_mod.apply_request(
+                command, config_path=config_mod.CONFIG_PATH,
+                ledger_path=ledger, now=time.time())
+            if not answer:
+                return
+            state = str(answer.get("state") or "")
+            already = bool(prior) and str(prior.get("state") or "") == state
+            if already:
+                return
+            by = str(command.get("requested_by") or "").strip()[:64] or "Your administrator"
+            settings = command.get("set") if isinstance(command.get("set"), dict) else {}
+            if state == machine_settings_mod.STATE_APPLIED:
+                log.warning("machine settings: %s asked this computer from the "
+                            "dashboard to change %s; saved to config.toml, takes "
+                            "effect at the next start", by, settings)
+                self._notify_tray(
+                    machine_settings_mod.change_sentence(settings, by),
+                    site_mod.notify_title("fleet work settings changed"))
+            else:
+                log.warning("machine settings: %s asked this computer to change %s: "
+                            "%s (%s)", by, settings, state, answer.get("detail") or "")
+        except Exception:
+            log.exception("could not apply the dashboard's machine settings request")
 
     def _apply_file_moves(self, resp: Any) -> None:
         """Follow the server's file moves (docs/FILE_MOVES.md, 2026-08-27).

@@ -1,0 +1,61 @@
+{# FLEET JOBS for one computer (account page 2026-09-25, ACCOUNT_PAGE_FEATURES.md
+   3.6, 4.5, 4.7, 4.8). Its own fragment because an ask answers with it.
+
+   Two forms, one key each, so a click asks for the one thing it changed. The
+   boxes show what the computer WILL do: the pending ask, else what is saved
+   there, else what is running. `mode` is not a control here and never can be
+   (CR-88). A kinds list with every box ticked is "every kind", and unticking
+   the last box is refused before anything is sent (account.js, and the
+   server says the same sentence). #}
+<div class="account-jobs" id="{{ pc.dom_id }}-jobs">
+  <div class="account-h3">fleet jobs</div>
+  <dl class="row-detail-list account-kv">
+    <dt title="Whether this computer is taking fleet work at the moment, and if not, why not.">now</dt>
+    <dd><span class="why-line {{ pc.gate_tone }}">{{ pc.gate_words }}</span></dd>
+    {% if pc.running_words %}<dt>running</dt><dd>{{ pc.running_words }}</dd>{% endif %}
+    <dt title="The kinds of fleet work this computer accepts.">takes</dt>
+    <dd>{% if pc.jobs.enabled is none %}<span class="muted">not reported</span>{% elif pc.kind_words %}{{ pc.kind_words | join(", ") }}{% else %}every kind{% endif %}</dd>
+    <dt title="How long nobody must use the computer before it starts fleet work, so it never slows you down.">starts after</dt>
+    <dd>{{ pc.idle_words }}</dd>
+    <dt title="The computer's graphics card. Transcribing audio needs a good one; the other kinds do not.">graphics</dt>
+    <dd>{{ pc.jobs.gpu or "no separate graphics card reported" }}</dd>
+  </dl>
+
+  {% if pc.can_request %}
+    <form class="account-jobs-form" hx-post="/partials/account/machines/settings"
+          hx-trigger="change" hx-target="#{{ pc.dom_id }}-jobs" hx-swap="outerHTML">
+      <input type="hidden" name="editor" value="{{ acct.user }}">
+      <input type="hidden" name="machine" value="{{ pc.machine }}">
+      {# The "0" first and the box's "1" after it: the LAST value is the box. #}
+      <input type="hidden" name="jobs_enabled" value="0">
+      <label title="Fleet work is small background tasks (transcripts, preview copies, waveforms) that the server hands to idle computers. Untick to keep this computer out of all of it.">
+        <input type="checkbox" name="jobs_enabled" value="1"{% if pc.want_enabled %} checked{% endif %}> Let the fleet use this computer</label>
+    </form>
+    <form class="account-jobs-form account-kinds" hx-post="/partials/account/machines/settings"
+          hx-trigger="change" hx-target="#{{ pc.dom_id }}-jobs" hx-swap="outerHTML"
+          data-last-kind="That is the last kind of work this computer takes. Untick Let the fleet use this computer instead.">
+      <input type="hidden" name="editor" value="{{ acct.user }}">
+      <input type="hidden" name="machine" value="{{ pc.machine }}">
+      <input type="hidden" name="jobs_kinds_sent" value="1">
+      {% for b in pc.kind_boxes %}
+        <label title="The job called {{ b.kind }}. Untick to keep this computer out of this kind only.">
+          <input type="checkbox" name="jobs_kinds" value="{{ b.kind }}"{% if b.checked %} checked{% endif %}{% if pc.want_enabled is sameas false %} disabled{% endif %}> {{ b.label }}</label>
+      {% endfor %}
+    </form>
+    <div class="field-hint muted">Asked of {{ pc.machine }} on its next report, and it takes effect when CCSync next starts there. Fleet work only runs while nobody is using the computer.</div>
+    {% if pc.status %}<div class="account-result {{ pc.status.tone }}" role="status">{{ pc.status.text }}</div>{% endif %}
+    {% if pc.pending %}
+      <form class="inline-form" hx-post="/partials/account/machines/settings/withdraw"
+            hx-target="#{{ pc.dom_id }}-jobs" hx-swap="outerHTML">
+        <input type="hidden" name="editor" value="{{ acct.user }}">
+        <input type="hidden" name="machine" value="{{ pc.machine }}">
+        <button class="btn tap" type="submit" title="Take the request back before {{ pc.machine }} picks it up. Anything it has already saved stays saved.">[ WITHDRAW ]</button>
+      </form>
+    {% endif %}
+  {% else %}
+    <div class="muted">{{ pc.request_blocked }}</div>
+    {% if pc.status %}<div class="account-result {{ pc.status.tone }}" role="status">{{ pc.status.text }}</div>{% endif %}
+  {% endif %}
+  {% if result %}<div class="account-result {{ result.tone }}" role="status">{{ result.text }}</div>{% endif %}
+  <div class="muted account-where">lend it now, or stop the job it is running: <b>tray, Take fleet jobs now</b> and <b>Settings, FLEET JOBS</b></div>
+</div>

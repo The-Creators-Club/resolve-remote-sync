@@ -1961,6 +1961,50 @@ CREATE TABLE IF NOT EXISTS triage_replies (
 );
 """
 
+# v58: the account page (account page 2026-09-25, docs/ACCOUNT_PAGE_FEATURES.md).
+#
+# `user_profiles` holds the display name, which is a LABEL and never a key:
+# everything else stays keyed by the sign-in name. Its own table rather than a
+# column on `users` (which only DASH_AUTH_METHOD=local fills) or on
+# `known_editors` (an admin who never ticked or reported has no row there).
+#
+# `machine_setting_requests` is ONE standing ask per computer, latest wins: a
+# second ask while one is pending merges into it under a new request_id, so
+# the companion never has two to reconcile. A table of its own, keyed
+# (editor_username, machine), so forget_machine and the rename adoption treat
+# it like the other command tables.
+#
+# The `cfg_*` columns are what the computer REPORTED about its own settings.
+# NULL is "not reported" (a companion older than the section), never a
+# default: `cfg_accepts` NULL means this computer cannot take a request.
+SCHEMA_V58 = """
+CREATE TABLE IF NOT EXISTS user_profiles (
+  username      TEXT PRIMARY KEY,
+  display_name  TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  updated_by    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS machine_setting_requests (
+  editor_username TEXT NOT NULL,
+  machine         TEXT NOT NULL,
+  request_id      TEXT NOT NULL,
+  settings_json   TEXT NOT NULL,
+  requested_by    TEXT NOT NULL,
+  requested_at    TEXT NOT NULL,
+  delivered_at    TEXT,
+  state           TEXT NOT NULL DEFAULT 'pending',
+  answered_at     TEXT,
+  detail          TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (editor_username, machine)
+);
+ALTER TABLE machine_state ADD COLUMN cfg_accepts TEXT;
+ALTER TABLE machine_state ADD COLUMN cfg_jobs_volunteer_minutes INTEGER;
+ALTER TABLE machine_state ADD COLUMN cfg_drive_reminder_minutes REAL;
+ALTER TABLE machine_state ADD COLUMN cfg_youtube TEXT;
+ALTER TABLE machine_state ADD COLUMN cfg_pending_restart TEXT;
+ALTER TABLE machine_state ADD COLUMN cfg_at TEXT;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -2112,6 +2156,11 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # (2026-09-24, docs/SERVER_TRIAGE_AGENT.md). One step for the three
     # tables, which are one feature, and gapless like every one before it.
     (57, SCHEMA_V57),
+    # 58: the account page's display names, the dashboard's standing ask to
+    # one computer, and that computer's reported settings (account page
+    # 2026-09-25). One step for one feature, and gapless like every one
+    # before it.
+    (58, SCHEMA_V58),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -6797,6 +6846,33 @@ def adopt_renamed_machine(
                  WHERE editor_username=? AND machine=? AND applied_at IS NULL""",
             (new_machine, editor, old_machine),
         )
+    # account page 2026-09-25: a PENDING settings ask comes across too, for
+    # the same reason (the offer asks under the new name). An answered row is
+    # history about the old name and stays behind for forget/evict to take.
+    # The table is ONE row per (editor, machine), so an ANSWERED row already
+    # at the new name (applied/refused/withdrawn/expired: the SYS-18a
+    # deferred adoption, where the new name has reported for a while) made
+    # the OR IGNORE below skip the pending ask, which then sat on a name the
+    # registry no longer holds: never offered, never shown, expired silently
+    # 14 days later (account page 2026-09-25, review round). A finished row
+    # is history and gives way to the live ask; only when the new name holds
+    # a PENDING ask of its own does OR IGNORE keep that one, the newer ask.
+    has_pending = conn.execute(
+        """SELECT 1 FROM machine_setting_requests
+            WHERE editor_username=? AND machine=? AND state='pending'""",
+        (editor, old_machine),
+    ).fetchone()
+    if has_pending is not None:
+        conn.execute(
+            """DELETE FROM machine_setting_requests
+                WHERE editor_username=? AND machine=? AND state != 'pending'""",
+            (editor, new_machine),
+        )
+    conn.execute(
+        """UPDATE OR IGNORE machine_setting_requests SET machine=?
+             WHERE editor_username=? AND machine=? AND state='pending'""",
+        (new_machine, editor, old_machine),
+    )
     conn.execute(
         "DELETE FROM machines WHERE editor_username=? AND machine=?",
         (editor, old_machine),
@@ -8622,6 +8698,10 @@ _MACHINE_STATE_TABLES = (
     "machines", "machine_state", "selections", "editor_prefs", "lane_report_current",
     "active_transfers", "editor_media_project", "editor_media", "media_tree_clips",
     "report_auth", "file_move_targets", "resolve_undo_requests", "broll_standins",
+    # account page 2026-09-25: the dashboard's standing settings ask is a
+    # command for a computer, so it goes with the computer (the res-fleet-4
+    # rule above).
+    "machine_setting_requests",
 )
 
 
@@ -8737,6 +8817,12 @@ def forget_editor(conn: sqlite3.Connection, editor: str) -> dict[str, Any]:
     deleted["devices"] = len(device_ids)
     deleted["known_editors"] = conn.execute(
         "DELETE FROM known_editors WHERE editor_username=?", (editor,)).rowcount
+    # account page 2026-09-25: the display name goes with the person. A new
+    # person given a departed editor's sign-in name must not inherit the name
+    # everyone knew the old one by (the bug-dash-db-3 shape).
+    deleted["user_profiles"] = conn.execute(
+        "DELETE FROM user_profiles WHERE username=?",
+        (str(editor or "").strip().lower(),)).rowcount
     return {"editor": editor, "machines": [f["machine"] for f in forgotten if f],
             "deleted": deleted}
 
@@ -9107,6 +9193,9 @@ def prune(conn: sqlite3.Connection, now: str, pin: bool = False,
     # the cycle that already bounds every other row, with the reason in the
     # audit ledger.
     expire_machine_update_requests(conn, now)
+    # account page 2026-09-25: the settings ask has the pushed update's
+    # window (D-10) and ends in the same sweep, with its own audit row.
+    expire_machine_settings_requests(conn, now)
     # FLEET JOBS (phase 0): a lease whose holder has gone is re-queued here as
     # well as on the way into a claim. Both, deliberately -- the claim path
     # only runs when some OTHER machine asks for work, and a fleet with one
@@ -11749,4 +11838,607 @@ def fetch_capabilities_map(
         for row in conn.execute(
             f"SELECT editor_username, machine, {_CAPABILITY_COLUMNS} "
             " FROM machine_state WHERE cap_at IS NOT NULL")
+    }
+
+
+# ================================================================ account page
+#
+# account page 2026-09-25 (docs/ACCOUNT_PAGE_FEATURES.md section 2.1). Three
+# things live here: the display name (a LABEL, never a key), the dashboard's
+# standing ask to one computer to change its fleet-jobs settings, and what
+# that computer reports about its own settings. The signatures are the
+# contract the account routes, the wire and the page are written against.
+
+AUDIT_ACCOUNT_DISPLAY_NAME = "account.display_name"
+AUDIT_USER_DISPLAY_NAME = "user.display_name"
+AUDIT_ACCOUNT_PASSWORD = "account.password_change"
+AUDIT_ACCOUNT_SIGNOUT_ONE = "account.signout_one"
+AUDIT_ACCOUNT_SIGNOUT_OTHERS = "account.signout_others"
+AUDIT_MACHINE_SETTINGS_REQUEST = "machine.settings_request"
+AUDIT_MACHINE_SETTINGS_WITHDRAW = "machine.settings_withdraw"
+AUDIT_MACHINE_SETTINGS_APPLIED = "machine.settings_applied"
+AUDIT_MACHINE_SETTINGS_REFUSED = "machine.settings_refused"
+# Not in the spec's list, added beside it: an ask that ran out of time has to
+# be findable in the timeline, exactly as REL-8 made the pushed update's
+# expiry findable (`machine.update_push_expired`).
+AUDIT_MACHINE_SETTINGS_EXPIRED = "machine.settings_expired"
+
+# ---------------------------------------------------------------- display names
+
+DISPLAY_NAME_MAX_CHARS = 64
+
+# The sentences an editor reads, verbatim from the spec (no em dash). The
+# route maps DisplayNameTaken to 409 and every other DisplayNameError to 422.
+DISPLAY_NAME_EMPTY = ("A name cannot be empty. To go back to your sign-in name, "
+                      "clear the box and save.")
+DISPLAY_NAME_TOO_LONG = f"A name can be at most {DISPLAY_NAME_MAX_CHARS} characters."
+DISPLAY_NAME_BAD_CHARS = "A name cannot contain invisible or control characters."
+DISPLAY_NAME_TAKEN = "Someone else already goes by that name. Pick another."
+
+# Controls, format marks (zero-width joiners, bidi overrides such as U+202E),
+# surrogates, private use and unassigned code points. Every one of them is
+# either invisible or renders differently per font, which is how somebody
+# would make a name that LOOKS like a colleague's.
+_DISPLAY_NAME_REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})
+# The only control characters treated as whitespace (collapsed to a space
+# rather than refused): a pasted tab or line break is a typing accident. The
+# file/group/record separators str.isspace() also accepts are refused.
+_DISPLAY_NAME_WHITESPACE_CONTROLS = frozenset("\t\n\r\x0b\x0c")
+
+
+class DisplayNameError(ValueError):
+    """str(exc) is a plain sentence an editor reads (no em dash)."""
+
+
+class DisplayNameTaken(DisplayNameError):
+    """The name is another person's sign-in name or display name (D-4).
+    A subclass so a route can answer 409 for this one and 422 for the rest;
+    an `except DisplayNameError` still catches it."""
+
+
+def _is_name_space(ch: str) -> bool:
+    if not ch.isspace():
+        return False
+    return (unicodedata.category(ch) != "Cc"
+            or ch in _DISPLAY_NAME_WHITESPACE_CONTROLS)
+
+
+def normalise_display_name(text: str) -> str:
+    """NFC, strip, collapse every run of whitespace to one space. Refuses
+    (DisplayNameError): empty after that; longer than 64; any character in
+    Unicode category Cc, Cf, Cs, Co, Cn.
+
+    NFC on the way IN because a display name is only ever compared and shown
+    (docs/GOTCHAS.md section 17): a Mac's decomposed `S-caron` and a PC's
+    composed one must be one name, and one row the "taken" check can match."""
+    if not isinstance(text, str):
+        raise DisplayNameError(DISPLAY_NAME_BAD_CHARS)
+    text = unicodedata.normalize("NFC", text)
+    words: list[str] = []
+    current: list[str] = []
+    for ch in text:
+        if _is_name_space(ch):
+            if current:
+                words.append("".join(current))
+                current = []
+            continue
+        if unicodedata.category(ch) in _DISPLAY_NAME_REFUSED_CATEGORIES:
+            raise DisplayNameError(DISPLAY_NAME_BAD_CHARS)
+        current.append(ch)
+    if current:
+        words.append("".join(current))
+    name = " ".join(words)
+    if not name:
+        raise DisplayNameError(DISPLAY_NAME_EMPTY)
+    if len(name) > DISPLAY_NAME_MAX_CHARS:
+        raise DisplayNameError(DISPLAY_NAME_TOO_LONG)
+    return name
+
+
+def _profile_key(username: str | None) -> str:
+    # The KEY is the sign-in name, lowercase: the same spelling
+    # known_editor_usernames folds every source to.
+    return str(username or "").strip().lower()
+
+
+def _name_fold(value: str | None) -> str:
+    return unicodedata.normalize("NFC", str(value or "")).strip().casefold()
+
+
+def get_display_name(conn: sqlite3.Connection, username: str) -> str | None:
+    row = conn.execute(
+        "SELECT display_name FROM user_profiles WHERE username=?",
+        (_profile_key(username),)).fetchone()
+    return None if row is None else (row["display_name"] or None)
+
+
+def display_names(conn: sqlite3.Connection) -> dict[str, str]:
+    """username -> display_name, every row. One query: every page renders
+    names through this (behind account_api's 30 s cache)."""
+    return {
+        row["username"]: row["display_name"]
+        for row in conn.execute("SELECT username, display_name FROM user_profiles")
+        if row["display_name"]
+    }
+
+
+def _account_usernames(conn: sqlite3.Connection) -> set[str]:
+    """Every sign-in name this database knows of: the fleet's evidence
+    (known_editor_usernames), this dashboard's local accounts and anyone who
+    has a profile. `settings.admin_users` is not in the database, so a caller
+    that has settings adds it (display_name_taken's `other_usernames`)."""
+    names = set(known_editor_usernames(conn))
+    for sql in ("SELECT username FROM users", "SELECT username FROM user_profiles"):
+        try:
+            for row in conn.execute(sql):
+                name = _profile_key(row[0])
+                if name:
+                    names.add(name)
+        except sqlite3.Error:
+            # A database that predates `users` still answers for the rest.
+            continue
+    return names
+
+
+def display_name_taken(
+    conn: sqlite3.Connection, username: str, display_name: str,
+    other_usernames: Iterable[str],
+) -> bool:
+    """True when casefold(NFC(name)) equals ANOTHER person's sign-in name or
+    display name (D-4): nobody may pass as a colleague by picking their name.
+    Your OWN sign-in name is allowed, in any case (`Tchen` for `tchen`).
+
+    `other_usernames` is built by the caller (known_editor_usernames | local
+    users | settings.admin_users | user_profiles usernames); the profile
+    usernames and display names are read here as well, so a thin list can
+    never make a clash pass."""
+    me = _profile_key(username)
+    wanted = _name_fold(display_name)
+    if not wanted:
+        return False
+    for other in other_usernames or ():
+        other_key = _profile_key(other)
+        if other_key and other_key != me and _name_fold(other_key) == wanted:
+            return True
+    for row in conn.execute("SELECT username, display_name FROM user_profiles"):
+        if row["username"] == me:
+            continue
+        if _name_fold(row["username"]) == wanted or _name_fold(row["display_name"]) == wanted:
+            return True
+    return False
+
+
+def set_display_name(
+    conn: sqlite3.Connection, username: str, display_name: str, *,
+    by: str, now: str, other_usernames: Iterable[str] | None = None,
+) -> str:
+    """Normalise, check display_name_taken, upsert; return the stored value.
+
+    Raises DisplayNameError (DisplayNameTaken for a clash). Does NOT audit and
+    does NOT commit: the route writes its own audit row (self or admin, with
+    the before/after) on this connection and commits once.
+
+    `other_usernames` is an addition to the pinned signature (keyword, so
+    every pinned call still works): the route passes the full set including
+    `settings.admin_users`, which the database cannot see. It is ADDED to
+    every sign-in name the database knows of, never a replacement for it."""
+    key = _profile_key(username)
+    if not key:
+        raise DisplayNameError(DISPLAY_NAME_EMPTY)
+    name = normalise_display_name(display_name)
+    # The check and the upsert must be ONE critical section: nothing in the
+    # schema makes a folded name unique, and connect() leaves isolation_level
+    # at the legacy default, so the SELECTs below would otherwise run in
+    # autocommit and two parallel requests claiming the same name could both
+    # pass and both be stored (account page 2026-09-25, review round).
+    # BEGIN IMMEDIATE takes the write lock (waiting out busy_timeout) BEFORE
+    # the read. A connection already in a transaction got there through a
+    # write (the legacy mode only opens one before DML), so it holds the lock
+    # already. A refusal releases a lock it took itself, so a caller that
+    # forgets to roll back does not hold every other writer for 5 s; one it
+    # did not take is the caller's to end.
+    began = not conn.in_transaction
+    if began:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        others = set(_account_usernames(conn))
+        if other_usernames is not None:
+            others |= {_profile_key(u) for u in other_usernames}
+        taken = display_name_taken(conn, key, name, others)
+    except BaseException:
+        if began:
+            conn.rollback()
+        raise
+    if taken:
+        if began:
+            conn.rollback()
+        raise DisplayNameTaken(DISPLAY_NAME_TAKEN)
+    conn.execute(
+        """INSERT INTO user_profiles (username, display_name, updated_at, updated_by)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(username) DO UPDATE SET
+             display_name=excluded.display_name,
+             updated_at=excluded.updated_at,
+             updated_by=excluded.updated_by""",
+        (key, name, now, str(by or "?")),
+    )
+    return name
+
+
+def clear_display_name(conn: sqlite3.Connection, username: str) -> bool:
+    """No row = no name: the sign-in name shows again (D-6). True when there
+    was one to clear. Does not audit or commit (see set_display_name)."""
+    cur = conn.execute("DELETE FROM user_profiles WHERE username=?",
+                       (_profile_key(username),))
+    return (cur.rowcount or 0) > 0
+
+
+# ------------------------------------------------------ machine setting requests
+
+# The dashboard's whitelist. `mode` is NEVER here (CR-88: wired or remote is
+# the computer's own setting), and nor is jobs_volunteer_minutes (D-11).
+MACHINE_SETTING_KEYS = ("jobs_enabled", "jobs_kinds")
+MACHINE_SETTING_REQUEST_MAX_AGE_DAYS = MACHINE_UPDATE_REQUEST_MAX_AGE_DAYS
+MACHINE_SETTING_DETAIL_MAX = 255
+_MACHINE_SETTING_FINAL_STATES = ("applied", "refused")
+
+
+def _clean_job_kinds(value: Any) -> list[str] | None:
+    """A list of str with duplicates dropped, in order; None when it is not a
+    list. A list naming every kind is stored as [] ("every kind", the
+    settings window's own rule), so the two spellings of one intent are one
+    row and compare equal."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    out: list[str] = []
+    for kind in value:
+        if isinstance(kind, str) and kind and kind[:32] not in out:
+            out.append(kind[:32])
+    if out and set(JOB_KINDS) <= set(out):
+        return []
+    return out
+
+
+def _clean_machine_settings(settings: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Only whitelisted keys with the right type. The route has already
+    refused anything else with a sentence; this is the database's own floor,
+    so nothing but a well-formed ask can ever ride a reply."""
+    out: dict[str, Any] = {}
+    if not isinstance(settings, Mapping):
+        return out
+    if isinstance(settings.get("jobs_enabled"), bool):
+        out["jobs_enabled"] = settings["jobs_enabled"]
+    kinds = _clean_job_kinds(settings.get("jobs_kinds"))
+    if kinds is not None:
+        out["jobs_kinds"] = kinds
+    return out
+
+
+def _load_json_object(text: Any) -> dict[str, Any]:
+    try:
+        value = json.loads(text) if text else {}
+    except (TypeError, ValueError):
+        return {}
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def machine_settings_request(
+    conn: sqlite3.Connection, editor: str, machine: str,
+) -> dict[str, Any] | None:
+    """The ask for this computer, `settings_json` decoded as `settings`
+    (unparseable reads as {}), or None when there has never been one."""
+    row = conn.execute(
+        "SELECT * FROM machine_setting_requests WHERE editor_username=? AND machine=?",
+        (editor, machine)).fetchone()
+    if row is None:
+        return None
+    out = dict(row)
+    out["settings"] = _clean_machine_settings(_load_json_object(out.pop("settings_json", "")))
+    return out
+
+
+def request_machine_settings(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    settings: Mapping[str, Any], *, requested_by: str, now: str,
+) -> dict[str, Any] | None:
+    """Ask this computer to change its fleet-jobs settings (F5). None when
+    (editor, machine) is not in `machines`.
+
+    ONE row per computer, latest wins. A pending ask is MERGED (per key, the
+    newer value wins) under a NEW request_id with delivered_at cleared, so the
+    companion never has two asks to reconcile and never answers the merged
+    one from the old one's ledger entry. An answered, expired or withdrawn
+    row is replaced outright. Audits `machine.settings_request`; does not
+    commit.
+
+    Raises ValueError when no whitelisted key survives: the route refuses
+    that case with its own sentence first, so reaching here is a bug."""
+    registered = conn.execute(
+        "SELECT 1 FROM machines WHERE editor_username=? AND machine=?",
+        (editor, machine)).fetchone()
+    if registered is None:
+        return None
+    asked = _clean_machine_settings(settings)
+    if not asked:
+        raise ValueError("no computer setting to request")
+    current = machine_settings_request(conn, editor, machine)
+    merged = current is not None and current.get("state") == "pending"
+    combined = dict(current["settings"]) if merged and current else {}
+    combined.update(asked)
+    request_id = secrets.token_hex(8)
+    conn.execute(
+        """INSERT INTO machine_setting_requests
+             (editor_username, machine, request_id, settings_json, requested_by,
+              requested_at, delivered_at, state, answered_at, detail)
+           VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', NULL, '')
+           ON CONFLICT(editor_username, machine) DO UPDATE SET
+             request_id=excluded.request_id,
+             settings_json=excluded.settings_json,
+             requested_by=excluded.requested_by,
+             requested_at=excluded.requested_at,
+             delivered_at=NULL, state='pending', answered_at=NULL, detail=''""",
+        (editor, machine, request_id, _dump_json(combined),
+         str(requested_by or "?"), now),
+    )
+    audit(conn, requested_by, AUDIT_MACHINE_SETTINGS_REQUEST, machine,
+          {"editor": editor, "machine": machine, "request_id": request_id,
+           "asked": asked, "settings": combined,
+           "merged_into": current["request_id"] if merged and current else None},
+          now=now)
+    return machine_settings_request(conn, editor, machine)
+
+
+def withdraw_machine_settings_request(
+    conn: sqlite3.Connection, editor: str, machine: str, *, by: str, now: str,
+) -> bool:
+    """pending -> withdrawn, audited. False (nothing written) when no ask is
+    pending: withdrawing an answer the computer already acted on would claim
+    an undo that did not happen."""
+    row = machine_settings_request(conn, editor, machine)
+    if row is None or row.get("state") != "pending":
+        return False
+    cur = conn.execute(
+        """UPDATE machine_setting_requests SET state='withdrawn', answered_at=?
+            WHERE editor_username=? AND machine=? AND request_id=? AND state='pending'""",
+        (now, editor, machine, row["request_id"]))
+    if not cur.rowcount:
+        return False
+    audit(conn, by, AUDIT_MACHINE_SETTINGS_WITHDRAW, machine,
+          {"editor": editor, "machine": machine, "request_id": row["request_id"],
+           "settings": row["settings"]}, now=now)
+    return True
+
+
+def mark_machine_settings_delivered(
+    conn: sqlite3.Connection, editor: str, machine: str, request_id: str, now: str,
+) -> None:
+    """The first reply that carried THIS request_id. Only when still NULL and
+    the id still matches: a merge mints a new id precisely so "sent" is about
+    the ask that is actually standing."""
+    conn.execute(
+        """UPDATE machine_setting_requests SET delivered_at=?
+            WHERE editor_username=? AND machine=? AND request_id=?
+              AND delivered_at IS NULL AND state='pending'""",
+        (now, editor, machine, str(request_id or "")))
+
+
+def answer_machine_settings_request(
+    conn: sqlite3.Connection, editor: str, machine: str, request_id: str,
+    state: str, detail: str, now: str,
+) -> bool:
+    """The computer's answer, from the report's `machine_settings.applied`.
+
+    An id that is not the PENDING one is ignored: a merged newer ask stands,
+    and a redelivered answer to a request already final must not be audited
+    twice (the companion repeats its ledger's last answer on every report).
+    `applied`/`refused` finalise and audit with actor = editor (a
+    companion-originated write). Any other word (`failed`, or one this build
+    has never heard of: the 4.6 skew rule) keeps the ask pending and only
+    updates `detail`, bounded, because the command is standing and the
+    computer will answer it again. True when it finalised."""
+    request_id = str(request_id or "")
+    if not request_id:
+        return False
+    row = machine_settings_request(conn, editor, machine)
+    if row is None or row.get("state") != "pending" or row.get("request_id") != request_id:
+        return False
+    word = str(state or "").strip().lower()[:32]
+    text = str(detail or "").strip()[:MACHINE_SETTING_DETAIL_MAX]
+    if word not in _MACHINE_SETTING_FINAL_STATES:
+        conn.execute(
+            """UPDATE machine_setting_requests SET detail=?
+                WHERE editor_username=? AND machine=? AND request_id=? AND state='pending'""",
+            (text, editor, machine, request_id))
+        return False
+    conn.execute(
+        """UPDATE machine_setting_requests SET state=?, answered_at=?, detail=?
+            WHERE editor_username=? AND machine=? AND request_id=? AND state='pending'""",
+        (word, now, text, editor, machine, request_id))
+    action = (AUDIT_MACHINE_SETTINGS_APPLIED if word == "applied"
+              else AUDIT_MACHINE_SETTINGS_REFUSED)
+    audit(conn, editor, action, machine,
+          {"editor": editor, "machine": machine, "request_id": request_id,
+           "settings": row["settings"], "requested_by": row.get("requested_by"),
+           "detail": text}, now=now)
+    return True
+
+
+def expire_machine_settings_requests(conn: sqlite3.Connection, now: str) -> int:
+    """pending older than 14 days (D-10) -> expired, audited. The page then
+    says the computer did not report in, which is the only way one goes
+    unanswered that long."""
+    cutoff = (parse_iso(now) - dt.timedelta(
+        days=MACHINE_SETTING_REQUEST_MAX_AGE_DAYS)).isoformat()
+    rows = conn.execute(
+        """SELECT editor_username, machine, request_id, requested_by, requested_at,
+                  settings_json
+             FROM machine_setting_requests
+            WHERE state='pending' AND requested_at < ?""",
+        (cutoff,)).fetchall()
+    for row in rows:
+        conn.execute(
+            """UPDATE machine_setting_requests SET state='expired', answered_at=?
+                WHERE editor_username=? AND machine=? AND request_id=? AND state='pending'""",
+            (now, row["editor_username"], row["machine"], row["request_id"]))
+        audit(conn, "system", AUDIT_MACHINE_SETTINGS_EXPIRED, row["machine"],
+              {"editor": row["editor_username"], "machine": row["machine"],
+               "request_id": row["request_id"],
+               "requested_by": row["requested_by"],
+               "requested_at": row["requested_at"],
+               "settings": _clean_machine_settings(_load_json_object(row["settings_json"])),
+               "reason": f"not answered within {MACHINE_SETTING_REQUEST_MAX_AGE_DAYS} days"},
+              now=now)
+    return len(rows)
+
+
+# ------------------------------------------------------------ reported settings
+
+_CFG_COLUMNS = ("cfg_accepts, cfg_jobs_volunteer_minutes, cfg_drive_reminder_minutes, "
+                "cfg_youtube, cfg_pending_restart, cfg_at")
+_SETTING_NUMBER_MAX = 100000
+_YOUTUBE_SIGNIN_MAX = 16
+
+
+def _dump_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _clean_accepts(value: Any) -> list[str] | None:
+    """Intersected with MACHINE_SETTING_KEYS, in the whitelist's order. None
+    stays None ("not reported"); a future companion's extra keys are dropped
+    (4.6: the dashboard decides from this list, and must never offer a key it
+    does not itself know how to ask for)."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    given = {v for v in value if isinstance(v, str)}
+    return [k for k in MACHINE_SETTING_KEYS if k in given]
+
+
+def _clean_setting_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return max(0, min(number, _SETTING_NUMBER_MAX))
+
+
+def _clean_setting_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return max(0.0, min(number, float(_SETTING_NUMBER_MAX)))
+
+
+def _clean_youtube(value: Any) -> dict[str, Any] | None:
+    """Status words only. No cookie, no path and no yt-dlp reason text is
+    sent by the companion, and none is stored even if one arrived: the object
+    is rebuilt from four named fields."""
+    if not isinstance(value, Mapping):
+        return None
+    out: dict[str, Any] = {}
+    for key in ("downloads", "signin_enabled", "terms_accepted"):
+        item = value.get(key)
+        out[key] = item if isinstance(item, bool) else None
+    signin = value.get("signin")
+    out["signin"] = signin.strip()[:_YOUTUBE_SIGNIN_MAX] if isinstance(signin, str) else ""
+    return out
+
+
+def _clean_pending_restart(value: Any) -> dict[str, Any]:
+    """Only the four keys a computer may report as waiting for a restart,
+    each with its own type (bool / list of str / int / number); everything
+    else is dropped silently (4.1)."""
+    out: dict[str, Any] = {}
+    if not isinstance(value, Mapping):
+        return out
+    if isinstance(value.get("jobs_enabled"), bool):
+        out["jobs_enabled"] = value["jobs_enabled"]
+    kinds = value.get("jobs_kinds")
+    if isinstance(kinds, (list, tuple)) and all(isinstance(k, str) for k in kinds):
+        out["jobs_kinds"] = [k[:32] for k in kinds][:16]
+    minutes = value.get("jobs_volunteer_minutes")
+    if isinstance(minutes, int) and not isinstance(minutes, bool):
+        out["jobs_volunteer_minutes"] = _clean_setting_int(minutes)
+    reminder = _clean_setting_float(value.get("drive_reminder_minutes"))
+    if reminder is not None:
+        out["drive_reminder_minutes"] = reminder
+    return out
+
+
+def store_machine_settings(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    section: Mapping[str, Any] | None, now: str,
+) -> None:
+    """The report's `machine_settings` section -> machine_state's cfg_* columns.
+
+    None leaves the columns ALONE: a report without the section says nothing
+    (store_machine_capabilities' rule). A section replaces all six wholesale,
+    so a computer that stops reporting a key (YouTube switched off site-wide)
+    stops showing it. The JSON columns are re-serialised from the cleaned
+    values only, never raw client text. Does not commit (the report's own
+    commit carries it)."""
+    if section is None or not isinstance(section, Mapping):
+        return
+    accepts = _clean_accepts(section.get("accepts"))
+    youtube = _clean_youtube(section.get("youtube"))
+    conn.execute(
+        """UPDATE machine_state SET
+             cfg_accepts=?, cfg_jobs_volunteer_minutes=?, cfg_drive_reminder_minutes=?,
+             cfg_youtube=?, cfg_pending_restart=?, cfg_at=?
+            WHERE editor_username=? AND machine=?""",
+        (None if accepts is None else _dump_json(accepts),
+         _clean_setting_int(section.get("jobs_volunteer_minutes")),
+         _clean_setting_float(section.get("drive_reminder_minutes")),
+         None if youtube is None else _dump_json(youtube),
+         # An ABSENT pending_restart is "cannot tell" (the companion leaves it
+         # out when config.toml does not parse), stored as NULL; "{}" would
+         # read as "nothing waiting" and the page would say "In effect."
+         (None if not isinstance(section.get("pending_restart"), Mapping)
+          else _dump_json(_clean_pending_restart(section.get("pending_restart")))),
+         now, editor, machine),
+    )
+
+
+def _machine_settings_of(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        accepts_raw = json.loads(row["cfg_accepts"]) if row["cfg_accepts"] else None
+    except (TypeError, ValueError):
+        accepts_raw = None
+    try:
+        youtube = (_clean_youtube(json.loads(row["cfg_youtube"]))
+                   if row["cfg_youtube"] else None)
+    except (TypeError, ValueError):
+        youtube = None
+    return {
+        # Re-cleaned on the way out too: a row written by a build with a
+        # longer whitelist must not offer this build a key it cannot ask for.
+        "accepts": _clean_accepts(accepts_raw) or [],
+        "jobs_volunteer_minutes": _clean_setting_int(row["cfg_jobs_volunteer_minutes"]),
+        "drive_reminder_minutes": _clean_setting_float(row["cfg_drive_reminder_minutes"]),
+        "youtube": youtube,
+        # None = the computer could not tell (see store_machine_settings);
+        # readers treat it as "nothing known to be waiting".
+        "pending_restart": (None if row["cfg_pending_restart"] is None else
+                            _clean_pending_restart(_load_json_object(row["cfg_pending_restart"]))),
+        "at": row["cfg_at"],
+    }
+
+
+def machine_settings_map(
+    conn: sqlite3.Connection,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """(editor, machine) -> {"accepts", "jobs_volunteer_minutes",
+    "drive_reminder_minutes", "youtube", "pending_restart", "at"}, for every
+    computer that has ever sent the section. Absent = never reported (show
+    "not reported", offer no request). Unparseable JSON reads as empty.
+    One query for the whole fleet (fetch_capabilities_map's rule)."""
+    return {
+        (row["editor_username"], row["machine"]): _machine_settings_of(row)
+        for row in conn.execute(
+            f"SELECT editor_username, machine, {_CFG_COLUMNS} "
+            " FROM machine_state WHERE cfg_at IS NOT NULL")
     }

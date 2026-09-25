@@ -38,7 +38,9 @@
       {% for row in audit_rows %}
         <tr class="editor-row">
           <td class="mono-sm muted" data-label="WHEN" title="{{ row.at }}">{{ row.at | ago }}</td>
-          <td class="who" data-label="WHO">{{ row.actor }}</td>
+          {# account page 2026-09-25: the display name, the actor (the key)
+             in the title. #}
+          <td class="who" data-label="WHO" title="{{ row.actor }}">{{ row.actor | shown_as }}</td>
           <td class="mono-sm" data-label="ACTION">{{ row.action }}</td>
           <td class="mono-sm" data-label="SUBJECT">{{ row.subject }}</td>
           <td class="mono-sm muted audit-detail" data-label="DETAIL">{{ row.detail_json }}</td>

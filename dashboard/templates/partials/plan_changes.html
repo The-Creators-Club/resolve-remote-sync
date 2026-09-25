@@ -28,13 +28,14 @@
       {% for row in plan_changes %}
         <tr class="editor-row">
           <td class="mono-sm muted">{{ row.at | ago }}</td>
-          <td class="who">{{ row.actor }}</td>
+          {# account page 2026-09-25: the display name, the sign-in name in the title. #}
+          <td class="who" title="{{ row.actor }}">{{ row.actor | shown_as }}</td>
           <td class="mono-sm">
             {% if row.action == "plan.untick" %}<span class="chip red">[ UNTICKED ]</span>
             {% else %}<span class="chip">[ TICKED ]</span>{% endif %}
           </td>
           <td class="mono-sm" title="{{ row.detail.slug }}">{{ row.label or row.detail.slug }}</td>
-          <td class="mono-sm">{{ row.detail.editor }}</td>
+          <td class="mono-sm" title="{{ row.detail.editor }}">{{ row.detail.editor | shown_as }}</td>
           <td class="mono-sm muted">
             {% if row.detail.scope == "person" %}
               every computer{% if row.detail.before | length > 1 %} ({{ row.detail.before | length }}){% endif %}

@@ -206,7 +206,8 @@ Revokes the server-side session, not just the browser's copy. Always
 ### `GET /api/v1/me`
 
 `{ "user": "…" | null, "is_admin": bool }`. The only "open" route that simply
-reports who you are.
+reports who you are. It is open by EXACT match only: every `/api/v1/me/...`
+route (the account page's, §4a) needs a session.
 
 ### `POST /api/v1/verify`
 
@@ -262,6 +263,7 @@ Request (abridged — `api.ReportIn`):
 | `youtube_import` | `youtube_import.status()`: whether the clips the dashboard downloaded reached the editor's Resolve |
 | `broll_ingest` | one local b-roll indexing batch (below) |
 | `music_ingest` | one local MUSIC indexing batch: the same fields plus `kind: "music"` |
+| `machine_settings` | the settings the `/account` page shows and the answer to a fleet-jobs change asked from it (below; account page 2026-09-25) |
 
 `proxy_coverage` and `youtube_import` were **undeclared until 2026-08-18**, so
 pydantic's `extra="ignore"` silently dropped both on every tick since their
@@ -361,6 +363,55 @@ absent rather than guessed when the runner cannot answer: the two can disagree
 (a stale offer, a volunteer window that expired between the report and the
 claim) and nothing showed it before.
 
+`machine_settings` (account page 2026-09-25, `docs/ACCOUNT_PAGE_FEATURES.md`
+§4) rides **every** report, light ticks included, from a companion that can
+take a settings request from the dashboard. It is a tolerant section like the
+three diagnostic ones: every field optional, numbers clamped, strings cut, and
+a section that will not parse at all is dropped while the report lands.
+
+```json
+{"machine_settings": {
+  "accepts": ["jobs_enabled", "jobs_kinds"],
+  "jobs_volunteer_minutes": 30,
+  "drive_reminder_minutes": 30.0,
+  "youtube": {"downloads": true, "signin_enabled": true,
+              "terms_accepted": true, "signin": "ok"},
+  "pending_restart": {"jobs_enabled": false},
+  "applied": {"id": "9f3c01b77de4a210", "state": "applied", "detail": "",
+              "at": "2026-09-25T10:00:00+00:00"}
+}}
+```
+
+- `accepts`: the keys this computer takes from the dashboard. **The request
+  route decides from this, never from a version compare.** Intersected with
+  the dashboard's whitelist (`db.MACHINE_SETTING_KEYS`: `jobs_enabled`,
+  `jobs_kinds`) before it is stored; `mode` is never requestable (CR-88).
+  Absent or `[]`: no request can be made for this computer.
+- `jobs_volunteer_minutes` (0..100000), `drive_reminder_minutes` (0..100000,
+  0 = first warning only): the RUNNING values, shown read-only.
+- `youtube`: status words only, **omitted when the site's `youtube_download`
+  is off**. `signin` is `ok` / `stale` / `expired` / `none`; a word this
+  dashboard does not know is shown as it is. No cookie, cookie path or
+  yt-dlp `reason` text is ever sent.
+- `pending_restart`: the ON-DISK values that differ from the running ones,
+  for `jobs_enabled` (bool), `jobs_kinds` (list of str),
+  `jobs_volunteer_minutes` (int) and `drive_reminder_minutes` (number). Any
+  other key, or a value of the wrong type, is dropped.
+- `applied`: the companion ledger's last answer to `commands.machine_settings`
+  (`id` <= 64, `state` <= 32, `detail` <= 255). `applied` and `refused` are
+  final; `failed` and any word this dashboard has never heard keep the request
+  pending with `detail` shown. An `id` that is not the pending request's (a
+  newer ask was merged over it) is ignored.
+
+A report without the section leaves the stored values alone; a report with it
+replaces all of them. Stored in `machine_state.cfg_*` (schema v58).
+
+**Deploy the dashboard before the companions** (spec §4.6 row 2). An older
+dashboard still accepts the report, but names `machine_settings` on the SYS-3
+"undeclared report sections" banner on every report from every updated
+computer, and never sends the command. Nothing breaks; the banner is noise
+until the dashboard catches up.
+
 Oversized sections are **sliced to the ceiling, not rejected** — a 422 used to
 take the whole machine off the fleet grid. What was dropped comes back in
 `truncated` and is logged on both sides. The three diagnostic sections above go
@@ -380,6 +431,10 @@ Response:
                "signature": "…", "pubkey_id": "…" },
   "resolve_project_unmapped": "Some Project",
   "commands": { "halt": { "active": false, "reason": "", "at": null },
+                "machine_settings": { "id": "9f3c01b77de4a210",
+                                      "set": { "jobs_enabled": false },
+                                      "requested_by": "tchen",
+                                      "requested_at": "…" },
                 "broll_ingest": { "cancel": ["<32 hex>"] },
                 "music_ingest": { "cancel": ["<32 hex>"] } }
 }
@@ -406,6 +461,22 @@ Response:
   terms and with the same best-effort rules, read from `music.db`. Two
   separate keys because one editor can be running one of each, and a cancel
   must reach the orchestrator it was meant for.
+- `commands.machine_settings` (account page 2026-09-25) — a fleet-jobs
+  settings change asked from `/account` (§4a). **Present only while one is
+  pending, and STANDING**: it rides every reply until the machine answers
+  `applied` or `refused` in `machine_settings.applied`, because applying it is
+  idempotent on the companion (the same `id` is answered from its ledger) and
+  the failure that matters is a click that evaporates while a laptop sleeps.
+  An answer in a report finalises the request before this reply is built, so
+  it is not re-sent on that same reply. `set` holds only whitelisted keys
+  (`jobs_enabled`, `jobs_kinds`; `jobs_kinds: []` means every kind), and it
+  is only sent while every key in it is in the machine's last reported
+  `accepts`: if `accepts` shrank after the ask (a rollback), the command is
+  withheld, not trimmed, and the request stays pending until `accepts` grows
+  back or it expires. The
+  change takes effect when CCSync next starts on that computer. An unanswered
+  request expires after 14 days. Absent means "nothing asked", which is also
+  what an older dashboard's silence means.
 
 ### `POST /api/v1/files/locate`
 
@@ -538,6 +609,214 @@ the `.ccsync-project` marker) or adopt an existing bare folder. Any signed-in
 user; `422` with a readable message on any refusal (a path escaping the tree,
 a folder that already contains projects, and so on).
 
+## 4a. Account -- `/account` and `/api/v1/me/*`
+
+The personal account page (account page 2026-09-25,
+`docs/ACCOUNT_PAGE_FEATURES.md`). Every route here needs a session (`401`
+`Sign in first.` without one) and every write needs the CSRF header or field;
+none is exempt. **Always about the signed-in user**: `?as=` is ignored, and an
+admin looks after other people from Settings, Users (§5). The page's htmx
+partials (`/partials/account/...`) call the same service functions as these
+JSON routes and answer an expected refusal as a 200 fragment; `401`/`403` stay
+HTTP errors. Every `detail` below is the exact sentence the route answers.
+
+Keys never change: everything stays keyed by the sign-in name. A display name
+is a label rendered at display time, never written into an audit actor, a
+selection, a job, a session row or a wire key. JSON APIs keep usernames.
+
+### `GET /api/v1/me/account`
+
+The page's data, built by `account_api.build_account_view`. Sessions and sync
+keys are NOT in it: each has its own route so a slow NAS never holds the page.
+
+```json
+{
+  "user": "tchen",
+  "display_name": "T. Chen",
+  "shown_as": "T. Chen",
+  "is_admin": false,
+  "admin_source": "",
+  "auth_method": "smb",
+  "password": {"changeable": true, "where": "server", "min_chars": 12, "oidc_host": null},
+  "account": {"suspended": false},
+  "computers": [
+    {
+      "machine": "TCHEN-RIG", "platform": "windows", "mode": "editor",
+      "companion_version": "0.9.80", "current_version": "0.9.80",
+      "last_seen": "2026-09-25T10:00:00+00:00", "live": true, "why": null,
+      "plan": [{"slug": "2026-ff5-elections", "label": "2026/FF5/Elections", "sync_mode": "full"}],
+      "jobs": {"enabled": true, "kinds": [], "idle_seconds": 300, "volunteering": {},
+               "gate": {"reason": "", "detail": ""}, "running": null, "gpu": "RTX 4080, 16 GB"},
+      "settings": {"accepts": ["jobs_enabled", "jobs_kinds"],
+                   "jobs_volunteer_minutes": 30, "drive_reminder_minutes": 30.0,
+                   "youtube": {"downloads": true, "signin_enabled": true,
+                               "terms_accepted": true, "signin": "ok"},
+                   "pending_restart": {"jobs_enabled": false},
+                   "at": "2026-09-25T10:00:00+00:00"},
+      "settings_request": {"request_id": "9f3c01b77de4a210", "settings": {"jobs_enabled": false},
+                           "state": "pending", "requested_by": "tchen",
+                           "requested_at": "2026-09-25T09:58:00+00:00",
+                           "delivered_at": null, "answered_at": null, "detail": ""},
+      "can_request": true,
+      "request_blocked": ""
+    }
+  ],
+  "site": {"canonical_prefix": "P:\\", "auto_update": false,
+           "youtube_download": true, "fleet_halt": false},
+  "csrf": null
+}
+```
+
+- `display_name` is `null` when unset; `shown_as` is the display name or the
+  sign-in name.
+- `admin_source`: `admin_list` (the server's admin list), `local_role` (an
+  admin in this dashboard's own accounts) or `""`.
+- `password.where`: `server` (smb), `dashboard` (local) or `organisation`
+  (oidc, with `oidc_host` the issuer's hostname only).
+- One computer is the fleet grid's own entry for it, so the page and the grid
+  cannot disagree. `settings` is `null` when that computer has never sent the
+  `machine_settings` report section (every value then reads "not reported");
+  `settings_request` is `null` when nothing was ever asked. `can_request` is
+  true for the owner or an admin when `settings.accepts` is not empty;
+  otherwise `request_blocked` holds the sentence the page shows:
+  `{machine} has not reported yet.` or
+  `{machine}'s CCSync is too old to change this from here. Update it, or change it in its tray: Settings, FLEET JOBS.`
+
+### Display name -- `PUT /api/v1/me/display-name`
+
+`{"display_name": "T. Chen"}` (at most 256 characters before normalising;
+`""` clears it) → `{"ok": true, "display_name": "T. Chen"}` (`null` after a
+clear). Stored NFC-normalised, trimmed, whitespace collapsed. Refusals (`422`
+unless noted):
+
+| When | `detail` |
+|---|---|
+| only whitespace was sent | `A name cannot be empty. To go back to your sign-in name, clear the box and save.` |
+| more than 64 characters | `A name can be at most 64 characters.` |
+| a control, format (zero-width, bidi override), surrogate, private-use or unassigned character | `A name cannot contain invisible or control characters.` |
+| `409`: another person's sign-in name or display name, in any case | `Someone else already goes by that name. Pick another.` |
+
+Your own sign-in name is allowed. Audited as `account.display_name`
+(`{"before", "after"}`). The admin twin is
+`PUT /api/v1/admin/users/{username}/display-name` (§5).
+
+### Change your own password -- `POST /api/v1/me/password`
+
+`{"current_password": "…", "new_password": "…", "new_password_again": "…"}`
+(each at most 1024 characters) →
+
+```json
+{"ok": true, "method": "smb", "other_sessions_signed_out": 2, "csrf": "<new token>"}
+```
+
+On success **every** other browser of yours is signed out and this browser's
+cookie is replaced by a fresh one (you stay signed in); `csrf` is the new
+session's token, the same reason `/login` returns one.
+`other_sessions_signed_out` is `null` when the revocation could not run (the
+password has changed regardless). Report tokens and identity tokens are
+untouched: they authenticate a computer. Audited as `account.password_change`
+(`{"method", "other_sessions_signed_out"}`); nothing about any password is
+logged or audited. Refusals, checked in this order:
+
+| Code | `detail` |
+|---|---|
+| `409` (oidc) | `You sign in with your organisation's account, so there is no password here to change. Change it where your organisation looks after its accounts.` |
+| `422` | `The two new passwords are not the same. Nothing changed.` |
+| `422` | `The new password needs at least 12 characters. Nothing changed.` |
+| `422` | `The new password is the same as the current one. Nothing changed.` |
+| `429` + `Retry-After` | the sign-in page's throttle sentence: wrong current passwords count against the SAME per-name and per-address budgets as sign-in |
+| `503` | `The server is busy checking other sign-ins. Try again in a minute. Nothing changed.` |
+| `422` | `That is not your current password, so nothing changed. Several wrong tries in a row make this form wait, like the sign-in page.` |
+| `409` (local) | `{user} is not an account this dashboard keeps a password for. Ask another admin, or change it where that account lives.` |
+| `503` (smb) | `This dashboard holds no server credential, so it cannot change server passwords. Ask your admin.` |
+| `502` (smb) | `Could not reach the server, so nothing changed. Try again in a minute.` |
+| `409` (smb) | `The server does not let this dashboard change the password of {user}. Change it in the NAS's own settings, or ask your admin.` |
+| `502` (smb) | `The server refused the change, so nothing changed. Try again, or ask your admin.` |
+
+### Your signed-in browsers -- `/api/v1/me/sessions`
+
+| Route | Answer |
+|---|---|
+| `GET /api/v1/me/sessions` | your live sessions (below) |
+| `POST /api/v1/me/sessions/{handle}/revoke` | `{"ok": true, "revoked": 1}` |
+| `POST /api/v1/me/sessions/revoke-others` | `{"ok": true, "revoked": 2}`: every session of yours except this one |
+
+```json
+{"sessions": [{"handle": "3fa9c01b77de", "ip": "100.64.3.21", "browser": "Chrome, Windows",
+               "created_at": "2026-09-20T08:00:00+00:00",
+               "last_seen": "2026-09-25T10:00:00+00:00", "current": true}]}
+```
+
+`handle` is the first 12 hex characters of the session id, the same
+truncation `GET /admin/sessions` publishes; the full id is never returned.
+Refusals:
+
+| Code | `detail` |
+|---|---|
+| `503` | `Signed-in browsers are not being recorded on this server.` |
+| `422` | `That is not a browser on this list.` (not 12 lowercase hex) |
+| `404` | `That browser is already signed out.` (no live session of YOURS matches) |
+| `409` | `That is this browser. Use Sign out instead.` |
+| `409` | `Two browsers match that; use sign out the others instead.` |
+
+Audited as `account.signout_one` (`{"handle"}`) and `account.signout_others`
+(`{"revoked"}`). `POST /logout-everywhere` is unchanged.
+
+### Your sync keys -- `GET /api/v1/me/sync-keys`
+
+Read-only: adding, approving and removing keys stay on the Users page (§5),
+because removing one stops that computer's upload and proxy download.
+
+```json
+{"keys": [
+   {"fingerprint": "SHA256:q3Rf", "state": "approved", "machine": "TCHEN-RIG",
+    "comment": "tchen@TCHEN-RIG", "at": null},
+   {"fingerprint": "SHA256:7bLm", "state": "waiting", "machine": "TCHEN-LAPTOP",
+    "comment": "", "at": "2026-09-24T08:00:00+00:00"}],
+ "installed_unknown": false,
+ "unreadable": "",
+ "needed": true}
+```
+
+A public key is shown as its fingerprint only; the key text is never
+returned. `waiting` rows are keys submitted and not yet approved.
+`installed_unknown` is true on a Synology NAS, which says only that a key is
+installed. `unreadable` is `The server could not be asked which keys are
+approved just now.` when the NAS could not be asked (the waiting half still
+shows). `needed` is false when every computer of yours is a wired rig.
+
+### Ask a computer to change its fleet-jobs settings -- `/api/v1/machines/{editor}/{machine}/settings`
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST` | `{"jobs_enabled": false}` and/or `{"jobs_kinds": ["proxy-480p", "peaks"]}` (at least one key) | `{"ok": true, "request": {…the stored row…}}`, or `{"ok": true, "unchanged": true}` |
+| `DELETE` | none | `{"ok": true}`: withdraws a pending ask |
+
+The owner of the computer or an admin. One request per computer: a second
+ask while one is pending MERGES into it (per key, the newer value wins) under
+a new id, and it reaches the computer as `commands.machine_settings` on its
+next report reply (§2, `POST /api/v1/report`). It takes effect when CCSync
+next starts there; the person at the computer gets one tray balloon naming who
+asked. Unanswered requests expire after 14 days. Wired or remote (`mode`) is
+never requestable. Refusals, in order:
+
+| Code | `detail` |
+|---|---|
+| `403` | `Only the person this computer belongs to, or an admin, can change it.` |
+| `404` | `{editor} has no computer called {machine}.` |
+| `422` | `Only these can be changed from here: whether the fleet may use the computer, and which kinds of work it takes.` (no known key, or any other key, `mode` included) |
+| `422` | `{kind} is not a kind of fleet work.` |
+| `409` | `{machine} has not reported yet.` or `{machine}'s CCSync is too old to change this from here. Update it, or change it in its tray: Settings, FLEET JOBS.` |
+
+A `jobs_kinds` list with every kind in it is stored as `[]` ("every kind",
+the tray's own rule); "none" cannot be sent (untick `jobs_enabled` instead).
+When nothing is pending and every value asked for already equals both the
+running and the on-disk value, nothing is stored and the answer is
+`unchanged`. Audited as `machine.settings_request` and
+`machine.settings_withdraw`; the computer's answer as
+`machine.settings_applied` / `machine.settings_refused` with the editor as
+actor.
+
 ---
 
 ## 5. Admin
@@ -551,7 +830,8 @@ Every route here requires a session belonging to a user in `DASH_ADMIN_USERS`
 |---|---|
 | `GET /admin/users` | editors, their devices, key status. The stack's own service account is filtered out. Response gains `auth_method` and `local_users` (WP C, below) |
 | `POST /admin/users` | `DASH_AUTH_METHOD=local`: create a **local account** — `{username, password?, role?, ssh_pubkey?}`. Otherwise: create/update a NAS editor account — `{username, ssh_pubkey, full_name, password?}` |
-| `POST /admin/users/{username}/password` | local mode: `{password}` sets it directly. Otherwise: set a known NAS password (≥ 12 chars; refusals for uid < 1000 or non-`editors` live in the NAS backend) |
+| `POST /admin/users/{username}/password` | local mode: `{password}` sets it directly. Otherwise: set a known NAS password (≥ 12 chars; refusals for uid < 1000 or non-`editors` live in the NAS backend). Signs that account's browsers out, and writes a `user.password_reset` audit row (`{"method": "local" \| "smb", "via": "reset"}`; a password given to `POST /admin/users` writes the same row with `"via": "create"`). Nothing about the password is audited (account page 2026-09-25, D-15) |
+| `PUT /admin/users/{username}/display-name` | `{display_name}` (≤ 256 before normalising; `""` clears) → `{"ok": true, "display_name": "…" \| null}`. The same rules as `PUT /me/display-name` (§4a), plus `404` `There is no account called {username}.` Audited as `user.display_name` (account page 2026-09-25) |
 | `POST /admin/users/{username}/disable` | **local mode only** (`400` otherwise): `{disabled: bool}` |
 | `POST /admin/users/{username}/keys` | **local mode only**: add an SSH key — `{key_text, label?}` → `{"fingerprint": "SHA256:…"}` |
 | `DELETE /admin/users/{username}/keys/{fingerprint}` | **local mode only**: revoke a key |

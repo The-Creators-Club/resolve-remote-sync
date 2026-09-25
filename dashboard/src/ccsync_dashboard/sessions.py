@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -120,7 +121,13 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 # read-then-write pair, so a burst could undercount failures.
 _write_lock = threading.Lock()
 
-_UA_SUMMARY_CHARS = 80
+# Account page 2026-09-25: was 80. The account page names each browser
+# ("Chrome, Windows"), and at 80 characters a desktop Chrome or Edge
+# User-Agent was cut inside "(KHTML, like Gecko) ", before the only token
+# that says which browser it is (Chrome/ sits at ~84, Edg/ at ~115). 200 keeps
+# every mainstream desktop and phone UA whole and is still a bound on what a
+# client can make us store and render.
+_UA_SUMMARY_CHARS = 200
 
 
 def summarize_client(ip: str | None, user_agent: str | None) -> str:
@@ -131,6 +138,96 @@ def summarize_client(ip: str | None, user_agent: str | None) -> str:
     if len(ua) > _UA_SUMMARY_CHARS:
         ua = ua[:_UA_SUMMARY_CHARS] + "..."
     return f"{(ip or '?').strip()} {ua}".strip()
+
+
+# Programs that are not browsers, named by the token they lead their
+# User-Agent with. Checked BEFORE the browser rules: none of them claim to be
+# Mozilla, and a person reading "python-urllib" on their own sessions list
+# should see that something other than a browser signed in as them.
+_PROGRAM_TOKENS = (
+    ("python-urllib", "python-urllib"),
+    ("python-requests", "python-requests"),
+    ("python-httpx", "python-httpx"),
+    ("curl/", "curl"),
+    ("wget/", "Wget"),
+    ("ccsync", "CCSync"),
+    ("testclient", "a test client"),
+)
+
+# Order matters in both lists: Edge and Opera also say "Chrome/", Chrome on
+# iOS says "Safari/", every Chromium says "Safari/"; iPhone and iPad UAs say
+# "Mac OS X", Android says "Linux".
+_BROWSER_TOKENS = (
+    ("edg/", "Edge"), ("edga/", "Edge"), ("edgios/", "Edge"),
+    ("opr/", "Opera"), ("samsungbrowser/", "Samsung Internet"),
+    ("firefox/", "Firefox"), ("fxios/", "Firefox"),
+    ("crios/", "Chrome"), ("chrome/", "Chrome"), ("chromium/", "Chromium"),
+    ("safari/", "Safari"),
+)
+_SYSTEM_TOKENS = (
+    ("iphone", "iPhone"), ("ipad", "iPad"), ("android", "Android"),
+    ("windows", "Windows"),
+    # Account page 2026-09-25 review round: "cros " WITH the space. A bare
+    # "cros" matched inside "Microsoft" (WSLg's "X11; Linux x86_64; Microsoft
+    # WSLg" came out ChromeOS). ChromeOS UAs read "(X11; CrOS x86_64 ...".
+    ("cros ", "ChromeOS"),
+    ("macintosh", "macOS"), ("mac os x", "macOS"),
+    ("linux", "Linux"),
+)
+
+
+def describe_client(client: str | None) -> dict[str, str]:
+    """{"ip", "browser"} for an auth_sessions.client value ("<ip> <UA>", as
+    summarize_client wrote it), for the account page's signed-in browsers
+    list (account page 2026-09-25, docs/ACCOUNT_PAGE_FEATURES.md 3.4).
+
+    `browser` is "Chrome, Windows" / "Safari, iPhone" / "Firefox" / "Windows"
+    (a row written before the 200-character cap, cut before its browser
+    token) / "python-urllib" / "Unknown browser"; "" when nothing was
+    recorded. It never echoes the raw User-Agent: the column is a string any
+    client chose, and the page shows words we picked, not words it sent.
+    Never raises (a row this cannot read is described as unknown, never a
+    500 on the page that lists it)."""
+    try:
+        text = str(client or "").strip()
+    except Exception:  # noqa: BLE001 - a label must never fail a page
+        text = ""
+    if not text:
+        return {"ip": "", "browser": ""}
+    ip, _, ua = text.partition(" ")
+    ip = "" if ip == "?" else ip[:64]
+    ua_low = ua.strip().lower()
+    if not ua_low:
+        return {"ip": ip, "browser": ""}
+    for token, name in _PROGRAM_TOKENS:
+        if ua_low.startswith(token):
+            return {"ip": ip, "browser": name}
+    browser = next((name for token, name in _BROWSER_TOKENS if token in ua_low), "")
+    if browser == "Safari" and "version/" not in ua_low and "mobile/" not in ua_low:
+        # Every WebKit embed says Safari/; real Safari also says Version/.
+        # A bare "Safari/" with neither is some other WebKit app.
+        browser = ""
+    system = next((name for token, name in _SYSTEM_TOKENS if token in ua_low), "")
+    if browser and system:
+        return {"ip": ip, "browser": f"{browser}, {system}"}
+    return {"ip": ip, "browser": browser or system or "Unknown browser"}
+
+
+# The public handle of a session: the first 12 hex characters of its sid, the
+# truncation api_admin_sessions already publishes (account page 2026-09-25).
+# 48 bits; the sid is an HMAC, so a handle cannot be turned back into a
+# session, and a collision within ONE person's live sessions is refused as
+# ambiguous rather than guessed at (revoke_by_handle).
+SESSION_HANDLE_CHARS = 12
+_HANDLE_RE = re.compile(r"[0-9a-f]{%d}" % SESSION_HANDLE_CHARS)
+
+
+def session_handle(sid: str | None) -> str:
+    return str(sid or "")[:SESSION_HANDLE_CHARS]
+
+
+def is_session_handle(handle: str | None) -> bool:
+    return isinstance(handle, str) and _HANDLE_RE.fullmatch(handle) is not None
 
 
 class SessionStore:
@@ -304,6 +401,49 @@ class SessionStore:
                 sql += " AND sid <> ?"
                 params.append(except_sid)
             return conn.execute(sql, params).rowcount
+
+        with _write_lock:
+            return int(self._run(go, write=True) or 0)
+
+    def revoke_by_handle(self, username: str, handle: str, *, by: str,
+                         except_sid: str | None = None, now: str | None = None) -> int:
+        """Revoke ONE live session of `username` named by its 12-character
+        handle (account page 2026-09-25, "sign out one of your browsers").
+
+        Returns 1 when it revoked one, 0 when no live session of THIS user
+        has that handle (already signed out, another person's, or a handle
+        that is not 12 lowercase hex). Raises ValueError("ambiguous") when two
+        of the user's live sessions share the handle, and ValueError("current")
+        when the one match is `except_sid` (the browser asking): the route
+        turns each into its own sentence, and neither is ever resolved by
+        guessing. The lookup is scoped by username in SQL, so another
+        person's session with the same prefix is invisible here, and it
+        compares a substring rather than using LIKE, so a '%' in a handle
+        can never widen the match. Select and update run in one transaction
+        under the module lock: a revoke-by-handle cannot race another into
+        revoking a row it did not look at."""
+        if not is_session_handle(handle):
+            return 0
+        now = now or db.utcnow_iso()
+
+        def go(conn: sqlite3.Connection) -> int:
+            rows = conn.execute(
+                "SELECT sid FROM auth_sessions WHERE username = ? AND revoked = 0 "
+                "AND substr(sid, 1, ?) = ?",
+                (username.lower(), SESSION_HANDLE_CHARS, handle),
+            ).fetchall()
+            if not rows:
+                return 0
+            if len(rows) > 1:
+                raise ValueError("ambiguous")
+            sid = rows[0]["sid"]
+            if except_sid and sid == except_sid:
+                raise ValueError("current")
+            return conn.execute(
+                "UPDATE auth_sessions SET revoked = 1, revoked_at = ?, revoked_by = ? "
+                "WHERE sid = ? AND username = ? AND revoked = 0",
+                (now, by, sid, username.lower()),
+            ).rowcount
 
         with _write_lock:
             return int(self._run(go, write=True) or 0)

@@ -1545,6 +1545,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # same channel but writes nothing to companion_packages -- a dashboard
     # bundle is APPLIED, never PUBLISHED (release_feed.DASHBOARD_KIND).
     app.include_router(dashboard_update.router)
+    # The personal /account page (account page 2026-09-25,
+    # docs/ACCOUNT_PAGE_FEATURES.md): its JSON routes and its page/partials,
+    # BEFORE ui.router so no catch-all there can shadow them. Every route in
+    # both is session-gated (none is in _OPEN_EXACT; /api/v1/me is open by
+    # EXACT match only) and none is CSRF-exempt.
+    from . import account_api, account_ui
+
+    app.include_router(account_api.router)
+    app.include_router(account_ui.router)
     app.include_router(ui.router)
     # The admin project<->editor assignment matrix (2026-08-17): one page,
     # /admin/assignments, that writes nothing itself -- it calls the selection

@@ -964,6 +964,31 @@ def is_admin(settings: Settings, username: str | None,
         opened.close()
 
 
+ADMIN_SOURCE_LIST = "admin_list"
+ADMIN_SOURCE_LOCAL_ROLE = "local_role"
+
+
+def admin_source(settings: Settings, username: str | None,
+                 conn: sqlite3.Connection | None = None) -> str:
+    """WHY `username` is an admin: "admin_list" (DASH_ADMIN_USERS), "local_role"
+    (role='admin' in the local accounts table), or "" (not an admin).
+
+    Account page 2026-09-25 (docs/ACCOUNT_PAGE_FEATURES.md 3.1): the page
+    tells an admin where their power comes from, because the two sources are
+    undone in different places (the container's environment vs Settings >
+    Users). The order and the rules are is_admin's exactly, so the two can
+    never disagree: the list first and with no database, the local role only
+    on DASH_AUTH_METHOD=local, a disabled local admin is not one."""
+    if not username:
+        return ""
+    name = username.lower()
+    if name in settings.admin_users:
+        return ADMIN_SOURCE_LIST
+    if str(getattr(settings, "auth_method", "") or "smb").strip().lower() != "local":
+        return ""
+    return ADMIN_SOURCE_LOCAL_ROLE if is_admin(settings, name, conn) else ""
+
+
 def can_manage(settings: Settings, session_user: str | None, editor: str) -> bool:
     if session_user is None:
         return False

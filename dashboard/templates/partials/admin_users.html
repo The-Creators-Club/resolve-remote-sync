@@ -33,11 +33,26 @@
        the page with it (round 2 of the sweep, 2026-08-30). #}
     <div class="scroll-x">
     <table class="editors stack">
-      <thead><tr><th>USERNAME</th><th>ROLE</th><th>STATUS</th><th>SSH KEYS</th><th>SET PASSWORD</th><th></th></tr></thead>
+      <thead><tr><th>USERNAME</th><th>SHOWN AS</th><th>ROLE</th><th>STATUS</th><th>SSH KEYS</th><th>SET PASSWORD</th><th></th></tr></thead>
       <tbody>
       {% for u in admin_users.local_users %}
         <tr class="editor-row">
           <td class="who" data-label="USERNAME">{{ u.username }}</td>
+          <td data-label="SHOWN AS">
+            {# F1a (account page 2026-09-25, owner decision D-5): an admin sets
+               or clears someone's display name here, audited as
+               user.display_name. The sign-in name beside it never changes:
+               it is the key every computer, plan and file uses. An empty box
+               clears the name. #}
+            <form class="inline-form" hx-post="/partials/admin/users/display-name"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+              <input type="hidden" name="username" value="{{ u.username }}">
+              <input type="text" name="display_name" value="{{ display_names.get(u.username, '') if display_names is defined and display_names else '' }}"
+                     maxlength="64" size="14" placeholder="{{ u.username }}" aria-label="the name {{ u.username }} is shown as"
+                     title="What other people see for {{ u.username }}. Up to 64 characters. Clear it and save to show the sign-in name again.">
+              <button class="btn tap" type="submit">[ SAVE ]</button>
+            </form>
+          </td>
           <td class="mono-sm" data-label="ROLE">{{ u.role }}</td>
           {# DCORE-4 (2026-09-04): two independent states, so two chips.
              DISABLED is about signing in; SUSPENDED is about the fleet, and
@@ -359,11 +374,26 @@
        phone reads it as a labelled block instead of seven columns. #}
     <div class="scroll-x">
     <table class="editors stack">
-      <thead><tr><th>USERNAME</th><th>UID</th><th>SSH KEY</th><th>SMB</th><th>LOCKED</th><th>SET PASSWORD</th><th></th></tr></thead>
+      <thead><tr><th>USERNAME</th><th>SHOWN AS</th><th>UID</th><th>SSH KEY</th><th>SMB</th><th>LOCKED</th><th>SET PASSWORD</th><th></th></tr></thead>
       <tbody>
       {% for e in admin_users.editors %}
         <tr class="editor-row">
           <td class="who" data-label="USERNAME">{{ e.username }}</td>
+          <td data-label="SHOWN AS">
+            {# F1a (account page 2026-09-25, owner decision D-5): an admin sets
+               or clears someone's display name here, audited as
+               user.display_name. The sign-in name beside it never changes:
+               it is the key every computer, plan and file uses. An empty box
+               clears the name. #}
+            <form class="inline-form" hx-post="/partials/admin/users/display-name"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+              <input type="hidden" name="username" value="{{ e.username }}">
+              <input type="text" name="display_name" value="{{ display_names.get(e.username, '') if display_names is defined and display_names else '' }}"
+                     maxlength="64" size="14" placeholder="{{ e.username }}" aria-label="the name {{ e.username }} is shown as"
+                     title="What other people see for {{ e.username }}. Up to 64 characters. Clear it and save to show the sign-in name again.">
+              <button class="btn tap" type="submit">[ SAVE ]</button>
+            </form>
+          </td>
           <td class="mono-sm" data-label="UID">{{ e.uid }}</td>
           {# OPS-2 / UX-14 (2026-09-04): an account may now be created with no
              key at all, so the row has to say what that costs and offer the

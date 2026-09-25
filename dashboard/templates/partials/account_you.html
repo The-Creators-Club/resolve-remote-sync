@@ -1,0 +1,48 @@
+{# YOU (account page 2026-09-25, ACCOUNT_PAGE_FEATURES.md 6.1 item 2). The
+   display name form (F1) answers into THIS panel with a result line, and a
+   refusal keeps what was typed so the reader can fix it. Never polled: a poll
+   would wipe a name half typed. SYNC KEYS loads on its own after paint, so a
+   slow NAS never holds the page. #}
+{% set sign_words = {
+  "smb": ("your account on the server", "The same name and password as your account on the server (the NAS), which also opens its shared folders."),
+  "local": ("a local account kept by this dashboard", "An account that exists only in this dashboard. It is not an account on the server."),
+  "oidc": ("your organisation's single sign-on", "You sign in through your organisation's own sign-in page, the way you sign in to its email. This dashboard never sees that password."),
+} %}
+{% set signs = sign_words.get(acct.auth_method, (acct.auth_method, "")) %}
+<div id="account-you">
+  <div class="side-head">[ YOU ]
+    {% if acct.is_admin %}<span class="chip red" title="You can change settings for everyone and look after every computer.">[ ADMIN ]</span>
+    {% else %}<span class="chip" title="You see and change your own computers only.">[ EDITOR ]</span>{% endif %}</div>
+  <div class="account-who">
+    <span class="account-shown">{{ acct.shown_as }}</span>
+    <span class="muted">signed in as {{ acct.user }}</span>
+  </div>
+  <form class="account-name-form" hx-post="/partials/account/display-name"
+        hx-target="#account-you" hx-swap="outerHTML">
+    <label class="muted" for="account-name-in">Name
+      <span class="field-hint">What other people see beside your work: plan changes, history, who opened a Cards episode. Your sign-in name stays <b>{{ acct.user }}</b>. Clear the box and save to go back to it.</span></label>
+    <div>
+      <input type="text" id="account-name-in" name="display_name"
+             value="{{ typed if (result and result.tone == 'red' and typed is defined) else (acct.display_name or '') }}"
+             maxlength="64" autocomplete="nickname" placeholder="{{ acct.user }}"
+             title="Up to 64 characters. Only how you are shown to other people; it does not change how you sign in.">
+      <button class="btn tap" type="submit" title="Save the name. Other people see it straight away.">[ SAVE ]</button>
+    </div>
+  </form>
+  {% if result %}<div class="account-result {{ result.tone }}" role="status">{{ result.text }}</div>{% endif %}
+  <dl class="row-detail-list account-kv">
+    <dt title="The name you type to sign in, here and in each computer's CCSync.">sign-in name</dt>
+    <dd>{{ acct.user }} <span class="muted">(cannot be changed: it is the key every computer, plan and file uses)</span></dd>
+    <dt>role</dt>
+    <dd>{% if acct.is_admin %}admin <span class="muted">({{ {"admin_list": "on the server's admin list", "local_role": "an admin in this dashboard's accounts"}.get(acct.admin_source, "an admin") }})</span>
+        {% else %}editor <span class="muted">(you see and change your own computers only)</span>{% endif %}</dd>
+    <dt>signs in with</dt>
+    <dd><span title="{{ signs[1] }}">{{ signs[0] }}</span> <span class="muted">&middot;</span>
+      <a href="#account-password">{{ "about your password" if acct.auth_method == "oidc" else "change your password" }}</a></dd>
+    <dt>account</dt>
+    <dd>{% if acct.account.suspended %}<span class="chip amber" title="An admin paused your account: your computers are turned away and your projects are unshared. Your sync plan is kept, and your admin can put it all back.">[ SUSPENDED BY AN ADMIN ]</span>
+        {% else %}<span class="chip green" title="You can sign in. An admin can switch an account off, and then it cannot.">[ ACTIVE ]</span>{% endif %}</dd>
+    <dt title="What each of your computers uses to prove it is yours when it uploads or downloads. It is not your password.">sync keys</dt>
+    <dd hx-get="/partials/account/sync-keys" hx-trigger="load" hx-swap="innerHTML"><span class="muted">asking which keys are approved</span></dd>
+  </dl>
+</div>

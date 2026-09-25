@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import shutil
 import sys
 
@@ -152,7 +153,7 @@ log = logging.getLogger("ccsync.config")
 # and this loop claims it BY ID through a closed idle gate, and a whisper pass
 # finally reports progress -- its stdout is read on a drain thread instead of
 # being buffered until exit, so the fleet chip moves while the GPU works.
-VERSION = "0.9.79"
+VERSION = "0.9.80"
 
 # The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
 # resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy
@@ -1539,7 +1540,24 @@ def ensure_config_exists(path: Path = CONFIG_PATH) -> None:
 _CONFIG_HARDENED = False
 
 
+# account page, 2026-09-25 (group E review): two threads now write this file
+# (the tray's Settings window on its Tk thread, and machine_settings applying
+# a dashboard ask on the reporter thread), both through the one fixed
+# `config.toml.tmp`. Unlocked, the loser's write is lost or its os.replace
+# fails. Held for the whole read-patch-write-verify, so each write sees the
+# other's result. Reentrant because ensure_config_exists may be reached from
+# inside a caller that already holds it.
+_SET_VALUE_LOCK = threading.RLock()
+
+
 def set_value(path: Path, key: str, value: Any) -> bool:
+    """Rewrite ONE key in config.toml in place; see _set_value_unlocked.
+    Serialised process-wide by _SET_VALUE_LOCK."""
+    with _SET_VALUE_LOCK:
+        return _set_value_unlocked(path, key, value)
+
+
+def _set_value_unlocked(path: Path, key: str, value: Any) -> bool:
     """Rewrite ONE key in config.toml in place, preserving every other line
     (comments included) -- added 2026-08-27 for the Settings window's role
     switch (MULTI_BASE_RIG_PLAN.md WP0/WP1).

@@ -17,6 +17,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import (FileResponse, HTMLResponse, PlainTextResponse,
                                RedirectResponse, Response)
 from fastapi.templating import Jinja2Templates
+from jinja2 import pass_context
 
 from . import (VERSION, auth, dashboard_update, db, health, local_users,
                notices, oidc, package_store, provision, release_feed, site_store)
@@ -176,6 +177,41 @@ templates.env.filters["ago"] = ago
 templates.env.filters["until"] = until
 templates.env.filters["bar"] = bar
 templates.env.filters["eta"] = eta
+
+
+# Display names (account page 2026-09-25, docs/ACCOUNT_PAGE_FEATURES.md 6.2).
+# A display name is a LABEL, resolved here at render time from the
+# `display_names` map _render puts in every context; the value a template
+# passes in is always the sign-in name (the key), and it is what comes back
+# when the person has no name, the map is absent, or the value is not a
+# username at all (an audit actor like "companion"). Never raises: a label
+# must never be the reason a page does not render.
+@pass_context
+def shown_as_filter(ctx, value) -> str:
+    raw = "" if value is None else str(value)
+    try:
+        names = ctx.get("display_names") or {}
+        return names.get(raw) or names.get(raw.strip().lower()) or raw
+    except Exception:  # noqa: BLE001
+        return raw
+
+
+templates.env.filters["shown_as"] = shown_as_filter
+
+
+def _display_names_safe(request: Request) -> dict[str, str]:
+    """account_api's 30 s cache, imported at call time so this module never
+    depends on account_api at import (account_api imports api, which this
+    module also imports, and a cycle there would take every page down).
+    {} on any failure: the page shows sign-in names, which is the D-6
+    default anyway."""
+    try:
+        from . import account_api
+
+        return dict(account_api.display_names_for(request.app) or {})
+    except Exception:  # noqa: BLE001
+        log.exception("could not read display names for this render")
+        return {}
 
 # UX-8 (usability sweep 2026-09-03): ONE list, in one place. The Settings
 # strip (partials/settings_nav.html) and the drawer's "which page lights
@@ -589,6 +625,19 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     user = auth.get_session_user(request)
     context.setdefault("session_user", user)
     context.setdefault("session_is_admin", auth.is_admin(settings, user))
+    # Account page 2026-09-25 (ACCOUNT_PAGE_FEATURES.md 6.2): every render
+    # carries the display-name map the `shown_as` filter reads, and the
+    # topbar's own label. Only for a signed-in render: the login page names
+    # nobody, and an anonymous request must not be able to read who is
+    # called what. The map is account_api's 30 s cache, so a 2 s poll costs
+    # a dict copy, not a query.
+    if user:
+        context.setdefault("display_names", _display_names_safe(request))
+        names = context.get("display_names") or {}
+        context.setdefault("session_shown_as", names.get(user) or user)
+    else:
+        context.setdefault("display_names", {})
+        context.setdefault("session_shown_as", "")
     # Every template gets it, because every partial can contain a form and a
     # partial re-rendered into the page must carry a live token (base.html puts
     # it on <body> as hx-headers, so htmx sends it on every request from the
@@ -3099,6 +3148,12 @@ async def partial_admin_set_password(request: Request, conn: sqlite3.Connection 
             except local_users.LocalUserError as exc:
                 error = str(exc)
             else:
+                # D-15 (account page 2026-09-25): the reset is on the audit
+                # timeline, written by the JSON route's own helper so the two
+                # doors cannot record it differently. Before the commit, as
+                # db.audit asks; nothing about the password goes in it.
+                from .api import _audit_password_reset as api_audit_password_reset
+                api_audit_password_reset(conn, admin, username, "local")
                 conn.commit()
                 notice = _signed_out()
         return _render(request, "partials/admin_users.html", {
@@ -3136,6 +3191,10 @@ async def partial_admin_set_password(request: Request, conn: sqlite3.Connection 
         except NasError as exc:
             error = str(exc)
         else:
+            # D-15 (account page 2026-09-25): see the local branch above.
+            from .api import _audit_password_reset as api_audit_password_reset
+            api_audit_password_reset(conn, admin, username, "smb")
+            conn.commit()
             notice = _signed_out()
 
     return _render(request, "partials/admin_users.html", {

@@ -91,7 +91,7 @@
         <a class="chip {{ 'red' if alert_counts.get('error') else 'amber' }}" href="/admin/health"
            title="what the fleet's self-diagnosis currently has open">[ {{ alert_total }} ALERT{{ "S" if alert_total != 1 }} ]</a>
       {% endif %}
-      {% if session_user %}<span class="muted">{{ session_user }}{{ " (admin)" if session_is_admin }}</span>{% endif %}
+      {% if session_user %}<a class="muted account-link" href="/account" title="signed in as {{ session_user }}">{{ session_shown_as or session_user }}{{ " (admin)" if session_is_admin }}</a>{% endif %}
     </div>
   </div>
   <nav class="drawer-nav">
@@ -142,7 +142,13 @@
   </nav>
   <div class="drawer-foot">
     {% if session_user %}
-      <div class="muted">{{ session_user }}{{ " (admin)" if session_is_admin }}</div>
+      {# Account page 2026-09-25: the name is the display name (a LABEL),
+         and the sign-in name is one hover away so nobody can pass as
+         somebody else by picking a name. The link is the way to /account
+         from every page, the SPAs included (a plain link survives their
+         innerHTML injection). #}
+      <div class="muted"><a class="account-link" href="/account" title="signed in as {{ session_user }}">{{ session_shown_as or session_user }}</a>{{ " (admin)" if session_is_admin }}</div>
+      <a class="btn" href="/account">[ YOUR ACCOUNT ]</a>
       {# PLAIN forms, not htmx, so they do not inherit base.html's hx-headers --
          the token has to travel as a field. app.py's csrf_gate reads either. #}
       <form method="post" action="/logout" class="inline-form">
@@ -215,7 +221,7 @@
 <span class="session">
   {% if session_user %}
     <a class="help-link" href="/help" title="how this works, and what the words mean">[ ? ]</a>
-    <span class="muted">{{ session_user }}{{ " (admin)" if session_is_admin }}</span>
+    <a class="muted account-link" href="/account" title="signed in as {{ session_user }}">{{ session_shown_as or session_user }}{{ " (admin)" if session_is_admin }}</a>
     {# The gear: the owner's own request (2026-08-18) for a way into Settings
        that is visible from every page without reading a word. Hand-drawn
        inline (ring + eight teeth) rather than an icon-set path, so it costs

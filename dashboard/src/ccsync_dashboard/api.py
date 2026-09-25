@@ -4530,6 +4530,11 @@ def api_admin_create_user(
     # The account provably exists now -- record it so a device named after it
     # is treated as an editor rather than as an unmapped machine (B16).
     db.record_known_editor(conn, username, "admin")
+    if payload.password:
+        # D-15 (account page 2026-09-25): create is create-or-update, so a
+        # password here may be a reset of an existing account by another
+        # door; it is audited like the reset route's, in the same commit.
+        _audit_password_reset(conn, admin, username, "smb", via="create")
     conn.commit()
     response = {"ok": True, "result": result}
     if payload.password:
@@ -4566,6 +4571,7 @@ def api_admin_set_password(
             local_users.set_password(conn, username, payload.password)
         except local_users.LocalUserError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _audit_password_reset(conn, admin, username, "local")
         conn.commit()
         return {"ok": True,
                 "sessions_revoked": revoke_sessions_after_password_reset(
@@ -4582,9 +4588,26 @@ def api_admin_set_password(
         nas.set_known_password(username, payload.password)
     except NasError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    _audit_password_reset(conn, admin, username, "smb")
+    conn.commit()
     return {"ok": True,
             "sessions_revoked": revoke_sessions_after_password_reset(
                 request, username, admin=admin)}
+
+
+AUDIT_USER_PASSWORD_RESET = "user.password_reset"
+
+
+def _audit_password_reset(conn: sqlite3.Connection, admin: str, username: str,
+                          method: str, *, via: str = "reset") -> None:
+    """One `user.password_reset` row on the audit timeline (owner decision
+    D-15, account page 2026-09-25): until now an admin setting someone's
+    password left no trace an admin could read. The detail names the backend
+    and the door and NOTHING about the password (not even its length: the
+    spec's secrets invariant). Before the route's commit, as db.audit asks,
+    so the row cannot outlive a change that was rolled back."""
+    db.audit(conn, admin, AUDIT_USER_PASSWORD_RESET, username,
+             {"method": method, "via": via})
 
 
 def revoke_sessions_after_password_reset(request: Request, username: str, *,
@@ -5129,6 +5152,13 @@ def delete_user_everywhere(request: Request, conn: sqlite3.Connection, username:
              {"machines": result["fleet"]["machines"],
               "devices_removed": len(result["devices_removed"])})
     conn.commit()
+    # forget_editor deleted their display name: drop the 30 s label cache so
+    # no page keeps showing a deleted person's chosen name (account review).
+    try:
+        from . import account_api
+        account_api.invalidate_display_names(request.app)
+    except Exception:                                           # noqa: BLE001
+        log.debug("display-name cache not invalidated", exc_info=True)
     purged = _purge_user_credentials(request, conn, username, by=admin)
     result.update(purged)
     log.warning(
@@ -9118,6 +9148,111 @@ def flatten_proxy_coverage(
     }
 
 
+# ------------------------------------------ machine_settings (account page)
+#
+# docs/ACCOUNT_PAGE_FEATURES.md §4 (account page 2026-09-25): the companion's
+# own statement of the settings the /account page shows (F6) and the answer to
+# a fleet-jobs change asked from there (F5). Tolerant like the sections above,
+# for the same reason and one more: this rides EVERY report, light ticks
+# included, so a malformed echo that 422'd would cost the machine its place on
+# the fleet grid within 30 s of a companion update. Every state word is a
+# plain bounded string, never a Literal: a Literal inside a non-tolerant list
+# is what 422'd whole reports in res-fleet-3, and a future companion's new
+# answer word must read as "still pending", not as a refusal of the report.
+
+# The on-disk keys a companion may say differ from what is running. Anything
+# else in `pending_restart` is dropped: the page renders these four and
+# nothing else, and an unknown key is a future companion's business.
+MACHINE_SETTINGS_RESTART_KEYS = ("jobs_enabled", "jobs_kinds",
+                                 "jobs_volunteer_minutes", "drive_reminder_minutes")
+# A kinds list longer than this is not a list of kinds of fleet work.
+_MACHINE_SETTINGS_KINDS_MAX = 16
+
+
+class MachineSettingsAppliedIn(_ReportSectionIn):
+    """The companion ledger's last answer to `commands.machine_settings`."""
+    id: str = Field(default="", max_length=64)
+    # applied | refused are final; failed and any word this build has never
+    # heard keep the request pending (db.answer_machine_settings_request).
+    state: str = Field(default="", max_length=32)
+    detail: str = Field(default="", max_length=255)
+    at: str = Field(default="", max_length=64)
+
+
+class MachineYoutubeIn(_ReportSectionIn):
+    """Status words only. The cookies, their path and yt-dlp's own `reason`
+    text never leave the machine (account page 2026-09-25, spec §4.3)."""
+    downloads: bool | None = None          # this machine's own opt-out (ytdl_local_downloads)
+    signin_enabled: bool | None = None     # the site's youtube_unblock + the local switch
+    terms_accepted: bool | None = None
+    signin: str = Field(default="", max_length=16)   # ok|stale|expired|none; unknown shown as-is
+
+
+def _restart_value_ok(key: str, value: Any) -> bool:
+    """The value type each pending_restart key must carry to be stored. bool
+    is an int to Python, so it is refused explicitly for the two numbers: a
+    `true` lend length is a companion bug, not thirty minutes."""
+    if key == "jobs_enabled":
+        return isinstance(value, bool)
+    if key == "jobs_kinds":
+        return (isinstance(value, list) and len(value) <= _MACHINE_SETTINGS_KINDS_MAX
+                and all(isinstance(k, str) and len(k) <= 32 for k in value))
+    if key == "jobs_volunteer_minutes":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if key == "drive_reminder_minutes":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return False
+
+
+class MachineSettingsIn(_ReportSectionIn):
+    """The companion's `machine_settings` section (spec §4.1/§4.3).
+
+    `accepts` is the CAPABILITY the dashboard gates requests on (never a
+    version compare): the keys this computer takes from the dashboard. It is
+    intersected with db.MACHINE_SETTING_KEYS here, so a future companion
+    advertising a key this dashboard has no whitelist entry for can never be
+    sent it, and `mode` (CR-88: wired or remote is the computer's own
+    setting) can never become requestable by a companion claiming it.
+    """
+    # No max_length on `accepts` or `pending_restart` (review round, account
+    # page 2026-09-25): _bound_to_field_caps runs BEFORE the field validators
+    # below, so a cap there sliced the raw list before the whitelist saw it,
+    # and a future companion listing 16+ keys with the known ones late lost
+    # them silently. The whitelist filters are the bound instead: their output
+    # is at most len(MACHINE_SETTING_KEYS) / len(MACHINE_SETTINGS_RESTART_KEYS),
+    # and the input is already bounded by the report body limit.
+    accepts: list[str] | None = None
+    jobs_volunteer_minutes: int | None = Field(default=None, ge=0, le=100000)
+    drive_reminder_minutes: float | None = Field(default=None, ge=0, le=100000)
+    youtube: MachineYoutubeIn | None = None
+    pending_restart: dict[str, Any] | None = None
+    applied: MachineSettingsAppliedIn | None = None
+
+    @field_validator("accepts", mode="before")
+    @classmethod
+    def _only_whitelisted_keys(cls, value):
+        # Filtered BEFORE type validation: one non-string entry from a future
+        # companion must cost that entry, not the section. A non-list is left
+        # alone so it fails the type check and the section is dropped (a
+        # wrong type is a broken companion, and the spec drops those).
+        if not isinstance(value, list):
+            return value
+        allowed = tuple(db.MACHINE_SETTING_KEYS)
+        out: list[str] = []
+        for key in value:
+            if isinstance(key, str) and key in allowed and key not in out:
+                out.append(key)
+        return out
+
+    @field_validator("pending_restart", mode="before")
+    @classmethod
+    def _only_known_restart_keys(cls, value):
+        if not isinstance(value, dict):
+            return value
+        return {k: v for k, v in value.items()
+                if k in MACHINE_SETTINGS_RESTART_KEYS and _restart_value_ok(k, v)}
+
+
 # Which model parses each of the tolerant sections. Explicit rather than
 # derived from the annotations: this table is what
 # ReportIn._a_bad_section_never_422s consults, and it must not silently grow.
@@ -9127,6 +9262,8 @@ _TOLERANT_SECTIONS: dict[str, type[BaseModel]] = {
     "broll_ingest": BrollIngestIn,
     "music_ingest": MusicIngestIn,
     "capabilities": CapabilitiesIn,
+    # account page 2026-09-25 (docs/ACCOUNT_PAGE_FEATURES.md §4.1).
+    "machine_settings": MachineSettingsIn,
 }
 
 
@@ -9550,6 +9687,12 @@ class ReportIn(BaseModel):
     # The music half of the same feature (MUSIC_INGEST_PLAN.md step 3). Its
     # own field for the reason MusicIngestIn gives: both can be true at once.
     music_ingest: MusicIngestIn | None = None
+    # The account page's settings echo and request answer (account page
+    # 2026-09-25, docs/ACCOUNT_PAGE_FEATURES.md §4.1). Absent from every
+    # companion before the account-page build, and absent is NOT REPORTED:
+    # db.store_machine_settings leaves the cfg_* columns alone, and the page
+    # says "not reported" and offers no request (cfg_accepts NULL).
+    machine_settings: MachineSettingsIn | None = None
     # Set by _truncate_report_sections, never by the client: {section:
     # entries dropped}. Echoed in the reply and logged, so a truncated report
     # is loud rather than silent (B6).
@@ -9593,7 +9736,7 @@ class ReportIn(BaseModel):
         return [lane for lane in lanes if lane.name in LANE_LABELS]
 
     @field_validator("proxy_coverage", "youtube_import", "broll_ingest",
-                     "music_ingest", "capabilities", mode="before")
+                     "music_ingest", "capabilities", "machine_settings", mode="before")
     @classmethod
     def _a_bad_section_never_422s(cls, value, info):
         """A diagnostic section that will not parse is DROPPED, not fatal.
@@ -10047,6 +10190,26 @@ def api_report(
         conn, editor, machine,
         None if payload.capabilities is None else payload.capabilities.model_dump(),
         received_at)
+    # The account page's settings echo and the answer to a fleet-jobs change
+    # asked from it (account page 2026-09-25, docs/ACCOUNT_PAGE_FEATURES.md
+    # §4.1). Written with the report's own commit, which lands BEFORE the
+    # commands block is built: an answer that finalises a request therefore
+    # stops it riding this very reply. `_declared_dump`, not model_dump(): the
+    # stored JSON is re-serialised from the validated fields only, never from
+    # an extra a future companion carried. A report without the section says
+    # nothing (None leaves the cfg_* columns alone).
+    settings_section = payload.machine_settings
+    db.store_machine_settings(
+        conn, editor, machine,
+        None if settings_section is None else _declared_dump(settings_section),
+        received_at)
+    applied = settings_section.applied if settings_section is not None else None
+    if applied is not None and applied.id:
+        if db.answer_machine_settings_request(
+                conn, editor, machine, applied.id, applied.state,
+                applied.detail, received_at):
+            log.info("%s/%s answered the fleet-work settings request %s: %s",
+                     editor, machine, applied.id, applied.state)
 
     # -- media presence (all optional; absent field ⇒ table untouched) --
     # (`mode` is read above, with the machine_state write that now stores it.)
@@ -10366,6 +10529,54 @@ def api_report(
             "requested_by": diag_request["by_user"],
             "requested_at": diag_request["at"],
         }
+    # A FLEET-JOBS SETTINGS CHANGE asked from the /account page (account page
+    # 2026-09-25, docs/ACCOUNT_PAGE_FEATURES.md §4.2). STANDING, on the
+    # file_moves rule rather than resume_lane_b's: it rides every reply until
+    # the machine answers applied or refused (written above, with the
+    # report's own commit, so a finalising answer is not re-sent here).
+    # Applying it is idempotent on the companion (the same id is answered from
+    # its ledger), and the failure that matters is a click that evaporates
+    # while a laptop sleeps. Present only while pending: absent means "nothing
+    # asked", which is also what an older dashboard's silence means.
+    #
+    # `set` is filtered to db.MACHINE_SETTING_KEYS once more on the way out,
+    # so a row written by some other door can never carry `mode` (CR-88) or a
+    # key this dashboard does not whitelist to a computer.
+    #
+    # And it is checked against the machine's STORED `accepts` (spec §4.6
+    # row 4; review round, account page 2026-09-25): the route checked it at
+    # ask time, but `accepts` can shrink afterwards (a rollback to a build
+    # that takes only `jobs_enabled`), and a companion refuses the WHOLE
+    # request on a key it does not accept. The command is WITHHELD rather
+    # than trimmed: trimming would let the machine answer `applied` to a
+    # subset while the page shows the whole ask as done. Withheld, it stays
+    # pending and either reaches the machine once `accepts` grows back or
+    # expires with the page saying so. A machine with no stored section at
+    # all (it cannot have been asked; a row written by another door) falls
+    # back to the whitelist alone, which is the old-companion case of row 3.
+    settings_request = db.machine_settings_request(conn, editor, machine)
+    if settings_request and settings_request.get("state") == "pending":
+        wanted = {k: v for k, v in (settings_request.get("settings") or {}).items()
+                  if k in db.MACHINE_SETTING_KEYS}
+        reported = db.machine_settings_map(conn).get((editor, machine))
+        accepted = (set(reported.get("accepts") or ())
+                    if reported is not None else set(db.MACHINE_SETTING_KEYS))
+        sendable = bool(wanted) and all(k in accepted for k in wanted)
+    else:
+        sendable = False
+    if sendable:
+        result["commands"]["machine_settings"] = {
+            "id": settings_request["request_id"],
+            "set": wanted,
+            "requested_by": settings_request["requested_by"],
+            "requested_at": settings_request["requested_at"],
+        }
+        if not settings_request.get("delivered_at"):
+            db.mark_machine_settings_delivered(
+                conn, editor, machine, settings_request["request_id"], received_at)
+            # Committed HERE: the report's own commit is above us (the
+            # pushed-update rule).
+            conn.commit()
     # B-roll ingest cancels (BROLL_INGEST_PLAN.md §4.2). Present ONLY when
     # there is something to cancel -- unlike `halt`, an empty list is not an
     # instruction and this rides every tick of every machine. The companion's

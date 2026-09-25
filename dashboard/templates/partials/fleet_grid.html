@@ -169,7 +169,11 @@
   {% for e in fleet.editors %}
     <tr>
       <td data-label="STATUS"><span class="dot {{ e.status }}"{% if e.status_reason %} title="{{ e.status_reason }}"{% endif %}>●</span></td>
-      <td class="who" data-label="EDITOR">{{ e.editor_username }}
+      {# Account page 2026-09-25: the display name, with the sign-in name
+         muted beneath whenever the two differ (6.2). #}
+      {% set who_name = e.editor_username | shown_as %}
+      <td class="who" data-label="EDITOR" title="signed in as {{ e.editor_username }}">{{ who_name }}
+        {% if who_name != e.editor_username %}<div class="muted mono-sm">{{ e.editor_username }}</div>{% endif %}
         {% if not e.verified %}<span class="chip amber" title="this companion has not signed in with verified credentials">[ UNVERIFIED ]</span>{% endif %}
         {# DCORE-4 (2026-09-04): a suspended person's computers are turned
            away and unshared, which on this page looks exactly like a
@@ -497,7 +501,8 @@
   {% for m in fleet.lost_machines %}
     <tr>
       <td data-label="STATUS"><span class="dot red" title="no report since {{ m.last_seen }}">●</span></td>
-      <td class="who" data-label="EDITOR">{{ m.editor_username }}</td>
+      {% set who_name = m.editor_username | shown_as %}
+      <td class="who" data-label="EDITOR" title="signed in as {{ m.editor_username }}">{{ who_name }}{% if who_name != m.editor_username %}<div class="muted mono-sm">{{ m.editor_username }}</div>{% endif %}</td>
       <td class="mono-sm" data-label="COMPUTER" title="{{ m.syncthing_device_id or 'no Syncthing device ever reported' }}">{{ m.machine }}</td>
       <td class="mono-sm muted" data-label="PLATFORM">{{ m.platform or "?" }}</td>
       <td class="mono-sm" data-label="STILL PLANNED">{% if m.projects %}{{ m.projects | length }} project{{ "" if m.projects | length == 1 else "s" }}: {{ m.projects | join(", ") }}{% else %}nothing{% endif %}</td>

@@ -1,0 +1,116 @@
+{# One computer on /account (account page 2026-09-25, ACCOUNT_PAGE_FEATURES.md
+   6.1 item 4). It refreshes ITSELF every 30 s (outerHTML, by machine name)
+   and on `account-refresh`, which the plan buttons and the admin buttons fire
+   after their own request: those routes answer other pages' fragments
+   (the sidebar, the packages panel, the fleet grid), so here they swap
+   nothing and this panel re-reads instead.
+
+   The data is the fleet grid's own entry for the machine (account_api's
+   view), so this panel and the grid can never disagree about it. #}
+<section class="account-pc{{ ' lost' if pc.lost }}" id="{{ pc.dom_id }}"
+         hx-get="/partials/account/computer?machine={{ pc.machine | urlencode }}"
+         hx-trigger="every 30s [document.visibilityState === 'visible'], account-refresh"
+         hx-swap="outerHTML">
+  <div class="side-head">[ {{ pc.machine }} ]
+    {% if pc.lost %}<span class="chip red" title="This computer has not reported in for a long time.">[ NOT HEARD FROM ]</span>
+    {% elif pc.live %}<span class="chip green" title="It reported in within the last few minutes.">[ ONLINE ]</span>
+    {% else %}<span class="chip amber" title="What this computer said in its last report. Computers report every few seconds while CCSync is running.">[ NOT REPORTING ]</span>{% endif %}
+  </div>
+  <dl class="row-detail-list account-kv">
+    <dt>role</dt>
+    <dd>{% if pc.is_rig %}wired to the server <span class="muted">(works off the server share; syncs nothing)</span>
+        {% else %}remote editor <span class="muted">(syncs projects to its own drive)</span>{% endif %}</dd>
+    {% if pc.is_rig %}<dt>sync drive</dt><dd>the server share, mapped as {{ site.canonical_prefix }}</dd>
+    {% elif pc.drive %}<dt title="The drive this computer keeps its synced projects on.">sync drive</dt><dd>{{ pc.drive }}</dd>{% endif %}
+    <dt>CCSync</dt>
+    <dd>{{ pc.companion_version or "?" }}
+      {% if pc.up_to_date %}<span class="chip green" title="The current CCSync{% if pc.current_version %}, {{ pc.current_version }}{% endif %}.">[ UP TO DATE ]</span>
+      {% elif pc.current_version %}<span class="chip amber" title="This computer runs an older CCSync than the current {{ pc.current_version }}.">[ OUT OF DATE: {{ pc.current_version }} ]</span>{% endif %}</dd>
+    {% if pc.platform %}<dt>system</dt><dd>{{ pc.platform }}</dd>{% endif %}
+    <dt>last report</dt>
+    <dd><span title="{{ pc.last_seen or '' }}">{{ pc.last_seen | ago }}</span></dd>
+    {% if pc.why_sentence %}<dt>now</dt><dd class="why-line {{ 'muted' if (pc.why and pc.why.informational) else 'amber' }}">{{ pc.why_sentence }}</dd>{% endif %}
+  </dl>
+
+  {% if not pc.up_to_date and pc.current_version %}
+    {% if acct.is_admin %}
+      <form class="inline-form" hx-post="/partials/admin/machines/update" hx-swap="none"
+            hx-on:htmx:after-request="var p = this.closest('.account-pc'); if (p) htmx.trigger(p, 'account-refresh')">
+        <input type="hidden" name="editor" value="{{ acct.user }}">
+        <input type="hidden" name="machine" value="{{ pc.machine }}">
+        <button class="btn tap" type="submit" title="Tell this computer to install {{ pc.current_version }} the next time it reports in. Nobody has to click anything there.">[ UPDATE NOW ]</button>
+      </form>
+    {% else %}
+      <div class="muted account-where">update it from its tray: <b>Settings, HELP, Update to {{ pc.current_version }}</b>. Your admin can also push it.</div>
+    {% endif %}
+  {% endif %}
+
+  {% if not pc.is_rig %}
+    <div class="account-h3">projects on this computer <span class="muted">{{ pc.plan | length }} ticked</span></div>
+    {% if pc.plan %}
+      <div class="scroll-x"><table class="editors stack account-plan">
+        <tbody>
+        {% for p in pc.plan %}
+          {% set base = "/partials/selection/" ~ (acct.user | urlencode) ~ "/" ~ (p.slug | urlencode) ~ "/toggle?machine=" ~ (pc.machine | urlencode) %}
+          <tr>
+            <td data-label="PROJECT"><b>{{ p.label.split('/') | last }}</b><div class="muted mono-sm">{{ p.label }}</div></td>
+            <td data-label="SYNCS">{% if p.sync_mode == "upload_only" %}<span class="chip amber" title="This computer sends its new camera files up to the server and gets nothing back.">[ UPLOAD ONLY ]</span>
+                {% else %}<span class="chip green" title="Uploads go up, and the project's proxies and edit files come down to this computer.">[ FULL ]</span>{% endif %}</td>
+            <td data-label="">
+              {% if p.sync_mode == "upload_only" %}
+                <button class="btn tap" type="button" hx-post="{{ base }}&mode=full" hx-swap="none"
+                        {% if p.warning %}hx-confirm="{{ p.warning }} Sync it there anyway?"{% endif %}
+                        hx-on:htmx:after-request="var p = this.closest('.account-pc'); if (p) htmx.trigger(p, 'account-refresh')"
+                        title="Also bring the project's proxies down to this computer.">[ SYNC FULLY ]</button>
+              {% else %}
+                <button class="btn tap" type="button" hx-post="{{ base }}&mode=upload_only" hx-swap="none"
+                        hx-on:htmx:after-request="var p = this.closest('.account-pc'); if (p) htmx.trigger(p, 'account-refresh')"
+                        title="Keep sending new files up, but stop bringing anything down to this computer.">[ UPLOAD ONLY ]</button>
+              {% endif %}
+              <button class="btn tap" type="button" hx-post="{{ base }}" hx-swap="none"
+                      hx-confirm="This removes {{ p.label }} from {{ pc.machine }}. Its copies stay on disk; nothing new comes down and proxy sync stops for it."
+                      hx-on:htmx:after-request="var p = this.closest('.account-pc'); if (p) htmx.trigger(p, 'account-refresh')"
+                      title="Stop syncing this project on this computer. Files already there stay on disk.">[ UNTICK ]</button>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+    {% else %}
+      <div class="muted">Nothing is ticked for this computer.</div>
+    {% endif %}
+    {% if pc.add_options %}
+      {# account.js builds the toggle URL from the chosen option (the slug is a
+         PATH segment of the existing route, so a plain form cannot carry it)
+         and asks the UX-1 capacity question before a FULL tick when the
+         option carries one. #}
+      <div class="account-add" data-editor="{{ acct.user }}" data-machine="{{ pc.machine }}" data-panel="{{ pc.dom_id }}">
+        <select aria-label="a project to tick for {{ pc.machine }}">
+          {% for o in pc.add_options %}<option value="{{ o.slug }}" data-warning="{{ o.warning }}">{{ o.label }}</option>{% endfor %}
+        </select>
+        <button class="btn tap" type="button" data-add-mode="full" title="Sync the chosen project to this computer: uploads go up, proxies come down.">[ TICK ]</button>
+        <button class="btn tap" type="button" data-add-mode="upload_only" title="Only send this computer's new files for the chosen project up to the server. Nothing comes down.">[ UPLOAD ONLY ]</button>
+      </div>
+    {% endif %}
+  {% endif %}
+
+  {% include "partials/account_jobs.html" %}
+
+  <div class="account-h3">what it reported</div>
+  <dl class="row-detail-list account-kv">
+    {% for r in pc.readonly %}
+      <dt>{{ r.name }}</dt>
+      <dd>{% if r.value %}{{ r.value }}{% else %}<span class="muted">not reported</span>{% endif %} <span class="muted">&middot; {{ r.where }}</span></dd>
+    {% endfor %}
+  </dl>
+
+  {% if acct.is_admin and not pc.lost %}
+    <form class="inline-form" hx-post="/partials/admin/machines/ask-why" hx-swap="none"
+          hx-on:htmx:after-request="var p = this.closest('.account-pc'); if (p) htmx.trigger(p, 'account-refresh')">
+      <input type="hidden" name="editor" value="{{ acct.user }}">
+      <input type="hidden" name="machine" value="{{ pc.machine }}">
+      <button class="btn tap" type="submit" title="Ask this computer to send its own explanation of what it is doing and what is stuck. The answer arrives with its next report, on the sync status page.">[ ASK THIS COMPUTER WHY ]</button>
+    </form>
+  {% endif %}
+  <div class="muted account-foot">Remote or wired, pause, stop all syncing, YouTube sign-in: <b>{{ pc.machine }}'s tray, Settings</b>.</div>
+</section>

@@ -287,6 +287,22 @@ run alongside the tray app — it would hold port 8899.
   `dashboard_url` does not match the URL editors actually browse, every
   Send-to-Resolve call 403s — the companion log names both the refused
   origin and the list it holds. `docs/LOOPBACK_API.md`.
+- **The personal account page** (2026-09-25, `/account`,
+  `docs/ACCOUNT_PAGE_FEATURES.md`, schema v58, dashboard 0.7.60 / companion
+  0.9.80): a person sets their display name, changes their password, signs
+  out their other browsers, sees their sync keys and asks one of THEIR
+  computers to change its fleet-jobs settings. A display name is a LABEL
+  rendered at display time (`account_api.display_names_for`), never a key:
+  never in `fleet_audit.actor`, a selection, a job, a session or a wire key.
+  The computer ask rides the report reply as `commands.machine_settings`
+  (`db.request_machine_settings`, one pending ask per computer, 14 days),
+  held back unless every key is in that computer's reported `accepts`, and
+  `mode` (wired/remote, CR-88) can NEVER be asked for from either side. The
+  companion writes only the asked keys to config.toml (`machine_settings.py`,
+  through `config.set_value`, now locked) and answers from its own ledger on
+  redelivery. An absent `pending_restart` means "cannot tell", stored NULL,
+  never "nothing waiting". Deploy the dashboard first: an old dashboard
+  banners the new report section on every report.
 - **The server triage agent** (2026-09-24, `docs/SERVER_TRIAGE_AGENT.md`,
   schema v57): `triage.py` runs Claude Code at `alerts_triage_hours` in the
   site zone, READ-ONLY (Read/Grep/Glob over a scrubbed `evidence.json` and

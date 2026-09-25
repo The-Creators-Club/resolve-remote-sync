@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{# The personal page (account page 2026-09-25, docs/ACCOUNT_PAGE_FEATURES.md
+   6.1). ALWAYS about the signed-in person: account_ui.page_account never reads
+   ?as=. The panels follow dashboard/design/account.html's order and words, in
+   the CURRENT dashboard look; the redesign port restyles it later.
+
+   What polls and what does not, on purpose:
+   - each computer re-renders itself every 30 s (its own hx-get);
+   - SIGNED-IN BROWSERS re-renders every 30 s, like the admin panel;
+   - YOU and CHANGE YOUR PASSWORD never poll. A poll would wipe a name or a
+     password half typed, and the password panel's slot is the only place
+     its answer appears. #}
+{% block title %}{{ brand_org | upper }}: YOUR ACCOUNT{% endblock %}
+{% block head %}<script src="/static/account.js" defer></script>{% endblock %}
+{% block layout %}
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+    {% include "partials/sidebar.html" %}
+  </aside>
+  {% set method_words = {"smb": "server password", "local": "local account", "oidc": "single sign-on"} %}
+  <main class="main account-page">
+    <div class="side-head account-head">[ YOUR ACCOUNT ]
+      {% if acct.is_admin %}<span class="chip red" title="You can change settings for everyone and look after every computer.">[ ADMIN ]</span>{% endif %}
+      <span class="muted">signed in as <b>{{ acct.user }}</b>
+        &middot; {{ "admin" if acct.is_admin else "editor" }}
+        &middot; {{ method_words.get(acct.auth_method, acct.auth_method) }}
+        &middot; <b>{{ remote | length }}</b> computer{{ "s" if remote | length != 1 }},
+        <b>{{ rigs | length }}</b> wired to the server</span>
+      {% if acct.password.changeable %}<a class="btn" href="#account-password" title="Jump to the password window below. Changing your password here signs your other browsers out; this one stays signed in.">[ CHANGE YOUR PASSWORD ]</a>{% endif %}
+    </div>
+
+    {% if changed %}
+      {# ?changed=password&others=<n>, printed by the password partial's
+         redirect (the page it came from held the rotated session's token). #}
+      <div class="account-note ok" role="status">Password changed.
+        {% if changed.others_unknown %}Your other browsers may still be signed in: check SIGNED-IN BROWSERS below, or use SIGN OUT EVERYWHERE.
+        {% elif changed.others %}Signed out {{ changed.others }} other browser{{ "s" if changed.others != 1 }}; this one stays signed in.
+        {% else %}No other browser was signed in; this one stays signed in.{% endif %}
+        {% if acct.auth_method == "smb" %}Use the new one for the shared folders too.{% endif %}
+      </div>
+    {% endif %}
+
+    {% if acct.is_admin %}
+      <div class="account-note" id="account-admin-note">
+        <span class="chip red">[ ADMIN ]</span>
+        This page is about <b>you</b> only. To change someone else's password, sign them out, or look after their computers, use Settings, Users.
+        <a class="btn" href="/admin/users">[ SETTINGS, USERS ]</a>
+      </div>
+    {% endif %}
+
+    <section class="account-panel" id="account-you-wrap">
+      {% include "partials/account_you.html" %}
+    </section>
+
+    <section class="account-panel" id="account-password">
+      {% include "partials/account_password.html" %}
+    </section>
+
+    <h2 class="account-sec">[ YOUR COMPUTERS ]{% if remote %} <span class="muted">({{ remote | length }})</span>{% endif %}</h2>
+    <p class="muted account-lede">Each computer has <b>its own sync plan</b>: what you tick here syncs to that computer only. The project list on the sync status page ticks for every computer you use at once. A computer's other settings belong to the computer, so they are changed from its tray (the CC icon, then Settings), and this page shows what it last reported.</p>
+    <div class="account-pcs">
+      {% for pc in remote %}
+        {% include "partials/account_computer.html" %}
+      {% else %}
+        <div class="account-empty">No remote computers have reported in as {{ acct.user }}.
+          Install CCSync on a computer and sign in to it as {{ acct.user }}: it appears here after its first report.
+          <a class="btn" href="/download">[ GET THE INSTALLER ]</a></div>
+      {% endfor %}
+    </div>
+
+    <h2 class="account-sec">[ YOUR WIRED COMPUTERS ]{% if rigs %} <span class="muted">({{ rigs | length }})</span>{% endif %}</h2>
+    <p class="muted account-lede">A computer wired to the server works directly off the server share, so nothing is synced to it and it holds no ticks. It still reports in, and it can take fleet work.</p>
+    <div class="account-pcs">
+      {% for pc in rigs %}
+        {% include "partials/account_computer.html" %}
+      {% else %}
+        <div class="account-empty">No computers wired to the server. A computer becomes one from its tray: Settings, THIS COMPUTER, Wired to the server, then a restart of CCSync.</div>
+      {% endfor %}
+    </div>
+
+    {# WHERE EACH SETTING LIVES: static wording, values from the acct. #}
+    <section class="account-panel" id="account-settings">
+      <div class="side-head">[ YOUR SETTINGS ]
+        <span class="muted">Every setting that is yours to change, what it is now, and where it changes. Settings kept on a computer take effect there, often only when CCSync next starts on it.</span></div>
+      {% set all_pcs = remote + rigs %}
+      <div class="scroll-x"><table class="editors stack account-where">
+        <thead><tr><th>SETTING</th><th>NOW</th><th>WHERE IT CHANGES</th></tr></thead>
+        <tbody>
+          <tr class="account-grp"><td colspan="3">yours, kept by this dashboard <span class="muted">Changed on this page, and in effect at once.</span></td></tr>
+          <tr><td data-label="SETTING">Name</td><td data-label="NOW">{{ acct.shown_as }}</td><td data-label="WHERE">here, under you</td></tr>
+          <tr><td data-label="SETTING">What each computer syncs</td>
+            <td data-label="NOW">{% for pc in remote %}<div>{{ pc.machine }}: {{ pc.plan | length }} project{{ "s" if pc.plan | length != 1 }}{% set up = pc.plan | selectattr("sync_mode", "equalto", "upload_only") | list %}{% if up %}, {{ up | length }} upload only{% endif %}</div>{% else %}<span class="muted">no remote computers</span>{% endfor %}</td>
+            <td data-label="WHERE">here, per computer; the sync status page's project list ticks every computer at once</td></tr>
+          <tr><td data-label="SETTING">Password</td>
+            <td data-label="NOW">{{ {"server": "your server account", "dashboard": "this dashboard", "organisation": "your organisation"}.get(acct.password.where, acct.password.where) }}</td>
+            <td data-label="WHERE">{% if acct.password.changeable %}<a href="#account-password">here, under change your password</a>{{ "; another admin can also set one" if acct.is_admin else "; your admin can also set one" }}{% else %}with your organisation, wherever it looks after your account{% endif %}</td></tr>
+          <tr><td data-label="SETTING">Signed-in browsers</td><td data-label="NOW"><a href="#account-sessions">listed below</a></td><td data-label="WHERE">here, at the bottom; also the menu's Sign out everywhere</td></tr>
+
+          <tr class="account-grp"><td colspan="3">each computer's own, asked from here <span class="muted">Sent to the computer with its next report; it applies them when CCSync next starts there.</span></td></tr>
+          <tr><td data-label="SETTING">Let the fleet use this computer</td>
+            <td data-label="NOW">{% for pc in all_pcs %}<div>{{ pc.machine }}: {% if pc.jobs.enabled is none %}<span class="muted">not reported</span>{% else %}{{ "yes" if pc.jobs.enabled else "no" }}{% endif %}</div>{% else %}<span class="muted">no computers yet</span>{% endfor %}</td>
+            <td data-label="WHERE">here, per computer; also the tray: Settings, FLEET JOBS</td></tr>
+          <tr><td data-label="SETTING">Kinds of fleet work</td>
+            <td data-label="NOW">{% for pc in all_pcs %}<div>{{ pc.machine }}: {{ pc.kind_words | join(", ") if pc.kind_words else "every kind" }}</div>{% else %}<span class="muted">no computers yet</span>{% endfor %}</td>
+            <td data-label="WHERE">here, per computer; also the tray: Settings, FLEET JOBS</td></tr>
+
+          <tr class="account-grp"><td colspan="3">each computer's own, changed from its tray <span class="muted">The computer is the only place these can change. This page shows what it last reported.</span></td></tr>
+          <tr><td data-label="SETTING">Remote editor or wired to the server</td>
+            <td data-label="NOW">{% for pc in all_pcs %}<div>{{ pc.machine }}: {{ "wired" if pc.is_rig else "remote" }}</div>{% else %}<span class="muted">no computers yet</span>{% endfor %}</td>
+            <td data-label="WHERE">tray: Settings, THIS COMPUTER (then restart CCSync)</td></tr>
+          <tr><td data-label="SETTING">Lend this computer to the fleet now</td>
+            <td data-label="NOW">{% for pc in all_pcs %}<div>{{ pc.machine }}: {% if pc.jobs.volunteering and pc.jobs.volunteering.active %}lent until {{ pc.jobs.volunteering.until }}{% elif pc.jobs.enabled is sameas false %}<span class="muted">fleet use is off</span>{% else %}not lent{% endif %}</div>{% else %}<span class="muted">no computers yet</span>{% endfor %}</td>
+            <td data-label="WHERE">tray menu: Take fleet jobs now; how long: Settings, FLEET JOBS</td></tr>
+          <tr><td data-label="SETTING">Drive reminder</td>
+            <td data-label="NOW">{% for pc in remote %}{% set r = pc.readonly | selectattr("name", "equalto", "drive reminder") | first %}<div>{{ pc.machine }}: {% if r and r.value %}{{ r.value }}{% else %}<span class="muted">not reported</span>{% endif %}</div>{% else %}<span class="muted">no remote computers</span>{% endfor %}</td>
+            <td data-label="WHERE">tray: Settings, SYNCING mutes one; the interval (every 30 min by default) is in the computer's config file</td></tr>
+          {% if site.youtube_download %}
+          <tr><td data-label="SETTING">YouTube terms and sign-in</td>
+            <td data-label="NOW">{% for pc in all_pcs %}{% set r = pc.readonly | selectattr("name", "equalto", "YouTube sign-in") | first %}<div>{{ pc.machine }}: {% if r and r.value %}{{ r.value }}{% else %}<span class="muted">not reported</span>{% endif %}</div>{% else %}<span class="muted">no computers yet</span>{% endfor %}</td>
+            <td data-label="WHERE">tray: Settings, YOUTUBE</td></tr>
+          {% endif %}
+          <tr><td data-label="SETTING">Update CCSync</td>
+            <td data-label="NOW">{% for pc in all_pcs %}<div>{{ pc.machine }}: {{ pc.companion_version or "?" }}{% if not pc.up_to_date and pc.current_version %} <span class="chip amber">[ OUT OF DATE: {{ pc.current_version }} ]</span>{% endif %}</div>{% else %}<span class="muted">no computers yet</span>{% endfor %}</td>
+            <td data-label="WHERE">tray: Settings, HELP{{ "; or push it from Settings, Packages" if acct.is_admin else "; your admin can also push it" }}</td></tr>
+          <tr><td data-label="SETTING">Sign this computer in or out</td>
+            <td data-label="NOW">{% for pc in all_pcs %}<div>{{ pc.machine }}: signed in as {{ acct.user }}</div>{% else %}<span class="muted">no computers yet</span>{% endfor %}</td>
+            <td data-label="WHERE">tray: Settings, THIS COMPUTER</td></tr>
+
+          <tr class="account-grp"><td colspan="3">{{ "set for everyone, by you and the other admins" if acct.is_admin else "set for everyone by your admin" }} <span class="muted">{{ "Changed under Settings, Site." if acct.is_admin else "Shown so you know; you cannot change these." }}</span></td></tr>
+          <tr><td data-label="SETTING">Drive letter for the project tree</td><td data-label="NOW">{{ site.canonical_prefix }}</td>
+            <td data-label="WHERE">{% if acct.is_admin %}<a href="/admin/settings">Settings, Site</a>{% else %}your admin{% endif %}</td></tr>
+          <tr><td data-label="SETTING">Automatic updates</td><td data-label="NOW">{{ "on: computers take a newer build by themselves" if site.auto_update else "off: your admin pushes each update" }}</td>
+            <td data-label="WHERE">{% if acct.is_admin %}<a href="/admin/settings">Settings, Site</a>{% else %}your admin{% endif %}</td></tr>
+          <tr><td data-label="SETTING">YouTube downloads</td><td data-label="NOW">{{ "on" if site.youtube_download else "off" }}</td>
+            <td data-label="WHERE">{% if acct.is_admin %}<a href="/admin/settings">Settings, Site</a>{% else %}your admin{% endif %}</td></tr>
+          <tr><td data-label="SETTING"><span title="An admin can stop all syncing on every computer at once, for example during a server repair. It restarts by itself after 24 hours.">Fleet stopped</span></td>
+            <td data-label="NOW">{{ "yes" if site.fleet_halt else "no" }}</td>
+            <td data-label="WHERE">{% if acct.is_admin %}<a href="/admin/users#admin-fleet-halt">Settings, Users, Stop the fleet</a>{% else %}your admin{% endif %}</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section class="account-panel" id="account-sessions-wrap"
+             hx-get="/partials/account/sessions"
+             hx-trigger="load, every 30s [document.visibilityState === 'visible']"
+             hx-swap="innerHTML">
+      <div class="muted">loading your signed-in browsers</div>
+    </section>
+  </main>
+{% endblock %}

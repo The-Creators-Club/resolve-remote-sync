@@ -67,7 +67,7 @@
         {% elif ep.state == 'failed' %}<span class="cl-badge cl-badge-failed">FAILED</span>{% endif %}
       </div>
       <div class="cl-meta">
-        <span class="cl-when">{{ ep.opened_phrase or 'never opened' }}</span>
+        <span class="cl-when"{% if ep.opened_by %} title="signed in as {{ ep.opened_by }}"{% endif %}>{{ ep.opened_phrase or 'never opened' }}</span>
         <span class="cl-size">{% if ep.size_label %}{{ ep.size_label }}{% if ep.size_partial %}+{% endif %}{% else %}sizing{% endif %}</span>
         {% if ep.modified_label %}<span class="cl-mod">changed {{ ep.modified_label }}</span>{% endif %}
         {# Last, so the tree can drop it (its folders already say it) without
@@ -86,12 +86,13 @@
          their OWN account's companions, so another person being live here is
          something to know, never something to take. #}
       {% if ep.occupants %}
-        <div class="cl-note">in it now: {{ ep.occupants | join(', ') }}</div>
+        {# account page 2026-09-25: display names, sign-in names in the title. #}
+        <div class="cl-note" title="signed in as {{ ep.occupants | join(', ') }}">in it now: {{ (ep.occupants_shown or ep.occupants) | join(', ') }}</div>
       {% elif ep.last_in_phrase %}
         {# security-1 (2026-09-18b mediums): the seat is stamped by requests
            SERVED here, so an editor working offline shows as nobody after
            fifteen minutes; the row says who was last in and when. #}
-        <div class="cl-note">{{ ep.last_in_phrase }}</div>
+        <div class="cl-note"{% if ep.last_in %} title="signed in as {{ ep.last_in }}"{% endif %}>{{ ep.last_in_phrase }}</div>
       {% endif %}
     </div>
     <div class="cl-act">{{ ep_actions(ep) }}</div>

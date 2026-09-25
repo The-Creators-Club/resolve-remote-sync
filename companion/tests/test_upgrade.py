@@ -672,18 +672,70 @@ def test_old_exe_survives_the_first_minutes_and_goes_on_one_accepted_report():
         return True
 
     def _healthy():
-        # Five polls in, the dashboard takes a report.
-        clock.now += 60.0
-        if clock.now >= 300.0:
+        # The dashboard takes a report at the 11-minute mark.
+        if clock.now >= 660.0:
             healthy["yes"] = True
         return healthy["yes"]
 
+    def _wait(_seconds):
+        clock.now += 60.0
+        return False
+
+    stop.wait = _wait
     reason = upgrade_mod.keep_old_exe_until_healthy(
         stop, _healthy, poll_seconds=0.0, clock=clock, cleanup=_cleanup)
 
     assert deleted == [True]
     assert "report" in reason
-    assert clock.now == 300.0, "it must not have deleted anything at 60 s"
+    assert clock.now == 660.0, "it must not have deleted anything before the report"
+
+
+def test_an_early_report_does_not_delete_the_rollback_copy_inside_the_crash_loop_window():
+    """bug-comp-core-2 (2026-09-24): the reporter's first post is accepted
+    two seconds after start, so "one accepted report" alone deleted `.old`
+    on the first check -- and APP-5's own scenario (reports once, dies three
+    minutes later, three times in ten minutes) then found no rollback copy.
+    The copy must survive until the process has ALSO outlived the window."""
+    import threading
+
+    stop = threading.Event()
+    clock = _Clock()
+    deleted_at = []
+
+    def _wait(_seconds):
+        clock.now += 30.0
+        return False
+
+    stop.wait = _wait
+    reason = upgrade_mod.keep_old_exe_until_healthy(
+        stop, lambda: True, poll_seconds=30.0, clock=clock,
+        cleanup=lambda: deleted_at.append(clock.now) or True)
+
+    assert len(deleted_at) == 1
+    assert deleted_at[0] >= upgrade_mod.CRASH_LOOP_WINDOW_SECONDS, (
+        "the rollback copy went before the crash-loop window closed")
+    assert "report" in reason
+
+
+def test_a_build_that_dies_three_minutes_in_still_has_its_rollback_copy():
+    """APP-5's headline scenario end to end on the keeper: report accepted at
+    once, the process is gone at three minutes. Nothing may be deleted."""
+    import threading
+
+    stop = threading.Event()
+    clock = _Clock()
+    deleted = []
+
+    def _wait(_seconds):
+        clock.now += 30.0
+        return clock.now >= 180.0     # the process dies
+
+    stop.wait = _wait
+    reason = upgrade_mod.keep_old_exe_until_healthy(
+        stop, lambda: True, poll_seconds=30.0, clock=clock,
+        cleanup=lambda: deleted.append(True) or True)
+
+    assert reason == "" and deleted == []
 
 
 def test_old_exe_goes_after_the_uptime_fallback_when_no_report_lands():
@@ -693,12 +745,13 @@ def test_old_exe_goes_after_the_uptime_fallback_when_no_report_lands():
     clock = _Clock()
     deleted = []
 
-    def _tick():
+    def _wait(_seconds):
         clock.now += 600.0
         return False
 
+    stop.wait = _wait
     reason = upgrade_mod.keep_old_exe_until_healthy(
-        stop, _tick, poll_seconds=0.0, clock=clock,
+        stop, lambda: False, poll_seconds=0.0, clock=clock,
         cleanup=lambda: deleted.append(True) or True)
 
     assert deleted == [True]
@@ -763,6 +816,75 @@ def test_revert_restores_the_old_exe_and_records_what_it_came_off(tmp_path):
     assert ledger["reverted_from"] == config_mod.VERSION
     # ...and it must NOT think it was just upgraded into.
     assert upgrade_mod.read_version_state(state)["version"] == "0.9.54"
+
+
+def test_the_fled_version_outlives_the_one_shot_revert_marker(tmp_path):
+    """bug-comp-core-1 (2026-09-24): `reverted_from` is cleared by the first
+    accepted report; the block on reinstalling the fled build must not be."""
+    exe, state = _crash_loop_tree(tmp_path)
+    upgrade_mod.revert_to_previous_build(
+        state, {}, exe_path=exe, spawn=lambda path: _LiveChild(),
+        clock=_Clock(step=1.0), sleep_fn=lambda _s: None,
+        floor_file=tmp_path / "floor.json", now=2000.0,
+    )
+    path = upgrade_mod.attempts_path(state)
+
+    upgrade_mod.clear_reverted_from(path)
+    upgrade_mod.clear_upgrade_attempts(path)
+    upgrade_mod.note_upgrade_attempt(path, "99.0.0", upgrade_mod.ERROR_SHA, now=2100.0)
+
+    record = upgrade_mod.read_attempts(path)
+    assert "reverted_from" not in record
+    assert upgrade_mod.crash_looped_on(record, config_mod.VERSION) is True
+    assert upgrade_mod.crash_looped_on(record, "99.0.0") is False
+
+    upgrade_mod.clear_crash_looped(path)
+    assert upgrade_mod.crash_looped_on(upgrade_mod.read_attempts(path),
+                                       config_mod.VERSION) is False
+
+
+def test_the_revert_leaves_a_give_up_record_the_previous_release_honours(tmp_path):
+    """bug-comp-core-1 review round (2026-09-24): the fleeing build WRITES the
+    marker and the RESTORED build reads it, so the first release carrying the
+    fix reverts onto 0.9.77, which has never heard of `crash_looped`. What
+    0.9.77 does know is REL-8's give-up record: it refuses an exhausted
+    version on both unattended paths, clears the record only when it is ITS
+    own version, and sends it in every report. Emulated here with the keys it
+    does not know stripped out, through the functions it runs (unchanged
+    since HEAD)."""
+    path = upgrade_mod.attempts_path(tmp_path / "state")
+    upgrade_mod.note_reverted_from(path, "0.9.78", now=2000.0)
+
+    # 0.9.77 starting: its own version's failures are cleared, nothing else.
+    upgrade_mod.clear_upgrade_attempts(path, "0.9.77")
+    # Its first accepted report clears the one-shot telemetry marker.
+    upgrade_mod.clear_reverted_from(path)
+    record = {key: value for key, value in upgrade_mod.read_attempts(path).items()
+              if key not in upgrade_mod.CRASH_LOOPED_KEYS}
+
+    assert upgrade_mod.upgrade_attempts_exhausted(record, "0.9.78") is True
+    assert upgrade_mod.upgrade_attempts_exhausted(record, "0.9.79") is False
+    report = upgrade_mod.upgrade_report(record)
+    assert report["version"] == "0.9.78"
+    assert report["attempts"] == upgrade_mod.MAX_UPGRADE_ATTEMPTS
+    assert report["last_error"] == upgrade_mod.ERROR_CRASH_LOOPED
+
+
+def test_every_fled_version_is_remembered(tmp_path):
+    """bug-comp-core-1 review round: a second revert (off vX+1) overwrote the
+    first, so an admin making vX current again had vX-1 take it again."""
+    path = upgrade_mod.attempts_path(tmp_path / "state")
+    upgrade_mod.note_reverted_from(path, "0.9.78", now=1000.0)
+    upgrade_mod.note_reverted_from(path, "0.9.79", now=2000.0)
+
+    record = upgrade_mod.read_attempts(path)
+    assert upgrade_mod.crash_looped_on(record, "0.9.78") is True
+    assert upgrade_mod.crash_looped_on(record, "0.9.79") is True
+
+    upgrade_mod.clear_crash_looped(path, "0.9.79")
+    record = upgrade_mod.read_attempts(path)
+    assert upgrade_mod.crash_looped_on(record, "0.9.78") is True
+    assert upgrade_mod.crash_looped_on(record, "0.9.79") is False
 
 
 def test_revert_refuses_to_go_below_the_downgrade_floor(tmp_path):

@@ -160,7 +160,79 @@ def _default_move(src: str, dst: str) -> None:
         if getattr(exc, "errno", None) != errno.EXDEV:
             raise
         log.info("repath: cross-volume move %s -> %s, falling back to copy+remove", src, dst)
-        shutil.move(src, dst)
+        _copy_then_swap(src, dst)
+
+
+# bug-comp-rclone-1 (2026-09-24): the cross-volume copy is built under this
+# name beside the target and renamed onto it only once it is whole.
+STAGING_SUFFIX = ".ccsync-moving"
+
+
+def _copy_then_swap(src: str, dst: str) -> None:
+    """copy -> rename onto the target -> remove the source.
+
+    bug-comp-rclone-1 (2026-09-24): shutil.move copies straight INTO the
+    target, so a copy that failed part-way (disk full, a handle on one
+    file) left a partial project at the new path. The next pass then saw
+    "live source, existing target", and a partial copy carries Syncthing's
+    .stfolder (a dot-directory sorts first, so it is copied first), which
+    is the one thing that makes a target look like the real folder. Syncthing
+    re-pointed at it reads every file the copy never reached as deleted.
+
+    The staging copy is only ever deleted when it is found at the START of
+    an attempt, which is safe by construction: the source is removed only
+    after the rename onto the target succeeded, so a staging directory that
+    still exists is a partial duplicate of a source nobody has touched."""
+    staging = dst + STAGING_SUFFIX
+    if os.path.lexists(staging):
+        log.warning("repath: discarding the partial copy %s a failed move left "
+                    "(its source %s is intact)", staging, src)
+        shutil.rmtree(staging)
+    shutil.copytree(src, staging, symlinks=True)
+    os.rename(staging, dst)
+    try:
+        shutil.rmtree(src)
+    except OSError:
+        # The target is whole and is what the folder is re-pointed at; the
+        # remains of the old directory are left for a human, as the
+        # conflict branch in _move_dir leaves them.
+        log.warning("repath: moved %s -> %s but could not remove all of the old "
+                    "directory -- left in place", src, dst, exc_info=True)
+
+
+# Syncthing's folder marker. Lane B excludes it and the structure clone never
+# creates a dot-directory, so a target holding one has been a Syncthing
+# folder root, not a directory the lanes made.
+SYNCTHING_MARKER = ".stfolder"
+
+
+def _raise(exc: OSError) -> None:
+    raise exc
+
+
+def _holds_files(path: Path) -> bool:
+    """Is there anything but directories under `path`? "Cannot tell" is
+    yes: the answer that keeps a target from being pruned."""
+    try:
+        for _root, _dirs, files in os.walk(path, onerror=_raise):
+            if files:
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _prune_empty_tree(path: Path) -> bool:
+    """rmdir every directory under and including `path`, deepest first.
+    Only ever removes an EMPTY directory (os.rmdir refuses anything else),
+    so it cannot lose a file. Returns whether `path` is gone."""
+    try:
+        for root, _dirs, _files in os.walk(path, topdown=False):
+            os.rmdir(root)
+    except OSError:
+        log.debug("repath: could not prune the empty skeleton at %s", path,
+                  exc_info=True)
+    return not os.path.lexists(path)
 
 
 def _item_is_valid(item: dict) -> bool:
@@ -327,6 +399,16 @@ def moved_note(name: str, relinked: Optional[bool]) -> str:
     return head + " Resolve reconnects the clips next time you open that project."
 
 
+def target_exists_note(name: str) -> str:
+    """bug-comp-rclone-1 (2026-09-24): the move is refused because something
+    other than this project's own folder is already at the new path. Closing
+    Resolve would not help, so the blocked sentence must not say it would.
+    No em dashes (user-visible)."""
+    return (f"{name} is not syncing because a folder with its new name is already "
+            f"on this computer. Your files are safe where they are. Move that "
+            f"other folder somewhere else, then it retries by itself.")
+
+
 def blocked_note(name: str) -> str:
     """What the editor is told about a rename whose move could not be made.
 
@@ -363,6 +445,9 @@ class ProjectRepather:
         # sequencer because reconcile is also called from the per-project
         # path, which a sequencer-side guard would miss.
         self._last_relink_retry: Optional[float] = None
+        # Set by _move_dir when it refuses because the new path is taken by
+        # something that is not this project's folder (bug-comp-rclone-1).
+        self._target_occupied = False
 
     def reconcile(self, selection: list[dict]) -> list[str]:
         """Repath every selected project whose local folder points somewhere
@@ -389,7 +474,14 @@ class ProjectRepather:
                 continue
             folder = folders.get(slug)
             if folder is None:
-                continue  # not accepted locally yet -- the accept flow owns creation
+                # Not accepted locally (yet, or any more) -- the accept flow
+                # owns creation. bug-comp-rclone-1 (2026-09-24): a blocked
+                # event now makes the sequencer skip the project's whole turn,
+                # and the accept flow IS part of that turn, so a stale event
+                # for a folder that no longer exists here would hold the
+                # project out for good. No folder, no move to be blocked on.
+                self.ledger.clear_blocked(slug)
+                continue
             actual = str(folder.get("path", ""))
             expected = str(Path(self.local_root) / "Projects" / Path(*rel.split("/")))
             if not actual or _norm(actual) == _norm(expected):
@@ -429,13 +521,16 @@ class ProjectRepather:
                 log.exception("repath: could not pause folder %s -- skipping this cycle", slug)
                 continue
 
+            self._target_occupied = False
             moved = self._move_dir(slug, actual, expected)
             if not moved:
                 # SYNC-102: recorded, not just logged. This branch is the
                 # routine one (Resolve or Explorer holding a handle) and it
                 # leaves ONE project not syncing, silently, until a human
                 # looks -- which is exactly what nothing anywhere said.
-                self.ledger.record(slug, actual, expected, blocked_note(rel),
+                note = (target_exists_note(rel) if self._target_occupied
+                        else blocked_note(rel))
+                self.ledger.record(slug, actual, expected, note,
                                    relinked=None, moved=False)
                 # DELIBERATELY LEFT PAUSED. Re-pointing after a failed move
                 # aims the local Syncthing folder at a directory that does
@@ -565,11 +660,34 @@ class ProjectRepather:
             )
             return False
         if dst.exists():
-            log.warning(
-                "repath: %s -- target %s already exists; leaving old dir %s in place "
-                "(reconcile by hand), re-pointing the folder anyway", slug, dst, src,
-            )
-            return True
+            # bug-comp-rclone-1 (2026-09-24): "re-point anyway" is right only
+            # when the target IS the folder's content going forward. It used
+            # to be taken for any existing target, and the routine one was
+            # the directory the structure clone and lane B had just created
+            # at the new path after a blocked move: the folder was aimed at
+            # a proxy-only skeleton, unpaused, and the editor told "CC Sync
+            # moved your copy", while the whole project sat at the old path
+            # in no lane's scope. The sequencer no longer runs a blocked
+            # project's lanes, so what reaches here now is a leftover from an
+            # older build, a hand copy, or an unrelated folder.
+            if (dst / SYNCTHING_MARKER).exists():
+                log.warning(
+                    "repath: %s -- target %s already exists and is a Syncthing folder; "
+                    "leaving old dir %s in place (reconcile by hand), re-pointing the "
+                    "folder", slug, dst, src,
+                )
+                return True
+            if dst.is_dir() and not _holds_files(dst) and _prune_empty_tree(dst):
+                log.info("repath: %s -- removed an empty directory skeleton at %s "
+                         "before the move", slug, dst)
+            else:
+                self._target_occupied = True
+                log.error(
+                    "repath: %s -- %s already exists and is not this project's "
+                    "folder (no %s); NOT re-pointing. The project stays at %s until "
+                    "that directory is moved away", slug, dst, SYNCTHING_MARKER, src,
+                )
+                return False
         try:
             self._move(str(src), str(dst))
         except OSError:

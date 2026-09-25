@@ -36,6 +36,7 @@ import http.client
 import json
 import logging
 import os
+import time
 import subprocess
 import sys
 import threading
@@ -3118,7 +3119,10 @@ def test_a_vp9_opus_clip_is_converted_here_under_its_original_name(tmp_path, ytd
     assert not list(outdir.glob("*.editready.*")) and not list(outdir.glob("*.original.*"))
     (conv,) = tools.named("ffmpeg")
     argv, timeout = conv[1], conv[2]
-    assert argv[argv.index("-i") + 1] == str(clip)
+    # bug-comp-ytdl-1 (2026-09-24): ffmpeg reads the original from its staged,
+    # non-deliverable name, never from the clip's own name
+    assert argv[argv.index("-i") + 1] == str(
+        outdir / f"Some Channel - A clip [{VID1}].source.editready.mp4")
     assert argv[-1] == str(outdir / f"Some Channel - A clip [{VID1}].editready.mp4")
     assert "libx264" in argv and argv[argv.index("-c:a") + 1] == "aac"
     assert timeout == ex.CONVERT_TIMEOUT_SECONDS
@@ -3195,11 +3199,15 @@ def test_a_conversion_note_joins_the_truncation_note(tmp_path, ytdlp):
         ex.os.replace = real_replace
 
     outdir = outdir_for(tmp_path)
-    clip = outdir / f"Some Channel - A clip [{VID1}].mp4"
-    assert clip.read_bytes() == b"converted bytes"
-    assert (outdir / f"Some Channel - A clip [{VID1}].original.mp4").read_bytes() == b"video bytes"
+    # bug-comp-ytdl-1 (2026-09-24): the original waits under its staged name
+    # and is removed, so it cannot be the file held open; the refused replace
+    # now takes swap_in's last rung, and its note is still the one on the row
+    kept = outdir / f"Some Channel - A clip.converted [{VID1}].mp4"
+    assert kept.read_bytes() == b"converted bytes"
+    assert not list(outdir.glob("*.source.editready.*"))
     assert fleet.body_for(VID1, "done")["note"] == (
-        f"original was in use, kept as Some Channel - A clip [{VID1}].original.mp4")
+        f"converted, but Some Channel - A clip [{VID1}].mp4 was in use: "
+        f"saved as {kept.name}")
 
 
 def test_no_ffprobe_means_delivered_unchecked_never_re_encoded(tmp_path, ytdlp,
@@ -3254,6 +3262,181 @@ def test_a_lost_lease_during_conversion_ends_the_clip_quietly(tmp_path, ytdlp):
     assert not list(outdir.glob("*.editready.*"))
     assert fleet.state_sequence == [(VID1, "downloading")]
     assert (job.done, job.failed) == (0, 0)
+
+
+def _visible_during_conversion(outdir: Path) -> list:
+    """Every file in the term folder that lane A would upload or the Resolve
+    importer would file, right now."""
+    from ccsync_companion import youtube_import
+    from ccsync_companion.sync import rclone_lane
+    return sorted(p.name for p in outdir.iterdir()
+                  if p.is_file()
+                  and (rclone_lane.path_matches_lane_a_filter(p.name)
+                       or youtube_import.YoutubeImporter._is_clip_name(p.name)))
+
+
+def test_a_long_conversion_never_leaves_the_original_under_its_deliverable_name(
+        tmp_path, ytdlp):
+    """bug-comp-ytdl-1 (2026-09-24). While ffmpeg re-encodes, the VP9
+    original used to sit as `<title> [id].mp4`: after 120 s (lane A's
+    --min-age, the importer's settle age) it was uploaded -- permanently, lane
+    A is --ignore-existing -- and filed into Resolve. Nothing the fleet can
+    see may be in the folder for the whole conversion, however long it runs."""
+    tools = FakeTools(ytdlp, probe=_probe(vcodec="vp9", acodec="opus"))
+    deps, fleet = _deps_with_tools(tmp_path, ytdlp, tools)
+    outdir = outdir_for(tmp_path)
+    seen: dict = {}
+    real_call = tools.__call__
+
+    def watching(argv, timeout, on_spawn=None, on_line=None):
+        if os.path.basename(str(argv[0])).lower().startswith("ffmpeg"):
+            # the moment the re-encode starts; age the whole folder past every
+            # 120 s gate, as a long conversion does
+            old = time.time() - 3600
+            for p in outdir.iterdir():
+                os.utime(p, (old, old))
+            seen["during"] = _visible_during_conversion(outdir)
+            seen["deliverable"] = (
+                outdir / f"Some Channel - A clip [{VID1}].mp4").exists()
+        return real_call(argv, timeout, on_spawn, on_line)
+
+    deps.run = watching
+    job = run_job(deps)
+
+    assert seen["during"] == [], seen
+    assert seen["deliverable"] is False
+    clip = outdir / f"Some Channel - A clip [{VID1}].mp4"
+    assert clip.read_bytes() == b"converted bytes"
+    assert not list(outdir.glob("*.source.editready.*"))
+    assert (job.done, job.failed) == (1, 0)
+
+
+def test_a_stop_mid_conversion_leaves_no_convert_needed_clip_behind(tmp_path, ytdlp):
+    """The same staging closes bug-comp-ytdl-2's shape: a [ STOP ] or tray
+    Quit during the re-encode used to leave the undecodable original under
+    the deliverable name for the importer and lane A. It is swept instead;
+    the server re-downloads and converts it."""
+    tools = FakeTools(ytdlp, probe=_probe(vcodec="vp9"))
+    deps, fleet = _deps_with_tools(tmp_path, ytdlp, tools)
+    job_ref: dict = {}
+    real_call = tools.__call__
+
+    def stopping(argv, timeout, on_spawn=None, on_line=None):
+        result = real_call(argv, timeout, on_spawn, on_line)
+        if os.path.basename(str(argv[0])).lower().startswith("ffmpeg"):
+            job_ref["job"]._lease_lost.set()
+        return result
+
+    deps.run = stopping
+    job = ex.DownloadJob(7, deps)
+    job_ref["job"] = job
+    job.run()
+
+    outdir = outdir_for(tmp_path)
+    assert _visible_during_conversion(outdir) == []
+    assert not list(outdir.glob("*.source.editready.*"))
+    assert fleet.state_sequence == [(VID1, "downloading")]
+
+
+def test_a_stop_during_the_probe_leaves_no_unchecked_clip_behind(tmp_path, ytdlp):
+    """bug-comp-ytdl-1 review (2026-09-24): the residual window before the
+    staging. A stop that lands while ffprobe runs returned the download under
+    its deliverable name, which _cleanup_current's sweep never touches."""
+    tools = FakeTools(ytdlp, probe=_probe(vcodec="vp9"))
+    deps, fleet = _deps_with_tools(tmp_path, ytdlp, tools)
+    job_ref: dict = {}
+    real_call = tools.__call__
+
+    def stopping(argv, timeout, on_spawn=None, on_line=None):
+        result = real_call(argv, timeout, on_spawn, on_line)
+        if os.path.basename(str(argv[0])).lower().startswith("ffprobe"):
+            job_ref["job"]._lease_lost.set()
+        return result
+
+    deps.run = stopping
+    job = ex.DownloadJob(7, deps)
+    job_ref["job"] = job
+    job.run()
+
+    outdir = outdir_for(tmp_path)
+    assert _visible_during_conversion(outdir) == []
+    assert not list(outdir.glob("*.source.editready.*"))
+    assert fleet.state_sequence == [(VID1, "downloading")]
+
+
+def test_a_held_staged_original_is_retried_then_named_on_the_row(tmp_path, ytdlp):
+    """bug-comp-ytdl-1 round 2 (2026-09-25). A successful conversion whose
+    staged original is held open (a thumbnailer, an AV scan, a local proxy
+    encode) used to log "swept on the next attempt", but a clip that
+    succeeded has no next attempt here: the full-size copy stayed silently.
+    A transient hold is waited out; a lasting one is named on the clip row."""
+    tools = FakeTools(ytdlp, probe=_probe(vcodec="vp9"))
+    deps, fleet = _deps_with_tools(tmp_path, ytdlp, tools)
+    pauses: list = []
+    deps.sleep = pauses.append
+    real_remove = os.remove
+
+    def always_held(path):
+        if str(path).endswith(".source.editready.mp4"):
+            raise PermissionError("The process cannot access the file")
+        return real_remove(path)
+
+    ex.os.remove = always_held
+    try:
+        job = run_job(deps)
+    finally:
+        ex.os.remove = real_remove
+
+    outdir = outdir_for(tmp_path)
+    staged = outdir / f"Some Channel - A clip [{VID1}].source.editready.mp4"
+    assert staged.exists()
+    assert (outdir / f"Some Channel - A clip [{VID1}].mp4").read_bytes() == b"converted bytes"
+    note = fleet.body_for(VID1, "done").get("note") or ""
+    assert staged.name in note and "syncs nowhere" in note
+    assert len(pauses) == ex.DownloadJob.STAGED_REMOVE_TRIES - 1
+    assert "—" not in note
+    assert (job.done, job.failed) == (1, 0)
+
+
+def test_a_briefly_held_staged_original_is_still_removed(tmp_path, ytdlp):
+    tools = FakeTools(ytdlp, probe=_probe(vcodec="vp9"))
+    deps, fleet = _deps_with_tools(tmp_path, ytdlp, tools)
+    deps.sleep = lambda s: None
+    real_remove = os.remove
+    refused = {"n": 0}
+
+    def held_once(path):
+        if str(path).endswith(".source.editready.mp4") and refused["n"] == 0:
+            refused["n"] += 1
+            raise PermissionError("The process cannot access the file")
+        return real_remove(path)
+
+    ex.os.remove = held_once
+    try:
+        run_job(deps)
+    finally:
+        ex.os.remove = real_remove
+
+    outdir = outdir_for(tmp_path)
+    assert refused["n"] == 1
+    assert not list(outdir.glob("*.source.editready.*"))
+    assert fleet.body_for(VID1, "done").get("note") in (None, "")
+
+
+def test_a_failed_conversion_still_disowns_the_original_under_its_own_name(
+        tmp_path, ytdlp):
+    """The staged original goes back under its name before _fail_clip, so
+    YTDL-3's `.failed` evidence is kept exactly as before (a sweepable name
+    would have been deleted instead)."""
+    tools = FakeTools(ytdlp, probe=_probe(vcodec="vp9"), ffmpeg_rc=1)
+    deps, fleet = _deps_with_tools(tmp_path, ytdlp, tools)
+
+    run_job(deps)
+
+    outdir = outdir_for(tmp_path)
+    assert [p.name for p in outdir.glob("*.failed")] == [
+        f"Some Channel - A clip [{VID1}].mp4.failed"]
+    assert not list(outdir.glob("*.editready.*"))
 
 
 def test_the_snapshot_carries_the_phase(tmp_path):

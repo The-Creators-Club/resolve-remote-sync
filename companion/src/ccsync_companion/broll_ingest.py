@@ -66,6 +66,10 @@ from . import upgrade as upgrade_mod
 
 log = logging.getLogger("ccsync.brollingest")
 
+# "No candidate was handed in" for _item_from_manifest, distinct from None
+# ("matched, and this machine holds nothing for the row").
+_UNMATCHED = object()
+
 
 class _KindLog:
     """`log`, with the kind stamped on every line.
@@ -1797,8 +1801,7 @@ class BrollIngestor:
             return 503, {"ok": False, "message": why, "reason": "tier_unfit"}
         self._clear_warning()
 
-        items = [self._item_from_manifest(entry, staging)
-                 for entry in parsed.get("items") or []]
+        items = self._items_from_manifest(parsed.get("items") or [], staging)
         if not staging_id and items and not any(i.get("local_path") for i in items):
             # comp-broll-music-1 (2026-09-11b): a claim that names no staging
             # id builds every item with `local_path: ""`, and `_crunch_item`
@@ -1888,17 +1891,43 @@ class BrollIngestor:
                         return str(sid)
         return ""
 
-    def _item_from_manifest(self, entry: dict, staging: Optional[dict]) -> dict:
-        """One manifest row plus whatever this machine knows about the file."""
-        local_path = ""
-        thumb = ""
-        items = (staging or {}).get("items") or {}
-        for candidate in items.values():
-            if (candidate.get("name") == entry.get("orig_name")
-                    and candidate.get("rel_dir", "") == (entry.get("rel_dir") or "")):
-                local_path = str(candidate.get("path") or "")
-                thumb = str(candidate.get("thumb") or "")
-                break
+    def _items_from_manifest(self, entries: list, staging: Optional[dict]) -> list:
+        """Every manifest row, each paired with AT MOST one staged file.
+
+        bug-comp-broll-1 (2026-09-24): rows used to be paired one at a time,
+        by (name, rel_dir), first match wins. Two cards dropped one after the
+        other both hold `C0001.MP4` at the same rel_dir, the page never
+        dedupes names, and the claim manifest carries no local_id -- so BOTH
+        rows got card A's staged path. Card A was indexed and uploaded under
+        `C0001` and `C0001_2` (the second row still carrying card B's hash),
+        card B was never indexed, and retention later pruned its staged copy.
+        Now the whole manifest is matched at once (match_manifest_rows): each
+        staged file is used once, by the strongest evidence first.
+
+        A subclass that still pairs row by row with its own
+        `_item_from_manifest` (music_ingest, whose override matches by name
+        alone and does not take a candidate) keeps exactly that until it is
+        converted: this matcher's rel_dir and hash keys are b-roll's.
+        """
+        if type(self)._item_from_manifest is not BrollIngestor._item_from_manifest:
+            return [self._item_from_manifest(entry, staging) for entry in entries]
+        entries = [e for e in entries if isinstance(e, dict)]
+        matched = match_manifest_rows(entries, (staging or {}).get("items") or {})
+        return [self._item_from_manifest(entry, staging, candidate=candidate)
+                for entry, candidate in zip(entries, matched)]
+
+    def _item_from_manifest(self, entry: dict, staging: Optional[dict],
+                            candidate: Any = _UNMATCHED) -> dict:
+        """One manifest row plus whatever this machine knows about the file.
+
+        `candidate` is the staged entry _items_from_manifest paired it with
+        (None: nothing on this machine). Called without one, the row is
+        matched on its own, which can only be right for a manifest of one."""
+        if candidate is _UNMATCHED:
+            candidate = match_manifest_rows(
+                [entry], (staging or {}).get("items") or {})[0]
+        local_path = str((candidate or {}).get("path") or "")
+        thumb = str((candidate or {}).get("thumb") or "")
         rel_path = entry.get("rel_path") or ""
         return {
             "uid": entry.get("uid"), "video_id": entry.get("video_id"),
@@ -3918,6 +3947,74 @@ def _safe_id(value: Any) -> bool:
 def _safe_uid(value: Any) -> bool:
     text = str(value or "")
     return len(text) == 32 and all(c in "0123456789abcdef" for c in text)
+
+
+def match_manifest_rows(entries: list, staged: Any) -> list:
+    """-> one staged entry (or None) per manifest row, each used at most once.
+
+    bug-comp-broll-1 (2026-09-24). The claim manifest names a clip by
+    (orig_name, rel_dir, size_bytes, hash) and nothing else -- no local_id --
+    and one drop can hold two different clips with the same name and rel_dir
+    (two camera cards, `PRIVATE/M4ROOT/CLIP/C0001.MP4` on both). Three passes
+    over the WHOLE manifest, strongest evidence first, so a weak match can
+    never take a file a later row would have claimed by its bytes:
+
+      1. the content hash, when both sides have one (the page's hash IS this
+         machine's hash of that staged file, relayed; equal means same bytes);
+      2. name + rel_dir + size, when both sides know the size;
+      3. name + rel_dir -- the old key, now consuming.
+
+    A candidate whose hash is known and DIFFERS from a row's known hash is
+    never paired with that row at any tier: it is provably another file, and
+    pairing it is exactly the silent wrong-footage outcome. Rows are taken in
+    manifest `ord` order and candidates in staging `ord` order, so a claim
+    re-issued after a restart pairs identically.
+    """
+    pool = [c for c in (staged.values() if isinstance(staged, dict) else staged or [])
+            if isinstance(c, dict)]
+    pool.sort(key=lambda c: (_int_or_none(c.get("ord")) is None,
+                             _int_or_none(c.get("ord")) or 0))
+    rows = sorted(range(len(entries)),
+                  key=lambda i: (_int_or_none(entries[i].get("ord")) is None,
+                                 _int_or_none(entries[i].get("ord")) or 0, i))
+    taken: set[int] = set()
+    result: list = [None] * len(entries)
+
+    def place(key) -> None:
+        for i in rows:
+            if result[i] is not None:
+                continue
+            entry = entries[i]
+            for index, candidate in enumerate(pool):
+                if index in taken or not _hash_compatible(entry, candidate):
+                    continue
+                if key(entry, candidate):
+                    taken.add(index)
+                    result[i] = candidate
+                    break
+
+    def same_place(entry, candidate) -> bool:
+        return (candidate.get("name") == entry.get("orig_name")
+                and (candidate.get("rel_dir") or "") == (entry.get("rel_dir") or ""))
+
+    def same_hash(entry, candidate) -> bool:
+        a, b = entry.get("hash"), candidate.get("hash")
+        return bool(a) and bool(b) and str(a) == str(b)
+
+    def same_size(entry, candidate) -> bool:
+        a = _int_or_none(entry.get("size_bytes"))
+        b = _int_or_none(candidate.get("size"))
+        return a is not None and b is not None and a == b and same_place(entry, candidate)
+
+    place(same_hash)
+    place(same_size)
+    place(same_place)
+    return result
+
+
+def _hash_compatible(entry: dict, candidate: dict) -> bool:
+    a, b = entry.get("hash"), candidate.get("hash")
+    return not a or not b or str(a) == str(b)
 
 
 def _clean_local_id(value: Any, index: int) -> str:

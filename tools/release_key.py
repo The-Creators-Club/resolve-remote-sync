@@ -10,6 +10,8 @@ tools/sign_release.py ever reads it, on the release rig, at publish time.
 
     python tools/release_key.py new         # create it (refuses to clobber)
     python tools/release_key.py pubkey      # print the public half + its id
+    python tools/release_key.py trusted     # every public half this rig's dashboard
+                                            # must trust (a rotation keeps two)
     python tools/release_key.py bake        # write the public half into the
                                             # companion's RELEASE_PUBKEYS
     python tools/release_key.py bake --add  # keep the existing keys (rotation)
@@ -125,10 +127,34 @@ def cmd_new(args) -> int:
     print(f"public key : {pub}")
     print(f"pubkey_id  : {release_pubkey.pubkey_id(pub)}")
     print("")
-    print("Next: python tools/release_key.py bake   (puts the PUBLIC half into")
-    print("      companion/src/ccsync_companion/release_pubkey.py), then rebuild")
-    print("      and ship -- companions only trust keys baked into their own binary.")
-    print("")
+    # logic-release-1 (2026-09-24): the runbook's rotation used to start with
+    # `new --force`, which is THIS branch: the new key lands at the path every
+    # signer reads, so the "overlap" build that followed was signed by a key
+    # the fleet did not trust yet, and the publish refusal then invited the
+    # override. A rotation now generates the new key at a SIDE path, and this
+    # says so at the one moment the wrong order can still be undone.
+    signer = key_path("")      # what sign_release/publish_feed will read
+    if args.force and path == signer:
+        print("THE NEW KEY NOW SIGNS EVERYTHING. If this is a ROTATION, that is the")
+        print("wrong order: the overlap release must be signed by the OLD key. Put it")
+        print(f"back now (move {path.name}.superseded over {path.name}) and follow")
+        print("docs/RELEASE.md \"Rotating\", which makes the new key at a side path.")
+        print("")
+    if path != signer and signer.exists():
+        print("A SIDE key: nothing signs with it yet. For a rotation (docs/RELEASE.md):")
+        print(f"  python tools/release_key.py --path \"{path}\" bake --add")
+        print(f"then ship as usual; {signer} (the OLD key) signs the overlap build.")
+        print("")
+    elif not (args.force and path == signer):
+        # logic-release-1 review (2026-09-24): after the warning above, a
+        # "Next: bake" (no --add) is the stranding step itself, printed as an
+        # instruction to someone who has just been told to undo this. The
+        # one legitimate --force (starting over before anything shipped) is
+        # in the runbook and does not need the prompt.
+        print("Next: python tools/release_key.py bake   (puts the PUBLIC half into")
+        print("      companion/src/ccsync_companion/release_pubkey.py), then rebuild")
+        print("      and ship -- companions only trust keys baked into their own binary.")
+        print("")
     # REL-14 (usability sweep 2026-09-04): the same voice `bake` uses for a
     # replaced key, because this is the same fact seen from the other end.
     # Losing these 32 bytes is unrecoverable for every fleet that exists, and
@@ -152,7 +178,15 @@ def backup_record_path(path: Path) -> Path:
     format is one line of base64 that gets copied to an offline medium and
     read back by read_secret, and a JSON blob in it would break every copy
     anybody has already made."""
-    return path.parent / BACKUP_RECORD_NAME
+    # logic-release-1 review (2026-09-24): the rotation's side key
+    # (`release-next.key`) lives in the same directory as the signing key, and
+    # one shared `backup.json` meant backing up the side key overwrote the
+    # signing key's record with another key's id. The signing key keeps the
+    # plain name (ship.ps1 reads it by that path); any other key file gets its
+    # own `<name>.backup.json`.
+    if path.name == DEFAULT_KEY_PATH.name:
+        return path.parent / BACKUP_RECORD_NAME
+    return path.parent / f"{path.name}.{BACKUP_RECORD_NAME}"
 
 
 def read_backup_record(path: Path) -> dict:
@@ -262,6 +296,53 @@ def cmd_pubkey(args) -> int:
     return 0
 
 
+# The keys a rotation keeps on this rig beside release.key (RELEASE.md,
+# Rotating): the side key of steps 1-2, and the old key step 3 moves aside.
+ROTATION_NEIGHBOURS = ("release-next.key", "release.key.superseded")
+
+
+def trusted_key_paths(signing: Path) -> list[Path]:
+    """release.key first, then whichever rotation neighbours exist beside it.
+
+    logic-release-1 round 2 (2026-09-25): load_secrets.ps1 used to set
+    DASH_RELEASE_PUBKEYS to release.key's public half ONLY, and ship.cmd's
+    dashboard deploy writes that value into the container. So every ship in
+    a rotation's window redeployed THIS studio's dashboard trusting one key:
+    before the switch it could not verify anything the side key signed, and
+    after the switch it stopped trusting the old key the current build, the
+    vendor channel and the OTA code trees are still signed by - the exact
+    state RELEASE.md step 2 exists to prevent. The window is defined by the
+    files on disk, so the trust list is derived from them too, and dropping
+    the old key from the dashboard is moving release.key.superseded off the
+    rig (step 4)."""
+    out = [signing]
+    for name in ROTATION_NEIGHBOURS:
+        cand = signing.parent / name
+        if cand != signing and cand.exists():
+            out.append(cand)
+    return out
+
+
+def cmd_trusted(args) -> int:
+    pubs: list[tuple[Path, str]] = []
+    for path in trusted_key_paths(key_path(args.path)):
+        # An unreadable neighbour is a refusal, not a skip: a trust list
+        # quietly missing one half of a rotation is the stranding it exists
+        # to prevent.
+        pub = base64.b64encode(ed25519.public_key(read_secret(path))).decode("ascii")
+        if pub not in (p for _, p in pubs):
+            pubs.append((path, pub))
+    if args.quiet:
+        print(",".join(p for _, p in pubs))
+        return 0
+    for path, pub in pubs:
+        print(f"{release_pubkey.pubkey_id(pub)}  {path.name}  {pub}")
+    print("")
+    print("DASH_RELEASE_PUBKEYS for this studio's dashboard (load_secrets.ps1 sets it):")
+    print(",".join(p for _, p in pubs))
+    return 0
+
+
 _TUPLE_RE = re.compile(
     r"(RELEASE_PUBKEYS:\s*tuple\[str,\s*\.\.\.\]\s*=\s*\()(.*?)(\n\))",
     re.DOTALL,
@@ -317,6 +398,13 @@ def main(argv: list[str] | None = None) -> int:
     p_pub = sub.add_parser("pubkey", help="print the public half")
     p_pub.add_argument("--quiet", action="store_true", help="just the base64 key")
     p_pub.set_defaults(func=cmd_pubkey)
+
+    p_tr = sub.add_parser(
+        "trusted",
+        help="the public halves the studio dashboard must trust: release.key plus "
+             "release-next.key / release.key.superseded while a rotation is under way")
+    p_tr.add_argument("--quiet", action="store_true", help="just the comma-separated keys")
+    p_tr.set_defaults(func=cmd_trusted)
 
     p_backup = sub.add_parser("backup", help="copy the key somewhere safe (REL-14)")
     p_backup.add_argument("--to", default="",

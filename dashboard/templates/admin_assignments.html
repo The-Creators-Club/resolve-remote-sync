@@ -162,8 +162,15 @@
                  exactly as they are, which is what the confirm says. A plain
                  form, like the topbar's sign-out-everywhere, because the
                  whole grid changes when a row leaves it. #}
+              {# ui-dash-admin-1 (2026-09-24): the label travels in a data-
+                 attribute and is read as a DOM string, never spliced into the
+                 handler's JS source. HTML autoescaping is decoded back before
+                 the handler compiles, so "Editor's Cut" was a SyntaxError (a
+                 null handler, so ARCHIVE went through with no question) and a
+                 crafted folder name ran as script in the admin's session. #}
               <form class="inline-form" method="post" action="/partials/admin/projects/archive"
-                    onsubmit="return window.confirm('Archive {{ p.label }}? {{ tick_count }} editor{{ '' if tick_count == 1 else 's' }} sync it now, and it stops being sent to their computers. Nothing is deleted: the folder and the files stay on the server, and UNARCHIVE puts it back.');">
+                    data-archive-label="{{ p.label }}"
+                    onsubmit="return window.confirm('Archive ' + this.dataset.archiveLabel + '? {{ tick_count | int }} editor{{ '' if tick_count == 1 else 's' }} sync it now, and it stops being sent to their computers. Nothing is deleted: the folder and the files stay on the server, and UNARCHIVE puts it back.');">
                 <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
                 <input type="hidden" name="slug" value="{{ p.slug }}">
                 <input type="hidden" name="archived" value="1">

@@ -262,6 +262,37 @@ def test_appledouble_sidecars_are_skipped(tmp_path):
     assert gap["missing"] == 0 and gap["clips"] == []
 
 
+@pytest.mark.parametrize("name", [
+    "Some Channel - A clip [aaaaaaaaaaa].source.editready.webm",
+    "Some Channel - A clip [aaaaaaaaaaa].editready.mp4",
+    "Some Channel - A clip [aaaaaaaaaaa].original.mp4",
+    "Some Channel - A clip [aaaaaaaaaaa].f137.mp4",
+    "Some Channel - A clip [aaaaaaaaaaa].temp.mp4",
+])
+def test_ytdl_work_files_are_never_queued(name, tmp_path):
+    """bug-comp-ytdl-1 round 2 (2026-09-25): a conversion that outlasts the
+    settle window left its staged source queued as a preview, and its proxy
+    `Proxy/<title> [id].source.editready.mp4` was an orphan lane B fans out
+    to every editor. Lane A never carries a ytdl work name, so it is no gap."""
+    project = _make_project(tmp_path)
+    _clip(project / "Youtube" / "some term" / name, age=600)
+
+    gap = _scan(project)
+    assert gap["missing"] == 0 and gap["clips"] == []
+
+
+def test_a_finished_youtube_clip_beside_its_work_file_is_still_queued(tmp_path):
+    project = _make_project(tmp_path)
+    term = project / "Youtube" / "some term"
+    _clip(term / "Some Channel - A clip [aaaaaaaaaaa].source.editready.webm", age=600)
+    _clip(term / "Some Channel - A clip [bbbbbbbbbbb].mp4", age=600)
+
+    gap = _scan(project)
+    assert gap["missing"] == 1
+    assert [os.path.basename(c["path"]) for c in gap["clips"]] == [
+        "Some Channel - A clip [bbbbbbbbbbb].mp4"]
+
+
 def test_the_settle_window_ignores_a_file_still_landing(tmp_path):
     """A clip mid-copy is a file in flight, not a gap."""
     project = _make_project(tmp_path)

@@ -797,3 +797,128 @@ def test_the_pruner_never_deletes_a_drop_the_base_rig_still_needs(tmp_path):
     assert answer["held"] == 1 and answer["held_names"] == ["Slow Burn.ogg"]
     assert directory.is_dir()
     assert staging_id in ing._staging
+
+
+# ---------------------------------------------------------------------------
+# bug-comp-broll-1, music half (owed-music, 2026-09-25): two tracks with one
+# name in one drop. The claim manifest carries no local_id and the page never
+# dedupes names, so pairing rows to staged files by name, first match wins,
+# gave both rows the first file.
+# ---------------------------------------------------------------------------
+
+def _manifest_row(n, name, size, content_hash=None):
+    return {"uid": f"{n}" * 32, "ord": n, "orig_name": name,
+            "size_bytes": size, "content_hash": content_hash,
+            "duration_s": 185.0, "state": "pending", "duplicate_of": None,
+            "source": "upload", "dest_name": None, "track_id": None,
+            "attempts": 0}
+
+
+def _stage_two(ing, name, sizes, hashes=(None, None)):
+    """Stage two different files both called `name`, the way `prepare` would
+    for a drop of two folders. -> (staging_id, [path of l1, path of l2])."""
+    status, answer = ing.prepare({"items": [
+        {"local_id": f"l{n + 1}", "name": name, "source": "upload",
+         "size": size} for n, size in enumerate(sizes)]})
+    assert status == 202, answer
+    staging_id = answer["staging_id"]
+    paths = []
+    for n, digest in enumerate(hashes):
+        local_id = f"l{n + 1}"
+        path = Path(ing.staging_dir(staging_id)) / f"{local_id}{Path(name).suffix}"
+        path.write_bytes(bytes([65 + n]) * 800)
+        entry = ing._staging[staging_id]["items"][local_id]
+        entry["path"] = str(path)
+        entry["hash"] = digest
+        paths.append(str(path))
+    return staging_id, paths
+
+
+def test_two_tracks_with_one_name_are_two_files_by_size(tmp_path):
+    """On HEAD both rows got l1's path: l1 embedded and uploaded twice, l2
+    never touched."""
+    server = FakeServer(items=[_manifest_row(0, "theme.wav", 4096),
+                               _manifest_row(1, "theme.wav", 8192)])
+    ing = make_ingestor(tmp_path, server=server)
+    # Staged in the other order, so "first staged file with that name" is
+    # wrong for row 0 as well as row 1.
+    status, answer = ing.prepare({"items": [
+        {"local_id": "l1", "name": "theme.wav", "source": "upload", "size": 8192},
+        {"local_id": "l2", "name": "theme.wav", "source": "upload", "size": 4096}]})
+    assert status == 202, answer
+    staging_id = answer["staging_id"]
+    paths = {}
+    for local_id in ("l1", "l2"):
+        path = Path(ing.staging_dir(staging_id)) / f"{local_id}.wav"
+        path.write_bytes(b"x" * 800)
+        ing._staging[staging_id]["items"][local_id]["path"] = str(path)
+        paths[local_id] = str(path)
+
+    status, answer = ing.run("b" * 32, staging_id)
+    assert status == 202, answer
+
+    local = [item["local_path"] for item in ing._batch["items"]]
+    assert local == [paths["l2"], paths["l1"]]
+
+
+def test_two_tracks_with_one_name_and_size_still_get_one_file_each(tmp_path):
+    """Nothing but the name and size to go on: each staged file is still used
+    once, in `ord` order on both sides."""
+    server = FakeServer(items=[_manifest_row(0, "theme.wav", 4096),
+                               _manifest_row(1, "theme.wav", 4096)])
+    ing = make_ingestor(tmp_path, server=server)
+    staging_id, paths = _stage_two(ing, "theme.wav", (4096, 4096))
+
+    status, answer = ing.run("b" * 32, staging_id)
+    assert status == 202, answer
+
+    assert [i["local_path"] for i in ing._batch["items"]] == paths
+
+
+def test_the_content_hash_decides_between_two_identical_names(tmp_path):
+    server = FakeServer(items=[_manifest_row(0, "theme.wav", 4096, "hB"),
+                               _manifest_row(1, "theme.wav", 4096, "hA")])
+    ing = make_ingestor(tmp_path, server=server)
+    staging_id, paths = _stage_two(ing, "theme.wav", (4096, 4096),
+                                   hashes=("hA", "hB"))
+
+    status, answer = ing.run("b" * 32, staging_id)
+    assert status == 202, answer
+
+    assert [i["local_path"] for i in ing._batch["items"]] == paths[::-1]
+
+
+def test_a_reclaimed_transcoded_track_keeps_its_file(tmp_path):
+    """The server overwrites content_hash with the .mp3's digest at status and
+    result, and the staged entry keeps the .ogg's. A re-claim (RETRY FAILED)
+    must still pair the row with its file: a hash that names nothing staged
+    here is no evidence, not a veto."""
+    server = FakeServer(items=[_manifest_row(0, "Slow Burn.ogg", 4096,
+                                             "digest-of-the-mp3")])
+    ing = make_ingestor(tmp_path, server=server)
+    staging_id = stage_one(ing, tmp_path)
+    ing._staging[staging_id]["items"]["l1"]["hash"] = "digest-of-the-ogg"
+
+    status, answer = ing.run("b" * 32, staging_id)
+    assert status == 202, answer
+
+    item, = ing._batch["items"]
+    assert item["local_path"] == ing._staging[staging_id]["items"]["l1"]["path"]
+    # The row's own hash is what the checkpoint carries, as before.
+    assert item["hash"] == "digest-of-the-mp3"
+
+
+def test_both_same_named_tracks_are_crunched_and_uploaded(tmp_path):
+    server = FakeServer(items=[_manifest_row(0, "theme.wav", 4096),
+                               _manifest_row(1, "theme.wav", 8192)])
+    sidecar = FakeSidecar()
+    queue = FakeQueue()
+    ing = make_ingestor(tmp_path, server=server, sidecar=sidecar, queue=queue)
+    staging_id, paths = _stage_two(ing, "theme.wav", (4096, 8192))
+    status, answer = ing.run("b" * 32, staging_id)
+    assert status == 202, answer
+
+    for _ in range(4):
+        ing.tick()
+
+    assert sorted(sidecar.embedded) == sorted(paths)

@@ -5161,6 +5161,35 @@ def clear_machine_update_request(
     )
 
 
+# bug-comp-core-1 (2026-09-25): the companion's `upgrade.ERROR_CRASH_LOOPED`.
+# A revert writes REL-8's own give-up record (attempts 8, this last_error) so
+# that the restored 0.9.77, which knows nothing newer, stops taking the fled
+# build. Every surface that explains `upgrade_last_error` must read this code
+# as "kept crashing and was rolled back", never as a failed download.
+UPGRADE_ERROR_CRASH_LOOPED = "crash-looped"
+
+
+def upgrade_crash_looped(last_error: Any) -> bool:
+    return str(last_error or "").strip() == UPGRADE_ERROR_CRASH_LOOPED
+
+
+def machine_reverted_from(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> str:
+    """The build this machine's crash-loop guard rolled back from, as kept by
+    store_upgrade_state ('' when none, or on a database older than v35).
+
+    bug-comp-core-1 (2026-09-25): read by the upgrade offer, which must not
+    hand a machine the build it fled. SELECT * on purpose, for the reason
+    machines_running_version gives."""
+    row = conn.execute(
+        "SELECT * FROM machine_state WHERE editor_username=? AND machine=?",
+        (editor, machine)).fetchone()
+    if row is None:
+        return ""
+    return str(_row_value(row, "upgrade_reverted_from") or "").strip()
+
+
 def machine_update_request(
     conn: sqlite3.Connection, editor: str, machine: str
 ) -> dict[str, Any] | None:
@@ -5364,6 +5393,28 @@ def store_upgrade_state(
          guard.get("upgrade_last_error"), guard.get("upgrade_last_attempt_at"),
          guard.get("upgrade_reverted_from"), editor, machine),
     )
+    # bug-comp-core-1 (2026-09-25): a revert ANSWERS any standing push of the
+    # build this machine just fled. The push was made before the crash loop,
+    # and a request that outlives it rides every report reply as
+    # `commands.upgrade`, so the restored build (0.9.77 has no crash_looped
+    # gate) reinstalled the build it fled on its first reply. The companion
+    # sends `reverted_from` once per revert, so this runs once per incident;
+    # a push made AFTER it is the admin choosing that build again on purpose,
+    # and `api._upgrade_info` honours that one.
+    fled = str(guard.get("upgrade_reverted_from") or "").strip()
+    if fled:
+        cur = conn.execute(
+            """UPDATE machines
+                  SET update_requested_version=NULL, update_requested_at=NULL,
+                      update_requested_by=NULL, update_requested_from=NULL,
+                      update_requested_withheld=NULL
+                WHERE editor_username=? AND machine=?
+                  AND update_requested_version=?""",
+            (editor, machine, fled))
+        if cur.rowcount > 0:
+            audit(conn, "system", "machine.update_push_withdrawn", machine,
+                  {"editor": editor, "machine": machine, "version": fled,
+                   "reason": "crash-looped and rolled back"})
     # ...and the revert marker takes itself off once this machine is running a
     # build at or above the one it fell back from: the incident is over, and a
     # chip that needs a human to clear it is a chip that stays on the grid for

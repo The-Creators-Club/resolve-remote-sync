@@ -1674,6 +1674,9 @@ class CompanionApp:
         # wait on -- one report the dashboard actually took.
         self._upgrade_attempts: dict[str, Any] = {}
         self._upgrade_reverted_from = ""
+        # bug-comp-core-1 (2026-09-24): log the fled-build refusal once per
+        # version, not on every report the push rides.
+        self._crash_looped_block_logged = ""
         # REL-3: the in-memory twin for a REFUSED offer, which is deliberately
         # not in the ledger above (see _note_upgrade_refusal).
         self._upgrade_refusal_version = ""
@@ -6342,6 +6345,11 @@ class CompanionApp:
         it leaves the lanes down but still walks to _lanes_started."""
         refusal = self._lanes_refusal()
         gate = refusal[0] if refusal else ""
+        # bug-comp-app-1 (2026-09-24): ahead of the tray-pause refusal too, so
+        # a machine that is both paused and halted still gets its folders
+        # held. See _reassert_halt_pause; off this thread, see
+        # _reassert_halt_pause_soon.
+        self._reassert_halt_pause_soon()
         if gate == self.LANE_GATE_PAUSED:
             # SYNC-3 (2026-08-11): sign-in must not override the tray's Pause.
             # on_signed_in() gated on _lanes_started and the login gate only,
@@ -6647,6 +6655,30 @@ class CompanionApp:
             if str(record.get("version") or "") == config_mod.VERSION:
                 upgrade_mod.clear_upgrade_attempts(path, config_mod.VERSION)
                 record = upgrade_mod.read_attempts(path)
+            recorded = str(record.get("version") or "").strip()
+            if (recorded
+                    and record.get("last_error") == upgrade_mod.ERROR_CRASH_LOOPED
+                    and upgrade_mod.compare_to_running(recorded, config_mod.VERSION)
+                    == upgrade_mod.VERSION_OLDER):
+                # bug-comp-core-1 round 2 (2026-09-25): the give-up record a
+                # revert writes for the fled build is there for the RESTORED
+                # (older) build's REL-8 gate. Once the machine has moved past
+                # it to a newer build, nothing else clears it (a successful
+                # update writes nothing, and the rule above only matches the
+                # fled version itself), so a healthy machine reported "gave up
+                # on vX x8" for ever: a permanent [ UPDATE FAILED x8 ], an
+                # upgrade_failed alert telling the admin to hand-install the
+                # build that crash-looped, and a false Settings warning. Only
+                # the counters go: `crash_looped` stays and still refuses a
+                # rollback push of vX.
+                upgrade_mod.clear_upgrade_attempts(path, recorded)
+                record = upgrade_mod.read_attempts(path)
+            if upgrade_mod.crash_looped_on(record, config_mod.VERSION):
+                # bug-comp-core-1 (2026-09-24): someone installed the fled
+                # build by hand and it is running. If it loops again the
+                # revert writes the marker again.
+                upgrade_mod.clear_crash_looped(path, config_mod.VERSION)
+                record = upgrade_mod.read_attempts(path)
             self._upgrade_attempts = record
             self._upgrade_reverted_from = str(record.get("reverted_from") or "")
         except Exception:
@@ -6677,6 +6709,23 @@ class CompanionApp:
         minutes for ever."""
         try:
             record = self._upgrade_attempts
+            if upgrade_mod.crash_looped_on(record, wanted):
+                # bug-comp-core-1 (2026-09-24): this machine reverted OFF
+                # `wanted` because it could not stay up. The dashboard keeps
+                # offering it and a standing push rides every report, and the
+                # attempt counters above are empty (the bad build cleared
+                # them by starting), so without this the restored build
+                # reinstalled it on its first report reply -- into a
+                # supervisor with its hourly relaunches already spent. Only a
+                # DIFFERENT version, or a person's own click in the tray,
+                # moves this machine on.
+                if getattr(self, "_crash_looped_block_logged", "") != wanted:
+                    self._crash_looped_block_logged = wanted
+                    log.warning(
+                        "not installing v%s unattended: this machine reverted "
+                        "off it because it kept crashing. A newer build, or "
+                        "Update in the tray, will move it on", wanted)
+                return "crash-looped"
             if upgrade_mod.upgrade_attempts_exhausted(record, wanted):
                 return "given up"
             if not upgrade_mod.upgrade_retry_due(record, wanted):
@@ -7646,7 +7695,28 @@ class CompanionApp:
             log.exception("halt: could not stop the rclone lanes")
         self._lanes_started = False
         self._set_express_paused(True)
-        paused = self._pause_lane_c_folders(True)
+        attempted: set[str] = set()
+        paused = self._pause_lane_c_folders(True, attempted=attempted)
+        # bug-comp-app-1 review (2026-09-24): halt_folder_ids() is the
+        # selection the sequencer has ADOPTED, which is nothing at all in a
+        # process whose sequencer never ran (the EULA gate, a config problem,
+        # nobody signed in). The reporter still runs there, so a fleet halt
+        # arrives on the report reply and paused only the asset libraries
+        # while every project folder kept syncing behind a tray that said
+        # STOPPED. The re-pause reads the cached selection.json as well and
+        # skips what is already paused, so after a pause that did land this
+        # costs one GET. Only with a sequencer that has the lister: the
+        # fallback there is _pause_lane_c_folders again, a second write each.
+        #
+        # bug-comp-app-1 round 2 (2026-09-25): the lister returns every id
+        # unfiltered when Syncthing's folder list cannot be read, which is
+        # every folder the line above just wrote (or just timed out on). On
+        # the reporter thread, against a Syncthing that hangs, that doubled
+        # the fleet halt to N x 30 s + 5 s + N x 30 s. What was attempted
+        # here, written or not, is not attempted again: a write that failed
+        # is the next start's re-pause to retry, off this thread.
+        if getattr(self.sequencer, "halt_folder_ids_to_repause", None) is not None:
+            paused += self._reassert_halt_pause(skip=attempted)
         for lane in self.lanes:
             try:
                 with lane._lock:
@@ -7710,7 +7780,96 @@ class CompanionApp:
             log.exception("halt release: the sequencer could not release lane C "
                           "-- the folders stay paused until the next pass")
 
-    def _pause_lane_c_folders(self, paused: bool) -> int:
+    # bug-comp-app-1 review (2026-09-24): one re-pause in flight at a time,
+    # across start() and every _start_lanes() caller.
+    _HALT_REPAUSE_LOCK = threading.Lock()
+
+    def _reassert_halt_pause_soon(self) -> None:
+        """_reassert_halt_pause on its own daemon thread. Never raises.
+
+        bug-comp-app-1 review (2026-09-24): start() and _start_lanes() are on
+        the startup path, and the tray and the reporter come up after them.
+        Against a Syncthing that hangs rather than refuses, the re-pause is a
+        5 s read plus a 30 s config write per folder, and a halted machine
+        whose tray took minutes to appear is a worse answer than a folder
+        paused a few seconds late. A re-pause already running is not joined
+        by a second one: both would write the same folders."""
+        try:
+            if not self.halt.active:
+                return
+        except Exception:
+            log.debug("halt: could not read the halt latch", exc_info=True)
+            return
+        if self.syncthing_admin is None:
+            return
+        with self._HALT_REPAUSE_LOCK:
+            running = getattr(self, "_halt_repause_thread", None)
+            if running is not None and running.is_alive():
+                return
+            thread = threading.Thread(target=self._reassert_halt_pause,
+                                      name="ccsync-halt-repause", daemon=True)
+            self._halt_repause_thread = thread
+            try:
+                thread.start()
+            except Exception:
+                log.exception("halt: could not start the lane C re-pause")
+
+    def _reassert_halt_pause(self, skip: Optional[set[str]] = None) -> int:
+        """Put every lane C folder back in the halted state when the halt
+        latch is set. Never raises; returns how many folders were written.
+
+        bug-comp-app-1 (2026-09-24): the halt survives a restart (it is read
+        back from disk) but the lanes' refusal was all a restart did about it.
+        Syncthing is its own service and keeps its folders' paused flag, so a
+        folder released by the outgoing process (every build up to 0.9.77
+        released them all in its own shutdown's sequencer.stop()) synced for
+        the whole of the halt behind a tray that said STOPPED. The sequencer
+        names what is not already paused, so a halt that held costs one GET."""
+        try:
+            if not self.halt.active:
+                return 0
+        except Exception:
+            log.debug("halt: could not read the halt latch", exc_info=True)
+            return 0
+        if self.syncthing_admin is None:
+            return 0
+        lister = getattr(self.sequencer, "halt_folder_ids_to_repause", None)
+        if lister is None:
+            return self._pause_lane_c_folders(True)
+        try:
+            folders = lister() or []
+        except Exception:
+            log.exception("halt: could not list the lane C folders to re-pause")
+            if skip is not None:
+                # bug-comp-app-1 round 2 (2026-09-25): the caller has just
+                # attempted exactly what that fallback would write.
+                return 0
+            return self._pause_lane_c_folders(True)
+        written = 0
+        for folder_id in folders:
+            if skip and folder_id in skip:
+                continue
+            # Now off the caller's thread (_reassert_halt_pause_soon), so a
+            # release can land between two writes: a folder paused after
+            # release_for_halt ran would stay paused until the next pass.
+            try:
+                if not self.halt.active:
+                    break
+            except Exception:
+                pass
+            try:
+                self.syncthing_admin.set_folder_paused(folder_id, True)
+                written += 1
+            except Exception:
+                log.warning("halt: could not re-pause Syncthing folder %s",
+                            folder_id, exc_info=True)
+        if written:
+            log.warning("sync is halted: re-paused %d lane C folder(s) that were "
+                        "running", written)
+        return written
+
+    def _pause_lane_c_folders(self, paused: bool,
+                              attempted: Optional[set[str]] = None) -> int:
         """Pause/unpause every lane C folder through Syncthing's REST API.
 
         Lane C is not a process this companion owns -- Syncthing runs as its
@@ -7742,6 +7901,8 @@ class CompanionApp:
             return 0
         written = 0
         for folder_id in folders or []:
+            if attempted is not None:
+                attempted.add(str(folder_id))
             try:
                 self.syncthing_admin.set_folder_paused(folder_id, paused)
                 written += 1
@@ -7770,8 +7931,16 @@ class CompanionApp:
         rollback. site.feature_enabled fails CLOSED: no manifest, an older
         dashboard, an unreadable cache all mean "wait for the click"."""
         try:
-            self._notify_tray(
-                upgrade_mod.offer_toast(info["version"]), site_mod.notify_title())
+            if upgrade_mod.crash_looped_on(self._upgrade_attempts, info.get("version")):
+                # bug-comp-core-1 (2026-09-24): the balloon for the build this
+                # machine just reverted off would sit beside "the last update
+                # kept crashing" and invite the click that restarts the loop.
+                # The tray menu still offers it to someone who means it.
+                log.info("not announcing v%s: this machine reverted off it "
+                         "because it kept crashing", info.get("version"))
+            else:
+                self._notify_tray(
+                    upgrade_mod.offer_toast(info["version"]), site_mod.notify_title())
         except Exception:
             log.exception("could not notify about the available build")
         try:
@@ -8153,7 +8322,18 @@ class CompanionApp:
                     # a perfectly good home here (comp-sync-4, the same
                     # lookup missed from the other end). None on an unmanaged
                     # companion, which keeps the old behaviour.
-                    project_rels=_synced_project_rels(self))
+                    project_rels=_synced_project_rels(self),
+                    # logic-plans-3 (2026-09-24): section 4b bins only what
+                    # the server already holds at the destination, and asks
+                    # through lane A's own remote. Without the listing a
+                    # folder holding originals cannot be triaged and answers
+                    # `retrying`, never "done", because a done move's
+                    # exclusion lapses in a day and lane A then re-uploads
+                    # the whole folder to the path the admin cleared.
+                    server_files=file_moves_mod.rclone_server_files(
+                        str(self.config.get("rclone_path", "rclone") or "rclone"),
+                        str(self.config.get("remote", "") or ""),
+                        str(self.config.get("remote_root", "") or "")))
                 relink_pending = False
                 if ok and paths is not None:
                     matched, relinked = self._relink_moved_result(
@@ -8822,7 +9002,15 @@ class CompanionApp:
                        + (f" (last error: {report['last_error']}"
                           f" at {report['last_attempt_at']})"
                           if report["attempts"] else ""))
-            if report["attempts"] >= upgrade_mod.MAX_UPGRADE_ATTEMPTS:
+            if (report["attempts"] >= upgrade_mod.MAX_UPGRADE_ATTEMPTS
+                    and report["last_error"] == upgrade_mod.ERROR_CRASH_LOOPED):
+                # bug-comp-core-1 (2026-09-25): the revert writes this
+                # give-up record so the restored build stops taking the one
+                # it fled; "failed 8 times" read as a download problem to be
+                # fixed by installing that build by hand.
+                out.append("  GIVEN UP on that build: it kept crashing and "
+                           "was rolled back (do not install it by hand)")
+            elif report["attempts"] >= upgrade_mod.MAX_UPGRADE_ATTEMPTS:
                 out.append("  GIVEN UP on that build: it has failed "
                            f"{report['attempts']} times")
             if report["reverted_from"]:
@@ -9274,6 +9462,11 @@ class CompanionApp:
 
     # -- lifecycle ---------------------------------------------------
     def start(self) -> None:
+        # bug-comp-app-1 (2026-09-24): the three branches below that do not
+        # reach _start_lanes (a config problem, the drive out, nobody signed
+        # in) would otherwise leave a persisted halt's folders as the last
+        # process left them. Syncthing does not wait for any of those gates.
+        self._reassert_halt_pause_soon()
         if self.config_problems:
             # DEL-3: takes precedence over the sign-in gate -- signing in
             # would not fix it, and the lane detail must name the real

@@ -5259,6 +5259,9 @@ def api_push_machine_update(
             detail=f"{version} is not in this channel for {plat or 'that platform'}",
         )
     staged = not bool(_row_value(record, "is_current"))
+    refusal = fled_push_refusal(conn, editor, machine, version)
+    if refusal:
+        raise HTTPException(status_code=409, detail=refusal)
     # DCORE-13: what was already parked, read BEFORE this write overwrites it,
     # so the answer can say "you were already waiting on this one".
     pending_before = bool(db.pending_machine_request(conn, editor, machine)["update"])
@@ -5769,6 +5772,55 @@ def _machine_can_be_offered(
         return True
 
 
+# bug-comp-core-1 (2026-09-25): the reason a machine is not offered the build
+# its crash-loop guard fled. Rides `upgrade_none_reason` (a key every build in
+# the field either reads as a plain sentence or ignores) and the Packages page.
+FLED_BUILD_REASON = ("this computer kept crashing on that build and rolled "
+                     "itself back, so it is not offered again")
+
+# Fable review (2026-09-25): the push that used to be let through for a fled
+# build could never land. The companion's pushed path is gated exactly like
+# auto-update ("crash-looped" on 0.9.78, REL-8's "given up" record on 0.9.77),
+# so the push sat "asked" beside [ KEPT CRASHING, ROLLED BACK ] until it
+# expired, the CR-306 shape. It is refused HERE instead, in words.
+FLED_PUSH_REFUSAL = ("{machine} kept crashing on {version} and rolled itself "
+                     "back, so it will not install that build again, not even "
+                     "from UPDATE NOW. Publish a fixed build and it is offered "
+                     "as usual.")
+
+
+def fled_push_refusal(conn: sqlite3.Connection, editor: str, machine: str,
+                      version: str) -> str:
+    """The sentence refusing a push of the build this machine fled, or ""."""
+    if _fled_here(conn, editor, machine, version):
+        return FLED_PUSH_REFUSAL.format(machine=machine, version=version)
+    return ""
+
+
+def _fled_here(conn: sqlite3.Connection, editor: str, machine: str,
+               version: str) -> bool:
+    """Is `version` the build this machine's crash-loop guard rolled back
+    from? Compared as the string and as the numeric version, so a "+dirty"
+    spelling on either side is still the same bytes. Fails OPEN (False): a
+    read that cannot be made must not take the upgrade channel away."""
+    try:
+        fled = db.machine_reverted_from(conn, editor, machine)
+    except sqlite3.Error:
+        log.exception("could not read the revert marker of %s/%s", editor, machine)
+        return False
+    return _fled_matches(fled, version)
+
+
+def _fled_matches(fled: Any, version: Any) -> bool:
+    fled, version = str(fled or "").strip(), str(version or "").strip()
+    if not fled or not version:
+        return False
+    if fled == version:
+        return True
+    a, b = _version_tuple(fled), _version_tuple(version)
+    return bool(a and b and a == b)
+
+
 def _upgrade_info(
     conn: sqlite3.Connection, platform: str | None, running: str | None,
     arch: str | None = None, editor: str | None = None,
@@ -5811,11 +5863,28 @@ def _upgrade_info(
     # over the running companion exe. get_package below is asked for the same
     # kind for the same reason.
     current = db.get_current_package(conn, plat, kind="companion")
+    pushed_here = False
     if editor and machine:
         targeted = targeted_staged_package(conn, plat, editor, machine)
         if targeted is not None:
             current = targeted
+            pushed_here = True
     if current is None or not running or running == current["version"]:
+        return None
+    if editor and machine and not pushed_here and _fled_here(
+            conn, editor, machine, str(current["version"] or "")):
+        # bug-comp-core-1 (2026-09-25): this machine installed this build,
+        # crashed on start three times, and rolled itself back. Companion
+        # 0.9.77 and older have no gate against taking it again, and the
+        # first release carrying the companion-side gate is exactly the build
+        # that would be fleeing, so offering it here restarts the loop on the
+        # restored build's first report reply. The refusal lasts as long as
+        # the dashboard keeps `upgrade_reverted_from` (store_upgrade_state:
+        # until the machine runs that build or newer), ends for a newer build
+        # (a different version is not refused), and yields to a push an admin
+        # makes AFTER the revert (the revert withdrew any earlier one).
+        if withheld is not None:
+            withheld.append(FLED_BUILD_REASON)
         return None
     # Three reasons to offer NOTHING rather than this build (resilience sweep
     # 2026-08-28). Each is silent to the companion on purpose -- there is no
@@ -6023,6 +6092,13 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
             # identically to one that had not reported yet. None is "not
             # refusing", never "we could not tell".
             "refused": refusals.get((e["editor_username"], e["machine"])),
+            # bug-comp-core-1 (2026-09-25): the current build is the one this
+            # machine crashed on and rolled back from, so `_upgrade_info` is
+            # not offering it here. Without this the row looked like any
+            # machine that had simply not taken the update yet.
+            "fled_current": _fled_matches(
+                (e.get("guard") or {}).get("upgrade_reverted_from"),
+                current.get(str(e.get("platform") or "windows").strip().lower(), "")),
         }
         for e in editors["editors"]
         if e["companion_outdated"]

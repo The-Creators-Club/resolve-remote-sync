@@ -421,19 +421,52 @@ def ensure_edit_ready(filepath: str, edit_codec: str = "h264",
                   + (f"/{acodec}" if acodec else "") + ")")
 
     tmp = f"{stem}.editready{out_ext}"
+    # [vendor] bug-comp-ytdl-1 (2026-09-24): off the deliverable name for as
+    # long as ffmpeg runs. A re-encode longer than 120 s left the VP9 original
+    # sitting under `<title> [id].<ext>` in the canonical tree, unchanging, so
+    # the base rig's importer (120 s settle, over the share) filed it into the
+    # Resolve pool, and the swap below then delivered a SECOND clip beside it
+    # (`.original` or `.converted [id]`). The staged name's stem ends in
+    # `.editready`, which worker._INTERMEDIATE_STEM, the importer and lane A's
+    # `*.editready.*` already refuse, so no rule list changes; it is the same
+    # name the companion's executor stages under (ytdl_executor.
+    # staged_source_name). A rename that fails converts in place, the old
+    # behaviour and no worse than it.
+    staged = staged_source_name(filepath)
+    try:
+        os.replace(filepath, staged)
+    except OSError:
+        staged = filepath
+
+    def unstage():
+        # Back under its own name before any failure outcome: "kept as
+        # downloaded" must deliver it, and the worker's _disown_output skips a
+        # sweepable name, so a staged original would lose the `.failed`
+        # evidence YTDL-3 keeps and be deleted by the next _clear_partials.
+        if staged != filepath:
+            try:
+                os.replace(staged, filepath)
+            except OSError:
+                pass
+
     cmd = ([_tool("ffmpeg", ffmpeg_location), "-y", "-hide_banner", "-loglevel", "error",
-            "-i", filepath, "-map", "0:v:0", "-map", "0:a:0?"]
+            "-i", staged, "-map", "0:v:0", "-map", "0:a:0?"]
            + vargs + aargs + ["-map_metadata", "0"] + muxargs + [tmp])
     try:
         res = subprocess.run(cmd, capture_output=True, text=True,
                              encoding="utf-8", errors="replace", **_NO_WINDOW)
     except FileNotFoundError:
+        unstage()
         return filepath  # no ffmpeg available — keep what we have
+    except Exception:
+        unstage()
+        raise
     if res.returncode != 0 or not os.path.exists(tmp):
         try:
             os.remove(tmp)
         except OSError:
             pass
+        unstage()
         if probe_failed:
             # YTDL-22 (2026-08-11): this conversion was a guess (ffprobe never
             # said the file needed one, and an audio-only download makes
@@ -446,7 +479,30 @@ def ensure_edit_ready(filepath: str, edit_codec: str = "h264",
         raise RuntimeError("Edit-ready conversion failed: "
                            + (res.stderr or "").strip()[-500:])
 
-    return _swap_in(tmp, stem + out_ext, filepath, on_status, notes)
+    if staged == filepath:
+        return _swap_in(tmp, stem + out_ext, filepath, on_status, notes)
+    # The staged original is nobody's clip and nothing has it open, so it is
+    # simply removed (a failure leaves it for _clear_partials / _sweep_stale,
+    # both of which read it as sweepable); _swap_in keeps its locked-file
+    # handling for whatever may already sit at the deliverable name.
+    try:
+        os.remove(staged)
+    except OSError:
+        pass
+    final = stem + out_ext
+    return _swap_in(tmp, final, final, on_status, notes)
+
+
+# [vendor] bug-comp-ytdl-1 (2026-09-24): the pre-conversion original's name
+# while ffmpeg reads it. Same spelling as the companion's
+# ytdl_executor.SOURCE_STAGING_SUFFIX.
+SOURCE_STAGING_SUFFIX = ".source.editready"
+
+
+def staged_source_name(filepath: str) -> str:
+    """`<stem>.source.editready.<ext>` for a landed `<stem>.<ext>`."""
+    path = Path(filepath)
+    return str(path.with_suffix("")) + SOURCE_STAGING_SUFFIX + path.suffix
 
 
 # [vendor] YT-6 (resilience sweep 2026-08-28). The fallback deliverable's name.

@@ -1,0 +1,500 @@
+[
+ {
+  "group": "comp-halt-repath",
+  "built": {
+   "fixes": [
+    {
+     "id": "bug-comp-app-1",
+     "fixed": true,
+     "mechanism": "Sequencer.stop() and pause() both end in _unpause_all(self._last_selection), and _unpause_all never checked _is_halted(). So the first stop or pause after halt_all_sync released every selected project folder while the halt was still active. That covers shutdown, tray Quit, the self-upgrade hand-off and the Resolve-exit restart (via _stop_lanes), and tray Pause and the drive being pulled (via _root_pause_lanes). On restart the persisted latch only stopped the lanes from starting and re-paused nothing. Builds up to 0.9.77 released the folders in their own shutdown, and a fresh sequencer knows no selection, so halt_folder_ids() alone could not name the project folders.",
+     "fix": "sync/sequencer.py:\n- _unpause_all returns early when _is_halted() is true, and 'cannot tell' counts as halted. release_for_halt still works because release_halt clears the latch first.\n- New halt_folder_ids_to_repause(): halt_folder_ids() plus the ids from the cached selection.json (read only; it does not become the known selection), filtered by one GET of the folder list to folders that are configured and still running. If that read fails, it returns every id.\n\napp.py:\n- New _reassert_halt_pause(), which never raises. It is called at the top of _start_lanes (ahead of the tray-pause gate) and at the top of start(), because start()'s config, drive-absent and login branches never reach _start_lanes.",
+     "files": [
+      "companion/src/ccsync_companion/sync/sequencer.py",
+      "companion/src/ccsync_companion/app.py",
+      "companion/tests/test_halt_holds_lane_c.py"
+     ],
+     "regression_test": "companion/tests/test_halt_holds_lane_c.py, with a real Sequencer and a fake admin. The regression tests:\n- test_stop_and_pause_leave_every_folder_paused_while_halted\n- test_a_predicate_that_cannot_answer_keeps_the_folders_paused\n- test_the_halt_holds_through_the_apps_own_stop_paths\n- test_a_restart_with_a_persisted_halt_re_pauses_the_folders\n\ntest_no_halt_means_no_re_pause is a supporting test. All 5 failed when run against git show HEAD: copies of app.py, sequencer.py and repath.py in a scratch package, with the module path checked first. All 5 pass on the fix.",
+     "tests_run": "companion .venv pytest on test_app, test_app_contract, test_borrowed_folders, test_bug_hunt_2026_09_11_comp_{app,sync,ui}, test_bug_hunt_2026_09_11b_comp_{app,ui}, test_file_moves, test_halt_holds_lane_c, test_rclone_express, test_rclone_lane, test_repath, test_repath_blocked_turn, test_selection, test_sequencer, test_sequencer_perf, test_sync_halt, test_sync_sequencer_policy, test_syncthing_lane and test_upload_only: 1164 passed.",
+     "fails_on_head": "Ran against HEAD copies: stop and pause released [('s-a', False), ('s-b', False)]; the restart test got pause_calls == [] (nothing re-paused); _reassert_halt_pause did not exist.",
+     "owed": "none"
+    },
+    {
+     "id": "bug-comp-rclone-1",
+     "fixed": true,
+     "mechanism": "After a failed move, _process_project still ran the structure clone and lane B at the NEW rel, which created Projects/<new rel> and filled its Proxy dirs. On the next pass _move_dir saw a live source and an existing target, took the 'conflict, re-point anyway' branch (True for any existing target), and reconcile re-pointed Syncthing at the proxy-only directory. It also unpaused it, recorded a false 'moved your copy' and relinked Resolve to paths that do not exist. The second route is also real: the EXDEV fallback shutil.move copies straight into the target, so a failed copy left a partial project there. That partial copy includes .stfolder (copied first), which makes it look like the real folder.",
+     "fix": "sync/sequencer.py:\n- _process_project skips the whole turn (clone, lanes A/B, borrowed runs, lane C) when the per-project reconcile did not repath the slug and the repath ledger has a live blocked event. New helper _repath_blocked(): a ledger read that raises counts as not blocked.\n\nsync/repath.py:\n- _move_dir's conflict branch re-points only when the target holds .stfolder. A target made only of empty directories is pruned with os.rmdir (it cannot lose a file) and the move then goes ahead. Any other occupied target is refused, with a new target_exists_note sentence (no em dash).\n- reconcile clears a blocked event when the folder is no longer configured locally, so a stale event cannot skip the turn that contains the accept flow.\n- The EXDEV fallback is now _copy_then_swap: it copies to <dst>.ccsync-moving, renames that onto the target only once whole, then removes the source. A leftover staging dir is discarded at the start of the next attempt, which is safe because the source is removed only after the rename.",
+     "files": [
+      "companion/src/ccsync_companion/sync/repath.py",
+      "companion/src/ccsync_companion/sync/sequencer.py",
+      "companion/tests/test_repath.py",
+      "companion/tests/test_repath_blocked_turn.py"
+     ],
+     "regression_test": "Regression tests:\n- companion/tests/test_repath_blocked_turn.py::test_a_blocked_move_is_not_finished_by_the_lanes_next_pass (real Sequencer and ProjectRepather; the lane B double writes a proxy the way rclone would)\n- test_repath.py::test_a_target_the_lanes_built_is_not_taken_for_the_project\n- test_repath.py::test_an_empty_skeleton_at_the_target_is_cleared_and_the_move_made\n- test_repath.py::test_a_failed_cross_volume_copy_leaves_nothing_at_the_target\n\nAll four failed against the HEAD copies in the scratch package and pass on the fix. test_a_blocked_event_for_a_folder_no_longer_here_does_not_hold_the_turn is a supporting test. The existing test_target_exists_conflict_skips_move_but_repoints now puts .stfolder in the target.",
+     "tests_run": "Same 21-file companion run: 1164 passed. After the folder-None clear, test_repath_blocked_turn, test_repath, test_sequencer and test_file_moves were re-run: 182 passed.",
+     "fails_on_head": "Ran against HEAD copies:\n- lane B ran at the new path on pass 1 and created New/Proxy\n- the lanes-built target returned ['s1'] and was re-pointed\n- the empty skeleton was re-pointed without the move\n- the partial EXDEV copy was left at New",
+     "owed": "none. For the KNOWN_BUGS entry: a blocked project now does no lane work until its move lands, and a target that holds files but no .stfolder needs a human to move it away (the new sentence says so)."
+    }
+   ]
+  },
+  "review": {
+   "verdicts": [
+    {
+     "id": "bug-comp-app-1",
+     "verdict": "PROBLEM",
+     "problems": "The core fix holds. `_unpause_all` now returns early when `_is_halted()` (sequencer.py ~1866), and that one guard covers stop(), pause(), the between-passes sweep and _startup_unpause. release_halt clears the latch before release_for_halt, so lifting a halt still works. I ran all 5 new tests against `git show HEAD:` copies of app.py, sequencer.py and repath.py: all 5 fail there. Group suites pass on the fix (610 passed across test_halt_holds_lane_c, test_repath_blocked_turn, test_repath, test_sequencer, test_sync_halt, test_file_moves and test_app). One entry point with the same shape is still open.\n\n1. (Must fix) halt_all_sync itself still pauses nothing but the asset libraries in a process whose sequencer has never run. app.py:7661 halt_all_sync -> _pause_lane_c_folders(True) -> sequencer.halt_folder_ids() -> expected_folder_slugs(), which is empty until a pass or _startup_unpause has adopted a selection. This is the \"fresh sequencer knows no selection\" problem the builder found, but it was only fixed for _reassert_halt_pause. The same problem hits the engagement itself.\n   - Reachable: under the EULA gate (a EULA version bump sends every editor back through the wizard) and under the config-problem gate. In both the reporter still runs, so a FLEET halt arrives on the report reply, while the sequencer never started. A tray halt pressed in those states does the same.\n   - Result: every project folder keeps syncing through the halt while the tray says STOPPED. Nothing re-pauses until a later _start_lanes or restart.\n   - Probe (scratchpad probe1/test_probe_halt.py; real Sequencer, fake admin, cached selection s-a/s-b, sequencer never run): `app.halt_all_sync('fleet halt')` left paused_state {'s-a': False, 's-b': False}, and the log said \"0 lane C folder(s) paused\".\n   - The new test_a_restart_with_a_persisted_halt_re_pauses_the_folders hides this: it calls first.halt_all_sync() on exactly this kind of never-run app and then overwrites admin.paused_state by hand.\n   - Fix: in halt_all_sync, after _pause_lane_c_folders(True), also call self._reassert_halt_pause(). The latch is already engaged, and that path reads the cached selection.json. Or have _pause_lane_c_folders(True) use the halt_folder_ids_to_repause list. Add a test that engages the halt on an app whose sequencer has not run.\n\n2. (Minor, safe direction) After a restart onto a halted machine, lifting the halt goes through release_for_halt -> _unpause_all(self._last_selection). `_last_selection` is empty because the sequencer never ran, so the folders re-paused at start() are released only when a later sequencer.start() runs _startup_unpause.\n   - If _start_lanes then refuses, they stay paused until that gate clears. For example, the editor pressed tray Pause during the halt (probe: after release_halt with _paused=True, both folders are still paused).\n   - That contradicts \"Pause deliberately leaves lane C running\".\n   - Fix: release_for_halt could fall back to the cached selection, going through _verify_startup_ignores, when _last_selection is empty.\n\n3. (Note) start() now calls _reassert_halt_pause synchronously before the tray and reporter come up. With a hung (not refusing) Syncthing and a halt latched, that is one 5 s read plus N x 30 s config writes on the startup path. The shape is the same as halt_all_sync, but it is new for startup. Consider moving it off the startup thread.\n\nNo wire change and no version-skew issue: this is companion-only."
+    },
+    {
+     "id": "bug-comp-rclone-1",
+     "verdict": "SOUND",
+     "problems": "Verified.\n\nHow the fix closes the finding:\n- _process_project (sequencer.py ~2143) skips the whole turn when the slug was not repathed and ledger.blocked(slug) is true. That covers the clone, lanes A/B, borrowed runs and lane C, so nothing is created at the new rel before the move.\n- The finding's dangerous outcome (re-point, unpause, a false \"moved your copy\") is now also refused inside _move_dir (repath.py ~663) for ANY entry point that creates the target. A target without .stfolder that holds files is refused with target_exists_note (no em dash). An all-empty skeleton is pruned with os.rmdir only, which cannot lose a file. That second guard covers routes other than the sequencer turn, such as consolidate running lane B directly (bug-comp-app-2).\n- The EXDEV fallback now stages to <dst>.ccsync-moving and renames onto the target only once the copy is whole. The source is removed only after that rename, so discarding a leftover staging dir at the start of the next attempt is safe.\n\nNeighbours checked:\n- In managed mode, express upload does not pick up the staging dir. _project_rel_for_path matches known rels segment-wise, so 'New.ccsync-moving' is not in scope. Legacy whole-tree mode has no repather.\n- Borrowed includes whose lender is selected are 'covered' and skipped, so no borrower turn recreates a blocked lender's new path.\n- A stale blocked event is cleared when the folder is gone (the new folder-None branch) and when the folder is at the expected path (existing comp-sync-5). Syncthing unreachable or a failed pause only skips the turn for that pass, which is fine while the move is pending.\n\nTests: all four regression tests fail against the HEAD copies of repath.py and sequencer.py, and so does the supporting test. All pass on the fix.\n\nResidual behaviours (acceptable, and the ledger documents them):\n- A machine that an older build already left with a proxy-filled New/ now stays blocked with the target_exists sentence until a human moves that folder.\n- A leftover partial shutil.move copy from 0.9.77 that carries .stfolder can still be re-pointed.\n- An _is_contained failure 'continue's without clearing an old blocked event, so that project's turn stays skipped. This is an edge case and already an error state.\n\nCompanion-only, free-text note, no skew."
+    }
+   ]
+  },
+  "rework": {
+   "fixes": [
+    {
+     "id": "bug-comp-app-1",
+     "fixed": true,
+     "mechanism": "Sequencer.stop() and pause() both ended in _unpause_all(self._last_selection), which never checked _is_halted(). Any stop or pause after halt_all_sync (tray Quit, the self-upgrade hand-off, the Resolve-exit restart, tray Pause, the drive guard) therefore released every selected project folder while halt.active was still true. On restart the persisted latch only refused the lanes. Syncthing keeps its own paused flags, so folders the old build released at shutdown kept syncing for the rest of the halt. The review round found three more problems, all taken. (1) halt_all_sync itself paused only the asset libraries when the sequencer had never run: under the EULA gate, under a config problem, or with nobody signed in, a fleet halt still arrives on the report reply, but halt_folder_ids() names no project at that point. (2) release_for_halt released _last_selection, which is empty after a restart, so the folders re-paused at startup stayed paused while the tray's Pause refused the lanes. (3) The re-pause ran synchronously on the startup path, ahead of the tray and the reporter.",
+     "fix": "sync/sequencer.py:\n- _unpause_all returns early while halted; cannot tell counts as halted.\n- New halt_folder_ids_to_repause() adds the cached selection.json slugs and borrowed lenders to halt_folder_ids(), read-only, then filters to folders that are still running (one GET).\n- release_for_halt falls back to the cached selection, verified by _verify_startup_ignores(honour_stop=False), when _last_selection is empty. honour_stop is a new parameter defaulting to True: a never-started or halt-stopped sequencer has its stop latch set, and honouring it would release nothing.\n\napp.py:\n- New _reassert_halt_pause(). It pauses the listed folders while halted, never raises, and re-reads the latch before each write.\n- New _reassert_halt_pause_soon() runs it on a single-flight daemon thread. start() and _start_lanes() call this one, so a hung Syncthing no longer blocks startup.\n- halt_all_sync also calls _reassert_halt_pause() synchronously after _pause_lane_c_folders(True), but only when the sequencer has the lister, so a sequencer double gets no double writes.",
+     "files": [
+      "companion/src/ccsync_companion/sync/sequencer.py",
+      "companion/src/ccsync_companion/app.py",
+      "companion/tests/test_halt_holds_lane_c.py",
+      "docs/bug-hunt-2026-09-24/ledger/comp-halt-repath.md"
+     ],
+     "regression_test": "All in companion/tests/test_halt_holds_lane_c.py.\n\nOriginal round:\n- test_stop_and_pause_leave_every_folder_paused_while_halted\n- test_a_predicate_that_cannot_answer_keeps_the_folders_paused\n- test_the_halt_holds_through_the_apps_own_stop_paths\n- test_a_restart_with_a_persisted_halt_re_pauses_the_folders (now joins the re-pause thread)\n- test_no_halt_means_no_re_pause\n\nReview round:\n- test_a_halt_engaged_before_the_sequencer_ever_ran_pauses_the_projects: HEAD and the pre-review fix both leave s-a and s-b unpaused.\n- test_lifting_a_halt_after_a_restart_releases_what_the_restart_re_paused: both leave the folders paused after the release.\n- test_the_halt_release_fallback_still_holds_an_unfiltered_folder: the clean folder is not released on either.\n- test_starting_the_lanes_does_not_wait_on_a_hung_syncthing: on HEAD nothing is re-paused; on the pre-review fix _start_lanes blocks on get_folders.",
+     "tests_run": "Ran the file against git show HEAD: copies of app.py, sequencer.py and repath.py in a scratch package: all 9 tests fail. Ran it against the pre-review fix (the current tree with the review edits reverted): the 4 new tests fail and 5 pass.\n\nCurrent tree, with companion\\.venv\\Scripts\\python.exe -m pytest:\n- test_halt_holds_lane_c, test_repath_blocked_turn, test_repath, test_sequencer, test_sync_halt, test_file_moves, test_app, test_app_contract, test_borrowed_folders, test_upload_only, test_selection, test_sync_sequencer_policy and test_bug_hunt_2026_09_11{_comp_app,b_comp_app,_comp_sync}: 860 passed.\n- test_bug_hunt_2026_09_11_comp_resolve, test_lane_watchdog, test_popup, test_timeline_cards_role, test_watch_probe, test_bug_hunt_2026_09_11{,b}_comp_ui, test_sequencer_perf, test_syncthing_lane, test_rclone_lane and test_rclone_express: 539 passed.",
+     "fails_on_head": "yes: all 9 tests in test_halt_holds_lane_c.py fail against HEAD copies, and the 4 review-round tests also fail against the pre-review fix",
+     "owed": "none"
+    },
+    {
+     "id": "bug-comp-rclone-1",
+     "fixed": true,
+     "mechanism": "When a repath's move failed, reconcile recorded the blocked event and left the folder paused. _process_project then carried on at the new rel: the structure clone mkdir'd it and lane B filled Proxy/. On the next pass, _move_dir's conflict branch returned True for any existing target. It re-pointed and unpaused Syncthing at that proxy-only directory, told the editor it had moved their copy, and relinked Resolve to paths that do not exist. There is a second route: the EXDEV shutil.move fallback copied straight into the target, so a copy that failed part-way left a partial project there, including .stfolder.",
+     "fix": "- sync/sequencer.py: _process_project skips a slug's whole turn when the repath ledger holds a live blocked event for it (new _repath_blocked()). Nothing is cloned, no lane runs, and no lane C turn happens, so nothing is created at the new path.\n- sync/repath.py, _move_dir conflict branch: re-points only when the target has a .stfolder marker. A target of only empty directories is pruned with os.rmdir, deepest first, and the move then proceeds. Any other occupied target is refused with the new target_exists_note().\n- sync/repath.py, reconcile: a folder that is no longer configured clears its blocked event.\n- sync/repath.py: the EXDEV fallback is now _copy_then_swap. It copies to <dst>.ccsync-moving, renames that onto the target once the copy is whole, and only then removes the source.\n- The reviewer raised no problem with this finding.",
+     "files": [
+      "companion/src/ccsync_companion/sync/sequencer.py",
+      "companion/src/ccsync_companion/sync/repath.py",
+      "companion/tests/test_repath_blocked_turn.py",
+      "companion/tests/test_repath.py",
+      "docs/bug-hunt-2026-09-24/ledger/comp-halt-repath.md"
+     ],
+     "regression_test": "- companion/tests/test_repath_blocked_turn.py::test_a_blocked_move_is_not_finished_by_the_lanes_next_pass: on HEAD, lane B builds New/Proxy and the conflict branch re-points.\n- companion/tests/test_repath.py::test_a_target_the_lanes_built_is_not_taken_for_the_project: on HEAD it returns ['s1'] and re-points.\n- test_repath.py::test_an_empty_skeleton_at_the_target_is_cleared_and_the_move_made\n- test_repath.py::test_a_failed_cross_volume_copy_leaves_nothing_at_the_target",
+     "tests_run": "All 4 regression tests fail against the HEAD copies. In this round they were re-run as part of the 860-passed group (test_repath, test_repath_blocked_turn, test_sequencer, test_file_moves).",
+     "fails_on_head": "yes: all 4 regression tests fail against git show HEAD: copies in a scratch package",
+     "owed": "none"
+    }
+   ]
+  }
+ },
+ {
+  "group": "comp-upgrade-moves",
+  "built": {
+   "fixes": [
+    {
+     "id": "bug-comp-core-1",
+     "fixed": true,
+     "mechanism": "As the finding says. revert_to_previous_build wrote only reverted_from, which the restored build's first accepted report clears. The attempt counters were already empty, because vX cleared them by starting. So _upgrade_attempt_blocked(vX) returned '' on both the auto-update and the pushed-update paths, and the restored build reinstalled vX on its first report reply. _on_upgrade_available also showed an 'Update available: vX' balloon next to the revert toast.",
+     "fix": "upgrade.py adds a durable fled marker, crash_looped/crash_looped_at (CRASH_LOOPED_KEYS). note_reverted_from writes it. clear_reverted_from and clear_upgrade_attempts leave it alone, and note_upgrade_attempt keeps it across a version change. Two new helpers: crash_looped_on(record, version) matches only that exact version, and clear_crash_looped runs when the machine comes up on the fled version. app.py: _upgrade_attempt_blocked returns 'crash-looped' for the fled version (logged once per version), which gates both the auto and push paths. _load_upgrade_state clears the marker when the machine is running the fled version. _on_upgrade_available skips the balloon for it. A newer version and the manual tray Update are still allowed.",
+     "files": [
+      "companion/src/ccsync_companion/upgrade.py",
+      "companion/src/ccsync_companion/app.py",
+      "companion/tests/test_app.py",
+      "companion/tests/test_upgrade.py",
+      "docs/bug-hunt-2026-09-24/ledger/comp-upgrade-moves.md"
+     ],
+     "regression_test": "companion/tests/test_app.py::test_a_pushed_update_does_not_reinstall_the_build_the_machine_fled, ::test_auto_update_does_not_reinstall_the_build_the_machine_fled, ::test_the_fled_build_block_survives_a_restart_and_another_failure; companion/tests/test_upgrade.py::test_the_fled_version_outlives_the_one_shot_revert_marker",
+     "tests_run": "companion .venv pytest tests/test_upgrade.py tests/test_app.py tests/test_file_moves.py tests/test_crash_loop_revert.py tests/test_tray_guard.py tests/test_bug_hunt_2026_09_18b_companion_core.py tests/test_bug_hunt_2026_09_11_comp_app.py -> 674 passed",
+     "fails_on_head": "Ran against a scratch copy of git archive HEAD companion/src. All four fail there: push and auto both apply (['applied'] == []), the gate returns '' not 'crash-looped', and crash_looped_on is missing.",
+     "owed": "Dashboard owner, optional defence in depth: api._upgrade_info / the push emitter could skip a version equal to the machine's reported upgrade_reverted_from."
+    },
+    {
+     "id": "bug-comp-core-2",
+     "fixed": true,
+     "mechanism": "Confirmed. keep_old_exe_until_healthy checked healthy() (_report_accepted) before its first wait. The first report is accepted about 2 s after start, so on an online machine <exe>.old went within about 2-32 s, and the crash-loop revert found no rollback copy.",
+     "fix": "keep_old_exe_until_healthy gains min_uptime_seconds, defaulting to CRASH_LOOP_WINDOW_SECONDS (10 min). An accepted report counts only once this process has also been up that long. By then, any later start is outside the window measured from the chain's first_start_at, so the revert could no longer fire anyway. The 60-minute no-report fallback is unchanged. app.py's call uses the default.",
+     "files": [
+      "companion/src/ccsync_companion/upgrade.py",
+      "companion/tests/test_upgrade.py"
+     ],
+     "regression_test": "companion/tests/test_upgrade.py::test_an_early_report_does_not_delete_the_rollback_copy_inside_the_crash_loop_window, ::test_a_build_that_dies_three_minutes_in_still_has_its_rollback_copy (two existing keeper tests were rewritten to advance the clock in stop.wait)",
+     "tests_run": "same 674-passed run",
+     "fails_on_head": "Ran against HEAD's upgrade.py in the scratch copy: HEAD deletes at clock 0 and returns the report reason, so both assertions fail.",
+     "owed": "none"
+    },
+    {
+     "id": "logic-plans-3",
+     "fixed": true,
+     "mechanism": "Confirmed. The 4b branch of apply_move did src.replace(trash) for the whole source folder, including originals the server never received. Lane A never walks .ccsync-trash, and prune_trash deletes a batch after 14 days (sooner over 50 GB or under disk pressure). The docs promised 'a year'. A single-file move is safe, because the command itself proves the server held the file. Only folders lose data.",
+     "fix": "file_moves.py: apply_move takes an optional server_files(dest_rel) that returns {(rel, size)}. For a folder, _split_folder_for_4b trashes only files the server holds (NFC/case-fold key plus exact size, via _apply_4b_partial, never overwriting) and keeps everything else at the old path. Lane A then uploads the kept files after the one-day exclusion. With no listing, or a failed one, a folder holding any lane A original (path_matches_lane_a_filter, lazy import, fails towards original) is left whole. A folder with no originals still goes whole. A partial outcome answers ok=True with DETAIL_KEPT_LOCAL_ONLY, so it is recorded as a plain done move with no relink. Also added rclone_server_files() as a ready-made listing on lane A's remote. Docs: the HAND_MOVES 4b 'As built' block and section 6 now describe the real 14-day/50 GB/disk-pressure retention and the new rule, and FILE_MOVES section 3 gets a new rule. lane_guard.py is unchanged, since 4b now only bins files the server also holds.",
+     "files": [
+      "companion/src/ccsync_companion/file_moves.py",
+      "companion/tests/test_file_moves.py",
+      "docs/HAND_MOVES_ON_THE_SERVER.md",
+      "docs/FILE_MOVES.md"
+     ],
+     "regression_test": "companion/tests/test_file_moves.py::test_4b_never_trashes_a_folder_holding_originals_the_server_may_not_have (plus test_4b_with_a_server_listing_trashes_only_what_the_server_holds, test_4b_a_same_name_file_of_another_size_is_not_the_servers_copy, test_4b_a_failed_server_listing_is_not_evidence, test_4b_still_trashes_a_folder_that_holds_no_original, test_the_rclone_server_listing_reads_lane_as_own_format)",
+     "tests_run": "same 674-passed run (includes test_file_moves.py and both bug-hunt companion files)",
+     "fails_on_head": "Ran against HEAD's file_moves.py in the scratch copy: HEAD trashes the whole Card_07, so reading the kept A002.mov raises FileNotFoundError. The server_files tests fail with TypeError because HEAD has no such argument.",
+     "owed": "Owner of app.CompanionApp._apply_file_moves (not in any group this wave): pass server_files=file_moves_mod.rclone_server_files(rclone path, remote, remote_root) from lane A config into apply_move. Until then the safe default holds: a 4b folder with any original is kept whole and lane A uploads it back to the old server path after a day. Nothing is lost, but originals the server already holds get uploaded again at the old path."
+    }
+   ]
+  },
+  "review": {
+   "verdicts": [
+    {
+     "id": "bug-comp-core-1",
+     "verdict": "PROBLEM",
+     "problems": "The code is correct for a machine where both builds carry the fix. crash_looped survives clear_reverted_from, clear_upgrade_attempts and note_upgrade_attempt's version change. The gate covers both _maybe_auto_update (app.py ~7897) and _apply_pushed_update (~8010). The balloon is suppressed, and the new tests fail on HEAD (confirmed in a scratch copy). Two concrete gaps remain:\n(1) The version-skew claim in the ledger is wrong. It says the fix 'protects only against reverts done by a build carrying this fix, which is the build doing the reverting, so that is correct'. But the marker is WRITTEN by the fleeing build and READ only by the RESTORED build (_load_upgrade_state / _upgrade_attempt_blocked run in vX-1). So if the first release carrying this fix (0.9.78) crash-loops, revert_to_previous_build (upgrade.py:1077) restores 0.9.77. 0.9.77 has no crash_looped gate, and its own note_upgrade_attempt drops the unknown keys on a version change. It reinstalls 0.9.78 on its first report reply, which is exactly the finding's scenario. The companion fix only protects a machine once two consecutive builds carry it. The dashboard-side defence the ledger calls 'optional' is the only thing that covers the next release. Something must also persist it per machine, because upgrade_reverted_from is cleared after one accepted report (_note_report_accepted, app.py ~6676). The minimum is to stop pushing or auto-offering a version equal to the machine's last reported reverted_from. This should be an owed item, not optional.\n(2) Nothing reports the block. crash_looped is not in upgrade_report (upgrade.py ~560), and reverted_from goes out once. After that an admin's standing [ UPDATE NOW ] push for vX shows as pending for ever: attempts 0, no last_error, no reverted_from. The REL-8 comment at the push gate says 'The dashboard is told through sync_guard.upgrade instead', and for 'crash-looped' it is not. A fresh admin re-push (new requested_at) is also refused silently and for ever, with nothing on the dashboard to explain it. Either send crash_looped in the sync_guard.upgrade block (a new optional key needs the dashboard to accept it first, which is the usual deploy order), or document it as owed.\nMinor: only one fled version is remembered. A second revert (vX+1) overwrites crash_looped=vX. If an admin then makes vX current again, auto-update on vX-1 would take vX again (it is newer than the running build)."
+    },
+    {
+     "id": "bug-comp-core-2",
+     "verdict": "SOUND",
+     "problems": "Traced it. keep_old_exe_until_healthy (upgrade.py ~949) now needs (now - started) >= CRASH_LOOP_WINDOW_SECONDS as well as healthy(). The keeper starts after process start (app.py ~11157), so the uptime it measures is a lower bound. Chain first_start_at <= process start, so any start after deletion is more than 600 s past first_start_at, and note_start resets the count (upgrade.py ~290). crash_loop can no longer trip on a chain whose .old is gone. On macOS, monotonic clock that pauses in sleep only delays the delete, which is the safe direction. The keeper is the only in-process deleter of .old: grep shows no other cleanup_old_exe call. The supervisor's restore only fills a missing exe. The 60-minute fallback and the shutdown-leaves-.old behaviour are unchanged. Both new tests fail against HEAD's upgrade.py in a scratch copy, and the targeted tests pass (34 passed). The cost is about 100 MB of .old kept for 10 minutes, which is acceptable."
+    },
+    {
+     "id": "logic-plans-3",
+     "verdict": "PROBLEM",
+     "problems": "The mechanism is right and its tests fail on HEAD (confirmed in a scratch copy). But the fix as shipped leaves the field on the no-listing fallback, which has a common, harmful failure mode:\n(1) server_files is not wired. The only caller, app.py:8225, passes no server_files, and the ledger's 'OWED' names no group. So on every machine, _split_folder_for_4b (file_moves.py ~497) has inventory None. Any 4b folder containing even one lane A original is kept WHOLE and answered ok=True with DETAIL_KEPT_LOCAL_ONLY. app.py ~8255 records that as a plain done move (state None). recent_excludes (file_moves.py ~1220) then drops the exclusion after EXCLUDE_WINDOW_SECONDS (24 h), because a done row is not in the unresolved set. Lane A then uploads every original in the folder back to the OLD server path. Who holds originals locally? Usually the machine that ingested and already uploaded them, so this is the common case, not the card-dump edge. Scenario: the owner drags a 300 GB Card_07 from project X into project Y. A day later every X-syncing machine that ingested it re-uploads the whole 300 GB to X/Card_07. The folder 'comes back', which is the exact failure docs/FILE_MOVES.md and CLAUDE.md say a move must never cause. The MOVES history shows the machine as done. HEAD risked losing unuploaded originals in a rare case. The fix guarantees a full duplicate re-upload in the ordinary case. Needed: wire server_files=file_moves_mod.rclone_server_files(<lane A rclone path, remote, remote_root>) at app.py:8225 in this wave. Failing that, make the no-listing fallback answer not-ok 'retrying' (keeping the RES-1 unresolved exclusion open, as the finding suggested) instead of ok/done.\n(2) _held_by_server (file_moves.py ~478) is O(files x inventory), and it calls _cmp_key on every inventory entry for every local file. A card dump of several thousand clips means tens of millions of NFC normalisations on the report-command thread. Build a set of (_cmp_key(rel), size) once per split.\n(3) _is_lane_a_original is given the rel UNDER the moved folder, not the full path. So a moved folder that is itself a Proxy dir, or sits under one, classifies its .mov/.mp4 proxies as originals and keeps them whole. That is the safe direction, but lane A will never upload them, so they sit at the old path for ever. Passing from_project_rel/from_rel + rel would match lane A's real classification.\nrclone_server_files is unwired and only unit-tested with a stub run_fn. Its remote path composition (remote_root + 'Projects/' + dest) has not been checked against a live lane A run."
+    }
+   ]
+  },
+  "rework": {
+   "fixes": [
+    {
+     "id": "bug-comp-core-1",
+     "fixed": true,
+     "mechanism": "revert_to_previous_build wrote only the one-shot reverted_from marker, which _note_report_accepted clears after the first accepted report. The per-version attempt counters were already empty because the bad build cleared them by starting. So _upgrade_attempt_blocked(vX) returned \"\" on both unattended paths, and the restored build reinstalled the build it had just fled. Review round: the fled marker is WRITTEN by the fleeing build and READ by the RESTORED one, i.e. the previous release. So the first release carrying the fix reverts onto 0.9.77, which ignores `crash_looped` and would reinstall it. Separately, nothing reported the block: the report showed a standing push as pending for ever. And only one fled version was remembered.",
+     "fix": "upgrade.note_reverted_from records every fled version in `crash_looped`, now a list of the last 8. Neither clear_reverted_from nor clear_upgrade_attempts drops it, and note_upgrade_attempt carries it across a version change. app._upgrade_attempt_blocked returns \"crash-looped\", which gates both _maybe_auto_update and _apply_pushed_update. _load_upgrade_state forgets only the version now running (clear_crash_looped(path, VERSION)). _on_upgrade_available skips the balloon for a fled version. The tray click is not gated. REVIEW ROUND: note_reverted_from ALSO writes REL-8's own give-up record for the fled version: version=vX, attempts=MAX_UPGRADE_ATTEMPTS, last_error=ERROR_CRASH_LOOPED (\"crash-looped\"), last_attempt_at. 0.9.77 already honours that record: its gate says \"given up\" on both unattended paths, and it clears only a record for its own version. The same existing report keys (version, attempts, last_error) carry the block on every report, so the dashboard shows UPDATE FAILED x8 with reason crash-looped beside REVERTED FROM. There is no new wire key.",
+     "files": [
+      "companion/src/ccsync_companion/upgrade.py",
+      "companion/src/ccsync_companion/app.py",
+      "companion/tests/test_upgrade.py",
+      "companion/tests/test_app.py",
+      "docs/bug-hunt-2026-09-24/ledger/comp-upgrade-moves.md"
+     ],
+     "regression_test": "companion/tests/test_app.py::test_a_pushed_update_does_not_reinstall_the_build_the_machine_fled, ::test_auto_update_does_not_reinstall_the_build_the_machine_fled, ::test_the_fled_build_block_survives_a_restart_and_another_failure, ::test_the_dashboard_hears_why_a_pushed_update_never_lands, ::test_a_restored_build_without_the_fled_key_still_refuses_the_push; companion/tests/test_upgrade.py::test_the_fled_version_outlives_the_one_shot_revert_marker, ::test_the_revert_leaves_a_give_up_record_the_previous_release_honours, ::test_every_fled_version_is_remembered",
+     "tests_run": "companion\\.venv\\Scripts\\python.exe -m pytest tests/test_upgrade.py tests/test_app.py tests/test_file_moves.py tests/test_crash_loop_revert.py tests/test_tray_guard.py tests/test_bug_hunt_2026_09_18b_companion_core.py tests/test_bug_hunt_2026_09_11_comp_app.py tests/test_bug_hunt_2026_09_11b_comp_app.py tests/test_bug_hunt_2026_09_11_comp_sync.py tests/test_bug_hunt_2026_09_18_companion.py tests/test_bug_hunt_2026_09_11b_comp_sync.py -q -> 779 passed",
+     "fails_on_head": "All 8 tests fail on a git archive HEAD scratch copy. Skew check: the new upgrade.py was put over HEAD's app.py, which has 0.9.77's gate. With it, test_a_restored_build_without_the_fled_key_still_refuses_the_push passes (push not applied, gate says \"given up\"), so a restored 0.9.77 honours the record the new build writes.",
+     "owed": "Dashboard owner (no group this wave), NOT optional: (a) api._upgrade_info and the UPDATE NOW push emitter must not offer or push a version equal to the machine's stored upgrade_reverted_from. db.store_upgrade_state already keeps it per machine. This covers machines older than REL-8, and 0.9.77 after a failed attempt at another version. (b) alerts._check_upgrade_failures and the update_failed chip help should read last_error == \"crash-looped\" as \"kept crashing, rolled back, do not install by hand\" instead of the download-failure text, which now fires for this case. (c) Minor: the companion diagnostics dump's \"GIVEN UP ... failed 8 times\" line (app.py, not this group's function) should say \"kept crashing\" for this code."
+    },
+    {
+     "id": "bug-comp-core-2",
+     "fixed": true,
+     "mechanism": "keep_old_exe_until_healthy deleted <exe>.old on the first accepted report. The reporter posts 2 s after start, so on any machine that could reach its dashboard the rollback copy was gone within about 2-32 s. When the crash loop tripped at the third start, revert_to_previous_build found no rollback copy.",
+     "fix": "An accepted report now counts only once THIS process has also been up for min_uptime_seconds, which defaults to CRASH_LOOP_WINDOW_SECONDS (10 min). After that, any later start falls outside the crash-loop window, so the copy has nothing left to protect. The 60-minute no-report fallback is unchanged. The reviewer raised nothing on this item, and it was not changed this round.",
+     "files": [
+      "companion/src/ccsync_companion/upgrade.py",
+      "companion/tests/test_upgrade.py"
+     ],
+     "regression_test": "companion/tests/test_upgrade.py::test_an_early_report_does_not_delete_the_rollback_copy_inside_the_crash_loop_window, ::test_a_build_that_dies_three_minutes_in_still_has_its_rollback_copy",
+     "tests_run": "same 779-passed run",
+     "fails_on_head": "Both fail against HEAD's upgrade.py in the scratch copy. HEAD deletes the copy at clock 0 with the \"report\" reason.",
+     "owed": "none"
+    },
+    {
+     "id": "logic-plans-3",
+     "fixed": true,
+     "mechanism": "On a machine that does not sync the destination, section 4b moved the whole local folder into .ccsync-trash, including originals the server never received. Lane A never walks the trash, and prune_trash deletes it after 14 days. Review round: (1) server_files was never passed by app.py. The no-listing fallback answered ok/done, so the exclusion lapsed after 24 h and lane A re-uploaded every original in the folder to the old server path. That is the ordinary case. (2) Server matching was O(files x inventory) with NFC folds. (3) Originals were classified on the path under the moved folder, so a moved Proxy folder's .movs looked like originals.",
+     "fix": "file_moves._split_folder_for_4b sends a file to the trash only when the server's listing of the destination holds the same relative path and size (compared with the CR-90 fold). Other files stay at the old path. A partial outcome is ok with DETAIL_KEPT_LOCAL_ONLY, and lane A later uploads the local-only files. Docs now describe the real 14-day / 50 GB / disk-pressure retention. REVIEW ROUND: (a) app._apply_file_moves now passes server_files=file_moves_mod.rclone_server_files(config rclone_path, remote, remote_root), the same keys lane A is built from. The listing timeout is 120 s because it runs on the reporter thread. (b) With no listing (none configured, it failed, or it timed out), a folder holding any original answers NOT ok with DETAIL_4B_CANNOT_LIST. app records that as retryable/retrying, which keeps RES-1's exclusion open until a listing answers or the move turns blocked, so the folder never comes back. (c) _server_keys folds the listing into a set once per folder. (d) _is_lane_a_original gets the full Projects/<from_project_rel>/<from_rel>/<rel> path. docs/FILE_MOVES.md section 3 and HAND_MOVES_ON_THE_SERVER.md 4b are updated.",
+     "files": [
+      "companion/src/ccsync_companion/file_moves.py",
+      "companion/src/ccsync_companion/app.py",
+      "companion/tests/test_file_moves.py",
+      "docs/FILE_MOVES.md",
+      "docs/HAND_MOVES_ON_THE_SERVER.md",
+      "docs/bug-hunt-2026-09-24/ledger/comp-upgrade-moves.md"
+     ],
+     "regression_test": "companion/tests/test_file_moves.py::test_4b_never_trashes_a_folder_holding_originals_the_server_may_not_have (now expects ok=False/DETAIL_4B_CANNOT_LIST), ::test_4b_a_failed_server_listing_is_not_evidence, ::test_4b_a_folder_it_could_not_triage_stays_excluded_past_a_day, ::test_4b_a_moved_proxy_folder_holds_no_original, ::test_4b_folds_the_server_listing_once_per_folder, ::test_4b_with_a_server_listing_trashes_only_what_the_server_holds, ::test_4b_a_same_name_file_of_another_size_is_not_the_servers_copy, ::test_the_rclone_server_listing_reads_lane_as_own_format, ::test_the_rclone_server_listing_asks_where_lane_a_uploads (pinned against build_up_command's remote side), ::test_the_app_lists_the_server_through_lane_as_remote_for_4b, ::test_the_app_answers_retrying_when_4b_cannot_list_the_server",
+     "tests_run": "companion\\.venv\\Scripts\\python.exe -m pytest tests/test_file_moves.py -q -> 47 passed; plus the 779-passed run above",
+     "fails_on_head": "On a git archive HEAD scratch copy, 10 of the 12 4b tests fail. test_4b_still_trashes_a_folder_that_holds_no_original pins unchanged behaviour. test_4b_a_moved_proxy_folder_holds_no_original guards against round one's code, not HEAD's. It was proved to fail by patching the classification back to rel-only in the scratch copy. The fold-count test fails on round one's _held_by_server by construction (43 x 41 folds).",
+     "owed": "None for code. Live check owed at ship time: the rclone lsf path composition is structurally pinned to lane A's own remote side but has not run against the live NAS. Watch the first real 4b folder move in companion.log and on the project page."
+    }
+   ]
+  }
+ },
+ {
+  "group": "comp-media",
+  "built": {
+   "fixes": [
+    {
+     "id": "bug-comp-ytdl-1",
+     "fixed": true,
+     "mechanism": "Confirmed as reported. yt-dlp lands '<title> [id].<ext>' under its deliverable name. _ensure_edit_ready then re-encodes reading that file in place. Nothing writes to it during the conversion, so once the re-encode runs past 120 s the file passes lane A's --min-age 120s (and lane A is --ignore-existing, so the VP9 copy becomes the NAS's permanent one). It also passes the importer's settle test, which files it into Resolve. No existing exclusion covers the deliverable name. The verifier's correction also holds: swap_in usually moves a held original aside to .original and only falls back to .converted [id] when that fails, so the pool gets two clips either way.",
+     "fix": "Once the probe says conversion is needed, the original is renamed to '<stem>.source.editready.<ext>' (SOURCE_STAGING_SUFFIX / staged_source_name) and ffmpeg reads it from there. This name already falls inside every existing exclusion: lane A's '*.editready.*', the dashboard's LANE_A_SKIP_GLOBS mirror, the importer's and the executor's _INTERMEDIATE_STEM_RE, and lane C's video-extension ignores. No rule list changed. On success the staged file is removed and swap_in(tmp, final, final) handles any held file already at final. On conversion failure _unstage restores the original name, so _fail_clip still disowns it to .failed. On a stop the staged file is left for _cleanup_current to sweep, which also closes the bug-comp-ytdl-2 shape. If the rename itself is refused, the conversion runs in place as before, with a warning. Residual: the ffprobe window (bounded at 120 s, normally under a second) is unchanged. Code: ytdl_executor.py:1498-1513, :1643, :2537-2548, :2570-2621.",
+     "files": [
+      "companion/src/ccsync_companion/ytdl_executor.py",
+      "companion/tests/test_ytdl_executor.py"
+     ],
+     "regression_test": "companion/tests/test_ytdl_executor.py::test_a_long_conversion_never_leaves_the_original_under_its_deliverable_name. It ages the folder past every 120 s gate while ffmpeg runs and asserts that path_matches_lane_a_filter and YoutubeImporter._is_clip_name accept nothing. On HEAD it fails with {'during': ['Some Channel - A clip [aaaaaaaaaaa].mp4'], 'deliverable': True}. Also ::test_a_stop_mid_conversion_leaves_no_convert_needed_clip_behind, which fails on HEAD. Two existing tests were updated for the intended behaviour change: the -i path is now the staged name, and a lock now leads to the .converted rung.",
+     "tests_run": "companion/.venv pytest tests/test_ytdl_executor.py (180 passed), tests/test_youtube_import.py and tests/test_rclone_filters.py (pass). server/ tests/test_cross_component.py from Git Bash with the dashboard venv: 70 passed. The new tests were also run against a scratch copy of HEAD's modules via -o pythonpath: they fail there.",
+     "fails_on_head": "yes, verified by running against HEAD's modules in a scratch copy (-o pythonpath)",
+     "owed": "webapps-ops/orchestrator: the NAS worker's own conversion (ytdl/web/ytdlweb/vendor/downloader.py ensure_edit_ready/_swap_in) has the same in-place window, visible to anything that reads the NAS tree. It needs the same staging name; worker._INTERMEDIATE_STEM already rejects a stem ending in .editready."
+    },
+    {
+     "id": "bug-comp-media-1",
+     "fixed": true,
+     "mechanism": "Confirmed, and wider than reported. ffmpeg_available, which the capability report uses, falls back to the managed sidecar ffmpeg. Every ffmpeg spawn instead put the raw config value 'ffmpeg' at argv[0], and Popen searches only PATH. Four spawners were affected: jobs_media._popen (the three fleet media recipes), proxy_gen._default_popen (encode and verify), broll_ingest_media.run_ffmpeg (all b-roll ingest encodes; the hunter's out-of-territory note, confirmed), and ffmpeg_tools.detect_encoders (a managed-only machine reported nvenc false). ffprobe was fine because ffprobe_for resolves.",
+     "fix": "Added one resolver at the spawn: ffmpeg_tools.spawn_argv(cmd) sets argv[0] to _resolve_binary(argv[0]) or argv[0]. It is applied in jobs_media._popen, proxy_gen._default_popen, broll_ingest_media.run_ffmpeg and detect_encoders. ffmpeg_available now calls the same _resolve_binary, so the capability report and the spawn cannot disagree. Resolving at spawn time rather than in the builders keeps the indexer-parity argv pins intact and picks up a sidecar that lands mid-session without a restart. An unresolvable name passes through unchanged, so the spawn still fails with the real OS error. Code: ffmpeg_tools.py:144-162, :221-226, :302-304; jobs_media.py:469-472; proxy_gen.py:326-329; broll_ingest_media.py:403-406.",
+     "files": [
+      "companion/src/ccsync_companion/ffmpeg_tools.py",
+      "companion/src/ccsync_companion/jobs_media.py",
+      "companion/src/ccsync_companion/proxy_gen.py",
+      "companion/src/ccsync_companion/broll_ingest_media.py",
+      "companion/tests/test_bug_hunt_2026_09_24_comp_media.py",
+      "companion/tests/test_ffmpeg_tools.py",
+      "companion/tests/test_proxy_gen.py"
+     ],
+     "regression_test": "companion/tests/test_bug_hunt_2026_09_24_comp_media.py::test_a_media_job_spawns_the_ffmpeg_the_capability_report_advertised. With PATH stripped and only a managed ffmpeg.exe present, it asserts that the capability's binary equals the Popen argv[0]; on HEAD argv[0] is ['ffmpeg','ffmpeg']. Three more tests fail on HEAD the same way, with argv[0] still 'ffmpeg': ::test_the_proxy_generator_spawns_the_managed_ffmpeg, ::test_broll_ingest_spawns_the_managed_ffmpeg and ::test_nvenc_is_detected_through_the_managed_ffmpeg. Two existing tests that pinned a bare argv[0] on a machine with ffmpeg on PATH were adjusted.",
+     "tests_run": "companion/.venv pytest on these files, all passing: test_ffmpeg_tools, test_jobs_media, test_jobs_runner, test_jobs_phase4, test_jobs_resilience, test_jobs_runner_visibility, test_proxy_gen, test_broll_ingest_media, test_broll_ingest, test_capabilities, test_music_clap_sidecar, test_bug_hunt_2026_09_18_companion_media, test_bug_hunt_2026_09_18b_companion_media, test_bug_hunt_2026_09_24_comp_media.",
+     "fails_on_head": "yes, verified against HEAD's modules in a scratch copy",
+     "owed": "none"
+    },
+    {
+     "id": "bug-comp-broll-1",
+     "fixed": true,
+     "mechanism": "Only the companion keys on the name. The page gives every item a unique local_id and does not need to dedupe names. The server allocates C0001/C0001_2 correctly but stores no local_id, so the claim manifest cannot echo one. BrollIngestor._item_from_manifest paired rows one at a time by (orig_name, rel_dir), taking the first match, so both rows got card A's staged path. The manifest hash was kept without being checked against the bytes, so nothing failed.",
+     "fix": "New broll_ingest.match_manifest_rows matches the whole manifest at once, and each staged file is used at most once. It makes three passes, strongest evidence first: (1) content hash when both sides have one, (2) name+rel_dir+size, (3) name+rel_dir, now consuming. A candidate whose known hash differs from the row's known hash is never paired. Pairing is deterministic by ord, so a re-issued claim pairs the same way. BrollIngestor._items_from_manifest replaces the per-row comprehension in run(), and _item_from_manifest takes the paired candidate. MusicIngestor keeps its own override path unchanged. No server or page change was needed. Code: broll_ingest.py:71, :1894-1930, :3952-4017. Side effect: the hash tier also covers the known-hash case of the medium bug-comp-broll-2.",
+     "files": [
+      "companion/src/ccsync_companion/broll_ingest.py",
+      "companion/tests/test_bug_hunt_2026_09_24_comp_media.py"
+     ],
+     "regression_test": "companion/tests/test_bug_hunt_2026_09_24_comp_media.py::test_two_same_named_clips_are_each_indexed_from_their_own_file[no-hashes-yet|page-relayed-hashes]. It runs the real prepare() and run() against a two-row manifest for PRIVATE/M4ROOT/CLIP/C0001.MP4. On HEAD it fails with ['cardA.mp4','cardA.mp4'] == ['cardA.mp4','cardB.mp4']. Also ::test_the_row_order_is_reversed_and_the_bytes_still_decide (fails on HEAD), plus pure-matcher tests for consume-once and the hash-conflict refusal.",
+     "tests_run": "companion/.venv pytest tests/test_broll_ingest.py, tests/test_music_ingest.py, tests/test_bug_hunt_2026_09_11b_comp_broll_music.py and tests/test_bug_hunt_2026_09_24_comp_media.py: all pass.",
+     "fails_on_head": "yes, verified against HEAD's modules in a scratch copy",
+     "owed": "orchestrator (no group owns it): music_ingest.py:203-214 MusicIngestor._item_from_manifest has the same first-match-by-name defect (its own comment names theme.wav twice). It should implement _items_from_manifest via match_manifest_rows, keyed on content_hash and name, and get a matching test."
+    }
+   ]
+  },
+  "review": {
+   "verdicts": [
+    {
+     "id": "bug-comp-ytdl-1",
+     "verdict": "PROBLEM",
+     "problems": "The companion half is closed and correct. I checked it and found nothing wrong. After the probe, the original is renamed with os.replace to '<stem> [id].source.editready.<ext>' (ytdl_executor.py:2541-2548). That name is covered by rules that already exist: lane A's '- *.editready.*' (rclone_lane.py:138), which comes before the + includes; the dashboard's LANE_A_SKIP_GLOBS mirror (db.py:9643); the executor's _INTERMEDIATE_STEM_RE (:147); and the importer's regex (youtube_import.py:124). So landed_file, lane A and the importer all skip the file for the whole re-encode. swap_in(tmp, final, final) is safe with same=True. When src is .mp4, final no longer exists, so the replace just lands; when src is .webm/.mkv, the staged file is removed first. _unstage restores the original before _fail_clip, so the .failed evidence is kept. On a stop, _cleanup_current -> clear_partials sweeps the staged file. If the rename fails, it falls back to the old in-place behaviour. No wire change and no skew. I re-ran the two new tests against HEAD's modules and they fail on the defect itself ({'during': ['Some Channel - A clip [aaaaaaaaaaa].mp4'], 'deliverable': True}). 934 tests pass across the touched suites. The whole path is NOT closed, though. The finding names a second entry point with the same shape and says to apply the same rule to the server worker, and that worker is unchanged: ytdl/web/ytdlweb/vendor/downloader.py:354 ensure_edit_ready still re-encodes the landed '<title> [id].<ext>' in place, writing only the tmp '{stem}.editready{out_ext}' (:423), and _swap_in (:475) only replaces it afterwards. For the whole conversion, the original sits on the NAS under its deliverable name, visible to the base rig's youtube_import over the share. It passes the 120 s settle test and is filed into the Resolve pool, and the later swap then delivers a second clip ('.original' or '.converted [id]'). The builder listed this as OWED to webapps-ops/orchestrator, but webapps-ops' ledger and the worker.py diff (which only touches the bug-music-ytdl-1 tree_missing_note order) do not pick it up, so nobody is fixing it in this wave. Fix: in downloader.ensure_edit_ready, os.replace the original to '<stem>.source.editready<ext>' before the ffmpeg -i, and use the same restore-on-failure / remove-on-success / leave-for-sweep-on-stop outcomes. worker._INTERMEDIATE_STEM (worker.py:902) already rejects that stem, so _landed_file and _sweepable need no change. Add a test in ytdl/web/tests. Minor residuals, not blocking: (1) if a stop comes during the ffprobe phase (before staging), the file is still returned under its deliverable name and _cleanup_current does not remove it (the bug-comp-ytdl-2 shape stays open for that window). (2) A staged file from a job abandoned by a crash, where no later attempt at the same id ever runs on this machine (for example another editor's companion finishes the shared job), is never swept. It is excluded from sync, so the only cost is local disk."
+    },
+    {
+     "id": "bug-comp-media-1",
+     "verdict": "SOUND",
+     "problems": "Traced it. HEAD's ffmpeg_available/capabilities fall back to the managed sidecar, while every spawn put the raw config value at argv[0], and Popen looks only on PATH. The fix routes all four ffmpeg spawners through ffmpeg_tools.spawn_argv, which applies _resolve_binary to argv[0]: jobs_media._popen (every media recipe goes through it via _run_ffmpeg), proxy_gen._default_popen (encode and verify, through ProxyGenerator._run_ffmpeg), broll_ingest_media.run_ffmpeg (before both the child_sink and the no-sink branch; broll_ingest's runner defaults to it), and detect_encoders. ffmpeg_available now uses the same resolver. The behaviour is equivalent for absolute paths (not-exists -> False, same message) and for bare names. _managed_binary refuses to substitute for an explicit path that has a directory part. I grepped the other ffmpeg/ffprobe spawns: ffprobe goes through ffprobe_for (already resolves), music_clap_sidecar and ytdl_executor already resolved, broll_server resolves, and the app.py frame counters use ffprobe_for. No other bare-argv ffmpeg spawn remains. No wire change: the capability report is unchanged except that a managed-only GPU machine now truthfully reports nvenc. I ran the new tests against HEAD's modules and they fail on the defect ('ffmpeg' vs the managed path), not on a missing name, except the one no-substitution test, which fails with AttributeError on spawn_argv by construction. The tests strip PATH and use a real file in a tmp tools dir; they do not mock _resolve_binary away. Touched suites pass. Unrelated nit, not blocking: config._ffmpeg_resolves (config.py:2362) still ignores the managed fallback, so validate_config can still show a false 'ffmpeg not found' warning on a sidecar-only machine."
+    },
+    {
+     "id": "bug-comp-broll-1",
+     "verdict": "SOUND",
+     "problems": "Traced both sides of the wire. The page (ingest.js:737-746) re-prepares the WHOLE item set into one new staging id, so staging ord is the page order. The create body (:1325-1336) sends chosen items in the same order with the hash the companion itself relayed. The server claim (ingest_batches.py:877-885) returns ord, orig_name, rel_dir, size_bytes and hash, which is every key match_manifest_rows reads, so there is no skew either way. The staging hash is the companion's own hash_partial (xxh64), and the server stores it verbatim, so the hash tier and the _hash_compatible veto compare like with like. Staging 'size' is the written byte count, and it matches the page's file.size in size_bytes. Each candidate is consumed at most once, strongest evidence first, and a known hash mismatch is vetoed at every tier. The ord sort makes a re-issued claim pair the same way. The only BrollIngestor caller is run (:1804); _staging_holding stays a yes/no. The MusicIngestor override is detected by type check and keeps its old path, which is disclosed as OWED (music_ingest.py:203, same defect). I ran the new tests against HEAD's modules: the ingest end-to-end cases fail with ['cardA.mp4','cardA.mp4'], and the matcher-only tests fail on the missing name. 934 tests pass across the touched suites. Minor residual, not blocking: tier 3 does not prefer a candidate that has a path. Take two same-named clips of identical size where the editor unticked the FIRST (include=false, so never uploaded and path '') and Run was pressed before the second's hash arrived. The second's row then pairs with the unticked candidate and fails 'no source' instead of indexing. Sorting a pathless candidate after one that has a path in the tier-3 pass would close this."
+    }
+   ]
+  },
+  "rework": {
+   "fixes": [
+    {
+     "id": "bug-comp-ytdl-1",
+     "fixed": true,
+     "mechanism": "yt-dlp lands '<title> [id].<ext>' under its deliverable name, and both executors then re-encoded it in place. For the whole conversion the VP9 original sat unchanged under that name. Past 120 s it cleared lane A's --min-age and the importer's settle test, and the swap then delivered a second clip. On the companion that is lane A plus the local importer. On the NAS worker (vendor/downloader.py ensure_edit_ready) it is the base rig's importer reading the share. Review round: the reviewer was right that the NAS half was open and owed to nobody. It is now fixed here. Separately, a stop that landed during the companion's ffprobe left an unchecked download under its deliverable name, and it is now moved aside so the cleanup removes it.",
+     "fix": "Both sides now move the original to '<stem>.source.editready.<ext>' before ffmpeg reads it. The staged name falls inside exclusions that already exist: lane A's '*.editready.*', the dashboard's LANE_A_SKIP_GLOBS, the importer's and executor's _INTERMEDIATE_STEM_RE, and worker._INTERMEDIATE_STEM / _sweepable. Outcomes:\n- Success: the staged file is removed and swap_in(tmp, final, final) runs.\n- Failure: the file is put back under its own name first, so the '.failed' disown still happens.\n- A failed guess or no ffmpeg: put back and delivered as downloaded.\n- Stop or kill: the staged file is left, and it is swept (companion _cleanup_current; NAS _clear_partials, then _sweep_stale).\n- Rename refused: converts in place, the old behaviour.\nThe companion also stages a download on a stop observed right after the probe. There is no wire change. downloader.py belongs to webapps-ops; that builder's diff does not touch it, and the edit was made at the reviewer's request (noted in the ledger).",
+     "files": [
+      "companion/src/ccsync_companion/ytdl_executor.py",
+      "companion/tests/test_ytdl_executor.py",
+      "ytdl/web/ytdlweb/vendor/downloader.py",
+      "ytdl/web/tests/test_bug_hunt_2026_09_24_comp_media.py",
+      "server/tests/test_cross_component.py",
+      "docs/bug-hunt-2026-09-24/ledger/comp-media.md"
+     ],
+     "regression_test": "companion: companion/tests/test_ytdl_executor.py::test_a_long_conversion_never_leaves_the_original_under_its_deliverable_name and ::test_a_stop_mid_conversion_leaves_no_convert_needed_clip_behind (both fail on HEAD) and ::test_a_stop_during_the_probe_leaves_no_unchecked_clip_behind (fails with the probe-stop hunk removed).\nNAS: ytdl/web/tests/test_bug_hunt_2026_09_24_comp_media.py::test_a_long_conversion_never_leaves_the_original_under_its_deliverable_name[.mp4|.webm]. It fails on HEAD's downloader.py, run in a scratch tree: {'during': ['...[aaaaaaaaaaa].mp4']} != {'during': [], 'landed': None}. That file also holds four guard tests.\nserver/tests/test_cross_component.py::test_the_companion_runs_the_vendored_ffmpeg_command pins that both sides use the same staged name and the same argv.",
+     "tests_run": "ytdl/web (dashboard venv): test_bug_hunt_2026_09_24_comp_media.py test_downloader.py test_worker.py test_local_download.py test_no_em_dash.py -> 269 passed.\nserver (Git Bash): test_cross_component.py -> 70 passed.\ncompanion: test_ytdl_executor.py test_youtube_import.py test_rclone_filters.py test_bug_hunt_2026_09_24_comp_media.py -> 352 passed.",
+     "fails_on_head": "yes: shown by running against HEAD's modules in scratch copies (companion and ytdl/web)",
+     "owed": "none. Accepted residual: on the companion, a staged file from a crash-abandoned job that no later attempt at that id ever runs is not swept. It is excluded from every sync lane, so the only cost is local disk."
+    },
+    {
+     "id": "bug-comp-media-1",
+     "fixed": true,
+     "mechanism": "ffmpeg_available (the capability report) falls back to the managed sidecar ffmpeg, but four spawners put the raw config name 'ffmpeg' at argv[0], and Popen searches PATH only. A managed-only machine therefore advertised the capability, claimed jobs and hit WinError 2. The four were jobs_media._popen, proxy_gen._default_popen, broll_ingest_media.run_ffmpeg and ffmpeg_tools.detect_encoders (which made nvenc read false).",
+     "fix": "ffmpeg_tools.spawn_argv resolves argv[0] through _resolve_binary at spawn time. ffmpeg_available now calls the same _resolve_binary, so the capability report and the spawn cannot drift. An unresolvable name passes through unchanged. It is used in jobs_media, proxy_gen, broll_ingest_media and detect_encoders. Review round: the reviewer raised nothing; no change.",
+     "files": [
+      "companion/src/ccsync_companion/ffmpeg_tools.py",
+      "companion/src/ccsync_companion/jobs_media.py",
+      "companion/src/ccsync_companion/proxy_gen.py",
+      "companion/src/ccsync_companion/broll_ingest_media.py",
+      "companion/tests/test_bug_hunt_2026_09_24_comp_media.py",
+      "companion/tests/test_ffmpeg_tools.py",
+      "companion/tests/test_proxy_gen.py"
+     ],
+     "regression_test": "companion/tests/test_bug_hunt_2026_09_24_comp_media.py::test_a_media_job_spawns_the_ffmpeg_the_capability_report_advertised, ::test_the_proxy_generator_spawns_the_managed_ffmpeg, ::test_broll_ingest_spawns_the_managed_ffmpeg and ::test_nvenc_is_detected_through_the_managed_ffmpeg. All four fail on HEAD with argv[0] 'ffmpeg'.",
+     "tests_run": "companion: test_ffmpeg_tools, test_jobs_media, test_jobs_runner, test_jobs_phase4, test_jobs_resilience, test_jobs_runner_visibility, test_proxy_gen, test_broll_ingest_media, test_broll_ingest, test_capabilities, test_music_clap_sidecar, and the 09-18 / 09-18b media hunt files -> all pass (first round). test_bug_hunt_2026_09_24_comp_media.py -> passes (re-run this round).",
+     "fails_on_head": "yes: run against HEAD's modules in a scratch copy",
+     "owed": "none"
+    },
+    {
+     "id": "bug-comp-broll-1",
+     "fixed": true,
+     "mechanism": "Only the companion keyed on the name. BrollIngestor._item_from_manifest paired each manifest row with a staged file by (orig_name, rel_dir), first match wins, one row at a time. Two C0001.MP4 rows therefore both got card A's file, and the manifest hash was never checked against the bytes. The page (unique local_id) and the server (C0001 / C0001_2) were correct.",
+     "fix": "broll_ingest.match_manifest_rows matches the whole manifest at once, using each staged file at most once, strongest evidence first: content hash, then name + rel_dir + size, then name + rel_dir. A known hash that differs from the row's known hash is never paired. The order is deterministic. BrollIngestor._items_from_manifest replaces the per-row pairing. No server or page change. Review round: the reviewer raised nothing; no change.",
+     "files": [
+      "companion/src/ccsync_companion/broll_ingest.py",
+      "companion/tests/test_bug_hunt_2026_09_24_comp_media.py"
+     ],
+     "regression_test": "companion/tests/test_bug_hunt_2026_09_24_comp_media.py::test_two_same_named_clips_are_each_indexed_from_their_own_file[no-hashes-yet|page-relayed-hashes] and ::test_the_row_order_is_reversed_and_the_bytes_still_decide. All fail on HEAD with ['cardA.mp4', 'cardA.mp4'].",
+     "tests_run": "companion: test_broll_ingest.py, test_music_ingest.py, test_bug_hunt_2026_09_11b_comp_broll_music.py, test_bug_hunt_2026_09_24_comp_media.py -> all pass (the last re-run this round).",
+     "fails_on_head": "yes: run against HEAD's modules in a scratch copy",
+     "owed": "orchestrator: music_ingest.MusicIngestor._item_from_manifest has the same name-only, first-match defect. The fix is to implement _items_from_manifest with match_manifest_rows (content_hash + name, no rel_dir), with a test using the music doubles."
+    }
+   ]
+  }
+ },
+ {
+  "group": "webapps-ops",
+  "built": {
+   "fixes": [
+    {
+     "id": "bug-music-ytdl-1",
+     "fixed": true,
+     "mechanism": "As reported. _phase_download ran ensure_outdir (makedirs <root>/<label>/Youtube/<term>) and _sweep_stale before the ytdl-web-5 tree guard. tree_is_gone answers 'present' as soon as <root>/<label> is a directory, so on an emptied mount point the guard, and _no_room_note's copy of it, never fired. The job downloaded into the container overlay, and the folder it left there fooled every later press-time check too.",
+     "fix": "The tree question is now asked BEFORE anything is created. When the tree is gone, ensure_outdir and _sweep_stale are skipped and the phase fails at the existing ytdl-web-5 spot with the same sentence; rows stay pending for RETRY. The reclaim and the requester's claim grace still run in between, because a companion writing to its own disk does not need the container mount.",
+     "files": [
+      "ytdl/web/ytdlweb/worker.py",
+      "ytdl/web/tests/test_bug_hunt_2026_09_24_webapps_ops.py"
+     ],
+     "regression_test": "ytdl/web/tests/test_bug_hunt_2026_09_24_webapps_ops.py::test_the_download_phase_refuses_a_vanished_share_it_would_have_created. It drives _phase_download itself. It fails on HEAD because yt-dlp was called into <root>/<label>/Youtube; I ran it against the HEAD worker.py swapped in place and then restored.",
+     "tests_run": "ytdl/web (dashboard venv): test_bug_hunt_2026_09_24_webapps_ops, test_worker, test_local_download, test_bug_hunt_2026_09_18_webapps_tools, test_bug_hunt_2026_09_18b_ytdl, test_bug_hunt_2026_09_11(_b)_ytdl_web, test_retry_failed, test_no_em_dash -> 277 passed",
+     "fails_on_head": "yes, run against the HEAD file",
+     "owed": "none"
+    },
+    {
+     "id": "bug-ops-1",
+     "fixed": true,
+     "mechanism": "As reported. The publish carries -wal/-shm to <target>.prev-<ts>-wal/-shm, and the find pattern lists those too. newest_prev took the last entry by plain sort, which was the -wal journal, and build_rollback_script renamed it over the live index while printing 'rolled back'. A hand-typed --from-prev could name the same wrong file.",
+     "fix": "newest_prev drops every name ending in a SIDECARS suffix (the new is_sidecar_name). do_rollback refuses a sidecar --from-prev before anything runs on the NAS, and says to name the .prev-<ts> file itself.",
+     "files": [
+      "server/publish_db.py",
+      "server/tests/test_bug_hunt_2026_09_24.py"
+     ],
+     "regression_test": "server/tests/test_bug_hunt_2026_09_24.py: test_the_newest_prev_is_a_database_never_its_wal, test_the_rollback_script_moves_the_database_over_the_live_path (end to end through do_rollback), test_a_sidecar_named_by_hand_is_refused_before_the_nas_is_touched. All 3 fail on HEAD; I ran them against the HEAD publish_db.py swapped in place and then restored.",
+     "tests_run": "Git Bash, server/: test_backup_restore, test_broll_drain, test_bug_hunt_2026_08_21, test_bug_hunt_2026_09_18_webapps_tools, test_bug_hunt_2026_09_24 -> 123 passed",
+     "fails_on_head": "yes, run against the HEAD file",
+     "owed": "none"
+    },
+    {
+     "id": "logic-release-1",
+     "fixed": true,
+     "mechanism": "As reported. RELEASE.md step 1 was `new --force` + `bake --add`, but new --force puts the NEW key at release.key, which every signer reads. So the 'overlap' build was signed with a key the fleet does not trust. REL-7's refusal then said 'Pass --allow-key-rotation if this is that deliberate step', which invites exactly the override that strands the fleet and re-signs the channel with a key that customer dashboards reject.",
+     "fix": "RELEASE.md Rotating rewritten. (1) Make the new key at a SIDE path (release-next.key: new, backup, bake --add) and ship as usual, so release.key (the OLD key) signs the overlap build and REL-7 passes with no override. (2) Add the new public key to DASH_RELEASE_PUBKEYS on every dashboard. (3) Once the fleet runs the overlap build, switch the key files, then drop the old key later. The doc says new --force is not a rotation step and that the override does not perform a rotation. publish_feed.key_rotation_refusal(): when the refused build already bakes both keys, the refusal says it is the overlap release, that it must be SIGNED WITH THE OLD KEY, names that key id and how to use it; otherwise it points at the procedure. The flag is described as stranding, never as the step. release_key.py new: --force on the signing path now warns THE NEW KEY NOW SIGNS EVERYTHING; a key made at a side path is announced as a SIDE key, with the bake --add next step.",
+     "files": [
+      "docs/RELEASE.md",
+      "tools/publish_feed.py",
+      "tools/release_key.py",
+      "tools/tests/test_bug_hunt_2026_09_24_webapps_ops.py"
+     ],
+     "regression_test": "tools/tests/test_bug_hunt_2026_09_24_webapps_ops.py. test_the_documented_rotation_ships_the_overlap_without_an_override executes the doc's own release_key.py commands against a tmp key, a tmp release_pubkey.py copy and a tmp feed, then checks the overlap is signed by the old key and the post-switch build by the new key, with no override. test_an_overlap_signed_by_the_new_key_is_refused_toward_the_old_key, test_a_build_that_does_not_bake_the_old_key_is_sent_to_the_procedure and test_the_runbook_no_longer_starts_a_rotation_with_new_force complete the set. All 4 fail against the HEAD publish_feed.py, release_key.py and RELEASE.md swapped in place and then restored.",
+     "tests_run": "tools/ (dashboard venv): test_publish_feed, test_release_key, test_release_scripts, test_publish_latest, test_sign_release, test_release_notes_flag, test_docs_index, test_bug_hunt_2026_09_24_webapps_ops -> 212 passed, 1 failed. The failure is test_docs_index::test_every_doc_is_listed: docs/README.md does not list the orchestrator's untracked docs/bug-hunt-2026-09-24.md. It is not caused by these changes.",
+     "fails_on_head": "yes, run against the HEAD files",
+     "owed": "installer group: installer/build_editor_package.ps1 around lines 460-462 has the same REL-7 text telling the operator to pass -AllowKeyRotation 'if this is that deliberate step'. It should match publish_feed.key_rotation_refusal: an overlap release is signed with the OLD key, and the override does not perform a rotation. Orchestrator: list bug-hunt-2026-09-24.md in docs/README.md, which is what turns test_docs_index red."
+    },
+    {
+     "id": "ui-dash-admin-1",
+     "fixed": true,
+     "mechanism": "As reported. {{ p.label }} sat inside a single-quoted JS string in the ARCHIVE form's onsubmit. Autoescape is decoded before the handler compiles, so an apostrophe is a SyntaxError (null handler, no confirm) and a crafted folder name runs script. The sweep found the same shape in project_detail.html: the MOVE form's hx-on::confirm spliced {{ project.label }} into a &quot;-quoted JS string.",
+     "fix": "Both labels now travel in data- attributes (data-archive-label, data-project-label) and are read as DOM strings (this.dataset.archiveLabel / f.dataset.projectLabel). The numeric values are forced through | int. Swept and left alone: topbar sign-out confirm and editor_switcher onchange (no values), the base.html inline script (no Jinja), base.html hx-headers (csrf_token is an HMAC hexdigest), and every hx-confirm (a data string for confirm(), never compiled, so HTML escaping is sufficient).",
+     "files": [
+      "dashboard/templates/admin_assignments.html",
+      "dashboard/templates/partials/project_detail.html",
+      "dashboard/tests/test_bug_hunt_2026_09_24_webapps_ops.py"
+     ],
+     "regression_test": "dashboard/tests/test_bug_hunt_2026_09_24_webapps_ops.py: test_the_archive_confirm_never_carries_the_label_in_its_source, test_the_archive_confirm_compiles_and_asks_about_the_real_name (compiles and runs the real handler under node with a stub confirm), test_the_move_confirm_never_carries_the_label_in_its_source (the same, for MOVE), and test_no_template_splices_a_string_value_into_an_inline_handler (the sweep, pinned over every template). All 4 fail against the HEAD templates swapped in place and then restored.",
+     "tests_run": "dashboard: test_admin_assignments, test_file_moves, test_sessions, test_mobile_admin, test_no_em_dash, test_templates_wave3_2026_09_04, test_bug_hunt_2026_09_24_webapps_ops -> 313 passed; test_admin_tick_for_editor, test_fleet_scope, test_bug_hunt_2026_09_18_dashboard_lows, test_upload_only, test_settings_hub -> 102 passed",
+     "fails_on_head": "yes, run against the HEAD files",
+     "owed": "none"
+    }
+   ]
+  },
+  "review": {
+   "verdicts": [
+    {
+     "id": "bug-music-ytdl-1",
+     "verdict": "SOUND",
+     "problems": "I traced it. `_phase_download` now calls `tree_missing_note` before `ensure_outdir` and `_sweep_stale`. `ensure_outdir` has no other caller, and `_no_room_note`'s copy of the check now runs after the early `gone` return. When the tree is gone, `_reclaim_local_job` only reads `outdir` (`_landed_file` treats a missing directory as empty) and `write_manifest` is never reached, so nothing is written into the container overlay and the rows stay pending. The routes_fleet readers (`_still_owed`, the clip-status path) only compose paths and never create directories. Running the regression test against a scratch copy of the package with HEAD's worker.py fails as expected (\"the phase must not reach yt-dlp\"). With the fix, 210 tests pass across test_bug_hunt_2026_09_24_webapps_ops, test_worker, test_bug_hunt_2026_09_18_webapps_tools and test_local_download. Not a defect, but worth knowing: I did not see the hunter's second suggestion (ensure_outdir refusing to create <root>/<label> itself) in this diff. So when `tree_is_gone` fails open (PROJECTS_ROOT itself missing, or an OSError), the phase still makes the folder in the overlay. That is the existing boot-order design, not a regression."
+    },
+    {
+     "id": "bug-ops-1",
+     "verdict": "SOUND",
+     "problems": "`newest_prev` now leaves out names ending in `SIDECARS` (-wal/-shm, the same tuple `build_rollback_script` uses to carry sidecars with the database), and `do_rollback` refuses a sidecar `--from-prev` before any SSH. The only writer of `.prev-*` is the swap at publish_db.py:936. I found no other caller that picks a newest prev: recovery.py only describes the command. All 3 new tests fail against HEAD's publish_db.py in a scratch copy. With the fix, 92 pass across test_bug_hunt_2026_09_24, test_backup_restore and test_bug_hunt_2026_08_21, run from Git Bash."
+    },
+    {
+     "id": "logic-release-1",
+     "verdict": "PROBLEM",
+     "problems": "1) (Real gap) The new runbook's step 3 is false for pathway A (tools\\ship.cmd), which is Alex's own path. docs/RELEASE.md step 3 says that after the key switch \"REL-7 passes again without an override\", and step 1 says \"No override is ever needed for a rotation ... never pass -AllowKeyRotation\". But the REL-7 check in installer/build_editor_package.ps1:442-463 compares `$SigningId` with the key that SIGNED the current build (`$current.pubkey_id`), not with that build's baked list. The dashboard does not store `baked_pubkey_ids` at all. RELEASE.md:717-718 itself says the ps1 \"asks the dashboard which key signed the build that is currently current\". So after the switch, the first new-key build through ship.cmd is refused: the current build is the overlap build, and it was signed by the OLD key. The operator then either stops (as the doc tells them) or passes the override the doc forbids. Fix one of two ways. (a) Carry `baked_pubkey_ids` into the dashboard's package record and have the ps1 compare against it, like publish_feed. That is a wire and schema change, so the dashboard must deploy first. (b) Have step 3 of the doc say that on pathway A the first new-key build needs -AllowKeyRotation, and have the ps1 text say when that is safe: the current build already bakes the new key. 2) The same ps1 refusal (build_editor_package.ps1:461-463) still says \"A rotation costs an overlap release: bake --add, ship THAT ... Pass -AllowKeyRotation if this IS that deliberate step\". That is the exact sentence the finding is about, on the path ship.cmd runs. The builder lists it as OWED to the installer group, but until that lands the finding is fixed only for pathway B. RELEASE.md:135-136 also still calls the flag \"the deliberate override\". 3) (Minor) In tools/release_key.py cmd_new, `new --force` on the signing path prints the new \"THE NEW KEY NOW SIGNS EVERYTHING ... put it back\" warning, then falls into the `else` branch and prints \"Next: python tools/release_key.py bake\". That is a plain bake with no --add, i.e. the stranding step, directly after the warning. Suppress the Next line in that case. 4) (Minor) Step 1's `--path ...release-next.key backup --to ...` calls `_record_backup`, which overwrites the directory-wide `~/.ccsync-release/backup.json` (`backup_record_path` = path.parent/backup.json) with the SIDE key's pubkey_id. After that, the record for release.key describes a different key. ship.ps1:593 only checks that the file exists, so this is cosmetic today. Tests: the 4 new tests fail against the HEAD publish_feed.py, release_key.py and RELEASE.md in a scratch copy. With the fix, 109 pass in test_publish_feed, test_release_key, test_publish_latest and the new file."
+    },
+    {
+     "id": "ui-dash-admin-1",
+     "verdict": "SOUND",
+     "problems": "The ARCHIVE label moved to an autoescaped `data-archive-label` and is read with `this.dataset.archiveLabel`. `tick_count` goes through `| int`. The MOVE handler in partials/project_detail.html gets the same treatment (`data-project-label` / `f.dataset.projectLabel`, and `| length | int`). My own scan of every on*/hx-on* attribute and inline <script> in dashboard/templates finds no string value left inside handler source. The only other one, cards_landing.html:44, uses `| tojson` inside a single-quoted attribute, and tojson escapes ' as ', so it is safe. 179 dashboard tests pass, including the node-compiled handler tests (node was present, no skips). Nit, not a defect: the sweep test's regex only scans double-quoted attributes, so a future single-quoted `onsubmit='...{{ x }}...'` splice would not be caught."
+    }
+   ]
+  },
+  "rework": {
+   "fixes": [
+    {
+     "id": "bug-music-ytdl-1",
+     "fixed": true,
+     "mechanism": "_phase_download ran ensure_outdir(outdir) (makedirs under PROJECTS_ROOT) and _sweep_stale before the ytdl-web-5 tree_missing_note guard. tree_is_gone's first test is project_dir.is_dir(), which the makedirs had just made true, so an emptied mount always read as present. The overlay folder it left then also defeated the press-time _refuse_if_the_tree_is_gone.",
+     "fix": "ytdl/web/ytdlweb/worker.py _phase_download: the tree question is asked before anything is created. When the tree is gone, ensure_outdir and _sweep_stale are skipped and the phase fails at the existing ytdl-web-5 spot with the same sentence; rows stay pending so RETRY re-queues them. The lease reclaim and requester claim grace still run in between (a companion writes to its own disk).",
+     "files": [
+      "ytdl/web/ytdlweb/worker.py",
+      "ytdl/web/tests/test_bug_hunt_2026_09_24_webapps_ops.py"
+     ],
+     "regression_test": "ytdl/web/tests/test_bug_hunt_2026_09_24_webapps_ops.py::test_the_download_phase_refuses_a_vanished_share_it_would_have_created - on HEAD the phase reached yt-dlp (the stub recorded a download into <root>/2026/FF5/Energy Transition/Youtube); run against git show HEAD:ytdl/web/ytdlweb/worker.py swapped in and restored.",
+     "tests_run": "cd ytdl/web; ..\\..\\dashboard\\.venv\\Scripts\\python.exe -m pytest tests/test_bug_hunt_2026_09_24_webapps_ops.py tests/test_worker.py tests/test_local_download.py tests/test_bug_hunt_2026_09_18_webapps_tools.py tests/test_bug_hunt_2026_09_18b_ytdl.py tests/test_bug_hunt_2026_09_11_ytdl_web.py tests/test_bug_hunt_2026_09_11b_ytdl_web.py tests/test_retry_failed.py tests/test_no_em_dash.py -q -> 277 passed (round 1; not touched this round)",
+     "fails_on_head": "yes, run against the HEAD worker.py",
+     "owed": "none. Server-only; an overlay folder a pre-fix run already created keeps answering 'present' until the container is recreated."
+    },
+    {
+     "id": "bug-ops-1",
+     "fixed": true,
+     "mechanism": "The publish swap renames <target>-wal/-shm to <target>.prev-<ts>-wal/-shm; list_prev_command's find '<file>.prev-*' lists them, and newest_prev's plain sort put the -wal sidecar last, so build_rollback_script mv'd the WAL journal over the live index and printed 'rolled back'. --from-prev accepted a sidecar by hand too.",
+     "fix": "server/publish_db.py: newest_prev drops every sidecar-suffixed name (new is_sidecar_name keyed on SIDECARS), so only a database can be a candidate (its sidecars still travel with it in build_rollback_script); do_rollback refuses a --from-prev naming a sidecar before anything runs on the NAS.",
+     "files": [
+      "server/publish_db.py",
+      "server/tests/test_bug_hunt_2026_09_24.py"
+     ],
+     "regression_test": "server/tests/test_bug_hunt_2026_09_24.py::test_the_newest_prev_is_a_database_never_its_wal, ::test_the_rollback_script_moves_the_database_over_the_live_path, ::test_a_sidecar_named_by_hand_is_refused_before_the_nas_is_touched - all fail on HEAD (chosen prev was ...T101500-wal; sidecar --from-prev went through); run against HEAD publish_db.py swapped in and restored.",
+     "tests_run": "Git Bash: cd server; ../dashboard/.venv/Scripts/python.exe -m pytest tests/test_backup_restore.py tests/test_broll_drain.py tests/test_bug_hunt_2026_08_21.py tests/test_bug_hunt_2026_09_18_webapps_tools.py tests/test_bug_hunt_2026_09_24.py -q -> 123 passed (round 1; not touched this round)",
+     "fails_on_head": "yes, run against the HEAD publish_db.py",
+     "owed": "none"
+    },
+    {
+     "id": "logic-release-1",
+     "fixed": true,
+     "mechanism": "RELEASE.md's rotation began with `release_key.py new --force` + `bake --add`, but new --force puts the NEW key at release.key, the path every signer reads, so the overlap build was signed by a key the fleet did not trust; REL-7 refused it and its text invited the override. Review round: pathway A's REL-7 (build_editor_package.ps1) compares against the key that SIGNED the current build, not its baked list, so after the key switch the first new-key build via ship.cmd is refused even in a correct rotation; my round-1 step 3 wrongly said it passes without an override.",
+     "fix": "Round 1: RELEASE.md Rotating rewritten (new key at a SIDE path release-next.key, bake --add, ship as usual so the OLD key signs the overlap; add the new pubkey to DASH_RELEASE_PUBKEYS; then switch files); publish_feed.key_rotation_refusal names the OLD key that must sign when the build already bakes both keys, and never calls the flag a rotation step; release_key new --force on the signing path warns loudly, a side key prints the --path bake --add next step. Review round: (1) RELEASE.md step 3 split by pathway: B passes with no override (publish_feed checks baked_pubkey_ids); A refuses that one build and -AllowKeyRotation is correct there only when the refusal names the OLD key as the current build's signer, this rig's id is the NEW key's, and the current version is the overlap build or later; the paragraph after the section lists the override's only two uses; RELEASE.md:135-136 no longer calls it 'the deliberate override'; tools/ship.ps1 -AllowKeyRotation help says the same. (2) The ps1 refusal text is in the installer group, OWED with exact replacement text. (3) release_key cmd_new no longer prints 'Next: ... bake' (no --add) after the NEW KEY NOW SIGNS EVERYTHING warning. (4) backup_record_path keeps backup.json for release.key and gives any other key file <name>.backup.json, so the side key's backup no longer overwrites the signing key's record; step 3 moves the records with the keys.",
+     "files": [
+      "docs/RELEASE.md",
+      "tools/publish_feed.py",
+      "tools/release_key.py",
+      "tools/ship.ps1",
+      "tools/tests/test_bug_hunt_2026_09_24_webapps_ops.py",
+      "docs/bug-hunt-2026-09-24/ledger/webapps-ops.md"
+     ],
+     "regression_test": "tools/tests/test_bug_hunt_2026_09_24_webapps_ops.py: round 1 ::test_the_documented_rotation_ships_the_overlap_without_an_override (executes the doc's commands against a tmp key/feed), ::test_an_overlap_signed_by_the_new_key_is_refused_toward_the_old_key, ::test_a_build_that_does_not_bake_the_old_key_is_sent_to_the_procedure, ::test_the_runbook_no_longer_starts_a_rotation_with_new_force; review round ::test_step3_says_pathway_a_needs_the_override_once_and_when (models the ps1's signed-by comparison on the real overlap record, pins doc + ship.ps1 help), ::test_new_force_on_the_signing_path_does_not_then_say_bake, ::test_backing_up_the_side_key_keeps_the_signing_keys_record, plus guard ::test_a_first_key_still_gets_the_bake_prompt. In a scratch copy with HEAD's release_key.py, publish_feed.py, ship.ps1 and RELEASE.md: 7 failed, 1 passed (the guard, meant to pass on both). The three new ones also fail against round-1 files by the exact lines the review quotes.",
+     "tests_run": "cd tools; ..\\dashboard\\.venv\\Scripts\\python.exe -m pytest tests/test_publish_feed.py tests/test_release_key.py tests/test_release_scripts.py tests/test_publish_latest.py tests/test_sign_release.py tests/test_docs_index.py tests/test_bug_hunt_2026_09_24_webapps_ops.py -q -> 211 passed, 1 failed (test_docs_index::test_every_doc_is_listed: docs/README.md does not list the orchestrator's untracked docs/bug-hunt-2026-09-24.md; unrelated, same as round 1)",
+     "fails_on_head": "yes: 7 of 8 tests fail on the HEAD copies in a scratch dir; the 8th is a guard",
+     "owed": "installer group: installer/build_editor_package.ps1 lines 460-462 still say 'A rotation costs an overlap release: bake --add, ship THAT ... Pass -AllowKeyRotation if this IS that deliberate step'; until changed, the fix covers pathway B and the runbook but not the refusal an operator reads on pathway A. Suggested text: 'A rotation's overlap release is signed with the OLD key ($currentKey), not this one: put that key back at release.key and ship again (docs\\RELEASE.md, Rotating). -AllowKeyRotation does not perform a rotation. Its one rotation use is the FIRST build after the key switch (step 3), when v$($current.version) is the overlap build and $currentKey is the old key. Nothing was built.' Proper fix = review option (a): carry baked_pubkey_ids into the dashboard package record (optional on read, deploy dashboard first) and compare against it in the ps1 like publish_feed. Orchestrator: list bug-hunt-2026-09-24.md in docs/README.md (red test_docs_index)."
+    },
+    {
+     "id": "ui-dash-admin-1",
+     "fixed": true,
+     "mechanism": "admin_assignments.html put {{ p.label }} inside a single-quoted JS string in onsubmit; the browser decodes autoescape's &#39; before compiling the handler, so an apostrophe is a SyntaxError (null handler, the form submits with no confirm) and a crafted name runs script in the admin session. Sweep found the same shape in partials/project_detail.html's MOVE hx-on::confirm ({{ project.label }} in a &quot;-quoted JS string).",
+     "fix": "admin_assignments.html ARCHIVE form: label moves to data-archive-label (HTML-escaped), handler reads this.dataset.archiveLabel, tick_count | int. partials/project_detail.html MOVE: label from data-project-label via f.dataset.projectLabel, editors count | length | int. Checked and left alone: topbar.html:160 (static), editor_switcher.html:11 (no value), base.html:61 script (no Jinja), base.html:128 hx-headers (csrf HMAC hex only), every hx-confirm (htmx passes to confirm() as data, HTML escaping sufficient); cards_landing.* excluded but covered by the sweep test.",
+     "files": [
+      "dashboard/templates/admin_assignments.html",
+      "dashboard/templates/partials/project_detail.html",
+      "dashboard/tests/test_bug_hunt_2026_09_24_webapps_ops.py"
+     ],
+     "regression_test": "dashboard/tests/test_bug_hunt_2026_09_24_webapps_ops.py::test_the_archive_confirm_never_carries_the_label_in_its_source, ::test_the_move_confirm_never_carries_the_label_in_its_source, ::test_the_archive_confirm_compiles_and_asks_about_the_real_name (+ MOVE twin, run under node with a stub confirm), ::test_no_template_splices_a_string_value_into_an_inline_handler - all fail on HEAD (handler source held the payload; sweep listed the four splices); run against HEAD templates swapped in and restored.",
+     "tests_run": "cd dashboard; .venv\\Scripts\\python.exe -m pytest tests/test_admin_assignments.py tests/test_file_moves.py tests/test_sessions.py tests/test_mobile_admin.py tests/test_no_em_dash.py tests/test_templates_wave3_2026_09_04.py tests/test_bug_hunt_2026_09_24_webapps_ops.py -q -> 313 passed; tests/test_admin_tick_for_editor.py tests/test_fleet_scope.py tests/test_bug_hunt_2026_09_18_dashboard_lows.py tests/test_upload_only.py tests/test_settings_hub.py -> 102 passed (round 1; not touched this round)",
+     "fails_on_head": "yes, run against the HEAD templates",
+     "owed": "none"
+    }
+   ]
+  }
+ }
+]

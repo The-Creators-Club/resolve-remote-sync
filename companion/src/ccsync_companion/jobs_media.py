@@ -466,7 +466,10 @@ def _popen(cmd: list[str], binary_stdout: bool = False,
     if os.name == "nt":
         flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
     kwargs["creationflags"] = flags
-    return subprocess.Popen(cmd, **kwargs)  # noqa: S603 -- argv built above
+    # bug-comp-media-1 (2026-09-24): argv[0] is the config value ("ffmpeg");
+    # resolved here so a machine whose only ffmpeg is the sidecar copy runs
+    # the binary its capability report advertised instead of WinError 2.
+    return subprocess.Popen(ffmpeg_tools.spawn_argv(cmd), **kwargs)  # noqa: S603 -- argv built above
 
 
 def progress_argv(cmd: list[str]) -> list[str]:

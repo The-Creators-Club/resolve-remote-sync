@@ -1,0 +1,1001 @@
+[
+ {
+  "group": "med-01",
+  "ids": [
+   "bug-comp-app-2",
+   "bug-comp-app-3",
+   "bug-comp-rclone-2",
+   "bug-comp-rclone-3",
+   "bug-comp-syncthing-1",
+   "bug-comp-syncthing-2",
+   "bug-comp-syncthing-3",
+   "bug-comp-syncthing-4"
+  ],
+  "verdicts": [
+   {
+    "id": "bug-comp-app-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "consolidate_project checks only sync_enabled, the tray pause, config_problems and the root. It never calls _lanes_refusal(), which is where the halt and the EULA are checked. It then calls lane_a/lane_b.run_once directly, and rclone_lane._run_once_locked has no halt check. A lane that was never started has its stop event clear, and the button is always offered in Settings ADVANCED. lane_b_allowed still blocks a lane B pull whose dry run showed deletions, so there is no data loss: an admin's halt is bypassed by one click."
+   },
+   {
+    "id": "bug-comp-app-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_apply_diagnostics_request saves applied_request to disk before it starts the fire-and-forget upload thread, and that thread's False result (signed out, POST failure) is thrown away. The dashboard clears the request only when the bundle arrives (api.py:10171) and resends it on every reply, but the saved stamp refuses every resend. A failed upload is never retried until the admin clicks again. This contradicts the reporter docstring's 'try again later' contract."
+   },
+   {
+    "id": "bug-comp-rclone-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "note_pass adds the full per-pass deletes to _deletes before anything else, and it runs the relocation probe only when the pass would trip or reaches the eager threshold (25 at the default cap). _discount_relocations is clamped to the current pass, and _deletes resets only on resume. Moves the lane already followed (_moved_out_of_trash, _server_relocated_keys) on passes of 1-24 files therefore build up and later trip BREAKER_CAUSE_LEAK at 200. Lane B parks until a human resumes it, with no data loss."
+   },
+   {
+    "id": "bug-comp-rclone-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "DiskFloorLatch.check updates _free_bytes while parked but keeps the reason sentence from when it parked, so the stated free-space figure goes stale. The park clears at 2x the floor, while prune_trash's disk-pressure loop (passed disk_floor.min_free_bytes) stops at 1x. The sequencer's per-pass prune therefore cannot bring about the automatic release: the lane stays parked until a manual RESUME and shows the wrong number meanwhile."
+   },
+   {
+    "id": "bug-comp-syncthing-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "apply_move puts src.replace(dest) and move_proxy_siblings in one try/except OSError. A locked proxy therefore returns (False, 'could not move it...') after the original has already moved, and the app records it as retryable, not applying. On the redelivery src is gone, and the resume arm accepts only STATE_APPLYING or a lane B relocation row. It answers (True, 'nothing at the old path', None), so there is no relink, relink_pending is False, and the proxy is left behind."
+   },
+   {
+    "id": "bug-comp-syncthing-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_build_borrowed never skips upload-only items, so an upload-only borrower's includes land in _borrowed_lenders. The collector shares a lender only for FULL borrower ticks, so the offer never comes. BorrowedFolderManager returns not-offered, and the tray and fleet permanently say 'Ask your admin to approve it'. The hunter's 'still pulling down' sub-case is weaker than stated (enforce would unshare the folder), but the permanent false problem and the wrong subtree attribution are real."
+   },
+   {
+    "id": "bug-comp-syncthing-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "The dashboard's _expand_includes marks an include covered when the lender is in the machine's selection in any mode, and the companion's _build_borrowed drops an include under any selected rel, upload-only rels included (rel_to_slug is built from every valid item). An upload-only lender's turn is lane A only, so a full borrower's borrowed subtree never comes down and nothing reports it. This breaks the CLAUDE.md FULL-only rule on both sides. Related to syncthing-2, not a duplicate."
+   },
+   {
+    "id": "bug-comp-syncthing-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "halt_all_sync pauses lane C folders once, after sequencer.stop() has returned (a 5 s idle wait plus a 10 s join), and nothing re-asserts the pause. In the sequencer thread, _maybe_auto_accept -> accept_folder ends in an unconditional unpause after a set_ignores on the 30 s write timeout. _verify_current_folder_unpaused runs after _wait_for_folder_sync with no stop check, and _set_paused has no halt check. The borrowed-folder manager guards the same accept_folder call with halted(), and the sequencer does not. It is a timing race that needs a slow Syncthing, but the code path is real. Related to high comp-app-1, not the same bug."
+   }
+  ]
+ },
+ {
+  "group": "med-02",
+  "ids": [
+   "bug-comp-ui-1",
+   "bug-comp-ui-2",
+   "bug-comp-resolve-1",
+   "bug-comp-resolve-2",
+   "bug-comp-resolve-3",
+   "bug-comp-resolve-4"
+  ],
+  "verdicts": [
+   {
+    "id": "bug-comp-ui-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "On win32 ui_dispatch.dispatch is inline, so _tk_pick builds a Tk root on the ccsync-ingest-picker helper thread with no _popup_active_lock anywhere on the path (pick_ingest_sources -> pick_media_sources -> _tk_pick). pick_media_sources returns [] after 300 s and never closes the dialog, so a late pick is dropped as 'cancelled' and a second click opens a second root. No existing entry covers this."
+   },
+   {
+    "id": "bug-comp-ui-2",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "The mechanism holds: _apply_menu_now unconditionally rebinds _targets/_delegate, and NSMenu's delegate is weak, so a rebuild during tracking loses menuDidClose_. But the window is milliseconds, it is macOS-only and has not been run on a Mac, and it is not 'forever': the next open and close of the new menu clears ui_state.menu_open. That makes it a rare stall that clears itself."
+   },
+   {
+    "id": "bug-comp-resolve-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "I replayed HEAD's PARK_HINTS/RETRY_HINTS/'resolve'+'not' logic over the messages. STARTING_MESSAGE 'DaVinci Resolve is starting up' classifies as failed, while the other disconnection messages classify as retrying. undo_last_relink passes through get_media_pool_items' describe_disconnection() text, and _apply_resolve_undo records the failed state for good."
+   },
+   {
+    "id": "bug-comp-resolve-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_project_name_cache has no invalidation, and _before_mutation, the link_proxy journal entry and both automatic limiters (app.py 3258/4653) read it with the 20 s TTL. After a switch, B's unprompted relink is journalled as A. The undo in A then passes the A==A check and replays B's entries against A's pool through shared Assets paths, which reopens CR-51. It needs a cache read just before the switch, so it stays medium."
+   },
+   {
+    "id": "bug-comp-resolve-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "sweep_items calls get_timeline_items(allow_cached=True). That call falls through to _get_timeline_items_locked under the API lock when the library answers None, and only afterwards does sweep_items discard the api-sourced items. It also shares the watcher's poll cache, and each hit bumps _polls_since_full_walk, which speeds up the per-clip full-walk valve. ResolveEngine._sweep calls it on every sweep, and being library-less is the documented default."
+   },
+   {
+    "id": "bug-comp-resolve-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_clear_dead does not stop the surviving daemon loop, and role.call has no current-client check, so the orphaned pull_loop keeps staging /cards/agent/pending requests on the old engine. This is worse than filed: _release_engine is a no-op, because SyncEngine/LibraryEngine/ResolveEngine have no stop() in the MulticamPipeline checkout (git grep 'def stop' HEAD finds only keys.py and project_agent.py), so engine #1's Resolve thread keeps running beside engine #2. Confidence goes from PLAUSIBLE to CONFIRMED; severity stays medium because a loop must die first and the role is opt-in."
+   }
+  ]
+ },
+ {
+  "group": "med-03",
+  "ids": [
+   "bug-comp-broll-2",
+   "bug-comp-broll-3",
+   "bug-comp-broll-4",
+   "bug-comp-broll-5",
+   "bug-comp-ytdl-2",
+   "bug-comp-ytdl-3",
+   "bug-comp-ytdl-4"
+  ],
+  "verdicts": [
+   {
+    "id": "bug-comp-broll-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "The server stores rel_dir as '' when keep_subfolders is off, and otherwise runs each part through safe_name. The companion stages the raw rel_dir, and _item_from_manifest matches on the exact (name, rel_dir) string. A probe against HEAD returned local_path '' for staged 'Day1' vs manifest '' and for 'Shoot A.' vs 'Shoot A', so _crunch_item fails the clip with 'not on this computer any more'. Retry fails the same way. The trigger differs from bug-comp-broll-1, but the matcher is the same and one id-based match fixes both."
+   },
+   {
+    "id": "bug-comp-broll-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "It is true that is_file() makes the DONE branch unreachable and the DONE job leaks. But the next poll still imports as a stand-in with upgrade_rel, so start_proxy_upgrade sets upgrade=pending. settle_intents also settles the row within 120 s, by geometry or by job_state, and job_state answers 'done' because of the leak itself. What remains: a stuck row only with no geometry plus a restart inside 120 s, a small per-clip registry leak (not counted toward the cap), and one misleading 'is the share mounted?' when a deleted clip is re-sent."
+   },
+   {
+    "id": "bug-comp-broll-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "held_for_base_rig is only ever appended to (:3632, :3650). A later successful original upload through retry_failed (proxies_live -> pending) never removes the name. prune_staging skips held entries even at max_age_days=0 (CLEAR FINISHED STAGING). staging_report counts held entries that have ended_at as finished_bytes, so _space_refusal names a button that frees nothing. The hold is intended only while the original is still owed, so after that the staging space is never reclaimed."
+   },
+   {
+    "id": "bug-comp-broll-5",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_run_media never passes a timeout, so the preview and editing-proxy encodes run under RUN_TIMEOUT_SECONDS=900, whose comment says it was sized for stills and sprites. On a machine without NVENC, own_proxy_cmd is libx265 -preset medium 10-bit, so a clip of roughly 10 minutes or more can exceed 15 min. The timeout becomes 'did not decode': the proxy is lost, or the whole item when the preview times out. proxy_gen runs the same recipe with max(1800, duration*60). Not measured on hardware."
+   },
+   {
+    "id": "bug-comp-ytdl-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "A stop during conversion deletes the .editready tmp and returns (name, None, None). _download_one then calls only _cleanup_current, which clears sweepable partials only. disown_output is reached only via _fail_clip, so the VP9 original stays under its deliverable '[id].mp4' name for the importer and lane A. The root is shared with high bug-comp-ytdl-1 (converting in place under the final name), but this trigger makes the bad file permanent, so it is not a duplicate. They should be fixed together."
+   },
+   {
+    "id": "bug-comp-ytdl-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "The mechanism is real: heartbeat discards the status, _call raises only on a transport failure or 410, require_fleet_caller answers 403 before the lease check, and sign_out does not stop the executor. The outcome is wasted work (a duplicate download of the remaining clips under the same [id] names, with lane A already stopped by the sign-out), not data loss. The triggers (a sign-out, token expiry or user deletion in the middle of a local job) are rare."
+   },
+   {
+    "id": "bug-comp-ytdl-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_loop waits CHECK_INTERVAL_SECONDS (24 h) after any enabled pass, including ACTION_FAILED with ok=False from a failed install or floor update. capabilities() then refuses every job. The only other ensure() caller is the per-job poke, which cannot fire because no job is ever claimed. So one network blip at boot or during a floor raise sends that machine's downloads to the slower, flag-prone server path for a day."
+   }
+  ]
+ },
+ {
+  "group": "med-04",
+  "ids": [
+   "bug-comp-core-3",
+   "bug-comp-core-4",
+   "bug-comp-core-5",
+   "bug-comp-media-2",
+   "bug-comp-media-3",
+   "bug-comp-media-4",
+   "bug-comp-media-6"
+  ],
+  "verdicts": [
+   {
+    "id": "bug-comp-core-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "refresh_site has one caller, a single fire-and-forget thread in App.start (app.py:9342-9356). save_site is only called from it, and no report reply carries the manifest. feature_enabled reads the cache only. So a companion that started offline, or any flag an admin flips later (auto_update, youtube_download), never reaches a running tray until it restarts."
+   },
+   {
+    "id": "bug-comp-core-4",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "The mechanism is real: verify sends no arch, VerifyIn does not declare it, api_verify passes no withheld, and sign_in feeds {upgrade: X} to note_report_response, which clears a refusal. But it only fires on a rare interactive sign-in. In (a) the swap guard rolls the wrong-CPU binary back and the next report, which carries arch, withdraws the offer. In (b) the only loss is a diagnostic chip and an alert. Self-correcting or display-only, so low."
+   },
+   {
+    "id": "bug-comp-core-5",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "refresh_once checks root presence only before the walk. os.walk has no onerror and size errors are skipped, so a drive pulled mid-walk yields 0/0 rollups that replace the cache. Later refreshes are then skipped because the root is absent, so the zeros persist for the whole unplugged period, and the reporter sends them with no presence gate. This is exactly the report the guard was built to prevent. The effect is a wrong presence view, not data loss."
+   },
+   {
+    "id": "bug-comp-media-2",
+    "verdict": "REFUTED",
+    "severity": "none",
+    "reason": "This is intended. docs/CONFIG.md says the dashboard's per-kind floor and the machine's jobs_idle_seconds must BOTH pass, and the key 'is never loosened by the server's'. The documented ways past the companion's gate are the tray volunteer and forced (--now) jobs, both implemented in _gate. The base-rig rank is a 60 s grace period, not a filter, so the job falls through to other machines."
+   },
+   {
+    "id": "bug-comp-media-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "out_stem is appended unchecked after job_paths.resolve has guarded the other inputs, so the escape is real. But POST /api/v1/jobs is admin-only and the other submitter is the in-process Cards engine, so 'write anywhere' needs an admin. The realistic case, a multicam name with '/' or ':', is shared with MulticamPipeline's own standalone engine (library_engine.py:3154 uses the same unsanitised name), not introduced by the fleet path."
+   },
+   {
+    "id": "bug-comp-media-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "Reproduced: the exact peaks_cmd argv on a video-only mp4 prints 'Output file does not contain any stream' with a non-zero exit. _peaks discards the probed codec, so the code != 0 branch raises a retryable MediaJobError, unlike _audio and _proxy. Cards falls back to the clip's own media when there is no reference WAV, so a video-only source is reachable. The peaks budget is 4 retries, each putting a machine on a 120 s cooldown for every kind, then a pin that fails again."
+   },
+   {
+    "id": "bug-comp-media-6",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "affected = items with GetEnd() > rec includes a clip that straddles the playhead. It is re-appended at start+shift with its full duration, so it always overlaps the new cue's [rec, rec+shift). Either Resolve refuses the span, so the verify fails and the insert rolls back every time, or it overwrites and silently cuts the cue's tail. Both are wrong for the common 'sting in the middle of a bed' case. No existing ledger entry covers it."
+   }
+  ]
+ },
+ {
+  "group": "med-05",
+  "ids": [
+   "bug-dash-db-1",
+   "bug-dash-db-2",
+   "bug-dash-api-1",
+   "bug-dash-api-2",
+   "bug-dash-diag-1",
+   "bug-dash-diag-2",
+   "bug-dash-diag-3"
+  ],
+  "verdicts": [
+   {
+    "id": "bug-dash-db-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "queued_jobs is LIMIT 200 by priority/id and both offers_for_machine and claim_next_job walk only that window; queued jobs never age out and unclaimable whisper never pins. HEAD probe: 200 GPU whisper jobs + 1 peaks -> peaks absent from window, claim_next_job(allowed_ids=[peaks]) None, offered []."
+   },
+   {
+    "id": "bug-dash-db-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "Companion caps the proxy list at 2000 per project (sets truncated); fetch_sync_backlog's down diff counts every NAS proxy without an editor_media row, so proxies past 2000 are permanent phantom downloads, and transfers.html says 'may undercount' (wrong direction). CR-314 fixed only the combined-kind cap."
+   },
+   {
+    "id": "bug-dash-api-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "approve_pending_ssh_key in NAS mode calls create_or_update_editor, and both TrueNAS (PUT sshpubkey) and Synology (printf > tmp; mv -f authorized_keys) replace the key. The approve button has no confirm/warning (unlike UPDATE SSH KEY), and each computer's wizard offers its own key, so approving a second machine locks the first out of SFTP lanes A/B. Recoverable, so medium."
+   },
+   {
+    "id": "bug-dash-api-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_move_proxy_siblings targets Proxy/<old candidate.name>. HEAD probe: same-folder rename returned (0, ['A001.mov (something is already at the destination)']) with the proxy unmoved (PARTIAL/207, false reason); a cross-folder rename left the proxy as B/Proxy/A001.mov, which no longer pairs with the renamed original. The companion renames case-only proxies to dest.stem, so NAS and machine diverge."
+   },
+   {
+    "id": "bug-dash-diag-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "protection.run_cycle keeps MISSING notices only for lines BROKEN this pass. A line that drops to NOT_CHECKED when tasks() is None closes its notice and leaves protection_missing findings, so deliver mails a recovery. invariants.run_cycle has the stored_broken carry for exactly this case (dash-collector-2), and protection lacks it."
+   },
+   {
+    "id": "bug-dash-diag-2",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Mechanism holds: checked_kinds comes from ALERT_KINDS, CHECK_FAILED is outside it, so check_failed never gets a .ok and _is_open stays True. But the UI's open counts come from the live scan (alerts.open_counts(findings)), not the ledger, and a later failure is still mailed (SEV_ERROR daily repeat). The only losses are the recovery message and the digest mislabelling a new failure as a 49-day repeat."
+   },
+   {
+    "id": "bug-dash-diag-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "restore_missing creates .restored-<ts> inside the live project folder, which is the Syncthing root. The dot prefix hides it only from provision's own walks. Syncthing syncs dot-dirs, and build_stignore_lines ignores only video, partials, ytdl fragments and Proxy, so every restored non-video file (and the copied marker) goes to every full-tick machine. Established by reading the code, not reproduced live."
+   }
+  ]
+ },
+ {
+  "group": "med-06",
+  "ids": [
+   "bug-dash-auth-2",
+   "bug-dash-auth-3",
+   "bug-dash-auth-4",
+   "bug-dash-cards-jobs-1",
+   "bug-dash-cards-jobs-2",
+   "bug-dash-cards-jobs-3",
+   "bug-dash-cards-jobs-4"
+  ],
+  "verdicts": [
+   {
+    "id": "bug-dash-auth-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "SessionStore.validate's once-a-minute last_seen UPDATE opens with the 20 s BUSY_TIMEOUT_BACKGROUND_MS and runs synchronously from the async login_gate/csrf_gate middlewares, so any write-lock holder stalls the single-worker event loop up to 20 s, then OperationalError (503 via the CR-282F handler) refuses a valid session. CR-282F fixed the same shape only in the error handler."
+   },
+   {
+    "id": "bug-dash-auth-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_settings_fallback returns '' for template_folders/shared_asset_folders, diff records from:'' and undo upserts an explicit '' row, so resolved_manifest yields empty lists instead of provision defaults. Probe on a temp DB: before 8 folders/2 assets, after undo-style restore [] []. Affects sites whose rows were never env-seeded."
+   },
+   {
+    "id": "bug-dash-auth-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "validate_many accepts 'Assets/Luts,音效'; resolved_manifest then raises ValueError from provision.slugify, and api_site has no fallback, so the open manifest (installers, wizard, companions) and project creation 500 until an admin rewrites the row. Reproduced in the dashboard venv."
+   },
+   {
+    "id": "bug-dash-cards-jobs-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_child builds '/'+tail so the gate sees '//api/root' (not in BLOCKED_PATHS), a2wsgi keeps it as PATH_INFO, and CPython 3.12 parse_request collapses '//' so the handler dispatches /api/root. Reproduced on HEAD's full stack with test_cards_pool fixtures: '//api/root' reached the handler (engine.posts recorded it) and '//api/restart' set restarted=True. Needs a signed-in session."
+   },
+   {
+    "id": "bug-dash-cards-jobs-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "note_visit overwrites one _where[editor] slot on every dispatched request, and cards_tunnel routes /state, /pending and /result independently via engine_for, so with one account in two episodes (the pool docstring's everyday pair) a pending from engine A can have its result routed to engine B, which refuses it, and A reports an applied edit as lost."
+   },
+   {
+    "id": "bug-dash-cards-jobs-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "The mechanism holds (tick returns while no engine exists; DDIAG-6 is silent for mounted+running+unclaimed), but the jobs are delayed, not lost. The pool has no idle release, and the drain resumes as soon as any episode opens, since any engine runs any pinned job. The outputs (proxy/audio/peaks) are consumed only by open Cards pages. The real cost is a jobs page that says in hand."
+   },
+   {
+    "id": "bug-dash-cards-jobs-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "BrollGate/MusicGate._identified_scope call read_session_cookie with the current secret only, while login_gate's _resolve_session accepts previous_session_secrets (DASH-2). Cookies are never re-minted per request and sessions last up to 7 days, so for the whole drain window pre-rotation browsers reach /broll and /music with no identity header and the header-gated panels 401. ytdl gate has the same shape."
+   }
+  ]
+ },
+ {
+  "group": "med-07",
+  "ids": [
+   "bug-dash-ops-1",
+   "bug-dash-ops-2",
+   "bug-dash-ops-4",
+   "bug-broll-1",
+   "bug-broll-2",
+   "bug-broll-3",
+   "bug-music-ytdl-3",
+   "bug-music-ytdl-4"
+  ],
+  "verdicts": [
+   {
+    "id": "bug-dash-ops-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_in_sent does an IMAP HEADER substring search (RFC 3501), and handle_message counts a hit as authentication when sender == alerts_smtp_user, overriding even an explicit dkim/dmarc fail. A Message-ID fragment such as 'mail.gmail.com' matches the Sent folder. It is bounded by the 48 h CCT token, and the feature is off in the vendor build."
+   },
+   {
+    "id": "bug-dash-ops-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "login_gate (_resolve_session) accepts cookies signed with session_secrets_previous, but YtdlGate._identified_scope calls read_session_cookie with the current secret only (gate built at ytdl.py:555), so no identity header is added and ytdlweb returns 401 after a rotation. broll.py and music.py gates have the same shape."
+   },
+   {
+    "id": "bug-dash-ops-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "Ran HEAD's _REDACTIONS. DASH_SESSION_SECRET=, TRUENAS_PW=, SYNCTHING_API_KEY:, {'password': ...} and {\"api_key\": ...} all come back unchanged, because \\b does not match after _ and a closing quote defeats the pattern, while token=abc is redacted. The redactor also feeds notices.error_detail."
+   },
+   {
+    "id": "bug-broll-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "The panel sends the stored item.video_id, and remove_item/set_note OR that id with the current index's identity of the same number. Reproduced with the HEAD module: items X(5), Z(9), renumbered to Z=5, X=12, then remove_item(5) deleted both items (folder empty)."
+   },
+   {
+    "id": "bug-broll-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "write_index_result and record_moved post the local shadow id, although the docstring says the id spaces are independent. routes_ingest /index looks body.video_id up directly in the canonical DB and replaces that clip's segments, themes and flags. Dormant on the base rig (sqlite mode), but db.mode api is a documented config and the corruption is silent."
+   },
+   {
+    "id": "bug-broll-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "Every link read at HEAD: claim mints AUTOINCREMENT ids on the live DB while the base rig mints the same range, stills are posters|sprites/{id}.jpg served by id, build_archive overwrites by id, and broll_drain re-inserts with new ids. No code renames stills. Not run end to end (needs a publish), but the mechanism is complete."
+   },
+   {
+    "id": "bug-music-ytdl-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Real: the tracks row is written before upload, and share_root_ready then samples only unlanded rows in a brand-new library and returns 503 share_not_ready. It is narrow: first drop into an empty library only, only while item 1's upload has not landed by the end of item 2's embedding, the 503 is retried with backoff for about 20 min, and success is cached. It fails permanently only with uploads paused or very slow."
+   },
+   {
+    "id": "bug-music-ytdl-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "release(cancelled) moves indexed/uploading items (whose tracks row exists) to terminal 'cancelled'. The companion's cancel() stops uploads first, retry_failed moves only failed items, and only a manual --prune deletes tracks rows, so orphan rows stay searchable with 404 audio. This contradicts release's own docstring. Also reached via expire_stale_leases, and not covered by CR-286E/CR-304A."
+   }
+  ]
+ },
+ {
+  "group": "med-08",
+  "ids": [
+   "bug-ops-2",
+   "bug-ops-3",
+   "bug-wire-1",
+   "bug-wire-2",
+   "bug-wire-3",
+   "logic-onboarding-2",
+   "logic-onboarding-3",
+   "logic-onboarding-4"
+  ],
+  "verdicts": [
+   {
+    "id": "bug-ops-2",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Mechanism holds: ship.ps1's already-published probes (:423-470) run unconditionally after -Resume sets ResumeFrom, so -Resume after journal step publish/current always exits 1 with 'bump VERSION'. Low because it is operator release tooling, the same exit-3 message names MAKE CURRENT in Settings as the first path, and no fleet state is harmed."
+   },
+   {
+    "id": "bug-ops-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Real: the printed recall line uses --retract --kind/--platform/--version, but --retract takes one KIND/PLATFORM/VERSION value and --feed-dir/--github-repo are required for --github-upload. Low because it fails instantly and loudly, the correct form is in publish_feed's docstring and --help, and it cannot retract the wrong thing."
+   },
+   {
+    "id": "bug-wire-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "duplicate_of": "bug-comp-app-4",
+    "reason": "Companion _relink_pending_moves queues a second ok answer, but db.mark_file_move_applied matches only applied_at IS NULL, so it updates zero rows; relink_pending stays 1 and project_detail.html:250 renders 'moved, Resolve not repointed yet' for good. Same defect as bug-comp-app-4, whose 'nothing renders it' premise is wrong."
+   },
+   {
+    "id": "bug-wire-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "broll/music/ytdl sub-apps verify X-CCSync-Identity with DASH_SESSION_SECRET only (no PREVIOUS anywhere under them), while the dashboard's report path accepts retired-key tokens and says the editor must sign in by hand to re-sign. During a rotation drain, ingest/ytdl 403 per machine while the grid shows it accepted. Related to bug-dash-ops-2 (session cookies in the gates), not a duplicate."
+   },
+   {
+    "id": "bug-wire-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "LaneReportIn keeps raising max_length caps with no before-validator and ReportIn's truncation never touches lanes; probe LaneReportIn(last_error='x'*2001) -> string_too_long. Companion lane C joins every errored folder's Syncthing error text unbounded and the reporter sends it verbatim, so ~15 folders in error 422 the whole report at the worst moment."
+   },
+   {
+    "id": "logic-onboarding-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "With the shared token retired, /verify returns an empty report_token and report_token_kind='editor', which no code reads; nothing writes editor_report_token except preserving an existing one, and the wizard has no field for it. The finish page says DONE for a machine whose every report 401s."
+   },
+   {
+    "id": "logic-onboarding-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Route is real (windows_upgrade.ps1 launches onboard.exe on a stale EULA while the companion's _licence_watch also prompts, and the -SkipWizard copy is stale). Low because the wizard is the designed consent path, documented safe to re-run and config-merging, and the trigger is a rare hand-run package upgrade across an EULA bump."
+   },
+   {
+    "id": "logic-onboarding-4",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Real: five wizard/bootstrap strings still say 'TrueNAS username and password' despite site.server_phrase existing for this. Copy-only, true on every site deployed today, recoverable in one sentence; belongs in the next copy pass for commercial sites."
+   }
+  ]
+ },
+ {
+  "group": "med-09",
+  "ids": [
+   "logic-sync-truth-1",
+   "logic-sync-truth-2",
+   "logic-sync-truth-3",
+   "logic-sync-truth-4",
+   "logic-plans-2",
+   "logic-plans-4"
+  ],
+  "verdicts": [
+   {
+    "id": "logic-sync-truth-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "lane_chip reds every lane at 15 min of silence while report_freshness says amber until 6 h. why_causes has no not-reporting reason, so fleet_headline falls to _lane_fault and says 'Upload has stopped: this companion has been silent...' in red. Reproduced in the dashboard venv against HEAD code."
+   },
+   {
+    "id": "logic-sync-truth-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "The companion and replace_editor_media both cap at 2000 per kind. down_totals_q counts proxies past the cap as owed for ever, and up_totals_q misses originals past the cap. safe_to_close ignores manifest_truncated, so it can say 'Safe to close', and transfers.html only warns of an undercount. This is the part CR-314 did not cover. It is display-only, so medium."
+   },
+   {
+    "id": "logic-sync-truth-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Real: check_once reports syncing with no peer check and no progress token, and the tray never reads _lane_peer_states. But the named scenarios are covered: NAS Syncthing down raises the dashboard syncthing_reachable alert, a tailnet drop gives transport_offline, which _sync_line renders before the counts, and editor_status turns behind-and-disconnected red. Left: a narrow single-machine Syncthing-only outage where the status is misleading."
+   },
+   {
+    "id": "logic-sync-truth-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "DiskFloorLatch clears only at 2x min_free_bytes, but prune_trash's pressure loop stops at 1x (rclone_lane passes disk_floor.min_free_bytes). So lane B stays parked until a human resumes, while trash that could have released it remains. CHIP_HELP['disk'] still says the trash cannot prune while proxy download is stopped, which has been false since SYNC-16."
+   },
+   {
+    "id": "logic-plans-2",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Mechanism true: the mode buttons go through add_selection_for_person and insert rows on every non-wired computer. But docs/UPLOAD_ONLY_TICK.md section 2 documents them as the PERSON's control, like the tick button, so ticking the other computers and flattening a mixed plan is the design. Left: SWITCH TO FULL SYNC has no UX-1 capacity hx-confirm, unlike TICK."
+   },
+   {
+    "id": "logic-plans-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "file_move_target_machines is the only target list (api.py:2856, collector.py:1908). It unions the plan holders of from_slug (no borrower expansion) with the editor_media holders. A borrower's manifest lists files only for selection rels, so a borrower machine that uploaded into the lender folder is never told and its lane A re-uploads the file to the old path. fetch_borrowers_by_lender exists but is not consulted, and there is no existing KNOWN_BUGS entry (CR-283J is the opposite direction)."
+   }
+  ]
+ },
+ {
+  "group": "med-10",
+  "ids": [
+   "logic-resolve-1",
+   "logic-resolve-2",
+   "logic-resolve-3",
+   "logic-resolve-4",
+   "logic-admin-1",
+   "logic-admin-2",
+   "logic-admin-3",
+   "logic-admin-4"
+  ],
+  "verdicts": [
+   {
+    "id": "logic-resolve-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "fix_clip always claims a new name via _claim_destination_path and never reuses copied_to; relink-failed and partial-relink results both go into popup _failed_rows (failures + aborted), so RETRY FAILED copies the whole file again as 'name (2).ext', which lane A uploads."
+   },
+   {
+    "id": "logic-resolve-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "SESSION_GAP_SECONDS=120 splits a FIX ALL with any copy over 2 minutes into several journals; undo_last_relink replays only latest_session and never retires it, so a second press finds no clip at the new paths and says they left the media pool. Admin dashboard undo by id (resolve_undo.py) is a partial mitigation only."
+   },
+   {
+    "id": "logic-resolve-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "search_dirs is Resolve's factory LUT folder and stray_luts has no factory exclusion, against the module's own rule; same-name different-size files stay strays while copy_into_library skips existing dests, so the offer never clears. P:\\Assets\\Luts already holds the factory set (ACES, Arri, Blackmagic Design, DCI, Invert Color.ilut ...), checked by directory listing."
+   },
+   {
+    "id": "logic-resolve-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "pick_project_prefix falls back to '' and suggest_destination then returns B-roll/Editor Added/<editor> at the tree root; fix_clip only checks containment in local_root, lane A walks Projects/<rel> only, and the dialog says Fixed. The only warning is a config log line."
+   },
+   {
+    "id": "logic-admin-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "db._halt_state returns active = active and not expired, and _check_fleet_halt_expired needs active and expired both true; Ctx.halt comes from get_fleet_halt, so the registered alert can never fire."
+   },
+   {
+    "id": "logic-admin-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "Both halt templates pass the future expires_at through ui.ago, which clamps negative deltas to 0 and prints '0s ago'. Same defect as ui-dash-admin-2.",
+    "duplicate_of": "ui-dash-admin-2"
+   },
+   {
+    "id": "logic-admin-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "The mechanism holds: the expired banner persists for everyone and the admin panel's expired branch has no release/acknowledge control, so only set_fleet_halt(active=False) via JSON or triage mail clears it. But the banner is truthful, blocks nothing and risks no data. It is a stale notice that cannot be dismissed."
+   },
+   {
+    "id": "logic-admin-4",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "The preview correctly still reports the files as missing from the live folder. By design (recovery.py:872-880) a restore copies into .restored-<ts> for the owner to move by hand, and a repeat restore is an additive duplicate that the module says costs only disk. The page names the folder and lists past restores. Real UX gap, no data loss. Related but distinct: bug-dash-diag-3."
+   }
+  ]
+ },
+ {
+  "group": "med-11",
+  "ids": [
+   "logic-alerts-1",
+   "logic-alerts-2",
+   "logic-alerts-3",
+   "logic-alerts-4",
+   "logic-broll-music-1",
+   "logic-broll-music-2",
+   "logic-broll-music-3"
+  ],
+  "verdicts": [
+   {
+    "id": "logic-alerts-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_check_feature_mounts skips only 'mounted'. The 'disabled' status is recorded for ytdl (off in the vendor build) and for cards (no checkout or vault configured), and each gets a feature_not_mounted warn whose fix is to check the bind mounts and restart. So the card stands permanently on every vendor install, and a restart cannot clear it. Neither DDIAG-7 nor the 09-11 hunt covers the disabled case."
+   },
+   {
+    "id": "logic-alerts-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_check_versions_behind counts staged rows and feed-offered builds that are newer than the running version. Counting them is intended (SYS-2), but the text then says 'current is X', which equals the running version, and the fix it names is UPDATE NOW. That button pushes the build the machine already runs, and triage_actions refuses it. So on a site with a build held for soak or waiting on manual adoption, the alert is contradictory and cannot be acted on."
+   },
+   {
+    "id": "logic-alerts-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_check_platform_channel_stale compares only the two platforms' current versions. It never looks for a newer build that is already published but staged on the lagging platform. It always says nothing will offer that build until somebody builds it, and its fix is hard-coded release_macos.sh commands. Those are wrong when the build is already staged (a re-publish is refused), cannot be run on a customer site with no repo, and still say 'On a Mac' when Windows is the platform behind. It is a separate defect from logic-alerts-2, although both fire on the same studio state."
+   },
+   {
+    "id": "logic-alerts-4",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "The mechanism holds. Every report and fallback is sent with Reply-To, and a report that offers no actions carries no CCT reference. A reply from an authenticated owner to one of these is refused under 'reference', which opens a triage_reply_refused warn whose fix cannot be followed. It is low because it needs the owner to reply to an email with no actions, nothing is changed or lost, the card can be dismissed and closes under CR-320's rule, and the silence is the designed refusal behaviour, only aimed at the wrong case."
+   },
+   {
+    "id": "logic-broll-music-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "Reproduced from the broll/web venv against the HEAD copy of client_folders.py. The panel sends each item's stored video_id, and remove_item and set_note also match on the (share, rel_path) the current index gives that id. After a rebuild renumbers the ids, a stored id can belong to a different clip. In the probe, adding clip C returned already=[9], and removing A (DELETE items/5) deleted both A and B from a live client folder. The OR clause added by broll-4 and MEDIA-23 causes this."
+   },
+   {
+    "id": "logic-broll-music-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_what_landed treats a probed width x height equal to the original's geometry as the real original. The preview is scaled to min(1080, ih) and never upscaled, so for any original 1080 lines or smaller the stand-in has exactly the original's geometry. Such clips are still heavy under edit_weight (codec not h264/hevc/prores, or bitrate over the cap) and get a stand-in when they are .mov, .mp4 or .m4v. If that fetch lands while nobody is watching, the ledger row is retired and the preview bytes stay under the original's name with nothing marking them, which is the outcome CR-288B/2 was meant to prevent."
+   },
+   {
+    "id": "logic-broll-music-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "write_item_result creates the tracks row and marks the item 'indexed' before the audio is uploaded. A cancel release then turns indexed and uploading items into terminal 'cancelled' items while their tracks rows stay. retry_failed only moves failed items, and load_matrix loads every track that has an embedding. The result is a searchable track with no audio that also holds its name, which contradicts release's own docstring."
+   }
+  ]
+ },
+ {
+  "group": "med-12",
+  "ids": [
+   "logic-ytdl-jobs-1",
+   "logic-ytdl-jobs-2",
+   "logic-ytdl-jobs-3",
+   "logic-release-2",
+   "logic-release-3",
+   "logic-release-4",
+   "logic-release-5",
+   "logic-release-6"
+  ],
+  "verdicts": [
+   {
+    "id": "logic-ytdl-jobs-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "fleet_facts/fetch_capabilities_map have no reported_at bound (only cap_at IS NOT NULL); nothing in jobs.py asks whether a machine is still reporting, so a long-silent machine is ranked on its last idle_seconds, can make explain say schedulable or keep idle_wait/transient, and can win the 60 s grace. A live machine still claims after the grace, so misleading why/schedulable plus delay: medium."
+   },
+   {
+    "id": "logic-ytdl-jobs-2",
+    "verdict": "REFUTED",
+    "severity": "none",
+    "reason": "Mechanism real but documented intent: docs/YTDL_TERMS_AND_QUEUE.md section 4 states a locally downloading job is BUSY for its own editor and invisible to the worker 'which is both of the properties it had before'; claim_next_job's docstring scopes the lease clause to not queuing the FLEET. Same one-job-per-editor rule as a server download; a feature request, not a defect."
+   },
+   {
+    "id": "logic-ytdl-jobs-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "app.js at HEAD never reads handed_back_reason or a handed_back phase, and only polls /ytdl/progress when download_mode is local, so pre-lease hand-backs are never fetched. CR-171 built the companion half and LOOPBACK_API.md promises the page learns why; CR-172's page wave never consumed it. The claim-refusal silence is deliberate per FleetClient.claim's docstring, but the unconsumed reason alone keeps the finding real."
+   },
+   {
+    "id": "logic-release-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "retract_record pops current[kind/platform] and neither it nor the CLI branch sets a replacement; select_offered_records then falls back to the highest version, so a newer staged record becomes what every policy=current site publishes and makes current after soak, contrary to publish_latest's 'offered to nobody' promise."
+   },
+   {
+    "id": "logic-release-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "record_offer_state writes every companion record into feed_offered rather than select_offered_records, while _apply_policy honours the pointer; invariant 11 takes the max and reports 'vendor offers X, not published here' for staged or pointer-withdrawn builds, and the alert/HEALTH readers follow. The feed_publish_refused half is currently dormant because no record carries requires_dashboard."
+   },
+   {
+    "id": "logic-release-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "dashboard_update.status builds code_updates from every newer dashboard record and _dashboard_auto_apply_reason takes updates[0] after only failed-before and soak-age checks; channel_current for dashboard/linux (present in feed/channel.json as 0.7.44) is never read, so a staged bundle is auto-applied with a restart at every image-mode policy=current site, and a pointer moved back rolls nothing back."
+   },
+   {
+    "id": "logic-release-5",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Verified: sign_release drops requires_dashboard without --emit-kind-extras, publish_latest never passes it and discards stderr on success, and 0 of 99 local channel records carry the field. But the missing customer-side ordering check is the deliberate REL-4/REL-16 overlap policy (sign_release.py:369-389); what remains is an advisory-only gate and a swallowed note. The false refusal cannot fire today (REQUIRES_DASHBOARD 0.7.23 < bundle 0.7.44) and has --allow-behind."
+   },
+   {
+    "id": "logic-release-6",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "The 'already published' skip precedes publish() and ignores --make-current, printing 'nothing to do', while the staged summary tells the operator to re-run with --make-current. RELEASE_PATHWAYS.md step 4 documents that this cannot work and names a per-record publish_feed recovery, so the tool's advice contradicts the runbook and leaves the fleet on the old build."
+   }
+  ]
+ },
+ {
+  "group": "med-13",
+  "ids": [
+   "logic-cards-1",
+   "logic-cards-2",
+   "logic-cards-3"
+  ],
+  "verdicts": [
+   {
+    "id": "logic-cards-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "HEAD may_close returns '' for any listed occupant even with others present (probe: occupants ['alex','ruskin'], may_close(slug,'ruskin',False)==''), and the confirm is built from last_in(), i.e. the presser ('ruskin is in it now'), never naming alex. Contradicts cards_close docstring and the template's Who-column comment; tests never cover two occupants. Medium: drops a colleague's live engine behind a misleading confirm, no data loss."
+   },
+   {
+    "id": "logic-cards-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "local_engine stamps note_agent on every routed agent call; _where is only cleared by drop(); the companion role long-polls pending for as long as the tray runs. Probe: entry idle 3 h reads occupants [] and closable; one note_agent makes it ['bob'] and may_close refuses a non-admin. So idle release, the cap sentence and Who column never lapse for editors with the Cards role on - a side effect of security-1 that restores the admin-only state security-2 fixed."
+   },
+   {
+    "id": "logic-cards-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "duplicate_of": "bug-dash-cards-jobs-2",
+    "reason": "Mechanisms real (one _where slot per editor so two machines share one engine, contradicting CARDS_TWO_PROJECTS 1a; /cards/open note_visit on a LOADING entry makes engine_for return None during the build - probed). But the harmful half is the same root cause as bug-dash-cards-jobs-2: the laptop page's own polling re-flips _where within seconds, so the detach window is transient unless no page is open (where following the last opened episode is the design rule), and routing on (editor, machine) fixes both. Residue not covered by jobs-2 is landing copy ('One episode at a time per person') and the LOADING stamp: low."
+   }
+  ]
+ },
+ {
+  "group": "med-14",
+  "ids": [
+   "ui-dash-main-1",
+   "ui-dash-main-2",
+   "ui-dash-main-3",
+   "ui-dash-main-4",
+   "ui-dash-main-7",
+   "ui-dash-main-8"
+  ],
+  "verdicts": [
+   {
+    "id": "ui-dash-main-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "Sidebar tick swaps outerHTML on the nav and gets the whole sidebar partial back (button plus nav). htmx 1.9.12 sets detail.target to the original target, which is detached after an outerHTML swap, so base.html's details keeper reapplies state to the removed tree. The new popover nav starts closed and a second sheet-handle is inserted."
+   },
+   {
+    "id": "ui-dash-main-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "duplicate_of": "ui-dash-static-1",
+    "reason": "htmx_errors.js searches detail.target, which is the detached old panel after an outerHTML swap (u.target=c, then Ie removes it). Every DUI-6 panel (admin_users, admin_packages, admin_jobs) swaps outerHTML, so the banner is never moved. This is the same defect and fix as ui-dash-static-1."
+   },
+   {
+    "id": "ui-dash-main-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "#project-detail polls every 10 s with innerHTML, and the SHARE and MOVE forms (inputs with no id, no hx-preserve) sit inside it. No script pauses the poll on focus. Typed values and focus are lost on each beat. Nothing is destroyed, because an empty move is refused."
+   },
+   {
+    "id": "ui-dash-main-4",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "The mechanism holds: the fix_root chips link to / and /?machine= with no as=, _queue_editor falls back to the admin, and _queue_machine drops the machine. But it is a read-only full-page hop and the change is visible: the header reads SYNC QUEUE: <admin>, the switcher resets and the 'acting as' warning disappears. Nothing is written."
+   },
+   {
+    "id": "ui-dash-main-7",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "[ UNDO ] has no hx-confirm. On a TICKED person-level row, partial_plan_change_undo removes the selection from every computer the person owns, which is a one-click person-wide untick. Every other such untick carries the DASH-8 confirm added after CR-49. It is recoverable by re-ticking and no files are deleted, so it stays medium."
+   },
+   {
+    "id": "ui-dash-main-8",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "Every page's aside polls /partials/sidebar every 30 s with innerHTML, and on a phone it holds the popover nav. Removing an open popover hides it and the replacement starts closed. Nothing in the JS, base.html or ui.py records or reopens the open state, and pwa.js does not slow 30 s polls, so the sheet closes and its scroll resets on each beat."
+   }
+  ]
+ },
+ {
+  "group": "med-15",
+  "ids": [
+   "ui-dash-admin-2",
+   "ui-dash-admin-3",
+   "ui-dash-admin-4",
+   "ui-dash-admin-5",
+   "ui-dash-admin-6",
+   "ui-dash-admin-7"
+  ],
+  "verdicts": [
+   {
+    "id": "ui-dash-admin-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "ui.ago clamps negative deltas to 0 and appends 'ago'; halt.expires_at is a future stamp, piped through ago in fleet_halt.html:38 and fleet_halt_banner.html:13, so every page says the stop 'releases itself 0s ago' for the whole 24 h. Reproduced: ui.ago(now+23h) -> '0s ago'. No until filter exists; not in KNOWN_BUGS."
+   },
+   {
+    "id": "ui-dash-admin-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "admin_users.html:16 and admin_packages.html:14 poll innerHTML every 30 s around partials whose write forms target 'closest .admin-users-box/.admin-packages-box'. No hx-sync/hx-preserve/focus guard anywhere in static or templates, so typed input is wiped and in-flight responses swap into a detached node (or swapError), hiding the result and inviting a duplicate NAS create/publish."
+   },
+   {
+    "id": "ui-dash-admin-4",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Real: details.pkg-other and the halt-history details have no data-key/id, and both base.html's keeper and tab_memory.js need one, so the polls re-render them collapsed. But nothing is lost or mis-written, one click reopens, PREVIOUS STOPS is read-only history, and the rollback controls keep their confirms - a usability annoyance."
+   },
+   {
+    "id": "ui-dash-admin-5",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "admin_alerts.html:15-16, recovery.html:16-17, protection.html:19-20 render error as class='banner' (not error-banner) and notice at the panel top, with outerHTML swaps that preserve scroll; htmx_errors.js only relocates .error-banner and KNOWN_BUGS:13040 shows DUI-6 was applied to six other partials only. SEND A TEST / RESTORE / REHEARSE results land off-screen."
+   },
+   {
+    "id": "ui-dash-admin-6",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "site_settings.js:794-799 writes 'saved' into #settings-saved on success and never clears it; showError only touches #settings-error; both sit above the first field while SAVE is at admin_settings.html:183, with no scrollIntoView. A refused save after a good one shows contradictory lines off-screen, and a refused dashboard_url/prefix change looks identical to an accepted one."
+   },
+   {
+    "id": "ui-dash-admin-7",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "_health_rows (ui.py:1868-1941) swallows each source's exception with log.exception and adds no row, so a failing source vanishes silently and all four failing renders 'Every check this server runs answered' (admin_health.html:113-117). This violates the module's own and CLAUDE.md's 'unverified is NOT CHECKED, never OK' rule; the per-line unknown band exists but the source-level failure bypasses it."
+   }
+  ]
+ },
+ {
+  "group": "med-16",
+  "ids": [
+   "ui-dash-static-1",
+   "ui-dash-static-2",
+   "ui-dash-static-3",
+   "ui-dash-static-4",
+   "ui-broll-web-1",
+   "ui-broll-web-3",
+   "ui-broll-web-4",
+   "ui-broll-web-5"
+  ],
+  "verdicts": [
+   {
+    "id": "ui-dash-static-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "In HEAD's htmx 1.9.12, afterSwap carries the ORIGINAL target (I={xhr,target:u,...}), and the outerHTML swap removes that node. htmx_errors.js:227 therefore searches a detached panel, and every outerHTML admin panel with an .error-banner (jobs, packages, report_tokens, users, fleet_halt) keeps its refusal at the top. The chip focusable() pass has the same stale root."
+   },
+   {
+    "id": "ui-dash-static-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "The responseError handler never reads the response body. It labels 401/403 as 'session has ended' and every other 4xx as 'THIS PAGE HAS STOPPED UPDATING'. No beforeSwap lets a 4xx swap. The toggle route answers 403 to a signed-in user and 409 with a detailed reason, and both are misreported; the next successful poll clears the banner."
+   },
+   {
+    "id": "ui-dash-static-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "The history and the undo closure's `latest` load once at DOMContentLoaded. The save and the CLI flag both PUT /admin/site, which records a new 'save' entry, and neither reloads the history. undo-last-change reverts entries[0]. The confirm names the old change while the server reverts the save just made."
+   },
+   {
+    "id": "ui-dash-static-4",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Real only for apply: the catch writes the refusal and then reloadPanel() replaces #dashupd-progress. The rollback catch does not reload, so its message stays. In the in-progress example the repainted panel shows 'working: step' and resumes watching. What remains is a vanished reason on an admin-only, retryable action, with no harm done."
+   },
+   {
+    "id": "ui-broll-web-1",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "The mechanism holds: grid-template-columns 1fr is minmax(auto,1fr), and .video-meta .title has no overflow-wrap, so an unbroken filename widens the column on a phone. The effect is horizontal scrolling with the player still reachable. It is cosmetic and the same class as ui-broll-web-2/-8, which the hunter filed as low."
+   },
+   {
+    "id": "ui-broll-web-3",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "onKeydown on document exempts only INPUT/SELECT/TEXTAREA while a detail is open. Enter calls preventDefault and then sendToResolve unconditionally. No other listener stops Enter or Space: the clientfolders capture handler and ingest.js handle only Escape. So focused buttons in the detail view and in the drawers cannot be activated, and Enter can append a clip to the live timeline."
+   },
+   {
+    "id": "ui-broll-web-4",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Confirmed that --header-h is a constant 88px with no writer anywhere, while the sticky #app-header (z-index 10) is taller, so the rail's head row is covered while scrolled. It clears on scrolling back up. Layout nuisance only, no loss of function."
+   },
+   {
+    "id": "ui-broll-web-5",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "The mechanism holds: the afterCreate items POST is awaited with no catch, which gives an unhandled rejection, no error toast and no popover re-render. The trigger is narrow, because the create just succeeded on the same session. The missing 'Added to' toast and the empty folder are visible and recoverable, with no data lost."
+   }
+  ]
+ },
+ {
+  "group": "med-17",
+  "ids": [
+   "ui-music-ytdl-web-1",
+   "ui-music-ytdl-web-2",
+   "ui-music-ytdl-web-3",
+   "ui-music-ytdl-web-4",
+   "ui-music-ytdl-web-5",
+   "ui-comp-windows-1",
+   "ui-comp-windows-2",
+   "ui-comp-windows-3"
+  ],
+  "verdicts": [
+   {
+    "id": "ui-music-ytdl-web-1",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Real: at HEAD, .search-bar is a non-wrapping flex row and ytdl style.css has no @media rule, so on a phone the row is wider than the screen. But /ytdl/ is a desktop tool that feeds the editing tree. The row fits at any desktop or half-screen width (847 px measured), and every control can still be reached by scrolling sideways. Nothing is lost, so this is layout polish."
+   },
+   {
+    "id": "ui-music-ytdl-web-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "In HEAD card(), the checkbox calls stopPropagation but the title <a target=_blank> has no handler of its own. A click on it bubbles up to n.onclick, which toggles selection and POSTs select. The change is optimistic and saved on the server, and DOWNLOAD uses what the database says. So previewing a clip silently changes what gets downloaded."
+   },
+   {
+    "id": "ui-music-ytdl-web-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "The mechanism holds. loadProjects() runs after loadAttestation() and sets #go and #golinks back to enabled whenever a project exists. setAttested(true) re-enables them over the no-projects disable, and dataset.title is never set, so the tooltip goes stale. But the server is the real gate (as loadAttestation's own comment says), the attestation notice stays on screen, and pressing SEARCH ends in a refusal toast that gives the reason. No download goes through that shouldn't, and nothing is lost."
+   },
+   {
+    "id": "ui-music-ytdl-web-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "At HEAD, .pane.open has a fixed height of 150px with overflow:hidden. openPane adds the wave (64 px), the bar (36 px) and padding, then the no-waveform caption on fleet tracks and the Resolve status/error line (.rmsg), and .pacts wraps. With a caption and an error message this passes 150 px even on desktop, so the line explaining why Resolve did not answer is clipped with no scroll. On the 900 px layout the wrapped buttons are clipped too."
+   },
+   {
+    "id": "ui-music-ytdl-web-5",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "At HEAD, the axis onchange, sort, includeUnknown and applyRange handlers, and the '[ include them ]' button that noteUnknownHidden adds after a search, all call loadTracks(), which is the browse route. None of them checks #q, and only selectFacet and #clear empty the box. So the ranked search results are replaced by an unranked 'All tracks' list while the box still shows the query. MUSIC-4 only fixed the other direction (search carrying the filters)."
+   },
+   {
+    "id": "ui-comp-windows-1",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "Partly refuted. The body Label has no wraplength and the WIRED body is one 330-character line, but the buttons are not pushed off-screen. Tk clamps a toplevel to wm maxsize, which defaults to the screen size. A replica probe requested 2289 px and got 516 (= maxsize), and the OK button sat inside the window. What gets clipped is the Label, so the dialog is screen-wide and its sentence is cut off before the end, while CANCEL and OK stay reachable. Worth adding a wraplength, but low."
+   },
+   {
+    "id": "ui-comp-windows-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "In HEAD settings_window.py, _blocked_line is tagged BLOCKING at the producer, and BLOCKING is styled 'warning'. A probe from the companion venv against HEAD source gave _lane_advisories(no_selection) -> ('blocking', 'No projects are ticked for this computer'), which rank_advisories turns into Line(style='warning'). _help_first then moves HELP to the top. This breaks the owner rule that nothing ticked is never an error or warning on any surface, and every new computer would see it."
+   },
+   {
+    "id": "ui-comp-windows-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "It is true that the dialog inserts raw EULA.md, leading HTML comment included. But the visible body of the HEAD EULA already says 'DRAFT FOR COUNSEL' (line 19), names Cablewrap Creative (lines 21 and 196) and carries inline TODO(legal) markers. Stripping comments, the suggested fix, would leave all of that on screen. The EULA being a draft for counsel is an owner-documented state (CLAUDE.md), so what is left for this finding is cosmetic: raw Markdown and one comment block. Separately, the body names a retired brand, which needs a content fix in the EULA itself."
+   }
+  ]
+ },
+ {
+  "group": "med-18",
+  "ids": [
+   "ui-onboarding-1",
+   "ui-onboarding-2",
+   "ui-onboarding-3",
+   "ui-onboarding-4",
+   "ui-copy-1",
+   "ui-copy-2"
+  ],
+  "verdicts": [
+   {
+    "id": "ui-onboarding-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "Nav bar packed last with side=bottom. Measured at the default 660x560 (the page frame is 524 px): the install page requests 555 px, or 611 px with the role note, and BACK is unmapped in both cases. The finish page hides CLOSE once there are 3 or more real-length warnings. The only escape is resizing the window, and nothing tells the editor to do that."
+   },
+   {
+    "id": "ui-onboarding-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "duplicate_of": "ui-comp-windows-3",
+    "reason": "eula_text() returns EULA.md verbatim and show_eula inserts it untouched. At HEAD the file opens with the DRAFT FOR COUNSEL / TODO(legal) comment, then markdown markup, and it has 14 em dashes. This is the same defect as ui-comp-windows-3 on the companion's licence dialog, and one fix should cover both."
+   },
+   {
+    "id": "ui-onboarding-3",
+    "verdict": "DOWNGRADE",
+    "severity": "low",
+    "reason": "The mechanism is real: the copy ignores the breadcrumb's clean_slate:<role>, and the base and macOS plans never unmap the drive. But the only harm is one wrong sentence on a rare path. The instruction on the page is still right. The resume radio default is overridden by the dashboard role when the account is verified (CR-66). The Mac wizard itself talks about a P:\\ mapping."
+   },
+   {
+    "id": "ui-onboarding-4",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "All three parts hold. The status label is computed once. The winget returncode is ignored, so a failure still shows green. On Windows the only CLI candidate is bare 'tailscale', resolved against the wizard's PATH from launch, so tailscale_up returns False after a fresh install. NEXT is enabled only by tailscale_up plus the probe, so the editor is stuck on the page until they restart the wizard."
+   },
+   {
+    "id": "ui-copy-1",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "[ RELEASE THE HALT ] exists only in alerts.py and a test allow-list. The real controls are [ START SYNCING AGAIN ] / [ KEEP IT STOPPED ] on /admin/users#admin-fleet-halt, and SYNC STATUS has no halt control. In the alert case, the halt banner on every page links to the right place, which softens it. The recovery step still sends the admin to /fleet before any halt exists, so there is no banner and no control, in the middle of a restore that depends on the fleet being halted."
+   },
+   {
+    "id": "ui-copy-2",
+    "verdict": "CONFIRMED",
+    "severity": "medium",
+    "reason": "Five notice fixes name 'Settings, Diagnostics', which is not in SETTINGS_NAV_GROUPS. At least nine notice kinds link to /fleet#fleet-diagnostics, a bare div that is filled only by the [ READ THE ANSWER ] / partial links; no JS loads it from the hash. Server-error notices therefore lead to an empty anchor and a page that does not exist."
+   }
+  ]
+ }
+]

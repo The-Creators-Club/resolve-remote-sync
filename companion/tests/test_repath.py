@@ -93,6 +93,9 @@ def test_target_exists_conflict_skips_move_but_repoints(tmp_path):
     (old / "keep.txt").write_text("old")
     new = tmp_path / "Projects" / "2026" / "CCT" / "Season 1"
     new.mkdir(parents=True)
+    # bug-comp-rclone-1 (2026-09-24): the conflict re-point is for a target
+    # that IS a Syncthing folder (a hand copy of the project, say).
+    (new / ".stfolder").mkdir()
     admin = FakeAdmin({"s1": str(old)})
     r = ProjectRepather(admin, str(tmp_path))
     assert r.reconcile([_sel("s1", "2026/CCT/Season 1")]) == ["s1"]
@@ -451,3 +454,106 @@ def test_a_relink_that_explodes_never_stops_the_repath(tmp_path):
     r = _repather(admin, tmp_path, relink=relink)
     assert r.reconcile([_sel("s1", "2026/CCT/Season 1")]) == ["s1"]
     assert r.ledger.events()[0]["relinked"] is None
+
+
+# -- bug-comp-rclone-1 (2026-09-24): a blocked move is never "finished" by --
+# -- re-pointing at a directory the lanes created at the new path          --
+
+
+def test_a_target_the_lanes_built_is_not_taken_for_the_project(tmp_path):
+    """Pass 1 of the finding's scenario: the move failed, lane B then pulled
+    proxies into the NEW path. Pass 2 must not re-point Syncthing at that
+    proxy-only directory, unpause it, or say the copy was moved."""
+    old = tmp_path / "Projects" / "2026" / "Old"
+    (old / ".stfolder").mkdir(parents=True)
+    (old / "Assets.wav").write_text("the real project")
+    new = tmp_path / "Projects" / "2026" / "New"
+    (new / "Proxy").mkdir(parents=True)
+    (new / "Proxy" / "a.mov").write_text("a proxy lane B pulled")
+    admin = FakeAdmin({"s1": str(old)})
+    r = ProjectRepather(admin, str(tmp_path))
+
+    assert r.reconcile([_sel("s1", "2026/New")]) == []
+    assert not any(c[0] == "path" for c in admin.calls)
+    assert ("paused", "s1", False) not in admin.calls
+    events = r.ledger.events()
+    assert events and events[-1]["moved"] is False
+    assert "moved your copy" not in events[-1]["note"]
+    assert "already on this computer" in events[-1]["note"]
+    assert "—" not in events[-1]["note"]
+    assert r.ledger.blocked("s1")
+    # Nothing moved or removed on either side.
+    assert (old / "Assets.wav").read_text() == "the real project"
+    assert (new / "Proxy" / "a.mov").is_file()
+
+
+def test_an_empty_skeleton_at_the_target_is_cleared_and_the_move_made(tmp_path):
+    """What the structure clone alone leaves (directories, no files) is
+    pruned with rmdir, so the retry can move the real project there."""
+    old = tmp_path / "Projects" / "2026" / "Old"
+    (old / ".stfolder").mkdir(parents=True)
+    (old / "cut.drp").write_text("x")
+    new = tmp_path / "Projects" / "2026" / "New"
+    (new / "Footage" / "A001").mkdir(parents=True)
+    (new / "Proxy").mkdir()
+    admin = FakeAdmin({"s1": str(old)})
+    r = ProjectRepather(admin, str(tmp_path))
+
+    assert r.reconcile([_sel("s1", "2026/New")]) == ["s1"]
+    assert (new / "cut.drp").read_text() == "x"
+    assert (new / ".stfolder").is_dir()
+    assert not old.exists()
+
+
+def test_a_failed_cross_volume_copy_leaves_nothing_at_the_target(tmp_path):
+    """shutil.move copied straight into the target, so a copy that died
+    part-way left a partial project there -- with .stfolder in it, copied
+    first -- which the next pass re-pointed at. The copy is staged and only
+    renamed onto the target once whole."""
+    import errno
+    import shutil as _shutil
+
+    old = tmp_path / "Projects" / "2026" / "Old"
+    (old / ".stfolder").mkdir(parents=True)
+    (old / "a.txt").write_text("a")
+    (old / "b.txt").write_text("b")
+    new = tmp_path / "Projects" / "2026" / "New"
+    admin = FakeAdmin({"s1": str(old)})
+
+    real_copytree = _shutil.copytree
+    real_copy2 = _shutil.copy2
+
+    def fail_on_b(src, dst, *a, **kw):
+        if str(src).endswith("b.txt"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_copy2(src, dst, *a, **kw)
+
+    def copytree_that_runs_out_of_room(src, dst, *a, **kw):
+        # shutil.move and a staged copy both come through here.
+        kw["copy_function"] = fail_on_b
+        return real_copytree(src, dst, *a, **kw)
+
+    real_rename = os.rename
+
+    def exdev_for_the_project(src, dst):
+        if str(src) == str(old):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_rename(src, dst)
+
+    r = ProjectRepather(admin, str(tmp_path))
+    with mock.patch("ccsync_companion.sync.repath.os.rename",
+                    side_effect=exdev_for_the_project), \
+            mock.patch("shutil.copytree", side_effect=copytree_that_runs_out_of_room):
+        assert r.reconcile([_sel("s1", "2026/New")]) == []
+    assert not new.exists()
+    assert (old / "b.txt").read_text() == "b"
+
+    # Pass 2 (the disk has room again): the stale staging copy goes, the
+    # move completes, and only then is the folder re-pointed.
+    with mock.patch("ccsync_companion.sync.repath.os.rename",
+                    side_effect=exdev_for_the_project):
+        assert r.reconcile([_sel("s1", "2026/New")]) == ["s1"]
+    assert (new / "a.txt").read_text() == "a"
+    assert (new / "b.txt").read_text() == "b"
+    assert not old.exists()
+    assert not (tmp_path / "Projects" / "2026" / "New.ccsync-moving").exists()

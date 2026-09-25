@@ -81,8 +81,12 @@
     staged, and [ MAKE CURRENT ] on the Packages page is the rest of it.
 
 .PARAMETER AllowKeyRotation
-    Publish although the signing key is not baked into the build the fleet is
-    currently on. Every machine on that build will refuse this one (REL-7).
+    Publish although this rig's key is not the one that signed the build the
+    fleet is currently on. Every machine on that build will refuse this one
+    unless it bakes this key in (REL-7). It does not perform a rotation: its
+    one rotation use is the first build after the key switch (docs\RELEASE.md,
+    Rotating, step 3), and the overlap release never needs it
+    (logic-release-1, 2026-09-25).
 
 .PARAMETER IReallyMeanDirtyCurrent
     Allow -MakeCurrent for a build made from an uncommitted tree (REL-13).
@@ -451,16 +455,31 @@ function Test-SigningKeyTheFleetTrusts {
     if ($AllowKeyRotation) {
         Write-Warn2 "-AllowKeyRotation: EVERY MACHINE ON v$($current.version) WILL REFUSE THIS BUILD"
         Write-Warn2 "  (it was signed with $currentKey; this rig signs with $SigningId)"
+        Write-Warn2 "  unless they already run a build that bakes $SigningId in. That is true only for"
+        Write-Warn2 "  the FIRST build after a rotation's key switch (docs\RELEASE.md, Rotating, step 3)."
         return
     }
+    # logic-release-1 (2026-09-24, round 2 2026-09-25): this text used to say
+    # "a rotation costs an overlap release: bake --add, ship THAT ... pass
+    # -AllowKeyRotation if this IS that deliberate step". The overlap release
+    # is exactly the build that must be signed by the OLD key, so an operator
+    # who had just done the bake was told to override the one refusal that
+    # would have saved the fleet. This check sees only which key SIGNED the
+    # current build (the dashboard stores no baked list), so it cannot tell a
+    # wrong key from the first new-key build after the switch; the text names
+    # both and says which one the override is for, as RELEASE.md does.
     Write-Warn2 "this rig signs with key $SigningId, but the build the fleet is CURRENTLY on"
     Write-Warn2 "(v$($current.version)) was signed with $currentKey."
     Write-Warn2 "EVERY MACHINE ON v$($current.version) WILL REFUSE THIS BUILD: a companion trusts"
     Write-Warn2 "only the keys baked into the binary it is already running, the refusal is silent,"
     Write-Warn2 "and the recovery is a hands-on reinstall per machine."
-    Write-Warn2 "A rotation costs an overlap release: python tools\release_key.py bake --add,"
-    Write-Warn2 "ship THAT build (it trusts both keys), and drop the old key a release later."
-    Write-Warn2 "Pass -AllowKeyRotation if this IS that deliberate step. Nothing was built."
+    Write-Warn2 "If this is a rotation's overlap release (bake --add), it must be signed with the"
+    Write-Warn2 "OLD key ($currentKey), not this one: put that key back at release.key and ship"
+    Write-Warn2 "again (docs\RELEASE.md, Rotating). The overlap release never needs an override."
+    Write-Warn2 "-AllowKeyRotation does not perform a rotation. Its one rotation use is the FIRST"
+    Write-Warn2 "build after the key switch (Rotating, step 3), when v$($current.version) is the"
+    Write-Warn2 "overlap build or later and $currentKey is the OLD key. Anything else is a wrong key."
+    Write-Warn2 "Nothing was built."
     exit 1
 }
 

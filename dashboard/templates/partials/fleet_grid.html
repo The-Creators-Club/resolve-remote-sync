@@ -253,7 +253,12 @@
               {# REL-8: a machine that cannot take a build used to retry for
                  ever with nobody told. The count separates "has not seen the
                  push yet" from "has failed this build eight times". #}
-              {% if e.guard.upgrade_attempts %}<span class="chip red" title="{{ chip_help('update_failed', version=(e.guard.upgrade_version or "an update"), n=e.guard.upgrade_attempts, when=((", last " ~ (e.guard.upgrade_last_attempt_at | ago)) if e.guard.upgrade_last_attempt_at else ""), why=((": " ~ e.guard.upgrade_last_error) if e.guard.upgrade_last_error else "")) }}">[ UPDATE FAILED x{{ e.guard.upgrade_attempts }} ]</span>{% endif %}
+              {# bug-comp-core-1 (2026-09-25): "crash-looped" is the give-up
+                 record a crash-loop revert writes, not a failed download, and
+                 the download advice would send the admin to install by hand
+                 the very build this machine fled. #}
+              {% if e.guard.upgrade_attempts and upgrade_crash_looped(e.guard.upgrade_last_error) %}<span class="chip red" title="{{ chip_help('update_crash_looped', version=(e.guard.upgrade_version or "an update"), when=((", last " ~ (e.guard.upgrade_last_attempt_at | ago)) if e.guard.upgrade_last_attempt_at else "")) }}">[ UPDATE KEPT CRASHING ]</span>
+              {% elif e.guard.upgrade_attempts %}<span class="chip red" title="{{ chip_help('update_failed', version=(e.guard.upgrade_version or "an update"), n=e.guard.upgrade_attempts, when=((", last " ~ (e.guard.upgrade_last_attempt_at | ago)) if e.guard.upgrade_last_attempt_at else ""), why=((": " ~ e.guard.upgrade_last_error) if e.guard.upgrade_last_error else "")) }}">[ UPDATE FAILED x{{ e.guard.upgrade_attempts }} ]</span>{% endif %}
               {# APP-5: the crash-loop guard put this machine back on its
                  previous build. The chip goes when the machine is running
                  something at or above what it fell back from. #}

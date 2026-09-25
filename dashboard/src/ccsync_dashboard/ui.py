@@ -38,6 +38,7 @@ from .api import _blank_key_refusal as api_blank_key_refusal
 # says where the rule lives: ONE definition, two callers (COMMERCIAL_READINESS.md
 # §C L1, 2026-08-17). See api.py's "scoping fleet reads" block.
 from .api import tick_capacity_warning
+from .api import fled_push_refusal as api_fled_push_refusal
 # The release-channel gate and the recall's fleet write (REL-1 / REL-3,
 # resilience sweep 2026-08-28), imported under names that say they belong to
 # the JSON routes: these htmx twins must apply the SAME refusals, not their
@@ -295,6 +296,14 @@ CHIP_HELP: dict[str, str] = {
         "this computer has tried to install {version} {n} time(s) and "
         "failed{when}{why}. Antivirus quarantine, a proxy mangling the "
         "download and a full disk all look like this."),
+    # bug-comp-core-1 (2026-09-25): the same chip for a different cause. A
+    # crash-loop revert writes REL-8's give-up record with this error so the
+    # restored build stops taking the build it fled, and the download advice
+    # above sent the admin to install that build by hand.
+    "update_crash_looped": (
+        "this computer installed {version}, kept crashing on it and was "
+        "rolled back{when}. It will not take that build again on its own. Do "
+        "not install it by hand: publish a newer build."),
     "unfiltered": (
         "{n} Syncthing folder(s) on this computer have no ignore filter "
         "written{names}. Without it, folder sync carries camera originals both "
@@ -410,6 +419,9 @@ def skipped_scope(guard: Mapping[str, Any] | None) -> str:
 templates.env.globals["skipped_scope"] = skipped_scope
 templates.env.globals["CHIP_HELP"] = CHIP_HELP
 templates.env.globals["chip_help"] = chip_help
+# bug-comp-core-1 (2026-09-25): one predicate for "this update error is a
+# crash-loop revert", shared by the grid chip and the Packages page.
+templates.env.globals["upgrade_crash_looped"] = db.upgrade_crash_looped
 # CR-317 (2026-09-24): the RESOLVE row's missing-clips group is labelled by
 # what the reporting companion build put in the list (health.py says why).
 templates.env.globals["missing_clips_label"] = health.missing_clips_label
@@ -3973,6 +3985,9 @@ async def partial_admin_machine_update(
         error = f"no computer {machine!r} for {editor!r}"
     elif current is None:
         error = "no current companion package is published for that computer's platform"
+    elif api_fled_push_refusal(conn, editor, machine, str(current["version"] or "")):
+        # Fable review (2026-09-25): see api.FLED_PUSH_REFUSAL.
+        error = api_fled_push_refusal(conn, editor, machine, str(current["version"] or ""))
     elif not db.request_machine_update(conn, editor, machine, current["version"],
                                        admin or "admin", db.utcnow_iso()):
         error = f"no computer {machine!r} for {editor!r}"

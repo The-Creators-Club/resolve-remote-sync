@@ -400,6 +400,10 @@ def run_ffmpeg(cmd: Sequence[str], timeout: int = RUN_TIMEOUT_SECONDS,
     Popen, published, and cleared again on the way out; the sink itself is
     never allowed to fail the run.
     """
+    # bug-comp-media-1 (2026-09-24): every b-roll argv carries the config
+    # value at argv[0]; unresolved, a machine whose only ffmpeg is the sidecar
+    # copy could not run a single proxy, sprite or poster.
+    cmd = ffmpeg_tools.spawn_argv(cmd)
     if child_sink is None:
         # No sink wired (a test double, a caller with nothing to kill): the
         # simple, blocking form, which is also what every existing test of

@@ -1779,6 +1779,22 @@ def _check_upgrade_failed(ctx: Ctx) -> list[Finding]:
         if attempts < UPGRADE_FAILURES_ALERT:
             continue
         who = ctx.name(_who(e))
+        if db.upgrade_crash_looped(g.get("upgrade_last_error")):
+            # bug-comp-core-1 (2026-09-25): not a failed download. The revert
+            # writes this give-up record so the restored build stops taking
+            # the one it fled, and the download advice below ("install the
+            # build by hand") would put the machine straight back in the loop.
+            version = g.get("upgrade_version") or "an update"
+            out.append(_f(
+                who,
+                f"{who} installed {version}, kept crashing on it, and rolled "
+                f"itself back. It will not take that build again on its own, "
+                f"and this dashboard no longer offers it to that computer.",
+                f"Do not install {version} on that computer by hand. Ask that "
+                f"editor to open {health.COMPANION_DIAGNOSTICS_PATH} and send "
+                f"it to us, and publish a newer build.",
+                str(g.get("upgrade_last_error") or "")))
+            continue
         out.append(_f(
             who,
             f"{who} has tried and failed to install "

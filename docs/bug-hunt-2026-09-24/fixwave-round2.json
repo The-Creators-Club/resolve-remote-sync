@@ -1,0 +1,234 @@
+{
+ "owed": [
+  {
+   "key": "owed-dashboard",
+   "built": {
+    "fixes": [
+     {
+      "id": "bug-comp-core-1",
+      "fixed": true,
+      "fix": "All three OWED dashboard items are done; nothing new goes on the wire. (a) api._upgrade_info no longer offers a machine the build stored as its upgrade_reverted_from. The check matches the exact string or the same numeric version (so a \"+dirty\" build matches), fails open on a sqlite error, and the reason rides the existing optional key upgrade_none_reason. The dashboard keeps that marker until the machine runs that build or a newer one, so the refusal persists for exactly that long. A newer build is a different version and is offered as usual, and other machines are unaffected. A targeted push is exempt: db.store_upgrade_state withdraws any standing push of exactly the fled version when a report carries reverted_from (and writes machine.update_push_withdrawn to the audit ledger), so any push of that version that exists afterwards was made by an admin after the revert. The [ UPDATE NOW ] emitter needed no change of its own, because _machine_can_be_offered asks _upgrade_info. Settings > Packages shows 'Not offered to this computer: it kept crashing on X and rolled itself back. UPDATE NOW sends it anyway. A newer build is offered as usual.' (b) alerts._check_upgrade_failed has its own finding for last_error 'crash-looped': it kept crashing and was rolled back, do not install it by hand. The fleet grid chip becomes [ UPDATE KEPT CRASHING ] with the new CHIP_HELP update_crash_looped text, and the Packages [ FAILED xN ] chip becomes [ KEPT CRASHING, ROLLED BACK ]. (c) The companion diagnostics dump says 'GIVEN UP on that build: it kept crashing and was rolled back (do not install it by hand)' for crash-looped; every other error keeps 'has failed N times'. Limits: /verify names no machine, so the sign-in offer still carries the build, but that only feeds the tray's manual Update. A push made before a revert that was recorded by an older dashboard is not withdrawn; the admin can CANCEL it on the Packages page.",
+      "files": [
+       "E:\\Projects\\Editing\\ccsync\\dashboard\\src\\ccsync_dashboard\\api.py",
+       "E:\\Projects\\Editing\\ccsync\\dashboard\\src\\ccsync_dashboard\\db.py",
+       "E:\\Projects\\Editing\\ccsync\\dashboard\\src\\ccsync_dashboard\\alerts.py",
+       "E:\\Projects\\Editing\\ccsync\\dashboard\\src\\ccsync_dashboard\\ui.py",
+       "E:\\Projects\\Editing\\ccsync\\dashboard\\templates\\partials\\fleet_grid.html",
+       "E:\\Projects\\Editing\\ccsync\\dashboard\\templates\\partials\\admin_packages.html",
+       "E:\\Projects\\Editing\\ccsync\\companion\\src\\ccsync_companion\\app.py",
+       "E:\\Projects\\Editing\\ccsync\\dashboard\\tests\\test_bug_hunt_2026_09_24_crash_looped.py",
+       "E:\\Projects\\Editing\\ccsync\\companion\\tests\\test_bug_hunt_2026_09_24_crash_looped_diag.py",
+       "E:\\Projects\\Editing\\ccsync\\docs\\bug-hunt-2026-09-24\\ledger\\comp-upgrade-moves.md"
+      ],
+      "regression_test": "dashboard/tests/test_bug_hunt_2026_09_24_crash_looped.py: test_the_offer_withholds_the_build_this_machine_fled, test_a_standing_push_of_the_fled_build_is_withdrawn, test_the_packages_page_says_why, test_the_grid_chip_reads_a_crash_loop_as_a_crash_loop and test_the_alert_does_not_send_the_admin_to_install_the_fled_build fail on HEAD. test_an_admin_push_after_the_revert_is_sent, test_a_newer_build_is_offered_as_usual, test_another_machine_is_still_offered_the_build and test_a_download_failure_keeps_its_own_alert pin behaviour that must not change. companion/tests/test_bug_hunt_2026_09_24_crash_looped_diag.py: test_the_dump_says_the_fled_build_kept_crashing fails on HEAD's app.py; test_a_download_give_up_keeps_its_own_words is a pin.",
+      "tests_run": "Scratch `git archive HEAD` copy: 5 of the 9 dashboard tests and 1 of the 2 companion tests FAIL, exactly the ones listed. In the tree: the dashboard's new file plus test_alerts, the 09_11 and 09_11b collector_alerts files, 09_18b_dashboard_api_db, test_fleet_audit, fleet_grid_declutter, mobile_fleet, no_em_dash, test_packages, test_release_channel, test_report_endpoint, test_ui_filters, 09_11b_dash_mounts_ui and test_select_code_root: 558 passed. Every dashboard test file that references request_machine_update, _upgrade_info, store_upgrade_state, reverted_from or update_failed: 334 passed. Companion: the new file plus test_app.py -k 'diagnostics or crash_looped or fled': 20 passed.",
+      "fails_on_head": "yes: 5 dashboard tests and 1 companion test fail against a git archive HEAD scratch copy",
+      "owed": "No code owed. When the first companion release carrying the crash_looped gate is staged, check on Settings > Packages that a reverted canary's row shows the new sentence. Deploy order: this dashboard must be live before that release is made current."
+     }
+    ]
+   }
+  },
+  {
+   "key": "owed-music",
+   "built": {
+    "fixes": [
+     {
+      "id": "bug-comp-broll-1 (music half, owed-music)",
+      "fixed": true,
+      "fix": "MusicIngestor now overrides _items_from_manifest and matches the whole claim manifest at once through broll_ingest.match_manifest_rows (reused as is). A new _match_staged helper maps content_hash to hash, forces rel_dir to \"\" on both sides (a music drop is flat and the page stages no rel_dir), and keeps size_bytes and ord. The manifest content_hash is passed on only when it equals a hash staged on this machine. The reason: the server overwrites ingest_items.content_hash with the transcoded .mp3's digest at status and result, while the staged entry keeps the original's digest. Passing it through anyway would trip the matcher's different-hash veto on a re-claim of a transcoded track and drop that track's local path. _item_from_manifest now takes the base's candidate=_UNMATCHED keyword and uses the same helper when it is called alone. broll_ingest.py was not edited.",
+      "files": [
+       "E:\\Projects\\Editing\\ccsync\\companion\\src\\ccsync_companion\\music_ingest.py",
+       "E:\\Projects\\Editing\\ccsync\\companion\\tests\\test_music_ingest.py",
+       "E:\\Projects\\Editing\\ccsync\\docs\\bug-hunt-2026-09-24\\ledger\\comp-media.md"
+      ],
+      "regression_test": "companion/tests/test_music_ingest.py: test_two_tracks_with_one_name_are_two_files_by_size, test_two_tracks_with_one_name_and_size_still_get_one_file_each, test_the_content_hash_decides_between_two_identical_names, test_both_same_named_tracks_are_crunched_and_uploaded (end to end through tick). Also test_a_reclaimed_transcoded_track_keeps_its_file, which guards the hash-veto trap and passes on HEAD by design.",
+      "tests_run": "companion .venv: pytest tests/test_music_ingest.py tests/test_bug_hunt_2026_09_11_comp_broll_music.py tests/test_bug_hunt_2026_09_11b_comp_broll_music.py tests/test_music_server.py tests/test_music_worker.py -> 196 passed",
+      "fails_on_head": "Ran against HEAD's music_ingest.py by putting the git show HEAD version in place, then restoring the fixed file (diff stat re-checked afterwards): the 4 new regression tests FAILED and 38 passed.",
+      "owed": "broll_ingest.py (not in this group): the docstring of BrollIngestor._items_from_manifest (around line 1907) still says music pairs rows one by one by name alone. That is no longer true, and the type() check branch is now unreached by music (harmless)."
+     }
+    ]
+   }
+  },
+  {
+   "key": "owed-installer",
+   "built": {
+    "fixes": [
+     {
+      "id": "logic-release-1",
+      "fixed": true,
+      "fix": "Rewrote the REL-7 refusal in installer/build_editor_package.ps1 (Test-SigningKeyTheFleetTrusts) to match docs/RELEASE.md Rotating. It now says the overlap release is signed with the OLD key (named by id): put it back at release.key and ship again, and that build never needs an override. It says -AllowKeyRotation does not perform a rotation, and that its one rotation use is the FIRST build after the key switch (step 3), when the named current version is the overlap build or later and the named signer is the OLD key. Anything else is a wrong key. The old 'bake --add, ship THAT ... if this IS that deliberate step' text is gone. The warning printed when the override is passed now names the first-build case too. The .PARAMETER AllowKeyRotation help used to say 'not baked into', which is not what the check compares; it now says 'not the one that signed'. A comment cites logic-release-1 with both dates. The file stays ASCII with CRLF line endings, so no em dash. RELEASE.md already matched and was not edited. I also added the bug-hunt-2026-09-24.md row to docs/README.md; the docs-index test is tools/tests/test_docs_index.py, not the dashboard/tests file the brief named.",
+      "files": [
+       "E:\\Projects\\Editing\\ccsync\\installer\\build_editor_package.ps1",
+       "E:\\Projects\\Editing\\ccsync\\installer\\tests\\Test-KeyRotationRefusal.ps1",
+       "E:\\Projects\\Editing\\ccsync\\docs\\README.md",
+       "E:\\Projects\\Editing\\ccsync\\docs\\bug-hunt-2026-09-24\\ledger\\webapps-ops.md"
+      ],
+      "regression_test": "installer/tests/Test-KeyRotationRefusal.ps1 (new; run_all_tests.ps1 picks it up because it runs every Test-*.ps1). It slices the function out of the script, turns its exit 1 into a throw, and stubs Invoke-RestMethod and Write-Warn2/Write-Step. It checks the refusal text, the override warning, that there is no U+2014, and that the same key passes quietly. For the docs index, tools/tests/test_docs_index.py.",
+      "fails_on_head": "I ran it with -ScriptPath against git show HEAD:installer/build_editor_package.ps1 saved in the scratchpad: 8 failures (seven refusal-text checks plus the override's first-build line). On the working tree all 15 checks pass. test_docs_index failed on the working tree before the README row because the new bug-hunt doc was not listed.",
+      "tests_run": "powershell -NoProfile -ExecutionPolicy Bypass -File installer\\tests\\Test-KeyRotationRefusal.ps1 -> 15/15 ok, exit 0; the same against HEAD's script -> 8 failures, exit 1; cd tools; ..\\dashboard\\.venv\\Scripts\\python.exe -m pytest tests/test_docs_index.py -q -> 2 passed",
+      "owed": "The proper fix is still round 1's option (a). Carry baked_pubkey_ids into the dashboard's package record (optional on read, deploy the dashboard first) and have build_editor_package.ps1 compare against that list, as publish_feed.py does. Pathway A would then need no override, and the step-3 sentence in both the refusal and RELEASE.md could be removed. That is a dashboard schema and wire change outside this group."
+     }
+    ]
+   }
+  }
+ ],
+ "reviews": [
+  {
+   "id": "bug-comp-app-1",
+   "review": {
+    "verdicts": [
+     {
+      "id": "bug-comp-app-1",
+      "verdict": "PROBLEM",
+      "problems": "The core fix holds, and all three round-1 problems are resolved in the code, not only in the ledger:\n- Point 1: `halt_all_sync` now calls `_reassert_halt_pause()` (app.py:7692).\n- Point 2: `release_for_halt` falls back to the cached selection and verifies it with `_verify_startup_ignores(honour_stop=False)` (sequencer.py:1168-1193).\n- Point 3: `start()` and `_start_lanes()` use `_reassert_halt_pause_soon()`, which runs the re-pause on its own daemon thread, one at a time.\n\nWhat I checked:\n- `_unpause_all` returns early on `_is_halted()`. That one guard covers `stop()`, `pause()`, the between-passes sweep and `_startup_unpause`. The latch is engaged before `_stop_lanes`, and `release_halt` and the fleet release both clear it before `release_for_halt`.\n- The other unpause sites run inside a pass (repath reconcile, the accept flow) or check the halt themselves (`borrowed_folders._reconcile_one`, `shared_folders`), so none of them releases a folder under a halt.\n- There is one Sequencer construction site, and it wires `halted=lambda: self.halt.active`.\n- Companion-only change, no wire change, so no skew with dashboard 0.7.57 in either direction.\n\nTests:\n- All 9 tests in `test_halt_holds_lane_c.py` fail against `git show HEAD:` copies of app.py, sync/sequencer.py and sync/repath.py (scratch package; I confirmed `ccsync_companion.__file__` resolved there). Each fails on its own assertion or on the missing `_reassert_halt_pause`.\n- On the fix, 636 passed across test_halt_holds_lane_c, test_sync_halt, test_sequencer, test_app, test_borrowed_folders, test_upload_only, test_repath_blocked_turn and test_bug_hunt_2026_09_11{,b}_comp_app.\n\nTwo residual defects remain, both minor and both introduced by this fix:\n\n1. Point 2 is fixed for project folders but not for borrowed lender folders.\n   - After a restart onto a halted machine, the re-pause now pauses the lender folders it derives from the cached selection (sequencer.py:1130).\n   - The release does not bring them back. `release_for_halt` hands them to `_reconcile_borrowed_folders()` (sequencer.py:1198), and `BorrowedFolderManager.reconcile` reads `lenders_fn=self.borrowed_lenders`. That returns `_borrowed_lenders` (set only at sequencer.py:1699, when a pass adopts a selection), which is empty in a sequencer that never ran. The cached-selection fallback covers projects only.\n   - Scenario: restart during a halt, the editor presses tray Pause, the halt is lifted. The projects come back, but a lender this machine borrows from stays paused for as long as Pause holds.\n   - Pause is the button that deliberately leaves lane C running, and before this fix nothing paused the lender in that scenario at all.\n   - Fix: in the empty-`_last_selection` fallback, also reconcile or release the lenders derived from the cached selection, e.g. `_build_borrowed(cached, ...)` fed to the manager, with its restricted-ignores check intact.\n\n2. `halt_all_sync` writes every folder twice, on the reporter thread, when the folder list cannot be read.\n   - `halt_all_sync` first runs `_pause_lane_c_folders(True)`, then `_reassert_halt_pause()` synchronously (app.py:7692).\n   - When `get_folders()` fails, `halt_folder_ids_to_repause` returns every id unfiltered (sequencer.py:1146). So every folder `_pause_lane_c_folders` just wrote is PATCHed again.\n   - The ledger says the second write per folder happens only for a sequencer double. It also happens with the real lister whenever the list read fails.\n   - Probe (real Sequencer, adopted selection s-a/s-b, `get_folders` raising): `app.halt_all_sync('fleet', scope='fleet')` wrote `[('s-a', True), ('s-b', True), ('s-a', True), ('s-b', True)]`.\n   - Against a Syncthing that hangs rather than refuses, the fleet halt path (`_apply_fleet_halt` on the reporter thread) grows from N×30 s to N×30 s + 5 s + N×30 s. That is the blocking-on-the-reporter shape round-1 point 3 moved off the startup path.\n   - Fix: pass `_reassert_halt_pause` the ids already written, or skip its fallback write when the lister's read failed.\n\nNote, not a defect: `release_for_halt`'s fallback now issues one synchronous `get_ignores` GET per cached folder on whichever thread lifts the halt (the reporter thread for a fleet release). It is bounded, and it is the same verification `_startup_unpause` already runs."
+     }
+    ]
+   },
+   "rework": {
+    "fixes": [
+     {
+      "id": "bug-comp-app-1",
+      "fixed": true,
+      "fix": "Second rework. Both residual defects the round-2 reviewer found were real, and both are fixed.\n\n(1) After a restart, borrowed lender folders were re-paused but never released. release_for_halt's fallback for an empty `_last_selection` now builds the lender map from the cached selection through the new `Sequencer._lenders_from()`, which uses the same `_build_borrowed` validation a pass does; `halt_folder_ids_to_repause` now uses it too. The map is lent to BorrowedFolderManager for that one reconcile through `_halt_release_lenders`. `borrowed_lenders()` falls back to it only while the adopted map is empty, and it is cleared in a `finally`, so it is never adopted. The manager's restricted-.stignore check still decides every unpause, and `_drop_unborrowed` stays inert.\n\n(2) halt_all_sync wrote every folder twice when Syncthing's folder list could not be read. `_pause_lane_c_folders` now takes an optional `attempted` set and records every id it tried to write. halt_all_sync passes that set as `skip` to `_reassert_halt_pause`, which leaves those ids out. When its lister raises, the re-pause returns 0 instead of rewriting everything. A failed write is retried by the next start's off-thread re-pause, not on the reporter thread.\n\nThe ledger's Round 2 review note corrects the round-1 claim that the double write happened only with a sequencer double. Companion-only, no wire change.",
+      "files": [
+       "E:\\Projects\\Editing\\ccsync\\companion\\src\\ccsync_companion\\sync\\sequencer.py",
+       "E:\\Projects\\Editing\\ccsync\\companion\\src\\ccsync_companion\\app.py",
+       "E:\\Projects\\Editing\\ccsync\\companion\\tests\\test_halt_holds_lane_c.py",
+       "E:\\Projects\\Editing\\ccsync\\docs\\bug-hunt-2026-09-24\\ledger\\comp-halt-repath.md"
+      ],
+      "regression_test": "companion/tests/test_halt_holds_lane_c.py::test_lifting_a_halt_after_a_restart_releases_the_borrowed_lender_too (the reviewer's scenario: restart onto a halt, tray Pause held, halt lifted; the lender s-l stayed paused before this fix) and ::test_a_halt_whose_folder_list_cannot_be_read_writes_each_folder_once (real Sequencer, adopted selection, get_folders raising; the round-1 code wrote [s-a, s-b, s-a, s-b]). Supporting test, not a regression test: ::test_the_lender_release_still_holds_an_unrestricted_lender.",
+      "tests_run": "companion .venv pytest on test_halt_holds_lane_c, test_sync_halt, test_sequencer, test_app, test_borrowed_folders, test_upload_only, test_repath_blocked_turn, test_bug_hunt_2026_09_11_comp_app, test_bug_hunt_2026_09_11b_comp_app, test_shared_folders: 663 passed (1 warning, test_sequencer's own deliberate thread-death test).",
+      "fails_on_head": "Checked by running the tests against scratch copies (pytest.ini pythonpath=pkg, with ccsync_companion.__file__ confirmed to resolve to each copy). r2prev is the current tree with only the two round-2 changes neutralised: exactly the two new regression tests fail and the other 10 pass. r2head uses git show HEAD: copies of app.py, sync/sequencer.py and sync/repath.py: 11 of 12 fail. The one that passes there is the write-once test, because HEAD has no re-pause at all; that defect existed only in the round-1 fix.",
+      "owed": "None. borrowed_folders.py (not in this group) did not need changing."
+     }
+    ]
+   }
+  },
+  {
+   "id": "bug-comp-core-1",
+   "review": {
+    "verdicts": [
+     {
+      "id": "bug-comp-core-1",
+      "verdict": "PROBLEM",
+      "problems": "The three round-1 problems are fixed in the code. (1) Skew: note_reverted_from (upgrade.py:499-507) now also writes REL-8's give-up record (version=vX, attempts=8, last_error=crash-looped). I copied the new upgrade.py onto a `git archive HEAD` scratch tree, so the HEAD app.py (0.9.77's gate) ran against it: the push was refused with \"given up\". I also traced it: 0.9.77's _load_upgrade_state, clear_reverted_from and note_upgrade_attempt leave the record alone until a failed attempt at another version. (2) The block now rides every report through the existing version/attempts/last_error keys. (3) crash_looped is a list of the last 8 fled versions. The only unattended installers are _maybe_auto_update (app.py:7952) and _apply_pushed_update (app.py:8065), and both are gated. The balloon is suppressed, and the tray click is still allowed. Tests: all 8 regression tests fail on the HEAD scratch copy (crash_looped_on missing, push/auto applied, gate returned \"\"). test_app/test_upgrade/test_crash_loop_revert/test_tray_guard/test_bug_hunt_2026_09_18b_companion_core pass on the fix: 598 passed.\n\nNEW NEIGHBOUR DEFECT, introduced by the review-round rework: the synthetic give-up record never clears once the machine moves on to a newer build. It is written at upgrade.py:502-507 (version=vX, attempts=MAX_UPGRADE_ATTEMPTS, last_error=crash-looped). The only thing that clears the counters is app.py:6655 `_load_upgrade_state`, and only when record.version == the running VERSION. A successful update writes nothing to the ledger. So in the normal recovery (vX crash-loops, the machine reverts to vX-1, the admin publishes vY and the machine takes it), the machine keeps reporting sync_guard.upgrade = {version: vX, attempts: 8, last_error: \"crash-looped\"} on vY for ever. That lasts until it happens to fail an attempt at some other version, or runs vX. Probe in the scratchpad (probe1.py): note_reverted_from('0.9.78'), then clear_reverted_from, then CompanionApp._load_upgrade_state with VERSION='0.9.79'. The report still carries version 0.9.78, attempts 8, last_error crash-looped, and tray._upgrade_line returns its warning. What a healthy, updated machine then shows: dashboard alerts._check_upgrade_failed (alerts.py:1774-1793, threshold 8, no version check) fires and tells the admin to \"install the build by hand\", which is the build that crash-looped. There is also a permanent red [ UPDATE FAILED x8 ] on fleet_grid.html:256 and admin_packages.html:513-514, \"an update keeps failing\" (health.py:1245), and a permanent Settings WARNING on the editor's machine: settings_window.py:195 -> tray.py:3592-3614 \"CCSync could not install the update to v0.9.78 8 times, so it has stopped trying\", which is also false, since it did install it. The dashboard-side reverted chip clears itself once running >= reverted (db.py:5371-5381); this record has no such clear. The ledger's OWED items (b)/(c) cover the wording, not this staleness, and the tray/Settings line is not listed at all. Before this rework, a revert followed by a move to vY left nothing stale. Fix, companion-side and with no wire change: in _load_upgrade_state (app.py:6654-6657), also clear the counters when last_error == ERROR_CRASH_LOOPED and the running VERSION is newer than record.version (compare_to_running / version tuple). Keep the crash_looped list, which still gates a rollback push of vX. Optionally, make tray._upgrade_line say \"kept crashing and was rolled back\" for that code. Add a regression test: revert off 0.9.78, run as 0.9.79, and the report must carry attempts 0 while crash_looped_on('0.9.78') stays true. Residual skew limit, as documented: a 0.9.77 that reverts and then takes vY keeps the stale record until vY (fixed) starts, and with the proposed clear, vY cleans it up on its first start."
+     }
+    ]
+   },
+   "rework": {
+    "fixes": [
+     {
+      "id": "bug-comp-core-1",
+      "fixed": true,
+      "fix": "Round 2 (2026-09-25): the reviewer was right. The revert's give-up record (version=vX, attempts=8, last_error=crash-looped) never cleared after the machine moved on to a newer build. On a healthy machine it kept a permanent UPDATE FAILED x8 chip, an upgrade_failed alert telling the admin to hand-install the build that crash-looped, and a false Settings warning. The fix is in companion/src/ccsync_companion/app.py `_load_upgrade_state`. When last_error == ERROR_CRASH_LOOPED and compare_to_running(record.version) == VERSION_OLDER, it calls clear_upgrade_attempts(path, record.version). That drops the counters and keeps the crash_looped list and the revert keys, so a rollback push of vX is still refused. On the restored older build the record stays, because it is that build's REL-8 gate. No wire change. Round 2 note appended under bug-comp-core-1 in E:\\Projects\\Editing\\ccsync\\docs\\bug-hunt-2026-09-24\\ledger\\comp-upgrade-moves.md.",
+      "files": [
+       "E:\\Projects\\Editing\\ccsync\\companion\\src\\ccsync_companion\\app.py",
+       "E:\\Projects\\Editing\\ccsync\\companion\\tests\\test_app.py",
+       "E:\\Projects\\Editing\\ccsync\\docs\\bug-hunt-2026-09-24\\ledger\\comp-upgrade-moves.md"
+      ],
+      "regression_test": "companion/tests/test_app.py::test_moving_past_the_fled_build_clears_the_give_up_record_but_not_the_block reverts off 9.9.9 and then runs as 9.9.10. It checks that the report has attempts 0 and last_error None, that tray._upgrade_line is None, and that crash_looped_on('9.9.9') is still True and _upgrade_attempt_blocked('9.9.9') == 'crash-looped'. companion/tests/test_app.py::test_the_restored_older_build_keeps_the_give_up_record pins the other side: running 9.9.8, the record stays at 8 / crash-looped.",
+      "fails_on_head": "Yes. It fails on round one's code: in a scratch copy of the current companion tree with only the new hunk removed, the result was `assert 8 == 0`. On HEAD it also fails, because HEAD has no crash_looped_on and no give-up record from note_reverted_from.",
+      "tests_run": "companion\\.venv\\Scripts\\python.exe -m pytest tests/test_app.py tests/test_upgrade.py tests/test_crash_loop_revert.py tests/test_tray_guard.py -q -> 586 passed",
+      "owed": "tray.py is outside this group. tray._upgrade_line could say 'kept crashing and was rolled back' for last_error crash-looped, which now only shows on the restored older build. Dashboard wording items (b)/(c) from round one still stand. Residual skew: a 0.9.77 that reverts and then takes vY keeps the stale record until vY (with this fix) starts, and vY clears it on its first start."
+     }
+    ]
+   }
+  },
+  {
+   "id": "logic-plans-3",
+   "review": {
+    "verdicts": [
+     {
+      "id": "logic-plans-3",
+      "verdict": "PROBLEM",
+      "problems": "All three round-1 problems are fixed in the code, not only in the ledger. (1) app.py:8297-8300 passes server_files=file_moves_mod.rclone_server_files(rclone_path, remote, remote_root), the same config keys lane A is built from. The no-listing fallback now returns (False, DETAIL_4B_CANNOT_LIST) (file_moves.py:713-718). app.py records that through record_attempt_failed as retryable/retrying, and recent_excludes keeps the exclusion open while the row is unresolved. (2) _server_keys builds the listing set once per folder. (3) _is_lane_a_original is given Projects/<from_project_rel>/<from_rel>/<rel>. The listing's remote side matches build_up_command's remote side (Projects/<dest> under remote_root). On the wire it is still the v36 'retrying' word and a plain detail string, so there is no version-skew issue either way.\n\nTests: on a git archive HEAD scratch copy, 10 of the 12 4b tests fail. The proxy-folder test fails once the current file_moves.py is patched back to rel-only classification. On the fix, tests/test_file_moves.py passes 47/47. Every companion test file that touches file_moves passes too: 386 passed.\n\nRemaining defect, in the finding's own card-dump scenario: file_moves.py:525 takes the snapshot of local files (_files_under) BEFORE the network listing at :535, which can take up to 120 s. When every snapshotted file is on the server, the list of kept files is empty, so apply_move skips the per-file path (:721) and moves the WHOLE directory into .ccsync-trash at :736 (src.replace(trash)). A file that landed in the folder during the listing window was never checked against the server and goes to the trash with the folder. Lane A never walks the trash, and prune_trash deletes it after 14 days.\n\nI reproduced this in a scratch probe. The server_files stub writes Card_07/A002.mov into the folder, then returns only A001.mov. Result: (True, 'trashed locally, destination not synced here'), and A002.mov is in .ccsync-trash/<stamp>/Projects/2026/X/Card_07/. On macOS the rename also succeeds under a Finder copy that is still running, and that copy keeps writing into the trash. On Windows, an open handle makes the rename fail, but a file finished between the snapshot and the rename is lost. Suggested fix: when a folder was triaged against a listing, trash it file by file through _apply_4b_partial even when nothing is kept, and remove the emptied tree only with rmdir. Or re-scan after the listing and keep any file missing from the first snapshot.\n\nMinor note: rclone lsf (timeout 120 s) runs on the reporter thread once per 4b folder move per attempt, one move after another. On a hung SFTP, several folder moves in one reply stall the report by N x 120 s. This is bounded and on the retry schedule, so it is not blocking. The live rclone lsf path has also still not run against the NAS, which the ledger already lists as owed."
+     }
+    ]
+   },
+   "rework": {
+    "fixes": [
+     {
+      "id": "logic-plans-3",
+      "fixed": true,
+      "fix": "Round 2 (2026-09-25). Every section 4b FOLDER now goes through _apply_4b_partial file by file, even when nothing is kept. The whole-folder src.replace(trash) is now used only for single files. _apply_4b_partial (1) moves only the files that were snapshotted AND matched the listing, and re-stats each one first: a file whose size changed since the snapshot is kept. (2) Re-scans the folder after the moves and keeps anything still in it, including files that landed during the up-to-120 s listing. (3) Removes only the directories it left empty, with rmdir deepest-first, never rmtree. When nothing is kept, the answer is unchanged (DETAIL_NOT_SYNCED_HERE, paths=None), so nothing changes on the wire and app.py is untouched. _split_folder_for_4b now returns (path, rel, size). docs/FILE_MOVES.md section 3 and docs/HAND_MOVES_ON_THE_SERVER.md 4b now describe this. Not done: the reviewer's minor N x 120 s note. Fixing it needs one listing closure per reply in app._apply_file_moves plus a way to tell a timeout apart, so it is recorded as OWED follow-up.",
+      "files": [
+       "E:\\Projects\\Editing\\ccsync\\companion\\src\\ccsync_companion\\file_moves.py",
+       "E:\\Projects\\Editing\\ccsync\\companion\\tests\\test_file_moves.py",
+       "E:\\Projects\\Editing\\ccsync\\docs\\FILE_MOVES.md",
+       "E:\\Projects\\Editing\\ccsync\\docs\\HAND_MOVES_ON_THE_SERVER.md",
+       "E:\\Projects\\Editing\\ccsync\\docs\\bug-hunt-2026-09-24\\ledger\\comp-upgrade-moves.md"
+      ],
+      "regression_test": "companion/tests/test_file_moves.py::test_4b_a_file_that_lands_during_the_listing_is_never_binned (the reviewer's scenario: the server_files stub writes A002.mov mid-listing and returns only A001.mov), ::test_4b_a_file_rewritten_during_the_listing_is_not_the_servers_copy, ::test_4b_a_folder_the_server_holds_whole_leaves_no_husk (pins the unchanged answer and checks that no empty directory is left)",
+      "fails_on_head": "Run in scratch copies. On git archive HEAD all 3 new tests fail (TypeError: HEAD has no server_files). On the round-1 code (the current file with only the `if kept:` gate restored) the first two fail: FileNotFoundError, because A002 is in the trash, and the grown file was binned. The husk test passes there by design, because it pins behaviour that did not change.",
+      "tests_run": "companion tests/test_file_moves.py: 50 passed. Every companion test file that references file_moves (test_bug_hunt_2026_09_11_comp_app, _09_11_comp_sync, _09_11b_comp_app, _09_11b_comp_sync, _09_18_companion, _09_18b_companion_core, test_file_moves, test_rclone_filters, test_sequencer): 389 passed.",
+      "owed": "The rclone lsf listing has not run against the live NAS: check it on the first real 4b folder move. Follow-up for the reviewer's minor note: build one server_files per reply in app._apply_file_moves and make it return None without calling rclone once a listing in that reply has taken the full timeout. This needs a change in the shared app.py and a way to tell a timeout apart from rclone_lane._run_lsf."
+     }
+    ]
+   }
+  },
+  {
+   "id": "bug-comp-ytdl-1",
+   "review": {
+    "verdicts": [
+     {
+      "id": "bug-comp-ytdl-1",
+      "verdict": "PROBLEM",
+      "problems": "Round-1 items are resolved in the code, not only in the ledger. (a) NAS half: ytdl/web/ytdlweb/vendor/downloader.py:434-491 now moves the original to `<stem>.source.editready<ext>` before the ffmpeg `-i`. The outcomes are correct: unstage on ffmpeg failure, a failed guess, FileNotFoundError or any other exception, then remove the staged file and `_swap_in(tmp, final, final)` on success. `_swap_in`'s same=True path still moves a held file at `final` aside. worker._INTERMEDIATE_STEM (worker.py:902) makes the staged name sweepable, `_landed_file` refuses it, and ytsearch._ID_RE/_ARTIFACT_EXT_RE do not count it as a finished clip. The name spelling is pinned against the companion's in server/tests/test_cross_component.py:1203-1207. (b) Stop during the probe: ytdl_executor.py:2521-2535 moves the unchecked download onto the staged name so `_cleanup_current` -> clear_partials sweeps it. (c) The crash-abandoned residual is disclosed and accepted.\n\nTests I ran. On the fix: companion 352 passed (test_ytdl_executor, test_youtube_import, test_rclone_filters, test_bug_hunt_2026_09_24_comp_media); ytdl/web 269 passed; server test_cross_component 70 passed. Against HEAD, in scratch copies with only a staged_source_name helper appended: the three companion regressions fail on the defect itself, all with `['Some Channe...aaaaaaa].mp4'] == []` (long conversion, stop mid-conversion, and stop during the probe, which also fails on HEAD). Both ytdl/web parametrised cases fail with `{'during': ['...[aaaaaaaaaaa].mp4'], 'landed': '...'} != {'during': [], 'landed': None}`. No wire change, so no skew risk between companion 0.9.77 and dashboard 0.7.57 in either direction. None of the new code runs on a startup or reporter thread.\n\nNew neighbour defect the fix introduces. companion/src/ccsync_companion/proxy_scan.py:415-434 (scan_project) picks candidates by VIDEO_EXTS and a 120 s mtime settle only. It never applies lane A's YTDL_WORK_EXCLUDE_RULES or the `.editready` stem rule, so the staged source is queued for a proxy. Probe: scan_project over `Youtube/<term>/Some Channel - A clip [aaaaaaaaaaa].source.editready.webm` aged 600 s returned it as a `preview` candidate (missing=1). Its expected proxy is `Proxy/<title> [id].source.editready.mp4`. On HEAD the same scan proxied the original under its deliverable stem, so `Proxy/<title> [id].mp4` also covered the converted final. With the fix, the base rig's generator will now do the following for any NAS conversion that outlasts 120 s plus a 900 s scan tick (4K/1440p VP9, the case this fix targets):\n- Encode a 540p preview of the staged file and publish `Youtube/<term>/Proxy/<title> [id].source.editready.mp4`. That path is an orphan with no original. Lane B's `+ **/Proxy/**` (rclone_lane.py:723-735, which has no editready rule) carries it to every editor with the project ticked, and nothing ever removes it.\n- Encode the converted final a second time.\n- If the worker's os.remove(staged) wins the race, record an encode failure against a path that will never come back.\nAn editor machine running proxy_gen gets the same local orphan. Fix: have proxy_scan skip the ytdl work names, either with rclone_lane.path_matches_lane_a_filter / YTDL_WORK_EXCLUDE_RES or with the `.editready|.original|.fNNN|.temp` stem rule, consistent with its own comment \"if a lane wouldn't carry it, its absence downstream is not a proxy gap\". Add a test with a staged `.source.editready.webm`.\n\nMinor, not blocking: ytdl_executor.py:2615-2621. On a Windows editor, a successful conversion whose staged original is still open elsewhere (the local proxy generator above, AV, or the Explorer thumbnailer) fails `os.remove(staged)`, and the log says \"it is swept on the next attempt\". A clip that succeeded has no next attempt on this machine (clear_partials runs only on a stop or on a new attempt at that id). So a full-size VP9 copy is left permanently from the ordinary success path, not only from a crash. It is excluded from every lane, so the cost is local disk. Either the log should say so, or the file should be retried from clear_aside_originals-style housekeeping."
+     }
+    ]
+   },
+   "rework": {
+    "fixes": [
+     {
+      "id": "bug-comp-ytdl-1",
+      "fixed": true,
+      "fix": "Round 2 rework, fixing both of the reviewer's points. (1) The proxy scanner was queuing the staged source for a proxy. Fixed in companion/src/ccsync_companion/proxy_scan.py: scan_project now skips every basename that matches rclone_lane.YTDL_WORK_EXCLUDE_RES. That is the compiled form of lane A's own YTDL_WORK_EXCLUDE_RULES, so the scanner cannot drift from the lanes. This means `<title> [id].source.editready.<ext>` no longer produces an orphan `Proxy/<title> [id].source.editready.mp4` that lane B would carry to every editor, and the converted final is no longer encoded twice. The skip also covers .editready, .original, .fNNN and .temp files. (2) On the success path, a staged original that is still held could stay on disk silently. Fixed in companion/src/ccsync_companion/ytdl_executor.py with a new DownloadJob._remove_staged. It makes 4 tries 0.5 s apart through deps.sleep. If the file is still held after that: a WARNING says nothing will retry it and how many bytes stay; the clip row's note names the file and its size and says it syncs nowhere and can be deleted (no em dash). The misleading 'swept on the next attempt' log is gone. No wire change. The ledger note 'Round 2 review' is under bug-comp-ytdl-1 in docs/bug-hunt-2026-09-24/ledger/comp-media.md.",
+      "files": [
+       "E:\\Projects\\Editing\\ccsync\\companion\\src\\ccsync_companion\\proxy_scan.py",
+       "E:\\Projects\\Editing\\ccsync\\companion\\src\\ccsync_companion\\ytdl_executor.py",
+       "E:\\Projects\\Editing\\ccsync\\companion\\tests\\test_proxy_scan.py",
+       "E:\\Projects\\Editing\\ccsync\\companion\\tests\\test_ytdl_executor.py",
+       "E:\\Projects\\Editing\\ccsync\\docs\\bug-hunt-2026-09-24\\ledger\\comp-media.md"
+      ],
+      "regression_test": "companion/tests/test_proxy_scan.py: test_ytdl_work_files_are_never_queued (5 cases, including .source.editready.webm aged 600 s) and the guard test_a_finished_youtube_clip_beside_its_work_file_is_still_queued. companion/tests/test_ytdl_executor.py: test_a_held_staged_original_is_retried_then_named_on_the_row and test_a_briefly_held_staged_original_is_still_removed.",
+      "tests_run": "companion venv: pytest tests/test_proxy_scan.py tests/test_ytdl_executor.py tests/test_bug_hunt_2026_09_24_comp_media.py tests/test_proxy_gen.py: 403 passed. Scratch copy with HEAD's proxy_scan.py: all 6 new proxy_scan tests failed (missing=1 or 2). Scratch copy with only the executor hunk reverted to round 1's single os.remove: both new executor tests failed (the note was empty; the staged file was still there after a one-time refusal).",
+      "fails_on_head": "yes. I ran the proxy_scan tests against HEAD's proxy_scan.py. I ran the executor tests against round 1's code, because HEAD has no staging at all.",
+      "owed": "None. proxy_scan.py is outside the brief's comp-media file list, but the reviewer named it for this fix and no other group had modified it (git status was clean for it)."
+     }
+    ]
+   }
+  },
+  {
+   "id": "logic-release-1",
+   "review": {
+    "verdicts": [
+     {
+      "id": "logic-release-1",
+      "verdict": "PROBLEM",
+      "problems": "Round-1 items. Item 1 (pathway A step 3 was false) is fixed: docs/RELEASE.md:702-730 now splits step 3 by pathway, and the pathway A conditions match the ps1's signed-by comparison. Item 3 is fixed: release_key.py:144-155 prints no 'Next: bake' after the --force warning. Item 4 is fixed: release_key.py:185-187 gives each key its own backup record, backup.json stays with release.key, and ship.ps1:598 still reads backup.json. Item 2 (the ps1 refusal text) was not changed by the builder. It is being fixed right now by the installer agent's uncommitted edit to installer/build_editor_package.ps1:455-482, and that edit's text agrees with the runbook. It is not committed, so the finding is only closed once it lands. Tests: the new file plus test_release_key, test_publish_feed, test_publish_latest, test_sign_release and test_release_scripts give 210 passed on the fix. Against a git-archive HEAD copy of tools/, docs/ and companion/src/ in the scratchpad, the new file gives 7 failed and 1 passed (the passing one is the guard test_a_first_key_still_gets_the_bake_prompt). No CRLF in any touched file. No companion/dashboard wire or skew impact; it is tooling and docs only.\n\nProblems remaining in the rewritten runbook:\n(A) Step 2 (docs/RELEASE.md:695-701) tells the operator to add the new public key to DASH_RELEASE_PUBKEYS 'on this studio's dashboard'. On pathway A that setting is undone by every ship. tools/load_secrets.ps1:156-161 (which ship.ps1:339 tells the operator to dot-source) SETS env:DASH_RELEASE_PUBKEYS to release.key's public half ONLY. server/install_dashboard_app.py:2623 then writes that env into the container on ship.cmd's dashboard deploy step. So during steps 1-2 each ship redeploys the studio dashboard trusting the old key only. After the step 3 switch, load_secrets derives the NEW key only, so the studio dashboard stops trusting the old key: records signed by it, the vendor channel still signed by it, and OTA code trees checked by dashboard/deploy/select_code_root.py:237-240. That is the exact state step 2 exists to prevent. The runbook needs a line for the rotation window: set $env:DASH_RELEASE_PUBKEYS to 'old,new' after load_secrets. Or load_secrets should keep a second key. The fix never mentions load_secrets.\n(B) Step 3's key switch (docs/RELEASE.md:702-710) moves only the files on this rig. tools/release_macos.sh:811-812 and build_onboard_macos.sh:508-510 sign Mac builds with a hand-copied ~/.ccsync-release/release.key on the Mac, and that path has no REL-7 check at all. A Mac that keeps the old key keeps signing with it past the switch. After the later 'drop the old key' release, those Mac builds are refused by every Mac on the drop build, and nothing warns. The runbook should say to replace or retire the Mac's copy at step 3. Lower severity: before the DASH_RELEASE_PUBKEYS drop, the dashboard still accepts those builds, and after the drop it refuses them loudly.\n(C) Minor: test_step3_says_pathway_a_needs_the_override_once_and_when (tools/tests/test_bug_hunt_2026_09_24_webapps_ops.py:193-222) only models the ps1 as one equality on a record it wrote itself. It mostly pins doc strings, so it would not catch the ps1 comparison changing."
+     }
+    ]
+   },
+   "rework": {
+    "fixes": [
+     {
+      "id": "logic-release-1",
+      "fixed": true,
+      "fix": "Round 2 review, second rework. (A) The rotation now keeps both keys trusted on the studio dashboard. load_secrets.ps1 used to set DASH_RELEASE_PUBKEYS to release.key's public half only, and ship.cmd's dashboard deploy writes that value into the container, so every ship during a rotation took one key away. tools/release_key.py has a new `trusted` subcommand. It prints release.key's public half, then the halves of release-next.key and release.key.superseded whenever they sit beside it. An unreadable one refuses; it is never skipped. load_secrets.ps1 now calls `trusted --quiet` and reports 'N keys: a key rotation is under way'. docs/RELEASE.md changes: step 2 is split into this studio's dashboard (reload load_secrets, never hand-set, on pathway B run ship.cmd -DashboardOnly once) and customer dashboards (add the key by hand). Step 3 keeps release.key.superseded on the rig until step 4. A new step 4 drops the old key: bake without --add in a later release, then move release.key.superseded off the rig, reload and ship. (B) Step 3 gains a Mac bullet. release_macos.sh and build_onboard_macos.sh sign with the Mac's hand-copied ~/.ccsync-release/release.key and have no REL-7 check. Replace that file at the switch and confirm `python3 tools/release_key.py pubkey` prints the NEW id there. The bullet also says what a stale Mac key costs. (C) The step-3 test now runs the ps1's own Get-PubkeyId and Test-SigningKeyTheFleetTrusts under PowerShell, cut from installer/build_editor_package.ps1, with only Invoke-RestMethod (fed the real feed record) and the console helpers stubbed. The overlap build passes. The first new-key build exits 1 with WILL REFUSE and names the old key id. The override lets it through. Any change to the ps1 comparison now turns the test red.",
+      "files": [
+       "E:\\Projects\\Editing\\ccsync\\tools\\release_key.py",
+       "E:\\Projects\\Editing\\ccsync\\tools\\load_secrets.ps1",
+       "E:\\Projects\\Editing\\ccsync\\docs\\RELEASE.md",
+       "E:\\Projects\\Editing\\ccsync\\tools\\tests\\test_bug_hunt_2026_09_24_webapps_ops.py",
+       "E:\\Projects\\Editing\\ccsync\\docs\\bug-hunt-2026-09-24\\ledger\\webapps-ops.md"
+      ],
+      "regression_test": "tools/tests/test_bug_hunt_2026_09_24_webapps_ops.py: test_the_trust_list_holds_both_keys_for_the_whole_rotation, test_an_unreadable_rotation_key_refuses_rather_than_trusting_one, test_load_secrets_exports_the_whole_trust_list (runs load_secrets.ps1's own block under PowerShell against a tmp ring), test_the_runbook_covers_the_trust_list_and_the_mac_key, and the rewritten test_step3_says_pathway_a_needs_the_override_once_and_when (runs the ps1's real check under PowerShell).",
+      "tests_run": "cd tools; ..\\dashboard\\.venv\\Scripts\\python.exe -m pytest tests/test_bug_hunt_2026_09_24_webapps_ops.py tests/test_release_key.py tests/test_publish_feed.py tests/test_publish_latest.py tests/test_sign_release.py tests/test_release_scripts.py -q: 214 passed. tests/test_build_dashboard_bundle.py tests/test_publish_package.py tests/test_release_notes_flag.py: 37 passed. The PowerShell tests ran and did not skip (checked with -v -rs).",
+      "fails_on_head": "Ran. A git archive HEAD copy of tools, docs, companion/src and installer in the scratchpad gave 11 failed, 1 passed; the one pass is the guard test_a_first_key_still_gets_the_bake_prompt. The new tests fail for the intended reasons: invalid choice 'trusted', SystemExit(2), load_secrets exporting ONE key ('LOADED=DASH_RELEASE_PUBKEYS (derived)'), and the runbook sections missing. The PowerShell half of the step-3 test passes against HEAD's ps1, which is expected because the comparison is unchanged there. The test fails on the doc half.",
+      "owed": "1) Add a REL-7-style signer check to tools/release_macos.sh and tools/build_onboard_macos.sh. For now the runbook's Mac bullet is the only guard, and it needs a Mac to build and test. 2) Unchanged from round 1: carry baked_pubkey_ids on the dashboard record (option (a)), so pathway A needs no override. 3) Left unchanged: the fix hint at server/install_dashboard_app.py:1660 still says `release_key.py pubkey`, because server/tests/test_image_mode.py:258 pins it. Item 2 of the review is closed only once the installer builder's uncommitted build_editor_package.ps1 edit lands."
+     }
+    ]
+   }
+  }
+ ]
+}

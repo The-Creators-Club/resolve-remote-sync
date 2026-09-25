@@ -6814,6 +6814,144 @@ def test_a_crash_loop_rollback_rides_the_report_until_it_is_accepted(tmp_path):
     assert "reverted_from" not in upgrade_mod.read_attempts(app._upgrade_attempts_path())
 
 
+def _fled_build_app(tmp_path, monkeypatch):
+    """A restored build whose crash-loop revert came off 9.9.9, as
+    revert_to_previous_build leaves the ledger, after its first accepted
+    report has cleared the one-shot `reverted_from` telemetry marker."""
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app, applied = _update_app(tmp_path, monkeypatch)
+    upgrade_mod.note_reverted_from(app._upgrade_attempts_path(), "9.9.9", now=100.0)
+    app._load_upgrade_state()
+    app._note_report_accepted()
+    assert app._upgrade_reverted_from == ""
+    return app, applied
+
+
+def test_a_pushed_update_does_not_reinstall_the_build_the_machine_fled(tmp_path, monkeypatch):
+    """bug-comp-core-1 (2026-09-24): the push rides every report until the
+    machine reports 9.9.9, and nothing read the revert as a gate, so the
+    restored build reinstalled the crash-looping one on its first reply."""
+    app, applied = _fled_build_app(tmp_path, monkeypatch)
+
+    app._apply_pushed_update({"commands": {"upgrade": {
+        "apply": True, "version": "9.9.9", "requested_at": "2026-09-24T10:00:00Z"}}})
+    _join_upgrade_threads()
+
+    assert applied == []
+    assert app._upgrade_attempt_blocked("9.9.9") == "crash-looped"
+    # A newly published fix still reaches it.
+    assert app._upgrade_attempt_blocked("9.9.10") == ""
+
+
+def test_auto_update_does_not_reinstall_the_build_the_machine_fled(tmp_path, monkeypatch):
+    from ccsync_companion import site as site_mod
+
+    app, applied = _fled_build_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(site_mod, "feature_enabled",
+                        lambda name, site=None: name == "auto_update")
+
+    app._on_upgrade_available({"version": "9.9.9"})
+    _join_upgrade_threads()
+
+    assert applied == []
+
+
+def test_the_fled_build_block_survives_a_restart_and_another_failure(tmp_path, monkeypatch):
+    """The marker must outlive both things that clear the other ledger keys:
+    a restart, and a failed attempt at some other version."""
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app, _ = _fled_build_app(tmp_path, monkeypatch)
+    upgrade_mod.note_upgrade_attempt(
+        app._upgrade_attempts_path(), "9.9.10", upgrade_mod.ERROR_DOWNLOAD)
+    app._load_upgrade_state()
+
+    assert app._upgrade_attempt_blocked("9.9.9") == "crash-looped"
+
+
+def test_the_dashboard_hears_why_a_pushed_update_never_lands(tmp_path, monkeypatch):
+    """bug-comp-core-1 review round (2026-09-24): `reverted_from` goes out
+    once, and after that an admin's standing push for 9.9.9 read as pending
+    for ever (attempts 0, no error). The give-up record rides every report."""
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app, _ = _fled_build_app(tmp_path, monkeypatch)
+    block = app.sync_guard()["upgrade"]
+
+    assert block["reverted_from"] is None
+    assert block["version"] == "9.9.9"
+    assert block["attempts"] == upgrade_mod.MAX_UPGRADE_ATTEMPTS
+    assert block["last_error"] == upgrade_mod.ERROR_CRASH_LOOPED
+
+
+def test_moving_past_the_fled_build_clears_the_give_up_record_but_not_the_block(
+        tmp_path, monkeypatch):
+    """bug-comp-core-1 round 2 (2026-09-25): the revert's synthetic give-up
+    record (version=vX, attempts=8, crash-looped) was cleared only by running
+    vX itself, and a successful update writes nothing. A machine that reverted
+    off 9.9.9 and then took 9.9.10 reported "gave up on 9.9.9 x8" for ever:
+    a permanent UPDATE FAILED chip, an alert telling the admin to install the
+    crash-looping build by hand, and a false Settings warning."""
+    from ccsync_companion import config as config_mod
+    from ccsync_companion import tray as tray_mod
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app, _ = _fled_build_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_mod, "VERSION", "9.9.10")
+    app._load_upgrade_state()
+
+    block = app.sync_guard()["upgrade"]
+    assert block["attempts"] == 0
+    assert block["last_error"] is None
+    assert tray_mod._upgrade_line(app.sync_guard()) is None
+    # The fled build itself is still refused on the unattended paths.
+    record = upgrade_mod.read_attempts(app._upgrade_attempts_path())
+    assert upgrade_mod.crash_looped_on(record, "9.9.9") is True
+    assert app._upgrade_attempt_blocked("9.9.9") == "crash-looped"
+
+
+def test_the_restored_older_build_keeps_the_give_up_record(tmp_path, monkeypatch):
+    """The other side of round 2's clear: on a build OLDER than the fled one
+    (the restored build, which is the one 0.9.77 would be) the record stays,
+    because it is that build's REL-8 gate."""
+    from ccsync_companion import config as config_mod
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app, _ = _fled_build_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_mod, "VERSION", "9.9.8")
+    app._load_upgrade_state()
+
+    block = app.sync_guard()["upgrade"]
+    assert block["attempts"] == upgrade_mod.MAX_UPGRADE_ATTEMPTS
+    assert block["last_error"] == upgrade_mod.ERROR_CRASH_LOOPED
+
+
+def test_a_restored_build_without_the_fled_key_still_refuses_the_push(tmp_path, monkeypatch):
+    """bug-comp-core-1 review round: the build that reads the ledger after a
+    revert is the PREVIOUS release, and the first release carrying this fix
+    reverts onto one that ignores `crash_looped`. REL-8's gate (the same code
+    in 0.9.77) must refuse the fled build from the give-up record alone."""
+    import json
+
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app, applied = _fled_build_app(tmp_path, monkeypatch)
+    path = app._upgrade_attempts_path()
+    record = json.loads(path.read_text(encoding="utf-8"))
+    for key in upgrade_mod.CRASH_LOOPED_KEYS:
+        record.pop(key, None)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    app._load_upgrade_state()
+
+    app._apply_pushed_update({"commands": {"upgrade": {
+        "apply": True, "version": "9.9.9", "requested_at": "2026-09-24T11:00:00Z"}}})
+    _join_upgrade_threads()
+
+    assert applied == []
+    assert app._upgrade_attempt_blocked("9.9.9") == "given up"
+
+
 def test_running_the_build_it_was_trying_to_install_clears_the_failures(tmp_path):
     from ccsync_companion import config as config_mod
     from ccsync_companion import upgrade as upgrade_mod

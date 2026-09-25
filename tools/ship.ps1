@@ -139,8 +139,13 @@
     this is about the editor-facing SmartScreen/AV experience.
 
 .PARAMETER AllowKeyRotation
-    Publish although this rig's signing key is not one the build the fleet is
-    currently on trusts. Every machine on that build refuses this one (REL-7).
+    Publish although this rig's signing key is not the key that signed the
+    build the fleet is currently on (REL-7). It does NOT perform a key
+    rotation. On this pathway a rotation needs it exactly once: the first
+    build after the signing-key switch (docs\RELEASE.md "Rotating", step 3),
+    and only when the refusal names the OLD key as the current build's signer
+    and that current build is the overlap release, which bakes the new key.
+    Any other refusal means every machine on that build refuses this one.
 
 .EXAMPLE
     .\tools\ship.cmd

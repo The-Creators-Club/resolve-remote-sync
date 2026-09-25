@@ -30905,6 +30905,128 @@ Dashboard 0.7.56, with CR-320. No schema change. Works with every companion
 in the field; the companion half, when it ships, sends `latest` and stops
 marking this case stale at the source.
 
+## The 2026-09-24 hunt's highs (CR-322..CR-333, companion 0.9.78 / dashboard 0.7.58) - FIXED in repo
+
+The eleventh fleet hunt (`docs/bug-hunt-2026-09-24.md`, 37 hunters in three
+waves) found 16 highs, 11 confirmed by an adversarial verifier. All eleven,
+plus the medium `bug-comp-core-2` (the same mechanism as `bug-comp-core-1`),
+were fixed on 2026-09-25 by four Opus builders on disjoint file groups. Each
+group was reviewed twice by adversarial Opus reviewers and reworked after each
+review, then the whole wave was reviewed by Fable (verdicts in the ledgers,
+`docs/bug-hunt-2026-09-24/ledger/*.md`, and `fixwave*.json`). Every regression
+test named below fails on `git show HEAD:` copies of the files it guards.
+**Deploy the dashboard before the companion** (CR-325's dashboard half is the
+only defence the field's 0.9.77 has).
+
+### CR-322 - a fleet halt's paused project folders were unpaused by the next stop, pause or restart (bug-comp-app-1)
+`halt_all_sync` paused every lane C folder once, and `Sequencer.stop()`/`pause()`
+ended in an unguarded `_unpause_all`, so tray Quit, a pushed update, the
+Resolve-exit restart, tray Pause or a pulled drive released every project
+folder while the tray still said STOPPED; a restart with a persisted halt
+re-paused nothing. Now `_unpause_all` returns while halted ("cannot tell" is
+halted), `_reassert_halt_pause` re-pauses every folder the halt covers
+(including the cached selection and borrowed lenders a fresh sequencer does
+not know yet) at start, at `_start_lanes` and inside `halt_all_sync`, on its
+own single-flight thread at startup, and `release_for_halt` releases from the
+cached selection when the sequencer never ran. Tests:
+`companion/tests/test_halt_holds_lane_c.py`. Residual (low, safe direction): a
+release landing during a hung 30 s pause write can leave one folder paused
+until the next pass.
+
+### CR-323 - a blocked folder move was "finished" by pointing Syncthing at the folder lane B built (bug-comp-rclone-1)
+A move that failed left the project's turn running at the NEW path, so the
+structure clone and lane B created it; the next pass saw an existing target
+and re-pointed Syncthing at a proxy-only folder, recorded "moved your copy"
+and relinked Resolve to nothing. Now a slug with a live blocked repath skips
+its whole turn, `_move_dir` re-points only at a target holding `.stfolder`,
+prunes an all-empty skeleton with `os.rmdir`, and refuses anything else with a
+sentence; the cross-volume fallback copies to `<dst>.ccsync-moving` and swaps
+whole. Tests: `test_repath_blocked_turn.py`, `test_repath.py`. See CR-333 for
+what is still open.
+
+### CR-324 - media jobs and proxy generation spawned the bare name `ffmpeg` (bug-comp-media-1)
+The capability check fell back to the sidecar-installed ffmpeg, every spawn
+did not, so a vendor laptop reported ffmpeg, claimed fleet media jobs and
+failed each in a second with WinError 2. `ffmpeg_tools.spawn_argv` resolves
+argv[0] with the same resolver `ffmpeg_available` uses, in jobs_media,
+proxy_gen, broll_ingest_media and detect_encoders.
+
+### CR-325 - a crash-loop revert reinstalled the build it had just fled, and the rollback copy was deleted too early (bug-comp-core-1, bug-comp-core-2)
+Companion: `note_reverted_from` keeps a list of fled versions
+(`crash_looped`) and writes REL-8's give-up record for the fled version, so
+both 0.9.78's gate and 0.9.77's existing one refuse it on the auto-update and
+push paths; the record clears once the machine runs a newer build. The
+`.old` rollback copy is kept until the process has also been up for the
+crash-loop window. Dashboard: `_upgrade_info` withholds, per machine, the
+build that machine fled (until it runs that build or newer), a revert report
+withdraws a standing push of it, both push doors refuse it in words (Fable
+review: the companion refuses such a push, so letting it through parked a
+request that never landed), and the grid chip, the Packages row and the alert
+read "kept crashing and was rolled back" instead of the download-failure
+text. Tests: `companion/tests/test_upgrade.py` and
+`test_bug_hunt_2026_09_24_crash_looped_diag.py`,
+`dashboard/tests/test_bug_hunt_2026_09_24_crash_looped.py`.
+
+### CR-326 - a folder moved on the server binned never-uploaded originals (logic-plans-3)
+Section 4b moved a whole local folder the machine does not sync into
+`.ccsync-trash`, including originals lane A had not uploaded yet, and trash
+is kept 14 days, not what the doc said. Now a 4b folder is handled file by
+file: a file goes to trash only when the server's listing of the destination
+(`rclone lsf`, the same remote lane A uses) holds it at the same relative
+path and size (CR-90 folded), is re-statted first, and anything else stays
+for lane A; with no listing, a folder holding an original answers `retrying`
+so the RES-1 exclusion stays open. The docs describe the real retention.
+**Live check owed:** watch the first real 4b folder move's `rclone lsf` line
+in companion.log. Tests: `test_file_moves.py`.
+
+### CR-327 - a YouTube conversion longer than 120 s left the original under its deliverable name (bug-comp-ytdl-1)
+On both the companion and the NAS worker the original is renamed to
+`<stem>.source.editready.<ext>` before ffmpeg reads it, a name every lane,
+importer and sweeper already refuses, and put back on failure; the proxy
+scanner now skips the same work names. Tests:
+`companion/tests/test_bug_hunt_2026_09_24_comp_media.py`,
+`ytdl/web/tests/test_bug_hunt_2026_09_24_comp_media.py`.
+
+### CR-328 - two clips with the same name in one ingest batch indexed the first twice and never the second (bug-comp-broll-1)
+`broll_ingest.match_manifest_rows` pairs the whole claim manifest at once,
+each staged file used once, by hash, then name + rel_dir + size, then name +
+rel_dir, never across two known different hashes. `music_ingest` uses it too.
+Open (low): no size veto at the name-only tier (a shared matcher, and the
+server rewrites a transcoded music track's size).
+
+### CR-329 - the server YouTube worker's "share vanished" guard could never fire (bug-music-ytdl-1)
+`_phase_download` asks `tree_missing_note` before `ensure_outdir` creates the
+folder that made the tree look present.
+
+### CR-330 - `publish_db.py --rollback` renamed a WAL sidecar over the live index (bug-ops-1)
+`newest_prev` ignores `-wal`/`-shm` names, and `--from-prev` refuses one.
+Tests: `server/tests/test_bug_hunt_2026_09_24.py`.
+
+### CR-331 - the documented key rotation stranded the fleet (logic-release-1)
+`docs/RELEASE.md` Rotating now has the OLD key sign the overlap release that
+bakes both public keys, per pathway; `release_key.py trusted` prints every
+public key a rotation needs trusted and `load_secrets.ps1` sets
+`DASH_RELEASE_PUBKEYS` from it; the REL-7 refusals in `publish_feed.py` and
+`installer/build_editor_package.ps1` point at the runbook, never at the
+override. Open (low): `release_macos.sh` / `build_onboard_macos.sh` have no
+REL-7-style signer check; carrying `baked_pubkey_ids` on the dashboard record
+would let pathway A pass the first post-switch build with no override.
+
+### CR-332 - a project name with an apostrophe broke the ARCHIVE confirm, and a crafted one ran script (ui-dash-admin-1)
+The label travels in a data- attribute (`this.dataset.archiveLabel`), never
+inside the handler's source; the MOVE confirm on the project page had the
+same shape and is fixed the same way. Tests:
+`dashboard/tests/test_bug_hunt_2026_09_24_webapps_ops.py`.
+
+### CR-333 - OPEN: a blocked move's new path can still be created by another writer, and then the project stays blocked (Fable review of CR-323)
+CR-323 stops the clone and lanes A/B, but `ytdl_executor.destination_for`
+(mkdir) and `file_moves.apply_move` still create `Projects/<new rel>/...`, and
+`borrowed_folders._repoint` still re-points after a failed move. Once
+anything real is at the target, `_move_dir` refuses and the project is
+blocked for good, with a note telling the editor to move "that other folder"
+(their own fresh downloads). A project whose local copy was deleted (both
+paths missing) is now blocked where HEAD healed it. No data loss.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

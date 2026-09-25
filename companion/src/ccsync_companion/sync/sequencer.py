@@ -519,6 +519,10 @@ class Sequencer:
         # from: lender_slug -> {"rel", "subs", "borrowers"} -- the WP3
         # borrowed-folder manager's input, and what a halt must also pause.
         self._borrowed_lenders: dict[str, dict] = {}
+        # bug-comp-app-1 round 2 (2026-09-25): the cached selection's lenders,
+        # set only while release_for_halt reconciles on a sequencer that has
+        # adopted nothing (borrowed_lenders() falls back to it then).
+        self._halt_release_lenders: Optional[dict[str, dict]] = None
         self._queue: Optional[deque] = None  # live remaining-items during a pass; None otherwise
         self._last_selection: list[dict] = []
         self._no_selection_reason = ""
@@ -1085,6 +1089,81 @@ class Sequencer:
                 ids.append(folder_id)
         return ids
 
+    def halt_folder_ids_to_repause(self) -> list[str]:
+        """The folders a halted machine must (re-)pause when its lanes are
+        asked to start, including right after a restart.
+
+        bug-comp-app-1 (2026-09-24): a halt persists across a restart but the
+        pause it put on lane C did not have to: the build being replaced (any
+        release up to 0.9.77) released every project folder in its own
+        shutdown's sequencer.stop(), and Syncthing runs as its own service,
+        so the restarted companion came up refusing to start the lanes while
+        Syncthing synced every project freely. halt_folder_ids() alone cannot
+        answer here: a sequencer that has never run knows no selection, so
+        the cached selection.json is read as well (read only -- it is NOT
+        adopted as the known selection, so the release after the halt goes
+        through _startup_unpause's ignores verification exactly as before).
+
+        Folders already paused, and folders not configured here at all, are
+        left out when the folder list can be read, so a halted machine whose
+        pause held costs one GET and no config writes (SYNC-7's rule). When
+        the list cannot be read every id is returned: a redundant pause is a
+        config write, a missed one is the halt not holding."""
+        ids = list(self.halt_folder_ids())
+        seen = set(ids)
+        cached: Optional[list[dict]] = None
+        try:
+            cached = self.selection.load_cached()
+        except Exception:
+            log.debug("sequencer: no cached selection for the halt re-pause", exc_info=True)
+        for item in cached or []:
+            if not isinstance(item, dict) or not _item_is_valid(item):
+                continue
+            if _item_upload_only(item):
+                continue
+            slug = str(item.get("slug"))
+            if slug not in seen:
+                seen.add(slug)
+                ids.append(slug)
+        for lender in self._lenders_from(cached):
+            if lender and lender not in seen:
+                seen.add(lender)
+                ids.append(lender)
+        getter = getattr(self.admin, "get_folders", None)
+        if getter is None:
+            return ids
+        try:
+            folders = getter()
+        except Exception:
+            log.debug("sequencer: could not read the folder list for the halt re-pause",
+                      exc_info=True)
+            return ids
+        if not isinstance(folders, (list, tuple)):
+            return ids
+        running = {
+            str(folder.get("id"))
+            for folder in folders
+            if isinstance(folder, dict) and folder.get("id") and not folder.get("paused")
+        }
+        return [folder_id for folder_id in ids if folder_id in running]
+
+    def _lenders_from(self, cached: Optional[list[dict]]) -> dict[str, dict]:
+        """The borrowed lender map a (cached) selection describes, through
+        the same validation a pass applies. {} on anything unusable: a lender
+        not named is a lender not touched."""
+        if not cached:
+            return {}
+        try:
+            valid = [i for i in cached if isinstance(i, dict) and _item_is_valid(i)]
+            rel_to_slug = {_item_rel(i): str(i.get("slug")) for i in valid}
+            slug_to_item = {str(i.get("slug")): i for i in valid}
+            _by, _rels, lenders = self._build_borrowed(cached, rel_to_slug, slug_to_item)
+            return lenders
+        except Exception:
+            log.debug("sequencer: could not derive borrowed lenders from the cached "
+                      "selection", exc_info=True)
+            return {}
+
     def release_for_halt(self) -> None:
         """Release lane C folders after a halt is lifted, through the SAME
         filter the leak-recovery sweep uses.
@@ -1097,12 +1176,58 @@ class Sequencer:
         that, and it also skips the invalid/de-selected items SYNC-2 is
         about. The shared asset folders come back through their own
         reconcile, which checks their ignores the same way."""
-        self._unpause_all(self._last_selection)
+        with self._lock:
+            selection = list(self._last_selection)
+        if not selection:
+            # bug-comp-app-1 review (2026-09-24): a sequencer that never ran
+            # (a restart onto a halted machine, whose lanes the halt itself
+            # refused) has adopted no selection, so the halt re-pause's
+            # folders -- named from selection.json -- were released by
+            # nothing until a later sequencer.start() reached
+            # _startup_unpause. If _start_lanes then refused on another gate
+            # (the tray's Pause, pressed during the halt), they stayed paused
+            # for as long as that gate held, and Pause is the button that
+            # deliberately leaves lane C running. Same cached list, same
+            # verification as _startup_unpause, and NOT adopted: the first
+            # pass still adopts the live selection its own way. The stop
+            # latch is not honoured: a never-started (or halt-stopped)
+            # sequencer has it set, and honouring it would latch every
+            # folder unconfirmed and release none.
+            try:
+                selection = list(self.selection.load_cached() or [])
+            except Exception:
+                log.debug("sequencer: no cached selection for the halt release",
+                          exc_info=True)
+                selection = []
+            if selection:
+                self._verify_startup_ignores(selection, honour_stop=False)
+            fallback_lenders = self._lenders_from(selection)
+        else:
+            fallback_lenders = {}
+        self._unpause_all(selection)
         self._reconcile_shared_folders()
         # Borrowed lender folders come back the same way the asset libraries
         # do: through their own reconcile, which re-checks the restricted
         # ignores before any unpause.
-        self._reconcile_borrowed_folders()
+        #
+        # bug-comp-app-1 round 2 (2026-09-25): the manager reads its lenders
+        # from borrowed_lenders(), which is the ADOPTED selection's map and
+        # empty in a sequencer that never ran -- while the restart re-pause
+        # paused the lenders it derived from selection.json. So the release
+        # brought the projects back and left every lender this machine
+        # borrows from paused for as long as the tray's Pause held. The
+        # cached map is lent to the manager for this one reconcile only (not
+        # adopted: the first pass still builds its own), and its restricted
+        # .stignore check is what decides each unpause, exactly as in a pass.
+        # _drop_unborrowed stays inert here: it needs an adopted selection.
+        if fallback_lenders:
+            with self._lock:
+                self._halt_release_lenders = fallback_lenders
+        try:
+            self._reconcile_borrowed_folders()
+        finally:
+            with self._lock:
+                self._halt_release_lenders = None
 
     # -- watcher hand-off -----------------------------------------------------
     def notify_change(self, rel: str) -> None:
@@ -1439,7 +1564,8 @@ class Sequencer:
             self._verify_startup_ignores(cached)
             self._unpause_all(cached)
 
-    def _verify_startup_ignores(self, selection: list[dict]) -> None:
+    def _verify_startup_ignores(self, selection: list[dict],
+                                honour_stop: bool = True) -> None:
         """One GET /rest/db/ignores per selected folder, at startup, BEFORE
         the leak-recovery sweep releases anything.
 
@@ -1471,7 +1597,7 @@ class Sequencer:
         if getter is None:  # an admin double that predates the getter
             return
         for index, item in enumerate(selection):
-            if self._stop_event.is_set():
+            if honour_stop and self._stop_event.is_set():
                 # SYNC-8 (2026-08-11): verification costs one GET per folder
                 # at up to the read timeout each, so a quit/sign-out/config
                 # reload lands inside it routinely -- and BOTH sweeps that
@@ -1673,7 +1799,12 @@ class Sequencer:
         the selection -- the borrowed-folder manager's one input (WP3), and
         the extra folders a halt pauses."""
         with self._lock:
-            return {k: dict(v) for k, v in self._borrowed_lenders.items()}
+            lenders = self._borrowed_lenders
+            if not lenders and getattr(self, "_halt_release_lenders", None):
+                # bug-comp-app-1 round 2 (2026-09-25): release_for_halt's
+                # cached map, lent for its one reconcile (see there).
+                lenders = self._halt_release_lenders
+            return {k: dict(v) for k, v in lenders.items()}
 
     def _prune_bookkeeping(
         self, live_slugs: set[str], selection_slugs: Optional[set[str]] = None
@@ -1783,6 +1914,23 @@ class Sequencer:
         }
 
     def _unpause_all(self, selection: list[dict]) -> None:
+        # bug-comp-app-1 (2026-09-24): every leak-recovery sweep ends here --
+        # stop() (tray Quit, the self-upgrade hand-off, the Resolve-exit
+        # restart), pause() (tray Pause, the drive being pulled), the
+        # between-passes sweep and _startup_unpause -- and none of them asked
+        # about the halt. halt_all_sync pauses every folder and the very next
+        # stop()/pause() in the same process released every selected project
+        # again, so Syncthing synced project files both ways while every tray
+        # and the fleet grid said STOPPED. The shared asset libraries already
+        # refuse on the same predicate (CR-48). release_for_halt still works:
+        # app.release_halt clears the latch BEFORE it calls in here, and
+        # "cannot tell" counts as halted, so the failure mode is a folder that
+        # stays paused one pass too long, never one released under a halt.
+        if self._is_halted():
+            log.info(
+                "sequencer: syncing is halted -- leaving every lane C folder paused"
+            )
+            return
         releasable: list[str] = []
         for item in selection:
             # SYNC-2 (2026-08-11): this swept by RAW slug while
@@ -2013,6 +2161,18 @@ class Sequencer:
             log.exception("sequencer: repath reconcile failed")
             return []
 
+    def _repath_blocked(self, slug: str) -> bool:
+        """Does the repather hold a live "could not move" event for this
+        project? Never raises; "cannot tell" is NOT blocked, because the
+        answer that costs is skipping every lane of a project forever, and
+        the repather's own guard still refuses to re-point an empty target."""
+        try:
+            return bool(self.repather.ledger.blocked(slug))
+        except Exception:
+            log.debug("sequencer: could not read the repath ledger for %s", slug,
+                      exc_info=True)
+            return False
+
     def _process_project(self, item: dict, ordered_selected: list[dict]) -> None:
         if not _item_is_valid(item):
             log.warning(
@@ -2043,6 +2203,21 @@ class Sequencer:
         # the project directory, and a lane A that started first would
         # re-upload the stale tree to the NAS's dead old path (AUDIT_2 C-1).
         repathed = self._reconcile_paths([item])
+        if slug not in repathed and self._repath_blocked(slug):
+            # bug-comp-rclone-1 (2026-09-24): the project's content is still
+            # at the OLD local path, and every step below works at the NEW
+            # one. The structure clone mkdirs local_root/Projects/<new rel>
+            # and lane B fills its Proxy dirs, so on the next pass the
+            # repather found "a live source AND an existing target", took
+            # that for a conflict it should settle by re-pointing, and aimed
+            # the Syncthing folder at a proxy-only directory, unpaused it and
+            # told the editor "CC Sync moved your copy". Nothing is created
+            # at the new path until the move itself has happened; the blocked
+            # sentence already says this project is not syncing.
+            log.warning(
+                "sequencer: %s -- its folder could not be moved to the new path yet; "
+                "skipping its turn so nothing is created there before the move", slug)
+            return
 
         # Then mirror the project's full directory skeleton -- including
         # empty folders, which neither lane would otherwise create (lane B

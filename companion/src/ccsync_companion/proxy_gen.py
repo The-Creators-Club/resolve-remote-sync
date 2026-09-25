@@ -323,7 +323,10 @@ def _default_popen(cmd: list[str]) -> Any:
     if sys.platform == "win32":
         flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
     kwargs["creationflags"] = flags
-    proc = subprocess.Popen(cmd, **kwargs)  # noqa: S603 -- argv built by ffmpeg_tools
+    # bug-comp-media-1 (2026-09-24): the encode and verify argvs carry the
+    # config value at argv[0]; unresolved, a sidecar-only machine passed the
+    # ffmpeg_available gate and then failed every clip's spawn.
+    proc = subprocess.Popen(ffmpeg_tools.spawn_argv(cmd), **kwargs)  # noqa: S603 -- argv built by ffmpeg_tools
     if sys.platform != "win32":
         try:
             os.setpriority(os.PRIO_PROCESS, proc.pid, ENCODE_NICE)

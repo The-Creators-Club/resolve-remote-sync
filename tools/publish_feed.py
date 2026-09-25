@@ -359,6 +359,48 @@ def current_version(channel: dict[str, Any], kind: str, platform: str) -> str:
     return str((channel.get("current") or {}).get(f"{kind}/{platform}") or "")
 
 
+def key_rotation_refusal(signing_id: str, cur_version: str, cur_keys, kind: str,
+                         platform: str, baked_ids: str = "") -> str:
+    """REL-7's refusal: what the operator must do instead, never an override.
+
+    logic-release-1 (2026-09-24): this used to end "a rotation costs an overlap
+    release: bake --add, ship THAT ... Pass --allow-key-rotation if this is
+    that deliberate step". An operator who had just run `new --force` and
+    `bake --add` WAS shipping what they took to be that overlap build, so they
+    passed the flag, and the build (signed by the NEW key, because `new
+    --force` puts the new key where every signer reads) was refused by every
+    machine on the current build with no over-the-air way back. A correct
+    rotation never trips this check: the overlap release is signed by the OLD
+    key, which the current build trusts. So the sentence names the key that
+    has to sign, and the flag is described as what it is.
+    """
+    baked = {part.strip() for part in (baked_ids or "").split(",") if part.strip()}
+    old = ", ".join(cur_keys)
+    head = (f"this build is signed with key {signing_id}, which the build currently "
+            f"CURRENT for {kind}/{platform} (v{cur_version}) does not trust: it bakes "
+            f"in {old}.\n"
+            f"EVERY MACHINE ON v{cur_version} WILL REFUSE THIS BUILD, silently and "
+            "permanently: a companion trusts only the keys inside the binary it is "
+            "already running, so the recovery is a hands-on reinstall per machine.\n")
+    if baked and set(cur_keys) & baked and signing_id in baked:
+        how = ("This build already trusts both the old key and the new one, so it IS "
+               "the overlap release, and an overlap release must be SIGNED WITH THE OLD "
+               f"KEY ({old}). Put the old key back at release.key (or point "
+               "CCSYNC_RELEASE_KEY or --key at it) and publish again. The new key "
+               "signs only the NEXT release, once the fleet runs this one.\n")
+    else:
+        how = ("A rotation is two releases, and neither needs an override "
+               "(docs/RELEASE.md, \"Rotating\"): first a build that bakes BOTH keys "
+               f"(`release_key.py --path <new key file> bake --add`) signed with the OLD "
+               f"key ({old}); then, once every machine runs it, builds signed with the "
+               "new key.\n")
+    return (head + how +
+            "--allow-key-rotation does not perform a rotation: it publishes a build "
+            f"the fleet on v{cur_version} cannot take, for the one case where that is "
+            "accepted (the old key is lost and every machine will be reinstalled by "
+            "hand). Nothing was uploaded.")
+
+
 def baked_keys_of_current(channel: dict[str, Any], kind: str, platform: str) -> tuple[str, list]:
     """(version, baked pubkey ids) of the record customers are on today.
 
@@ -1251,16 +1293,9 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
             if cur_keys and signed["pubkey_id"] not in cur_keys:
                 if not args.allow_key_rotation:
                     raise PublishFeedError(
-                        f"this build is signed with key {signed['pubkey_id']}, which the build "
-                        f"currently CURRENT for {args.kind}/{args.platform} (v{cur_version}) "
-                        f"does not trust -- it bakes in {', '.join(cur_keys)}.\n"
-                        f"EVERY MACHINE ON v{cur_version} WILL REFUSE THIS BUILD, silently and "
-                        "permanently: a companion trusts only the keys inside the binary it is "
-                        "already running, so the recovery is a hands-on reinstall per machine.\n"
-                        "A rotation costs an overlap release: `python tools/release_key.py bake "
-                        "--add`, ship THAT (it trusts both keys), and only then drop the old "
-                        "one. Pass --allow-key-rotation if this is that deliberate step. "
-                        "Nothing was uploaded.",
+                        key_rotation_refusal(signed["pubkey_id"], cur_version, cur_keys,
+                                             args.kind, args.platform,
+                                             args.baked_pubkey_ids),
                         EXIT_USAGE)
                 print(f"[publish-feed] WARNING: --allow-key-rotation -- every machine on "
                       f"v{cur_version} will refuse this build (it trusts "

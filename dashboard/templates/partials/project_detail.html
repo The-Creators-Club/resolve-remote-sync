@@ -151,19 +151,25 @@
      path and a destination select that keeps the last project you looked at.
      htmx:confirm rather than hx-confirm because hx-confirm is a static
      string; issueRequest(true) is what lets the request through afterwards. #}
+  {# ui-dash-admin-1 sweep (2026-09-24): the project label is read from
+     data-project-label, never spliced into the handler's source. It sat
+     inside a &quot;-quoted JS string, and autoescaping is decoded before the
+     handler compiles, so a folder name with a double quote or a backslash
+     broke the confirm (or ran as script) exactly like the ARCHIVE one. #}
   <form class="move-form" style="display:inline" hx-post="/partials/project/{{ project.slug }}/move"
         hx-target="#project-detail" hx-swap="innerHTML"
+        data-project-label="{{ project.label }}"
         hx-on::confirm="event.preventDefault();
           var f = this;
           var path = (f.querySelector('[name=path]').value || '').trim();
           var sel = f.querySelector('[name=to_slug]');
           var dest = sel.options[sel.selectedIndex].text;
           var into = (f.querySelector('[name=to_path]').value || '').trim();
-          var n = {{ project.editors | length }};
+          var n = {{ project.editors | length | int }};
           {# An empty box goes through: the server's own "type the file or
              folder to move" banner is the answer, not a silent no-op. #}
           if (!path) { event.detail.issueRequest(true); return; }
-          var msg = &quot;Move '&quot; + path + &quot;' from {{ project.label }} to &quot; + dest
+          var msg = &quot;Move '&quot; + path + &quot;' from &quot; + f.dataset.projectLabel + &quot; to &quot; + dest
             + (into ? '/' + into : '') + ' on the server, and tell ' + n + ' computer'
             + (n === 1 ? '' : 's') + ' to move their copy and relink Resolve?'
             + ' Proxies move with it. You can put it back with UNDO while every computer'

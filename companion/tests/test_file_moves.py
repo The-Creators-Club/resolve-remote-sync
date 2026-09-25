@@ -69,6 +69,283 @@ def test_a_move_into_a_project_this_machine_does_not_sync_is_trashed(tmp_path):
     assert DRONE.split("/")[-1] in str(trashed[0])
 
 
+def _card_dump(root):
+    """An upload-only machine part-way through a card dump: the server has
+    A001 (lane A got it up before the owner moved the folder), A002 is still
+    only here. The proxy is lane B's."""
+    card = root / "Projects" / DRONE / "Card_07"
+    (card / "Proxy").mkdir(parents=True)
+    (card / "A001.mov").write_bytes(b"uploaded")
+    (card / "A002.mov").write_bytes(b"never reached the server")
+    (card / "Proxy" / "A001.mp4").write_bytes(b"proxy")
+    return card
+
+
+def _card_cmd():
+    return file_moves.parse_command(_cmd(
+        from_rel="Card_07", to_rel="Card_07", is_dir=True))
+
+
+def test_4b_never_trashes_a_folder_holding_originals_the_server_may_not_have(tmp_path):
+    """logic-plans-3 (2026-09-24): section 4b moved the WHOLE local folder
+    into `.ccsync-trash`, including originals lane A had not uploaded yet.
+    Lane A never walks the trash, prune_trash deleted them a fortnight later,
+    and the answer said the machine had followed. With no server listing to
+    prove otherwise, a folder holding any lane A original stays put.
+
+    Review round (2026-09-24): and the answer is NOT ok. An ok answer is a
+    done move, whose lane A exclusion lapses after a day, after which lane A
+    re-uploaded every original in the folder to the path the admin cleared.
+    Not-ok is recorded `retrying`, which keeps RES-1's exclusion open."""
+    root = _tree(tmp_path)
+    card = _card_dump(root)
+    ledger = file_moves.FileMoveLedger(tmp_path / "state" / "file_moves.json")
+
+    ok, detail, paths = file_moves.apply_move(
+        _card_cmd(), str(root), ledger, project_rels=_plan(DRONE))
+
+    assert (card / "A002.mov").read_bytes() == b"never reached the server"
+    assert (card / "A001.mov").exists()
+    assert not list((root / file_moves.TRASH_DIR_NAME).rglob("*.mov")), (
+        "an original the server may not hold went to the trash")
+    assert ok is False and paths is None
+    assert detail == file_moves.DETAIL_4B_CANNOT_LIST
+    assert not (root / "Projects" / ANIMALS).exists()
+
+
+def test_4b_a_folder_it_could_not_triage_stays_excluded_past_a_day(tmp_path):
+    """logic-plans-3 review (2026-09-24): the whole path, as app.py records
+    it. The not-ok answer becomes a `retryable` ledger row, and a retryable
+    row's exclusion outlives EXCLUDE_WINDOW_SECONDS, so lane A does not put
+    Card_07 back on the NAS under the project it was moved out of."""
+    root = _tree(tmp_path)
+    _card_dump(root)
+    clock = [1_000_000.0]
+    ledger = file_moves.FileMoveLedger(tmp_path / "state" / "file_moves.json",
+                                       now=lambda: clock[0])
+    move = _card_cmd()
+
+    ok, detail, _ = file_moves.apply_move(
+        move, str(root), ledger, project_rels=_plan(DRONE),
+        server_files=lambda _rel: None)
+    assert ok is False
+    entry = ledger.record_attempt_failed(move, detail)
+    assert entry["state"] == file_moves.STATE_RETRYABLE
+
+    clock[0] += file_moves.EXCLUDE_WINDOW_SECONDS * 3
+    assert "Card_07" in ledger.recent_excludes(f"Projects/{DRONE}")
+
+
+def test_4b_a_moved_proxy_folder_holds_no_original(tmp_path):
+    """logic-plans-3 review: lane A skips anything under a `Proxy` component
+    at ANY depth of the tree path. The folder's own name counts, so a moved
+    Proxy dir of .mov files owes lane A nothing and goes whole without a
+    listing; judged by the path under the folder alone, its .movs looked
+    like originals and sat at the old path for ever."""
+    root = _tree(tmp_path)
+    proxy_dir = root / "Projects" / DRONE / "B-roll" / "Proxy"
+    (proxy_dir / "A009.mov").write_bytes(b"a proxy in a .mov wrapper")
+    move = file_moves.parse_command(_cmd(
+        from_rel="B-roll/Proxy", to_rel="B-roll/Proxy", is_dir=True))
+
+    ok, detail, _ = file_moves.apply_move(
+        move, str(root), None, project_rels=_plan(DRONE))
+
+    assert ok is True and detail == file_moves.DETAIL_NOT_SYNCED_HERE
+    assert not proxy_dir.exists()
+
+
+def test_4b_folds_the_server_listing_once_per_folder(tmp_path, monkeypatch):
+    """logic-plans-3 review: the listing is folded into a set once, not once
+    per local file (a card dump of thousands of clips was millions of NFC
+    folds on the reporter thread)."""
+    root = _tree(tmp_path)
+    card = _card_dump(root)
+    for n in range(40):
+        (card / f"B{n:03}.mov").write_bytes(b"x" * (n + 1))
+    listing = {(f"B{n:03}.mov", n + 1) for n in range(40)} | {("other.mov", 1)}
+    calls = [0]
+    real = file_moves._cmp_key
+
+    def counting(path):
+        calls[0] += 1
+        return real(path)
+
+    monkeypatch.setattr(file_moves, "_cmp_key", counting)
+    file_moves.apply_move(_card_cmd(), str(root), None, project_rels=_plan(DRONE),
+                          server_files=lambda _rel: listing)
+
+    local_files = 43
+    assert calls[0] <= 2 * (len(listing) + local_files), calls[0]
+
+
+def test_4b_with_a_server_listing_trashes_only_what_the_server_holds(tmp_path):
+    """logic-plans-3: given the server's files at the destination, the ones it
+    holds go to the trash (recoverable from the server too) and the local-only
+    original stays where lane A will upload it."""
+    root = _tree(tmp_path)
+    card = _card_dump(root)
+    asked = []
+
+    def server_files(dest_rel):
+        asked.append(dest_rel)
+        return {("A001.mov", len(b"uploaded")), ("Proxy/A001.mp4", len(b"proxy"))}
+
+    ok, detail, paths = file_moves.apply_move(
+        _card_cmd(), str(root), None, project_rels=_plan(DRONE),
+        server_files=server_files)
+
+    assert asked == [ANIMALS + "/Card_07"]
+    assert ok is True and paths is None
+    assert (card / "A002.mov").read_bytes() == b"never reached the server"
+    assert not (card / "A001.mov").exists()
+    trashed = {p.name for p in (root / file_moves.TRASH_DIR_NAME).rglob("*") if p.is_file()}
+    assert trashed == {"A001.mov", "A001.mp4"}
+    assert "kept 1 file" in detail and "trashed 2" in detail
+
+
+def test_4b_a_same_name_file_of_another_size_is_not_the_servers_copy(tmp_path):
+    root = _tree(tmp_path)
+    card = _card_dump(root)
+
+    file_moves.apply_move(
+        _card_cmd(), str(root), None, project_rels=_plan(DRONE),
+        server_files=lambda _rel: {("A001.mov", 1), ("A002.mov", 2)})
+
+    assert (card / "A001.mov").exists() and (card / "A002.mov").exists()
+
+
+def test_4b_a_file_that_lands_during_the_listing_is_never_binned(tmp_path):
+    """logic-plans-3 round 2 (2026-09-25): the triage snapshot is taken
+    before a listing of up to two minutes. When every snapshotted file was
+    on the server, the old code moved the WHOLE folder into the trash, and a
+    clip that landed in it during the listing (a card dump still copying)
+    went with it, never checked against the server, gone in 14 days."""
+    root = _tree(tmp_path)
+    card = root / "Projects" / DRONE / "Card_07"
+    card.mkdir(parents=True)
+    (card / "A001.mov").write_bytes(b"uploaded")
+
+    def server_files(_rel):
+        (card / "A002.mov").write_bytes(b"landed during the listing")
+        return {("A001.mov", len(b"uploaded"))}
+
+    ok, detail, paths = file_moves.apply_move(
+        _card_cmd(), str(root), None, project_rels=_plan(DRONE),
+        server_files=server_files)
+
+    assert (card / "A002.mov").read_bytes() == b"landed during the listing"
+    trashed = {p.name for p in (root / file_moves.TRASH_DIR_NAME).rglob("*") if p.is_file()}
+    assert trashed == {"A001.mov"}
+    assert ok is True and paths is None
+    assert detail != file_moves.DETAIL_NOT_SYNCED_HERE
+    assert "kept 1 file" in detail and "A002.mov" in detail
+
+
+def test_4b_a_file_rewritten_during_the_listing_is_not_the_servers_copy(tmp_path):
+    """logic-plans-3 round 2: the size matched before the listing is the
+    size that was compared; a file that grew since stays for lane A."""
+    root = _tree(tmp_path)
+    card = root / "Projects" / DRONE / "Card_07"
+    card.mkdir(parents=True)
+    (card / "A001.mov").write_bytes(b"part")
+
+    def server_files(_rel):
+        (card / "A001.mov").write_bytes(b"part and the rest of it")
+        return {("A001.mov", len(b"part"))}
+
+    ok, _detail, _ = file_moves.apply_move(
+        _card_cmd(), str(root), None, project_rels=_plan(DRONE),
+        server_files=server_files)
+
+    assert ok is True
+    assert (card / "A001.mov").read_bytes() == b"part and the rest of it"
+
+
+def test_4b_a_folder_the_server_holds_whole_leaves_no_husk(tmp_path):
+    """logic-plans-3 round 2: binned file by file, the emptied tree is
+    removed with rmdir, and the answer is still the plain not-synced-here
+    one, as when the folder went whole."""
+    root = _tree(tmp_path)
+    card = _card_dump(root)
+    (card / "A002.mov").unlink()
+
+    ok, detail, _ = file_moves.apply_move(
+        _card_cmd(), str(root), None, project_rels=_plan(DRONE),
+        server_files=lambda _rel: {("A001.mov", len(b"uploaded")),
+                                   ("Proxy/A001.mp4", len(b"proxy"))})
+
+    assert ok is True and detail == file_moves.DETAIL_NOT_SYNCED_HERE
+    assert not card.exists()
+    trashed = {p.name for p in (root / file_moves.TRASH_DIR_NAME).rglob("*") if p.is_file()}
+    assert trashed == {"A001.mov", "A001.mp4"}
+
+
+def test_4b_a_failed_server_listing_is_not_evidence(tmp_path):
+    root = _tree(tmp_path)
+    card = _card_dump(root)
+
+    def broken(_rel):
+        raise OSError("rclone is not there")
+
+    ok, detail, _ = file_moves.apply_move(
+        _card_cmd(), str(root), None, project_rels=_plan(DRONE), server_files=broken)
+
+    assert ok is False and detail == file_moves.DETAIL_4B_CANNOT_LIST
+    assert (card / "A002.mov").exists() and (card / "A001.mov").exists()
+
+
+def test_4b_still_trashes_a_folder_that_holds_no_original(tmp_path):
+    """A folder of proxies and sidecars owes lane A nothing, so it goes whole,
+    as it always did."""
+    root = _tree(tmp_path)
+    folder = root / "Projects" / DRONE / "Card_07"
+    (folder / "Proxy").mkdir(parents=True)
+    (folder / "Proxy" / "A001.mp4").write_bytes(b"proxy")
+
+    ok, detail, _ = file_moves.apply_move(
+        _card_cmd(), str(root), None, project_rels=_plan(DRONE))
+
+    assert ok is True and detail == file_moves.DETAIL_NOT_SYNCED_HERE
+    assert not folder.exists()
+
+
+def test_the_rclone_server_listing_reads_lane_as_own_format():
+    seen = []
+
+    def run(cmd, timeout):
+        seen.append(cmd)
+        return "8;A001.mov\n5;Proxy/A001.mp4\nnot a line\n"
+
+    listing = file_moves.rclone_server_files("rclone", "nas", "/mnt/tank/Creators_Club",
+                                             run_fn=run)
+    assert listing(ANIMALS + "/Card_07") == {("A001.mov", 8), ("Proxy/A001.mp4", 5)}
+    assert seen[0][-1].endswith("Projects/" + ANIMALS + "/Card_07")
+    assert file_moves.rclone_server_files("rclone", "nas", "/r",
+                                          run_fn=lambda c, t: None)("x") is None
+
+
+def test_the_rclone_server_listing_asks_where_lane_a_uploads(tmp_path):
+    """logic-plans-3 review: the listing must name the same remote directory
+    lane A copies that folder INTO, or "the server holds it" is a question
+    about the wrong place. Compared against build_up_command's own remote
+    side for the same run root, not against a hand-built string."""
+    from ccsync_companion.sync import rclone_lane
+
+    seen = []
+    listing = file_moves.rclone_server_files(
+        "rclone", "nas", "/mnt/tank/Creators_Club/",
+        run_fn=lambda cmd, timeout: seen.append(cmd) or "")
+    listing(ANIMALS + "/Card_07")
+
+    rules = tmp_path / "filter_up.txt"
+    rclone_lane.write_filter_file(rclone_lane.build_filter_rules_up(), rules)
+    up = rclone_lane.build_up_command(
+        "rclone", str(tmp_path), "nas", "/mnt/tank/Creators_Club/", rules,
+        subpath=f"Projects/{ANIMALS}/Card_07")
+    assert seen[0][-1] == up[3]
+
+
 def test_the_trashed_outcome_is_recorded_with_its_own_word(tmp_path):
     """res-fleet-3: `ok` and the sentence are the wire as it was - a dashboard
     that drops the word still records the move as done with an honest detail -
@@ -782,3 +1059,84 @@ def test_relink_moved_says_so_when_resolve_is_not_open(tmp_path, monkeypatch):
                         lambda: {"ok": False, "message": "not open"})
     matched, text = file_moves.relink_moved("a", "b", str(tmp_path), "P:" + chr(92))
     assert matched is False and "not open" in text
+
+
+def _4b_app_stub(tmp_path, root, config):
+    from ccsync_companion import app as app_mod
+
+    answers: list = []
+
+    class _Sequencer:
+        def rel_to_slug_with_borrowed(self):
+            return {DRONE: "d"}
+
+    class _Stub:
+        _root_absent = False
+        sequencer = _Sequencer()
+
+        def __init__(self):
+            self.config = dict(config, local_root=str(root))
+            self.file_moves = file_moves.FileMoveLedger(tmp_path / "state")
+
+        def _relink_moved_result(self, *a):
+            raise AssertionError("nothing moved to a path Resolve should follow")
+
+        def _notify_tray(self, *a, **k):
+            pass
+
+        def _queue_file_move_answer(self, move_id, ok, detail, state=None,
+                                    attempts=0, relink_pending=False):
+            answers.append({"id": move_id, "ok": ok, "detail": detail,
+                            "state": state})
+
+        _apply_file_moves = app_mod.CompanionApp._apply_file_moves
+
+    return _Stub(), answers
+
+
+def test_the_app_lists_the_server_through_lane_as_remote_for_4b(tmp_path, monkeypatch):
+    """logic-plans-3 review (2026-09-24): `server_files` was built but never
+    passed, so every machine took the no-listing branch. The app now asks
+    through the configured rclone, remote and remote_root, and a folder the
+    listing proves the server holds goes to the trash as a done move."""
+    from ccsync_companion.sync import rclone_lane
+
+    root = _tree(tmp_path)
+    card = _card_dump(root)
+    seen = []
+
+    def lsf(cmd, timeout):
+        seen.append(cmd)
+        return "8;A001.mov\n24;A002.mov\n5;Proxy/A001.mp4\n"
+
+    monkeypatch.setattr(rclone_lane, "_run_lsf", lsf)
+    stub, answers = _4b_app_stub(tmp_path, root, {
+        "rclone_path": "C:/tools/rclone.exe", "remote": "nas",
+        "remote_root": "/mnt/tank/Creators_Club"})
+
+    stub._apply_file_moves({"commands": {"file_moves": [_cmd(
+        from_rel="Card_07", to_rel="Card_07", is_dir=True)]},
+        "dashboard_version": "0.7.56"})
+
+    assert seen and seen[0][0] == "C:/tools/rclone.exe"
+    assert seen[0][-1] == f"nas:/mnt/tank/Creators_Club/Projects/{ANIMALS}/Card_07"
+    assert answers[0]["ok"] is True
+    assert not card.exists()
+
+
+def test_the_app_answers_retrying_when_4b_cannot_list_the_server(tmp_path):
+    """logic-plans-3 review: with no remote configured the listing is
+    unavailable, and a folder holding originals is kept AND answered
+    `retrying`, so its lane A exclusion does not lapse after a day."""
+    root = _tree(tmp_path)
+    card = _card_dump(root)
+    stub, answers = _4b_app_stub(tmp_path, root, {})
+
+    stub._apply_file_moves({"commands": {"file_moves": [_cmd(
+        from_rel="Card_07", to_rel="Card_07", is_dir=True)]},
+        "dashboard_version": "0.7.56"})
+
+    assert answers[0]["ok"] is False and answers[0]["state"] == "retrying"
+    assert answers[0]["detail"] == file_moves.DETAIL_4B_CANNOT_LIST
+    assert (card / "A002.mov").exists()
+    assert stub.file_moves.entry(1)["state"] == file_moves.STATE_RETRYABLE

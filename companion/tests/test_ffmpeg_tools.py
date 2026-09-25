@@ -718,6 +718,9 @@ def test_detect_encoders_parses_the_listing(monkeypatch):
         return _FakeCompletedProcess(0, stdout=ENCODERS_OUTPUT)
 
     monkeypatch.setattr(ft.subprocess, "run", fake_run)
+    # argv[0] is resolved at the spawn since bug-comp-media-1 (2026-09-24);
+    # pin the resolution so this machine's own ffmpeg does not leak in.
+    monkeypatch.setattr(ft, "_resolve_binary", lambda path, managed_fallback=True: None)
 
     found = ft.detect_encoders("ffmpeg")
 

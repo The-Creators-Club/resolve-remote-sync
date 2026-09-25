@@ -100,6 +100,26 @@ On the project page, an admin has `MOVE: <path> to <project> / <folder>
   path" would be a lie with the disk unplugged.
 - **Admins only.** A move rewrites the tree and reaches into every machine
   holding the file; the editor who mis-filed the card asks the admin.
+- **A destination this machine does not sync bins only what the server
+  holds** (`HAND_MOVES_ON_THE_SERVER.md` section 4b; logic-plans-3,
+  2026-09-24). The local copy has no home here, so it goes to lane B's
+  `.ccsync-trash` (pruned after 14 days, sooner when the trash passes 50 GB
+  or the disk is short) - but for a FOLDER, only the files the server's
+  listing of the destination shows at the same relative path and size. An
+  original the server may not have (a card dump still uploading) stays at
+  the old path and lane A uploads it there once the one-day exclusion
+  lapses. The listing is `rclone lsf -R` of the destination through lane
+  A's own remote (`file_moves.rclone_server_files`, wired in
+  `app._apply_file_moves`, two-minute timeout on the reporter thread). With
+  no listing (no remote configured, the NAS unreachable), a folder holding
+  any original is left whole and the move answers `retrying`, NOT done: a
+  done move's exclusion lapses in a day, and lane A would then put every
+  original in the folder back at the path the admin cleared. A folder is
+  binned FILE BY FILE, never renamed into the trash whole (round 2,
+  2026-09-25): the listing can take two minutes, and a whole-folder rename
+  took anything that landed in the folder meanwhile with it, unchecked. A
+  file the snapshot did not see, or whose size changed since, stays; only
+  the directories left empty are removed, with `rmdir`.
 
 ## 4. What it does not do
 

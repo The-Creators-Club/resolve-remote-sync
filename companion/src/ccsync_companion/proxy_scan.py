@@ -414,6 +414,18 @@ def scan_project(
                 # its absence downstream is not a proxy gap.
                 if ext not in rclone_lane.VIDEO_EXTS:
                     continue
+                # bug-comp-ytdl-1 round 2 (2026-09-25): the ytdl executors now
+                # stage a download as `<title> [id].source.editready.<ext>`
+                # for the whole of its conversion, which on a 4K VP9 clip
+                # outlasts the settle window and a scan tick. Proxied, it
+                # became `Proxy/<title> [id].source.editready.mp4`: an orphan
+                # with no original that lane B's `+ **/Proxy/**` fans out to
+                # every editor and nothing removes, plus a second encode of
+                # the converted final. Lane A refuses every ytdl work name
+                # (YTDL_WORK_EXCLUDE_RES), so by this loop's own rule none of
+                # them is a proxy gap.
+                if any(rx.match(filename) for rx in rclone_lane.YTDL_WORK_EXCLUDE_RES):
+                    continue
                 state = generation_state(ext)
                 if state == GEN_SKIP:
                     continue

@@ -141,6 +141,27 @@ def _resolve_binary(path: str, managed_fallback: bool = True) -> Optional[str]:
         return None
 
 
+def spawn_argv(cmd) -> list[str]:
+    """`cmd` with argv[0] resolved the way ffmpeg_available resolved it.
+
+    bug-comp-media-1 (2026-09-24): the argv builders put the CONFIG value
+    (the bare default "ffmpeg") at argv[0], and Popen looks only on PATH --
+    so a machine whose only ffmpeg is the sidecar-installed copy (the normal
+    vendor-build laptop, CR-53) reported ffmpeg/ffprobe/nvenc to the fleet,
+    claimed proxy-480p/audio-extract/peaks, and failed every spawn with
+    WinError 2, while proxy_gen's gate read RUNNING and burned three
+    attempts per clip. Resolution happens HERE, at the spawn, rather than in
+    the builders (whose argv the suites pin flag for flag against the
+    indexer's) or once at startup (the generator must start working the
+    instant the sidecar lands, with no restart). An argv[0] that resolves to
+    nothing is passed through unchanged, so the spawn fails with the real
+    OS error exactly as before."""
+    argv = [str(part) for part in cmd]
+    if argv:
+        argv[0] = _resolve_binary(argv[0]) or argv[0]
+    return argv
+
+
 def ffprobe_for(ffmpeg_path: str) -> str:
     """The ffprobe that belongs to `ffmpeg_path`.
 
@@ -197,14 +218,13 @@ def ffmpeg_available(ffmpeg_path: str, use_cache: bool = True) -> tuple[bool, st
         if entry is not None and (time.monotonic() - entry[0]) < FFMPEG_PROBE_TTL_SECONDS:
             return True, entry[1]
 
-    resolved = ffmpeg_path
-    if not os.path.isabs(ffmpeg_path):
-        found = shutil.which(ffmpeg_path) or _managed_binary(ffmpeg_path)
-        if found is None:
+    # bug-comp-media-1 (2026-09-24): the SAME resolver spawn_argv uses, so the
+    # capability this answers for the fleet is the binary a spawn will run.
+    resolved = _resolve_binary(ffmpeg_path)
+    if resolved is None:
+        if not os.path.isabs(ffmpeg_path):
             return False, f"ffmpeg not found on PATH ('{ffmpeg_path}')"
-        resolved = found
-    elif not os.path.exists(resolved):
-        return False, f"ffmpeg not found at '{resolved}'"
+        return False, f"ffmpeg not found at '{ffmpeg_path}'"
 
     try:
         proc = subprocess.run(
@@ -279,7 +299,9 @@ def detect_encoders(ffmpeg_path: str) -> frozenset[str]:
 
     try:
         proc = subprocess.run(
-            [ffmpeg_path, "-hide_banner", "-encoders"],
+            # bug-comp-media-1 (2026-09-24): resolved, or a managed-only
+            # machine reports nvenc false and encodes on the CPU for ever.
+            spawn_argv([ffmpeg_path, "-hide_banner", "-encoders"]),
             capture_output=True,
             timeout=20,
             encoding="utf-8",

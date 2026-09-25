@@ -133,7 +133,8 @@ ordinary ship; all of them change what happens when something goes wrong.
   the publish asks the dashboard which key signed the build that is currently
   current, and refuses when this rig's key is not it, spelling out that every
   machine on that build will refuse this one. `-AllowKeyRotation` /
-  `--allow-key-rotation` is the deliberate override; see "Rotating" below.
+  `--allow-key-rotation` publishes anyway; it is NOT a rotation step, and a
+  rotation needs it once, on pathway A only (see "Rotating" below).
 - **`windows_upgrade.ps1` keeps the build it replaces** as
   `ccsync-companion.exe.prev` (REL-12). When the new build exits inside the
   relaunch window, the script puts the previous one back, starts it, and says
@@ -670,14 +671,99 @@ key on this rig is not one the build trusts.
 ### Rotating
 
 `RELEASE_PUBKEYS` is a list and **every** key in it is trusted. Rotation is a
-two-release dance, and skipping the overlap strands the fleet:
+two-release dance, and skipping the overlap strands the fleet. The one rule
+that makes it work: **the overlap release is signed by the OLD key.** Every
+machine on the current build trusts only the old key, so the build that
+teaches them the new one has to arrive under the old signature.
 
-1. `python tools\release_key.py new --force` then `... bake --add` — the new
-   public key joins the old one. **Ship this build with the OLD key still
-   signing.**
-2. Once `check_deploy_drift.ps1` (and the dashboard's fleet grid) shows every
-   machine on that build, sign with the new key and drop the old one from the
-   list in a later release.
+1. **Make the new key at a SIDE path and bake its public half in beside the
+   old one.** `release.key` is not touched, so it (the OLD key) keeps signing:
+
+   ```powershell
+   python tools\release_key.py --path $env:USERPROFILE\.ccsync-release\release-next.key new
+   python tools\release_key.py --path $env:USERPROFILE\.ccsync-release\release-next.key backup --to <offline copy>
+   python tools\release_key.py --path $env:USERPROFILE\.ccsync-release\release-next.key bake --add
+   ```
+
+   Commit the baked list and ship this build **exactly as usual** (`ship.cmd`
+   or CI + `publish_latest.py`). It is signed by `release.key`, the OLD key,
+   which the current build trusts, so the REL-7 check passes by itself.
+   **No override is ever needed for the overlap release.** If its publish
+   refuses with "WILL REFUSE THIS BUILD", it was signed with the wrong key:
+   stop and fix the key, never pass `--allow-key-rotation` /
+   `-AllowKeyRotation` here.
+2. **Tell every dashboard about the new key** before anything is signed with
+   it, and keep the old one there until step 4. The feed CHANNEL is signed by
+   the same key as the records, and a dashboard that does not trust the
+   channel's key rejects the whole channel.
+   - **This studio's dashboard: reload, never hand-set.** `ship.cmd` writes
+     whatever `DASH_RELEASE_PUBKEYS` holds into the container on every
+     deploy, and `load_secrets.ps1` sets it from `release_key.py trusted`:
+     `release.key` plus `release-next.key` and `release.key.superseded`
+     whenever they sit beside it. So once step 1 has made the side key,
+     dot-source `load_secrets.ps1` again in the window you ship from (it
+     reports "2 keys: a key rotation is under way"), and every ship until
+     step 4 deploys both keys by itself. A value typed into
+     `$env:DASH_RELEASE_PUBKEYS` by hand is what the next ship deploys, and
+     before 2026-09-25 `load_secrets.ps1` derived `release.key` alone, so
+     each ship in the window quietly took the other key away again
+     (logic-release-1). On pathway B, where no `ship.cmd` runs, redeploy it
+     once with `tools\ship.cmd -DashboardOnly` after the reload.
+   - **Every customer dashboard that pins the vendor key: by hand.** Add the
+     new public half (`release_key.py --path ...release-next.key pubkey`) to
+     its `DASH_RELEASE_PUBKEYS`, comma-separated, keeping the old one.
+3. Once `check_deploy_drift.ps1` (and the dashboard's fleet grid) shows every
+   machine on the overlap build, **switch the signing key**: in
+   `%USERPROFILE%\.ccsync-release`, move `release.key` to
+   `release.key.superseded` (keep it there, and its offline copy, until
+   step 4: while it is there `load_secrets.ps1` keeps the old key trusted on
+   this studio's dashboard) and
+   `release-next.key` to `release.key`. Move the backup records with them:
+   `backup.json` to `release.key.superseded.backup.json`, then
+   `release-next.key.backup.json` to `backup.json` (each key's record sits
+   beside it under its own name, `backup.json` for `release.key`, so the side
+   key's `backup` in step 1 never overwrote the signing key's). From here on builds are
+   signed by the new key. What the FIRST of them meets depends on the pathway:
+   - **Pathway B** (CI + `publish_latest.py` / `publish_feed.py`): the check
+     compares this rig's key with the keys the current record BAKES
+     (`baked_pubkey_ids`), and the overlap build bakes both, so it passes with
+     no override.
+   - **Pathway A** (`ship.cmd`): `build_editor_package.ps1` can only ask the
+     dashboard which key SIGNED the current build (the dashboard stores no
+     baked list), and the overlap build was signed by the OLD key, so the
+     first new-key build IS refused. This one build is the only place a
+     rotation passes `-AllowKeyRotation`, and only when all three hold: the
+     refusal names the OLD key's id as "was signed with" (`python
+     tools\release_key.py --path
+     $env:USERPROFILE\.ccsync-release\release.key.superseded pubkey` prints
+     its `pubkey_id`), this rig's id is the NEW key's (the same command
+     without `--path`), and the version it names as current
+     is the overlap build or later. Any other refusal is a wrong key, not a
+     rotation. Every build after this one is signed by the key the current
+     build was signed by, and passes by itself.
+   - **The Mac signs too, and nothing checks it.** `release_macos.sh` and
+     `build_onboard_macos.sh` sign with the Mac's own hand-copied
+     `~/.ccsync-release/release.key` and have no REL-7 check at all. In the
+     same sitting as the switch, replace that file on the Mac with the new
+     key (copy this rig's `release.key` after the move, `chmod 600`) and
+     confirm `python3 tools/release_key.py pubkey` there prints the NEW
+     `pubkey_id`. A Mac left on the old key keeps signing with it: the
+     dashboards still accept those builds until step 4, and after step 4's
+     release every Mac on it refuses them, silently.
+4. **Drop the old key**, in this order and never in one release. First from
+   `RELEASE_PUBKEYS` (`release_key.py bake` without `--add`) in a LATER
+   release, and only once the fleet runs it, from the dashboards: on this
+   studio's, move `release.key.superseded` and
+   `release.key.superseded.backup.json` off this rig to where its offline
+   copy lives, reload `load_secrets.ps1` (it reports one key again) and ship;
+   on every customer dashboard, remove it from `DASH_RELEASE_PUBKEYS` by
+   hand.
+
+`release_key.py new --force` is NOT a rotation step: it moves the old key
+aside and puts the new one at `release.key`, where every signer reads, so the
+very next build would be signed by a key the fleet does not trust yet (it
+says so when it runs; logic-release-1, 2026-09-24). Its only use is starting
+over before any build has shipped.
 
 Since 2026-08-28 skipping the overlap is **refused rather than warned about**
 (REL-7). `release_key.py bake` still only warns — baking a replacement before
@@ -687,7 +773,16 @@ key signed the build that is currently current, `publish_feed.py` compares
 against the `baked_pubkey_ids` the current record carries (written into the
 release manifest by `release.ps1`), and both refuse with "every machine on
 v&lt;current&gt; will refuse this build" unless `-AllowKeyRotation` /
-`--allow-key-rotation` is passed. A record published before that date carries
+`--allow-key-rotation` is passed. **That override does not perform a
+rotation**: it publishes a build the check cannot vouch for. Its uses are
+exactly two: the first new-key build of a rotation on pathway A (step 3
+above, where the ps1's proxy, "which key SIGNED the current build", is the
+wrong question because the overlap build bakes a key it was not signed by),
+and the case where stranding is accepted, i.e. the old key is lost and every
+machine will be reinstalled by hand. The feed path never needs it for a
+rotation. When the refused build already bakes
+both keys, `publish_feed.py`'s refusal says it is the overlap release signed
+with the wrong key and names the key that must sign it. A record published before that date carries
 no key list, and the feed path says the check could not run rather than
 passing it silently.
 

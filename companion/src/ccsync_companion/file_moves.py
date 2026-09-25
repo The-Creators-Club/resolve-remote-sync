@@ -86,6 +86,22 @@ STATE_APPLYING = "applying"
 # first, exactly as `applying` did).
 STATE_NOT_SYNCED_HERE = "not_synced_here"
 DETAIL_NOT_SYNCED_HERE = "trashed locally, destination not synced here"
+# logic-plans-3 (2026-09-24): section 4b used to bin the WHOLE local folder.
+# A folder move names only what the SERVER had, and the machine can hold
+# more: a card dump lane A is part-way through uploading, an upload-only
+# ingest laptop, a machine that was offline. Those originals were on no
+# server, lane A never walks `.ccsync-trash`, and prune_trash deleted them
+# a fortnight later while the project page said the machine had followed.
+# Now a file goes to the trash only when the server is KNOWN to hold it at
+# the destination; everything else stays at the old path, where lane A will
+# upload it once the move's one-day exclusion lapses (the server never had
+# it, so nothing "comes back" that the admin moved away). The answer is
+# still ok=True - this machine has done all it safely can - with a detail
+# of its own, so the dashboard records a plain done move with an honest
+# sentence rather than "trashed locally".
+DETAIL_KEPT_LOCAL_ONLY = ("destination not synced here; kept {kept} file(s) at the "
+                          "old path that the server may not have (e.g. {sample}), "
+                          "trashed {trashed}")
 # The lane B trash, spelled the same way rclone_lane spells it. NOT imported
 # from there: rclone_lane is the sync package and this module is imported by
 # it in comment and by app.py before the lanes exist. One directory per run,
@@ -426,9 +442,163 @@ def _trash_destination(local_root: str, move: dict[str, Any]) -> Path:
             / Path(*str(move["from_rel"]).split("/")))
 
 
+ServerFilesFn = Callable[[str], Optional[set]]
+
+
+def _is_lane_a_original(rel_posix: str) -> bool:
+    """Would lane A upload this file? Lazy import: the sync package imports
+    this module, and this is the one predicate lane A's express door uses, so
+    it stays the ONE definition of "an original". Fails towards True: a file
+    we cannot classify is treated as one lane A may still owe."""
+    try:
+        from .sync.rclone_lane import path_matches_lane_a_filter
+        return bool(path_matches_lane_a_filter(rel_posix))
+    except Exception:
+        log.debug("file moves: lane A filter unavailable", exc_info=True)
+        return True
+
+
+def _files_under(folder: Path) -> list[tuple[Path, str, int]]:
+    """(path, rel posix under `folder`, size) for every file in it."""
+    out: list[tuple[Path, str, int]] = []
+    for path in folder.rglob("*"):
+        try:
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+        except OSError:
+            continue
+        out.append((path, path.relative_to(folder).as_posix(), int(size)))
+    return out
+
+
+def _server_keys(inventory: Any) -> set:
+    """The server's listing as {(comparison key, size)}, built ONCE per
+    folder (logic-plans-3 review, 2026-09-24): matching every local file
+    against every listed entry re-folded the whole listing per file, which
+    for a card dump of a few thousand clips is millions of NFC folds on the
+    reporter thread. Compared through the NFC/case-fold key (CR-90): a Mac's
+    name for a file is NFD and the NAS's is NFC, and that is the same file."""
+    keys: set = set()
+    for entry in inventory or ():
+        try:
+            rel, size = entry
+            keys.add((_cmp_key(str(rel)), int(size)))
+        except (TypeError, ValueError):
+            continue
+    return keys
+
+
+# logic-plans-3 review (2026-09-24): the answer for a folder section 4b could
+# not triage because the server could not be asked. NOT ok: an ok answer is
+# recorded as a done move, and a done move's lane A exclusion lapses after
+# EXCLUDE_WINDOW_SECONDS, after which lane A (which never deletes) put every
+# original in the folder back on the NAS at the path the admin cleared - the
+# ordinary case, since the machine holding originals is usually the one that
+# ingested and uploaded them. `retrying` keeps RES-1's unresolved exclusion
+# open and asks again on the retry schedule.
+DETAIL_4B_CANNOT_LIST = ("destination not synced here, and the server could not be "
+                         "asked which of these files it already holds; keeping the "
+                         "folder where it is and trying again")
+
+
+def _split_folder_for_4b(src: Path, move: dict[str, Any],
+                         server_files: Optional[ServerFilesFn],
+                         ) -> Optional[tuple[list[tuple[Path, str, int]], list[str]]]:
+    """Section 4b's triage of a FOLDER (logic-plans-3, 2026-09-24).
+
+    Returns (to_trash, kept): `to_trash` is (path, rel, size) for each file the
+    server is known to hold at the destination, `kept` the rels left where
+    they are. None when a folder holding a lane A original could not be
+    triaged (no `server_files`, or a listing that failed): "we could not
+    tell" is never "the server has it", and it is not "done" either (see
+    DETAIL_4B_CANNOT_LIST). A folder holding NO original still goes whole
+    without a listing, as it always did: proxies and sidecars are what the
+    server's own lanes hand out, and the move command says the server had
+    the folder.
+
+    The lane A test is given the file's FULL tree path (review, 2026-09-24),
+    not its path under the moved folder: lane A skips anything with a
+    `Proxy` component at any depth, so a moved folder that is itself a Proxy
+    dir, or sits in one, holds no original even though its .mov files would
+    look like originals on their own."""
+    files = _files_under(src)
+    base = "/".join(part for part in (
+        str(move.get("from_project_rel") or "").strip("/"),
+        str(move.get("from_rel") or "").strip("/")) if part)
+    inventory = None
+    if server_files is not None:
+        dest_rel = "/".join(part for part in (
+            str(move.get("to_project_rel") or "").strip("/"),
+            str(move.get("to_rel") or "").strip("/")) if part)
+        try:
+            inventory = server_files(dest_rel)
+        except Exception:
+            log.warning("file move #%s: the server listing of %s failed",
+                        move.get("id"), dest_rel, exc_info=True)
+            inventory = None
+    if inventory is None:
+        if not any(_is_lane_a_original(f"{PROJECTS_PREFIX}{base}/{rel}")
+                   for _path, rel, _size in files):
+            return list(files), []
+        return None
+    held = _server_keys(inventory)
+    to_trash: list[tuple[Path, str, int]] = []
+    kept: list[str] = []
+    for path, rel, size in files:
+        if (_cmp_key(rel), int(size)) in held:
+            to_trash.append((path, rel, int(size)))
+        else:
+            kept.append(rel)
+    return to_trash, kept
+
+
+def rclone_server_files(rclone_path: str, remote: str, remote_root: str,
+                        run_fn: Optional[Callable[[list[str], float], Optional[str]]] = None,
+                        # Two minutes, not list_remote_files' ten: this runs on
+                        # the REPORTER thread (_apply_file_moves), and a hung
+                        # NAS must cost one report, not ten minutes of them. A
+                        # timeout is a failed listing, which answers
+                        # `retrying` and asks again.
+                        timeout: float = 120.0) -> ServerFilesFn:
+    """A `server_files` for apply_move built on lane A's own remote
+    (logic-plans-3, 2026-09-24): `rclone lsf -R` of `Projects/<dest>` on the
+    NAS, as {(rel posix, size)}. None on any failure, which apply_move reads
+    as "could not tell" and keeps the folder. The `s` then `p` format is
+    list_remote_files' for the same reason: the size cannot contain the
+    separator, so the whole filename survives the split."""
+    def _list(dest_rel: str) -> Optional[set]:
+        from .sync import rclone_lane
+        if not (rclone_path and remote and remote_root and dest_rel):
+            return None
+        side = f"{remote}:" + rclone_lane._join_remote_path(
+            remote_root, PROJECTS_PREFIX + str(dest_rel).strip("/"))
+        cmd = [rclone_path, "lsf", "-R", "--files-only", "--format", "sp",
+               "--separator", ";", side]
+        try:
+            output = (run_fn or rclone_lane._run_lsf)(cmd, timeout)
+        except Exception:
+            log.warning("file moves: listing %s failed", side, exc_info=True)
+            return None
+        if output is None:
+            return None
+        found: set = set()
+        for line in output.splitlines():
+            size_text, sep, rel = line.partition(";")
+            if not sep:
+                continue
+            try:
+                found.add((rel.strip().strip("/"), int(size_text.strip())))
+            except ValueError:
+                continue
+        return found
+    return _list
+
+
 def apply_move(move: dict[str, Any], local_root: str,
                ledger: Optional["FileMoveLedger"] = None,
                project_rels: Optional[Any] = None,
+               server_files: Optional[ServerFilesFn] = None,
                ) -> tuple[bool, str, Optional[tuple[str, str]]]:
     """Move this machine's copy. Returns (ok, detail, (old_local, new_local))
     -- the pair is None when nothing was here to move. Never deletes and
@@ -439,7 +609,15 @@ def apply_move(move: dict[str, Any], local_root: str,
     filesystem call and a redelivered command whose file is already at the
     new path resumes from it instead of answering "nothing at the old path
     on this machine". Without it the behaviour is exactly what it was, which
-    is what lets an older caller keep working."""
+    is what lets an older caller keep working.
+
+    `server_files` (logic-plans-3, 2026-09-24) is optional too: given a
+    Projects-relative directory it returns the server's files under it as
+    {(rel posix, size)}, or None when it could not list. Section 4b uses it
+    to bin only what the server already holds; without it (or when it
+    fails), a folder holding any lane A original is left where it is and
+    the move answers not-ok (DETAIL_4B_CANNOT_LIST), which the caller
+    records as `retrying`."""
     root = Path(local_root) / "Projects"
     src = root / Path(*move["from_project_rel"].split("/")) / Path(*move["from_rel"].split("/"))
     dest = root / Path(*move["to_project_rel"].split("/")) / Path(*move["to_rel"].split("/"))
@@ -532,6 +710,23 @@ def apply_move(move: dict[str, Any], local_root: str,
         # lane B's floor parks on - while the MOVES history said that
         # computer had followed. Trashed, never deleted, and said so.
         trash = _trash_destination(local_root, move)
+        if src.is_dir():
+            split = _split_folder_for_4b(src, move, server_files)
+            if split is None:
+                log.warning("file move #%s: %s may hold originals the server does "
+                            "not have and the server could not be listed; keeping "
+                            "it and asking again", move.get("id"), src)
+                return False, DETAIL_4B_CANNOT_LIST, None
+            to_trash, kept = split
+            # logic-plans-3 round 2 (2026-09-25): a folder is ALWAYS binned
+            # file by file, even when every file it held was on the server.
+            # The triage snapshot is taken before a listing that can take two
+            # minutes, and the old whole-folder `src.replace(trash)` then took
+            # anything that landed in the folder meanwhile (a card dump still
+            # copying) into the trash unchecked, where lane A never looks and
+            # prune_trash deletes it in 14 days. Per file, only what was
+            # snapshotted AND matched is moved; the rest stays for lane A.
+            return _apply_4b_partial(move, src, trash, to_trash, kept, ledger)
         if ledger is not None:
             # comp-sync-2 / res-companion-1 (2026-09-18b): the intent row is
             # written for its lane A exclusion and for the crash window, NOT
@@ -579,6 +774,69 @@ def apply_move(move: dict[str, Any], local_root: str,
         return False, f"could not move it on this machine: {exc}", None
     detail = "moved" + (f", {proxies} proxy file(s) with it" if proxies else "")
     return True, detail, (str(src), str(dest))
+
+
+def _apply_4b_partial(move: dict[str, Any], src: Path, trash: Path,
+                      to_trash: list[tuple[Path, str, int]], kept: list[str],
+                      ledger: Optional["FileMoveLedger"],
+                      ) -> tuple[bool, str, Optional[tuple[str, str]]]:
+    """Section 4b for a FOLDER (logic-plans-3, 2026-09-24; every folder since
+    round 2, 2026-09-25): bin only what the triage matched, leave the rest at
+    the old path for lane A. Nothing is deleted and nothing is overwritten; a
+    file that will not move is simply kept. paths=None for the same reason as
+    the single-file branch: nothing moved anywhere Resolve should be
+    repointed at."""
+    if ledger is not None:
+        ledger.record_intent(move, str(src), "")
+    trashed = 0
+    moved: set = set()
+    for path, rel, size in to_trash:
+        target = trash / Path(*rel.split("/"))
+        try:
+            # logic-plans-3 round 2 (2026-09-25): the match was made against a
+            # size taken before a listing of up to two minutes. A file that
+            # grew or was rewritten since is no longer the one the server was
+            # shown to hold, so it stays for lane A.
+            if target.exists() or path.stat().st_size != size:
+                kept.append(rel)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            path.replace(target)
+            trashed += 1
+            moved.add(rel)
+        except OSError:
+            log.warning("file move #%s: %s stays at the old path (could not move "
+                        "it into the trash)", move.get("id"), path, exc_info=True)
+            kept.append(rel)
+    # logic-plans-3 round 2 (2026-09-25): whatever is still in the folder now
+    # is kept, whether or not the snapshot saw it - a clip that landed during
+    # the listing was never checked against the server. Only the directories
+    # this leaves EMPTY go, one rmdir at a time (never rmtree), deepest
+    # first, so a file arriving right now makes its directory refuse.
+    seen = set(kept)
+    for _path, rel, _size in _files_under(src):
+        if rel not in seen and rel not in moved:
+            kept.append(rel)
+            seen.add(rel)
+    for folder in sorted((p for p in src.rglob("*") if p.is_dir()),
+                         key=lambda p: len(p.parts), reverse=True) + [src]:
+        try:
+            folder.rmdir()
+        except OSError:
+            pass
+    if not kept:
+        log.info("file move #%s: %s is not a project this machine syncs -- "
+                 "the local copy is in %s", move.get("id"),
+                 move.get("to_project_rel"), trash)
+        return True, DETAIL_NOT_SYNCED_HERE, None
+    sample = sorted(kept)[0].rsplit("/", 1)[-1]
+    log.warning(
+        "file move #%s: %s is not a project this machine syncs, and %d file(s) "
+        "under %s may not be on the server, so they stay where lane A will "
+        "upload them; %d file(s) the server holds went to %s",
+        move.get("id"), move.get("to_project_rel"), len(kept), src, trashed, trash)
+    return True, DETAIL_KEPT_LOCAL_ONLY.format(
+        kept=len(kept), sample=sample, trashed=trashed), None
 
 
 def relink_moved(old_local: str, new_local: str, local_root: str,

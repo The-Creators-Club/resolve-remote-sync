@@ -92,10 +92,51 @@ both needed:
 **4b. A destination the machine does not sync.** Ruskin syncs Creator
 Profiles but not FF5 Talent Gap. His copy at the old path has no new home
 on his disk. The right answer is the one lane B gives today for a project
-that left the plan: trash it locally (recoverable for a year), quietly,
-without counting toward the breaker, because the server has told us it is
-a move. The `file_move_targets` row for such a machine records `trashed
-locally, destination not synced here` rather than `done`.
+that left the plan: trash it locally, quietly, without counting toward the
+breaker, because the server has told us it is a move. The
+`file_move_targets` row for such a machine records `trashed locally,
+destination not synced here` rather than `done`.
+
+As built (res-fleet-3, corrected 2026-09-24 by logic-plans-3):
+
+- **Only what the server already holds goes to the trash.** A FOLDER move
+  names what the server had, and the machine can hold more: a card dump
+  lane A is part-way through uploading, an upload-only ingest laptop, a
+  machine that was offline. The first build moved the whole local folder
+  into `.ccsync-trash`, which lane A never walks, so those originals were on
+  no server and were deleted when the trash aged out. Now the companion
+  compares the folder against the server's listing of the destination
+  (`file_moves.apply_move(server_files=...)`, relative path + exact size,
+  NFC-folded): a file the server holds goes to the trash, anything else
+  stays at the old path. The listing is `rclone lsf -R` of
+  `<remote_root>/Projects/<destination>` through lane A's own remote. With
+  no listing (no remote configured, or the listing failed or timed out), a
+  folder holding any lane A original is left alone entirely and the move
+  answers `retrying` (review round, 2026-09-24): an ok answer is a done
+  move, a done move's exclusion lapses after a day, and lane A would then
+  re-upload the whole folder to the old path, which is exactly "the folder
+  comes back". `retrying` keeps the exclusion open until a listing answers
+  or the retry budget turns the move `blocked`. Whether a file is an
+  original is judged on its full tree path, so a moved `Proxy` folder holds
+  none. Only a folder of proxies and sidecars is binned without a listing.
+  Either way the companion moves the folder's files one by one and then
+  `rmdir`s what that emptied (round 2, 2026-09-25), so a clip copied into
+  the folder while the listing ran is never binned unchecked with it: it
+  stays at the old path like any other kept file.
+  A single-file move goes to the trash as before: the command itself says
+  the server held that file.
+- **What stays behind is uploaded.** A kept file is at the old path with
+  the move's usual one-day lane A exclusion; after that lane A uploads it to
+  the old path on the server, where the owner can see it and file it. The
+  row records a plain done move with the sentence `destination not synced
+  here; kept N file(s) at the old path that the server may not have (e.g.
+  <name>), trashed M`, not `trashed locally`.
+- **The trash is not an archive.** It is lane B's `.ccsync-trash`, pruned by
+  `lane_guard.prune_trash`: batches older than 14 days go
+  (`DEFAULT_TRASH_MAX_AGE_DAYS`), and older batches go sooner when the trash
+  passes 50 GB or the disk is under pressure. This section once promised
+  "recoverable for a year"; that was never built, and it is safe only
+  because of the rule above: everything 4b bins, the server also holds.
 
 ## 5. What the owner sees
 
@@ -119,8 +160,11 @@ locally, destination not synced here` rather than `done`.
 ## 6. Safety rules, unchanged
 
 - Nothing in this design deletes anything, on the server or on a machine.
-  A detected move renames; a copy with no destination is trashed (a year,
-  recoverable); the breaker still parks on anything that is not a match.
+  A detected move renames; a copy with no destination is trashed only
+  when the server holds it too (the trash is pruned after 14 days, sooner
+  under disk pressure, see 4b), and anything the server may not have stays
+  where lane A will upload it; the breaker still parks on anything that is
+  not a match.
 - A detected move is only ever a rename the server ALREADY DID. The
   collector never moves files on the NAS from a guess; it records what it
   saw and asks the machines to follow.

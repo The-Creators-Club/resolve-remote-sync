@@ -155,12 +155,24 @@ foreach ($n in $SecretNames) {
 # and it did not, which cost a run.
 $keyFile = Join-Path (Join-Path $env:USERPROFILE '.ccsync-release') 'release.key'
 if (Test-Path -LiteralPath $keyFile) {
-    $pub = & python (Join-Path $PSScriptRoot 'release_key.py') pubkey --quiet 2>$null
+    # logic-release-1 round 2 (2026-09-25): `trusted`, not `pubkey`. ship's
+    # dashboard deploy writes this value into the container, and with
+    # release.key's half alone every ship during a key rotation redeployed
+    # this studio's dashboard trusting ONE key - after the switch, not the
+    # old key the current build, the vendor channel and the OTA code trees
+    # are still signed by (docs\RELEASE.md, Rotating, step 2). `trusted`
+    # adds release-next.key and release.key.superseded while they exist.
+    $pub = & python (Join-Path $PSScriptRoot 'release_key.py') trusted --quiet 2>$null
     if ($LASTEXITCODE -eq 0 -and $pub) {
-        Set-Item -LiteralPath 'env:DASH_RELEASE_PUBKEYS' -Value ($pub.Trim())
-        $loaded += 'DASH_RELEASE_PUBKEYS (derived)'
+        $pub = "$pub".Trim()
+        Set-Item -LiteralPath 'env:DASH_RELEASE_PUBKEYS' -Value $pub
+        $nKeys = @($pub -split ',' | Where-Object { $_ }).Count
+        if ($nKeys -gt 1) {
+            $loaded += "DASH_RELEASE_PUBKEYS (derived, $nKeys keys: a key rotation is under way)"
+        }
+        else { $loaded += 'DASH_RELEASE_PUBKEYS (derived)' }
     }
-    else { Write-Warn2 "could not read the public key from $keyFile -- ship step 1 will refuse" }
+    else { Write-Warn2 "could not read every release key in $(Split-Path -Parent $keyFile) (python tools\release_key.py trusted says which) -- ship step 1 will refuse" }
 }
 else { Write-Warn2 "no release key at $keyFile -- DASH_RELEASE_PUBKEYS unset, ship step 1 will refuse" }
 

@@ -1495,6 +1495,23 @@ ORIGINAL_SUFFIX = ".original"
 # the stem still ends `[id]`, and the name still says what happened.
 CONVERTED_SUFFIX = ".converted"
 
+# bug-comp-ytdl-1 (2026-09-24): where a download that NEEDS converting waits
+# while ffmpeg runs. It used to wait under its deliverable name, and `--no-mtime`
+# (YT-3) only made that name young: a re-encode longer than 120 s (any 4K VP9,
+# most 1440p) let lane A's `--min-age 120s` and the importer's settle test
+# both pass on the undecodable original. Lane A is `copy --ignore-existing`,
+# so the NAS then kept the VP9 copy for good, and the importer put it in the
+# media pool, where Resolve's handle made the swap deliver a second clip.
+# The name is chosen to fall inside every exclusion that ALREADY exists, so no
+# rule list anywhere had to grow: `*.editready.*` (lane A, and the dashboard's
+# LANE_A_SKIP_GLOBS mirror of it), a stem ending `.editready` (the importer's
+# and this module's _INTERMEDIATE_STEM_RE, so landed_file never reads it as
+# the clip and clear_partials sweeps it), and it keeps its video extension so
+# lane C's extension ignores still hold. Swept means a stop mid-conversion
+# deletes it rather than leaving a convert-needed file as a finished clip
+# (the bug-comp-ytdl-2 shape), and the next attempt clears a stale one.
+SOURCE_STAGING_SUFFIX = ".source" + EDITREADY_SUFFIX
+
 # The trailing `[id]` of a yt-dlp outtmpl name. Non-greedy head so a title
 # that itself contains brackets keeps them: only the LAST bracket group is the
 # id (the same anchoring rule as the dedupe scan).
@@ -1621,6 +1638,13 @@ def editready_name(name: str) -> str:
     """`<stem>.editready.mp4` for a landed `<stem>.<ext>` (ensure_edit_ready's
     `tmp`; the h264 policy's out_ext is always .mp4)."""
     return str(Path(name).with_suffix("")) + EDITREADY_SUFFIX + ".mp4"
+
+
+def staged_source_name(name: str) -> str:
+    """`<stem>.source.editready.<ext>` for a landed `<stem>.<ext>`: the
+    pre-conversion original, off its deliverable name (SOURCE_STAGING_SUFFIX)."""
+    path = Path(name)
+    return str(path.with_suffix("")) + SOURCE_STAGING_SUFFIX + path.suffix
 
 
 def converted_name(final: str) -> str:
@@ -2495,6 +2519,19 @@ class DownloadJob:
             with self._lock:
                 self._proc = None
         if self._should_stop():
+            # bug-comp-ytdl-1 review (2026-09-24): a stop that lands during
+            # the probe (which it usually kills) leaves a download nobody
+            # checked, and _cleanup_current's id-scoped sweep does not touch a
+            # deliverable name, so it stayed in the tree as a finished clip
+            # lane A would upload. Moved onto the staging name, it is litter
+            # the sweep removes; the job is no longer ours and whoever holds
+            # it next downloads it again.
+            try:
+                os.replace(src, Path(outdir) / staged_source_name(name))
+            except OSError as exc:
+                log.warning("ytdl: job %s clip %s: stopped before its check "
+                            "and could not be moved aside (%s)",
+                            self.job_id, video_id, exc)
             return name, None, None
         plan = edit_ready_plan(probe)
         if not plan["convert"]:
@@ -2510,10 +2547,22 @@ class DownloadJob:
                         "ffmpeg is gone; kept as downloaded", self.job_id, video_id, was)
             return name, "could not convert (no ffmpeg); kept as downloaded", None
         tmp = Path(outdir) / editready_name(name)
+        # bug-comp-ytdl-1 (2026-09-24): off the deliverable name for as long
+        # as ffmpeg runs (SOURCE_STAGING_SUFFIX says why). A rename that fails
+        # (a scanner holding the just-closed file) falls back to converting
+        # in place, which is the old behaviour and no worse than it.
+        staged = Path(outdir) / staged_source_name(name)
+        try:
+            os.replace(src, staged)
+        except OSError as exc:
+            log.warning("ytdl: job %s clip %s: could not move the download "
+                        "aside for its conversion (%s); converting in place",
+                        self.job_id, video_id, exc)
+            staged = src
         self._set(phase="converting", bytes_done=None, bytes_total=None, speed_bps=None)
         log.info("ytdl: job %s clip %s: converting to H.264 (was %s)",
                  self.job_id, video_id, was)
-        argv = edit_ready_argv(ffmpeg, src, tmp, plan)
+        argv = edit_ready_argv(ffmpeg, staged, tmp, plan)
         rc, stderr = 1, ""
         try:
             proc = _call_run(self.deps.run, argv, CONVERT_TIMEOUT_SECONDS,
@@ -2542,15 +2591,81 @@ class DownloadJob:
             except OSError:
                 pass
             if self._should_stop():
+                # Left staged: _download_one's _cleanup_current sweeps it, and
+                # a download that needed converting is never a finished clip.
                 return name, None, None
+            # Back under its own name either way: kept as downloaded, or
+            # disowned by _fail_clip (which skips a sweepable name, and would
+            # otherwise delete the evidence YTDL-3 keeps as `.failed`).
+            restore_error = self._unstage(staged, src, video_id)
+            if restore_error:
+                return name, None, restore_error
             if plan["probe_failed"]:
                 return name, ("could not probe the codecs and the safety "
                               "conversion failed; kept as downloaded"), None
             return name, None, ("Edit-ready conversion failed: "
                                 + stderr.strip()[-500:])
         final = Path(outdir) / (str(Path(name).with_suffix("")) + ".mp4")
-        delivered, note = swap_in(tmp, final, src)
+        if staged == src:
+            delivered, note = swap_in(tmp, final, src)
+            return delivered, note, None
+        # The staged original is nobody's clip and nothing has it open, so it
+        # is simply removed; swap_in keeps its locked-file handling for
+        # whatever may already sit at `final` (an earlier copy Resolve holds).
+        held = self._remove_staged(staged, video_id)
+        delivered, note = swap_in(tmp, final, final)
+        if held is not None:
+            # bug-comp-ytdl-1 round 2 (2026-09-25): a clip that succeeded has
+            # no next attempt on this machine, and clear_partials runs only
+            # on a stop or a new attempt at this id, so a staged original
+            # still held here stays for good. It syncs nowhere (lane A
+            # refuses `*.editready.*`), so the cost is this disk alone, and
+            # the row says so rather than the space going invisible (YT-6).
+            held_note = (f"the pre-conversion download could not be removed "
+                         f"({_reclaimable_bytes(held)}, kept as {staged.name}); "
+                         f"it syncs nowhere and can be deleted")
+            note = f"{note}; {held_note}" if note else held_note
         return delivered, note, None
+
+    # A thumbnailer or an AV scan that opened the just-closed download lets
+    # go within a second or two; Resolve does not, and it never has this name.
+    STAGED_REMOVE_TRIES = 4
+    STAGED_REMOVE_PAUSE_SECONDS = 0.5
+
+    def _remove_staged(self, staged: Path, video_id: str) -> Optional[int]:
+        """Remove a converted clip's staged original. -> None, or the bytes
+        it still holds when it could not be removed."""
+        for attempt in range(self.STAGED_REMOVE_TRIES):
+            try:
+                os.remove(staged)
+                return None
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                if attempt + 1 < self.STAGED_REMOVE_TRIES:
+                    self.deps.sleep(self.STAGED_REMOVE_PAUSE_SECONDS)
+                    continue
+                size = _size_of(staged)
+                log.warning("ytdl: job %s clip %s: could not remove %s (%s). "
+                            "The clip is done, so nothing will retry it: %s "
+                            "bytes stay on this disk until deleted by hand "
+                            "(it syncs nowhere)", self.job_id, video_id,
+                            staged, exc, size)
+                return size
+        return None
+
+    def _unstage(self, staged: Path, src: Path, video_id: str) -> Optional[str]:
+        """Put a staged original back under its landed name. -> error or None."""
+        if staged == src:
+            return None
+        try:
+            os.replace(staged, src)
+        except OSError as exc:
+            log.warning("ytdl: job %s clip %s: could not put %s back as %s (%s)",
+                        self.job_id, video_id, staged.name, src.name, exc)
+            return (f"the download could not be put back under its name "
+                    f"after its conversion: {exc}")
+        return None
 
     def _fail_clip(self, outdir: str, video_id: str, before: set,
                    error: str) -> None:

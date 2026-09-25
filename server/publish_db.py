@@ -573,8 +573,21 @@ def newest_prev(backend, remote_dir: str, filename: str,
     if rc != 0:
         return "", ((err or out or f"rc={rc}").strip()[:300]
                     or f"the listing of {remote_dir} exited {rc}")
-    found = sorted(line.strip() for line in (out or "").splitlines() if line.strip())
+    # bug-ops-1 (2026-09-24): the publish carries the live file's -wal/-shm
+    # WITH it, to <prev>-wal/-shm, and the find pattern matches those too. A
+    # bare name is a prefix of its own sidecars' names, so by plain sort the
+    # "newest" of `...T101500`, `...T101500-shm`, `...T101500-wal` was the WAL
+    # journal, and the rollback renamed a journal over the live index and
+    # printed "rolled back". Only a database is a candidate; its sidecars
+    # travel with it inside build_rollback_script.
+    found = sorted(line.strip() for line in (out or "").splitlines()
+                   if line.strip() and not is_sidecar_name(line.strip()))
     return (found[-1] if found else ""), ""
+
+
+def is_sidecar_name(path: str) -> bool:
+    """Is `path` a SQLite sidecar (-wal/-shm) rather than a database?"""
+    return any(path.endswith(s) for s in SIDECARS)
 
 
 def staging_parent(backend, dry_run: bool) -> str:
@@ -617,6 +630,13 @@ def do_rollback(args, backend, spec) -> int:
     prev, why = "", ""
     if args.from_prev:
         prev = args.from_prev
+        if is_sidecar_name(prev):
+            # bug-ops-1 (2026-09-24): the same wrong file, typed by hand. The
+            # sidecars come back with the database they belong to.
+            print(f"FAILED: {prev} is a SQLite sidecar, not an index. Name the "
+                  f".prev-<ts> file itself; its -wal/-shm come back with it. "
+                  f"Nothing was changed.", file=sys.stderr)
+            return 1
     else:
         prev, why = newest_prev(backend, remote_dir, spec["filename"], args.dry_run)
     if why:

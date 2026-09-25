@@ -510,7 +510,11 @@
               {% endif %}
               {# REL-8: "asked, waiting for its next report" and "has failed
                  this build eight times" used to render identically here. #}
-              {% if m.upgrade and m.upgrade.upgrade_attempts %}
+              {# bug-comp-core-1 (2026-09-25): "crash-looped" is a revert's
+                 give-up record, not a download error to retry by hand. #}
+              {% if m.upgrade and m.upgrade.upgrade_attempts and upgrade_crash_looped(m.upgrade.upgrade_last_error) %}
+                <span class="chip red" title="{{ chip_help('update_crash_looped', version=(m.upgrade.upgrade_version or "an update"), when="") }}">[ KEPT CRASHING, ROLLED BACK ]</span>
+              {% elif m.upgrade and m.upgrade.upgrade_attempts %}
                 <span class="chip red" title="{% if m.upgrade.upgrade_last_error %}{{ m.upgrade.upgrade_last_error }}{% else %}no error reported{% endif %}{% if m.upgrade.upgrade_last_attempt_at %} (last tried {{ m.upgrade.upgrade_last_attempt_at | ago }}){% endif %}">[ FAILED x{{ m.upgrade.upgrade_attempts }} ]</span>
               {% endif %}
               <form class="inline-form" hx-post="/partials/admin/machines/update/cancel"
@@ -525,6 +529,15 @@
                  then says "asked" for ever (REL-3). #}
               <span class="muted">This computer refuses the current build: {{ m.refused.reason or "no reason reported" }}. Pushing it again will not change that.</span>
             {% else %}
+              {# bug-comp-core-1 (2026-09-25): the offer is withheld from a
+                 machine for the build it crashed on and rolled back from, so
+                 this row would otherwise read as "just has not updated yet". #}
+              {# Fable review (2026-09-25): no [ UPDATE NOW ] beside it. The
+                 companion refuses a push of the build it fled, so the button
+                 could only park a request that never lands. #}
+              {% if m.fled_current %}
+                <span class="muted">Not offered to this computer: it kept crashing on {{ m.upgrade.upgrade_reverted_from }} and rolled itself back, and it will not install that build again. A newer build is offered as usual.</span>
+              {% else %}
               <form class="inline-form" hx-post="/partials/admin/machines/update"
                     hx-target="closest .admin-packages-box" hx-swap="outerHTML">
                 <input type="hidden" name="editor" value="{{ m.editor_username }}">
@@ -532,6 +545,7 @@
                 <button class="btn tap" type="submit"
                         title="update this computer to the current build on its next report, without waiting for its editor to click">[ UPDATE NOW ]</button>
               </form>
+              {% endif %}
             {% endif %}
           </td>
         </tr>

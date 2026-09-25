@@ -200,19 +200,67 @@ class MusicIngestor(broll_ingest.BrollIngestor):
     def _remote_rel(self, parsed: dict) -> str:
         return str(parsed.get("library_remote_rel") or LIBRARY_REMOTE_REL)
 
-    def _item_from_manifest(self, entry: dict, staging: Optional[dict]) -> dict:
+    def _items_from_manifest(self, entries: list, staging: Optional[dict]) -> list:
+        """Every manifest row, each paired with AT MOST one staged file.
+
+        bug-comp-broll-1, music half (owed-music, 2026-09-25): rows were
+        paired one at a time by NAME alone, first match wins. The page never
+        dedupes names and the claim manifest carries no local_id, so a drop
+        of two different `theme.wav` (two folders, two albums) gave BOTH rows
+        the first file's path: it was embedded and uploaded twice (as
+        `theme.wav` and `theme (2).wav`) and the second track never was.
+        Now the whole manifest goes through broll_ingest.match_manifest_rows,
+        so each staged file is used once, hash first, then name + size, then
+        name, in `ord` order on both sides.
+
+        Two keys are translated, not shared:
+          * rel_dir is "" on both sides: a music drop is flat (the library has
+            no folders -- `db.unique_dest` lands everything under the share
+            root), and the page stages no rel_dir.
+          * the manifest's `content_hash` is used only when it names a file
+            staged here. The server overwrites it with the TRANSCODED .mp3's
+            digest at status/result (`COALESCE(?, content_hash)`), while the
+            staged entry keeps the original's, so on a re-claim (RETRY
+            FAILED, a restart) a transcoded track's hash names bytes nobody
+            staged -- and the matcher's "known and different means another
+            file" veto would strip its local path at every tier. A hash that
+            matches no staged file is no evidence either way, so it is
+            dropped; one that does match is exactly the b-roll case.
+        """
+        entries = [e for e in entries if isinstance(e, dict)]
+        matched = self._match_staged(entries, staging)
+        return [self._item_from_manifest(entry, staging, candidate=candidate)
+                for entry, candidate in zip(entries, matched)]
+
+    @staticmethod
+    def _match_staged(entries: list, staging: Optional[dict]) -> list:
+        """-> the staged entry (or None) for each row; see _items_from_manifest."""
+        raw = (staging or {}).get("items") or {}
+        staged = [dict(c, rel_dir="") for c in
+                  (raw.values() if isinstance(raw, dict) else raw)
+                  if isinstance(c, dict)]
+        staged_hashes = {str(c["hash"]) for c in staged if c.get("hash")}
+        keyed = []
+        for entry in entries:
+            digest = entry.get("content_hash")
+            keyed.append({
+                "orig_name": entry.get("orig_name"), "rel_dir": "",
+                "size_bytes": entry.get("size_bytes"), "ord": entry.get("ord"),
+                "hash": digest if digest and str(digest) in staged_hashes else None,
+            })
+        return broll_ingest.match_manifest_rows(keyed, staged)
+
+    def _item_from_manifest(self, entry: dict, staging: Optional[dict],
+                            candidate: Any = broll_ingest._UNMATCHED) -> dict:
         """One manifest row plus whatever this machine knows about the file.
 
-        Matched to a staged file by NAME alone: a music drop is flat (the
-        library has no folders -- `db.unique_dest` lands everything under the
-        share root), so there is no rel_dir to disambiguate with and none to
-        carry.
+        `candidate` is the staged entry `_items_from_manifest` paired it with
+        (None: nothing on this machine). Called without one, the row is
+        matched on its own, which can only be right for a manifest of one.
         """
-        local_path = ""
-        for candidate in ((staging or {}).get("items") or {}).values():
-            if candidate.get("name") == entry.get("orig_name"):
-                local_path = str(candidate.get("path") or "")
-                break
+        if candidate is broll_ingest._UNMATCHED:
+            candidate = self._match_staged([entry], staging)[0]
+        local_path = str((candidate or {}).get("path") or "")
         return {
             "uid": entry.get("uid"), "track_id": entry.get("track_id"),
             "ord": entry.get("ord"), "name": entry.get("orig_name") or "",

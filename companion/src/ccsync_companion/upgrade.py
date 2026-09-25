@@ -129,6 +129,13 @@ OLD_EXE_POLL_SECONDS = 30.0
 # a machine whose AV quarantined every download pulled ~20 MB every ten
 # minutes indefinitely, and a restart reset even that.
 ATTEMPTS_FILENAME = "upgrade_attempts.json"
+# bug-comp-core-1 (2026-09-24): the version a crash-loop revert took this
+# machine off. Kept apart from `reverted_from` (cleared by the first accepted
+# report) and from the per-version attempt counters (cleared when the bad
+# build STARTS, which it did three times), because this one has to outlive
+# both: it is what stops the unattended and pushed paths reinstalling it.
+CRASH_LOOPED_KEYS = ("crash_looped", "crash_looped_at")
+CRASH_LOOPED_KEEP = 8
 UPGRADE_BACKOFF_SECONDS = (600.0, 3600.0, 21600.0)
 MAX_UPGRADE_ATTEMPTS = 8
 # The `last_error` codes carried in the report, so the dashboard can tell an
@@ -140,6 +147,11 @@ ERROR_SPACE = "no-space"
 ERROR_REFUSED = "refused"
 ERROR_SWAP = "swap-failed"
 ERROR_EXEC = "exec-failed"
+# bug-comp-core-1 review (2026-09-24): not a failed download at all. The build
+# installed, then kept crashing, and the crash-loop guard put the previous one
+# back; note_reverted_from writes REL-8's give-up record with this code so an
+# older restored build honours it and the dashboard can say why.
+ERROR_CRASH_LOOPED = "crash-looped"
 
 
 def arch_key() -> str:
@@ -368,6 +380,7 @@ def note_upgrade_attempt(path: Path, version: Any, error: str,
     if str(record.get("version") or "") != wanted:
         record = {key: record[key] for key in
                   ("reverted_from", "reverted_at", "reverted_announced")
+                  + CRASH_LOOPED_KEYS
                   if key in record}
         record["version"] = wanted
         record["attempts"] = 0
@@ -453,12 +466,87 @@ def upgrade_retry_due(record: Any, version: Any, now: Optional[float] = None) ->
 def note_reverted_from(path: Path, version: Any, now: Optional[float] = None) -> None:
     """Leave the crash-loop revert where the RESTORED build will find it: it
     is the build that comes up next which has to toast it and report it, not
-    the one on its way out. Never raises."""
+    the one on its way out. Never raises.
+
+    bug-comp-core-1 (2026-09-24): it also records the version as one this
+    machine FLED (`crash_looped`), in keys of their own. `reverted_from` is a
+    one-shot telemetry marker that the first accepted report clears, and
+    until this existed nothing else remembered the revert: the restored
+    build's first report reply carried the same offer (and a standing admin
+    push), the back-off ledger was empty because the bad build had cleared
+    it by starting, and the machine reinstalled the build it had just fled.
+    In round two the supervisor had already spent its relaunches for the
+    hour, so the loop ended with no companion at all.
+
+    Review round (2026-09-24): `crash_looped` is only read by a build that
+    carries this fix, and the build that READS it is the RESTORED one, i.e.
+    the previous release. The first release carrying the fix reverts onto
+    0.9.77, which has never heard of the key. So the revert also writes
+    REL-8's own give-up record for the fled version (attempts at the cap,
+    `last_error` = ERROR_CRASH_LOOPED): every build since REL-8, 0.9.77
+    included, refuses an exhausted version on both unattended paths (a
+    person's click in the tray is not gated), never clears a record kept
+    for a version other than its own, and SENDS it in every report's
+    `sync_guard.upgrade`, which is also what tells the dashboard why a
+    standing [ UPDATE NOW ] never lands. The count is written, not
+    counted; `last_error` says which."""
     stamp = time.time() if now is None else float(now)
+    fled = str(version or "").strip()
     record = read_attempts(path)
     record["reverted_from"] = str(version or "")
     record["reverted_at"] = stamp
     record["reverted_announced"] = False
+    if fled:
+        earlier = [v for v in _crash_looped_versions(record) if v != fled]
+        record["crash_looped"] = (earlier + [fled])[-CRASH_LOOPED_KEEP:]
+        record["crash_looped_at"] = stamp
+        record["version"] = fled
+        record["attempts"] = MAX_UPGRADE_ATTEMPTS
+        record["last_error"] = ERROR_CRASH_LOOPED
+        record["last_attempt_at"] = stamp
+    _write_json(path, record)
+
+
+def _crash_looped_versions(record: Any) -> list[str]:
+    """The fled versions, oldest first. A plain string is read as one (the
+    shape this key had before the review round; nothing in the field wrote
+    it, but a ledger is data and data outlives the code that wrote it)."""
+    if not isinstance(record, dict):
+        return []
+    raw = record.get("crash_looped")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [str(v).strip() for v in raw if str(v or "").strip()]
+
+
+def crash_looped_on(record: Any, version: Any) -> bool:
+    """Did this machine revert OFF `version` because it could not stay up?
+    (bug-comp-core-1). Only those exact versions: a newly published build is
+    a new question, exactly as for REL-8's cap, because publishing a fix is
+    how the fleet gets off a bad build. EVERY fled version is remembered
+    (review round): a second revert, off vX+1, must not un-flee vX, which an
+    admin could make current again. Never raises."""
+    wanted = str(version or "").strip()
+    return bool(wanted) and wanted in _crash_looped_versions(record)
+
+
+def clear_crash_looped(path: Path, version: Any = None) -> None:
+    """Forget a fled version (every one when `version` is None). Called when
+    this machine comes up ON it (a person installed it by hand from the
+    tray, and it is running), so the block has nothing left to protect.
+    Never raises."""
+    record = read_attempts(path)
+    if not any(key in record for key in CRASH_LOOPED_KEYS):
+        return
+    wanted = str(version or "").strip()
+    left = [v for v in _crash_looped_versions(record) if wanted and v != wanted]
+    if left:
+        record["crash_looped"] = left
+    else:
+        for key in CRASH_LOOPED_KEYS:
+            record.pop(key, None)
     _write_json(path, record)
 
 
@@ -912,6 +1000,7 @@ def keep_old_exe_until_healthy(
     poll_seconds: float = OLD_EXE_POLL_SECONDS,
     clock: Callable[[], float] = time.monotonic,
     cleanup: Callable[[], bool] = cleanup_old_exe,
+    min_uptime_seconds: float = CRASH_LOOP_WINDOW_SECONDS,
 ) -> str:
     """Block until this build has proven itself, then delete `<exe>.old`.
 
@@ -923,14 +1012,29 @@ def keep_old_exe_until_healthy(
     APP-5 / REL-2, replacing `threading.Timer(60.0, cleanup_old_exe)`. Sixty
     seconds is shorter than every failure mode this guard is for: a Tk fault
     in the first dialog, an exception on a code path only one editor's config
-    reaches, a lane touching a surrogate path. Never raises."""
-    deadline = clock() + max(0.0, float(keep_seconds))
+    reaches, a lane touching a surrogate path. Never raises.
+
+    bug-comp-core-2 (2026-09-24): an accepted report alone is NOT enough. The
+    reporter's first post goes out two seconds after start, so on any machine
+    that can reach its dashboard the copy went within ~2-32 s -- sooner than
+    the 60 s timer this replaced -- and APP-5's own scenario (reports once,
+    dies three minutes later, three times in ten minutes) found "no rollback
+    copy" when the crash loop tripped. The report now only counts once THIS
+    process has also been up for `min_uptime_seconds`, the crash-loop window:
+    by then any later start is outside the window measured from the first
+    start of the chain, so the revert could no longer fire anyway and the
+    copy has nothing left to protect."""
+    started = clock()
+    deadline = started + max(0.0, float(keep_seconds))
+    min_uptime = max(0.0, float(min_uptime_seconds))
     while True:
         reason = ""
         try:
-            if healthy():
-                reason = "the dashboard accepted a report from it"
-            elif clock() >= deadline:
+            now = clock()
+            if (now - started) >= min_uptime and healthy():
+                reason = ("the dashboard accepted a report from it and it has "
+                          f"stayed up for {int(min_uptime // 60)} minutes")
+            elif now >= deadline:
                 reason = f"it has been up for {int(keep_seconds // 60)} minutes"
         except Exception:
             log.debug("upgrade: health check for the rollback copy failed", exc_info=True)

@@ -1200,7 +1200,11 @@ def test_the_companion_runs_the_vendored_ffmpeg_command(monkeypatch, tmp_path, p
     plan = companion_ytdl_exec.edit_ready_plan(probe)
     assert plan["convert"] is True
     tmp = tmp_path / companion_ytdl_exec.editready_name(original.name)
-    ours = companion_ytdl_exec.edit_ready_argv(cmd[0], original, tmp, plan)
+    # bug-comp-ytdl-1 (2026-09-24): both sides read the original from its
+    # staged name while ffmpeg runs, and must agree on that name too.
+    staged = tmp_path / companion_ytdl_exec.staged_source_name(original.name)
+    assert server_downloader.staged_source_name(str(original)) == str(staged)
+    ours = companion_ytdl_exec.edit_ready_argv(cmd[0], staged, tmp, plan)
     assert ours == cmd
     # and both deliver under the ORIGINAL name -- the fact the 0.8.0 scope cut
     # misread as an unreproducible `.editready` deliverable

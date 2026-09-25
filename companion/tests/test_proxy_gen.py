@@ -2052,15 +2052,17 @@ def test_stdout_is_piped_only_when_progress_was_asked_for(monkeypatch):
     captured: dict = {}
 
     def _popen(cmd, **kwargs):
-        captured[tuple(cmd)] = kwargs
+        # argv[0] is resolved at the spawn since bug-comp-media-1 (2026-09-24),
+        # to whatever ffmpeg this machine has; the flags are what is asserted
+        captured[tuple(cmd[1:])] = kwargs
         return type("P", (), {"pid": 1})()
 
     monkeypatch.setattr(sp, "Popen", _popen)
     proxy_gen._default_popen(["ffmpeg", "-progress", "pipe:1", "-i", "x"])
     proxy_gen._default_popen(["ffmpeg", "-i", "x"])
 
-    assert captured[("ffmpeg", "-progress", "pipe:1", "-i", "x")]["stdout"] is sp.PIPE
-    assert captured[("ffmpeg", "-i", "x")]["stdout"] is sp.DEVNULL
+    assert captured[("-progress", "pipe:1", "-i", "x")]["stdout"] is sp.PIPE
+    assert captured[("-i", "x")]["stdout"] is sp.DEVNULL
 
 
 def test_progress_pairs_become_a_percentage_and_an_eta(tmp_path):

@@ -1616,8 +1616,22 @@ def _phase_download(c, job):
     job_id = job['id']
     outdir = config.safe_join(config.PROJECTS_ROOT, job['project_label'],
                               'Youtube', job['term_dir'])
-    ensure_outdir(outdir)
-    _sweep_stale(outdir)
+    # bug-music-ytdl-1 (2026-09-24): the tree question is asked BEFORE
+    # anything is created under the root. `tree_is_gone` answers "present" the
+    # moment <root>/<label> is a directory, and `ensure_outdir` makedirs
+    # exactly that on the leftover mount point, so the ytdl-web-5 guard below
+    # (and `_no_room_note`'s copy of it) could never fire once it ran after
+    # the makedirs: the job succeeded into the container overlay and the
+    # ledger claimed clips with no file behind them. The folder it left there
+    # then also answered "present" to every later press. When the tree is
+    # gone nothing is created at all; the reclaim and the requester's grace
+    # still run, because a companion writing to its OWN disk does not need
+    # this container's mount.
+    from ytdlweb import routes_api as _routes_api   # circular at module scope
+    gone = _routes_api.tree_missing_note(job)
+    if not gone:
+        ensure_outdir(outdir)
+        _sweep_stale(outdir)
 
     # Reached with download_mode='local' only when the lease has EXPIRED --
     # run_job returns early while it is live, and db.claim_next_job hides the
@@ -1679,8 +1693,7 @@ def _phase_download(c, job):
     # paste of those ids is skipped as "the fleet already has that video". The
     # clips are lost on the next container recreate. Refusing is strictly
     # better, and `tree_is_gone` answers False for everything it cannot prove.
-    from ytdlweb import routes_api as _routes_api   # circular at module scope
-    gone = _routes_api.tree_missing_note(job)
+    # (measured above, before `ensure_outdir` could make it untrue)
     if gone:
         log.warning('job %s: not starting the download phase: %s', job_id, gone)
         _clear_progress(job_id)

@@ -167,6 +167,9 @@ _OPEN_GET_ONLY = frozenset({
     "/favicon.ico", "/manifest.webmanifest", "/sw.js", "/offline",
     "/cards/manifest.webmanifest", "/cards/icon.svg", "/cards/sw.js",
     "/.well-known/assetlinks.json",
+    # UI port 3.4 (wave 6): the signed-out "use the classic look" escape.
+    # The route refuses variant=cc without a session itself.
+    "/ui/preview",
 })
 
 _READ_METHODS = frozenset({"GET", "HEAD"})
@@ -1561,6 +1564,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(subject_data_api.router)
     app.include_router(ui.router)
+    # The terminal look's per-browser cookie and /go/<panel> (UI port 7.0).
+    from . import ui_variant
+    app.include_router(ui_variant.router)
+    # The terminal chrome's own route (/partials/halt-line) and the HUD's
+    # Jinja globals (UI port phase 1).
+    from . import ui_chrome
+    app.include_router(ui_chrome.router)
+    # The terminal home and project pages' new-named routes (UI port phase 2).
+    from . import ui_home
+    app.include_router(ui_home.router)
+    # The account page's person queue (UI port phase 3).
+    from . import ui_everyday
+    app.include_router(ui_everyday.router)
+    # The terminal Health tabs' own routes (UI port phase 5).
+    from . import ui_health
+    app.include_router(ui_health.router)
+    # The terminal Packages page's Jinja global (UI port phase 4, no route).
+    from . import ui_packages  # noqa: F401
     # The admin project<->editor assignment matrix (2026-08-17): one page,
     # /admin/assignments, that writes nothing itself -- it calls the selection
     # routes api.router already registered above (see assignments.py).
@@ -1664,7 +1685,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _install_busy_handler_on_mounts(app, unhandled_error)
 
     if STATIC_DIR.is_dir():
-        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+        from .static_files import CachedStaticFiles
+        app.mount("/static", CachedStaticFiles(directory=str(STATIC_DIR)), name="static")
 
     # Browsers request /favicon.ico unprompted (the path is already in
     # _OPEN_EXACT); serve the product mark instead of a 404. The

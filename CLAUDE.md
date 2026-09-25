@@ -325,6 +325,16 @@ run alongside the tray app — it would hold port 8899.
   note, not a refusal. The dashboard records `machine_state.report_via` on
   change and alerts only on `http_public`. Site-wide "require https" is
   deferred (plan §6): it could strand the live http fleet.
+- **The CC Terminal look is an OVERLAY** (2026-09-25, dashboard 0.7.62,
+  `docs/UI_REDESIGN_PORT_PLAN.md`, ledgers `docs/UI_PORT_LEDGER/`): every page
+  has a `templates/cc/` twin drawn only for the page groups in the site
+  setting `ui_terminal_groups` (empty in the vendor build, so every site is
+  classic) or for a browser holding the preview cookie (`/ui/preview`,
+  `ui_preview` decides who may). `ui_variant.render` picks the set; the
+  classic set can never load `cc/*`. A change to a classic template that
+  adds a control must add it to the cc twin too (the port was built without
+  the legal-gap controls and had to be caught up). Phase 8 (default on,
+  delete classic) is NOT built: it waits for a two-week soak.
 - **The server triage agent** (2026-09-24, `docs/SERVER_TRIAGE_AGENT.md`,
   schema v57): `triage.py` runs Claude Code at `alerts_triage_hours` in the
   site zone, READ-ONLY (Read/Grep/Glob over a scrubbed `evidence.json` and

@@ -1,0 +1,396 @@
+{# USERS panel, terminal look (phase 4, group settings-fleet; classic twin
+   partials/admin_users.html). Every route that renders the classic partial
+   renders this one when the group is on, with the same context, the same
+   form names, the same hx-post URLs and the same confirms (their copy is
+   pinned by tests and by the classic page).
+
+   One swap unit, several windows: every form here targets
+   `closest .admin-users-box`, a plain div that holds the windows, and cc.js
+   re-applies each window's stored fold after the swap (plan 3.1's keeper
+   fallback). The one-time secret rides out of band, first, at the top level. #}
+{% macro bar(hid, title, meta='', label='') -%}
+<div class="bar"><button class="fold" type="button" aria-expanded="true" aria-labelledby="{{ hid }}"><span class="fold-g" aria-hidden="true">&#9662;</span></button><span aria-hidden="true">&#9484;&#9472;&#9569;</span><h2 class="t" id="{{ hid }}">{{ title.split('_') | join('<span aria-hidden="true">_</span><span class="vh"> </span>' | safe) }}</h2><span aria-hidden="true">&#9566;</span><span class="bar-rule"></span>{% if meta %}<span class="meta">{{ meta }}</span>{% endif %}<span aria-hidden="true">&#9552;&#9488;</span></div>
+{%- endmacro %}
+{# LG-2 / LG-3 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.2 and 4.3, 2026-09-25),
+   carried from the classic partial: the two data-subject buttons, one macro
+   so every row that names a person carries the same pair. EXPORT is a plain
+   form, not htmx (the answer is a file download, which htmx would swap in as
+   text) and carries the hidden `csrf` field app.csrf_gate reads. ERASE keeps
+   the account and every computer's current state (decision D15), and its
+   confirm says exactly that. #}
+{% macro subject_buttons(name) -%}
+  <form class="inline-form" method="post" action="/api/v1/admin/users/{{ name | urlencode }}/export">
+    <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+    <button class="key sm" type="submit"
+            title="Downloads one JSON file with everything this dashboard holds about {{ name }}: their computers' records, history, sessions, requests and audit entries. Passwords and keys are left out. The download is recorded in the audit log."><span class="t">export data</span></button>
+  </form>
+  <form class="inline-form" hx-post="/partials/admin/users/erase-history"
+        hx-target="closest .admin-users-box" hx-swap="outerHTML"
+        hx-confirm="Erase the history of {{ name }}? Their account and what their computers report now stay.">
+    <input type="hidden" name="username" value="{{ name }}">
+    <button class="key quiet sm" type="submit"
+            title="Removes their computers' past sync and transfer history, completion and missing-file records, stored diagnostics, expired sign-in sessions, past failed sign-ins and finished YouTube requests. Their account, their computers and what those computers report now all stay."><span class="t">erase history</span></button>
+  </form>
+{%- endmacro %}
+{% include "partials/minted_secret.html" %}
+<div class="admin-users-box sp-stack">
+  {% if error %}
+    {# DUI-6: `error-banner` is what htmx_errors.js moves next to the button
+       that caused it. #}
+    <div class="note err error-banner"><span class="grow">{{ error }}</span></div>
+  {% endif %}
+  {% if notice %}
+    <div class="note ok"><span class="grow">{{ notice }}</span></div>
+  {% endif %}
+
+  {% if admin_users.auth_method == 'local' %}
+  <section class="win" data-win="local-accounts" aria-labelledby="win-local-accounts-t">
+    {{ bar("win-local-accounts-t", "local_accounts", ((admin_users.local_users | length) ~ " accounts") if admin_users.local_users else "none yet", "local accounts") }}
+    {% if admin_users.local_users %}
+    <div class="scroll-x"><table class="tbl stack-sm">
+      <thead><tr><th>username</th><th title="What other people see for this person. The sign-in name never changes.">shown as</th><th title="admin: can use Settings. editor: their own computers and projects only.">role</th><th title="active, disabled (cannot sign in) or suspended (cannot sync)">status</th><th title="keys that let them use SFTP to the server">ssh keys</th><th>set password</th><th></th></tr></thead>
+      <tbody>
+      {% for u in admin_users.local_users %}
+        <tr class="editor-row">
+          <td class="who" data-label="username"><b>{{ u.username }}</b></td>
+          <td data-label="shown as">
+            {# F1a (account page 2026-09-25, owner decision D-5). #}
+            <form class="inline-form cell-form" hx-post="/partials/admin/users/display-name"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+              <input type="hidden" name="username" value="{{ u.username }}">
+              <input class="inp sm" type="text" name="display_name" value="{{ display_names.get(u.username, '') if display_names is defined and display_names else '' }}"
+                     maxlength="64" size="14" placeholder="{{ u.username }}" aria-label="the name {{ u.username }} is shown as"
+                     title="What other people see for {{ u.username }}. Up to 64 characters. Clear it and save to show the sign-in name again.">
+              <button class="key sm" type="submit"><span class="t">save</span></button>
+            </form>
+          </td>
+          <td data-label="role">{{ u.role }}</td>
+          <td data-label="status">{% if u.disabled %}<span class="tag err" title="Cannot sign in to the dashboard or SFTP.">disabled</span>{% elif u.username not in (admin_users.suspended or []) %}<span class="tag ok">active</span>{% endif %}
+            {% if u.username in (admin_users.suspended or []) %}<span class="tag warn" title="An admin paused this person: their computers are turned away and their projects are unshared. The sync plan is kept. Resume puts it back.">suspended</span>{% endif %}</td>
+          <td data-label="ssh keys">
+            <div class="key-list">
+            {% if u.ssh_keys %}
+              {% for k in u.ssh_keys %}
+                <div class="kl"><span class="sp-fp">{{ k.fingerprint }}</span>{% if k.label %} <span class="muted">({{ k.label }})</span>{% endif %}
+                  {# DUI-18 (2026-09-04): revoking stops their SFTP now. #}
+                  <form class="inline-form" hx-post="/partials/admin/users/keys/remove"
+                        hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                        hx-confirm="Revoke this SSH key for {{ u.username }}? Their SFTP stops now.">
+                    <input type="hidden" name="username" value="{{ u.username }}">
+                    <input type="hidden" name="fingerprint" value="{{ k.fingerprint }}">
+                    <button class="key quiet sm" type="submit"
+                          title="Their SFTP access through this key stops immediately, and the key text is not stored anywhere this page can put it back from: they have to send it again."><span class="t">revoke</span></button>
+                  </form>
+                </div>
+              {% endfor %}
+            {% else %}
+              <span class="muted">none</span>
+            {% endif %}
+            </div>
+            <form class="inline-form cell-form" hx-post="/partials/admin/users/keys/add"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+              <input type="hidden" name="username" value="{{ u.username }}">
+              <input class="inp sm sp-w-key" type="text" name="key_text" placeholder="ssh-ed25519 AAAA... (add key)" size="28" aria-label="add a key for {{ u.username }}">
+              <button class="key sm" type="submit"><span class="t">add</span></button>
+            </form>
+          </td>
+          <td data-label="set password">
+            <form class="inline-form cell-form" hx-post="/partials/admin/users/password"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  hx-confirm="Set a new password for {{ u.username }}? Their old one stops working now.">
+              <input type="hidden" name="username" value="{{ u.username }}">
+              <input class="inp sm sp-w-pw" type="password" name="password" placeholder="new password" required aria-label="new password for {{ u.username }}">
+              <button class="key sm" type="submit"
+                      title="The old password stops working the moment this lands, so they cannot sign in until you tell them the new one. This page does not show it again."><span class="t">set</span></button>
+            </form>
+          </td>
+          <td class="acts-cell" data-label="actions"><span class="acts">
+            {# DCORE-1 (2026-09-04): the confirm names the consequence exactly. #}
+            <form class="inline-form" hx-post="/partials/admin/users/disable"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  {% if not u.disabled %}hx-confirm="Stop {{ u.username }} signing in? Their computers keep their projects until you untick them."{% endif %}>
+              <input type="hidden" name="username" value="{{ u.username }}">
+              <input type="hidden" name="disabled" value="{{ '0' if u.disabled else '1' }}">
+              <button class="key sm w-9" type="submit"
+                      title="{% if u.disabled %}Let this account sign in again. Its computers are welcomed back on their next report.{% else %}A disabled account cannot sign into the dashboard or SFTP, its sessions and report tokens are revoked, and its computers are turned away when they report. The files already on those computers stay there, and enable here undoes all of it.{% endif %}"><span class="t">{% if u.disabled %}enable{% else %}disable{% endif %}</span></button>
+            </form>
+            {% set suspend_user = u.username %}{% include "partials/admin_suspend_button.html" with context %}
+            {{ subject_buttons(u.username) }}
+            <form class="inline-form" hx-post="/partials/admin/users/delete"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  hx-confirm="Delete {{ u.username }}, their computers and their sync plans? DISABLE only stops logins.">
+              <input type="hidden" name="username" value="{{ u.username }}">
+              <button class="key quiet sm" type="submit"
+                      title="Their login, SSH keys, browser sessions and report tokens go, and so do all of their computers: sync plans, status rows and Syncthing devices (they stop receiving projects). Files already on their computers stay there."><span class="t">delete</span></button>
+            </form>
+          </span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}
+    <div class="empty"><span class="glyph" aria-hidden="true">&middot; &middot; &middot;</span>No local accounts yet.</div>
+    {% endif %}
+  </section>
+
+  <section class="win" data-win="create-local" id="win-create" aria-labelledby="win-create-t">
+    {{ bar("win-create-t", "create_local_account", "", "create a local account") }}
+    <div class="body">
+      <form class="form" hx-post="/partials/admin/users/create" hx-target="closest .admin-users-box" hx-swap="outerHTML">
+        <div class="form-row"><label class="lbl" for="new-local-user">username</label><input class="inp sp-w-md" id="new-local-user" type="text" name="username" placeholder="username (e.g. jsmith)" required></div>
+        <div class="form-row"><label class="lbl" for="new-local-role">role</label><select class="sel sp-w-md" id="new-local-role" name="role">
+          <option value="editor" selected>editor</option>
+          <option value="admin">admin</option>
+        </select></div>
+        <div class="form-row"><label class="lbl" for="new-local-key">ssh public key<small>optional, for SFTP</small></label><textarea class="area sp-w-lg" id="new-local-key" name="ssh_pubkey" placeholder="ssh-ed25519 AAAA... user@host" rows="2"></textarea></div>
+        <div class="form-row"><label class="lbl" for="new-local-pw">password<small>optional</small></label><div><input class="inp sp-w-md" id="new-local-pw" type="password" name="password" placeholder="leave blank to generate one">
+          <div class="hint">Blank generates a one-time password that is shown once, at the top of this page.</div></div></div>
+        {# DUI-4: both labels live in the button; the idle one and the busy one
+           share one cell, so the button keeps its size while it waits. #}
+        <div class="form-row"><span></span><div><button class="key primary sp-busy" type="submit"><span class="t">create</span><span class="busy-t">creating the account...</span></button></div></div>
+      </form>
+    </div>
+  </section>
+  {% endif %}
+
+  {% if admin_users.truenas_configured %}
+  {# DASH-7: an unreachable backend is a note, then whichever half answered. #}
+  {% if admin_users.error %}
+    <div class="note err error-banner"><span class="grow">{{ admin_users.error }}</span></div>
+  {% endif %}
+
+  <section class="win" data-win="devices" aria-labelledby="win-devices-t">
+    {{ bar("win-devices-t", "devices_awaiting_approval", ((admin_users.pending_devices | length) ~ " waiting") if admin_users.pending_devices else "none pending", "devices awaiting approval") }}
+    {% if admin_users.syncthing_error %}
+      <div class="body"><div class="note warn"><span class="grow">The device list is unavailable: {{ admin_users.syncthing_error }}</span></div></div>
+    {% elif admin_users.pending_devices %}
+      <div class="scroll-x"><table class="tbl stack-sm">
+        <thead><tr><th title="The long id the sync engine on that computer introduced itself with.">device id</th><th title="pending: asked to join. unmapped: joined under a name that is not a person.">status</th><th>computer name</th><th title="The person this computer belongs to.">owner (editor)</th></tr></thead>
+        <tbody>
+        {% for d in admin_users.pending_devices %}
+          <tr class="editor-row">
+            <td class="wrap" data-label="device id"><span class="sp-fp">{{ d.device_id }}</span></td>
+            <td data-label="status"><span class="tag {{ 'warn' if d.status == 'pending' else 'err' }}">{{ d.status | lower }}</span></td>
+            <td data-label="computer name">{{ d.suggested_machine or d.current_name or "-" }}</td>
+            <td data-label="owner (editor)">
+              {# The OWNER, never the computer's own name (CR-91). #}
+              <form class="inline-form cell-form" hx-post="/partials/admin/users/approve"
+                    hx-target="closest .admin-users-box" hx-swap="outerHTML">
+                <input type="hidden" name="device_id" value="{{ d.device_id }}">
+                <input class="inp sm sp-w-name" type="text" name="username" list="known-editors"
+                       value="{{ d.suggested_owner }}" aria-label="owner of {{ d.suggested_machine or d.device_id }}"
+                       placeholder="editor username" autocomplete="off" required>
+                {% if d.suggested_owner %}<span class="tag ok" title="Filled in from what that computer's companion already told the dashboard.">reported</span>{% endif %}
+                <label class="check"><input type="checkbox" name="create_new" value="1"><span class="g" aria-hidden="true"></span><span class="l">create new editor</span></label>
+                <button class="key primary sm" type="submit" title="Add this computer to the person named beside it. Their projects are shared with it on the next cycle."><span class="t">approve</span></button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+      <datalist id="known-editors">
+        {% for name in admin_users.known_editors or [] %}<option value="{{ name }}"></option>{% endfor %}
+      </datalist>
+      <div class="foot-in">Pick the <b>person</b> who owns this computer, never the computer's own name.
+        One editor can own several computers, so a second computer takes the SAME username as their first.
+        A row marked <span class="tag ok">reported</span> was filled in from what that computer's
+        companion already told the dashboard.</div>
+    {% else %}
+      <div class="empty"><span class="glyph" aria-hidden="true">&middot; &middot; &middot;</span>No device is waiting. A new computer appears here when its Syncthing asks to join.</div>
+    {% endif %}
+  </section>
+
+  {% if admin_users.auth_method != 'local' %}
+  <section class="win" data-win="editor-accounts" aria-labelledby="win-editor-accounts-t">
+    {{ bar("win-editor-accounts-t", "editor_accounts", ((admin_users.editors | length) ~ " on the NAS") if admin_users.editors else "", "editor accounts") }}
+    {% if admin_users.truenas_error %}
+      <div class="body"><div class="note warn"><span class="grow">The account list is unavailable: {{ admin_users.truenas_error }}</span></div></div>
+    {% elif admin_users.editors %}
+      <div class="scroll-x"><table class="tbl stack-sm">
+        <thead><tr><th>username</th><th title="What other people see for this person. The sign-in name never changes.">shown as</th><th title="The account's number on the NAS; files they write carry it.">uid</th><th title="The key their upload and proxy download sign in with.">ssh key</th><th title="Whether the account can open the NAS shares.">smb</th><th title="Locked on the NAS, or paused here (suspended).">locked</th><th title="Their NAS password, which is also their dashboard password.">set password</th><th></th></tr></thead>
+        <tbody>
+        {% for e in admin_users.editors %}
+          <tr class="editor-row">
+            <td class="who" data-label="username"><b>{{ e.username }}</b></td>
+            <td data-label="shown as">
+              <form class="inline-form cell-form" hx-post="/partials/admin/users/display-name"
+                    hx-target="closest .admin-users-box" hx-swap="outerHTML">
+                <input type="hidden" name="username" value="{{ e.username }}">
+                <input class="inp sm" type="text" name="display_name" value="{{ display_names.get(e.username, '') if display_names is defined and display_names else '' }}"
+                       maxlength="64" size="14" placeholder="{{ e.username }}" aria-label="the name {{ e.username }} is shown as"
+                       title="What other people see for {{ e.username }}. Up to 64 characters. Clear it and save to show the sign-in name again.">
+                <button class="key sm" type="submit"><span class="t">save</span></button>
+              </form>
+            </td>
+            <td data-label="uid">{{ e.uid }}</td>
+            <td data-label="ssh key">{% if e.has_ssh_key %}<span class="tag ok">set</span>{% else %}<span class="tag err">no ssh key</span>
+              <span class="sub">upload and proxy download will not run until a key is added</span>{% endif %}
+              <form class="inline-form cell-form" hx-post="/partials/admin/users/create"
+                    hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                    {% if e.has_ssh_key %}hx-confirm="Replace {{ e.username }}'s SSH key? Their upload and proxy download stop until it is in use."{% endif %}>
+                <input type="hidden" name="username" value="{{ e.username }}">
+                <input class="inp sm sp-w-key" type="text" name="ssh_pubkey" placeholder="ssh-ed25519 AAAA... user@host" size="26" required aria-label="ssh key for {{ e.username }}">
+                <button class="key sm" type="submit"
+                        title="Installs this public key on the NAS account. It is what upload and proxy download authenticate with: the editor's installer prints it at the end, and their wizard also sends it up on its own for approval on this page."><span class="t">{% if e.has_ssh_key %}update ssh key{% else %}add ssh key{% endif %}</span></button>
+              </form>
+            </td>
+            <td data-label="smb">{% if e.smb %}<span class="tag ok">on</span>{% else %}<span class="tag err">off</span>{% endif %}</td>
+            <td data-label="locked">{% if e.locked %}<span class="tag err">locked</span>{% elif e.username in (admin_users.suspended or []) %}<span class="tag warn" title="An admin paused this person: their computers are turned away and their projects are unshared. The sync plan is kept. Resume puts it back.">suspended</span>{% else %}<span class="muted">-</span>{% endif %}</td>
+            <td data-label="set password">
+              <form class="inline-form cell-form" hx-post="/partials/admin/users/password"
+                    hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                    hx-confirm="Set a new password for {{ e.username }}? It is their NAS login too.">
+                <input type="hidden" name="username" value="{{ e.username }}">
+                <input class="inp sm sp-w-pw" type="password" name="password" placeholder="new password" required aria-label="new password for {{ e.username }}">
+                <button class="key sm" type="submit"
+                        title="This is their NAS account password: the dashboard, SMB and SFTP all stop working with the old one the moment this lands. It is not shown again."><span class="t">set</span></button>
+              </form>
+            </td>
+            <td class="acts-cell" data-label="actions"><span class="acts">
+              {% set suspend_user = e.username %}{% include "partials/admin_suspend_button.html" with context %}
+            {{ subject_buttons(e.username) }}
+              <form class="inline-form" hx-post="/partials/admin/users/delete"
+                    hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                    hx-confirm="Delete {{ e.username }}: their NAS account, their computers and their sync plans?">
+                <input type="hidden" name="username" value="{{ e.username }}">
+                <button class="key quiet sm" type="submit"
+                        title="Suspend pauses them instead and keeps all of this. Delete: their NAS account, browser sessions and report tokens go, and so do all of their computers: sync plans, status rows and Syncthing devices (they stop receiving projects). Files already on their computers stay there, and nothing in the project tree is touched."><span class="t">delete</span></button>
+              </form>
+            </span></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+    {% else %}
+      <div class="empty"><span class="glyph" aria-hidden="true">&middot; &middot; &middot;</span>No editor accounts yet.</div>
+    {% endif %}
+  </section>
+
+  <section class="win" data-win="create-nas" id="win-create" aria-labelledby="win-create-t">
+    {{ bar("win-create-t", "create_new_editor_account", "", "create a new editor account") }}
+    <div class="body">
+      <form class="form" hx-post="/partials/admin/users/create" hx-target="closest .admin-users-box" hx-swap="outerHTML">
+        <div class="form-row"><label class="lbl" for="new-nas-user">username</label><input class="inp sp-w-md" id="new-nas-user" type="text" name="username" placeholder="username (e.g. jsmith)" required></div>
+        <div class="form-row"><label class="lbl" for="new-nas-name">full name<small>optional</small></label><input class="inp sp-w-md" id="new-nas-name" type="text" name="full_name" placeholder="full name"></div>
+        {# UX-14 / OPS-2 (2026-09-04): the key is NOT required. #}
+        <div class="form-row"><label class="lbl" for="new-nas-key">ssh public key<small>optional</small></label><div><textarea class="area sp-w-lg" id="new-nas-key" name="ssh_pubkey" placeholder="ssh-ed25519 AAAA... user@host" rows="2"></textarea>
+          <div class="hint">Leave this blank if they have not installed yet: their installer sends the key up on first sign-in and
+            you approve it on this page. Upload and proxy download do not run until a key is on the account.</div></div></div>
+        <div class="form-row"><label class="lbl" for="new-nas-pw">known password<small>optional</small></label><input class="inp sp-w-md" id="new-nas-pw" type="password" name="password" placeholder="otherwise randomized and unusable for dashboard login"></div>
+        <div class="form-row"><span></span><div class="inline">
+          <button class="key primary sp-busy" type="submit"><span class="t">create</span><span class="busy-t">creating the account on the NAS...</span></button>
+          <span class="hint">This can take up to two minutes: the NAS creates the account, its group and its home directory. Leave the page open.</span>
+        </div></div>
+      </form>
+    </div>
+  </section>
+  {% endif %}
+  {% elif admin_users.auth_method != 'local' %}
+    {# UX-13 (2026-09-04): the new name first, and the two places to set it. #}
+    <div class="note warn"><span class="grow">This dashboard has no NAS password, so editor accounts cannot be
+      created here. Set it on <a href="/setup#nas_connect">Settings, Setup (Connect to your
+      NAS)</a>, or set DASH_NAS_PW in the container.</span></div>
+  {% endif %}
+
+  {% if admin_users.pending_ssh_keys %}
+  {# OPS-2 (2026-09-04): the key an editor's installer generated. #}
+  <section class="win" data-win="pending-keys" aria-labelledby="win-pending-keys-t">
+    {{ bar("win-pending-keys-t", "ssh_keys_awaiting_approval", (admin_users.pending_ssh_keys | length) ~ " waiting", "ssh keys awaiting approval") }}
+    <div class="lede-in">Sent up by an editor's installer. Their upload and proxy download cannot authenticate until one is approved.</div>
+    <div class="scroll-x"><table class="tbl stack-sm">
+      <thead><tr><th>editor</th><th title="A short, unique summary of the key: compare it with what the editor sees.">fingerprint</th><th title="The computer the installer ran on.">from</th><th>sent</th><th></th></tr></thead>
+      <tbody>
+      {% for k in admin_users.pending_ssh_keys %}
+        <tr class="editor-row">
+          <td class="who" data-label="editor"><b>{{ k.username }}</b></td>
+          <td class="wrap" data-label="fingerprint" title="{{ k.key_text }}"><span class="sp-fp">{{ k.fingerprint }}</span></td>
+          <td data-label="from">{{ k.machine or "-" }}</td>
+          <td data-label="sent">{{ k.submitted_at | ago }}</td>
+          <td class="acts-cell" data-label="actions"><span class="acts">
+            <form class="inline-form" hx-post="/partials/admin/users/keys/approve"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+              <input type="hidden" name="username" value="{{ k.username }}">
+              <input type="hidden" name="fingerprint" value="{{ k.fingerprint }}">
+              <button class="key primary sm" type="submit"
+                      title="Installs this key on {{ k.username }}'s account. It is what their upload and proxy download authenticate with."><span class="t">approve</span></button>
+            </form>
+            <form class="inline-form" hx-post="/partials/admin/users/keys/dismiss"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  hx-confirm="Throw away this key for {{ k.username }}? Their computer can offer it again.">
+              <input type="hidden" name="username" value="{{ k.username }}">
+              <input type="hidden" name="fingerprint" value="{{ k.fingerprint }}">
+              <button class="key quiet sm" type="submit"
+                      title="Removes the offer only. Nothing on the account changes and that computer can offer the key again."><span class="t">dismiss</span></button>
+            </form>
+          </span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+  </section>
+  {% endif %}
+
+  {# The fleet's own records (CR-76), shown whatever the identity backend. #}
+  <section class="win" data-win="computers" aria-labelledby="win-computers-t">
+    {{ bar("win-computers-t", "computers", ((admin_users.computers | length) ~ " computers") if admin_users.computers else "none yet", "computers") }}
+    <div class="lede-in">Every computer that has reported in. <b>Remove</b> forgets it: its sync plan, its status rows and its Syncthing device.</div>
+    {% if admin_users.computers %}
+    <div class="scroll-y box-h"><div class="scroll-x"><table class="tbl stack-sm">
+      <thead><tr><th>editor</th><th title="Hover a name for its Syncthing device id.">computer</th><th>platform</th><th title="editor: syncs its own copy. base: wired to the server, syncs nothing.">mode</th><th title="The CC Sync app version it last reported.">running</th><th title="How many projects are ticked for this computer.">plan</th><th>last report</th><th></th></tr></thead>
+      <tbody>
+      {% for m in admin_users.computers %}
+        <tr class="editor-row">
+          <td class="who" data-label="editor">{{ m.editor_username }}</td>
+          <td data-label="computer" title="{{ m.syncthing_device_id or 'no Syncthing device reported' }}"><b>{{ m.machine }}</b></td>
+          <td data-label="platform">{{ m.platform or "?" }}</td>
+          <td data-label="mode">{{ m.mode }}</td>
+          <td data-label="running">{{ m.companion_version or "?" }}</td>
+          <td data-label="plan">{{ m.plan_count }} project{{ "" if m.plan_count == 1 else "s" }}</td>
+          <td data-label="last report">{{ m.last_seen | ago }}</td>
+          <td class="acts-cell" data-label="actions">
+            <form class="inline-form" hx-post="/partials/admin/machines/forget"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  hx-confirm="Forget {{ m.machine }}? It stops receiving projects. A running companion re-registers.">
+              <input type="hidden" name="editor" value="{{ m.editor_username }}">
+              <input type="hidden" name="machine" value="{{ m.machine }}">
+              <button class="key quiet sm" type="submit"
+                      title="Its sync plan, its status rows and its Syncthing device go. Files already on it stay there. If the companion on it is still running and signed in it registers itself again on its next report: uninstall the companion first, or delete the user instead, if it should stay gone."><span class="t">remove</span></button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div></div>
+    {% else %}
+    <div class="empty"><span class="glyph" aria-hidden="true">&middot; &middot; &middot;</span>No computer has reported in yet.</div>
+    {% endif %}
+  </section>
+
+  {% if admin_users.fleet_only_editors %}
+  <section class="win" data-win="orphans" aria-labelledby="win-orphans-t">
+    {{ bar("win-orphans-t", "editors_without_an_account", (admin_users.fleet_only_editors | length) ~ "", "editors without an account") }}
+    <div class="lede-in">Known to the fleet (a device, a plan or a report), but no account here.</div>
+    <div class="scroll-x"><table class="tbl stack-sm">
+      <thead><tr><th>username</th><th></th></tr></thead>
+      <tbody>
+      {% for name in admin_users.fleet_only_editors %}
+        <tr class="editor-row">
+          <td class="who" data-label="username"><b>{{ name }}</b></td>
+          <td class="acts-cell" data-label="actions">
+            <form class="inline-form" hx-post="/partials/admin/users/delete"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  hx-confirm="Delete {{ name }} from the fleet, with their computers and sync plans?">
+              <input type="hidden" name="username" value="{{ name }}">
+              <button class="key sm" type="submit"
+                      title="All of their computers go: sync plans, status rows and Syncthing devices (they stop receiving projects). Any report tokens and browser sessions in their name are revoked. Files already on their computers stay there."><span class="t">delete</span></button>
+            </form>
+            {{ subject_buttons(name) }}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+  </section>
+  {% endif %}
+</div>

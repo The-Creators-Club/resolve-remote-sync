@@ -1,0 +1,326 @@
+{% extends "cc/shell.html" %}
+{% block title %}{{ brand_org | upper }}: SETTINGS{% endblock %}
+{% block head %}
+  <link rel="stylesheet" href="{{ asset_url('cc/settings_fleet.css') }}">
+  <script src="{{ asset_url('cc/site_settings.js') }}" defer></script>
+  <script src="{{ asset_url('ui_groups.js') }}" defer></script>
+{% endblock %}
+{# The terminal Site settings page (UI redesign port, phase 4, group
+   `settings-fleet`; bench: dashboard/design/site.html). The same page as the
+   classic admin_settings.html, in five tabs.
+
+   The tabs are DISPLAY ONLY (plan 1.3, 5.3): only "studio and tree" and
+   "features" sit inside #settings-form, exactly the fields the classic form
+   carries, each under its site_store.KEYS name. AI providers, export and
+   history, Android and the look's page groups are SIBLING panels with their
+   own forms and ids, because a <form> nested in #settings-form is dropped by
+   the parser and its fields would join the general save, which
+   site_store.validate refuses for any key outside KEYS.
+
+   Every non-submit button carries type="button": the two windows inside
+   #settings-form fold from a button in their bar, and a typeless one would
+   PUT every setting (plan 3.2). Scripts: static/cc/site_settings.js (the
+   classic file stays frozen) and the shared static/ui_groups.js. #}
+
+{% macro bar(title, meta="") %}
+  <div class="bar">
+    <button class="fold" type="button" aria-expanded="true" title="Folds or unfolds this window."><span class="fold-g" aria-hidden="true">&#9662;</span><span class="vh">fold</span></button>
+    <h2 class="t">{{ title }}</h2>
+    <span class="bar-rule"></span>
+    {% if meta %}<span class="meta">{{ meta }}</span>{% endif %}
+    {% if caller is defined %}{{ caller() }}{% endif %}
+  </div>
+{% endmacro %}
+
+{# The classic page's own words for every field (DUI-11), unchanged. #}
+{% set FIELD_HINTS = {
+  "org_name": "Your company's full name, shown in the header, on the login page and in every editor's tray. Example: Northlight Films Ltd.",
+  "org_short": "The short form used where space is tight (the header, a browser tab). Example: Northlight.",
+  "product_name": "What this software is called in your fleet. Leave it as the product's own name unless you have a reason. Example: CC Sync.",
+  "brand_logo": "Your studio's mark in every editor's tray and window title. Blank wears the product's own. A bare name (cc_mark_white.png) selects a mark the companion build already ships; anything with a slash is a path on the EDITOR's computer. It must be WHITE on transparent: the tray tints it to carry sync status, so a pre-coloured logo comes out a solid blob.",
+  "tree_name": "The name of the top folder that holds every project on the server, and the same folder on every editor's disk. Changing it does not move anything. Example: Studio_Projects.",
+  "canonical_prefix": "The drive every editor's Resolve sees the footage at. It is written into every clip path, so it must be the same on every computer. Example: P:\\",
+  "remote_root": "The full path to the tree on the server itself, as the server sees it. Example: /mnt/tank/studio/Studio_Projects",
+  "smb_unc": "The Windows network address editors map that drive to. Example: \\\\nas\\studio",
+  "dashboard_url": "The address of THIS dashboard. It must be exactly the address editors type in their browser, or Send to Resolve stops working. Example: https://nas.example.ts.net",
+  "sftp_host": "The address uploads and proxy downloads connect to. Usually the same machine as this dashboard. Example: nas.example.ts.net",
+  "sftp_port": "The port for that connection. 22 unless your server was set up differently. Example: 22",
+  "sftp_chunk_size": "How much data is sent at a time. Bigger is faster on a good link and worse on a poor one. Leave it alone unless we ask. Example: 64M",
+  "sftp_concurrency": "How many transfers run at once. Leave it alone unless we ask. Example: 8",
+  "sftp_shell_type": "Which kind of shell the server offers. Leave it as it was set up; a wrong value stops every upload. Example: unix",
+  "rclone_remote": "The internal name of the upload connection. It is generated for you; change it only if we ask. Example: ccnas",
+  "nas_syncthing_id": "The server's own sync identity, so editors' computers know they are talking to the right one. It is filled in for you when the server is set up.",
+} %}
+{% set FIELD_FLAGS = {
+  "dashboard_url": "This must be exactly the address editors type in their browser, or Send to Resolve stops working.",
+} %}
+{# Plain-words glosses for the labels that are jargon (bench). #}
+{% set LABEL_TIPS = {
+  "smb_unc": "SMB is Windows file sharing. A UNC is its address, written \\\\server\\share.",
+  "canonical_prefix": "Resolve stores this letter inside every clip path, which is why every computer must use the same one.",
+  "sftp_host": "SFTP is the secure file transfer that uploads and proxy downloads use.",
+  "sftp_port": "SFTP is the secure file transfer that uploads and proxy downloads use.",
+  "sftp_chunk_size": "SFTP is the secure file transfer that uploads and proxy downloads use.",
+  "sftp_concurrency": "SFTP is the secure file transfer that uploads and proxy downloads use.",
+  "sftp_shell_type": "SFTP is the secure file transfer that uploads and proxy downloads use.",
+  "rclone_remote": "Rclone is the program on each computer that runs uploads.",
+  "nas_syncthing_id": "Syncthing is the sync engine that runs on the server and on every computer.",
+} %}
+{% set FIELD_LABELS = {
+  "org_name": "Org name", "org_short": "Short name",
+  "product_name": "Product name", "brand_logo": "Tray logo",
+  "tree_name": "Tree name", "canonical_prefix": "Drive letter",
+  "remote_root": "Remote root", "smb_unc": "SMB UNC",
+  "dashboard_url": "Dashboard URL", "sftp_host": "SFTP host",
+  "sftp_port": "SFTP port", "sftp_chunk_size": "SFTP chunk size",
+  "sftp_concurrency": "SFTP concurrency", "sftp_shell_type": "SFTP shell type",
+  "rclone_remote": "Rclone remote", "nas_syncthing_id": "NAS Syncthing ID",
+} %}
+
+{% macro field(key) %}
+  {% set is_auto = key in auto_derived %}
+  {% set hint = FIELD_HINTS.get(key, "") %}
+  {% set env_val = env_hint.get(key) %}
+  {% set flag = FIELD_FLAGS.get(key, "") %}
+  <div class="form-row">
+    <label class="lbl" for="f-{{ key }}"{% if LABEL_TIPS.get(key) %} title="{{ LABEL_TIPS[key] }}"{% endif %}>{{ FIELD_LABELS.get(key, key) }}
+      {%- if is_auto %}<small><span class="sf-auto" title="Read from the running server, so the box is locked. Change the thing it comes from instead.">auto-derived</span>: {{ auto_derived_reason.get(key, "") }}</small>{% endif %}</label>
+    <div>
+      <input class="inp" type="text" id="f-{{ key }}" name="{{ key }}" value="{{ manifest[key] }}"
+             {% if hint %}title="{{ hint }}" aria-describedby="h-{{ key }}"{% endif %} {{ "readonly" if is_auto }}>
+      {% if hint %}<div class="hint" id="h-{{ key }}">{{ hint }}</div>{% endif %}
+      {% if flag %}<div class="hint sf-hint-warn">&#9650; {{ flag }}</div>{% endif %}
+      {% if env_val %}<div class="hint sf-env" title="A value set where the server was deployed. The saved value above wins over it.">env DASH_SITE_{{ key | upper }}={{ env_val }} (not applied: the value above is what is live; edit it, or import a site.toml, to change it)</div>{% endif %}
+    </div>
+  </div>
+{% endmacro %}
+
+{% block layout %}
+<div class="page one">
+  {% include "partials/settings_nav.html" %}
+  <div class="head">
+    <div>
+      <h1><span><span class="prompt">&gt;</span> SITE SETTINGS</span></h1>
+      <div class="sub">Who this deployment is: names, tree, NAS and sync settings every editor's companion reads. <b>Changes apply on save</b>, no redeploy needed.</div>
+    </div>
+  </div>
+
+  <div class="sf-tabs-wrap">
+    <div class="tabs" role="tablist" id="site-tabs" aria-label="site settings">
+      <button type="button" role="tab" id="tab-site" aria-controls="panel-site" aria-selected="true" title="Your studio's names, where the footage lives, the NAS and how editors connect. One form with one save.">studio and tree</button>
+      <button type="button" role="tab" id="tab-features" aria-controls="panel-features" aria-selected="false" tabindex="-1" title="Optional parts of the product, switched on for this site only, and which model indexes b-roll.">features</button>
+      <button type="button" role="tab" id="tab-ai" aria-controls="panel-ai" aria-selected="false" tabindex="-1" title="Which AI answers the YouTube downloader, Timeline Cards and the server check, and adding a new one.">ai providers</button>
+      <button type="button" role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" tabindex="-1" title="Download or paste the whole settings file, and see or undo recent changes.">export and history</button>
+      <button type="button" role="tab" id="tab-android" aria-controls="panel-android" aria-selected="false" tabindex="-1" title="The proof the Android app needs before it opens without a browser address bar.">android</button>
+    </div>
+
+    <div class="tab-host">
+    <form id="settings-form" autocomplete="off">
+      {# ======================================================= studio and tree #}
+      <div class="sf-stack sf-panel" id="panel-site">
+        <section class="win" data-win="your_studio" id="win-your_studio">
+          {{ bar("your_studio", "header, login page, every tray") }}
+          <div class="body form">
+            <div class="lede">Who this deployment is. These names appear in the header, on the login page and in every editor's tray.</div>
+            {% for key in ["org_name", "org_short", "product_name", "brand_logo"] %}{{ field(key) }}{% endfor %}
+          </div>
+        </section>
+        <section class="win" data-win="the_tree" id="win-the_tree">
+          {{ bar("the_tree", "server and every editor's disk") }}
+          <div class="body form">
+            <div class="lede">Where the footage lives, on the server and on every editor's computer.</div>
+            {% for key in ["tree_name", "canonical_prefix", "remote_root", "smb_unc", "dashboard_url"] %}{{ field(key) }}{% endfor %}
+          </div>
+        </section>
+        {# Advanced: set up once by the installer. Its fields are inside the
+           form either way (a nested <details>, only SHOWN conditionally), so
+           every input posts whether it is open or not. #}
+        <section class="win" data-win="how_editors_connect" id="win-how_editors_connect">
+          {% call bar("how_editors_connect") %}<span class="meta"><span class="red" title="Set once when the server was installed. Change these only if support asks you to.">advanced</span></span>{% endcall %}
+          <details class="fold" data-key="site-connect">
+            <summary title="Open the seven fields that say how editors' computers reach this server.">show the seven connection fields <span class="dim">Set up once when the server was installed. A wrong value here stops syncing for everybody.</span></summary>
+            <div class="body form">
+              {% for key in ["sftp_host", "sftp_port", "sftp_chunk_size", "sftp_concurrency", "sftp_shell_type", "rclone_remote", "nas_syncthing_id"] %}{{ field(key) }}{% endfor %}
+            </div>
+          </details>
+        </section>
+        <section class="win" data-win="nas_and_folders" id="win-nas_and_folders">
+          {{ bar("nas_and_folders") }}
+          <div class="body form">
+            <div class="form-row"><label class="lbl" for="f-nas_kind" title="The brand of storage server (NAS) this dashboard runs on. Installers read it to set editors' computers up the right way.">NAS kind<small>Which NAS this dashboard drives. Published to installers in the site manifest.</small></label>
+              <div><select class="sel" id="f-nas_kind" name="nas_kind">
+                {% for kind in nas_kinds %}<option value="{{ kind }}" {% if manifest.nas_kind == kind %}selected{% endif %}>{{ kind }}</option>{% endfor %}
+              </select></div></div>
+            <div class="form-row"><label class="lbl" for="f-template_folders" title="The folders every new project is created with.">Template folders<small>comma-separated</small></label>
+              <div><input class="inp" type="text" id="f-template_folders" name="template_folders" value="{{ manifest.template_folders | join(', ') }}"></div></div>
+            <div class="form-row"><label class="lbl" for="f-shared_asset_folders" title="Folders inside the tree that every editor gets, whatever projects they ticked, such as the LUT library.">Shared asset folders<small>comma-separated paths inside the tree</small></label>
+              <div><input class="inp" type="text" id="f-shared_asset_folders" name="shared_asset_folders" value="{{ manifest.shared_asset_folders | map(attribute='rel') | join(', ') }}"></div></div>
+          </div>
+        </section>
+        <div class="sf-foot"><button class="key primary" type="submit" title="Saves every field on this tab and the features tab. Editors' companions pick it up on their next report."><span class="t">Save</span><span class="busy-t">saving</span></button><span class="res save-res" id="settings-save-result" role="status" aria-live="polite"></span></div>
+      </div>
+
+      {# ============================================================= features #}
+      <div class="sf-stack sf-panel" id="panel-features" hidden>
+        <section class="win" data-win="features" id="win-features">
+          {{ bar("features", "published to every companion") }}
+          <div class="body sf-checks">
+            <label class="check" title="Turns on the YouTube page and its download worker for this site."><input type="checkbox" name="features.youtube_download" {{ "checked" if manifest.features.youtube_download }}><span class="g"></span><span class="l">YouTube downloader</span></label>
+            <label class="check" title="Adds the helpers that get past YouTube's bot checks. Only needed when YouTube refuses downloads."><input type="checkbox" name="features.youtube_unblock" {{ "checked" if manifest.features.youtube_unblock }}><span class="g"></span><span class="l">YouTube anti-automation bypass</span></label>
+            <label class="check" title="A computer never goes backwards and never updates in the middle of a popup."><input type="checkbox" name="features.auto_update" {{ "checked" if manifest.features.auto_update }}><span class="g"></span><span class="l">Automatic companion updates<span class="dim"> - editors' computers take a newer published build without anyone clicking</span></span></label>
+            {# No name: set on the AI providers tab, where accepting the notice turns it on. #}
+            <label class="check" title="Lets this server use Claude Code or Codex. It is switched on from the AI providers tab, after its notice."><input type="checkbox" disabled {{ "checked" if manifest.features.ai_cli_providers }}><span class="g"></span><span class="l">AI CLI providers<span class="dim"> - set on <a class="hi" href="#ai-providers">AI providers</a>, where accepting the notice turns it on</span></span></label>
+            <label class="check" title="Only does anything once Claude Code is installed from the AI providers tab."><input type="checkbox" name="features.ai_cli_auto_update" {{ "checked" if manifest.features.ai_cli_auto_update }}><span class="g"></span><span class="l">Keep Claude Code up to date<span class="dim"> - once a day, this server installs the publisher's newer Claude Code (checked against the publisher's checksum) so new Claude models work without anyone clicking update</span></span></label>
+          </div>
+        </section>
+        {# LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.1, 2026-09-25), carried from
+           the classic page: the site's four reporting switches, inside
+           #settings-form so Save carries them. static/cc/site_settings.js asks
+           before a save that switches one OFF (it deletes what the dashboard
+           holds for every computer); `data-initial` is what it compares
+           against and `data-label` is the name it asks with. Absent
+           `manifest.telemetry` (a build without LG-1) draws nothing. #}
+        {% if manifest.telemetry is defined %}
+        <section class="win" data-win="telemetry" id="telemetry">
+          {{ bar("telemetry", "what every computer reports") }}
+          <div class="body sf-checks">
+            <div class="lede">What every computer reports to this dashboard. Switching one off stops every computer sending it, deletes what the dashboard already holds about it for every computer, and does not affect sync. A computer can also switch these off for itself (its tray: Settings, THIS COMPUTER, PRIVACY); it cannot switch back on what the site has switched off.</div>
+            {% set TELEMETRY_ROWS = [
+              ("resolve_project", "Open Resolve project name",
+               "The name of the project open in Resolve, wherever it is reported. Off also stops the Resolve bin structure, which is organised by project name. Cost: no NEW PROJECT prompt for that project, an editor cannot be first to map a Resolve project to a folder (an admin can), and projects are not mapped automatically from that computer."),
+              ("local_manifest", "Files on each computer's disk",
+               "The list of media files on the computer's disk, and the file names in its Resolve and sync-conflict checks, which are then sent only as counts. Cost: every file move in every active project is sent to that computer, and its holdings and upload progress show as not reported."),
+              ("media_tree", "Resolve bin structure",
+               "The bins and the clips in them, as the companion reads them from Resolve."),
+              ("input_idle", "Time since the last keyboard or mouse input",
+               "Used only to offer background jobs to an idle computer. Cost: that computer is not offered jobs that wait for an idle computer."),
+            ] %}
+            {% for name, label, hint in TELEMETRY_ROWS %}
+            <label class="check" title="{{ hint }}"><input type="checkbox" name="telemetry.{{ name }}" data-telemetry="{{ name }}" data-label="{{ label }}" data-initial="{{ '1' if manifest.telemetry[name] else '0' }}" {{ "checked" if manifest.telemetry[name] }}><span class="g"></span><span class="l">{{ label }}<span class="dim"> - {{ hint }}</span></span></label>
+            {% endfor %}
+          </div>
+        </section>
+        {% endif %}
+        {# LG-4 (4.4): one informational line from GET /api/v1/admin/site's
+           report_via_counts; empty when every computer uses https. #}
+        <div id="site-transport-line" class="hint"></div>
+        <section class="win" data-win="b-roll_indexing_model" id="win-b-roll_indexing_model">
+          {{ bar("b-roll_indexing_model") }}
+          <div class="body sf-radios">
+            <div class="lede">The indexer on your wired computer reads this choice from the dashboard; it can be overridden per computer in the indexer's config.</div>
+            <label class="radio" title="The smaller model. It fits more graphics cards and indexes about twice as fast."><input type="radio" name="indexer_model_tier" value="good" {{ "checked" if manifest.indexer.model_tier == "good" }}><span class="g"></span><span class="l"><b>Good</b><span class="dim">: Qwen3-VL 4B. Needs an NVIDIA GPU with 8 GB <span title="VRAM is the graphics card's own memory. The model has to fit in it.">VRAM</span> (or Apple Silicon with 16 GB); about 20 s per clip on an RTX 3080.</span></span></label>
+            <label class="radio" title="The larger model. Reads on-screen text a little better, at half the speed."><input type="radio" name="indexer_model_tier" value="best" {{ "checked" if manifest.indexer.model_tier == "best" }}><span class="g"></span><span class="l"><b>Best</b><span class="dim">: Qwen3-VL 8B. Needs 12 GB VRAM (or Apple Silicon with 24 GB); a little sharper on on-screen text and vocabulary, about 2x slower.</span></span></label>
+          </div>
+        </section>
+        <div class="sf-foot"><button class="key primary" type="submit" title="Saves every field on this tab and the studio and tree tab."><span class="t">Save</span><span class="busy-t">saving</span></button><span class="res save-res" role="status" aria-live="polite"></span></div>
+      </div>
+    </form>
+
+    {# ========================================================= ai providers
+       Drawn by static/cc/site_settings.js from GET /api/v1/admin/ai-providers
+       (a CLI status costs subprocesses, so the page never blocks on it). What
+       is here is true whatever that call answers. #}
+    <div class="sf-stack sf-panel" id="panel-ai" hidden>
+      <p class="lede">Which AI answers the things on this server that ask one. When nothing is pinned, the <b>first available</b> provider in the order is used. Only the providers you have set up are listed; <b>add new</b> walks you through another. Claude Code and Codex are command-line tools published by Anthropic and OpenAI; API keys are the supported path and need no install.</p>
+      <div class="note err sf-ai-err" id="ai-error" role="alert" hidden></div>
+      <section class="win" data-win="who_answers" id="win-who_answers">
+        {% call bar("who_answers") %}<span class="meta" id="ai-who-meta"></span>{% endcall %}
+        <div class="who">
+          <div id="ai-resolved"><div class="ln"><span class="k">YouTube downloader</span><span class="v">loading</span></div></div>
+          <div class="pinrow">
+            <label class="lbl" for="ai-preference" title="Pinning makes one provider answer everything, whatever the order says. Auto uses the first one that works.">prefer</label>
+            <select class="sel" id="ai-preference"><option value="auto">auto: first available in the order</option></select>
+            <div class="hint">A pinned provider that is not available is a refusal, not a fallback: nothing else is used in its place.</div>
+          </div>
+        </div>
+      </section>
+      <section class="win" data-win="your_ai_providers" id="ai-providers">
+        {% call bar("your_ai_providers") %}<span class="meta" id="ai-prov-meta"></span>{% endcall %}
+        <div class="plist" id="ai-list"><div class="none"><span>loading</span></div></div>
+        <div class="body split" id="ai-add"></div>
+        <div class="body split cli-line" id="ai-cli-line">
+          <span id="ai-cli-tos" title="">CLI tools (Claude Code, Codex):</span>
+          <label class="switch" title="Allows Claude Code and Codex on this site. It spends a personal subscription: read the notice under add new first."><input type="checkbox" id="ai-cli-enabled"><span class="off">OFF</span><span class="on">ON</span></label>
+          <span class="res" id="ai-cli-state"></span>
+        </div>
+      </section>
+    </div>
+
+    {# ==================================================== export and history #}
+    <div class="sf-stack sf-panel" id="panel-history" hidden>
+      <div class="cols-2">
+        <section class="win" data-win="export_import" id="win-export_import">
+          {% call bar("export_import") %}<span class="meta" title="The site's settings as one text file, in the TOML format.">site.toml</span>{% endcall %}
+          <div class="body form">
+            <div class="lede">site.toml-shaped text, for a NAS migration or a backup.</div>
+            <div><a class="key" href="/api/v1/admin/site/export" download="site.toml" title="Downloads every site setting as one text file. No password or AI key is in it."><span class="t">Export site.toml</span></a></div>
+            <form id="settings-import-form" class="form">
+              <textarea class="area" name="text" rows="8" placeholder="paste a site.toml here" aria-label="site.toml to import"></textarea>
+              <div class="sf-foot"><button class="key" type="submit" title="Reads the pasted text, shows you every setting it would change and asks first. Nothing changes until you say yes."><span class="t">Import</span><span class="busy-t">reading</span></button><span class="res" id="settings-import-result" role="status" aria-live="polite"></span></div>
+            </form>
+          </div>
+        </section>
+        <section class="win" data-win="change_history" id="win-change_history">
+          {% call bar("change_history") %}<span class="meta" id="site-history-meta"></span>{% endcall %}
+          <div class="body form">
+            <div class="lede">The last few times a save or an import changed these settings. Undo puts back the values from just before the most recent one.</div>
+            <div id="site-history-list" class="sf-hist">loading</div>
+            <div class="sf-foot"><button class="key" type="button" id="site-undo-btn" disabled title="Puts back the values from just before the most recent save or import. Asks first."><span class="t">Undo last change</span></button><span class="res" id="site-undo-result" role="status" aria-live="polite"></span></div>
+          </div>
+        </section>
+      </div>
+      {# The look's page groups (R24): its OWN form, never part of
+         #settings-form, driven by the shared static/ui_groups.js. The way back
+         to the classic look from the page that is in the new one. #}
+      {% set look = ui_look_form(request) %}
+      <section class="win" data-win="new_look" id="ui-look">
+        {{ bar("new_look", "page groups") }}
+        <form id="ui-groups-form" class="body form">
+          <div class="lede">Which parts of the dashboard use the new terminal look for everyone. Turning a group off puts it back to the classic look on each browser's next page load. Nothing here changes what syncs.</div>
+          <div class="sf-checks">
+          {% for g in look.groups %}
+            <label class="check"{% if g.name == "chrome" %} title="The new header is part of every new page; turning it off turns them all off."{% endif %}><input type="checkbox" value="{{ g.name }}" data-ui-group {% if g.on %}checked{% endif %} {% if not g.in_build %}disabled{% endif %} {% if g.name == "chrome" %}data-ui-chrome{% endif %}><span class="g"></span><span class="l">{{ g.name }}{% if not g.in_build %}<span class="dim"> (waiting for its build{% if g.on %}; stored as on{% endif %})</span>{% endif %}</span></label>
+          {% endfor %}
+          </div>
+          <div class="hint">Stored: <span id="ui-groups-stored">{{ look.stored }}</span>{% if look.follows_default %} (follows the vendor default){% endif %}. Preview with the per-browser cookie: {{ look.preview }}.</div>
+          <div class="sf-foot">
+            <button class="key" type="submit" title="Saves which page groups use the new look, for every browser."><span class="t">Save page groups</span></button>
+            <button class="key quiet" type="button" id="ui-groups-default" title="Forgets this site's choice and follows the vendor default."><span class="t">Follow the default</span></button>
+            <span class="res" id="ui-groups-result" role="status" aria-live="polite"></span>
+          </div>
+          {% if look.history %}
+          <ul class="hint">
+            {% for e in look.history %}<li>{{ e.at }}: {{ e.by }} set {{ e.key }} from {{ e.get("from") }} to {{ e.get("to") }}</li>{% endfor %}
+          </ul>
+          {% endif %}
+        </form>
+      </section>
+    </div>
+
+    {# ============================================================== android #}
+    <div class="sf-stack sf-panel" id="panel-android" hidden>
+      <section class="win" data-win="android" id="win-android">
+        {% call bar("android") %}<span class="meta" title="The address Android reads to check that this site and the app belong together.">/.well-known/assetlinks.json</span>{% endcall %}
+        {% include "partials/android_settings.html" %}
+      </section>
+    </div>
+    </div>
+  </div>
+</div>
+
+{# Import and undo ask here, not through window.confirm (plan 1.3). Its own
+   dialog, not #cc-confirm: that one answers htmx requests and this page's
+   writes are fetch() calls. #}
+<dialog id="site-ask" class="cc-dialog" aria-labelledby="site-ask-t">
+  <section class="win dialog">
+    <div class="bar"><h2 class="t" id="site-ask-t">are_you_sure</h2><span class="bar-rule"></span></div>
+    <div class="body">
+      <p id="site-ask-q"></p>
+      <div class="acts">
+        <button class="key quiet" type="button" id="site-ask-no" autofocus><span class="t">Cancel</span></button>
+        <button class="key primary" type="button" id="site-ask-yes"><span class="t">Yes</span></button>
+      </div>
+    </div>
+  </section>
+</dialog>
+{% endblock %}

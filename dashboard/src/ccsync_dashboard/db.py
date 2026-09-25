@@ -3614,7 +3614,7 @@ NOTICE_KINDS: dict[str, dict[str, Any]] = {
     "server_crash_report": {"severity": "error", "what":
         "this server's own background tasks have crashed since it started",
         "href": "/admin/diagnostics/crash-reports.zip",
-        "href_label": "[ DOWNLOAD CRASH REPORTS ]"},
+        "href_label": "Download crash reports"},
     # dash-db-2 = dash-collector-alerts-5 (2026-09-18). The 2026-09-17
     # busy-database rework added two writers (`notices.record_db_busy`,
     # `notices.record_slow_write`) and no registry rows, which is the mirror
@@ -3704,7 +3704,7 @@ def notice_href(kind: str, subject: str = "") -> tuple[str, str]:
     href = str(href or "")
     if not href:
         return "", ""
-    return href, str(spec.get("href_label") or "[ TAKE ME THERE ]")
+    return href, str(spec.get("href_label") or "Take me there")
 
 
 def notice_counts(conn: sqlite3.Connection) -> dict[str, int]:

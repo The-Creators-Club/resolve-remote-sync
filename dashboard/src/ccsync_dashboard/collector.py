@@ -748,9 +748,8 @@ class Collector:
                           "project reaches anybody."),
                     # ui-copy-2 (2026-09-25): "Settings, Diagnostics" is not a page.
                     fix=("Look at the other problems listed here first. If there is none, "
-                         "check that Syncthing is running on the server (the [ COLLECTOR ] "
-                         "panel under the computers table on SYNC STATUS shows whether it "
-                         "answers)."),
+                         "check that Syncthing is running on the server (the Collector "
+                         "panel shows whether it answers)."),
                     now=self.now_fn())
         # -- 5. shared asset libraries -------------------------------------
         # Deliberately after the project loop and outside its per-slug fault

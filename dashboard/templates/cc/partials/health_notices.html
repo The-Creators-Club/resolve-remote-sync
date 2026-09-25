@@ -1,0 +1,53 @@
+{# PROBLEMS THE SERVER FOUND, the Health tab's body (UI port phase 5; a NEW
+   name, R15: classic home still fetches partials/notices.html). Served by
+   /partials/health-notices into #health-notices-body, whose frame
+   (#server-notices) is static on the page. A dismiss posts to this panel's
+   own route and gets this markup back, never the classic panel.
+
+   Same context and rules as partials/notices.html + notice_checks.html:
+   OK needs EVIDENCE a pass evaluated the kind (checked_kinds); a registered
+   kind nothing ran renders "not checked", never a false OK. #}
+{% if notice_error %}<div class="note err error-banner"><span class="grow">{{ notice_error }}</span></div>{% endif %}
+<div class="body lede">
+  {% if notices %}
+    Things this server refused to do, and what to do about them. Each one
+    comes back by itself if it is still true after you dismiss it.
+  {% else %}
+    Nothing. <b>{{ notice_checks_ran }} of {{ notice_checks_total }}</b> checks ran and found nothing wrong.
+    {% if notice_checks_never_ran %}<span class="tag warn" title="A check registered with nothing behind it yet reports neither OK nor a problem. Open the list below to see which.">{{ notice_checks_never_ran }} never ran</span>{% endif %}
+  {% endif %}
+</div>
+{% if notices %}
+<div class="scroll-y hl-list">
+  {% for n in notices %}
+    <div class="prob">
+      <span class="sev"><span class="tag {{ 'solid err' if n.severity == 'error' else ('solid warn' if n.severity == 'warn' else 'mute') }}" title="{{ 'Something is wrong and needs a person.' if n.severity == 'error' else ('Worth checking before it gets worse.' if n.severity == 'warn' else 'For your information.') }}">{{ n.severity }}</span></span>
+      <span class="title">{{ n.subject }}<span class="who" title="The name of the check that found it.">{{ n.kind }}</span></span>
+      <span class="when">last seen {{ n.last_seen | ago }}</span>
+      <div class="what">{{ n.body }}</div>
+      <div class="todo">{% if n.fix %}<span class="cmd">{{ n.fix }}</span>{% endif %}<span class="keys">
+        {% if n.href %}<a class="key sm" href="{{ n.href }}"><span class="t">{{ n.href_label | cc_unbracket }}</span></a>{% endif %}
+        <form class="inline" hx-post="/partials/health-notices/{{ n.id }}/dismiss"
+              hx-target="#health-notices-body" hx-swap="innerHTML"
+              data-confirm-key="notice-dismiss-{{ n.id }}"
+              hx-confirm="Dismiss this? It is only hidden. If the server finds the same problem again it comes straight back, so dismissing it is not a fix.">
+          <button class="key quiet sm" type="submit" title="Hides it. It comes straight back if the server finds it again, so this is not a fix."><span class="t">dismiss</span></button>
+        </form>
+      </span></div>
+      <div class="subj">first seen {{ n.first_seen | ago }}</div>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+<details class="fold" data-key="notice-checks">
+  <summary title="Open the full list of checks and what each one found.">what the server checks <span class="dim">{{ notice_kinds | length }} checks, silence has to read as checked and fine, never as nobody wrote a check</span></summary>
+  <div class="scroll-y hl-checks">
+    <ul class="checks">
+    {% for k in notice_kinds %}
+      <li>{% if k.kind in open_kinds %}<span class="tag solid {{ 'err' if k.severity == 'error' else 'warn' }}" title="This check found something. It is in the list above.">found</span>
+        {% elif k.kind in checked_kinds %}<span class="tag ok" title="This check ran and found nothing wrong.">ok</span>
+        {% else %}<span class="tag mute" title="Registered, but nothing in this build has ever run it, so it is neither OK nor a problem.">not checked</span>{% endif %}<span>{{ k.what }}</span></li>
+    {% endfor %}
+    </ul>
+  </div>
+</details>

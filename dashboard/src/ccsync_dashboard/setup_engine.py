@@ -1281,7 +1281,9 @@ def _check_nas_connect(ctx: SetupContext) -> TaskState:
 
 
 register(Task(
-    id="nas_connect", title="Connect to your NAS (optional)",
+    # UI port phase 7: optional=True already draws "(optional)"; the title
+    # carried it too, so the wizard said it twice.
+    id="nas_connect", title="Connect to your NAS",
     description="One-time admin credential for snapshots and SMB users.",
     check=_check_nas_connect, run=None, optional=True,
 ))
@@ -1463,7 +1465,7 @@ def _check_software(ctx: SetupContext) -> TaskState:
         return TaskState(
             status="todo",
             detail="no companion build is current for any platform: open Settings, then "
-                   "PACKAGES, and publish one under [ AVAILABLE FROM THE VENDOR ]",
+                   "Packages, and publish one under \"Available from the vendor\"",
         )
     parts = [f"{p} {v} current" if v else f"{p}: none published" for p, v in current.items()]
     # warn, not ok: half a fleet cannot upgrade itself. Still optional, so it

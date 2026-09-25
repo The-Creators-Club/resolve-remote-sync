@@ -1,0 +1,88 @@
+/* The Health group's page sheet (UI port phase 5, 2026-09-25): Health,
+   Invariants, Protection, Alerts, Recovery. Loaded after terminal.css,
+   components.css and phone.css by each page's head block, so it only adds
+   what the bench wrote inline (design/health.html, alerts.html,
+   recovery.html style="" attributes) as named classes. Every class is
+   hl-* (health) or rc-* (recovery) so nothing here reaches another page.
+
+   Long lists live in a window with a fixed max-height (the owner's rule: a
+   busy list must not ruin the layout); heights are the bench's. */
+
+/* Health tabs: the panels sit under the tab strip. */
+.hl-panel { margin-top: 22px; }
+.hl-running { display: grid; gap: 8px; }
+.hl-running .note { margin-top: 6px; }
+
+/* Scroll bodies. */
+.hl-list { max-height: 620px; }
+#hpanel-open .hl-list { max-height: 760px; }
+.hl-checks { max-height: 520px; border-top: 1px dashed var(--line); }
+details.fold > .hl-checks { max-height: 520px; }
+.hl-pre { padding: 0 var(--pad) var(--pad); }
+.hl-pre pre.log { max-height: 280px; overflow: auto; }
+.hl-tight { padding-bottom: 0; }
+
+/* Numbers in a head line. */
+.hl-err { color: var(--err); }
+.hl-ok { color: var(--ok); }
+
+/* Narrow fixed columns. */
+th.hl-led { width: 3ch; }
+.hl-port { max-width: 10ch; }
+
+/* ---- Recovery ---------------------------------------------------------- */
+
+/* The two-pane problem picker: choices on the left, the plan on the right,
+   the plan pane a fixed height so picking a problem never moves the windows
+   below it (round 2, "nothing may shift"). */
+.rc-wizard { gap: 0; }
+.rc-wizard > .choices { padding: 8px 0; border-right: 1px dashed var(--line); }
+.rc-wizard a.choice { text-decoration: none; color: inherit; }
+.rc-plan .rc-plan-head { padding-bottom: 4px; }
+.rc-plan h2.sec { margin: 0; }
+.rc-plan .lede { margin-top: 6px; }
+.rc-undo { border-top: 1px dashed var(--line); padding-bottom: 0; }
+.rc-undo h2.sec { margin: 0 0 8px; }
+.rc-sep { border: 0; border-top: 1px dashed var(--line); margin: 0; }
+.rc-prot-lede { font-size: 12px; }
+.rc-list { max-height: 340px; }
+.rc-facts { max-height: 420px; }
+.rc-value { color: var(--hi); }
+.rc-pick { flex: 1 1 240px; }
+.rc-pick-go { align-self: end; }
+.rc-preview { border-top: 1px dashed var(--line); padding-top: 14px; }
+.rc-counts { font-size: 13px; }
+.rc-counts .rc-missing { color: var(--warn); }
+.rc-files { max-height: 200px; overflow-y: auto; }
+.rc-files .rc-plus { color: var(--ok); }
+.rc-files .rc-more { color: var(--muted); }
+.rc-drills { margin-top: 4px; }
+.rc-drills .tag { margin-right: 8px; }
+
+/* The picker is links (?problem=, as classic), so the chosen one is
+   aria-current, painted as the bench's checked radio. */
+.choice[aria-current="true"] { border-left-color: var(--hi); background: rgb(var(--hi-rgb) / 0.05); }
+.choice[aria-current="true"] .g { color: var(--hi); }
+.choice[aria-current="true"] .g::before { content: "\25C9"; }
+.choice[aria-current="true"] .q { color: var(--text); }
+.rc-tight { padding-bottom: 0; }
+.rc-pickrow { gap: 10px; align-items: end; flex-wrap: wrap; }
+.rc-pick { display: grid; gap: 4px; flex: 1 1 240px; min-width: 0; }
+.rc-pick .sel { width: 100%; }
+
+/* A restore or a rehearsal runs for minutes: the key says so while its
+   form's request is in flight (htmx puts htmx-request on the form). The key
+   keeps its min-width, so the swap of words does not move the page. */
+#recovery form.htmx-request .key .t,
+#admin-alerts form.htmx-request .key .t,
+#alerts-test-form.htmx-request .key .t { display: none; }
+#recovery form.htmx-request .key .busy-t,
+#admin-alerts form.htmx-request .key .busy-t,
+#alerts-test-form.htmx-request .key .busy-t { display: inline; }
+#recovery form.htmx-request .key,
+#admin-alerts form.htmx-request .key,
+#alerts-test-form.htmx-request .key { pointer-events: none; opacity: 0.7; }
+
+@media (max-width: 760px) {
+  .rc-wizard > .choices { border-right: 0; }
+}

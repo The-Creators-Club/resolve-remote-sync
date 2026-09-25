@@ -1777,7 +1777,7 @@ def test_the_disk_chip_no_longer_says_the_trash_cannot_prune():
     # chip names both, and tells the old-machine reader what restarts it.
     assert "On CC Sync newer than 0.9.78 it is emptied until the drive has twice the floor free" in text
     assert "On 0.9.78 or older it stops emptying at the floor" in text
-    assert "presses [ RESUME ] in that computer's tray" in text
+    assert "presses \"Resume\" in that computer's tray" in text  # D8, UI port phase 7
     # The first cut claimed the self-restart for every machine.
     assert "is emptied oldest first until the drive has twice the floor free" not in text
 

@@ -29,6 +29,19 @@ for _ai_key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
 
 from ccsync_dashboard import db as dbmod  # noqa: E402
 
+# The terminal look's variant switch and its coverage hook (UI port phase 0,
+# tests/ui_variant_support.py).
+from ui_variant_support import ui_variant  # noqa: E402,F401
+import ui_variant_support as _uvs  # noqa: E402
+
+
+def pytest_configure(config):
+    _uvs.configure(config)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    _uvs.sessionfinish(session, exitstatus)
+
 
 class NasCase:
     """One backend the admin-user call sites must work through.

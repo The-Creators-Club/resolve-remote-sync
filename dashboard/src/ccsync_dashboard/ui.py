@@ -62,6 +62,10 @@ STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
 
 router = APIRouter(default_response_class=HTMLResponse)
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+# The terminal look's overlay (UI_REDESIGN_PORT_PLAN.md 7.0): the classic
+# environment refuses cc/*, and every render goes through ui_variant.render.
+from . import ui_variant  # noqa: E402
+ui_variant.install(templates)
 
 log = logging.getLogger("ccsync.dashboard.ui")
 
@@ -414,10 +418,10 @@ CHIP_HELP: dict[str, str] = {
         "until the drive has twice the floor free, which starts proxy "
         "download again. On 0.9.78 or older it stops emptying at the floor, "
         "so proxy download starts again only once somebody frees space up to "
-        "twice the floor, or presses [ RESUME ] in that computer's tray. "
+        "twice the floor, or presses \"Resume\" in that computer's tray. "
         "Either way, a proxy download the safety breaker "
         "has stopped waits for somebody to resume it, from that computer's "
-        "tray or by an admin with [ RESUME ] on this row."),
+        "tray or by an admin with \"Resume\" on this row."),
     # `lane` is filled through ui.lane_word (fleet_grid.html), so this
     # reads "proxy download on this computer made no progress...".
     "stalled": (
@@ -717,7 +721,7 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     # itself is behind the login gate. Its own connection for the same reason
     # the two counts below take one: _render has no request-scoped handle, and
     # a stamp is not worth threading one through every call site for.
-    if not name.startswith("partials/") and context.get("session_user"):
+    if not ui_variant.is_partial(name) and context.get("session_user"):
         try:
             conn = db.connect(settings.db_path)
             try:
@@ -727,7 +731,7 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
                 conn.close()
         except Exception:  # noqa: BLE001
             log.exception("could not stamp this page render")
-    if not name.startswith("partials/") and context.get("session_is_admin"):
+    if not ui_variant.is_partial(name) and context.get("session_is_admin"):
         context.setdefault("notice_counts", _notice_counts_safe(settings))
         # SYS-8: the same idea for the alert scan, read from the LAST SCAN'S
         # stored counts rather than by scanning here. A scan walks the whole
@@ -735,7 +739,7 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
         # the cost of the diagnosis on every click, and the number a topbar
         # shows does not need to be fresher than the collector's cadence.
         context.setdefault("alert_counts", _alert_counts_safe(settings))
-    return templates.TemplateResponse(request=request, name=name, context=context)
+    return ui_variant.render(request, name, context)
 
 
 def _alert_counts_safe(settings) -> dict[str, int]:
@@ -1096,9 +1100,17 @@ def partial_topbar(request: Request, current: str = "",
     left out here because no `view` was passed, so an SPA's header said
     nothing about whether the server was still answering. It is its own read
     now (_stamp_context), not the fleet view, so this stays one cheap query."""
-    return _render(request, "partials/topbar.html",
-                   {"nav_current": current.strip().lower(),
-                    **_stamp_context(conn)})
+    # UI port phase 1 (3.4, 7.0): the HUD shows the problem and alert counts
+    # in the SPAs too (under hud_* names, so the classic bar is unchanged),
+    # and this fragment is the one that writes the SPAs' first-paint cookie.
+    from . import ui_chrome
+    response = _render(request, "partials/topbar.html",
+                       {"nav_current": current.strip().lower(),
+                        **_stamp_context(conn), **ui_chrome.topbar_extras(request)})
+    groups = getattr(response, "context", {}).get("ui_groups")
+    if groups is not None and response.status_code == 200:
+        ui_variant.set_effective_cookie(request, response, frozenset(groups))
+    return response
 
 
 # ----------------------------------------------------------- freshness stamp
@@ -1608,6 +1620,16 @@ def partial_toggle(
     _nudge_collector(request)
     # Return the partial the control lives in.
     view_kind = request.query_params.get("view")
+    # UI port phase 2: the terminal tree and home queue get their own markup
+    # back (ui_home.py; 404 when the asking page has no `home` group).
+    from . import ui_home
+    if view_kind in ui_home.TOGGLE_VIEWS:
+        return ui_home.toggle_answer(request, conn, editor, target, view_kind)
+    # UI port phase 3: the account page's person queue, and `view=none` (an
+    # empty 200 for its swap-none buttons, R15) (ui_everyday.py).
+    from . import ui_everyday
+    if view_kind in ui_everyday.TOGGLE_VIEWS:
+        return ui_everyday.toggle_answer(request, conn, editor, view_kind)
     # Re-render for `editor` (the POST path), not for whoever _queue_editor
     # would infer: an admin ticking for someone else must get that editor's
     # checkboxes back, not their own.
@@ -1868,6 +1890,11 @@ def partial_notice_dismiss(
     row = db.dismiss_notice(conn, notice_id, admin)
     conn.commit()
     error = None if row else "that notice is already gone. Reload the page."
+    # UI port phase 2: a dismiss from a terminal window answers with that
+    # window's markup (?view=), never the classic admin-users-box.
+    from . import ui_home
+    if request.query_params.get("view") in ui_home.DISMISS_VIEWS:
+        return ui_home.dismiss_answer(request, conn, request.query_params["view"], error)
     return _render(request, "partials/notices.html", _notices_context(conn, error))
 
 
@@ -2119,7 +2146,7 @@ def _health_rows(request: Request, conn) -> list[dict]:
             subject=f"{type(exc).__name__}: {str(exc)[:160]}",
             diagnosis=("This page could not ask this source, so nothing it "
                        "would report is shown here. That is not checked, not OK."),
-            fix=(f"Open {detail_label} for its own list. If that page fails "
+            fix=(f"Open \"{detail_label}\" for its own list. If that page fails "
                  "too, the dashboard log names the error."),
             href="", href_label="",
             detail_page=detail_page, detail_label=detail_label)
@@ -2136,11 +2163,11 @@ def _health_rows(request: Request, conn) -> list[dict]:
                 subject=str(n.get("subject") or ""),
                 diagnosis=str(n.get("body") or ""), fix=str(n.get("fix") or ""),
                 href=href, href_label=href_label,
-                detail_page="/#server-notices", detail_label="[ NOTICES ]")
+                detail_page="/#server-notices", detail_label="Notices")
     except Exception as exc:  # noqa: BLE001 - see the docstring
         log.exception("health: could not read the open notices")
         failed("notice", "PROBLEM THE SERVER FOUND", "the open notices",
-               "/#server-notices", "[ NOTICES ]", exc)
+               "/#server-notices", "Notices", exc)
 
     try:
         for f in alerts_mod.scan(conn, settings, db.utcnow_iso()):
@@ -2149,11 +2176,11 @@ def _health_rows(request: Request, conn) -> list[dict]:
                 title=str(f.get("title") or ""), subject=str(f.get("subject") or ""),
                 diagnosis=str(f.get("diagnosis") or ""), fix=str(f.get("fix") or ""),
                 href="", href_label="",
-                detail_page="/admin/alerts", detail_label="[ ALERTS ]")
+                detail_page="/admin/alerts", detail_label="Alerts")
     except Exception as exc:  # noqa: BLE001
         log.exception("health: could not run the alert scan")
         failed("alert", "ALERT", "the alert checks", "/admin/alerts",
-               "[ ALERTS ]", exc)
+               "Alerts", exc)
 
     try:
         for inv in invariants_mod.page_view(conn):
@@ -2168,11 +2195,11 @@ def _health_rows(request: Request, conn) -> list[dict]:
                 subject=str(inv.get("detail") or ""),
                 diagnosis=str(inv.get("consequence") or ""),
                 fix=str(inv.get("fix") or ""), href="", href_label="",
-                detail_page="/admin/invariants", detail_label="[ INVARIANTS ]")
+                detail_page="/admin/invariants", detail_label="Invariants")
     except Exception as exc:  # noqa: BLE001
         log.exception("health: could not read the invariants")
         failed("invariant", "INVARIANT", "the invariants", "/admin/invariants",
-               "[ INVARIANTS ]", exc)
+               "Invariants", exc)
 
     try:
         for line in protection_mod.page_view(conn).get("lines", []):
@@ -2187,11 +2214,11 @@ def _health_rows(request: Request, conn) -> list[dict]:
                 subject=str(line.get("detail") or ""),
                 diagnosis=str(line.get("consequence") or ""),
                 fix=str(line.get("fix") or ""), href="", href_label="",
-                detail_page="/admin/protection", detail_label="[ PROTECTION ]")
+                detail_page="/admin/protection", detail_label="Protection")
     except Exception as exc:  # noqa: BLE001
         log.exception("health: could not read the protection lines")
         failed("protection", "PROTECTION", "the protection lines",
-               "/admin/protection", "[ PROTECTION ]", exc)
+               "/admin/protection", "Protection", exc)
 
     rows.sort(key=lambda r: (HEALTH_BAND_ORDER.index(r["band"])
                              if r["band"] in HEALTH_BAND_ORDER else len(HEALTH_BAND_ORDER),
@@ -3689,7 +3716,7 @@ async def partial_admin_set_fleet_halt(
             return _fleet_halt_render(
                 request, conn,
                 error="a new stop was set since this page loaded, so nothing "
-                      "was changed. Use [ START SYNCING AGAIN ] if you mean "
+                      "was changed. Use \"Start syncing again\" if you mean "
                       "to end it.")
     if active and not extend and len(reason) < 3:
         # The reason is shown in EVERY editor's tray. A halt with no reason
@@ -4414,6 +4441,11 @@ async def partial_admin_machine_update(
         error = f"no computer {machine!r} for {editor!r}"
     else:
         conn.commit()
+    if request.query_params.get("view") == "none":
+        # UI port phase 3 (plan R15, wave 5): the account page asks with
+        # swap none; the Packages panel (another group's markup, with oob
+        # parts) must not reach it. An empty 200, no template.
+        return HTMLResponse("")
     return _render(request, "partials/admin_packages.html",
                    _packages_and_feed(conn, request, error))
 
@@ -4470,6 +4502,10 @@ async def partial_admin_ask_why(
     if not db.request_diagnostics(conn, editor, machine, admin, db.utcnow_iso()):
         log.warning("ask-why refused: no machine %r for %r", machine, editor)
     conn.commit()
+    if request.query_params.get("view") == "none":
+        # UI port phase 3 (plan R15, wave 5): the account page's swap-none
+        # ask gets no fleet grid (home's markup, with its oob bar meta).
+        return HTMLResponse("")
     scope = auth.scope_for(request)
     return _render(request, "partials/fleet_grid.html", {
         "view": api_scope_projects_view(build_projects_view(conn), scope),
@@ -4891,6 +4927,7 @@ def service_worker() -> Response:
     if not path.is_file():
         return PlainTextResponse("no service worker on this server", status_code=404)
     body = path.read_text(encoding="utf-8").replace("__VERSION__", VERSION)
+    body = body.replace("/*__CC_PRECACHE__*/[]", json.dumps(ui_variant.precache_urls()))
     return Response(
         content=body,
         media_type="application/javascript",

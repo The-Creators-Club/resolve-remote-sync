@@ -3850,7 +3850,7 @@ def _refuse_archived_project(conn: sqlite3.Connection, slug: str, rel: str) -> N
     if row is not None and row["archived_at"]:
         raise ProjectSetupError(
             f"{rel} is an archived project. An admin can put it back with "
-            "[ UNARCHIVE ] under ARCHIVED PROJECTS on the SYNC PLANS page, and "
+            "\"Unarchive\" under \"Archived projects\" on the Sync plans page, and "
             "it keeps its folder, its files and its ticks")
 
 
@@ -3953,7 +3953,7 @@ def create_tree_project(
         # already there" stops being "type another name" (the double-nesting
         # bug).
         raise FolderExistsError(
-            f"Projects/{rel} already exists. Use [ USE THIS FOLDER ] to point the project "
+            f"Projects/{rel} already exists. Use \"Use this folder\" to point the project "
             "at it instead of creating another folder inside it",
             rel,
         )
@@ -6601,6 +6601,11 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
             "notes": _row_str(row, "notes"),
             "retracted_at": _row_str(row, "retracted_at"),
             "retracted_reason": _row_str(row, "retracted_reason"),
+            # Was this build ever what the fleet was offered: a make-current
+            # of it is a rollback and skips the soak (package_store). The
+            # terminal Packages page's "roll back to" select lists only
+            # builds a plain MAKE CURRENT accepts (UI port phase 4, 5.3).
+            "ever_current": bool(_row_value(row, "ever_current") or 0),
         }
         entry["retracted"] = bool(entry["retracted_at"])
         entry["ordering_blocked"] = package_store.blocks_on_dashboard_version(
@@ -7701,8 +7706,8 @@ def _note_identity_clone(
                  "then be given its own projects. Nothing to do if this was a "
                  "rename rather than a copy: wait five minutes and it sorts "
                  "itself out. If it is still here after that and one of the two "
-                 "computers no longer exists, remove that one with [ FORGET ] on "
-                 "the SYNC STATUS page."),
+                 "computers no longer exists, remove that one with \"Forget\" on "
+                 "the Sync status page."),
             now=now)
     except sqlite3.Error:
         log.warning("could not record the duplicate_machine_id notice for %s",

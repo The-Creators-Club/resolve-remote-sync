@@ -241,6 +241,10 @@ def page_admin_assignments(request: Request,
     # what the old grid told an admin at a glance that the per-person view
     # cannot (owner, 2026-09-11).
     picker["machine_count"] = len(db.fetch_machines(conn))
+    # The terminal page (UI port phase 4, 5.3) shows the computer select
+    # before a person is chosen and fills it in the browser, so it needs
+    # every person's computer options up front; the classic page ignores it.
+    picker["machine_map"] = {e: _machine_options(conn, e) for e in editors}
     # No selection means no columns, not every column: an empty username
     # matches none of them. The projects, the archived list and the counts
     # below are the whole-fleet half of the page and are built either way.

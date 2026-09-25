@@ -92,8 +92,16 @@
     if (!slot || slot.querySelector('.install-btn')) return;
     var btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'btn chip tap install-btn';
-    btn.textContent = '[ INSTALL ]';
+    // UI port phase 1 (plan 2.1): with the terminal HUD on, the slot lives in
+    // its "more" sheet (on classic pages too), where hud-common paints a
+    // .hud-key and brackets are gone. The classic slot is unchanged.
+    if (slot.closest('.hud-more')) {
+      btn.className = 'hud-key install-btn';
+      btn.textContent = 'install this app';
+    } else {
+      btn.className = 'btn chip tap install-btn';
+      btn.textContent = '[ INSTALL ]';
+    }
     btn.addEventListener('click', function () {
       if (!deferredPrompt) return;
       var prompted = deferredPrompt;

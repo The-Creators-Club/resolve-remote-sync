@@ -34,8 +34,9 @@ notice". The fix is to make the move happen on BOTH ends.
 
 ## 2. What it does now
 
-On the project page, an admin has `MOVE: <path> to <project> / <folder>
-[ MOVE ON THE SERVER AND ON EVERY MACHINE ]`. Pressing it:
+On the project page, an admin has `MOVE: <path> to <project> / <folder>`
+and "Move on the server and on every computer" (the key was "MOVE ON THE
+SERVER AND ON EVERY MACHINE" until the UI port, 2026-09-25). Pressing it:
 
 1. **Records the move first, then moves it on the server.** The `file_moves`
    row is written `state='pending'` and COMMITTED before `src.rename`, and

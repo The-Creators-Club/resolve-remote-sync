@@ -1,0 +1,69 @@
+/* The terminal /cards landing (UI redesign port, phase 6, group `apps`).
+   Loaded only by templates/cc/cards_landing.html, after the four cc sheets,
+   and reads ONLY the cc tokens (the classic cards_landing.css reads --amber,
+   --panel, --tap... which the cc :root does not define, plan 1.4). The rows,
+   tiles, folders, chips and keys are components.css's; this sheet holds only
+   what is particular to this page: the cl-* states the shared script
+   (static/cards_landing.js) toggles, and the "nothing shifts" rules. */
+
+.page.cc-cards { max-width: 1180px; margin: 0 auto; }
+
+/* Every element the script hides with the attribute stays hidden, whatever
+   display a component rule gives it (.ep is a grid, .dirfold a block). */
+.cl [hidden] { display: none !important; }
+
+/* Nothing shifts (owner rule, round 2): the clear key keeps its box while
+   there is nothing to clear, so the search line never changes width. */
+.cl .cl-search .cl-clear[hidden] { display: inline-flex !important; visibility: hidden; }
+.cl .cl-search.is-active { border-color: var(--hi); }
+
+/* The recent window stays while a search runs (cards_landing.js adds
+   .cl-dim in the terminal look) so the list below it does not jump up at the
+   first letter; it only dims, and it cannot be pressed through the dim. */
+.cl .cl-recent.cl-dim { opacity: 0.45; }
+.cl .cl-recent.cl-dim .tiles { pointer-events: none; }
+
+.cl .cl-find { display: grid; gap: 14px; }
+
+/* The recent tiles: a form around a button must not add a box of its own. */
+.cl .cl-tile-form { display: contents; }
+.cl .tile { cursor: pointer; min-width: 0; text-decoration: none; }
+.cl .tile .tn, .cl .tile .tp { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cl .tile[disabled] { cursor: default; }
+
+/* The two bar keys, drawn as the bar's quiet links. */
+.cl .bar .cl-fold { color: var(--text-2); }
+.cl .bar button.act {
+  background: none; border: 0; padding: 0 2px; font: inherit; color: var(--text-2);
+  cursor: pointer; min-height: 24px;
+}
+.cl .bar button.act:hover, .cl .bar button.act:focus-visible { color: var(--hi); }
+/* The fold keys mean nothing in the flat list; they keep their room. */
+.cl .bar .cl-fold[hidden] { display: inline !important; visibility: hidden; }
+
+/* The tree and the flat list. The folders already say the path, so a row
+   in the tree drops its "in ..." (the flat list keeps it). */
+.cl .cl-tree .cl-path { display: none; }
+.cl .cl-list .cl-path { color: var(--text-2); }
+.cl .cl-tree, .cl .cl-list { max-height: 760px; overflow-y: auto; overscroll-behavior: contain; }
+.cl .dirfold > summary { display: flex; align-items: baseline; gap: 10px; }
+.cl .dirfold > summary .fnm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cl .cl-depth-2 > .kids, .cl .cl-depth-3 > .kids { margin-left: 1ch; }
+
+/* Rows: a long name wraps rather than pushing the keys off the row. */
+.cl .ep .nm { overflow-wrap: anywhere; }
+.cl .ep .act form, .cl .note .act form { display: inline-flex; }
+.cl .note .act { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.cl .cl-reset-row { margin-top: 12px; }
+
+/* A loading row's icon blinks four beats, then holds (motion never loops for ever). */
+@media (prefers-reduced-motion: reduce) {
+  .cl .ep[data-state="loading"] .ico { animation: none; }
+}
+
+@media (max-width: 760px) {
+  .cl .ep { grid-template-columns: 2ch minmax(0, 1fr); }
+  .cl .ep .act { grid-column: 2; justify-content: flex-start; min-width: 0; }
+  .cl .note { flex-wrap: wrap; }
+  .cl .cl-tree, .cl .cl-list { max-height: none; }
+}

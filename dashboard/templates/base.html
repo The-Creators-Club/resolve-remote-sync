@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-ui-groups="{{ ui_groups_attr }}">
 <head>
   <meta charset="utf-8">
   {# viewport-fit=cover (2026-08-30, MOBILE_PLAN.md M1): the page paints under
@@ -23,6 +23,10 @@
      owns the tokens, the class vocabulary and the chrome, this one carries the
      rules for the fleet grid and the admin pages. Second, so it wins ties. #}
   <link rel="stylesheet" href="/static/mobile.css">
+  {# UI port phase 1: when the `chrome` group is on, partials/topbar.html
+     resolves to the terminal HUD, painted by hud-common in its own hashed
+     sheet (never in classic style.css, 2.2). #}
+  {% if 'chrome' in ui_groups %}<link rel="stylesheet" href="{{ asset_url('cc/hud.css') }}">{% endif %}
   {# One page's own stylesheet/script (2026-09-24, the /cards picker first).
      After mobile.css so a page's rules win ties with the shared ones. #}
   {% block head %}{% endblock %}
@@ -168,7 +172,15 @@
    on the page carries the token without each partial having to declare it --
    including partials swapped in later, because the attribute lives on an
    ancestor that never gets replaced. #}
-<body hx-headers='{"X-CSRF-Token": "{{ csrf_token or "" }}"}'>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token or "" }}"{% for k, v in ui_hx_headers %}, {{ k|tojson }}: {{ v|tojson }}{% endfor %}}'>
+  {% if 'chrome' in ui_groups %}
+  {# The HUD (UI port phase 1): a bare host, display: contents in hud-common,
+     so the sticky bar sticks against the page; no .topbar flex rules and no
+     box-drawing .rule under it. #}
+  <header class="hud-host">
+    {% include "partials/topbar.html" %}
+  </header>
+  {% else %}
   <header class="topbar">
     {# The topbar lives in its own partial because the mounted SPAs (/broll,
        /music) fetch it from /partials/topbar and swap it in over their static
@@ -181,6 +193,7 @@
      wider font simply overflowed the page. .rule is now an empty element with
      a border-top and the same 21px of vertical rhythm. #}
   <div class="rule"></div>
+  {% endif %}
   {# UX-8 (2026-08-28): the fleet halt on EVERY page. It stops every computer
      in the company, and it used to be visible only on the Users panel that
      set it -- so a Friday halt was a fleet that could not work all weekend

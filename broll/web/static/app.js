@@ -294,7 +294,27 @@ function trackHeaderHeight() {
  * imitation of one. Standalone the same fetch resolves inside THIS app, 404s,
  * and the fallback stays. Never made root-relative: see
  * tests/test_mounted_prefix.py. */
+/* UI port phase 1 (7.0): after an injection, the markup that ARRIVED is the
+   truth. html.cc-chrome only when a HUD came back, html.cc only when its
+   marker says the apps look is on, and the readable cookie rewritten to
+   match (path=/ always, or a second cookie scoped here would win). */
+function syncDashboardLook(host) {
+  const root = document.documentElement;
+  const hud = !!(host && host.querySelector(".hud"));
+  const marker = host && host.querySelector("[data-dash-topbar]");
+  const apps = !!marker && marker.getAttribute("data-ui-apps") === "cc";
+  root.classList.toggle("cc-chrome", hud);
+  root.classList.toggle("cc", apps);
+  relayoutDetail();
+  const v = [hud ? "chrome" : "", apps ? "apps" : ""].filter(Boolean).join(".");
+  try {
+    document.cookie = "ccsync_ui_effective=" + v + "; path=/; samesite=lax" +
+      (location.protocol === "https:" ? "; secure" : "");
+  } catch { /* storage blocked: the next load corrects it */ }
+}
+
 async function loadDashboardTopbar() {
+  let host = null;
   try {
     const res = await fetch("../partials/topbar?current=broll");
     // redirected = an expired session answered with the login PAGE; injecting
@@ -302,9 +322,15 @@ async function loadDashboardTopbar() {
     if (!res.ok || res.redirected) return;
     const html = await res.text();
     if (!html.includes("data-dash-topbar")) return;
-    document.getElementById("dash-topbar").innerHTML = html;
+    host = document.getElementById("dash-topbar");
+    host.innerHTML = html;
   } catch {
     /* dashboard unreachable -- the fallback header stands */
+  } finally {
+    // Every path: the hold ends, and cc-chrome stays only if a HUD arrived.
+    if (host && host.querySelector("[data-dash-topbar]")) syncDashboardLook(host);
+    else document.documentElement.classList.remove("cc-chrome");
+    document.documentElement.classList.remove("cc-chrome-pending");
   }
 }
 
@@ -1201,9 +1227,15 @@ async function openDetail(videoId, seekToSeconds, hits) {
   // The WHOLE browse layout goes, not just the grid: the folder rail is a
   // full-height sticky column, so leaving it mounted kept a 210px gutter beside
   // the player and left the page scrolled halfway down the results.
-  $("#browse-layout").classList.add("hidden");
+  // The terminal look (UI port phase 6) opens the clip BESIDE the grid
+  // instead: relayoutDetail keeps the browse layout and moves the detail into
+  // it, so the grid keeps its place and its scroll.
   $("#detail-view").classList.remove("hidden");
-  window.scrollTo(0, 0);
+  if (relayoutDetail()) {
+    $("#detail-view").scrollIntoView({ block: "nearest" });
+  } else {
+    window.scrollTo(0, 0);
+  }
 
   const player = $("#player");
   player.src = `media/proxy/${videoId}.mp4`;
@@ -1251,12 +1283,46 @@ function closeDetail() {
   state.detailHits = [];
   state.detailSeekTo = null;
   resetShuttle();
+  const beside = detailIsBeside();
   $("#detail-view").classList.add("hidden");
-  $("#browse-layout").classList.remove("hidden");
+  relayoutDetail();
   renderSendButtons();
   // Back to the row of results the clip was opened from, not to the top of a
-  // freshly re-shown grid.
-  window.scrollTo(0, state.gridScrollY || 0);
+  // freshly re-shown grid. Beside the grid nothing moved, so nothing scrolls.
+  if (!beside) window.scrollTo(0, state.gridScrollY || 0);
+}
+
+/** Where the clip detail sits (UI port phase 6, 2026-09-25). Classic: the
+ * detail REPLACES the browse layout, which is hidden while a clip is open.
+ * Terminal (html.cc): the detail sits BESIDE the grid, inside #browse-layout
+ * (.cc-with-detail), and the grid stays. Called on open, on close, and when
+ * the look changes under an open clip (syncDashboardLook: a deep link opens
+ * a clip before the topbar's marker has settled the look). Returns true when
+ * the detail is open beside the grid. */
+function detailIsBeside() {
+  const layout = document.getElementById("browse-layout");
+  return !!(layout && layout.classList.contains("cc-with-detail"));
+}
+
+function relayoutDetail() {
+  const layout = document.getElementById("browse-layout");
+  const detail = document.getElementById("detail-view");
+  if (!layout || !detail) return false;
+  const open = !!state.detail && !detail.classList.contains("hidden");
+  const beside = open && document.documentElement.classList.contains("cc");
+  if (beside) {
+    if (detail.parentNode !== layout) layout.appendChild(detail);
+    layout.classList.add("cc-with-detail");
+    layout.classList.remove("hidden");
+  } else {
+    // Home again, straight after the browse layout, whatever the look.
+    if (detail.parentNode === layout) layout.after(detail);
+    layout.classList.remove("cc-with-detail");
+    layout.classList.toggle("hidden", open);
+  }
+  const back = document.getElementById("detail-back");
+  if (back) back.textContent = beside ? "close this clip" : "← back to results";
+  return beside;
 }
 
 /** A piece of metadata you can click to search by it. Kept to <button> rather

@@ -345,6 +345,22 @@ def api_admin_site_put(
 ) -> dict:
     admin = _require_admin(request)
     settings = request.app.state.settings
+    # UI port R24 (2026-09-25): the look's two keys take their own path. They
+    # are recorded under `ui_groups_history`, never in site_history (whose
+    # undo an older build could not validate), and `site` deletes the row.
+    ui_values = {k: payload.values[k] for k in list(payload.values)
+                 if k in site_store.UI_KEYS}
+    if ui_values:
+        from . import ui_variant_settings
+        ui_variant_settings.apply(conn, admin, ui_values)
+        payload.values = {k: v for k, v in payload.values.items()
+                          if k not in site_store.UI_KEYS}
+        if not payload.values:
+            conn.commit()
+            site_store.invalidate(request.app)
+            manifest = site_store.resolved_manifest(conn, settings)
+            manifest["auto_derived"] = sorted(site_store.AUTO_DERIVED_KEYS)
+            return manifest
     # UX-21 (resilience sweep 2026-08-28): "The same snapshot belongs on
     # [ SAVE ] for the three tree keys" -- canonical_prefix, tree_name and
     # remote_root are read by both installers and every companion, so a save

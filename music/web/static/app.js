@@ -683,6 +683,8 @@ function paintFacets() {
   for (const [cat, labels] of Object.entries(FACETS)) {
     if (cat.startsWith('_')) continue;
     const sec = el('section', 'facet');
+    // UI port phase 6: a window in the terminal look (cc_spa.js); inert otherwise.
+    sec.dataset.ccWin = cat;
     sec.appendChild(el('h2', null, cat.replace('_', ' ')));
     const chips = el('div', 'chips');
     labels.forEach(l => {
@@ -897,7 +899,26 @@ function paintStats(s) {
 // imitation of one. Standalone the same fetch resolves inside THIS app, 404s,
 // and the fallback stays. Never made root-relative: see
 // tests/test_mounted_prefix.py.
+/* UI port phase 1 (7.0): after an injection, the markup that ARRIVED is the
+   truth. html.cc-chrome only when a HUD came back, html.cc only when its
+   marker says the apps look is on, and the readable cookie rewritten to
+   match (path=/ always, or a second cookie scoped here would win). */
+function syncDashboardLook(host) {
+  const root = document.documentElement;
+  const hud = !!(host && host.querySelector('.hud'));
+  const marker = host && host.querySelector('[data-dash-topbar]');
+  const apps = !!marker && marker.getAttribute('data-ui-apps') === 'cc';
+  root.classList.toggle('cc-chrome', hud);
+  root.classList.toggle('cc', apps);
+  const v = [hud ? 'chrome' : '', apps ? 'apps' : ''].filter(Boolean).join('.');
+  try {
+    document.cookie = 'ccsync_ui_effective=' + v + '; path=/; samesite=lax' +
+      (location.protocol === 'https:' ? '; secure' : '');
+  } catch { /* storage blocked: the next load corrects it */ }
+}
+
 async function loadDashboardTopbar() {
+  let host = null;
   try {
     const r = await fetch('../partials/topbar?current=music');
     // redirected = an expired session answered with the login PAGE; injecting
@@ -905,9 +926,15 @@ async function loadDashboardTopbar() {
     if (!r.ok || r.redirected) return;
     const html = await r.text();
     if (!html.includes('data-dash-topbar')) return;
-    document.getElementById('dash-topbar').innerHTML = html;
+    host = document.getElementById('dash-topbar');
+    host.innerHTML = html;
   } catch {
     /* dashboard unreachable -- the fallback header stands */
+  } finally {
+    // Every path: the hold ends, and cc-chrome stays only if a HUD arrived.
+    if (host && host.querySelector('[data-dash-topbar]')) syncDashboardLook(host);
+    else document.documentElement.classList.remove('cc-chrome');
+    document.documentElement.classList.remove('cc-chrome-pending');
   }
 }
 

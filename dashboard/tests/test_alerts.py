@@ -788,7 +788,7 @@ def test_a_day_of_silence_is_still_a_daily_alarm(env):
     silent = [f for f in alerts.scan(conn, settings, A_DAY_LATER)
               if f["kind"] == "machine_silent"]
     assert silent and silent[0]["repeat"] is True
-    assert "[ FORGET ]" in silent[0]["fix"]
+    assert '"Forget"' in silent[0]["fix"]  # D8, UI port phase 7
 
 
 def test_a_computer_gone_a_fortnight_stops_being_a_daily_mail(env, monkeypatch):
@@ -897,7 +897,7 @@ def test_abandoned_jobs_are_reported_once_for_the_window(env):
                 if f["kind"] == "jobs_abandoned"]
     assert len(findings) == 1
     assert "gave up on 3 job(s)" in findings[0]["diagnosis"]
-    assert "[ TRY AGAIN ]" in findings[0]["fix"]
+    assert '"Try again"' in findings[0]["fix"]  # D8, UI port phase 7
 
 
 def test_a_pinned_job_with_cards_mounted_and_a_worker_running_is_quiet(

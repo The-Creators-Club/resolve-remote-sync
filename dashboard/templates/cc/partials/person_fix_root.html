@@ -1,0 +1,24 @@
+{# FIX DESTINATION ROOT for ONE of the person's computers, terminal look (UI
+   redesign port phase 3, group `everyday`; plan phase 2 row, wave 5). A NEW
+   name: the classic fix_root.html is included by queue_section, which home
+   fetches. Drawn from that computer's own queue view (`fix.queue`), so no
+   /?machine= link is needed. A read-out: only an admin changes the root, on
+   a project's page. #}
+<div class="fix-root person-fix-root" data-machine="{{ fix.machine }}">
+  <div class="acct-h3">fix destination root <span class="n">{{ fix.machine }}</span></div>
+  <div class="root-line">
+    {% if fix.queue.resolve_project %}
+      open in Resolve on <b>{{ fix.machine }}</b>: <b>{{ fix.queue.resolve_project }}</b>
+      {% if fix.queue.root_label %}
+        files into <b>{{ fix.queue.root_label }}</b>
+        <span class="muted">({{ "admin-set" if fix.queue.root_source == "admin" else "auto-matched, fixed" }}; admins change it in the project's roots window)</span>
+      {% else %}
+        <span class="tag warn" title="No project on the server matched the one open in Resolve.">no match</span>
+        <span class="muted">no tree project matched; an admin can map it in a project's roots window</span>
+      {% endif %}
+    {% else %}
+      <span class="dim">no Resolve project reported yet</span>
+    {% endif %}
+  </div>
+  <div class="hint">Where Fix all puts the files for the project open in Resolve on this computer.</div>
+</div>

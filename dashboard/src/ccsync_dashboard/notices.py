@@ -242,9 +242,8 @@ _JOB_MEANING = {
     # grid, and a server-side notice's own detail is the notice itself.
     "config": ("this server cannot read its own sync engine, so nothing about the fleet "
                "is being updated",
-               "Check that Syncthing is running on the server; the [ COLLECTOR ] panel "
-               "under the computers table on SYNC STATUS shows each cycle's last run "
-               "and error."),
+               "Check that Syncthing is running on the server; the Collector panel "
+               "shows each cycle's last run and error."),
     "enforce": ("projects ticked or unticked on this dashboard are not reaching the "
                 "editors' computers",
                 "Check that Syncthing is running on the server, then untick and re-tick "
@@ -293,9 +292,8 @@ def _check_collector_jobs(conn, settings, now: str) -> None:
             continue
         meaning, fix = _JOB_MEANING.get(
             kind, ("one of the background jobs that keeps the fleet in step is failing",
-                   "Restart the dashboard, then read the [ COLLECTOR ] panel under the "
-                   "computers table on SYNC STATUS: it shows each cycle's last run "
-                   "and error."))
+                   "Restart the dashboard, then read the Collector panel: it shows "
+                   "each cycle's last run and error."))
         when = str(row.get("finished_at") or row.get("started_at") or "")
         db.notice(
             conn, "collector_cycle_failed", "error", kind,
@@ -320,9 +318,8 @@ def _check_collector_jobs(conn, settings, now: str) -> None:
             conn, "syncthing_unreachable", "error", "server",
             body=("The sync engine (Syncthing) on this server is not answering, so no "
                   "project is being shared, measured or updated for anybody."),
-            fix=("Start Syncthing on the server, then read the [ COLLECTOR ] panel "
-                 "under the computers table on SYNC STATUS: its cycles turn green "
-                 "once it answers."),
+            fix=("Start Syncthing on the server, then read the Collector panel: "
+                 "its cycles turn green once it answers."),
             now=now)
     elif health.get("syncthing_reachable") is True:
         db.clear_notice(conn, "syncthing_unreachable", "server", now=now)
@@ -403,8 +400,8 @@ def _check_collector_alarms(conn, settings, now: str) -> None:
             # button (that is a chip); the panel on Packages is [ DASHBOARD ]
             # and its button [ UPDATE NOW ] (admin_dashboard_update.html), and
             # it offers only a bundle matching the running image.
-            fix=("Update the dashboard: Settings, Packages, then [ UPDATE NOW ] in "
-                 "the [ DASHBOARD ] panel. If that panel offers no update, this "
+            fix=("Update the dashboard: Settings, Packages, then press \"Update "
+                 "now\" in the Dashboard panel. If that panel offers no update, this "
                  "server needs a newer container image."),
             now=now)
     else:
@@ -471,8 +468,8 @@ def _check_inventory(conn, now: str) -> None:
                   f"{str(row['last_error'])[:200]}. The figures on that project's page "
                   f"are the last good ones, from before this started."),
             fix=("Check that the project's folder is still on the server under the name "
-                 "the dashboard knows. If it was renamed, use [ MOVE ON THE SERVER AND "
-                 "ON EVERY MACHINE ] on the project page."),
+                 "the dashboard knows. If it was renamed, use \"Move on the server "
+                 "and on every computer\" on the project page."),
             now=now)
     db.clear_notices_of_kind(conn, "inventory_refused", failing, now=now)
 
@@ -687,7 +684,7 @@ def _check_machine_space(conn, settings, now: str) -> None:
                       "taking up room that footage needs."),
                 fix=("The computer clears these by itself every 6 hours unless "
                      "proxy download has stopped itself. Check that computer's row on "
-                     "the SYNC STATUS page for [ RESUME ]."),
+                     "the Sync status page for \"Resume\"."),
                 now=now)
     db.clear_notices_of_kind(conn, "machine_disk_low", open_disks, now=now)
     db.clear_notices_of_kind(conn, "machine_trash_oversize", open_trash, now=now)
@@ -721,8 +718,9 @@ def _check_forgotten_machines(conn, settings, now: str) -> None:
                   f"{_since(str(row['received_at']), now)}, so this server has stopped "
                   "asking about it. Nothing is syncing to or from that computer, and "
                   "anything ticked for it is sitting unapplied."),
-            fix=("If that computer is gone for good, open FLEET and press [ FORGET ] on "
-                 "its row so this stops. If it is coming back, no action is needed."),
+            fix=("If that computer is gone for good, open Sync status and press "
+                 "\"Forget\" on its row so this stops. If it is coming back, no "
+                 "action is needed."),
             now=now)
     db.clear_notices_of_kind(conn, "machine_forgotten", open_subjects, now=now)
 
@@ -829,8 +827,8 @@ def record_moves_dropped(
               f"paths, and proxy download stops itself on the computers that "
               f"held them."),
         fix=("Find what changed on the server (a restore, a remount, or a big "
-             "reorganisation), then move the rest with [ MOVE ON THE SERVER "
-             "AND ON EVERY MACHINE ] on the project page so every computer "
+             "reorganisation), then move the rest with \"Move on the server "
+             "and on every computer\" on the project page so every computer "
              "follows."),
         now=stamp)
     conn.commit()
@@ -964,7 +962,7 @@ def _check_alerts_sink(conn, settings, now: str) -> None:
                   "no address or webhook set the first anyone hears of a stopped sync is "
                   "an editor asking."),
             fix=("Set an address or a webhook on Settings, Alerts, then press "
-                 "[ SEND A TEST ]."),
+                 "\"Send a test\"."),
             now=now)
     else:
         db.clear_notice(conn, "alerts_sink_none", "alerts", now=now)
@@ -1057,8 +1055,8 @@ def _check_server_crashes(conn, settings, now: str) -> None:
         # ui-copy-2 (2026-09-25): the registry gives this notice its own
         # [ DOWNLOAD CRASH REPORTS ] button (db.NOTICE_KINDS href_label); the
         # sentence used to send the owner to a Settings page that does not exist.
-        fix=("Send us the crash files: press [ DOWNLOAD CRASH REPORTS ] on this "
-             "notice and attach the zip."),
+        fix=("Send us the crash files: press \"Download crash reports\" on "
+             "this notice and attach the zip."),
         now=now)
 
 
@@ -1120,7 +1118,7 @@ def _check_release_feed(conn, settings, now: str) -> None:
                   + (_since(checked, now) if checked else "at all yet")
                   + (f": {error[:200]}" if error else ".")
                   + " No new companion or dashboard builds can arrive until it can be."),
-            fix=("Press [ CHECK NOW ] on Settings, Packages. If it keeps failing, check "
+            fix=("Press \"Check now\" on Settings, Packages. If it keeps failing, check "
                  "that this server can reach the internet."),
             now=now)
     else:
@@ -1213,7 +1211,7 @@ def _check_accounts(conn, settings, now: str) -> None:
             body=(f"The account {name} has existed {_since(since, now) if since else 'for a while'} "
                   "and no computer has ever reported for it, so nothing is syncing for "
                   "that person."),
-            fix=("Send them the installer from the [ INSTALLER ] link, or delete the "
+            fix=("Send them the installer from the \"Installer\" link, or delete the "
                  "account on Settings, Users if it is not needed."),
             now=now)
     db.clear_notices_of_kind(conn, "editor_without_machine", open_names, now=now)

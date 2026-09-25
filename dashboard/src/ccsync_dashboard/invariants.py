@@ -613,7 +613,7 @@ def _check_companion_floor(ctx: Ctx) -> Outcome:
         reason = ("it holds an upload-only tick, which needs "
                   f"{FLOOR_UPLOAD_ONLY} or it will download that project too"
                   if key in upload_only else
-                  f"the fleet's [ RESUME ] and [ UPDATE NOW ] buttons need {FLOOR_RESUME}")
+                  f"the fleet's \"Resume\" and \"Update now\" buttons need {FLOOR_RESUME}")
         if db.version_tuple(running) and db.version_tuple(running) < db.version_tuple(needed):
             bad.append((f"{key[0]}/{key[1]}", f"running {running}: {reason}"))
     if bad:
@@ -1131,9 +1131,9 @@ INVARIANTS: tuple[Invariant, ...] = (
         "companion_floor", 7,
         "every computer runs a build new enough for the plan it has been given",
         "A computer running too old a build ignores the buttons on this dashboard "
-        "in silence: the update push does nothing, [ RESUME ] never arrives, and an "
+        "in silence: the update push does nothing, \"Resume\" never arrives, and an "
         "upload-only project is downloaded anyway.",
-        "On Settings, Packages: press [ UPDATE NOW ] for that computer. If it is "
+        "On Settings, Packages: press \"Update now\" for that computer. If it is "
         "below 0.9.3 that button cannot reach it, and somebody has to update it at "
         "the computer itself.",
         _check_companion_floor),
@@ -1222,8 +1222,8 @@ INVARIANTS: tuple[Invariant, ...] = (
         "everything this server finds waits on a page for somebody to open. That "
         "is how an outage runs for eighteen hours.",
         "On Settings, Alerts: set an email or webhook destination and press "
-        "[ SEND A TEST ]. If one is set already, the reason the last message "
-        "failed is under WHAT WAS SENT on the same page.",
+        "\"Send a test\". If one is set already, the reason the last message "
+        "failed is under \"What was sent\" on the same page.",
         _check_alerts_deliverable, severity="warn"),
 )
 

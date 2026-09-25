@@ -1,0 +1,38 @@
+{# FIX DESTINATION ROOT on the terminal home, under a NEW name (UI redesign
+   port phase 2, plan 7.1 row 2, wave 5): the classic fix_root is included by
+   queue_section, which splits into home_queue here and phase 3's
+   person_queue, so a same-named overlay would be reached by two groups.
+   Included by home_queue.html, so it rides the queue's 10 s poll and its
+   untick answer. A read-out: where "Fix all" puts the files for the project
+   open in Resolve on ONE computer. The computer links are plain links, not
+   hx-get, so the choice survives the poll, and they carry the ?as= the page
+   is viewed under (ui-dash-main-4). Only an admin changes the root, in each
+   project's project_roots window. #}
+<div class="fix-root">
+  <h3 class="sec">fix destination root</h3>
+  {% if queue.machines and queue.machines | length > 1 %}
+  {% set fix_as = queue.editor if (session_user and queue.editor and queue.editor | lower != session_user | lower) else '' %}
+  {% set fix_as_qs = ('as=' ~ (fix_as | urlencode)) if fix_as else '' %}
+  {% set qm_now = queue_machine | default('', true) %}
+  <div class="inline fix-root-machines"><span class="dim">computer:</span>
+    <a class="key quiet sm" href="/{{ ('?' ~ fix_as_qs) if fix_as_qs }}"{% if not qm_now %} aria-current="true"{% endif %}><span class="t">last to report</span></a>
+    {% for m in queue.machines %}
+    <a class="key quiet sm" href="/?machine={{ m | urlencode }}{{ ('&' ~ fix_as_qs) if fix_as_qs }}"{% if qm_now == m %} aria-current="true"{% endif %}><span class="t">{{ m }}</span></a>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <div class="root-line">
+    {% if queue.resolve_project %}
+      open in Resolve{% if queue_machine | default('', true) %} on <b>{{ queue_machine }}</b>{% endif %}: <b>{{ queue.resolve_project }}</b>,
+      {% if queue.root_label %}
+        files go into <b>{{ queue.root_label }}</b>
+        <span class="dim">({{ "set by an admin" if queue.root_source == "admin" else "matched by itself, then kept" }}; admins change it in the project's project roots window)</span>
+      {% else %}
+        <span class="tag warn"><span class="w">no match</span></span>
+        <span class="dim">no project in the tree matched; an admin can map it in a project's project roots window</span>
+      {% endif %}
+    {% else %}
+      <span class="dim">no Resolve project reported yet</span>
+    {% endif %}
+  </div>
+</div>

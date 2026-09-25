@@ -299,6 +299,40 @@ Verdicts:
 | (a) the studio router's UDP/NAT handling | **Still possible, second** | It is a consumer router (`3c:52:a1:85:40:ad` at `192.168.0.1`, also the studio AP, PPPoE WAN, no UPnP) forwarding every tunnel byte in software; the two-peer test cannot separate it from (b), because both peers leave through it to the same destination. Settled by: a laptop tethered to a phone (off the studio line) pulling from the NAS over the tunnel at 40+ MB/s rules it in; a second remote site that is not behind CGNAT getting 40+ MB/s rules it out |
 | (b') UDP shaping by HiNet at the studio | **Unlikely, not excluded** | HiNet forwarded a high UDP port at line rate before (`SPEC.md:28`); the same hotspot test settles it with (a) |
 
+## 6b. The culprit, settled (evening of 2026-09-25): the crossing between two ISPs, not UDP
+
+Three same-session tests from Ruskin's PC, each alternating with the normal
+Tailscale path as the control (1 GiB of random bytes, 40 s windows):
+
+| Path from the studio to Ruskin | 1 stream | 4 streams |
+|---|---|---|
+| Tailscale, direct (UDP), the control | 15.1 to 15.8 MB/s | 17.5 to 18.2 MB/s |
+| Plain TCP straight over the internet (a temporary router forward, TCP 18779 to the NAS, removed after) | 17.0 and 14.6 MB/s | 18.5 MB/s |
+| Tailscale Funnel (TCP to Tailscale's ingress) | 2.3 to 2.5 MB/s | 2.6 MB/s (Funnel's own relay cap: says nothing about his line) |
+| **Cloudflare quick tunnel** (studio -> Cloudflare Taipei `tpe01` -> Ruskin, HTTPS) | **50.1 and 52.7 MB/s** | **52.8 MB/s** |
+
+- **Not UDP.** Plain TCP over the internet hits the same ~18 MB/s as the
+  tunnel, so the carrier-grade-NAT UDP-policing theory (section 6a) is wrong.
+- **It is the direct route between the two networks.** The studio is on
+  HiNet (`114.34.8.231`, `HINET-NET`); Ruskin's traffic leaves through
+  **UBBNET** (`122.100.70.91`, `UBBNET-NET`, Taiwan Broadband cable), behind
+  its carrier-grade NAT, even though he says his account is HiNet (check
+  what his router is actually plugged into). Everything taking the direct
+  HiNet -> UBBNET route is capped at about 18 MB/s whatever the protocol;
+  the same bytes sent HiNet -> Cloudflare Taipei -> UBBNET arrive at about
+  52 MB/s, which is close to his 57 MB/s Singapore baseline. A classic
+  congested domestic interconnect.
+- **What fixes it:** (1) if Ruskin really has a HiNet line, put his router on
+  it: HiNet to HiNet never crosses the interconnect; (2) a relay with good
+  peering to both networks. Cloudflare proves the effect, but CC Sync's
+  rule is Tailscale-only access and footage through a third party changes
+  the privacy text, so the candidate to test next is a small Taipei VPS as a
+  Tailscale **peer relay** (traffic stays end-to-end encrypted inside
+  Tailscale); (3) nothing in CC Sync's own settings moves this.
+- Everything was removed after each test: the router forward (other forwards
+  untouched), the NAS and rig test servers and files, the Funnel, and the
+  quick tunnel.
+
 ## 6. Measurement plan for the remote-editor side
 
 What to run, and what each result would mean. Every step is short, uses temp

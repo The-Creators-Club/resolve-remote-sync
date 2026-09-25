@@ -1,0 +1,58 @@
+{# YOU, terminal look (UI redesign port phase 3, group `everyday`; bench
+   design/account.html renderYou). The window's frame is cc/account.html's;
+   this is its BODY, #account-you, which the display name form swaps
+   (outerHTML) with a result line. Same route, fields and sentences as the
+   classic partial. Never polled: a poll would wipe a name half typed. #}
+{% from "partials/ev_macros.html" import result_line, tag with context %}
+{% set sign_words = {
+  "smb": ("your account on the server", "The same name and password as your account on the server (the NAS), which also opens its shared folders."),
+  "local": ("a local account kept by this dashboard", "An account that exists only in this dashboard. It is not an account on the server."),
+  "oidc": ("your organisation's single sign-on", "You sign in through your organisation's own sign-in page, the way you sign in to its email. This dashboard never sees that password."),
+} %}
+{% set signs = sign_words.get(acct.auth_method, (acct.auth_method, "")) %}
+<div class="body acct-you" id="account-you">
+  <div>
+    <div class="acct-who">
+      <span class="mono-name">{{ acct.shown_as }}</span>
+      <span class="login">signed in as {{ acct.user }}</span>
+    </div>
+    <form class="form account-name-form" hx-post="/partials/account/display-name"
+          hx-target="#account-you" hx-swap="outerHTML">
+      <div class="form-row">
+        <label class="lbl" for="account-name-in">Name<small>What other people see beside your work: plan changes, history, who opened a Cards episode. Your sign-in name stays <b>{{ acct.user }}</b>. Clear the box and save to go back to it.</small></label>
+        <div class="inline">
+          <input class="inp" type="text" id="account-name-in" name="display_name"
+                 value="{{ typed if (result and result.tone == 'red' and typed is defined) else (acct.display_name or '') }}"
+                 maxlength="64" autocomplete="nickname" placeholder="{{ acct.user }}"
+                 title="Up to 64 characters. Only how you are shown to other people; it does not change how you sign in.">
+          <button class="key sm" type="submit" title="Save the name. Other people see it straight away."><span class="t">Save</span></button>
+        </div>
+      </div>
+    </form>
+    <div class="ev-result">{{ result_line(result) }}</div>
+  </div>
+  <dl class="kv">
+    <dt title="The name you type to sign in, here and in each computer's CCSync.">sign-in name</dt>
+    <dd>{{ acct.user }} <span class="dim">(cannot be changed: it is the key every computer, plan and file uses)</span></dd>
+    <dt>role</dt>
+    <dd>{% if acct.is_admin %}admin <span class="dim">({{ {"admin_list": "on the server's admin list", "local_role": "an admin in this dashboard's accounts"}.get(acct.admin_source, "an admin") }})</span>
+        {% else %}editor <span class="dim">(you see and change your own computers only)</span>{% endif %}</dd>
+    <dt>signs in with</dt>
+    <dd><span title="{{ signs[1] }}">{{ signs[0] }}</span> <span class="dim">&middot;</span>
+      <a class="hi" href="#account-password">{{ "about your password" if acct.auth_method == "oidc" else "change your password" }}</a></dd>
+    <dt>account</dt>
+    <dd>{% if acct.account.suspended %}{{ tag("warn", "suspended by an admin", "An admin paused your account: your computers are turned away and your projects are unshared. Your sync plan is kept, and your admin can put it all back.", true) }}
+        {% else %}{{ tag("ok", "active", "You can sign in. An admin can switch an account off, and then it cannot.") }}{% endif %}</dd>
+    <dt title="What each of your computers uses to prove it is yours when it uploads or downloads. It is not your password.">sync keys</dt>
+    <dd class="acct-keys" hx-get="/partials/account/sync-keys" hx-trigger="load" hx-swap="innerHTML"><span class="dim">asking which keys are approved</span></dd>
+    {# LG-2 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.2, 2026-09-25), carried from the
+       classic partial: a person's own copy. A plain form, not htmx, because
+       the answer is a download; the hidden field is the CSRF token
+       app.csrf_gate reads. The route takes the subject from the session. #}
+    <dt title="One JSON file with your computers' records, your history, your sign-in sessions, your requests and the audit entries about you. Passwords and keys are left out, and the file lists what it does not include.">your data</dt>
+    <dd><form class="inline account-export-form" method="post" action="/api/v1/me/export">
+        <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+        <button class="key sm" type="submit" title="Downloads the file straight away. The download is recorded in the audit log."><span class="t">Download</span></button>
+      </form> <span class="dim">Download everything the dashboard holds about you</span></dd>
+  </dl>
+</div>

@@ -1,0 +1,26 @@
+{# FLEET JOBS, terminal look (UI redesign port phase 4, group settings-fleet,
+   2026-09-25; classic twin admin_jobs.html, design/jobs.html).
+
+   The poll lives on the partial itself (#admin-jobs, 15 s, outerHTML, with
+   ?finished=1 carried in its own URL: DDIAG-11). #admin-jobs is a plain div
+   holding the page's windows, never a window itself; cc.js re-applies each
+   window's fold after every swap (plan 3.1's keeper fallback). No sidebar
+   (D17). #}
+{% extends "cc/shell.html" %}
+{% block title %}{{ brand_org | upper }}: JOBS{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset_url('cc/settings_people.css') }}">{% endblock %}
+{% block layout %}
+<div class="page one fl-page sp-page">
+  {% include "partials/settings_nav.html" %}
+  <div class="head">
+    <div>
+      <h1><span><span class="prompt">&gt;</span> FLEET JOBS</span></h1>
+      <div class="sub">Work the fleet does for itself: transcriptions, 480p proxies, audio extractions and waveform peaks.</div>
+    </div>
+  </div>
+  <p class="lede">A job is offered to every computer that can do it and claimed by the first one to ask,
+    so nothing here is assigned to anybody. What this page is for is the opposite case: a queue that is
+    not moving, and why. That answer is under each row, per computer, in words.</p>
+  {% include "partials/admin_jobs.html" %}
+</div>
+{% endblock %}

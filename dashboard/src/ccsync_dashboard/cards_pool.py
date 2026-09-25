@@ -386,7 +386,7 @@ class EnginePool:
                 entry.detail = (
                     f"the vault did not answer for "
                     f"{int(BUILD_DEADLINE_SECONDS // 60)} min, so this episode "
-                    f"did not open. Press [ OPEN ] to try again.")
+                    f"did not open. Press \"Open\" to try again.")
                 log.warning("Timeline Cards: %s was still opening after %d s; "
                             "marked failed", entry.root,
                             int(BUILD_DEADLINE_SECONDS))
@@ -582,7 +582,7 @@ class EnginePool:
                     return None, (
                         f"{entry.name} did not open a moment ago. Wait "
                         f"{max(1, int(RETRY_FLOOR_SECONDS - since))} s and "
-                        f"press [ OPEN ] again.")
+                        f"press \"Open\" again.")
                 self._entries.pop(slug, None)
             live = [e for e in self._entries.values() if e.state != FAILED]
             if len(live) >= self.cap:
@@ -609,7 +609,7 @@ class EnginePool:
             who = ", ".join(entry.occupants()) or "nobody in the last 15 min"
             bits.append(f"{entry.name} ({who})")
         return (f"{self.cap} episodes are already open: " + " and ".join(bits)
-                + ". Ask whoever is in one to press [ CLOSE ] beside it here, "
+                + ". Ask whoever is in one to press \"Close\" beside it here, "
                   "or close an idle one yourself. An admin can close any of "
                   "them.")
 
@@ -683,7 +683,7 @@ class EnginePool:
                         if e is not entry and e.state != FAILED]
                 if len(live) >= self.cap:
                     late = ("this episode opened too late: every seat was "
-                            "taken by then. Press [ OPEN ] to try again.")
+                            "taken by then. Press \"Open\" to try again.")
             entry.engine = engine
             if not (orphaned or late):
                 # Published under the SAME lock as the checks above: now that

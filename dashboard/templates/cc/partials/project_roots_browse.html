@@ -1,0 +1,40 @@
+{# The folder picker for one Resolve project's root (UI redesign port phase
+   2). The overlay of partials/project_roots_browse.html, click-fetched into
+   a row's drawer. data-poll-hold: htmx_errors.js skips the roots window's
+   30 s beat while a picker is open (ui-dash-main-6), so a walk is not
+   emptied halfway. PICK answers into the whole .roots-box. #}
+<div class="roots-browse" data-poll-hold>
+  <div class="inline crumbs"><span class="dim">files into, for <b>{{ browse.resolve_project }}</b>:</span>
+    <button class="key quiet sm" type="button" hx-get="/partials/project-roots/browse?rel=&resolve_project={{ browse.resolve_project | urlencode }}"
+            hx-target="closest .roots-browse" hx-swap="outerHTML"><span class="t">Projects</span></button>
+    {% for c in browse.crumbs %}<span class="dim" aria-hidden="true">/</span>
+    <button class="key quiet sm" type="button" hx-get="/partials/project-roots/browse?rel={{ c.rel | urlencode }}&resolve_project={{ browse.resolve_project | urlencode }}"
+            hx-target="closest .roots-browse" hx-swap="outerHTML"><span class="t">{{ c.name }}</span></button>
+    {% endfor %}
+  </div>
+  {% if browse.error %}<div class="note err error-banner"><span class="grow">{{ browse.error }}</span></div>{% endif %}
+  {% if browse.rel and not browse.error %}
+  <form class="inline" hx-post="/partials/project-roots" hx-target="closest .roots-box" hx-swap="outerHTML">
+    <input type="hidden" name="resolve_project" value="{{ browse.resolve_project }}">
+    <input type="hidden" name="root_rel" value="{{ browse.rel }}">
+    <button class="key sm" type="submit"><span class="t">Files go into Projects/{{ browse.rel }}</span></button>
+  </form>
+  {% endif %}
+  <ul class="browse-list">
+  {% for e in browse.entries %}
+    <li>
+      <button class="key quiet sm" type="button" hx-get="/partials/project-roots/browse?rel={{ e.rel | urlencode }}&resolve_project={{ browse.resolve_project | urlencode }}"
+              hx-target="closest .roots-browse" hx-swap="outerHTML" title="Open this folder."><span class="t">{{ e.name }}/</span></button>
+      {% if e.is_project %}<span class="tag ok"><span class="w">project</span></span>{% endif %}
+      {% if e.name_match %}<span class="tag ok"><span class="w">same name</span></span>{% endif %}
+      <form class="inline" hx-post="/partials/project-roots" hx-target="closest .roots-box" hx-swap="outerHTML">
+        <input type="hidden" name="resolve_project" value="{{ browse.resolve_project }}">
+        <input type="hidden" name="root_rel" value="{{ e.rel }}">
+        <button class="key sm" type="submit" title="Files for this Resolve project go into this folder."><span class="t">Pick</span></button>
+      </form>
+    </li>
+  {% else %}
+    <li class="dim">no folders here</li>
+  {% endfor %}
+  </ul>
+</div>

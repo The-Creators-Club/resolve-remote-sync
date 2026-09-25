@@ -1,0 +1,14 @@
+{# WHAT THIS MEANS: the terminal shell's hint sheet (phase 1; DUI-3).
+
+   The same job as partials/chip_sheet.html under a NEW name (R15), so a
+   classic page never receives it. static/htmx_errors.js block 2 fills it
+   from the tapped tag, LED or [data-tip] element and toggles `hidden`, and
+   finds it ONLY by these three hooks: #chip-sheet, .chip-sheet-label and
+   .chip-sheet-text. Keep all three, or every tap on a cc page throws. #}
+<div id="chip-sheet" class="hint-sheet" role="dialog" aria-live="polite" aria-label="what this means" hidden>
+  <div class="hint-sheet-inner">
+    <div class="chip-sheet-label"></div>
+    <div class="chip-sheet-text"></div>
+    <div class="hint-sheet-foot">tap anywhere to close</div>
+  </div>
+</div>

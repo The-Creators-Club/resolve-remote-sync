@@ -1,0 +1,50 @@
+{# WHAT IS PROTECTED, terminal twin (UI port phase 5). The default is
+   INVERTED, as partials/protection.html: a safety mechanism this server
+   cannot positively verify is "missing" or "cannot verify", never green.
+   The whole #protection block is what the two ack forms swap (outerHTML). #}
+<div id="protection" class="vstack">
+  {% if protection_error %}<div class="note err error-banner"><span class="grow">{{ protection_error }}</span></div>{% endif %}
+  {% if protection_notice %}<div class="note ok result-banner"><span class="grow">{{ protection_notice }}</span></div>{% endif %}
+
+  <section class="win" data-win="protected">
+    <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold what is protected"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">what_is_protected</h2><span class="bar-rule"></span><span class="meta"><b>{{ protection.counts.ok }}</b> of {{ protection.lines | length }} confirmed, <b>{{ protection.counts.broken }}</b> missing</span></div>
+    <div class="scroll-y hl-list" id="protection-table">
+    {% for row in protection.lines %}
+      <div class="vd no-when{{ ' ok' if row.state == 'ok' }}">
+        <span class="st">
+          {% if row.state == 'ok' %}<span class="tag ok" title="Protected: this server has seen the evidence for itself.">protected</span>
+          {% elif row.state == 'broken' %}<span class="tag solid {{ 'err' if row.severity == 'error' else 'warn' }}" title="Missing: this protection is not in place.">missing</span>
+          {% elif row.state == 'check_failed' %}<span class="tag solid err" title="The check itself hit an error.">could not run</span>
+          {% else %}<span class="tag warn" title="This server has no way to get evidence for this one; the reason is beside it.">cannot verify</span>{% endif %}
+        </span>
+        <span class="ti">{{ row.title }}</span>
+        <div class="more">
+          {% if row.state != 'ok' %}<div class="cq">{{ row.consequence }}</div>{% endif %}
+          {% if row.detail %}<div class="dt">{{ row.detail }}</div>{% endif %}
+          {% for s in row.subjects %}<div class="subj">{{ s.subject }}{% if s.detail %}: {{ s.detail }}{% endif %}</div>{% endfor %}
+          {% if row.state != 'ok' %}<div class="fix">{{ row.fix }}</div>{% endif %}
+        </div>
+      </div>
+    {% endfor %}
+    </div>
+  </section>
+
+  {# The two dates nothing on this server can observe for itself. DATES, not
+     ticks: "the key is backed up" is a claim that ages. #}
+  <section class="win" data-win="acks" id="acks">
+    <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold what only you can confirm"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">what_only_you_can_confirm</h2><span class="bar-rule"></span></div>
+    <div class="body lede">This server cannot see a key on your workstation or a restore you did by hand. Record it here and the lines above turn green.</div>
+    {% for key, question, button, tip in [
+         ('release_key_backup', 'The release signing key is backed up, on', 'I have backed it up', 'The signing key is the one file that makes the seal on every update. It lives on one workstation, so it needs a backup copy.'),
+         ('restore_drill', 'A restore from a backup was tried, on', 'Record a restore', 'A restore drill is a practice run: bringing something back from a snapshot to prove the backups work.')] %}
+    {% set a = protection.acks[key] if protection.acks and key in protection.acks else None %}
+    <form class="ack" hx-post="/partials/admin/protection/ack" hx-target="#protection" hx-swap="outerHTML">
+      <input type="hidden" name="key" value="{{ key }}">
+      <label class="q" for="ack-{{ key }}" title="{{ tip }}">{{ question }}
+        <small>{% if a %}last recorded <b>{{ a.date }}</b>{% if a.by %} by {{ a.by }}{% endif %}{% else %}never recorded{% endif %}</small></label>
+      <input class="inp" type="date" name="date" id="ack-{{ key }}" value="">
+      <button class="key" type="submit" title="Records that you did this on that date, under your name. The line above turns green."><span class="t">{{ button }}</span></button>
+    </form>
+    {% endfor %}
+  </section>
+</div>

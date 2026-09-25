@@ -708,7 +708,7 @@ LINES: tuple[ProtectionLine, ...] = (
         "published to these computers over the air.",
         "Copy the release key off that workstation to somewhere it can be found "
         "again (docs/SECRETS.md), then record it here with "
-        "[ I HAVE BACKED IT UP ].",
+        "\"I have backed it up\".",
         _check_key_backup),
     ProtectionLine(
         "restore_drill",
@@ -718,7 +718,7 @@ LINES: tuple[ProtectionLine, ...] = (
         "recovery path here starts with finding a snapshot, and the first time "
         "anyone tries should not be the day something is lost.",
         "Restore one project folder from a snapshot into a scratch path, check "
-        "the files open, then record the date here with [ RECORD A RESTORE ].",
+        "the files open, then record the date here with \"Record a restore\".",
         _check_restore_drill),
     ProtectionLine(
         "server_versioning",
@@ -737,7 +737,7 @@ LINES: tuple[ProtectionLine, ...] = (
         "CC Sync keeps a copy of everything it deletes on an editor's computer. "
         "They are pruned automatically, and a computer well over the limit is a "
         "computer whose pruning has stopped, filling the drive footage needs.",
-        "Check that computer's row on the SYNC STATUS page for [ RESUME ]: pruning is "
+        "Check that computer's row on the Sync status page for \"Resume\": pruning is "
         "paused while its download safety brake is on.",
         _check_editor_trash,
         severity="warn"),
@@ -758,7 +758,7 @@ LINES: tuple[ProtectionLine, ...] = (
         f"and writes down what is wrong. With nobody to tell, the first anyone "
         f"hears of a stopped sync is an editor asking.",
         "On Settings, Alerts: choose mail or a webhook, then press "
-        "[ SEND A TEST ].",
+        "\"Send a test\".",
         _check_alerts_sink,
         severity="error"),
 )
@@ -1121,7 +1121,9 @@ def weekly_lines(conn: sqlite3.Connection) -> list[str]:
            f"{counts[BROKEN]} missing, "
            f"{counts[NOT_CHECKED] + counts[CHECK_FAILED]} unverifiable)"]
     for row in view["lines"]:
-        out.append(f"  [ {row['label']} ] {row['title']}")
+        # D8 (UI port phase 7, 2026-09-25): a plain-text state word is a
+        # "PROTECTED:" prefix, not a bracketed chip; brackets read as buttons.
+        out.append(f"  {row['label']}: {row['title']}")
         if row["detail"]:
             out.append(f"      {row['detail']}")
         for subject in row["subjects"]:

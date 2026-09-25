@@ -1,0 +1,40 @@
+{# PACKAGES, terminal look (UI redesign port, phase 4, group
+   `settings-fleet`, builder P4a, 2026-09-25; classic twin admin_packages.html,
+   bench design/packages.html). Same partials by name, same routes, same
+   _packages_and_feed context; no sidebar (D17).
+
+   - The packages panel keeps its 30 s innerHTML poll on a plain wrapper; the
+     partial is a plain .admin-packages-box holding its windows (3.1's keeper
+     fallback).
+   - The dashboard's own code sits in the this_dashboard window, whose BODY is
+     loaded once (never polled: an update in flight owns it) and then driven
+     by static/cc/dashboard_update.js, the cc copy of the classic script.
+   - The UPDATE ALL panel of the bench is NOT built: it needs a server-side
+     plan builder (BACKEND, plan 5.3). #}
+{% extends "cc/shell.html" %}
+{% block title %}{{ brand_org | upper }}: PACKAGES{% endblock %}
+{% block head %}
+  <link rel="stylesheet" href="{{ asset_url('cc/settings_fleet.css') }}">
+  <script src="{{ asset_url('cc/dashboard_update.js') }}" defer></script>
+  <script src="{{ asset_url('confirms.js') }}" defer></script>
+{% endblock %}
+{% block layout %}
+<div class="page one">
+  {% include "partials/settings_nav.html" %}
+  <div class="head">
+    <div>
+      <h1><span><span class="prompt">&gt;</span> PACKAGES</span></h1>
+      <div class="sub">The builds this server hands to the fleet, the ones the vendor offers, the computers that are behind, and this dashboard's own code.</div>
+    </div>
+  </div>
+  <div class="sf-stack">
+    <div hx-get="/partials/admin/packages" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+      {% include "partials/admin_packages.html" %}
+    </div>
+    <section class="win" data-win="this_dashboard" id="win-this_dashboard">
+      <div class="bar"><button class="fold" type="button" aria-expanded="true" title="Folds or unfolds this window."><span class="fold-g" aria-hidden="true">&#9662;</span><span class="vh">fold</span></button><h2 class="t">this_dashboard</h2><span class="bar-rule"></span><span class="meta" title="The container image is what runs; only a bundle that matches it can be applied from here.">its own code</span></div>
+      <div class="body sf-pkg" hx-get="/partials/admin/dashboard-update" hx-trigger="load" hx-swap="innerHTML"><div class="empty">loading</div></div>
+    </section>
+  </div>
+</div>
+{% endblock %}

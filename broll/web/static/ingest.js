@@ -1289,10 +1289,12 @@ async function ingestRun() {
     const free = typeof staging.free_bytes === "number"
       ? ingestBytes(staging.free_bytes) : "an unknown amount";
     const hours = Math.max(1, Math.round(chosen.length * ING_MINUTES_PER_CLIP / 60));
-    if (!window.confirm(
-      `This drop is ${ingestBytes(bytes)} across ${chosen.length} clips. ` +
+    // UI port phase 6: the terminal look asks through its own dialog; the
+    // classic look keeps the browser's confirm.
+    const q = `This drop is ${ingestBytes(bytes)} across ${chosen.length} clips. ` +
       `Staging it needs ${ingestBytes(bytes)} free on this computer and it has ` +
-      `${free}. Indexing will run for about ${hours} hours. Start it?`)) return;
+      `${free}. Indexing will run for about ${hours} hours. Start it?`;
+    if (!((window.ccSpa && window.ccSpa.active()) ? await window.ccSpa.confirm(q) : window.confirm(q))) return;
   }
   const info = ingestTierInfo(ing.tier);
   if (info && info.cached === false) {
@@ -1301,9 +1303,9 @@ async function ingestRun() {
     // business, not ours.
     const size = info.download_bytes || info.bytes || info.size_bytes;
     const how = size ? `about ${ingestBytes(size)}` : "several gigabytes";
-    if (!window.confirm(
-      `The ${ing.tier} model isn't on this computer yet. Running this batch ` +
-      `downloads it first (${how}). Continue?`)) return;
+    const q = `The ${ing.tier} model isn't on this computer yet. Running this batch ` +
+      `downloads it first (${how}). Continue?`;
+    if (!((window.ccSpa && window.ccSpa.active()) ? await window.ccSpa.confirm(q) : window.confirm(q))) return;
   }
 
   const settings = {
@@ -1531,9 +1533,9 @@ function ingestCancelBatch() {
 }
 
 async function ingestCancelUid(uid) {
-  if (!window.confirm(
-    "Stop this batch? Clips already in the archive stay there; the rest are " +
-    "dropped and their staged files are kept for a week.")) return;
+  const q = "Stop this batch? Clips already in the archive stay there; the rest are " +
+    "dropped and their staged files are kept for a week.";
+  if (!((window.ccSpa && window.ccSpa.active()) ? await window.ccSpa.confirm(q) : window.confirm(q))) return;
   try {
     await fetchJson(`api/ingest-batches/${encodeURIComponent(uid)}/cancel`, { method: "POST" });
   } catch (e) {

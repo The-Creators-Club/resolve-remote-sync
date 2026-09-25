@@ -1,0 +1,467 @@
+/* CC Terminal: the HUD's own sheet (UI port 2.2). Linked through asset_url()
+   by cc/shell.html and, when the HUD is served, by classic base.html. The
+   block between the markers is byte-identical in the three SPA sheets; the
+   lifts after the END marker name classic classes and are this file's only. */
+
+/* The HUD's face, for classic pages under the HUD (terminal pages get the
+   same faces from terminal.css). Relative to this sheet. */
+@font-face {
+  font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: optional;
+  src: url(../fonts/jetbrains-mono-regular.woff2) format('woff2');
+  unicode-range: U+0000-017F, U+2000-206F, U+2100-214F, U+2190-21FF, U+2200-22FF, U+2300-23FF, U+2500-25FF, U+2600-26FF, U+2700-27BF;
+}
+@font-face {
+  font-family: 'JetBrains Mono'; font-style: normal; font-weight: 500; font-display: optional;
+  src: url(../fonts/jetbrains-mono-medium.woff2) format('woff2');
+  unicode-range: U+0000-017F, U+2000-206F, U+2100-214F, U+2190-21FF, U+2200-22FF, U+2300-23FF, U+2500-25FF, U+2600-26FF, U+2700-27BF;
+}
+@font-face {
+  font-family: 'JetBrains Mono'; font-style: normal; font-weight: 700; font-display: optional;
+  src: url(../fonts/jetbrains-mono-bold.woff2) format('woff2');
+  unicode-range: U+0000-017F, U+2000-206F, U+2100-214F, U+2190-21FF, U+2200-22FF, U+2300-23FF, U+2500-25FF, U+2600-26FF, U+2700-27BF;
+}
+
+/* ==== hud-common BEGIN (byte-identical in cc/hud.css and the three SPA sheets) ====
+   The terminal HUD: the top bar, the phone dock, the user menu, the "more"
+   sheet and the Settings strip (UI redesign port, phase 1, 2026-09-25).
+
+   The dashboard serves this markup from partials (topbar, stamp,
+   settings_nav) into every page, and the three SPAs inject the topbar with
+   innerHTML and paint it with THEIR OWN sheet. So the same bytes live in
+   four files and a test in each suite compares them: fix a drift by copying
+   the whole block, never by editing one side.
+
+   Rules for everything between the markers:
+   - every selector is a .hud* or .snav* class, header.hud-host or the
+     #dash-topbar reset; no html, body, root or bare element rule, because
+     the b-roll sheet is also the client share page's;
+   - tokens are --cc-* and declared here (each SPA has its own --red);
+   - no quote, backtick or parenthesis directly before a slash, comments
+     included (the ytdl mounted-prefix scan reads this raw);
+   - no long dash anywhere; nothing animates for more than about 5 s;
+   - no backdrop blur (it would trap the fixed dock and costs a repaint
+     over every playing video);
+   - popover base rules declare no display (an author display beats the
+     UA rule that keeps a closed popover hidden). */
+
+.hud, .hud-dock, .hud-more, .hud-menu, .snav {
+  --cc-bg: #070403;
+  --cc-bg-2: #0b0605;
+  --cc-red: #ff2e2e;
+  --cc-line: rgb(255 70 50 / 0.2);
+  --cc-text: #ffffff;
+  --cc-text-2: #cbbfa8;
+  --cc-muted: #8a8378;
+  --cc-hi-rgb: 0 229 255;
+  --cc-hi: rgb(var(--cc-hi-rgb));
+  --cc-ok: #3aff6e;
+  --cc-warn: #ffb02e;
+  --cc-err: #ff2e2e;
+  --cc-mono: 'JetBrains Mono', ui-monospace, Consolas, Menlo, monospace;
+  --cc-glow: 1;
+  --cc-tap: 44px;
+  --cc-hud-h: 58px;
+}
+
+/* The hosts are transparent for layout, so the sticky bar sticks against
+   the page rather than inside a wrapper exactly as tall as itself. */
+header.hud-host { display: contents; }
+#dash-topbar:has(> .hud) { display: contents; padding: 0; margin: 0; border: 0; }
+#dash-topbar:has(> .hud) > * { flex: initial; white-space: normal; }
+
+/* ------------------------------------------------------------ the bar */
+.hud {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  width: 100%;
+  height: var(--cc-hud-h);
+  margin: 0;
+  padding: 0 max(24px, env(safe-area-inset-right, 0px)) 0 max(24px, env(safe-area-inset-left, 0px));
+  background: linear-gradient(180deg, rgb(7 4 3 / 0.97), rgb(7 4 3 / 0.9));
+  border-bottom: 1px solid var(--cc-line);
+  color: var(--cc-text);
+  font-family: var(--cc-mono);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 1px;
+  text-transform: none;
+  -webkit-font-smoothing: antialiased;
+}
+.hud a, .hud-dock a, .hud-more a, .hud-menu a, .snav a { color: inherit; text-decoration: none; }
+.hud-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  color: var(--cc-text);
+}
+.hud-mark {
+  flex: none;
+  width: 36px;
+  height: 17px;
+  color: var(--cc-red);
+  fill: currentColor;
+  filter: drop-shadow(0 0 calc(var(--cc-glow) * 6px) rgb(255 46 46 / 0.55));
+}
+/* The brand is SITE DATA (org_short, any length, any script), so it is in
+   the mono face and it is the thing that gives way, never the counts. */
+.hud-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+.hud-nav { display: flex; align-items: center; gap: 18px; flex: none; }
+.hud-nav a { color: var(--cc-text); opacity: 0.8; white-space: nowrap; }
+.hud-nav a:hover { opacity: 1; }
+.hud-slash { color: var(--cc-red); }
+.hud-nav a[aria-current="page"] {
+  color: var(--cc-hi);
+  opacity: 1;
+  text-shadow: 0 0 calc(var(--cc-glow) * 8px) rgb(var(--cc-hi-rgb) / 0.55);
+}
+.hud-nav a[aria-current="page"] .hud-slash { color: var(--cc-hi); }
+.hud-more-btn { display: none; }
+.hud-spacer { flex: 1 1 0; min-width: 0; }
+.hud-meta { display: flex; align-items: center; gap: 16px; flex: none; white-space: nowrap; }
+.hud-meta a { display: inline-flex; align-items: center; gap: 7px; color: var(--cc-text-2); }
+.hud-meta a:hover { color: var(--cc-hi); }
+.hud-count b { color: var(--cc-text); font-weight: 500; }
+.hud-user b { color: var(--cc-hi); font-weight: 500; }
+.hud-stamp { display: inline-flex; align-items: center; gap: 10px; color: var(--cc-muted); font-variant-numeric: tabular-nums; }
+.hud-stale { display: inline-flex; align-items: center; gap: 6px; color: var(--cc-warn); }
+.hud-key {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--cc-line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--cc-text-2);
+  font: inherit;
+  letter-spacing: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.hud-key:hover { color: var(--cc-hi); border-color: var(--cc-hi); }
+
+/* status LEDs: a square. The blink stops after four beats (WCAG 2.2.2). */
+.hud-led {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  background: var(--cc-ok);
+  box-shadow: 0 0 calc(var(--cc-glow) * 8px) var(--cc-ok);
+}
+.hud-led.hud-warn { background: var(--cc-warn); box-shadow: 0 0 calc(var(--cc-glow) * 8px) var(--cc-warn); }
+.hud-led.hud-err {
+  background: var(--cc-err);
+  box-shadow: 0 0 calc(var(--cc-glow) * 8px) var(--cc-err);
+  animation: hud-blink 1.2s steps(1) 4;
+}
+@keyframes hud-blink { 50% { opacity: 0.25; } }
+
+/* Visually hidden, still read aloud. */
+.hud-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------- the menus (popovers) */
+.hud-menu, .hud-more {
+  position: fixed;
+  box-sizing: border-box;
+  height: auto;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--cc-red);
+  background: var(--cc-bg-2);
+  color: var(--cc-text);
+  font-family: var(--cc-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  letter-spacing: 0.5px;
+  box-shadow: 0 0 calc(var(--cc-glow) * 26px) rgb(255 46 46 / 0.12);
+}
+.hud-menu {
+  inset: calc(var(--cc-hud-h) + 4px) max(12px, env(safe-area-inset-right, 0px)) auto auto;
+  width: min(300px, calc(100vw - 24px));
+  max-height: calc(100vh - var(--cc-hud-h) - 24px);
+}
+.hud-more {
+  inset: auto 0 0 0;
+  width: auto;
+  max-height: 80vh;
+  padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  border-width: 1px 0 0;
+}
+.hud-menu:popover-open, .hud-more:popover-open { display: flex; flex-direction: column; gap: 2px; }
+.hud-menu::backdrop, .hud-more::backdrop { background: rgb(0 0 0 / 0.5); }
+.hud-mi {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 6px 2px;
+  border: 0;
+  background: none;
+  color: var(--cc-text-2);
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hud-mi:hover { color: var(--cc-hi); }
+.hud-mi[aria-current="page"] { color: var(--cc-hi); }
+.hud-mi b { color: var(--cc-text); font-weight: 500; }
+.hud-mi-h {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--cc-line);
+  color: var(--cc-muted);
+  font-size: 12px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+.hud-mi-form { display: block; margin: 0; }
+.hud-mi-who { color: var(--cc-muted); overflow-wrap: anywhere; }
+
+/* ------------------------------------------------ the phone dock */
+.hud-dock { display: none; }
+.hud-g { font-size: 16px; line-height: 1; color: var(--cc-red); }
+
+/* ------------------------------------------------ the Settings strip */
+.snav {
+  grid-column: 1 / -1;
+  position: relative;
+  z-index: 1;
+  box-sizing: border-box;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 30px;
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border: 1px solid var(--cc-line);
+  border-left: 3px solid var(--cc-red);
+  background: rgb(10 5 4 / 0.8);
+  color: var(--cc-text-2);
+  font-family: var(--cc-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+.snav-g { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.snav-h { color: var(--cc-muted); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; }
+.snav-h::after { content: " :"; color: var(--cc-red); }
+.snav a { color: var(--cc-text-2); letter-spacing: 0.5px; white-space: nowrap; }
+.snav a::before { content: ">"; color: var(--cc-red); margin-right: 1px; }
+.snav a:hover { color: var(--cc-text); }
+.snav a[aria-current="page"] {
+  color: var(--cc-hi);
+  text-shadow: 0 0 calc(var(--cc-glow) * 8px) rgb(var(--cc-hi-rgb) / 0.55);
+}
+.snav a[aria-current="page"]::before { color: var(--cc-hi); }
+
+/* Focus: 2 px in the live colour, because a 1 px red ring vanishes in a UI
+   whose every frame is 1 px red. */
+.hud :focus-visible, .hud-dock :focus-visible, .hud-more :focus-visible,
+.hud-menu :focus-visible, .snav :focus-visible {
+  outline: 2px solid var(--cc-hi);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------ tablet: 601 to 900 px
+   The lower-priority modules move into the "more" sheet, which needs its
+   own opener here because the dock only exists at 600 and below. */
+@media (min-width: 601px) and (max-width: 900px) {
+  .hud { gap: 16px; }
+  .hud-nav { gap: 12px; }
+  .hud-lowpri { display: none; }
+  .hud-more-btn { display: inline-flex; }
+  .hud-more {
+    inset: calc(var(--cc-hud-h) + 4px) 12px auto auto;
+    width: min(320px, calc(100vw - 24px));
+    max-height: calc(100vh - var(--cc-hud-h) - 24px);
+    border-width: 1px;
+  }
+}
+
+/* ------------------------------------------- phone: 600 px and below
+   THE dock query. Everything that makes room for the dock uses this same
+   width (the --cc-dock-h lift blocks outside this block). */
+@media (max-width: 600px) {
+  .hud {
+    --cc-hud-h: 52px;
+    gap: 12px;
+    padding: 0 max(14px, env(safe-area-inset-right, 0px)) 0 max(14px, env(safe-area-inset-left, 0px));
+  }
+  .hud-nav, .hud-hide-sm { display: none; }
+  .hud-name { font-size: 13px; letter-spacing: 1px; }
+  .hud-meta { gap: 12px; }
+  .hud-dock {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 50;
+    box-sizing: border-box;
+    height: calc(58px + env(safe-area-inset-bottom, 0px));
+    padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+    background: rgb(7 4 3 / 0.96);
+    border-top: 1px solid var(--cc-red);
+    font-family: var(--cc-mono);
+    font-size: 12px;
+    line-height: 1.2;
+    letter-spacing: 0;
+  }
+  .hud-dock a, .hud-dock button {
+    appearance: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    border: 0;
+    background: none;
+    color: var(--cc-text-2);
+    font: inherit;
+    letter-spacing: 0;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .hud-dock [aria-current="page"] { color: var(--cc-hi); }
+  .hud-dock [aria-current="page"] .hud-g { color: var(--cc-hi); }
+  .hud-menu, .hud-more { font-size: 14px; }
+  .hud-mi-h { font-size: 12px; }
+  .snav { gap: 6px 18px; }
+  .snav-h { font-size: 12px; }
+  .snav.scroll-x { flex-wrap: nowrap; overflow-x: auto; scroll-snap-type: x proximity; }
+  .snav.scroll-x .snav-g { flex-wrap: nowrap; }
+  .snav.scroll-x a[aria-current="page"] { scroll-snap-align: center; }
+}
+
+/* Touch: every HUD control is a 44 px target. */
+@media (pointer: coarse) {
+  .hud-nav a, .hud-key, .hud-more-btn, .hud-mi, .hud-meta a, .hud-dock a, .hud-dock button {
+    min-height: var(--cc-tap);
+  }
+  .snav a { display: inline-flex; align-items: center; min-height: var(--cc-tap); }
+}
+
+/* The installed app paints under the notch: the bar pays the top inset. */
+@media (display-mode: standalone) {
+  .hud {
+    height: calc(var(--cc-hud-h) + env(safe-area-inset-top, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+}
+
+/* Forced colours: an LED and the current entry keep a visible border,
+   since their meaning is otherwise only a colour. */
+@media (forced-colors: active) {
+  .hud-led { forced-color-adjust: none; border: 1px solid CanvasText; }
+  .hud-nav a[aria-current="page"], .hud-dock [aria-current="page"],
+  .hud-mi[aria-current="page"], .snav a[aria-current="page"] {
+    outline: 1px solid Highlight;
+    text-decoration: underline;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-led { animation: none; }
+}
+/* ==== hud-common END ====================================================== */
+
+/* ---------------------------------------------------------------------
+   Outside hud-common: the dashboard's own lifts (plan 2.2, R6). These name
+   classic classes or the root, so they can never live in the shared block.
+   Everything keyed on the dock's presence, which the client share page and
+   a classic page without the HUD never match. */
+
+/* The dock's height, on the ROOT so the scroll-padding below (which only the
+   root element's value drives) and every fixed element inherit it. THE dock
+   query: the same 600 px as hud-common. */
+@media (max-width: 600px) {
+  html:has(.hud-dock) { --cc-dock-h: calc(58px + env(safe-area-inset-bottom, 0px)); }
+}
+
+/* The HUD is sticky: a deep link, scrollIntoView and Tab focus must land
+   below it, and above the dock on a phone. */
+html:has(.hud) {
+  scroll-padding-top: calc(58px + 8px + env(safe-area-inset-top, 0px));
+  scroll-padding-bottom: var(--cc-dock-h, 0px);
+}
+@media (max-width: 600px) {
+  html:has(.hud) { scroll-padding-top: calc(52px + 8px + env(safe-area-inset-top, 0px)); }
+}
+
+/* Classic pages under the HUD: the last row, the stale-data alarm, the chip
+   sheet, the projects-sheet handle (the only way into the tree on a
+   classic phone) and the toasts all clear the dock. */
+body:has(.hud-dock) { padding-bottom: var(--cc-dock-h, 0px); }
+body[data-stale]:has(.hud-dock) { padding-bottom: calc(var(--stale-h, 4rem) + var(--cc-dock-h, 0px)); }
+body:has(.hud-dock) .banner.alarm.stale-banner { bottom: var(--cc-dock-h, 0px); }
+body:has(.hud-dock) .chip-sheet { bottom: var(--cc-dock-h, 0px); }
+body:has(.hud-dock) .btn.sheet-handle { bottom: var(--cc-dock-h, 0px); }
+body:has(.hud-dock) .toast-host { bottom: calc(1rem + var(--cc-dock-h, 0px)); }
+body[data-stale]:has(.hud-dock) .toast-host { bottom: calc(1rem + var(--stale-h, 4rem) + var(--cc-dock-h, 0px)); }
+
+/* The classic sticky project tree slides under a sticky HUD otherwise. */
+html:has(.hud) .project-tree { top: calc(58px + 1rem); max-height: calc(100vh - 9rem - 58px); }
+@media (max-width: 600px) {
+  html:has(.hud) .project-tree { top: calc(52px + 1rem); max-height: calc(100vh - 9rem - 52px); }
+}
+
+/* The terminal shell's hint sheet (cc/partials/hint_sheet.html). Its
+   hooks are htmx_errors.js block 2's; its look is here until the cc page
+   sheets take it (hand-off to phase 0's components.css). */
+html[data-ui="cc"] .hint-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--cc-dock-h, 0px);
+  z-index: 70;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+  background: #0b0605;
+  border-top: 1px solid #ff2e2e;
+  color: #ffffff;
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, Menlo, monospace;
+  font-size: 14px;
+  line-height: 1.55;
+}
+html[data-ui="cc"] .hint-sheet[hidden] { display: none; }
+html[data-ui="cc"] .hint-sheet .chip-sheet-label { color: #ff2e2e; font-size: 12px; letter-spacing: 1px; }
+html[data-ui="cc"] .hint-sheet .chip-sheet-text { margin: 6px 0; }
+html[data-ui="cc"] .hint-sheet-foot { color: #8a8378; font-size: 12px; }

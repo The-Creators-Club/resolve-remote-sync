@@ -3,6 +3,32 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+/* UI port phase 1 (7.0): the dashboard's terminal HUD arrives by fetch, so
+   its height is held before first paint when the dashboard's readable
+   cookie says it is coming. The cookie is dot-separated, read with split,
+   never a regex literal. The loader in app.js clears the hold when the
+   fetch settles; this timer is the safety net. */
+(function () {
+  try {
+    var v = '';
+    var parts = document.cookie.split('; ');
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i].indexOf('ccsync_ui_effective=') === 0) { v = parts[i].slice(20); break; }
+    }
+    var groups = v.split('.');
+    var cl = document.documentElement.classList;
+    if (groups.indexOf('chrome') !== -1) {
+      cl.add('cc-chrome');
+      cl.add('cc-chrome-pending');
+      setTimeout(function () { cl.remove('cc-chrome-pending'); }, 3000);
+    }
+    /* UI port phase 6: the terminal body look, before first paint. The
+       injected topbar's data-ui-apps marker is authoritative afterwards. */
+    if (groups.indexOf('apps') !== -1) cl.add('cc');
+  } catch (e) { /* no cookie access: no hold */ }
+})();
+</script>
 <title>CC SYNC // YOUTUBE</title>
 <!-- Document-relative on purpose: mounted at /ytdl/ a leading slash would
      resolve against the dashboard's origin root. See tests/test_mounted_prefix.py. -->
@@ -176,7 +202,7 @@
        it gates everything: the server refuses to create a job, start a
        download, or hand a claim to a companion without it, so a page that
        buried it would only produce 403s nobody could act on. -->
-  <section id="attest" class="panel hidden">
+  <section id="attest" class="panel hidden" data-cc-win="before_you_download">
     <h2 id="attesttitle">Before you download</h2>
     <pre id="attesttext" class="attesttext"></pre>
     <div class="attestrow">
@@ -187,7 +213,7 @@
 
 
   <!-- progress: the pipeline running (REQ 3) -->
-  <section id="progress" class="panel hidden">
+  <section id="progress" class="panel hidden" data-cc-win="progress">
     <div class="prow">
       <span id="phase" class="phase"></span>
       <span id="ticker" class="muted"></span>
@@ -206,7 +232,7 @@
        life. The ticking is done in the browser and posted ONCE, when SEARCH
        WITH THESE is pressed: a round trip per checkbox would be a request per
        click on a handler that shares its process with the fleet status page. -->
-  <section id="terms" class="panel hidden">
+  <section id="terms" class="panel hidden" data-cc-win="search_terms">
     <h2>Search terms</h2>
     <div class="muted termhint">These are the queries this search will run.
       Untick any you do not want. A translation in brackets is what a
@@ -231,7 +257,7 @@
        keeps the COUNT: collapsed still reads "74 clips · 61 selected", because
        collapsing must hide bulk and not meaning. app.js owns the state
        (PANELS/COLLAPSE_KEY); the markup below is the pre-JS fallback. -->
-  <section id="review" class="hidden">
+  <section id="review" class="hidden" data-cc-win="" data-cc-own-fold>
     <div class="panelhead">
       <button id="reviewtoggle" class="ptoggle" type="button"
               aria-expanded="true" aria-controls="reviewbody">[-] REVIEW</button>
@@ -274,7 +300,7 @@
   <!-- downloads in flight -->
   <!-- Only the LIST collapses here: the phase, the counter and [ CANCEL ] are
        the job talking, and the bar under them is two pixels of it. -->
-  <section id="downloads" class="panel hidden">
+  <section id="downloads" class="panel hidden" data-cc-win="" data-cc-own-fold>
     <div class="prow panelhead">
       <button id="downloadstoggle" class="ptoggle" type="button"
               aria-expanded="true" aria-controls="dllist">[-] DOWNLOADS</button>
@@ -326,17 +352,17 @@
        curated and never downloaded. It is also where a reloaded page finds
        the search it is no longer attached to: db.active_job prefers the job
        that is MOVING now, and these are named rather than implied. -->
-  <section id="waiting" class="panel hidden">
+  <section id="waiting" class="panel hidden" data-cc-win="waiting_for_you">
     <h2>Waiting for you</h2>
     <div id="waitinglist" class="queuelist muted"></div>
   </section>
 
-  <section id="queue" class="panel hidden">
+  <section id="queue" class="panel hidden" data-cc-win="queue">
     <h2>Queue</h2>
     <div id="queuelist" class="queuelist muted"></div>
   </section>
 
-  <section id="recent" class="panel">
+  <section id="recent" class="panel" data-cc-win="" data-cc-own-fold>
     <div class="panelhead">
       <button id="recenttoggle" class="ptoggle" type="button"
               aria-expanded="true" aria-controls="recentlist">[-] RECENT SEARCHES</button>
@@ -351,7 +377,7 @@
        row opens its folder on the EDITOR'S machine through the companion's
        loopback server; a browser cannot open a local folder from an http page,
        and the page (served from the NAS) must not know where P: is. -->
-  <section id="history" class="panel">
+  <section id="history" class="panel" data-cc-win="" data-cc-own-fold>
     <div class="panelhead">
       <button id="historytoggle" class="ptoggle" type="button"
               aria-expanded="true" aria-controls="historybody">[-] DOWNLOAD HISTORY</button>
@@ -382,6 +408,10 @@
 </main>
 
 <div id="toast" class="toast hidden"></div>
+<!-- UI port phase 6: the terminal look's helper (folds, tips, confirm,
+     unbracketed labels). Inert unless html.cc is set; loaded first so
+     window.ccSpa exists when app.js runs. -->
+<script src="cc_spa.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

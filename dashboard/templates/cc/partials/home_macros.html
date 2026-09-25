@@ -1,0 +1,96 @@
+{# The home group's window, readout and key macros (UI redesign port phase 2,
+   plan 3.1 and 3.2). A NEW name with no classic twin: only the home pages
+   import it, so it is reachable only when `home` is on.
+
+   win(key, title, ...): a .win whose bar holds a real fold button
+   (type="button", named by the title through aria-labelledby), the title as
+   an h2 whose accessible name has no underscore (the cc_title filter), the
+   dashed rule, and optional meta. The caller's block is the window's content.
+   The window NEVER carries a swap hook or a panel id (3.1): those go on the
+   .body or a child. cc.js folds it by data-win, per page. #}
+{% macro win(key, title, cls='', meta='', meta_id='', act_href='', act_label='', act_tip='', nofold=false) -%}
+<section class="win {{ cls }}"{% if not nofold %} data-win="{{ key }}"{% else %} data-nofold{% endif %} id="win-{{ key }}" aria-labelledby="win-{{ key }}-t">
+  <div class="bar{{ ' can-fold' if not nofold }}">{% if not nofold %}<button class="fold" type="button" aria-expanded="true" aria-labelledby="win-{{ key }}-t"><span class="fold-g" aria-hidden="true">&#9662;</span></button>{% endif %}<h2 class="t" id="win-{{ key }}-t">{{ title | cc_title }}</h2><span class="bar-rule" aria-hidden="true"></span>{% if meta or meta_id %}<span class="meta"{% if meta_id %} id="{{ meta_id }}"{% endif %}>{{ meta }}</span>{% endif %}{% if act_href %}<a class="act" href="{{ act_href }}"{% if act_tip %} title="{{ act_tip }}"{% endif %}>{{ act_label }}</a>{% endif %}</div>
+  {{ caller() }}
+</section>
+{%- endmacro %}
+
+{# One readout window, as the bench draws them. #}
+{% macro readout(r) -%}
+{% call win('ro-' ~ (r.k | replace(' ', '-')), r.k, cls='readout ' ~ r.tone, meta='') %}
+  <div class="body" data-tip="{{ r.tip }}" title="{{ r.tip }}">
+    <div class="big">{{ r.big }}<small>{{ r.of }}</small></div>
+    <div class="meter" aria-hidden="true">{{ cc_meter(r.n, r.total) }}</div>
+    <div class="foot">{{ r.foot }}</div>
+  </div>
+{% endcall %}
+{%- endmacro %}
+
+{# The four readouts' contents, drawn on first paint by the page and as an
+   out-of-band swap by the grid's htmx answers (3.1: oob only on htmx). #}
+{% macro readouts_inner(ro) -%}
+{% for r in ro.readouts %}{{ readout(r) }}{% endfor %}
+{%- endmacro %}
+
+{# The computers bar's meta (count and collector age). #}
+{% macro computers_meta(ro) -%}
+<b>{{ ro.computers }}</b> computer{{ 's' if ro.computers != 1 }}{% if ro.collector_at %} &middot; <span title="The collector is the server's regular check that reads every computer's report and the sync engine.">collector <b>{{ ro.collector_at | ago }}</b></span>{% endif %}
+{%- endmacro %}
+
+{# A state tag: a square plus a lowercase word (the owner's round 2 rule). #}
+{% macro tag(tone, word, tip='', solid=false) -%}
+<span class="tag {{ 'solid ' if solid }}{{ tone }}"{% if tip %} title="{{ tip }}"{% endif %}><span class="w">{{ word }}</span></span>
+{%- endmacro %}
+
+{# health's chip colour as a terminal tone. #}
+{% macro chip_tone(c) -%}{{ {'red': 'err', 'amber': 'warn', 'green': 'ok'}.get(c, 'mute') }}{%- endmacro %}
+
+{# ticking_for: whose plan (and which computer's) the tree below ticks.
+   Shared by the home and project pages; `tree` is ui_home.tree_context. #}
+{% macro ticking_for(tree) -%}
+{% call win('ticking-for', 'ticking_for') %}
+      <div class="body fieldset">
+        <form method="get" action="{{ tree.switch_action or '/' }}" class="tick-for-form">
+          {% if session_is_admin and tree.switch_editors %}
+          <label class="pick" title="Whose sync plan the ticks below change. Pick another editor to tick projects for them; the change reaches their computer on its next report.">
+            <span>editor</span>
+            <select name="as" class="sel" onchange="this.form.machine && (this.form.machine.value = ''); this.form.submit()" aria-label="tick projects for">
+              <option value="">{{ session_user }} (me)</option>
+              {% for e in tree.switch_editors %}<option value="{{ e }}" {{ 'selected' if tree.acting_as == e }}>{{ e }}</option>{% endfor %}
+            </select>
+          </label>
+          {% elif tree.acting_as %}<input type="hidden" name="as" value="{{ tree.acting_as }}">{% endif %}
+          {% if tree.toggle_editor_machines | length > 1 %}
+          <label class="pick" title="Which of that editor's computers the ticks below apply to. A sync plan belongs to a computer, not a person. Every computer ticks or unticks all of them at once.">
+            <span>computer</span>
+            <select name="machine" class="sel" onchange="this.form.submit()" aria-label="the computer the ticks apply to">
+              <option value="">every computer</option>
+              {% for m in tree.toggle_editor_machines %}<option value="{{ m }}" {{ 'selected' if tree.tree_machine == m }}>{{ m }}</option>{% endfor %}
+            </select>
+          </label>
+          {% elif tree.toggle_editor_machines %}
+          <div class="hint">computer: <b>{{ tree.toggle_editor_machines[0] }}</b></div>
+          {% endif %}
+          <noscript><button class="key sm" type="submit"><span class="t">Go</span></button></noscript>
+        </form>
+        {% if tree.acting_as %}
+        <div class="hint acting-warn" title="the ticks below change {{ tree.acting_as }}'s sync plan, not yours">&#9650; acting as <b>{{ tree.acting_as }}</b>: a tick here starts a real sync on their computer</div>
+        {% endif %}
+      </div>
+    {% endcall %}
+{%- endmacro %}
+
+{# The projects window: the find box outside the swap target (the filter
+   is re-applied after every 30 s beat by home.js) and the polled tree body. #}
+{% macro projects_win(tree, current) -%}
+{% call win('projects', 'projects') %}
+      <div class="body">
+        <div class="prompt-in"><span class="p" aria-hidden="true">&gt;</span><input class="tree-find" type="search" placeholder="find a project" aria-label="find a project" autocomplete="off"><kbd aria-hidden="true">/</kbd></div>
+        <div class="tree-body"
+             hx-get="/partials/projects-tree?current={{ current | urlencode }}&machine={{ tree.tree_machine | urlencode }}{{ tree.as_qs }}"
+             hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+          {% with t = tree %}{% include "partials/projects_tree.html" %}{% endwith %}
+        </div>
+      </div>
+    {% endcall %}
+{%- endmacro %}

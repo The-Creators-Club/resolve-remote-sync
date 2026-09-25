@@ -1,0 +1,33 @@
+{# WHAT THESE COMPUTERS SAID, the Health tab's body (UI port phase 5; a NEW
+   name, R15: classic home still fetches partials/admin_diagnostics.html).
+   Served by /partials/health-diagnostics into #health-diagnostics-body; the
+   frame (#fleet-diagnostics) is static. With no parameters it lists the
+   newest bundle per computer; "every computer" goes back to THIS route and
+   this window, never the classic one (1.5). Admin only: a bundle names an
+   editor's paths, their Resolve project and their tree. #}
+{% set trig = {
+  'lane_error': ('warn', 'lane error', 'a sync job failed, so this computer sent its own diagnostics'),
+  'admin_request': ('hi', 'admin request', 'an admin asked this computer why'),
+  'button': ('hi', 'button', 'the editor used Copy diagnostics in the companion (' ~ COMPANION_DIAGNOSTICS_PATH ~ ')')} %}
+{% if crash_reports %}
+<div class="body split"><div class="inline">
+  <span>This server has <b>{{ crash_reports }}</b> saved crash report(s) of its own.</span>
+  <a class="key sm" href="/admin/diagnostics/crash-reports.zip" title="Downloads this server's own crash reports as one zip, to send to support."><span class="t">download crash reports</span></a>
+</div></div>
+{% endif %}
+{% if diagnostics.bundles %}
+  {% for b in diagnostics.bundles %}
+  {% set t = trig.get(b.trigger, ('mute', (b.trigger or 'upload') | replace('_', ' '), 'uploaded by this computer')) %}
+  <details class="fold" data-key="diag-{{ loop.index }}"{% if loop.first %} open{% endif %}>
+    <summary><b>{{ b.editor }}</b> <span>{{ b.machine }}</span> <span class="tag {{ t[0] }}" title="{{ t[2] }}">{{ t[1] }}</span>
+      <span class="dim">{{ b.received_at | ago }}{% if b.at and b.at != b.received_at %}, the computer said {{ b.at }}{% endif %}</span></summary>
+    <div class="hl-pre"><pre class="log">{{ b.text }}</pre></div>
+  </details>
+  {% endfor %}
+  {% if diagnostics.machine %}
+  <div class="body hint">Showing {{ diagnostics.machine }} only.
+    <a class="key quiet sm" href="/go/diagnostics" hx-get="/partials/health-diagnostics" hx-target="#health-diagnostics-body" hx-swap="innerHTML"><span class="t">every computer</span></a></div>
+  {% endif %}
+{% else %}
+<div class="empty"><span class="glyph">&gt;_</span>No computer has uploaded diagnostics yet. Use <b class="hi">ask this computer why</b> on a computer row on the home page, or have the editor open {{ COMPANION_DIAGNOSTICS_PATH }} in the companion. Companions older than the build that added this cannot send any.</div>
+{% endif %}

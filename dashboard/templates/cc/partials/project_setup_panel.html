@@ -1,0 +1,116 @@
+{# PROJECT SETUP's body, terminal look (UI redesign port phase 3, group
+   `everyday`; bench design/project-setup.html). Every browse, link and
+   create answers with this fragment into `closest .project-setup-box`
+   (outerHTML), exactly as classic, so the swap-target class sits on the
+   window's BODY, never on the .win (plan 3.1): the bar and its fold button
+   are drawn by cc/project_setup.html and no answer can replace them. Same
+   routes, fields and sentences as classic; no bracket labels. #}
+{% set browse_url = "/partials/project-setup/browse?resolve_project=" ~ (setup.resolve_project | urlencode) ~ "&rel=" %}
+{% set use_tip = "Points \"" ~ setup.resolve_project ~ "\" at this folder exactly as it is. Nothing inside it is changed or moved." %}
+<div class="body project-setup-box ev-setup">
+
+  {% if setup.error %}
+    <div class="note err">
+      <span class="tag solid err" title="Nothing was created or changed. The reason is beside this.">not done</span>
+      <span class="grow">{{ setup.error }}
+      {% if setup.suggest_rel %}
+        <form class="inline ev-row" hx-post="/partials/project-setup/link"
+              hx-target="closest .project-setup-box" hx-swap="outerHTML">
+          <input type="hidden" name="resolve_project" value="{{ setup.resolve_project }}">
+          <input type="hidden" name="rel" value="{{ setup.suggest_rel }}">
+          <button class="key sm primary" type="submit" title="{{ use_tip }}"><span class="t">Use Projects/{{ setup.suggest_rel }}</span></button>
+        </form>
+      {% endif %}</span>
+    </div>
+  {% endif %}
+
+  {% if setup.created %}
+    <h3 class="ev-h">done</h3>
+    <div class="inline">
+      <span class="tag ok" title="Done: the folder is set up and linked.">ok</span>
+      <span><b>Projects/{{ setup.created.rel }}</b> is set up on the server{% if setup.created.mapped %} and "{{ setup.resolve_project }}" now files into it{% endif %}.</span>
+    </div>
+    <div class="dim" title="Syncthing is the sync engine that keeps project files the same on every computer.">Sync (its Syncthing folder) is set up automatically within about 5 minutes. You can close this page.</div>
+  {% elif setup.mapping %}
+    <h3 class="ev-h">already set up</h3>
+    <dl class="kv">
+      <dt>resolve project</dt><dd>{{ setup.mapping.resolve_project }}</dd>
+      <dt title="The server folder this Resolve project's media is filed into.">files into</dt>
+      <dd>{{ setup.mapping.rel_path }} <span class="dim">({{ setup.mapping.source }}-set by {{ setup.mapping.updated_by }})</span></dd>
+    </dl>
+    <div class="dim">Mappings are fixed once set{% if setup.is_admin %}. As an admin you can change it in the project roots box on the <a class="hi" href="/">sync status page</a>{% else %}. Ask your admin if this looks wrong{% endif %}.</div>
+  {% elif not setup.projects_dir_ok %}
+    <div class="note warn">
+      <span class="tag warn" title="The dashboard cannot see the server's Projects folder, so there is nothing to pick from.">cannot show folders</span>
+      <span class="grow">The server's Projects tree is not mounted on this dashboard, so it cannot show you the folders. Ask whoever installed this server: it is a container setting, not something this page can change.</span>
+    </div>
+  {% else %}
+
+  <h3 class="ev-h">pick the folder for this project</h3>
+  <div class="lede">Browse the server's Projects tree. If the project's folder is already there, pick it with <b>Use this folder</b>. Nothing inside it is changed. Only create a new folder when there is not one yet; new folders get the standard subfolders (<span class="hi">{{ setup.template_folders | join(", ") }}</span>).</div>
+
+  {% if browse %}
+  <nav class="crumbs" aria-label="where you are">
+    <a href="#" hx-get="{{ browse_url }}" hx-target="closest .project-setup-box" hx-swap="outerHTML" title="Back to the top of the server's Projects folder.">Projects</a>
+    {% for c in browse.crumbs %}<span class="sep">/</span>{% if loop.last %}<span class="here">{{ c.name }}</span>{% else %}<a href="#" hx-get="{{ browse_url }}{{ c.rel | urlencode }}" hx-target="closest .project-setup-box" hx-swap="outerHTML">{{ c.name }}</a>{% endif %}{% endfor %}
+  </nav>
+
+  {% if browse.error %}
+    <div class="note err"><span class="tag solid err">not shown</span><span class="grow">{{ browse.error }}</span></div>
+  {% endif %}
+
+  <div class="inline here-row">
+  {% if browse.can_link_current %}
+    <span>You are in <b>Projects/{{ browse.rel }}</b></span>
+    <form class="inline" hx-post="/partials/project-setup/link"
+          hx-target="closest .project-setup-box" hx-swap="outerHTML">
+      <input type="hidden" name="resolve_project" value="{{ setup.resolve_project }}">
+      <input type="hidden" name="rel" value="{{ browse.rel }}">
+      <button class="key sm primary" type="submit" title="{{ use_tip }}"><span class="t">Use this folder</span></button>
+    </form>
+    <span class="dim">points "{{ setup.resolve_project }}" at this folder as it is</span>
+  {% else %}
+    <span class="dim">{{ "Open a year, then a show, to find the folder." if not browse.rel else "You are inside a project: go up a level to pick a folder." }}</span>
+  {% endif %}
+  </div>
+
+  <div class="dirlist scroll-y ev-dirlist">
+  {% for e in browse.entries %}
+    <div class="d">
+      <span class="nm">
+        {% if e.name_match %}<span class="tag ok" title="This folder has the same name as the Resolve project, so it is probably the one you want.">same name</span>{% endif %}
+        {% if e.is_project %}<span class="tag ok" title="This folder is already a project. Projects cannot sit inside each other, so it does not open.">project</span><span class="plain">{{ e.name }}</span>
+        {% else %}<span class="gl" aria-hidden="true">&#9656;</span><a class="go{{ ' parent' if e.has_children }}" href="#" hx-get="{{ browse_url }}{{ e.rel | urlencode }}" hx-target="closest .project-setup-box" hx-swap="outerHTML">{{ e.name }}</a>{% endif %}
+      </span>
+      <form class="inline" hx-post="/partials/project-setup/link"
+            hx-target="closest .project-setup-box" hx-swap="outerHTML">
+        <input type="hidden" name="resolve_project" value="{{ setup.resolve_project }}">
+        <input type="hidden" name="rel" value="{{ e.rel }}">
+        <button class="key sm{{ ' primary' if e.name_match }}" type="submit"
+                title="{{ ('This folder is already a project. Links \"' ~ setup.resolve_project ~ '\" to it so its media is filed there.') if e.is_project else use_tip }}"><span class="t">{{ "Link this project" if e.is_project else "Use this folder" }}</span></button>
+      </form>
+    </div>
+  {% else %}
+    <div class="d"><span class="dim">empty folder</span></div>
+  {% endfor %}
+  </div>
+
+  {% if browse.inside_project %}
+    <div class="note"><span class="grow">{% if browse.current_is_project %}This folder is already a project. Use <b>Use this folder</b> above to point "{{ setup.resolve_project }}" at it.{% else %}You are inside an existing project, and projects cannot nest. Go up to pick or create.{% endif %}</span></div>
+  {% else %}
+    <h3 class="ev-h">or create a new project folder here <span class="dim">in Projects/{{ browse.rel or "" }}</span></h3>
+    <div class="lede">Only for a folder that does not exist yet. A name that is already listed above would nest a second folder inside it, so pick it with <b>Use this folder</b> instead.</div>
+    <form class="inline ev-create" hx-post="/partials/project-setup/create"
+          hx-target="closest .project-setup-box" hx-swap="outerHTML">
+      <input type="hidden" name="resolve_project" value="{{ setup.resolve_project }}">
+      <input type="hidden" name="parent_rel" value="{{ browse.rel }}">
+      <input class="inp" type="text" name="name" placeholder="new folder name" required aria-label="new folder name">
+      <button class="key primary" type="submit" title="Makes a new folder here with the standard subfolders, turns it into a project and files this Resolve project into it."><span class="t">Create &amp; link</span></button>
+    </form>
+    {# DCORE-5 (2026-09-04), as classic: who may do this, and what undoing costs. #}
+    <div class="hint">Anyone signed in can create a project, and it appears for everyone: in the tick lists, on SYNC PLANS and in the queue. Who made it is recorded in HISTORY. Only an admin can take one back off those lists, with Archive on SYNC PLANS, and even that keeps the folder and the files.</div>
+  {% endif %}
+  {% endif %}
+
+  {% endif %}
+</div>

@@ -1,0 +1,37 @@
+{# media_presence, the project page window's BODY (UI redesign port phase
+   2). The overlay of partials/bins.html: /partials/project/<slug>/bins
+   (load + 5 s) swaps it into #media-presence, innerHTML; the frame is in
+   cc/project.html. Each computer and each bin is a <details data-key>, so
+   the shell's keeper holds what was open across the 5 s beat. #}
+{% set nas = presence.nas %}
+<div class="hint pres-head">the server has <b>{{ nas.n_originals }}</b> original{{ "s" if nas.n_originals != 1 }} and <b>{{ nas.n_proxies }}</b> proxy file{{ "s" if nas.n_proxies != 1 }}</div>
+{% if presence.editors %}
+  {% for e in presence.editors %}
+  {% set et = {'red': 'err', 'amber': 'warn', 'green': ''}.get(e.status, 'off') %}
+  <details class="fold sub-win" data-key="mp:{{ e.editor }}:{{ e.machine }}">
+    <summary><span class="caret" aria-hidden="true">&#9656;</span> <span class="led {{ et }}"><span class="vh">{{ e.status }}</span></span> <b>{{ e.editor }}</b> <span class="dim">{{ e.machine }}, {{ e.mode }}</span>
+      {% if e.proxy_only %}<span class="tag ok"><span class="w">proxy only</span></span>{% endif %}
+      <span>originals {{ e.have.n_originals }}/{{ nas.n_originals }}, proxies {{ e.have.n_proxies }}/{{ nas.n_proxies }}</span>
+      {% if e.offline %}<span class="tag warn"><span class="w">{{ e.offline }} offline in Resolve</span></span>{% endif %}</summary>
+    {% if e.bins %}
+      {% for b in e.bins %}
+      <details class="fold bin" data-key="bin:{{ e.editor }}:{{ e.machine }}:{{ b.bin_path }}">
+        <summary title="{{ b.bin_path or '(root)' }}"><span class="caret" aria-hidden="true">&#9656;</span> {{ b.bin_path or "(root)" }}
+          <span class="{{ 'warn' if b.present < b.total else 'dim' }}">{{ b.present }}/{{ b.total }} present</span></summary>
+        <ul class="clips">
+          {% for c in b.clips %}
+          <li>{% if c.uploading %}<span class="led busy" title="uploading"><span class="vh">uploading</span></span>{% elif c.present %}<span class="led" title="online"><span class="vh">online</span></span>{% else %}<span class="led err" title="offline"><span class="vh">offline</span></span>{% endif %}
+            <span class="clip-name" title="{{ c.clip_name }}">{{ c.clip_name }}</span>{% if c.kind == "proxy" %} <span class="tag mute"><span class="w">proxy</span></span>{% endif %}</li>
+          {% endfor %}
+        </ul>
+      </details>
+      {% endfor %}
+      {% if e.truncated %}<div class="hint">(clip list shortened)</div>{% endif %}
+    {% else %}
+      <div class="hint">No Resolve bin data. Open this project in Resolve on that computer to fill it in.</div>
+    {% endif %}
+  </details>
+  {% endfor %}
+{% else %}
+<div class="allclear"><span class="led off" aria-hidden="true"></span>No computer has reported what it holds for this project yet.</div>
+{% endif %}

@@ -1,0 +1,85 @@
+/* The everyday group's own glue (UI redesign port phase 3, 2026-09-25):
+   transfers, project setup, installer, sign in, help and the account page.
+   Everything the bench draws lives in terminal.css / components.css /
+   phone.css already; this sheet only holds the few names the live pages
+   need that the bench never had (reserved slots, the poll element, result
+   lines). Every rule is scoped to a page class or an ev- name, so a page of
+   another group that loads it by accident changes nothing. */
+
+/* the transfers poll: an element that only asks, never shows */
+.ev-poll { display: none; }
+
+/* page furniture */
+.ev-page > nav[aria-label="settings"], .ev-page > .head { grid-column: 1 / -1; }
+.ev-page .vstack { min-width: 0; }
+.ev-lede { padding: 10px var(--pad) 6px; }
+.ev-h { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text); display: flex; align-items: center; gap: 8px; margin: 4px 0 2px; }
+.ev-h::before { content: "\2f\2f"; color: var(--red); letter-spacing: 0; }
+.ev-err { color: var(--err); }
+.ev-warn { color: var(--warn); }
+.allclear-in { display: inline-flex; align-items: center; gap: 10px; }
+
+/* transfers: the safe-to-close line keeps its height on the admin view too,
+   so nothing below it moves when it appears (owner rule: nothing shifts) */
+.ev-safe { min-height: 44px; }
+.ev-safe:empty { min-height: 0; }
+.ev-xf .scroll-y { max-height: 420px; }
+.ev-live { min-height: 120px; }
+.ev-queued .fgroup summary { flex-wrap: wrap; }
+.ev-queued .why { flex-basis: 100%; color: var(--text-2); font-size: 12px; }
+.xft td.file { overflow-wrap: anywhere; }
+.xft td small { display: block; color: var(--muted); font-size: 11px; }
+
+/* project setup */
+.ev-setup { display: grid; gap: 14px; }
+.ev-dirlist { max-height: 380px; border: 1px solid var(--line-soft); }
+.ev-row { display: inline-flex; margin-left: 8px; }
+.ev-create { display: grid; gap: 8px; padding-top: 10px; border-top: 1px dashed var(--line-soft); }
+
+/* installer */
+.installer-picks { align-items: stretch; }
+.ev-pick { display: grid; gap: 12px; align-content: start; }
+.ev-pick .ver { font-size: 20px; font-weight: 700; color: var(--text); }
+.ev-pick .ver small { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
+.pick-plat.here { border-color: var(--hi); }
+
+/* sign in */
+.ev-login { display: grid; gap: 14px; }
+.ev-login-form { display: grid; gap: 12px; }
+.ev-login-form .fld { display: grid; gap: 4px; font-size: 12px; color: var(--text-2); }
+.ev-look { text-align: center; margin-top: 14px; font-size: 12px; }
+.ev-look a { color: var(--muted); border-bottom: 1px dotted var(--muted); }
+.ev-look a:hover { color: var(--hi); border-color: var(--hi); }
+
+/* help */
+.ev-help .help-doc { overflow-wrap: anywhere; }
+.ev-help .help-files { max-height: 70vh; overflow-y: auto; }
+
+/* account: the result line an answer lands in, reserved so it never pushes */
+.ev-result { min-height: 22px; }
+.ev-result .note { margin: 0; }
+.ev-acct .acct-pc .projects { height: auto; max-height: 240px; }
+.ev-acct .acct-pc .kinds .check { align-items: flex-start; }
+.ev-acct .acct-pc .foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.ev-acct .acct-pc.lost { opacity: 0.8; }
+.ev-acct .grp td small { display: block; color: var(--muted); font-size: 11px; text-transform: none; letter-spacing: 0; }
+.ev-acct .tbl .v { display: block; }
+.ev-acct .sessions-acts { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 10px var(--pad); border-top: 1px dashed var(--line); }
+.ev-acct .sessions-acts .muted { flex-basis: 100%; }
+.ev-acct .acct-keys > div { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.ev-acct .pq-row.cur { background: rgb(var(--hi-rgb) / 0.05); }
+.ev-acct .root-line { font-size: 12px; color: var(--text-2); }
+.ev-acct .hint.ok { color: var(--ok); }
+.ev-acct .hint.warn { color: var(--warn); }
+
+@media (max-width: 760px) {
+  .ev-safe { min-height: 0; }
+  .ev-xf .scroll-y { max-height: none; }
+  .ev-row { display: flex; margin: 8px 0 0; }
+}
+
+/* account section headings between the window rows */
+.ev-acct h2.sec { font-size: 12px; letter-spacing: 2px; text-transform: uppercase; color: var(--text); display: flex; align-items: baseline; gap: 8px; margin-top: 6px; }
+.ev-acct h2.sec::before { content: "\2f\2f"; color: var(--red); letter-spacing: 0; }
+.ev-acct h2.sec .muted { font-weight: 400; letter-spacing: 0; text-transform: none; }
+.ev-acct .acct-empty-win { grid-column: 1 / -1; }

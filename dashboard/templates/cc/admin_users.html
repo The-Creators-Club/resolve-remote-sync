@@ -1,0 +1,72 @@
+{# USERS, terminal look (UI redesign port phase 4, group settings-fleet,
+   2026-09-25; plan 1.3, 3.1, design/users.html).
+
+   The same four panels on the same four routes and polls as the classic
+   page, and the one-time slot above them all:
+   - #minted-secret sits outside every window and every poll (plan 3.1, wave
+     5): a password or a token can never be shown again, so no fold may hide
+     it. Both mints swap into it out of band.
+   - USERS polls /partials/admin/users every 30 s into a bare wrapper. That
+     partial is one swap unit holding several windows (accounts, computers,
+     devices, keys), so its windows ride the keeper: cc.js re-applies each
+     window's fold after every swap (3.1's fallback). Its forms target
+     `closest .admin-users-box`, a plain div, never a .win.
+   - Sessions, report tokens and the fleet stop each have a FRAME here and a
+     body from their route (3.1: the frame is static, the body polls). The
+     hook ids (#admin-sessions, #admin-report-tokens, #admin-fleet-halt) are
+     on the body's child, never on the window.
+   No sidebar (D17): the tree and TICKING FOR live on home. #}
+{% extends "cc/shell.html" %}
+{% block title %}{{ brand_org | upper }}: USERS{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset_url('cc/settings_people.css') }}">{% endblock %}
+{% block layout %}
+<div class="page one fl-page sp-page">
+  {% include "partials/settings_nav.html" %}
+  <div class="head">
+    <div>
+      <h1><span><span class="prompt">&gt;</span> USERS</span></h1>
+      <div class="sub">Create editor accounts, approve new computers and keys, set known passwords.</div>
+    </div>
+    <div class="acts">
+      <a class="key quiet sm" href="#win-halt" title="The switch that stops syncing on every computer at once. Nothing is deleted."><span class="t">stop syncing everywhere</span></a>
+      <a class="key quiet sm" href="#win-create" title="Jump to the form that makes a new account."><span class="t">create an account</span></a>
+    </div>
+  </div>
+
+  <div class="sp-stack">
+    {# DUI-1 (2026-09-04): the one-time credential slot. Never polled, never
+       inside a foldable window. #}
+    <div id="minted-secret"></div>
+
+    <div class="sp-stack" hx-get="/partials/admin/users" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+      {% include "partials/admin_users.html" %}
+    </div>
+
+    <h2 class="sec">browsers, tokens and the fleet stop</h2>
+
+    <section class="win" data-win="sessions" id="win-sessions" aria-labelledby="win-sessions-t">
+      <div class="bar"><button class="fold" type="button" aria-expanded="true" aria-label="fold signed-in browsers"><span class="fold-g" aria-hidden="true">&#9662;</span></button><span aria-hidden="true">&#9484;&#9472;&#9569;</span><h2 class="t" id="win-sessions-t">signed<span aria-hidden="true">_</span><span class="vh"> </span>in<span aria-hidden="true">_</span><span class="vh"> </span>browsers</h2><span aria-hidden="true">&#9566;</span><span class="bar-rule"></span><span aria-hidden="true">&#9552;&#9488;</span></div>
+      <div class="body flush" hx-get="/partials/admin/sessions"
+           hx-trigger="load, every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+        <div class="lede-in">loading...</div>
+      </div>
+    </section>
+
+    <section class="win" data-win="report-tokens" id="win-tokens" aria-labelledby="win-tokens-t">
+      <div class="bar"><button class="fold" type="button" aria-expanded="true" aria-label="fold report tokens"><span class="fold-g" aria-hidden="true">&#9662;</span></button><span aria-hidden="true">&#9484;&#9472;&#9569;</span><h2 class="t" id="win-tokens-t">report<span aria-hidden="true">_</span><span class="vh"> </span>tokens</h2><span aria-hidden="true">&#9566;</span><span class="bar-rule"></span><span aria-hidden="true">&#9552;&#9488;</span></div>
+      <div class="body flush" hx-get="/partials/admin/report-tokens"
+           hx-trigger="load, every 60s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+        <div class="lede-in">loading...</div>
+      </div>
+    </section>
+
+    <section class="win" data-win="fleet-halt" id="win-halt" aria-labelledby="win-halt-t">
+      <div class="bar"><button class="fold" type="button" aria-expanded="true" aria-label="fold stop syncing everywhere"><span class="fold-g" aria-hidden="true">&#9662;</span></button><span aria-hidden="true">&#9484;&#9472;&#9569;</span><h2 class="t" id="win-halt-t">stop<span aria-hidden="true">_</span><span class="vh"> </span>syncing<span aria-hidden="true">_</span><span class="vh"> </span>everywhere</h2><span aria-hidden="true">&#9566;</span><span class="bar-rule"></span><span aria-hidden="true">&#9552;&#9488;</span></div>
+      <div class="body flush" hx-get="/partials/admin/fleet-halt"
+           hx-trigger="load, every 60s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+        <div class="lede-in">loading...</div>
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}

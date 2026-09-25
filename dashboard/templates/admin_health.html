@@ -105,8 +105,8 @@
           {% if row.diagnosis %}<div style="margin-top:0.35rem">{{ row.diagnosis }}</div>{% endif %}
           {% if row.fix %}<div class="mono-sm" style="margin-top:0.35rem">WHAT TO DO: {{ row.fix }}</div>{% endif %}
           <div class="mono-sm" style="margin-top:0.35rem">
-            {% if row.href %}<a class="btn tap" href="{{ row.href }}">{{ row.href_label }}</a>{% endif %}
-            <a class="btn tap" href="{{ row.detail_page }}">{{ row.detail_label }}</a>
+            {% if row.href %}<a class="btn tap" href="{{ row.href }}">[ {{ row.href_label | upper }} ]</a>{% endif %}
+            <a class="btn tap" href="{{ row.detail_page }}">[ {{ row.detail_label | upper }} ]</a>
           </div>
         </div>
       {% endfor %}

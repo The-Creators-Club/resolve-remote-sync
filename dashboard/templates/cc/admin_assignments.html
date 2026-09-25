@@ -1,0 +1,254 @@
+{# SYNC PLANS, terminal look (UI redesign port phase 4, group settings-fleet,
+   2026-09-25; classic twin admin_assignments.html, design/sync-plans.html).
+
+   The same grid, the same cells, the same writes (static/cc/assignments.js
+   is a fork of the classic script: same PUT/DELETE per cell, same column
+   tools, same copy-from; only its labels and its toast host differ). What
+   the terminal page adds, all presentation (plan 5.3):
+   - the computer select is shown before a person is chosen and filled in
+     the browser from `picker.machine_map`, emitted below as JSON;
+   - free space per computer and the proxy size per project are visible
+     text (they used to be data-* only).
+   Confirms stay NATIVE (wave 5, 3.2): ARCHIVE is a plain form with an
+   onsubmit window.confirm, and the script's checkbox confirms are
+   window.confirm too; htmx:confirm never fires for either.
+   Not htmx, not polled. No sidebar (D17). #}
+{% extends "cc/shell.html" %}
+{% block title %}{{ brand_org | upper }}: SYNC PLANS{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset_url('cc/settings_people.css') }}">{% endblock %}
+{% block layout %}
+{% macro bar(hid, title, meta='', label='') -%}
+<div class="bar"><button class="fold" type="button" aria-expanded="true" aria-labelledby="{{ hid }}"><span class="fold-g" aria-hidden="true">&#9662;</span></button><span aria-hidden="true">&#9484;&#9472;&#9569;</span><h2 class="t" id="{{ hid }}">{{ title.split('_') | join('<span aria-hidden="true">_</span><span class="vh"> </span>' | safe) }}</h2><span aria-hidden="true">&#9566;</span><span class="bar-rule"></span>{% if meta %}<span class="meta">{{ meta }}</span>{% endif %}<span aria-hidden="true">&#9552;&#9488;</span></div>
+{%- endmacro %}
+{% set led_for = {"green": "", "amber": "warn", "red": "err", "": "off"} %}
+<div class="page one fl-page sp-page">
+  {% include "partials/settings_nav.html" %}
+  <div class="head">
+    <div>
+      <h1><span><span class="prompt">&gt;</span> SYNC PLANS</span></h1>
+      <div class="sub"><span title="People with a plan, or a computer, on this server."><b>{{ picker.editors | length }}</b> {{ "person" if picker.editors | length == 1 else "people" }}</span>
+        &middot; <span title="Computers that have reported in: each one has its own plan."><b>{{ picker.machine_count }}</b> computer{{ "s" if picker.machine_count != 1 }}</span>
+        &middot; <span title="Active project folders on the server that can be ticked."><b>{{ assignments.projects | length }}</b> project{{ "s" if assignments.projects | length != 1 }}</span></div>
+    </div>
+  </div>
+
+  <p class="lede">
+    Choose a person, then one of their computers: a plan belongs to a <b>computer</b>, not to a person,
+    so this page shows one at a time. Tick a project onto that computer, or pull it back. A person with a
+    desktop and a laptop has a plan for each, and the two sync different things: pick <b>every computer</b>
+    to see them side by side. Every box here is the same write the checkboxes on Sync status make: there is
+    one list, not two. The small <span class="upm on sp-inert">up</span> box beside a tick makes it
+    <a class="hi" href="{{ term_href('Upload only') }}">upload only</a>: that computer sends its video
+    originals for the project to the server and downloads nothing, for an editor who has the footage backed
+    up locally and does not want the rest of the project coming down. What the words on this page mean:
+    <a class="hi" href="{{ GLOSSARY_HREF }}">the glossary</a>.
+  </p>
+
+  <div class="sp-stack">
+  <section class="win" data-win="whose-plan" aria-labelledby="win-whose-plan-t">
+    {{ bar("win-whose-plan-t", "whose_plan", "the choice is in the address, so a link lands here too", "whose plan") }}
+    <div class="body">
+      {# A plain GET form (owner, 2026-09-11): the choice is in the URL. #}
+      <form class="assign-pick pickrow" method="get" action="/admin/assignments">
+        <label class="pick" title="Whose plan to show. Nothing is listed until you choose, so a studio with many editors never gets a grid too wide to read."><span>person</span>
+          <select class="sel" id="assign-editor" name="editor">
+            <option value="">choose a person&hellip;</option>
+            {% for e in picker.editors %}
+            <option value="{{ e }}" {% if e == picker.editor %}selected{% endif %}>{{ e }}</option>
+            {% endfor %}
+          </select></label>
+        <label class="pick" title="Which of their computers. A plan belongs to one computer: a desktop and a laptop can sync different projects. Every computer puts them side by side."><span>computer</span>
+          {# value="-", not "": "" is the unassigned bucket (db.ANY_MACHINE). #}
+          <select class="sel" id="assign-machine" name="machine" {% if not picker.editor %}disabled{% endif %}>
+            <option value="-" {% if picker.machine is none %}selected{% endif %}>choose a computer&hellip;</option>
+            {% if picker.editor %}
+            {% if picker.machines | length > 1 %}
+            <option value="{{ machine_all }}" {% if picker.machine == machine_all %}selected{% endif %}>every computer</option>
+            {% endif %}
+            {% for m in picker.machines %}
+            <option value="{{ m.value }}" {% if picker.machine is not none and picker.machine == m.value %}selected{% endif %}>{{ m.label }}</option>
+            {% endfor %}
+            {% endif %}
+          </select></label>
+        <button class="key primary w-9" type="submit" title="Show the plan for the person and computer chosen. Nothing is written until you tick a box."><span class="t">show</span></button>
+      </form>
+      <script type="application/json" id="assign-machine-map">{{ {"all": machine_all, "map": picker.machine_map or {}} | tojson }}</script>
+    </div>
+  </section>
+
+  <section class="win" data-win="plan" aria-labelledby="win-plan-t">
+    {% if picker.show_grid and assignments.columns %}
+    {{ bar("win-plan-t", "plan", (assignments.projects | length) ~ " projects x " ~ (assignments.columns | length) ~ " computer" ~ ("s" if assignments.columns | length != 1 else ""), "plan") }}
+    {% else %}
+    {{ bar("win-plan-t", "plan", "nobody chosen" if not picker.show_grid else "", "plan") }}
+    {% endif %}
+    {% if not picker.editors %}
+      <div class="plan-empty"><span class="glyph" aria-hidden="true">&middot; &middot; &middot;</span>
+        <span>No known editors yet: one appears here once they sign in, tick a project of their own, or their companion reports.</span></div>
+    {% elif not picker.show_grid %}
+      <div class="plan-empty"><span class="glyph" aria-hidden="true">&middot; &middot; &middot;</span>
+        <span>Choose a <b>person</b> above{% if picker.editor %}, then one of their <b>computers</b>{% endif %}, then <b>show</b>.</span>
+        <span class="muted">Nothing is listed until then: a company with many editors has a grid too wide to read, and a plan belongs to one computer anyway.</span></div>
+    {% elif not assignments.columns %}
+      <div class="plan-empty"><span>This person has no computer to show a plan for yet.</span></div>
+    {% elif not assignments.projects %}
+      <div class="plan-empty"><span>No active projects yet.</span></div>
+    {% else %}
+    <div class="body sp-tight">
+      <div class="prompt-in sp-filter" title="Show only the projects whose name contains this. Filtering unticks nothing.">
+        <span class="p" aria-hidden="true">&gt;</span>
+        <input class="assign-filter" type="search" id="assign-filter" placeholder="filter projects" aria-label="filter projects">
+      </div>
+    </div>
+    <div class="mx-wrap assign-scroll">
+      <table class="mx assign-grid" id="assign-grid">
+        <thead>
+          <tr>
+            <th class="pcol assign-project-head">project</th>
+            {% for c in assignments.columns %}
+            {# A WIRED COLUMN, not a wired account (CR-49). #}
+            {% set wired = (c.editor, c.machine) in assignments.base_machine_cells %}
+            {% set col_disk = assignments.disk.get((c.editor, c.machine)) or {} %}
+            <th><div class="ch">
+              <span class="nm">{{ c.sub or c.label }} <span class="led {{ led_for.get(assignments.presence.get(c.editor, ''), 'off') }} sp-led-sm" title="companion presence for {{ c.editor }}"></span></span>
+              <span class="who">{{ c.editor }}</span>
+              {% if col_disk.get('free') is not none %}
+              <span class="free" title="Free space this computer last reported on the drive its projects sync to. Ticking a project whose proxies would not fit asks first.">{{ col_disk.get('free') | human_bytes }} free</span>
+              {% endif %}
+              {% if wired %}
+              {# DUI-20: where the setting lives, as visible text. #}
+              <span class="wired" title="This computer works directly off the NAS tree, so it syncs nothing. Change it on that computer: tray, Settings, This computer."><b>wired</b>: set on that computer</span>
+              {% else %}
+              <span class="tools assign-colbtns">
+                <button type="button" class="key sm fixw"
+                        data-col-all="{{ c.editor }}" data-col-machine="{{ c.machine }}"
+                        {% if col_disk.get('free') is not none %}data-col-free="{{ col_disk.get('free') }}"{% endif %}
+                        data-col-label="{{ c.sub or c.editor }}"
+                        title="Tick every project for {{ c.sub }}. Asks first if the proxies would not fit. Press again while it runs to stop after the change in flight."><span class="t">all</span></button>
+                <button type="button" class="key sm fixw"
+                        data-col-none="{{ c.editor }}" data-col-machine="{{ c.machine }}"
+                        data-col-label="{{ c.sub or c.editor }}"
+                        data-idle-title="untick every project for {{ c.sub }}"
+                        title="untick every project for {{ c.sub }}"><span class="t">none</span></button>
+                {% if c.siblings %}
+                <select class="sel sm assign-copy" data-copy-editor="{{ c.editor }}"
+                        data-copy-target="{{ c.machine }}" aria-label="copy a plan onto {{ c.sub or c.machine }}"
+                        title="Give this computer the same projects as another of {{ c.editor }}'s. Asks first, and names anything it would stop syncing.">
+                  <option value="">copy from&hellip;</option>
+                  {% for other in c.siblings %}
+                  <option value="{{ other }}">{{ other }}</option>
+                  {% endfor %}
+                </select>
+                {% endif %}
+              </span>
+              {% endif %}
+            </div></th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in assignments.projects %}
+          {% set tick_count = assignments.tick_editor_counts.get(p.slug, 0) %}
+          {% set proxy = assignments.proxy_bytes.get(p.slug) %}
+          <tr data-project-label="{{ p.label | lower }}">
+            <td class="pcol assign-project"><div class="pname">
+              <span class="nm" title="{{ p.label }}">{{ p.label }}</span>
+              <span class="sz" title="{% if proxy is none %}The proxies of this project have not been measured yet, so a tick cannot warn about space.{% else %}The size of this project's proxies on the server: roughly what a full tick brings down.{% endif %}">{% if proxy is none %}not measured{% else %}{{ proxy | human_bytes }}{% endif %}</span>
+              {# DCORE-5 + ui-dash-admin-1: the label rides a data- attribute,
+                 read as a DOM string; the confirm stays native (wave 5). #}
+              <form class="inline-form" method="post" action="/partials/admin/projects/archive"
+                    data-archive-label="{{ p.label }}"
+                    onsubmit="return window.confirm('Archive ' + this.dataset.archiveLabel + '? {{ tick_count | int }} editor{{ '' if tick_count == 1 else 's' }} sync it now, and it stops being sent to their computers. Nothing is deleted: the folder and the files stay on the server, and UNARCHIVE puts it back.');">
+                <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+                <input type="hidden" name="slug" value="{{ p.slug }}">
+                <input type="hidden" name="archived" value="1">
+                <input type="hidden" name="editor" value="{{ picker.editor }}">
+                <input type="hidden" name="machine" value="{{ picker.machine if picker.machine is not none else '' }}">
+                <button class="key quiet sm" type="submit"
+                        title="Take this project off every tick list, the queue and this grid. The folder, its files and the ticks themselves are kept, and unarchive brings it all back."><span class="t">archive</span></button>
+              </form>
+            </div></td>
+            {% for c in assignments.columns %}
+            {% set wired = (c.editor, c.machine) in assignments.base_machine_cells %}
+            {% set up_only = (p.slug, c.editor, c.machine) in assignments.upload_only_cells %}
+            {% set cell_disk = assignments.disk.get((c.editor, c.machine)) or {} %}
+            {% set ticked = (p.slug, c.editor, c.machine) in assignments.ticked_cells %}
+            <td class="cell assign-cell">
+              <label class="check sp-tick">
+              <input type="checkbox" class="proj-check matrix-check"
+                     data-slug="{{ p.slug }}" data-editor="{{ c.editor }}"
+                     data-machine="{{ c.machine }}"
+                     {% if wired %}data-wired="1"{% endif %}
+                     {% if proxy is not none %}data-proxy-bytes="{{ proxy }}"{% endif %}
+                     {% if cell_disk.get('free') is not none %}data-free-bytes="{{ cell_disk.get('free') }}"{% endif %}
+                     data-project-label="{{ p.label }}"
+                     data-machine-label="{{ c.sub or c.editor }}"
+                     {{ 'checked' if ticked }}
+                     {# CR-28 follow-up: a ticked wired cell stays removable. #}
+                     {% if wired and not ticked %}disabled
+                     title="{{ c.sub or c.editor }} is wired to the NAS: it works directly off the tree, so a new sync cannot be ticked here. Change it on that computer: tray, Settings, This computer."
+                     {% elif wired %}
+                     title="{{ c.sub or c.editor }} is wired to the NAS and syncs nothing: untick to clear this stale sync. Change it on that computer: tray, Settings, This computer."
+                     {% else %}
+                     title="sync &quot;{{ p.label }}&quot; to {{ c.sub }}"
+                     {% endif %}
+                     aria-label="sync {{ p.label }} to {{ c.editor }} on {{ c.sub }}"><span class="g" aria-hidden="true"></span></label>
+              {# The upload-only half (docs/UPLOAD_ONLY_TICK.md): its own
+                 class, never replayed by the column tools. #}
+              <label class="assign-upmode upm {{ 'on' if up_only }}"
+                     title="Upload only: {{ c.sub }} sends its video originals for &quot;{{ p.label }}&quot; to the server and downloads nothing.">
+                <input type="checkbox" class="matrix-upmode"
+                       data-slug="{{ p.slug }}" data-editor="{{ c.editor }}"
+                       data-machine="{{ c.machine }}"
+                       {{ 'checked' if up_only }}
+                       {% if wired %}disabled{% endif %}
+                       aria-label="upload only: {{ p.label }} from {{ c.editor }} on {{ c.sub }}">up</label>
+            </td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="legend"><span><span class="check sp-inert"><span class="g sp-on" aria-hidden="true"></span></span> synced: the project comes down and goes up</span>
+      <span><span class="upm on sp-inert">up</span> upload only: originals go up, nothing comes down</span>
+      <span><span class="check sp-inert"><span class="g" aria-hidden="true"></span></span> not on this computer</span></div>
+    {% endif %}
+  </section>
+
+  {% if assignments.archived_unreadable %}
+  {# dash-db-5's hand-off: an unreadable list is not an empty one. #}
+  <div class="note warn"><span class="grow">The archived list could not be read right now, so it is not shown. Nothing was archived or restored by this, and the projects above are unaffected.</span></div>
+  {% endif %}
+  {% if assignments.archived_projects %}
+  <section class="win" data-win="archived" aria-labelledby="win-archived-t">
+    {{ bar("win-archived-t", "archived_projects", (assignments.archived_projects | length) ~ "", "archived projects") }}
+    <div class="lede-in">Off every tick list and the queue. Nothing was deleted: the folders and the files are still on the server.</div>
+    <div class="scroll-x"><table class="tbl stack-sm"><tbody>
+      {% for a in assignments.archived_projects %}
+      <tr class="editor-row">
+        <td data-label="project"><b>{{ a.label }}</b></td>
+        <td data-label="archived">archived {{ a.archived_at | ago }} by {{ a.archived_by or "?" }},
+          <span title="How many people still have it ticked: their ticks are kept, and come back into force if it is unarchived.">still ticked for {{ a.editors }} editor{{ "" if a.editors == 1 else "s" }}</span></td>
+        <td class="acts-cell" data-label="actions">
+          <form class="inline-form" method="post" action="/partials/admin/projects/archive">
+            <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+            <input type="hidden" name="slug" value="{{ a.slug }}">
+            <input type="hidden" name="archived" value="0">
+            <input type="hidden" name="editor" value="{{ picker.editor }}">
+            <input type="hidden" name="machine" value="{{ picker.machine if picker.machine is not none else '' }}">
+            <button class="key sm" type="submit"
+                    title="Put this project back on every tick list and the queue. The ticks it had are still there, so it starts syncing again on the next cycle."><span class="t">unarchive</span></button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody></table></div>
+  </section>
+  {% endif %}
+  </div>
+  {# aria-live region for the grid's results, outside the scroller. #}
+  <div id="assign-toast" class="sp-notes" aria-live="polite"></div>
+  <script src="{{ asset_url('cc/assignments.js') }}" defer></script>
+</div>
+{% endblock %}

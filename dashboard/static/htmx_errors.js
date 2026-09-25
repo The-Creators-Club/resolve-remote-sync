@@ -196,6 +196,14 @@
   "use strict";
 
   var SHEET_ID = "chip-sheet";
+  // UI port phase 1 (plan 3.2): one explicit selector for everything that
+  // explains itself on a tap, whatever the page's look. The terminal HUD's
+  // LEDs sit on classic pages too, and the terminal shell's hint sheet
+  // carries the same three hooks. Never a bare [title]: that would swallow
+  // a <summary title>'s toggle and put a tabindex on every titled cell.
+  var TIPPED = "[data-tip], [data-chip-detail], .tag[title], .led[title], " +
+    ".hud-led[title], .chip[title], .dot[title]";
+  var CONTROLS = "a, button, input, select, textarea, label, summary";
 
   // ui-dash-main-2 / ui-dash-static-1 (2026-09-25): see liveRoot in the
   // DUI-6 block below. A chip swapped in by an outerHTML panel is only
@@ -221,7 +229,8 @@
   function open(chip) {
     var el = sheet();
     if (!el) return;
-    var text = chip.getAttribute("data-chip-detail") || chip.getAttribute("title") || "";
+    var text = chip.getAttribute("data-tip") || chip.getAttribute("data-chip-detail") ||
+      chip.getAttribute("title") || "";
     if (!text) return;
     // textContent, never innerHTML: a chip's text can carry a Syncthing
     // error, a file name or a companion's own message.
@@ -236,8 +245,9 @@
     // A chip that is a LINK or sits in a control is that control first: the
     // job chip goes to the jobs page, and taking that away to show a tooltip
     // would be a worse page, not a better one.
-    if (node.closest("a, button, input, select, textarea, label")) return null;
-    return node.closest("[data-chip-detail], .chip[title], .dot[title]");
+    // `summary` too (UI port 3.2): a <summary title> must still fold.
+    if (node.closest(CONTROLS)) return null;
+    return node.closest(TIPPED);
   }
 
   document.addEventListener("click", function (evt) {
@@ -269,8 +279,8 @@
   // grid replaces its own chips every 15 s.
   function focusable(root) {
     if (!root || !root.querySelectorAll) return;
-    root.querySelectorAll("[data-chip-detail], .chip[title]").forEach(function (c) {
-      if (c.closest("a, button, input, select, textarea, label")) return;
+    root.querySelectorAll(TIPPED).forEach(function (c) {
+      if (c.closest(CONTROLS)) return;
       if (!c.hasAttribute("tabindex")) c.setAttribute("tabindex", "0");
     });
   }

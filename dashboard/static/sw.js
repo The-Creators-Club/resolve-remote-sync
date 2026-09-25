@@ -39,6 +39,11 @@ const PRECACHE = [
   '/static/icons/icon-512-maskable.png'
 ];
 
+// UI port R8 (phase 0): the terminal look's hashed cc/ sheets and scripts and
+// the fonts at their plain urls, substituted by the /sw.js route from the
+// same content-hash map asset_url() uses. Empty when served raw.
+const CC_PRECACHE = /*__CC_PRECACHE__*/[];
+
 // Prefixes this worker keeps its hands off entirely: live data, the htmx
 // fragments that carry it, the three mounted SPAs and Timeline Cards (which
 // has its own manifest and its own worker scope), and the two ends of a
@@ -70,7 +75,7 @@ self.addEventListener('install', function (event) {
       // Per file, not cache.addAll: addAll rejects as a whole, so one asset
       // a build dropped (mobile.css before it merged, say) would leave the
       // worker with NO precache at all rather than one file short.
-      return Promise.all(PRECACHE.map(function (url) {
+      return Promise.all(PRECACHE.concat(CC_PRECACHE).map(function (url) {
         return cache.add(new Request(url, { cache: 'reload' })).catch(function () { });
       }));
     }).then(function () { return self.skipWaiting(); })
@@ -133,7 +138,9 @@ self.addEventListener('fetch', function (event) {
         // work that has to outlive the response; `network` is the response
         // itself, which the no-hit branch must not delay behind a cache write.
         var stored = null;
-        var network = fetch(req).then(function (res) {
+        // {cache: 'no-cache'}: revalidate past the browser's heuristic HTTP
+        // cache, or a deploy's changed classic script is not seen for hours (R8).
+        var network = fetch(req, {cache: 'no-cache'}).then(function (res) {
           if (res && res.ok && res.type === 'basic') {
             var copy = res.clone();
             stored = caches.open(CACHE).then(function (cache) {

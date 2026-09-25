@@ -1,0 +1,24 @@
+{# transfers, the terminal home window's BODY (UI redesign port phase 2;
+   plan 5.1, R15). A NEW name on /partials/home-transfers: the Transfers page
+   keeps partials/transfers.html. Only what is moving: the queued and history
+   halves are one link away on /transfers (the bar's "all transfers"). Polled
+   every 2 s into the window body, innerHTML, so the frame stays put. The
+   safe-to-close line is always drawn (a blank line on the admin view, which
+   has no "this computer"), so nothing below it shifts. #}
+{% set moving = transfers.transfers if transfers and transfers.transfers else [] %}
+<div class="hint xf-close{{ ' warn' if safe_to_close and not safe_to_close.safe }}">{% if safe_to_close %}{{ safe_to_close.sentence }}{% else %}&nbsp;{% endif %}</div>
+{% if moving %}
+<div class="xf-list">
+  {% for t in moving %}
+  <div class="xf">
+    <span class="dir {{ 'up' if t.direction == 'up' else 'down' }}" title="{{ 'Uploading to the server' if t.direction == 'up' else 'Downloading from the server' }}"><span aria-hidden="true">{% if t.direction == "up" %}&#9650;{% else %}&#9660;{% endif %}</span><span class="vh">{{ "up" if t.direction == "up" else "down" }}</span></span>
+    <span class="file" title="{{ t.name }}">{{ t.name }}<small>{% if scope_admin %}{{ t.editor }}{% if t.machine %} / {{ t.machine }}{% endif %}{% endif %}{% if t.granularity == "project" %}{% if scope_admin %} &middot; {% endif %}folder sync{% endif %}</small></span>
+    <span class="meter">{% if t.percentage is not none %}<span aria-hidden="true">{{ cc_meter(t.percentage, 100, 16) }}</span> <span class="pct">{{ "%.0f" | format(t.percentage) }}%</span>{% else %}<span class="dim">-</span>{% endif %}</span>
+    <span class="speed num">{% if t.speed_bps %}{{ t.speed_bps | human_bytes }}/s{% else %}-{% endif %}</span>
+    <span class="eta num" title="Time left for this file at the current speed.">{{ t.eta_seconds | eta if t.eta_seconds else "-" }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="allclear"><span class="led" aria-hidden="true"></span>Nothing is moving right now.</div>
+{% endif %}

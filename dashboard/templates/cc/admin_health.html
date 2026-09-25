@@ -1,0 +1,145 @@
+{# HEALTH, terminal twin (UI port phase 5, 2026-09-25; bench design/health.html).
+
+   Same data as admin_health.html (ui.page_admin_health: WHAT IS RUNNING and
+   the ranked open list), plus the three panels the classic look draws on the
+   home page, as tabs (D7). The FRAMES are static and carry the anchors other
+   code links to (#server-notices, #fleet-collector, #fleet-diagnostics, via
+   /go/<panel>); only their bodies are fetched, from the new-named routes in
+   ui_health.py, so a fold or a tab is never replaced by a swap (3.1).
+   Not polled, as classic: a list that moves under the reader loses the row
+   they are reading. #}
+{% extends "cc/shell.html" %}
+{% block title %}{{ brand_org | upper }}: HEALTH{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset_url('cc/health.css') }}">{% endblock %}
+{% block layout %}
+{%- set band_word = {'error': 'needs attention', 'warn': 'worth a look', 'unknown': 'not checked'} -%}
+{%- set band_tip = {'error': 'Something is wrong and needs a person.', 'warn': 'Not broken yet, but worth checking before it is.', 'unknown': 'This server could not find out. That is not the same as fine.'} -%}
+{%- set src_tip = {'notice': "Found by the server's own checks. The full list is under problems the server found.", 'alert': 'From the alert checks. The Alerts page decides who is told.', 'invariant': 'A fact the whole system relies on, re-checked every few minutes.', 'protection': 'A safety net, such as snapshots, backups or the signing key.'} -%}
+<div class="page one">
+  {% include "partials/settings_nav.html" %}
+
+  <div class="head">
+    <div>
+      <h1><span><span class="prompt">&gt;</span> HEALTH</span></h1>
+      <div class="sub">{% if health_total %}<b>{{ health_total }}</b> open across notices, alerts, invariants and protection{% else %}nothing open, every check answered{% endif %}</div>
+    </div>
+    <div class="acts bands">
+      {% if health_total %}
+        {% if health_counts.error %}<span class="tag solid err" title="{{ band_tip.error }}">{{ health_counts.error }} needs attention</span>{% endif %}
+        {% if health_counts.warn %}<span class="tag solid warn" title="{{ band_tip.warn }}">{{ health_counts.warn }} worth a look</span>{% endif %}
+        {% if health_counts.unknown %}<span class="tag mute" title="{{ band_tip.unknown }}">{{ health_counts.unknown }} not checked</span>{% endif %}
+      {% else %}
+        <span class="tag ok" title="Every check answered and none found a problem.">nothing open</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="vstack">
+    <p class="lede">Everything this server currently has open, worst first:
+      problems it found, alerts, facts that have stopped being true, and
+      safety mechanisms it cannot confirm. Each line says what it means and
+      what to do, in the words of the page it came from. <b>Nothing here
+      changes anything.</b></p>
+    <div class="note"><span class="tag mute" title="This server could not find the answer. It is shown so that silence is never mistaken for fine.">not checked</span><span class="grow"><b>Not checked is not OK.</b> It means this server cannot answer that one, and the reason is beside it.</span></div>
+
+    {% if what_is_running %}
+    {% set wr = what_is_running %}
+    <section class="win" data-win="running">
+      <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold what is running"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">what_is_running</h2><span class="bar-rule"></span>
+        <span class="meta">{% if wr.feed_checked_at %}<span title="Where the vendor publishes new builds. This server looks there by itself.">vendor channel</span> last checked <b>{{ wr.feed_checked_at | ago }}</b>{% else %}the vendor channel has never been checked here{% endif %}</span>
+        <a class="act" href="/admin/packages" title="Open Packages: publish a build, make it current, push an update.">packages</a></div>
+      <div class="body hl-running">
+        <div class="run-line"><span class="lbl" title="The version of this dashboard running on the server now.">this dashboard</span><b>{{ wr.dashboard.running }}</b>
+          {% if wr.dashboard.newest_offered %}<span class="tag {{ 'warn' if wr.dashboard.behind else 'mute' }}" title="{{ 'The vendor has published a newer build than the one here.' if wr.dashboard.behind else 'The newest build the vendor has published.' }}">vendor: {{ wr.dashboard.newest_offered }}</span>
+          {% else %}<span class="tag mute" title="The vendor channel could not be read, so this is unknown.">vendor: not checked</span>{% endif %}</div>
+        {% for c in wr.companions %}
+          <div class="run-line"><span class="lbl" title="The build this dashboard hands to {{ c.platform }} computers when they ask for an update.">{{ c.platform }} computers are offered</span><b>{{ c.current or "nothing" }}</b>
+            {% if c.current_published_at %}<span class="muted">published {{ c.current_published_at | ago }}</span>{% endif %}
+            {% if c.newest_offered %}<span class="tag {{ 'warn' if c.behind_vendor else 'mute' }}" title="{{ 'The vendor has published a newer build than the one offered here.' if c.behind_vendor else 'The newest build the vendor has published.' }}">vendor: {{ c.newest_offered }}</span>{% endif %}</div>
+          {% for b in c.builds %}
+            <div class="run-sub">{{ b.computers }} on {{ b.version }}{% if b.is_current %} <span class="hi" title="The build computers are being offered now.">(current)</span>{% endif %}{% if b.published_at %}, published {{ b.published_at | ago }}{% endif %}</div>
+          {% endfor %}
+        {% endfor %}
+        {% if not wr.companions %}
+          <div class="run-sub">No computer build is current here yet, so nothing has been offered to anybody.</div>
+        {% endif %}
+        {% for line in wr.disagreements %}
+          <div class="note warn"><span class="grow">{{ line }}</span></div>
+        {% else %}
+          <div class="note ok"><span class="grow">Everything here agrees: this server, the vendor's channel and the computers reporting in.</span></div>
+        {% endfor %}
+        {% if wr.dashboard_update_note %}<div class="hint">{{ wr.dashboard_update_note }}</div>{% endif %}
+      </div>
+    </section>
+    {% endif %}
+
+    <div>
+      <div class="tabs" role="tablist" id="health-tabs" aria-label="health">
+        <button type="button" role="tab" id="htab-open" aria-controls="hpanel-open" aria-selected="true" title="Everything open from all four sources, worst first.">open findings{% if health_total %} ({{ health_total }}){% endif %}</button>
+        <button type="button" role="tab" id="htab-notices" aria-controls="hpanel-notices" aria-selected="false" title="Things the server refused to do or found wrong, with the fix for each, and the list of every check it runs.">problems the server found</button>
+        <button type="button" role="tab" id="htab-collector" aria-controls="hpanel-collector" aria-selected="false" title="The background jobs that keep the fleet in step, and the sharing changes they are about to make.">collector</button>
+        <button type="button" role="tab" id="htab-diag" aria-controls="hpanel-diag" aria-selected="false" title="Diagnostics that editors' computers uploaded, newest first.">what computers said</button>
+      </div>
+
+      <div class="tab-host">
+        <div class="vstack hl-panel" id="hpanel-open">
+          <section class="win" data-win="open">
+            <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold open findings"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">open.log</h2><span class="bar-rule"></span>{% if health_total %}<span class="meta"><b>{{ health_total }}</b> open, worst first</span>{% endif %}</div>
+            <div class="scroll-y hl-list">
+            {% for row in health_rows %}
+              <div class="prob wide">
+                <span class="sev"><span class="tag {{ 'solid err' if row.band == 'error' else ('solid warn' if row.band == 'warn' else 'mute') }}" title="{{ band_tip.get(row.band, '') }}">{{ band_word.get(row.band, row.band) }}</span></span>
+                <span class="title">{{ row.title }}<span class="who">{{ row.source_label | lower }}</span></span>
+                <span class="src" title="{{ src_tip.get(row.source, '') }}">{{ row.source }}</span>
+                {% if row.subject %}<div class="subj">{{ row.subject }}</div>{% endif %}
+                {% if row.diagnosis %}<div class="what">{{ row.diagnosis }}</div>{% endif %}
+                <div class="todo">{% if row.fix %}<span class="cmd">{{ row.fix }}</span>{% endif %}<span class="keys">
+                  {% if row.href %}<a class="key sm" href="{{ row.href }}"><span class="t">{{ row.href_label | cc_unbracket }}</span></a>{% endif %}
+                  {% if row.source == 'notice' %}<a class="key quiet sm" href="#server-notices" title="Open the problems the server found tab."><span class="t">notices</span></a>
+                  {% else %}<a class="key quiet sm" href="{{ row.detail_page }}"><span class="t">{{ row.detail_label | cc_unbracket }}</span></a>{% endif %}
+                </span></div>
+              </div>
+            {% else %}
+              <div class="allclear"><span class="led"></span>Nothing is open. Every check this server runs answered, and none of them found a problem.</div>
+            {% endfor %}
+            </div>
+          </section>
+          <p class="lede">The four pages behind this one are
+            <a class="hi" href="#server-notices">the problems the server found</a>,
+            <a class="hi" href="/admin/alerts">alerts</a>,
+            <a class="hi" href="/admin/invariants">invariants</a> and
+            <a class="hi" href="/admin/protection">protection</a>. Each holds the
+            full list, including everything that is currently fine.</p>
+        </div>
+
+        <div class="vstack hl-panel" id="hpanel-notices" hidden>
+          <section class="win" data-win="notices" id="server-notices">
+            <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold problems the server found"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">problems_the_server_found</h2><span class="bar-rule"></span></div>
+            <div id="health-notices-body" hx-get="/partials/health-notices" hx-trigger="load" hx-swap="innerHTML">
+              <div class="allclear"><span class="spin"></span>asking the server</div>
+            </div>
+          </section>
+        </div>
+
+        <div class="vstack hl-panel" id="hpanel-collector" hidden>
+          <section class="win" data-win="collector" id="fleet-collector">
+            <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold the collector"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">collector</h2><span class="bar-rule"></span><span class="meta" title="This panel only shows. Nothing here changes a share.">read only</span></div>
+            <div id="health-collector-body" hx-get="/partials/health-collector" hx-trigger="load" hx-swap="innerHTML">
+              <div class="allclear"><span class="spin"></span>asking the server</div>
+            </div>
+          </section>
+        </div>
+
+        <div class="vstack hl-panel" id="hpanel-diag" hidden>
+          <section class="win" data-win="diagnostics" id="fleet-diagnostics">
+            <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold what these computers said"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">what_these_computers_said</h2><span class="bar-rule"></span><span class="meta">diagnostics each companion uploaded, newest first</span></div>
+            <div id="health-diagnostics-body" hx-get="/partials/health-diagnostics" hx-trigger="load" hx-swap="innerHTML">
+              <div class="allclear"><span class="spin"></span>asking the server</div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

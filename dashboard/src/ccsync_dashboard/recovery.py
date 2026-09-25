@@ -933,7 +933,7 @@ def _stop_the_fleet_step() -> Step:
         # (partials/fleet_halt.html), never on SYNC STATUS, which is where
         # this step used to link, mid-restore, with no control on it. Named
         # with the button's own label instead of a fourth word for it.
-        body=("Every editor's computer is still syncing. Press [ STOP ALL SYNCING ] "
+        body=("Every editor's computer is still syncing. Press \"Stop all syncing\" "
               "on Settings, Users before you put anything back, or the computers "
               "will push the state you are undoing straight back up."),
         href="/admin/users#admin-fleet-halt")
@@ -1041,7 +1041,7 @@ def _plan_whole_tree(facts: dict[str, Fact], ctx: dict[str, Any]) -> list[Step]:
                    "server with everything else written since. Create it again on "
                    "the PROJECT SETUP page here, which opens for one Resolve project "
                    "at a time: open /project-setup?resolve_project= followed by the "
-                   "project's name in Resolve, then [ CREATE & LINK ]. The folder is made with the right owner and "
+                   "project's name in Resolve, then \"Create & link\". The folder is made with the right owner and "
                    "permissions as it goes, which is what editors need to be able to "
                    "write to it. Folders that existed in the snapshot come back "
                    "exactly as they were and need nothing.")),
@@ -1102,11 +1102,11 @@ def _plan_resolve(facts: dict[str, Fact], ctx: dict[str, Any]) -> list[Step]:
              "Undo it from here",
              body=("CC Sync writes down every clip path it changes, and each change "
                    "can be replayed backwards. The UNDO A CLIP-PATH CHANGE panel on "
-                   "this page lists them per computer: [ UNDO THIS CHANGE ] on one and it is "
+                   "this page lists them per computer: \"Undo this change\" on one and it is "
                    "undone when that computer next reports, while the project is "
                    "open in its Resolve. Somebody at that computer can do the same "
-                   "from Settings in the CC Sync tray icon, [ UNDO LAST FIX ] in the "
-                   "RESOLVE section."),
+                   "from Settings in the CC Sync tray icon, \"Undo last fix\" in the "
+                   "Resolve section."),
              href="#resolve-undo"),
         Step("note",
              "If the undo cannot help",

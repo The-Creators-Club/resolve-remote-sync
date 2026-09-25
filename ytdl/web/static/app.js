@@ -2119,7 +2119,12 @@ function announceQueued(r) {
 
 const confirmDiscard = msg => typeof confirm === 'function' && confirm(msg);
 
-const askDiscardParked = () => confirmDiscard(
+// UI port phase 6: the terminal look asks through cc_spa.js's dialog; with
+// the look off (or no helper, as in the test harness) it is confirmDiscard.
+const ccAsk = async msg => ((typeof window !== 'undefined' && window.ccSpa
+  && window.ccSpa.active()) ? window.ccSpa.confirm(msg) : confirmDiscard(msg));
+
+const askDiscardParked = () => ccAsk(
   'Your previous search is still waiting for review and nothing from it was '
   + 'downloaded. Discard it and start the new one?');
 
@@ -2131,7 +2136,7 @@ const askDiscardParked = () => confirmDiscard(
 // only re-attaching and telling the editor which button to go and press.
 // -> true when it took over (cancelled + retried, or failed loudly trying).
 async function discardParkedAndRetry(info, retry) {
-  if (!info || info.phase !== 'ready_for_review' || !askDiscardParked()) {
+  if (!info || info.phase !== 'ready_for_review' || !(await askDiscardParked())) {
     return false;
   }
   try {
@@ -2352,8 +2357,8 @@ async function startDownload() {
 // this button exists to end.
 async function discardReview() {
   if (!state.jobId) return;
-  if (!confirmDiscard('Discard this search? Nothing from it was downloaded, '
-                      + 'and its results will be thrown away.')) return;
+  if (!(await ccAsk('Discard this search? Nothing from it was downloaded, '
+                      + 'and its results will be thrown away.'))) return;
   try {
     await post(`api/jobs/${state.jobId}/cancel`);
     detach();
@@ -3160,7 +3165,26 @@ function copyText(text) {
 // imitation of one. Standalone the same fetch resolves inside THIS app, 404s,
 // and the fallback stays. Never made root-relative: see
 // tests/test_mounted_prefix.py.
+/* UI port phase 1 (7.0): after an injection, the markup that ARRIVED is the
+   truth. html.cc-chrome only when a HUD came back, html.cc only when its
+   marker says the apps look is on, and the readable cookie rewritten to
+   match (path=/ always, or a second cookie scoped here would win). */
+function syncDashboardLook(host) {
+  const root = document.documentElement;
+  const hud = !!(host && host.querySelector('.hud'));
+  const marker = host && host.querySelector('[data-dash-topbar]');
+  const apps = !!marker && marker.getAttribute('data-ui-apps') === 'cc';
+  root.classList.toggle('cc-chrome', hud);
+  root.classList.toggle('cc', apps);
+  const v = [hud ? 'chrome' : '', apps ? 'apps' : ''].filter(Boolean).join('.');
+  try {
+    document.cookie = 'ccsync_ui_effective=' + v + '; path=/; samesite=lax' +
+      (location.protocol === 'https:' ? '; secure' : '');
+  } catch { /* storage blocked: the next load corrects it */ }
+}
+
 async function loadDashboardTopbar() {
+  let host = null;
   try {
     const r = await fetch('../partials/topbar?current=ytdl');
     // redirected = an expired session answered with the login PAGE; injecting
@@ -3168,9 +3192,19 @@ async function loadDashboardTopbar() {
     if (!r.ok || r.redirected) return;
     const html = await r.text();
     if (!html.includes('data-dash-topbar')) return;
-    document.getElementById('dash-topbar').innerHTML = html;
+    host = document.getElementById('dash-topbar');
+    host.innerHTML = html;
   } catch {
     /* dashboard unreachable -- the fallback header stands */
+  } finally {
+    // Every path: the hold ends, and cc-chrome stays only if a HUD arrived.
+    // (documentElement is absent only in the node test harness)
+    const root = document.documentElement;
+    if (root) {
+      if (host && host.querySelector('[data-dash-topbar]')) syncDashboardLook(host);
+      else root.classList.remove('cc-chrome');
+      root.classList.remove('cc-chrome-pending');
+    }
   }
 }
 

@@ -32,7 +32,13 @@ VENDORED = {"htmx.min.js"}
 
 
 def js_files() -> list[Path]:
-    return sorted(p for p in STATIC.glob("*.js") if p.name not in VENDORED)
+    # rglob since the UI port's phase 0 (2026-09-25): static/cc/ holds the
+    # terminal look's scripts, which every terminal page loads.
+    return sorted(p for p in STATIC.rglob("*.js") if p.name not in VENDORED)
+
+
+def _rel(p: Path) -> str:
+    return p.relative_to(STATIC).as_posix()
 
 
 def test_there_are_files_to_check():
@@ -47,7 +53,17 @@ ON_EVERY_PAGE = {"htmx_errors.js", "copy_value.js", "pwa.js", "tab_memory.js"}
 
 
 def test_the_scripts_every_page_loads_are_among_them():
-    assert ON_EVERY_PAGE <= {p.name for p in js_files()}
+    assert ON_EVERY_PAGE <= {_rel(p) for p in js_files()}
+
+
+# What cc/shell.html loads on every terminal page (UI port 2.5), by path
+# relative to static/: `copy_value.js` and `cc/copy_value.js` are two files.
+CC_ON_EVERY_PAGE = {"htmx_errors.js", "cc/copy_value.js", "pwa.js", "tab_memory.js",
+                    "cc/cc.js"}
+
+
+def test_the_scripts_every_terminal_page_loads_are_among_them():
+    assert CC_ON_EVERY_PAGE <= {_rel(p) for p in js_files()}
 
 
 def unterminated_string_lines(src: str) -> list[tuple[int, str]]:
@@ -142,7 +158,7 @@ def unterminated_string_lines(src: str) -> list[tuple[int, str]]:
     return bad
 
 
-@pytest.mark.parametrize("path", js_files(), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", js_files(), ids=_rel)
 def test_no_quoted_string_literal_spans_a_newline(path: Path):
     bad = unterminated_string_lines(path.read_text(encoding="utf-8"))
     assert not bad, (
@@ -151,7 +167,7 @@ def test_no_quoted_string_literal_spans_a_newline(path: Path):
         f"parse and every listener in it is dead. Escape it as \\n.")
 
 
-@pytest.mark.parametrize("path", js_files(), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", js_files(), ids=_rel)
 def test_node_check_parses_the_file(path: Path):
     node = shutil.which("node")
     if not node:

@@ -172,9 +172,13 @@
 {% set row_tone = cc_tone(level) %}
 <div class="pc home-pc{{ ' ' ~ row_tone if row_tone }}">
   <span class="led {{ row_tone }}{{ ' off' if hl.reason == 'not_reporting' and not row_tone }}" title="{{ hl.text }}"><span class="vh">{{ hl.text }}</span></span>
-  <div class="name">{{ e.machine }}<small title="signed in as {{ e.editor_username }}">{{ who_name }}{% if who_name != e.editor_username %} ({{ e.editor_username }}){% endif %}</small></div>
+  {#- The headline sits under the name in its own box (owner, 2026-09-25:
+      red and yellow sentences above the lanes made the row look
+      "higgledypiggledy"). A fault or warning is a small scrolling box; a
+      muted line ("Idle", "Nothing ticked") is plain text. #}
+  <div class="name">{{ e.machine }}<small title="signed in as {{ e.editor_username }}">{{ who_name }}{% if who_name != e.editor_username %} ({{ e.editor_username }}){% endif %}</small>
+    <div class="hl {{ row_tone or 'muted' }}" title="{{ hl.text }}" tabindex="0">{{ hl.text }}</div></div>
   <div class="lanes-wrap">
-    <div class="hl {{ row_tone or 'muted' }}" title="{{ hl.text }}">{{ hl.text }}</div>
     <div class="lanes">
     {% for lane in e.lane_strip %}{% set lt = cc_lane_tone(lane, level) %}
       <div class="lane {{ lt }}" title="{{ lane.label }}: {{ lane.state }}{% if lane.chip_reason %} - {{ lane.chip_reason }}{% elif lane.last_error %} ({{ lane.last_error }}){% endif %}"><span class="k">{{ lane.label | lower }}</span><span class="m" aria-hidden="true">{{ cc_meter(1 if lt in ('ok', 'busy') else 0, 1, 10) }}</span><span class="s">{{ lane.state }}{% if lane.chip_reason and "no progress" in lane.chip_reason %}, stalled{% endif %}</span></div>

@@ -9,7 +9,7 @@ same, only the markup it is read off changed:
      The order is the page's whole argument -- "is everyone's footage where
      it should be" before "what is mine doing" -- and a template reshuffle
      would not fail any other test.
-  2. A windowed live-transfers view in a panel exactly 35vh tall that
+  2. A windowed live-transfers view in a panel at most 35vh tall that
      scrolls inside itself. The height is in cc/home.css and the class is in
      the template, so both halves are checked: a panel with no height is an
      unbounded list that pushes the queue off the screen and shifts the page
@@ -25,6 +25,8 @@ same, only the markup it is read off changed:
 still_a_page): the window is an addition, not a move.
 """
 from __future__ import annotations
+
+import re
 
 from pathlib import Path
 
@@ -111,15 +113,16 @@ def test_the_home_page_carries_the_live_transfers_panel(client):
     assert "Safe to close" in win
 
 
-def test_the_window_is_exactly_35vh_and_scrolls_inside_itself(client):
-    """The number is the owner's and it lives in one place. A `max-height`
-    would let the panel shrink to nothing when nothing is transferring and the
-    page below it would jump every 2s, so `height` is load-bearing too."""
+def test_the_window_is_at_most_35vh_and_scrolls_inside_itself(client):
+    """35vh is the owner's number (2026-08-18) and it lives in one place. It
+    is a CAP since 2026-09-25: the owner found the fixed-height idle box "way
+    too big for this little content" and chose a short box over a window
+    below that never moves."""
     css = HOME_CSS.read_text(encoding="utf-8")
     rule = css[css.index(".home-page .live-transfers-window {"):]
     rule = rule[:rule.index("}")]
-    assert "height: 35vh" in rule
-    assert "max-height" not in rule
+    assert "max-height: 35vh" in rule
+    assert re.search(r"(?<!-)height:", rule) is None
     assert "overflow: auto" in rule
 
 

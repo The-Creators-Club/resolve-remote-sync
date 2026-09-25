@@ -115,7 +115,10 @@
   <div class="scroll-y ev-history" id="xf-history">
     <div class="lede ev-lede">Recently completed files: what the companions report, plus files arriving at the server.</div>
   {% if transfers.history %}
-    <table class="tbl stack-sm fixed xft hist">
+    {#- `xft-hist`, not `hist` (2026-09-25): components.css's `.hist` is a
+        three-column grid ROW from the design bench, and it turned this table into
+        one, so the file-name column collapsed to nothing. #}
+    <table class="tbl stack-sm fixed xft xft-hist">
       <colgroup>{% if scope_admin %}<col style="width:18ch">{% endif %}<col style="width:5ch"><col><col style="width:14ch"></colgroup>
       <tbody>
       {% for h in transfers.history %}

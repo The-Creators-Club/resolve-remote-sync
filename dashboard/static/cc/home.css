@@ -133,11 +133,13 @@
 .home-page .missing { padding: 6px 0; }
 
 /* ---- transfers / queue */
-/* The owner's 35vh live-transfers window (2026-08-18): `height`, never
-   `max-height`, so an idle fleet does not shrink it and the queue below
-   never jumps on the 2 s poll. The poll swaps a wrapper inside it. */
+/* The live-transfers window: 35vh at most (2026-08-18), and since
+   2026-09-25 only as tall as what it holds. The owner, on an idle fleet:
+   "nothing is moving box is way too big for this little content". A fixed
+   height kept the window below still on the 2 s poll; the owner chose the
+   short idle box over that. The poll swaps a wrapper inside it. */
 .home-page .live-transfers-window {
-  height: 35vh;
+  max-height: 35vh;
   overflow: auto;
 }
 .home-page .xf-close { padding: 8px var(--pad) 0; min-height: 1.7em; }
@@ -214,4 +216,20 @@
    floor list cannot reach a rule written here. */
 @media (max-width: 760px) {
   .home-page h3.sec, .home-page .tree-count, .home-page .field > span:not(.vh) { font-size: 12px; }
+}
+
+/* The row's headline under the name (owner, 2026-09-25). A fault or a
+   warning is a small box that scrolls inside itself; a muted line is plain
+   text. The lanes and issues no longer reserve a headline's line above
+   them, so every column starts at the row's top. */
+.home-page .pc .name .hl { margin-top: 8px; font-weight: 400; font-size: 12px; min-height: 0;
+  display: block; -webkit-line-clamp: unset; line-clamp: none; overflow-wrap: anywhere; }
+.home-page .pc .name .hl.err, .home-page .pc .name .hl.warn {
+  max-height: calc(1.35em * 4 + 0.8em); overflow-y: auto; overscroll-behavior: contain;
+  padding: 0.3em 0.6em; border: 1px solid currentColor; border-left-width: 3px;
+  background: color-mix(in srgb, currentColor 6%, transparent); }
+.home-page .pc.home-pc { --pc-h: calc(var(--lane-h) * 3); }
+.home-page .pc.home-pc > .lanes-wrap, .home-page .pc.home-pc > .issues { min-height: 0; }
+@media (pointer: coarse), (max-width: 760px) {
+  .home-page .pc .name .hl.err, .home-page .pc .name .hl.warn { max-height: none; overflow: visible; }
 }

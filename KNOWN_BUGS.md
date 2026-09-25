@@ -31289,6 +31289,21 @@ Verified by rendering the seeded grid in headless Chromium at 1700, 1173 and
 `templates/partials/fleet_grid.html`, `static/cc/home.css`; test
 `test_health.py::test_a_base_rig_has_no_sync_engine_to_be_down`.
 
+**Second pass, dashboard 0.7.66** (owner, same evening, on 0.7.65):
+- The row's headline moved from above the lanes to under the computer name;
+  a fault or warning is a small bordered box that scrolls inside itself
+  (whole on a phone), a muted line is plain text ("this red text move it to a
+  scrollable text box underneath the name ... at the top makes it look
+  higgledypiggledy").
+- The live-transfers window is `max-height: 35vh`, not `height`: "nothing is
+  moving box is way too big for this little content". The owner's 2026-08-18
+  fixed height (so the window below never jumps) is overruled;
+  `test_home_layout.py` pins the cap.
+- Transfers -> history showed only editor, arrow, "Pr" and a time: the table
+  carried the class `hist`, which components.css also defines as a
+  three-column GRID row, so the table became a grid and the file-name column
+  collapsed. Renamed `xft-hist` (template + phone.css).
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

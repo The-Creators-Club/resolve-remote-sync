@@ -138,16 +138,16 @@
   .tbl.fixed { table-layout: auto; }
   .tbl.fixed colgroup { display: none; }
   .tbl.xft tr { grid-template-columns: 3ch minmax(0, 1fr) auto; grid-template-areas: "dir who eta" "file file file" "prog prog speed"; column-gap: 8px; }
-  .tbl.xft.hist tr { grid-template-columns: 3ch minmax(0, 1fr); grid-template-areas: "dir file" ". eta"; }
-  .tbl.xft.hist .c-eta { text-align: left; font-size: 12px; }
+  .tbl.xft.xft-hist tr { grid-template-columns: 3ch minmax(0, 1fr); grid-template-areas: "dir file" ". eta"; }
+  .tbl.xft.xft-hist .c-eta { text-align: left; font-size: 12px; }
   .tbl.xft td { padding: 1px 0; }
   .tbl.xft td:first-child { padding-left: var(--pad); }
   .tbl.xft .c-dir { grid-area: dir; padding-left: var(--pad); }
   .tbl.xft .c-who { grid-area: who; }
   .tbl.xft .c-who small { display: inline; margin-left: 6px; }
   .tbl.xft .c-file { grid-area: file; padding: 2px var(--pad); }
-  .tbl.xft.hist .c-file { padding: 1px 0; }
-  .tbl.xft.hist .c-who { display: none; }
+  .tbl.xft.xft-hist .c-file { padding: 1px 0; }
+  .tbl.xft.xft-hist .c-who { display: none; }
   .tbl.xft .c-prog { grid-area: prog; padding-left: var(--pad); }
   .tbl.xft .c-speed { grid-area: speed; padding-right: var(--pad); }
   .tbl.xft .c-eta { grid-area: eta; padding-right: var(--pad); }

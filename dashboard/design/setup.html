@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: setup</title>
+<!-- The design bench (dashboard/design/README.md): SETUP. Mirrors
+     templates/setup.html + static/setup.js (the first-run browser wizard),
+     setup_routes.py (first_run_open: the page is reachable with NO session
+     until the first admin account exists) and setup_engine.py (the task
+     registry: fourteen tasks, the completeness gate of release_key /
+     snapshots / alerts, a recorded skip that outlives a CHECK).
+     Two shapes:
+       setup.html          signed in: a Settings page with the strip.
+       setup.html?first=1  first run: bare, no HUD, no strip, and step 2 is
+                           the create-your-admin form.
+     The four form steps are windows (shell.js folds them; a finished one starts folded); the checklist is
+     the whole registry, as setup.js draws it. Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/safety.css">
+</head>
+<body data-page="setup">
+
+<div class="shell">
+  <div class="page narrow" id="page">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> SETUP</span></h1>
+        <div class="sub">First-run wizard: every step here can be re-run later from Settings.</div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="steps" id="strip"></div>
+      <div class="acc" id="acc"></div>
+      <div id="checklist"></div>
+      <div class="bench-var" title="Design bench only: switch between the states the real page can be in. Not part of the real page."><b>bench</b><span>shape:</span><a href="setup.html" id="v-in">signed in (Settings)</a><a href="setup.html?first=1" id="v-first">first run (no account yet)</a></div>
+    </div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, toast } = CC;
+  const $ = s => document.querySelector(s);
+  const FIRST = new URLSearchParams(location.search).get('first') === '1';
+  $(FIRST ? '#v-first' : '#v-in').setAttribute('aria-current', 'page');
+  // The strip is for somebody signed in only (setup.html's own rule).
+  if (FIRST) $('#settings-nav').remove();
+
+  const EULA = `CC Sync: End User Licence Agreement
+
+Version 1.0
+
+This End User Licence Agreement ("Agreement") is between the Licensor and the
+individual or organisation installing or using the CC Sync software (the
+"Customer", "you").
+
+By clicking ACCEPT in the CC Sync setup wizard, or by installing, copying or
+using any part of the Software, you agree to this Agreement. If you do not
+agree, do not install or use the Software.
+
+1. What the Software is
+
+CC Sync is a companion for DaVinci Resolve Studio ...`;
+
+  // [id, title, optional, gate, can_run, run_label]; setup_engine registration order.
+  const TASKS = [
+    ['eula', 'Welcome, EULA', false, false, true, 'do it'],
+    ['admin', 'Create your admin account', false, false, false],
+    ['studio', 'Your studio', false, false, false],
+    ['storage', 'Storage check', false, false, true, 'do it'],
+    ['secrets', 'Secrets', false, false, true, 'do it'],
+    ['syncthing', 'Sync engine', false, false, true, 'do it'],
+    ['done', 'Done', false, false, false],
+    ['tailnet', 'Connect to your tailnet', true, false, true, 'get a sign-in link'],
+    ['nas_connect', 'Connect to your NAS', true, false, false],   // the real title also says (optional), so the row reads it twice
+    ['snapshots', 'Protect your data', true, true, false],
+    ['editors', 'Editors', true, false, false],
+    ['software', 'Software for editors', true, false, true, 'check now'],
+    ['release_key', 'Signing key for updates', true, true, false],
+    ['alerts', 'Who should we tell?', true, true, true, 'save a destination'],
+  ];
+  const RELEASE_TODO = 'no release signing key: this server refuses every build until DASH_RELEASE_PUBKEYS holds the public half of your release key, so your editors\' computers can never be updated from here. Set it and redeploy (docs/RELEASE.md). Skipping means updates wait until you do';
+  const ALERTS_TODO = 'nobody is being told: this server checks dozens of things about your fleet and has nowhere to send what it finds. Add an email address or a webhook URL. With nobody to tell, the first anyone hears of a stopped sync is an editor asking';
+  const SNAP_TODO = 'no NAS snapshot schedule (none found) and no /data backup in the last 7 days: docs/BACKUP_RESTORE.md section 2';
+
+  // status, detail, skip recorded
+  const STATES = {
+    first: {
+      eula: ['ok', 'accepted v1.0'], admin: ['todo', 'no admin account yet'],
+      studio: ['todo', 'not set: org_name, tree_name'], storage: ['todo', 'not yet probed: click Do it'],
+      secrets: ['ok', 'all five secrets present'], syncthing: ['ok', 'device id MFZWI3D...'],
+      done: ['todo', 'waiting on:', null, ['admin', 'studio', 'storage', 'snapshots', 'release_key', 'alerts']],
+      tailnet: ['todo', 'the bundled Tailscale node is NeedsLogin, with no sign-in link yet: press Get a sign-in link on this task (docs/APPLIANCE_INSTALL.md step 4 is the command-line way in)'],
+      nas_connect: ['todo', 'no NAS credential in this container: set DASH_NAS_HOST and the API key, then press Check'],
+      snapshots: ['todo', SNAP_TODO], editors: ['todo', 'no editors yet: open Settings, then USERS, and add one'],
+      software: ['todo', 'no companion build is current for any platform: open Settings, then PACKAGES, and publish one under Available from the vendor'],
+      release_key: ['todo', RELEASE_TODO], alerts: ['todo', ALERTS_TODO],
+    },
+    busy: {
+      eula: ['ok', 'accepted v1.0'], admin: ['ok', 'admins are local accounts: owen'],
+      studio: ['todo', 'not set: tree_name, canonical_prefix'], storage: ['ok', 'writable; 18.2 TB free'],
+      secrets: ['ok', 'all five secrets present'], syncthing: ['ok', 'device id MFZWI3D...'],
+      done: ['todo', 'waiting on:', null, ['studio', 'snapshots', 'release_key', 'alerts']],
+      tailnet: ['ok', 'the bundled Tailscale node is signed in as ccsync.tail1234.ts.net'],
+      nas_connect: ['ok', 'truenas at nas.local answered'],
+      snapshots: ['todo', SNAP_TODO], editors: ['ok', '3 editor(s): jsmith, mrivera, tchen'],
+      software: ['warn', 'windows 0.9.78 current, macos: none published'],
+      release_key: ['todo', RELEASE_TODO, '2026-09-20'], alerts: ['todo', ALERTS_TODO],
+    },
+    calm: {
+      eula: ['ok', 'accepted v1.0'], admin: ['ok', 'admins are local accounts: owen'],
+      studio: ['ok', 'Your Studio / Your_Studio'], storage: ['ok', 'writable; 18.2 TB free'],
+      secrets: ['ok', 'all five secrets present'], syncthing: ['ok', 'device id MFZWI3D...'],
+      done: ['ok', 'setup complete'],
+      tailnet: ['ok', 'the bundled Tailscale node is signed in as ccsync.tail1234.ts.net'],
+      nas_connect: ['ok', 'truenas at nas.local answered'],
+      snapshots: ['ok', '2 periodic snapshot task(s) on the NAS; newest /data backup data-20260924.tar'],
+      editors: ['ok', '3 editor(s): jsmith, mrivera, tchen'],
+      software: ['ok', 'windows 0.9.78 current, macos 0.9.78 current'],
+      release_key: ['ok', '1 release signing key configured'], alerts: ['ok', 'alerts go to ow***@yourstudio.com'],
+    },
+  };
+
+  const STEPS = [
+    { n: 1, key: 'eula', title: 'welcome_eula', label: 'Welcome, EULA' },
+    { n: 2, key: 'admin', title: 'create_your_admin_account', label: 'Admin account' },
+    { n: 3, key: 'studio', title: 'your_studio', label: 'Your studio' },
+    { n: 4, key: 'alerts', title: 'who_should_we_tell', label: 'Who should we tell?' },
+  ];
+  let S = null, open = 3, eulaOk = false;
+
+  const statusTag = st => ({
+    ok: '<span class="tag ok" title="Ok: this step is done and still holds.">ok</span>', warn: '<span class="tag warn" title="Warn: done in part. The detail says what is left.">warn</span>', fail: '<span class="tag solid err" title="Fail: the step was tried and did not work. The detail says why.">fail</span>',
+    todo: '<span class="tag hi" title="To do: not done yet.">to do</span>', skipped: '<span class="tag mute" title="Skipped: an admin chose to leave this for now. It can still be done later.">skipped</span>' }[st]);
+  // what each checklist step is, for somebody who has not set up a server before
+  const TASK_TIP = {
+    eula: 'The licence agreement for using CC Sync.',
+    admin: 'Your own sign-in for this dashboard, with the right to change settings.',
+    studio: 'Your studio\'s name and how its project folders are laid out.',
+    storage: 'Checks the dashboard can read and write the project storage, and how much space is free.',
+    secrets: 'Private keys the dashboard uses to sign people in and to trust the computers that report to it. They are made for you.',
+    syncthing: 'Syncthing is the sync engine that keeps project files the same on every computer. This checks it is running on the server.',
+    done: 'Everything required is finished.',
+    tailnet: 'The tailnet is your studio\'s private network (Tailscale). Editors reach this dashboard through it from anywhere.',
+    nas_connect: 'Lets this dashboard talk to the NAS itself, so it can check things like snapshots.',
+    snapshots: 'Snapshots are frozen copies of the storage the NAS can restore from. This checks they are scheduled.',
+    editors: 'The people who will sync projects. Add them on Settings, Users.',
+    software: 'The CC Sync app editors install on their computers, published for Windows and macOS.',
+    release_key: 'The digital seal on CC Sync updates. Without it the server refuses every update, so computers stay on old versions.',
+    alerts: 'Where the server sends the problems it finds: an email address or a webhook.',
+  };
+
+  const STUDIO_TIP = {
+    org_name: 'Your studio\'s name, shown in the app and the tray.',
+    org_short: 'A shorter name for tight spaces. Leave blank to use the full name.',
+    tree_name: 'The name of the top folder every project lives under.',
+    canonical_prefix: 'The drive letter the project storage appears as on every Windows editor computer. Every computer must use the same one.',
+    template_folders: 'The folders every new project is made with.',
+  };
+  function stepBody(step) {
+    const st = S[step.key];
+    if (step.key === 'eula') return eulaOk
+      ? `<div class="inline">${statusTag('ok')}<span>${esc(st[1])}</span></div>`
+      : `<pre class="code eula-text scroll-y" style="white-space:pre-wrap">${esc(EULA)}</pre>
+        <div class="inline" style="margin-top:14px">
+          <label class="check"><input type="checkbox" id="eula-box"><span class="g"></span><span class="l">I have read and accept this agreement.</span></label>
+          <button class="key primary" id="eula-accept" type="button" disabled title="Tick the box first. Accepting is recorded with the agreement's version."><span class="t">Accept</span></button>
+        </div>`;
+    if (step.key === 'admin') return FIRST && st[0] !== 'ok'
+      ? `<p class="lede">A local account for you. No NAS credential is involved.</p>
+        <div class="form" style="margin-top:14px">
+          <div class="form-row"><label class="lbl" for="a-user">Username</label><input class="inp" id="a-user" autocomplete="username" autocapitalize="none" spellcheck="false" value="owen"></div>
+          <div class="form-row"><label class="lbl" for="a-pw">Password</label><input class="inp" id="a-pw" type="password" autocomplete="new-password"></div>
+          <div class="form-row"><span></span><div><button class="key primary" type="button" data-busy="account created: signing you in"><span class="t">Create</span><span class="busy-t"><span class="spin"></span> creating</span></button></div></div>
+        </div>`
+      : `<p class="lede">An admin account already exists.</p>`;
+    if (step.key === 'studio') {
+      const done = st[0] === 'ok';
+      const v = done ? ['Your Studio', 'YS', 'Your_Studio', 'P:\\', 'AE, Audio/Music, B-roll, Footage, Graphics, Proxy, Resolve'] : ['Your Studio', '', '', '', ''];
+      const row = (name, lbl, hint, ph, val) => `<div class="form-row"><label class="lbl" for="s-${name}" title="${esc(STUDIO_TIP[name])}">${lbl}${hint ? `<small>${hint}</small>` : ''}</label><input class="inp" id="s-${name}" placeholder="${esc(ph)}" value="${esc(val)}"></div>`;
+      return `<div class="form">
+        ${row('org_name', 'Org name', '', 'Your Studio', v[0])}
+        ${row('org_short', 'Short name', '', 'optional: falls back to org name', v[1])}
+        ${row('tree_name', 'Tree name', 'the top folder', 'e.g. Your_Studio', v[2])}
+        ${row('canonical_prefix', 'Drive letter', 'on Windows', 'P:\\', v[3])}
+        ${row('template_folders', 'Template folders', 'comma-separated', 'AE, Audio/Music, B-roll, ...', v[4])}
+        <div class="form-row"><span></span><div class="inline"><button class="key primary" type="button" data-busy="saved"><span class="t">Save</span><span class="busy-t"><span class="spin"></span> saving</span></button>${done ? '<span class="muted" style="font-size:12px">saved</span>' : ''}</div></div>
+      </div>`;
+    }
+    return `<p class="lede">This server checks dozens of things about your fleet every few minutes. It needs somewhere to send what it finds. With nobody to tell, the first anyone hears of a stopped sync is an editor asking.</p>
+      <div class="form" style="margin-top:14px">
+        <div class="form-row"><label class="lbl" for="al-mail">Email address</label><input class="inp" id="al-mail" placeholder="you@yourstudio.com" ${S.alerts[0] === 'ok' ? 'value="owen@yourstudio.com"' : ''}></div>
+        <div class="form-row"><label class="lbl" for="al-hook" title="A webhook is a web address another app gives you (a chat app, for example); the server posts each alert to it.">Or a webhook URL</label><input class="inp" id="al-hook" placeholder="https://..."></div>
+        <div class="form-row"><span></span><div class="inline">
+          <button class="key primary" type="button" data-busy="saved: alerts go to that address"><span class="t">Save</span><span class="busy-t"><span class="spin"></span> saving</span></button>
+          <button class="key" type="button" data-busy="test sent to the destination you set." title="Sends one test message to the address or webhook above, so you can see it arrive."><span class="t">Send a test</span><span class="busy-t"><span class="spin"></span> sending</span></button>
+        </div></div>
+      </div>
+      <p class="lede" style="font-size:12px;margin-top:14px">Email is sent through the mail server on Settings, then ALERTS. If you have not set one up yet, save the address here and finish there.</p>`;
+  }
+
+  // Round 2 (2026-09-25): the whole-window fold is shell.js's now, so the
+  // stepper is plain windows. A finished step starts folded unless the
+  // reader unfolded it before (shell.js keeps that choice per window title).
+  let foldSeen = {};
+  try { foldSeen = JSON.parse(localStorage.getItem('ccsync.design.fold.setup') || '{}'); } catch (e) { /* blocked */ }
+  const startFolded = s => {
+    const k = `${s.n}. ${s.title}`;
+    return k in foldSeen ? foldSeen[k] : S[s.key][0] === 'ok';
+  };
+
+  function renderAcc() {
+    $('#strip').innerHTML = STEPS.map(s => {
+      const ok = S[s.key][0] === 'ok';
+      return `<a href="#step-${s.n}" class="s ${s.n === open ? 'cur' : ok ? 'done' : ''}" title="${ok ? 'Done. ' : ''}Jump to step ${s.n}."><b>${ok ? '&#10003;' : s.n + '.'}</b>${esc(s.label)}</a>`;
+    }).join('') + `<a href="#checklist" class="s ${S.done[0] === 'ok' ? 'done' : ''}" title="Jump to the checklist of every setup step, required and optional."><b>${S.done[0] === 'ok' ? '&#10003;' : '5.'}</b>Checklist</a>`;
+    $('#acc').innerHTML = STEPS.map(s => `
+      <section class="win${startFolded(s) ? ' collapsed' : ''}" data-step="${s.n}" id="step-${s.n}">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t"><span class="num">${s.n}.</span> ${s.title}</span><span>&#9566;</span><span class="rule"></span><span class="meta" title="${esc(S[s.key][1])}">${statusTag(S[s.key][0])}</span><span>&#9552;&#9488;</span></div>
+        <div class="body">${stepBody(s)}</div>
+      </section>`).join('');
+    const box = $('#eula-box'), btn = $('#eula-accept');
+    if (box) box.addEventListener('change', () => { btn.disabled = !box.checked; });
+  }
+
+  function renderChecklist() {
+    const titles = Object.fromEntries(TASKS.map(t => [t[0], t[1]]));
+    const rows = TASKS.map(([id, title, optional, gate, canRun, runLabel]) => {
+      const [st, detail, skipAt, waiting] = S[id];
+      let d = esc(detail);
+      if (waiting) d += ' ' + waiting.map(w => `<a class="hi" href="#task-${w}" style="white-space:nowrap">${esc(titles[w])}</a>`).join(', ');
+      if (skipAt && st !== 'skipped') d += ` <span class="muted">(you chose to skip this on ${skipAt})</span>`;
+      const acts = [`<button class="key sm" type="button" data-busy="checked ${esc(title)}" title="Checks this step again now and updates its status. Changes nothing."><span class="t">check</span><span class="busy-t"><span class="spin"></span></span></button>`];
+      if (canRun) acts.push(`<button class="key sm" type="button" data-busy="${esc(runLabel)}: done" title="Does this step for you from here."><span class="t">${esc(runLabel)}</span><span class="busy-t"><span class="spin"></span></span></button>`);
+      if (optional && st !== 'skipped') acts.push(`<button class="key quiet sm" type="button" data-skip="${id}" title="${gate ? 'Leaves this undone on purpose. It protects something important, so skipping means accepting that risk until you come back to it.' : 'Leaves this optional step for later.'}"><span class="t">${gate ? 'skip, I understand' : 'skip'}</span></button>`);
+      return `<tr id="task-${id}"><td><b title="${esc(TASK_TIP[id] || '')}">${esc(title)}</b>${optional && !/\(optional\)/i.test(title) ? ' <span class="muted" title="Setup is finished without this, but it is worth doing.">(optional)</span>' : ''}</td><td>${statusTag(st)}</td><td style="font-size:12px">${d}</td><td class="task-acts"><div class="acts">${acts.join('')}</div></td></tr>`;
+    }).join('');
+    $('#checklist').innerHTML = CC.win('checklist', '',
+      `<div class="body" style="padding-bottom:0"><p class="lede">Every step is re-runnable; optional ones may be skipped.</p></div><div class="scroll-y" style="max-height:640px"><table class="tbl stack-sm"><thead><tr><th style="width:22%">step</th><th title="Where each step stands right now.">status</th><th title="What the server found when it last checked.">detail</th><th style="width:300px"></th></tr></thead><tbody>${rows}</tbody></table></div>`);
+  }
+
+  function render(mode) {
+    S = JSON.parse(JSON.stringify(FIRST ? STATES.first : mode === 'calm' ? STATES.calm : STATES.busy));
+    eulaOk = S.eula[0] === 'ok';
+    open = FIRST ? 2 : mode === 'calm' ? 4 : 3;
+    renderAcc(); renderChecklist();
+  }
+
+  document.addEventListener('click', e => {
+    if (e.target.closest('#eula-accept')) { eulaOk = true; S.eula = ['ok', 'accepted v1.0']; open = 2; renderAcc(); renderChecklist(); toast('accepted v1.0'); return; }
+    const sk = e.target.closest('[data-skip]');
+    if (sk) { const id = sk.dataset.skip; S[id] = ['skipped', 'skipped by admin']; renderChecklist(); toast('skipped: ' + id); }
+  });
+
+  CC.page({ page: 'setup', bare: FIRST, onData: render });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: protection</title>
+<!-- The design bench (dashboard/design/README.md): Settings, PROTECTION.
+     Mirrors templates/admin_protection.html + partials/protection.html,
+     rendered by ui's /admin/protection from protection.page_view (the nine
+     protection.LINES, in their order) and the two acknowledgement forms
+     (POST /partials/admin/protection/ack). Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/safety.css">
+</head>
+<body data-page="protection">
+
+<div class="shell">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> PROTECTION</span></h1>
+        <div class="sub" id="counts"></div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <p class="lede">What stands between this fleet and losing something, and what does not. Every line here is green only on evidence this server actually has: a snapshot task it can see, a signing key it holds, a date you recorded. <b>Nothing is assumed to be there.</b></p>
+      <div class="note warn"><span class="tag warn" title="Cannot verify: this server has no way to see it. Treat it as unprotected until someone checks by hand.">cannot verify</span><span class="grow"><b>Cannot verify is not protected.</b> It means this server has no way to check that one from here, and the reason is beside it. On a Synology the snapshot lines stay that way for good: DSM keeps its schedules somewhere no other program can read.</span></div>
+
+      <div id="lines-win"></div>
+
+      <section class="win" id="acks">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">what_only_you_can_confirm</span><span>&#9566;</span><span class="rule"></span><span>&#9552;&#9488;</span></div>
+        <div class="body" style="padding-bottom:0"><p class="lede">This server cannot see a key on your workstation or a restore you did by hand. Record it here and the lines above turn green.</p></div>
+        <div id="ack-rows"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, win, toast } = CC;
+  const $ = s => document.querySelector(s);
+
+  // protection.LINES: key, title, consequence, fix, severity. Button names in
+  // the fixes use the new labels (no square brackets).
+  const LINES = [
+    ['snapshot_tree', 'the project tree is on a snapshot schedule', 'error',
+      'Without a snapshot schedule on the footage there is nothing to restore from: a folder deleted by hand, a bad sync or a failed disk is simply gone.',
+      'On the NAS: Data Protection, Periodic Snapshot Tasks, add an enabled task covering the dataset the project tree lives on. server/setup_snapshots.py does it in one command.'],
+    ['snapshot_apps', 'this dashboard\'s own data is on a snapshot schedule', 'error',
+      'The fleet\'s projects, editors, ticks, client links and search indexes all live in one folder on the NAS. Without a snapshot behind it, losing that folder loses how the fleet is set up, not only its footage.',
+      'On the NAS: make the folder holding the CC Sync data a dataset, then add an enabled periodic snapshot task for it (server/setup_snapshots.py --apps-root). Tell this dashboard its name with DASH_UPDATE_SNAPSHOT_DATASET.'],
+    ['snapshot_recent', 'a snapshot was actually taken in the last day', 'error',
+      'A schedule that exists but has stopped running looks exactly like a working one from every page in this product, and the day you need it the newest point-in-time is weeks old.',
+      'On the NAS: Data Protection, Periodic Snapshot Tasks, check the last-run column and the pool\'s free space (a full pool stops snapshots).'],
+    ['release_keys', 'this server only accepts CC Sync builds we signed', 'error',
+      'Without a signing key this dashboard cannot tell an update we published from one somebody else made, and it hands whatever it has to every computer in the fleet.',
+      'Set DASH_RELEASE_PUBKEYS on the dashboard container to the release public key (docs/RELEASE.md), then restart it.'],
+    ['release_key_backup', 'the release signing key has been backed up', 'error',
+      'The signing key exists in one place, on one workstation, and is not in any repository on purpose. Lose it and no further update can ever be published to these computers over the air.',
+      'Copy the release key off that workstation to somewhere it can be found again (docs/SECRETS.md), then record it below with I have backed it up.'],
+    ['restore_drill', 'somebody has actually restored from a backup this year', 'warn',
+      'A backup nobody has restored from is a hypothesis. Every documented recovery path here starts with finding a snapshot, and the first time anyone tries should not be the day something is lost.',
+      'Restore one project folder from a snapshot into a scratch path, check the files open, then record the date below with Record a restore.'],
+    ['server_versioning', 'files deleted on the server are kept for a year', 'error',
+      'Without version history on a project folder, a delete that syncs up from one editor\'s computer removes the file from the server outright.',
+      'Untick and re-tick that project so this server rebuilds the folder, or set File Versioning (staggered) on it in Syncthing on the NAS.'],
+    ['editor_trash', 'deleted-file copies on editors\' computers are within their limit', 'warn',
+      'CC Sync keeps a copy of everything it deletes on an editor\'s computer. They are pruned automatically, and a computer well over the limit is a computer whose pruning has stopped, filling the drive footage needs.',
+      'Check that computer\'s row on the SYNC STATUS page for Resume: pruning is paused while its download safety brake is on.'],
+    ['alerts_sink', 'somebody is told when this server finds a problem', 'error',
+      'This server checks 62 things every few minutes and writes down what is wrong. With nobody to tell, the first anyone hears of a stopped sync is an editor asking.',
+      'On Settings, Alerts: choose mail or a webhook, then press Send a test.'],
+  ];
+
+  // [state, detail, subjects]
+  const BUSY = {
+    snapshot_tree: ['ok', 'task 1 covers tank/projects (recursive): hourly, kept 2 weeks; daily, kept 6 months', []],
+    snapshot_apps: ['broken', 'the NAS has 2 snapshot tasks and none of them covers tank/apps', [['tank/apps', 'a plain folder, not a dataset: nothing snapshots it']]],
+    snapshot_recent: ['ok', 'newest: tank/projects@ccsync-20260925-1000, 33 minutes ago', []],
+    release_keys: ['ok', '1 release signing key configured', []],
+    release_key_backup: ['broken', 'never recorded', []],
+    restore_drill: ['broken', 'last recorded 2025-06-14 by owen, more than a year ago', []],
+    server_versioning: ['broken', '1 of 14 project folders keeps no deleted files', [['2026/Shorts/Typhoon Prep', 'no file versioning on its folder in the server\'s Syncthing']]],
+    editor_trash: ['not_checked', 'TCHEN-RIG runs 0.9.49, which does not report its deleted-file copies, so 1 of 6 computers cannot be checked', []],
+    alerts_sink: ['broken', 'no destination is configured', []],
+  };
+  const CALM = {
+    snapshot_tree: ['ok', 'task 1 covers tank/projects (recursive): hourly, kept 2 weeks; daily, kept 6 months', []],
+    snapshot_apps: ['ok', 'task 2 covers tank/apps: daily, kept 30 days', []],
+    snapshot_recent: ['ok', 'newest: tank/projects@ccsync-20260925-1000, 33 minutes ago', []],
+    release_keys: ['ok', '1 release signing key configured', []],
+    release_key_backup: ['ok', 'recorded 2026-09-02 by owen', []],
+    restore_drill: ['ok', 'recorded 2026-09-18 by owen (a rehearsal from this server)', []],
+    server_versioning: ['ok', 'all 14 project folders keep deleted files for a year', []],
+    editor_trash: ['ok', '6 computers, each within its limit', []],
+    alerts_sink: ['ok', 'mail to ow***@yourstudio.com; the last message, 2 h ago, arrived', []],
+  };
+  const ACKS = {
+    busy: { release_key_backup: null, restore_drill: { date: '2025-06-14', by: 'owen' } },
+    calm: { release_key_backup: { date: '2026-09-02', by: 'owen' }, restore_drill: { date: '2026-09-18', by: 'owen' } },
+  };
+  let acks = null;
+
+  const TERM_TIP = {
+    snapshot_tree: 'A snapshot is a frozen copy of the storage at a moment in time that the NAS can restore from. A schedule takes them automatically.',
+    snapshot_apps: 'A snapshot is a frozen copy of the storage at a moment in time. This line is about the dashboard\'s own settings and databases, not the footage.',
+    snapshot_recent: 'Checks the newest snapshot really is recent, because a schedule can exist and silently stop.',
+    release_keys: 'Signing is a digital seal on each CC Sync update. Computers only install updates carrying the right seal.',
+    release_key_backup: 'The signing key is the one file that makes the seal. It lives on one workstation, so it needs a backup copy.',
+    restore_drill: 'A restore drill is a practice run: bringing one folder back from a snapshot to prove backups actually work.',
+    server_versioning: 'Version history: the server keeps a copy of any file deleted or replaced by sync, for a year.',
+    editor_trash: 'Each editor computer keeps its own copies of files sync deleted, up to a size limit.',
+    alerts_sink: 'Where alerts go: an email address or a webhook (a message sent to another app).',
+  };
+  function stateTag(state, sev) {
+    if (state === 'ok') return '<span class="tag ok" title="Protected: the server has seen proof this is in place.">protected</span>';
+    if (state === 'broken') return `<span class="tag solid ${sev === 'error' ? 'err' : 'warn'}" title="Missing: this protection is not in place. What that risks and how to fix it are below.">missing</span>`;
+    if (state === 'check_failed') return '<span class="tag err" title="Could not run: the check itself hit an error, so nobody knows. The error is below.">could not run</span>';
+    return '<span class="tag warn" title="Cannot verify: this server has no way to see it. The reason is beside it. Treat it as unprotected until someone checks by hand.">cannot verify</span>';
+  }
+
+  function renderAcks() {
+    const row = (key, q, btn) => {
+      const a = acks[key];
+      return `<div class="ack">
+        <div class="q">${q}<small>${a ? `last recorded <b>${esc(a.date)}</b>${a.by ? ` by ${esc(a.by)}` : ''}` : 'never recorded'}</small></div>
+        <label class="pick" title="The day it was done. Today by default."><span>on</span><input class="inp" type="date" data-key="${key}" value="2026-09-25"></label>
+        <button class="key" type="button" data-ack="${key}" title="Records that you did this on that date, under your name. The line above turns green."><span class="t">${btn}</span></button>
+      </div>`;
+    };
+    $('#ack-rows').innerHTML =
+      row('release_key_backup', 'The release signing key is backed up', 'I have backed it up') +
+      row('restore_drill', 'A restore from a backup was tried', 'Record a restore');
+  }
+
+  function render(mode) {
+    const d = mode === 'calm' ? CALM : BUSY;
+    acks = JSON.parse(JSON.stringify(ACKS[mode === 'calm' ? 'calm' : 'busy']));
+    const n = { ok: 0, broken: 0, other: 0 };
+    const rows = LINES.map(([key, title, sev, cq, fix]) => {
+      const [state, detail, subjects] = d[key];
+      if (state === 'ok') n.ok++; else if (state === 'broken') n.broken++; else n.other++;
+      const notOk = state !== 'ok';
+      return `<div class="vd no-when ${notOk ? '' : 'ok'}">
+        <span class="st">${stateTag(state, sev)}</span>
+        <span class="ti"${TERM_TIP[key] ? ` title="${esc(TERM_TIP[key])}"` : ''}>${esc(title)}</span>
+        <div class="more">
+          ${notOk ? `<div class="cq">${esc(cq)}</div>` : ''}
+          ${detail ? `<div class="dt">${esc(detail)}</div>` : ''}
+          ${subjects.map(s => `<div class="subj">${esc(s[0])}${s[1] ? ': ' + esc(s[1]) : ''}</div>`).join('')}
+          ${notOk ? `<div class="fix">${esc(fix)}</div>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+    $('#counts').innerHTML = `<span title="Confirmed means the server has seen proof, not that it assumes so."><b>${n.ok}</b> of ${LINES.length} confirmed</span> &middot; <b style="color:${n.broken ? 'var(--err)' : 'var(--ok)'}">${n.broken}</b> missing &middot; <b>${n.other}</b> this server cannot check &middot; last looked at 6 min ago`;
+    $('#lines-win').innerHTML = win('what_is_protected', `<b>${LINES.length}</b> lines`, rows);
+    renderAcks();
+  }
+
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-ack]');
+    if (!b) return;
+    const key = b.dataset.ack;
+    const date = document.querySelector(`input[data-key="${key}"]`).value || '2026-09-25';
+    acks[key] = { date, by: 'owen' };
+    renderAcks();
+    toast(key === 'restore_drill' ? `restore recorded for ${date}` : `key backup recorded for ${date}`);
+  });
+
+  CC.page({ page: 'protection', onData: render });
+})();
+</script>
+</body>
+</html>

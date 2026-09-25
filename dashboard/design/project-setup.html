@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: project setup</title>
+<!-- The design bench (dashboard/design/README.md): /project-setup?resolve_project=...
+     Mirrors templates/project_setup.html + partials/project_setup_panel.html
+     (the folder picker, USE THIS FOLDER / LINK THIS PROJECT, CREATE & LINK,
+     the error banner with its one-click suggestion, DONE, ALREADY SET UP
+     for an editor and an admin, the unmounted tree) and ui.py
+     page_project_setup / _setup_context / _browse_context. The picker walks
+     an invented Projects tree. Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/sync.css">
+</head>
+<body data-page="home">
+
+<div class="shell">
+  <div class="page narrow">
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> PROJECT SETUP</span></h1>
+        <div class="sub"><span title="The project as it is named inside DaVinci Resolve. This page picks the server folder its media is filed into.">Resolve project: <b id="rp">Typhoon Prep</b></span></div>
+      </div>
+      <div class="acts">
+        <div class="bench" title="bench only: the real page shows whichever of these is true">state
+          <div class="opts" id="states">
+            <button type="button" data-v="pick" aria-pressed="true">pick a folder</button>
+            <button type="button" data-v="error">error</button>
+            <button type="button" data-v="done">done</button>
+            <button type="button" data-v="mapped">already set up</button>
+            <button type="button" data-v="mapped-admin">already set up, admin</button>
+            <button type="button" data-v="unmounted">tree not mounted</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stack" id="panel"></div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, tag, toast } = CC;
+  const $ = s => document.querySelector(s);
+  const RP = 'Typhoon Prep';
+  const TEMPLATE = ['AE', 'Audio/Music', 'Audio/Voiceover', 'B-roll', 'Interviewees', 'Render in Place', 'Subs', 'Youtube'];
+  // An invented Projects tree. '*' marks a folder that is already a project.
+  const PROJ = ['2025/FF4/CIA City', '2025/FF4/Kinmen', '2025/FF4/Taichung Drone Camp', '2026/FF5/Civil Defence', '2026/FF5/Elections', '2026/FF5/Repro Rights', '2026/Shorts/Night Market'];
+  const DIRS = { '': ['2025', '2026'], '2025': ['FF4'], '2026': ['FF5', 'Shorts'], '2025/FF4': ['CIA City', 'Kinmen', 'Taichung Drone Camp'],
+    '2026/FF5': ['Civil Defence', 'Elections', 'Repro Rights'], '2026/Shorts': ['Night Market', 'Typhoon Prep'],
+    '2026/Shorts/Typhoon Prep': ['Footage', 'Stills'] };
+  PROJ.forEach(p => { DIRS[p] = ['AE', 'Audio', 'B-roll', 'Interviewees', 'Render in Place', 'Subs', 'Youtube']; DIRS[p + '/Audio'] = ['Music', 'Voiceover']; });
+  const kids = rel => DIRS[rel] || [];
+  const isProj = rel => PROJ.includes(rel);
+  const projOf = rel => PROJ.find(p => rel === p || rel.startsWith(p + '/'));
+
+  let state = 'pick', rel = '2026/Shorts', created = null, err = null;
+
+  const win = (name, meta, body) => CC.win(name, meta, `<div class="body" style="display:grid;gap:14px">${body}</div>`);
+  const btn = (text, cls, attrs, tip) => `<button class="key ${cls || ''}" type="button" ${attrs || ''}${tip ? ` title="${esc(tip)}"` : ''}><span class="t">${esc(text)}</span></button>`;
+  const USE_TIP = `Points "${RP}" at this folder exactly as it is. Nothing inside it is changed or moved.`;
+  const LINK_TIP = `This folder is already a CC Sync project. Links "${RP}" to it so its media is filed there.`;
+
+  function picker() {
+    const crumbs = rel ? rel.split('/') : [];
+    const inside = projOf(rel), current = isProj(rel);
+    const canLinkCurrent = !!rel && (!inside || current);
+    const entries = kids(rel);
+    let h = '';
+    if (err) h += `<div class="note err"><span title="Nothing was created or changed. The reason is beside this.">${tag('err', 'not done', true)}</span><span class="grow">${esc(err.text)}${err.suggest ? `<div style="margin-top:8px">${btn('Use Projects/' + err.suggest, 'sm primary', `data-link="${esc(err.suggest)}"`, USE_TIP)}</div>` : ''}</span></div>`;
+    h += win('pick_the_folder_for_this_project', '', `
+      <div class="lede">Browse the server's Projects tree. If the project's folder is already there, pick it with <b>Use this folder</b>. Nothing inside it is changed. Only create a new folder when there is not one yet; new folders get the standard subfolders (<span class="hi">${TEMPLATE.map(t => `<span class="nowrap">${esc(t)}</span>`).join(', ')}</span>).</div>
+      <div class="crumbs"><a href="#" data-rel="" title="Back to the top of the server's Projects folder.">Projects</a>${crumbs.map((c, i) => `<span class="sep">/</span>${i === crumbs.length - 1 ? `<span class="here">${esc(c)}</span>` : `<a href="#" data-rel="${esc(crumbs.slice(0, i + 1).join('/'))}">${esc(c)}</a>`}`).join('')}</div>
+      <div class="inline here-row" style="font-size:13px">${canLinkCurrent ? `You are in <b>Projects/${esc(rel)}</b> ${btn('Use this folder', 'sm primary', `data-link="${esc(rel)}"`, USE_TIP)}<span class="dim">points "${esc(RP)}" at this folder as it is</span>` : `<span class="dim">${rel ? 'You are inside a project: go up a level to pick a folder.' : 'Open a year, then a show, to find the folder.'}</span>`}</div>
+      <div class="win" style="box-shadow:none"><div class="dirlist scroll-y" style="max-height:420px;min-height:260px">${entries.length ? entries.map(n => {
+        const r2 = rel ? rel + '/' + n : n;
+        const p = isProj(r2), has = kids(r2).length > 0, same = n.toLowerCase() === RP.toLowerCase();
+        const name = p ? `<span class="plain">${esc(n)}</span>` : `<a class="go ${has ? 'parent' : ''}" href="#" data-rel="${esc(r2)}">${esc(n)}</a>`;
+        return `<div class="d"><span class="nm">${same ? `<span title="This folder has the same name as the Resolve project, so it is probably the one you want.">${tag('ok', 'same name')}</span>` : ''}${p ? `<span title="This folder is already a CC Sync project. Projects cannot sit inside each other, so it does not open.">${tag('ok', 'project')}</span>` : '<span class="gl">&#9656;</span>'}${name}</span>
+          ${btn(p ? 'Link this project' : 'Use this folder', 'sm' + (same ? ' primary' : ''), `data-link="${esc(r2)}"`, p ? LINK_TIP : USE_TIP)}</div>`;
+      }).join('') : '<div class="d"><span class="dim">empty folder</span></div>'}</div></div>
+      ${inside ? `<div class="note">${current
+        ? `<span class="grow">This folder is already a project. Use <b>Use this folder</b> above to point "${esc(RP)}" at it.</span>`
+        : `<span class="grow">You are inside an existing project, and projects cannot nest. Go up to pick or create.</span>`}</div>` : ''}`);
+    if (!inside) {
+      h += win('or_create_a_new_project_folder_here', `in <b>Projects/${esc(rel)}</b>`, `
+        <div class="lede">Only for a folder that does not exist yet. A name that is already listed above would nest a second folder inside it, so pick it with <b>Use this folder</b> instead.</div>
+        <form class="inline" id="create"><input class="inp" name="name" placeholder="new folder name" required style="flex:1 1 240px;width:auto"><button class="key primary" type="submit" title="Makes a new folder here with the standard subfolders, turns it into a project and files this Resolve project into it."><span class="t">Create and link</span></button></form>
+        <div class="hint" style="font-size:12px;line-height:1.5">Anyone signed in can create a project, and it appears for everyone: in the tick lists, on SYNC PLANS and in the queue. Who made it is recorded in HISTORY. Only an admin can take one back off those lists, with Archive on SYNC PLANS, and even that keeps the folder and the files.</div>`);
+    }
+    return h;
+  }
+
+  function render() {
+    const P = $('#panel');
+    if (state === 'done') {
+      P.innerHTML = win('done', '', `
+        <div class="inline" style="font-size:14px"><span title="Done: the folder is set up and linked.">${tag('ok', 'ok')}</span><span><b>Projects/${esc(created || '2026/Shorts/Typhoon Prep')}</b> is set up on the server and "${esc(RP)}" now files into it.</span></div>
+        <div class="dim" title="Syncthing is the sync engine that keeps project files the same on every computer.">Sync (its Syncthing folder) is set up automatically within about 5 minutes. You can close this page.</div>`);
+    } else if (state === 'mapped' || state === 'mapped-admin') {
+      const admin = state === 'mapped-admin';
+      P.innerHTML = win('already_set_up', '', `
+        <dl class="kv"><dt>resolve project</dt><dd>${esc(RP)}</dd><dt title="The server folder this Resolve project's media is filed into.">files into</dt><dd>2026/Shorts/Typhoon Prep <span class="dim">(auto-set by jsmith)</span></dd></dl>
+        <div class="dim">Mappings are fixed once set. ${admin ? 'As an admin you can change it in the <a class="hi" href="project.html#roots">project roots box</a> on the fleet page.' : 'Ask your admin if this looks wrong.'}</div>`);
+    } else if (state === 'unmounted') {
+      P.innerHTML = win('pick_the_folder_for_this_project', '', `<div class="note warn"><span title="The dashboard cannot see the server's Projects folder, so there is nothing to pick from.">${tag('warn', 'cannot show folders')}</span><span class="grow">The server's Projects tree is not mounted on this dashboard, so it cannot show you the folders. Ask whoever installed this server: it is a container setting, not something this page can change.</span></div>`);
+    } else {
+      if (state === 'error' && !err) err = { text: `Projects/2026/Shorts/${RP} already exists. Use this folder to point the project at it instead of creating another folder inside it.`, suggest: `2026/Shorts/${RP}` };
+      P.innerHTML = picker();
+    }
+    P.querySelectorAll('[data-rel]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); rel = a.dataset.rel; err = null; render(); }));
+    P.querySelectorAll('[data-link]').forEach(b => b.addEventListener('click', () => { created = b.dataset.link; setState('done'); toast('linked ' + RP + ' to Projects/' + created); }));
+    const f = P.querySelector('#create');
+    if (f) f.addEventListener('submit', e => {
+      e.preventDefault();
+      const n = f.elements.name.value.trim();
+      if (kids(rel).some(k => k.toLowerCase() === n.toLowerCase())) {
+        err = { text: `Projects/${rel ? rel + '/' : ''}${n} already exists. Use this folder to point the project at it instead of creating another folder inside it.`, suggest: (rel ? rel + '/' : '') + n };
+        render(); return;
+      }
+      created = (rel ? rel + '/' : '') + n; setState('done');
+    });
+  }
+  function setState(s) {
+    state = s;
+    if (s !== 'error') err = null;
+    $('#states').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === s)));
+    render();
+  }
+  $('#states').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { if (b.dataset.v === 'error') { rel = '2026/Shorts'; err = null; } setState(b.dataset.v); } });
+  const m = /[?&]state=([\w-]+)/.exec(location.search);
+
+  CC.page({ page: 'home', onData: mode => {
+    // busy: an editor mid-walk, one level above the folder they want;
+    // calm: the picker as it first opens, at the top of the tree
+    rel = mode === 'calm' && !(m && m[1] === 'error') ? '' : '2026/Shorts';
+    setState(m ? m[1] : 'pick');
+  } });
+})();
+</script>
+</body>
+</html>

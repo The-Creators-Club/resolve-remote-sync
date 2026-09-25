@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: design bench</title>
+<!-- The design bench's launcher: every page of the redesign, one click away.
+     The HUD's CC mark links here from every page. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<style>
+  .launch { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 26px; }
+  .launch .body { padding: 6px 0; }
+  .launch a.pg { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 9px var(--pad); border-top: 1px dashed var(--line); }
+  .launch a.pg:first-child { border-top: 0; }
+  .launch a.pg:hover { background: var(--row-hover); }
+  .launch a.pg b { color: var(--text); font-weight: 700; }
+  .launch a.pg b::before { content: ">"; color: var(--red); margin-right: 4px; }
+  .launch a.pg:hover b { color: var(--hi); }
+  .launch a.pg span { grid-column: 1 / -1; color: var(--text-2); font-size: 12px; }
+  .launch a.pg i { font-style: normal; color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body data-page="bench">
+<div class="shell"><div class="page one">
+  <div class="head">
+    <div>
+      <h1><span><span class="prompt">&gt;</span> DESIGN BENCH</span></h1>
+      <div class="sub">every page of the redesign &middot; press <b>T</b> on any page to tune <b>all</b> of them &middot; invented data only</div>
+    </div>
+  </div>
+  <div class="launch" id="launch"></div>
+</div></div>
+<script src="shell.js"></script>
+<script>
+  const GROUPS = [
+    ['everyday', [
+      ['home.html', 'sync status', 'the home page: problems, computers, transfers, projects'],
+      ['project.html', 'a project', 'one project: who syncs it, bins, missing files, move on the server'],
+      ['transfers.html', 'transfers', 'live, queued and history'],
+      ['account.html', 'my account', 'you, your computers and rigs, your settings (editor and admin)'],
+      ['project-setup.html', 'project setup', 'where a Resolve project files its media'],
+      ['installer.html', 'installer', 'download the companion for this computer'],
+    ]],
+    ['apps', [
+      ['cards.html', 'timeline cards', 'the episode picker'],
+      ['broll.html', 'b-roll', 'search the archive, send to Resolve'],
+      ['music.html', 'music', 'search the library, send to Resolve'],
+      ['youtube.html', 'youtube', 'find and download'],
+    ]],
+    ['settings: run the fleet', [
+      ['site.html', 'site', 'identity, tree, features, AI providers'],
+      ['users.html', 'users', 'people, computers, sessions, the fleet halt'],
+      ['sync-plans.html', 'sync plans', 'who syncs what, on which computer'],
+      ['packages.html', 'packages', 'builds, the vendor feed, updates'],
+      ['jobs.html', 'jobs', 'the fleet job queue'],
+      ['history.html', 'history', 'the audit ledger'],
+      ['setup.html', 'setup', 'the first-run wizard'],
+    ]],
+    ['settings: is it healthy', [
+      ['health.html', 'health', 'the Settings landing: what the server checks'],
+      ['invariants.html', 'invariants', 'rules the data must keep'],
+      ['protection.html', 'protection', 'delete protection'],
+      ['alerts.html', 'alerts', 'who is told, and how'],
+    ]],
+    ['settings: when it breaks', [
+      ['recovery.html', 'recovery', 'snapshots and restore'],
+      ['help.html', 'help', 'the explainer'],
+    ]],
+    ['no menu bar', [
+      ['login.html', 'sign in', ''],
+      ['offline.html', 'offline', 'what a phone shows with no connection'],
+    ]],
+  ];
+  document.getElementById('launch').innerHTML = GROUPS.map(([g, pages]) => CC.win(g.replace(/[: ]+/g, '_'), `<b>${pages.length}</b>`,
+    `<div class="body">${pages.map(([href, name, what]) => `<a class="pg" href="${href}"><b>${name}</b><i>${href}</i>${what ? `<span>${what}</span>` : ''}</a>`).join('')}</div>`)).join('');
+  CC.page({ page: 'bench' });
+</script>
+</body>
+</html>

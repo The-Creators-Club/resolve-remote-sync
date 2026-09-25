@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: b-roll</title>
+<!-- The design bench (dashboard/design/README.md): the b-roll search app,
+     mounted at /broll by the dashboard (dashboard broll.py). Mirrors
+     broll/web/static/index.html + app.js + style.css, with ingest.js (the
+     add b-roll drawer) and clientfolders.js (client folders drawer and the
+     + popover). The real page swaps the grid for the clip's detail view;
+     here the clip you picked opens BESIDE the grid on a wide screen, and
+     under it on a narrow one. Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/apps.css">
+<style>
+  .page.broll { max-width: 1760px; }
+  .searchrow { display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: 10px; }
+  @media (max-width: 760px) { .searchrow { grid-template-columns: minmax(0, 1fr); } }
+  .flags { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; }
+  .rmeta { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; font-size: 13px; color: var(--text-2); margin-bottom: 12px; }
+  .rmeta b { color: var(--text); font-weight: 500; }
+  .vmeta { display: grid; gap: 6px; font-size: 13px; color: var(--text-2); }
+  .vmeta .ttl { font-size: 15px; font-weight: 700; color: var(--text); overflow-wrap: anywhere; }
+  .dcol { display: grid; gap: calc(22px * var(--d)); }
+</style>
+</head>
+<body data-page="b-roll">
+
+<div class="shell">
+  <div class="page one broll">
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> B-ROLL</span></h1>
+        <div class="sub" id="sub"></div>
+      </div>
+      <div class="acts">
+        <button class="key" type="button" data-drawer="ingest" title="Add clips to the archive (or drag clips or folders anywhere on this page)"><span class="t">Add b-roll</span><span class="kbd">+</span></button>
+        <button class="key" type="button" data-drawer="cf" title="Client folders: curate clips and get a link to send to a client"><span class="t">Client folders</span></button>
+        <button class="key quiet" type="button" data-drawer="tray" title="Shares and the CC Sync tray on this computer"><span class="t">tray + shares</span></button>
+      </div>
+    </div>
+
+    <section class="win">
+      <div class="bar"><span>┌─╡</span><span class="t">search</span><span>╞</span><span class="rule"></span><span class="meta hide-sm" title="Results that contain your exact words come first, then clips that only mean something similar.">keyword first, meaning second</span><span>═┐</span></div>
+      <div class="body" style="display:grid;gap:12px">
+        <div class="searchrow">
+          <div class="prompt-in"><span class="p">&gt;</span><input id="q" type="text" autocomplete="off" placeholder='search segments, e.g. sailors pier "harbor exercise"' aria-label="search segments"><kbd>/</kbd></div>
+          <select class="sel" id="cat" aria-label="category" title="Only search inside one subject, such as aerials or politics.">
+            <option value="">All categories</option><option>aerials</option><option>&nbsp;&nbsp;aerials / cities</option><option>&nbsp;&nbsp;aerials / coast</option>
+            <option>military</option><option>&nbsp;&nbsp;military / civil defence</option><option>politics</option><option>&nbsp;&nbsp;politics / elections</option><option>&nbsp;&nbsp;politics / protests</option><option>nature</option>
+          </select>
+        </div>
+        <div class="ctrl">
+          <div class="chips" role="group" aria-label="How to combine keyword and semantic (meaning-based) search" title="How to combine keyword and semantic (meaning-based) search"><span class="lbl">mode</span>
+            <button type="button" class="chip" data-mode="hybrid" title="Hybrid: exact word matches first, then clips with a similar meaning. The usual choice.">hybrid</button><button type="button" class="chip" data-mode="keyword" title="Keyword: only clips whose description or speech contains your words.">keyword</button><button type="button" class="chip" data-mode="semantic" title="Semantic: clips that mean something like your words, even if they use other words.">semantic</button></div>
+          <div class="chips" role="group" aria-label="Restrict search to what is on screen or what is said"><span class="lbl">in</span>
+            <button type="button" class="chip" data-src="all" title="Search what is seen and what is said.">all</button><button type="button" class="chip" data-src="visual" title="Visuals: what is seen on screen, including burned-in on-screen text">visuals</button><button type="button" class="chip" data-src="transcript" title="Transcript: what is said (spoken word)">transcript</button></div>
+          <label class="check" title="Retry with prefix and typo-tolerant matching when a keyword search finds little"><input type="checkbox" id="fuzzy" checked><span class="g"></span><span class="l">fuzzy</span></label>
+        </div>
+        <div class="flags" id="flags" title="Hide videos with these defect flags"><span class="chips"><span class="lbl">hide flagged</span></span></div>
+      </div>
+    </section>
+
+    <div class="app3">
+      <nav class="win sticky" aria-label="Browse by subject">
+        <div class="bar"><span>┌─╡</span><span class="t">browse</span><span>╞</span><span class="rule"></span><button type="button" class="act" id="tree-clear" title="Show everything">clear</button><span>═┐</span></div>
+        <div class="body vtree scroll-y" id="tree" style="max-height:640px"></div>
+      </nav>
+
+      <main class="win">
+        <div class="bar"><span>┌─╡</span><span class="t">results</span><span>╞</span><span class="rule"></span><span class="meta" id="rcount"></span><span>═┐</span></div>
+        <div class="body">
+          <div class="rmeta" id="rmeta"></div>
+          <div class="fgrid" id="grid" aria-live="polite"></div>
+        </div>
+        <div class="pager"><button class="key quiet sm" type="button" disabled><span class="t">prev</span></button><span id="pstat"></span><button class="key quiet sm" type="button" data-busy="page 2"><span class="t">next</span></button></div>
+      </main>
+
+      <div class="detail dcol" id="detail"></div>
+    </div>
+  </div>
+</div>
+
+<!-- the + popover: add this clip to a client folder -->
+<div class="pop win" id="pop" role="menu">
+  <div class="bar"><span>┌─╡</span><span class="t">add_to_client_folder</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+  <div class="body" id="pop-body"></div>
+</div>
+
+<div class="drawer-back" id="dback"></div>
+
+<!-- ingest.js: Add b-roll -->
+<aside class="drawer win" id="dr-ingest" aria-label="Add clips to the archive">
+  <div class="bar"><span>┌─╡</span><span class="t">add_b-roll</span><span>╞</span><span class="rule"></span><button type="button" class="act" data-close-drawer title="Closes this panel. Anything running keeps running.">close</button><span>═┐</span></div>
+  <div class="body" id="ingest-body"></div>
+</aside>
+
+<!-- clientfolders.js -->
+<aside class="drawer win" id="dr-cf" aria-label="Client folders">
+  <div class="bar"><span>┌─╡</span><span class="t">client_folders</span><span>╞</span><span class="rule"></span><button type="button" class="act" data-close-drawer>close</button><span>═┐</span></div>
+  <div class="body" id="cf-body"></div>
+</aside>
+
+<!-- tray + shares -->
+<aside class="drawer win" id="dr-tray" aria-label="Tray and shares">
+  <div class="bar"><span>┌─╡</span><span class="t">tray_and_shares</span><span>╞</span><span class="rule"></span><button type="button" class="act" data-close-drawer>close</button><span>═┐</span></div>
+  <div class="body">
+    <h3 title="Named storage places the archive's clips live in. Each editor's computer knows which drive each one is on.">Shares</h3>
+    <table class="tbl tight"><tbody>
+      <tr><td title="A share is a named storage place the clips live in."><b>broll</b></td><td>The B-roll Archive in your synced tree</td></tr>
+      <tr><td><b>ff5</b></td><td>Framing Formosa 5 shoots</td></tr>
+      <tr><td><b>ff4</b></td><td>Framing Formosa 4 shoots</td></tr>
+      <tr><td><b>shorts</b></td><td>Shorts shoots</td></tr>
+    </tbody></table>
+    <p class="lede">Mount paths (which local drive or volume each share resolves to) are set per editor in <code>~/.broll-companion.json</code> on your own computer, not here. The <code>broll</code> share needs no entry: the CC Sync tray points it at the B-roll Archive in your synced tree.</p>
+    <h3>CC Sync tray</h3>
+    <div class="inline" id="tray-status"></div>
+    <p class="lede">"Send to Resolve" is built into the CC Sync tray, the app you already run. It listens on <code>127.0.0.1:8899</code> and drives DaVinci Resolve from there. If this says it is not running, start CC Sync (and if you still have the old separate BRoll Companion in your tray, quit it: it is retired and it holds this port).</p>
+  </div>
+</aside>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, toast, tag, led } = CC;
+  const $ = s => document.querySelector(s);
+  const FPS = 29.97;
+  const tc = (t, fps) => {
+    fps = Math.round(fps || 25); t = Math.max(0, t);
+    const f = Math.floor((t % 1) * fps), s = Math.floor(t) % 60, m = Math.floor(t / 60) % 60, h = Math.floor(t / 3600);
+    return [h, m, s, f].map(n => String(n).padStart(2, '0')).join(':');
+  };
+  const dur = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+  // --------------------------------------------------------- data
+  const TREE = [
+    { label: 'Downloads', collection: 'downloads', total: 1104, groups: [
+      { label: 'Aerials', slug: 'aerials', count: 214, children: [{ label: 'Cities', slug: 'aerials/cities', count: 131 }, { label: 'Coast', slug: 'aerials/coast', count: 83 }] },
+      { label: 'Military', slug: 'military', count: 156, children: [{ label: 'Civil defence', slug: 'military/civil-defence', count: 64 }, { label: 'Exercises', slug: 'military/exercises', count: 92 }] },
+      { label: 'Politics', slug: 'politics', count: 388, children: [{ label: 'Elections', slug: 'politics/elections', count: 241 }, { label: 'Protests', slug: 'politics/protests', count: 147 }] },
+      { label: 'Nature', slug: 'nature', count: 324 },
+      { label: 'Uncategorised', slug: 'uncategorised', count: 22 },
+    ] },
+    { label: 'Creators_Club', collection: 'own', total: 3708, groups: [
+      { label: 'ff5', slug: 'ff5::', count: 1942, children: [{ label: 'Elections', slug: 'ff5::Elections', count: 1204, children: [{ label: 'Day 1', slug: 'ff5::Elections / Day 1', count: 611 }, { label: 'Day 2', slug: 'ff5::Elections / Day 2', count: 593 }] }, { label: 'Civil Defence', slug: 'ff5::Civil Defence', count: 738 }] },
+      { label: 'ff4', slug: 'ff4::', count: 1344, children: [{ label: 'Kinmen', slug: 'ff4::Kinmen', count: 802 }, { label: 'Taichung Drone Camp', slug: 'ff4::Taichung Drone Camp', count: 542 }] },
+      { label: 'shorts', slug: 'shorts::', count: 422 },
+    ] },
+  ];
+  const HITS = [
+    ['Wanhua_air_raid_drill_0412.mp4', 222, 38, 'military/civil-defence'],
+    ['Taipei_empty_street_siren_03.mp4', 94, 12, 'military/civil-defence'],
+    ['Wan_An_exercise_Ximen_wide.mov', 611, 405, 'military/civil-defence'],
+    ['civil_defence_volunteers_bags.mp4', 185, 71, 'military/civil-defence'],
+    ['siren_tower_closeup_dusk.mp4', 48, 9, 'military/civil-defence'],
+    ['shelter_sign_underground_mall.mp4', 133, 64, 'military/civil-defence'],
+    ['police_waving_cars_over_drill.mp4', 302, 188, 'military/exercises'],
+    ['Kaohsiung_drill_harbour_pan.mp4', 416, 97, 'military/exercises'],
+    ['scooters_stopped_roadside_drill.mov', 77, 30, 'military/civil-defence'],
+    ['first_aid_training_school_gym.mp4', 540, 212, 'military/civil-defence'],
+    ['drill_announcement_loudspeaker.mp4', 66, 21, 'military/civil-defence'],
+    ['fire_brigade_hose_demo_night.mp4', 259, 140, 'military/exercises'],
+  ];
+  const RELATED = [
+    ['typhoon_shelter_evacuation_bus.mp4', 170, 44, 'nature'],
+    ['Keelung_navy_pier_sailors.mov', 391, 215, 'military/exercises'],
+    ['blackout_city_lights_off_drone.mp4', 88, 51, 'aerials/cities'],
+    ['sandbags_river_levee_volunteers.mp4', 223, 12, 'nature'],
+  ];
+  const BROWSE = [
+    ['DJI_0442_Taipei101_dawn.mp4', 64], ['coastline_Yilan_drone_pull.mp4', 131], ['Ketagalan_rally_flags_wide.mov', 402],
+    ['night_market_crowd_steam.mp4', 97], ['rice_terrace_mist_timelapse.mp4', 45], ['MRT_platform_rush_hour.mp4', 188],
+    ['temple_incense_closeup.mp4', 36], ['harbour_container_cranes.mov', 250], ['ballot_count_volunteers.mp4', 612],
+    ['typhoon_waves_breakwater.mp4', 74], ['scooter_waterfall_intersection.mp4', 58], ['mountain_road_hairpin_aerial.mp4', 143],
+  ];
+  const SEGS = [
+    [0, 21, 'A wide street in Wanhua, traffic moving normally under grey sky.'],
+    [21, 38, 'A siren tower on a rooftop; the wail starts and pedestrians look up.', '萬安演習 空襲警報', 'Wan An exercise: air raid alert'],
+    [38, 74, 'Scooters pull to the kerb and riders dismount as police wave them aside.'],
+    [74, 118, 'The street is empty. A volunteer in a yellow vest walks the centre line.'],
+    [118, 170, 'People file down a stairway marked as an air raid shelter.', '防空避難處所', 'air raid shelter'],
+    [170, 222, 'All clear: traffic resumes, a bus pulls away from the stop.'],
+  ];
+  const CUES = [
+    [24, 29, 'This is an air raid drill. Please move to the nearest shelter.'],
+    [80, 86, 'Stay off the road until the all clear.'],
+    [171, 175, 'The drill is over, thank you for your patience.'],
+  ];
+  const FOLDERS = [
+    { id: 1, title: 'Taiwan civil defence: selects', status: 'live', n: 14, by: 'jsmith', views: 6, expires: '24 Oct 2026', last: '23 Sep 2026, 16:40' },
+    { id: 2, title: 'Taichung Drone Camp preview', status: 'live', n: 31, by: 'owen', views: 0 },
+    { id: 3, title: 'Night market montage (old)', status: 'revoked', n: 9, by: 'mrivera', views: 12 },
+    { id: 4, title: 'Kinmen coastline pitch', status: 'expired', n: 22, by: 'tchen', views: 3 },
+  ];
+
+  let mode = 'busy';
+  const st = { mode: 'hybrid', src: 'all', hide: new Set(), coll: 'downloads', cat: 'military/civil-defence', sel: 0, t: 38, inP: null, outP: null, sending: false };
+
+  // --------------------------------------------------------- tree
+  function treeNodes(coll, n, depth) {
+    const kids = n.children || [];
+    const open = st.coll === coll && (st.cat === n.slug || st.cat.startsWith(n.slug + '/') || st.cat.startsWith(n.slug + ' / ') || (n.slug.endsWith('::') && st.cat.startsWith(n.slug)));
+    let h = `<button type="button" class="n ${st.coll === coll && st.cat === n.slug ? 'on' : ''}" data-coll="${coll}" data-cat="${esc(n.slug)}" title="${esc(n.slug)}" style="padding-left:${6 + depth * 14}px">
+      <span class="c">${kids.length ? (open ? '&#9662;' : '&#9656;') : ''}</span><span>${esc(n.label)}</span><span class="k" title="Clips in this folder.">${n.count}</span></button>`;
+    if (kids.length && open) h += kids.map(k => treeNodes(coll, k, depth + 1)).join('');
+    return h;
+  }
+  function renderTree() {
+    $('#tree').innerHTML = TREE.map(r => `<button type="button" class="n root ${st.coll === r.collection && !st.cat ? 'on' : ''}" data-coll="${r.collection}" data-cat=""><span class="c"></span><span>${esc(r.label)}</span><span class="k" title="Clips in this collection.">${r.total}</span></button>` +
+      r.groups.map(g => treeNodes(r.collection, g, 0)).join('')).join('');
+  }
+
+  // --------------------------------------------------------- grid
+  const results = () => mode === 'busy' ? HITS.map(h => ({ name: h[0], dur: h[1], hit: h[2], cat: h[3] })).concat(RELATED.map(h => ({ name: h[0], dur: h[1], hit: h[2], cat: h[3], sem: true })))
+    : BROWSE.map(b => ({ name: b[0], dur: b[1], hit: null, cat: '' }));
+  function frame(r, i, big) {
+    return `<div class="frame${big ? ' big' : ''}" style="--tilt:${(i * 37) % 80 + 10}%"><span class="fn">${esc(r.name)}</span><span class="fg">&#9654;</span>${r.hit != null ? `<span class="fhit" title="Where in the clip your search matched (hours:minutes:seconds:frames).">${tc(r.hit, FPS)}</span>` : ''}<span class="ftc" title="Length of the clip.">${dur(r.dur)}</span></div>`;
+  }
+  function renderGrid() {
+    const rs = results();
+    const q = $('#q').value.trim();
+    const bits = [];
+    if (q) bits.push(`search: <b>"${esc(q)}"</b>`);
+    const root = TREE.find(r => r.collection === st.coll);
+    if (st.coll || st.cat) bits.push(`folder: <b>${esc([root ? root.label : st.coll, st.cat ? st.cat.split('/').pop().replace('::', '').replace(/-/g, ' ') : ''].filter(Boolean).join(' / '))}</b>`);
+    $('#rmeta').innerHTML = `<span>${bits.length ? bits.join(' &middot; ') : 'browsing all videos'}</span>`;
+    let seen = false;
+    $('#grid').innerHTML = rs.map((r, i) => {
+      let h = '';
+      if (r.sem && !seen) { seen = true; h += '<div class="sep" title="Clips that do not contain your words but mean something similar.">related</div>'; }
+      return h + `<div class="fcard${i === st.sel ? ' sel' : ''}${r.sem ? ' semantic' : ''}" data-i="${i}" role="button" tabindex="0" title="${esc(r.name)} - ${esc(r.cat || 'uncategorised')}">${frame(r, i)}<button type="button" class="add" data-add="${i}" title="Add to a client folder">+</button></div>`;
+    }).join('');
+    const total = mode === 'busy' ? 143 : 4812;
+    $('#pstat').textContent = `1-${rs.length} of ${total}`;
+    $('#rcount').innerHTML = `<b>${total}</b> ${mode === 'busy' ? 'matches' : 'clips'}`;
+  }
+
+  // --------------------------------------------------------- detail
+  function renderDetail() {
+    const rs = results();
+    const r = rs[st.sel] || rs[0];
+    const D = r.dur;
+    const segs = mode === 'busy' && st.sel === 0 ? SEGS : [[0, D * 0.4, 'Opening shot, steady.'], [D * 0.4, D, 'The same scene from a second angle.']];
+    const cues = mode === 'busy' && st.sel === 0 ? CUES : [];
+    const hits = r.hit != null ? [[r.hit, r.hit + 16]] : [];
+    const pct = t => (t / D * 100).toFixed(2) + '%';
+    const parts = r.cat ? ['Downloads', ...r.cat.split('/').map(p => p.replace(/-/g, ' ').replace(/^./, c => c.toUpperCase()))] : ['Downloads', 'Uncategorised'];
+    const sendLabel = st.sending ? 'Syncing 42%' : 'Append to timeline';
+    const themes = st.sel === 0 && mode === 'busy' ? ['air raid siren', 'empty streets', 'civil defence', 'Wan An exercise'] : ['street life'];
+    $('#detail').innerHTML = `
+      <section class="win">
+        <div class="bar"><span>┌─╡</span><span class="t">clip</span><span>╞</span><span class="rule"></span><button type="button" class="act" id="back">back to results</button><span>═┐</span></div>
+        <div class="body">
+          ${frame({ ...r, hit: null }, st.sel, true)}
+          <div class="seek" id="seek" title="click to seek">
+            ${st.inP != null && st.outP != null ? `<div class="io" style="left:${pct(st.inP)};width:${pct(st.outP - st.inP)}"></div>` : ''}
+            ${hits.map(h => `<div class="hit" style="left:${pct(h[0])};width:${pct(h[1] - h[0])}"></div>`).join('')}
+            ${segs.map(s => `<div class="seg" style="left:${pct(s[0])}"></div>`).join('')}
+            <div class="ph" style="left:${pct(st.t)}"></div>
+          </div>
+          <div class="transport">
+            <span class="tc" title="Timecode: where the playhead is (hours:minutes:seconds:frames)."><span class="k">TC</span><span class="v">${tc(st.t, FPS)}</span></span>
+            <span class="tc" title="In point: where the part you send to Resolve starts. Press I to set it."><span class="k">IN</span><span class="v ${st.inP != null ? 'set' : ''}">${st.inP != null ? tc(st.inP, FPS) : '--:--:--:--'}</span></span>
+            <span class="tc" title="Out point: where the part you send to Resolve ends. Press O to set it."><span class="k">OUT</span><span class="v ${st.outP != null ? 'set' : ''}">${st.outP != null ? tc(st.outP, FPS) : '--:--:--:--'}</span></span>
+            <span class="tc" title="Playback speed. J and L change it."><span class="k">RATE</span><span class="v">1x</span></span>
+          </div>
+          <div class="transport">
+            <button class="key primary" type="button" id="send" style="min-width:25ch;justify-content:center" ${st.sending ? 'disabled' : ''} title="Adds the part between in and out to the end of the timeline open in your Resolve. If the clip is not on this computer yet, it is synced down first."><span class="t">${sendLabel}</span><span class="kbd">&#9166;</span></button>
+            <button class="key" type="button" id="place" ${st.sending ? 'disabled' : ''} title="${st.sending ? `Still sending &quot;${esc(r.name)}&quot; to Resolve. This clip can go when that one has finished.` : 'Puts the part between in and out into your Resolve timeline where its playhead is.'}"><span class="t">Place at playhead</span><span class="kbd">&#8679;&#9166;</span></button>
+            <button class="key quiet sm" type="button" data-add="${st.sel}" title="Add this clip to a client folder"><span class="t">client folder</span></button>
+          </div>
+          <div class="note" style="margin-top:12px${st.sending ? '' : ';visibility:hidden'}" aria-hidden="${!st.sending}"><span class="spin" style="color:var(--hi)"></span><span class="grow">Clip is not on this computer yet: syncing it down, then inserting.</span></div>
+          <div class="keyhelp"><b>space</b><b>K</b> play / pause &middot; <b>J</b><b>L</b> shuttle &middot; <b>&larr;</b><b>&rarr;</b> one frame &middot; <b>I</b><b>O</b> set in / out &middot; <b>Enter</b> append &middot; <b>&#8679;Enter</b> place at playhead</div>
+        </div>
+      </section>
+      <section class="win">
+        <div class="bar"><span>┌─╡</span><span class="t">about_this_clip</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+        <div class="body vmeta">
+          <div class="ttl">${esc(r.name)}</div>
+          <div class="crumbs"><a href="#" data-crumb>broll</a>${parts.map(p => `<span class="s">/</span><a href="#" data-crumb>${esc(p)}</a>`).join('')}<span class="s">/</span><span>${esc(r.name)}</span><span>&nbsp;- ${dur(D)} @ ${FPS}fps</span></div>
+          <div title="The subject folder this clip is filed under. Click to browse it.">category: ${r.cat ? `<a href="#" class="linkish" data-crumb>${esc(r.cat)}</a>` : 'none'}</div>
+          <div title="Subjects the indexer found in this clip. Click one to search for it.">themes: ${themes.map(t => `<a href="#" class="linkish" data-theme="${esc(t)}">${esc(t)}</a>`).join(', ')}</div>
+          ${mode === 'busy' && st.sel === 0 ? '<div class="muted" title="Picture problems the indexer spotted. You can hide flagged clips from results in the search box.">flags: shaky</div>' : ''}
+        </div>
+      </section>
+      <section class="win">
+        <div class="bar"><span>┌─╡</span><span class="t">visual_segments</span><span>╞</span><span class="rule"></span><span class="meta" title="Shots the indexer described. Click one to jump there.">${segs.length}</span><span>═┐</span></div>
+        <div class="cues scroll-y" style="max-height:330px">${segs.map(s => `<div class="cue ${st.t >= s[0] && st.t < s[1] ? 'now' : ''}" data-seek="${s[0]}"><span class="t">${tc(s[0], FPS)} - ${tc(s[1], FPS)}</span><span class="d">${esc(s[2])}</span>${s[3] ? `<span class="os">"${esc(s[3])}"</span><span class="en">${esc(s[4])}</span>` : ''}</div>`).join('')}</div>
+      </section>
+      ${cues.length ? `<section class="win">
+        <div class="bar"><span>┌─╡</span><span class="t">transcript</span><span>╞</span><span class="rule"></span><span class="meta">what is said</span><span>═┐</span></div>
+        <div class="cues scroll-y" style="max-height:220px">${cues.map(c => `<div class="cue said" data-seek="${c[0]}"><span class="t">${tc(c[0], FPS)} - ${tc(c[1], FPS)}</span><span class="d">${esc(c[2])}</span></div>`).join('')}</div>
+      </section>` : ''}`;
+  }
+
+  // --------------------------------------------------------- drawers
+  function renderIngest() {
+    const busy = mode === 'busy';
+    const items = [['indexed', 'Day 3/C0114.MP4'], ['indexed', 'Day 3/C0115.MP4'], ['original still owed', 'Day 3/C0116.MP4'], ['indexing', 'Day 3/C0117.MP4'], ['pending', 'Day 3/C0118.MP4'], ['pending', 'Day 3/C0119.MP4'], ['failed', 'Day 3/C0120.MP4 - ffprobe could not read the file']];
+    const cls = s => s === 'indexed' ? 'done' : s === 'indexing' ? 'run' : s === 'failed' ? 'bad' : s === 'original still owed' ? 'owed' : '';
+    $('#ingest-body').innerHTML = `
+      <div class="inline">${led('')}<span title="The CC Sync tray app on this computer answered, Resolve is running, and the indexing model is downloaded.">connected (Resolve: yes, v0.9.78, model ready)</span><button type="button" class="key quiet sm" data-busy="the CC Sync tray answered" title="Asks the CC Sync tray on this computer again whether it is running."><span class="t">recheck</span></button></div>
+      <p class="lede">Your own computer does the work: the CC Sync tray transcodes, indexes with the local model and uploads the finished clips to the archive. Nothing is uploaded to the dashboard.</p>
+      ${busy ? `<div class="note warn" role="alert"><span class="grow">This computer's GPU has 6 GB free and the Best model needs about 12 GB. Choose Good, or close what is using the GPU, then press Run again.</span><button class="key quiet sm" type="button" data-dismiss=".note"><span class="t">dismiss</span></button></div>` : ''}
+      <div class="dropzone">
+        <span class="dh">Drag clips or folders here</span>
+        <span>or choose from this computer...</span>
+        <span class="inline"><button type="button" class="key sm" data-busy="the file picker opens on your computer" title="Pick clips on this computer to add to the archive."><span class="t">Choose files</span></button><button type="button" class="key sm" data-busy="the folder picker opens on your computer" title="Pick a whole folder of clips on this computer."><span class="t">Choose a folder</span></button></span>
+        <span class="hint">Files chosen this way are indexed where they are: they are not copied into the browser first.</span>
+      </div>
+      ${busy ? `
+      <h3>Clips</h3>
+      <div class="hint">12 of 14 clips selected &middot; 2 already in the archive</div>
+      <div class="fgrid" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr))">${['A001_C003.MOV', 'A001_C004.MOV', 'A001_C005.MOV', 'A001_C006.MOV'].map((n, i) => `<div class="fcard">${frame({ name: n, dur: 40 + i * 17, hit: null }, i)}</div>`).join('')}</div>
+      <h3>Settings</h3>
+      <div class="form">
+        <div class="form-row"><span class="lbl">Shoot name<small>where the clips file under Creators_Club</small></span><input class="inp" value="Civil Defence Day 4" maxlength="90" spellcheck="false"></div>
+        <div class="form-row"><span class="lbl" title="The program that watches each clip and writes what is in it. Best is more accurate but needs a bigger graphics card. VRAM is the graphics card's own memory.">Model</span><div style="display:grid;gap:6px">
+          <label class="radio"><input type="radio" name="tier" checked><span class="g"></span><span class="l">Good: Qwen3-VL 4B, needs about 8 GB of VRAM</span></label>
+          <label class="radio"><input type="radio" name="tier"><span class="g"></span><span class="l">Best: Qwen3-VL 8B, needs about 12 GB of VRAM</span></label></div></div>
+        <div class="form-row"><span class="lbl">When to run</span><div style="display:grid;gap:8px">
+          <label class="radio"><input type="radio" name="when" checked><span class="g"></span><span class="l">Only when idle <span class="hint" style="display:block">Starts when you step away, pauses the moment you come back, the way proxy generation already works.</span></span></label>
+          <label class="radio"><input type="radio" name="when"><span class="g"></span><span class="l">Foreground <span class="hint" style="display:block">Starts now and keeps going while you work. Your GPU will be busy.</span></span></label></div></div>
+        <div class="form-row"><span class="lbl">Options</span><div style="display:grid;gap:6px">
+          <label class="check"><input type="checkbox" checked><span class="g"></span><span class="l">Keep sub-folders</span></label>
+          <label class="check"><input type="checkbox" checked><span class="g"></span><span class="l">Upload the originals too <span class="muted">(previews and the index go up either way)</span></span></label>
+          <label class="check" style="opacity:.5"><input type="checkbox" disabled><span class="g"></span><span class="l">Transcribe speech <span class="muted">(phase 2, not available yet)</span></span></label></div></div>
+      </div>
+      <div class="hint">12 clips, about 18 min of indexing on this computer at Good</div>
+      <div class="inline"><button type="button" class="key primary" data-busy="batch queued: it starts when you step away" title="Starts indexing these clips on this computer, when it is idle or right away as chosen above."><span class="t">Run</span></button><button type="button" class="key quiet" data-busy="cleared" title="Forgets the clips chosen above. Nothing is deleted from your computer."><span class="t">clear</span></button></div>
+      <h3>Running</h3>
+      <div class="batch run">
+        <div class="bh"><b>Civil Defence Day 3</b><span>indexing on JSMITH-STUDIO</span></div>
+        <div title="Indexed: described by the model. Searchable: already findable in the archive. Heartbeat: when the computer doing the work last checked in.">3 of 7 indexed &middot; 2 searchable &middot; 1 failed &middot; 0 already in the archive &middot; 1 still to send the original &middot; heartbeat 4s ago</div>
+        <div class="hi">indexing &middot; transcode 64% &middot; uploads: 2 queued</div>
+        <div class="items">${items.map(i => `<div class="it ${cls(i[0])}"><span class="st" title="${ITEM_TIP[i[0]]}">${i[0]}</span> ${esc(i[1])}</div>`).join('')}</div>
+        <div class="ba"><button class="key sm" type="button" data-busy="paused" title="Stops indexing for now. Nothing is lost."><span class="t">Pause</span></button><button class="key sm" type="button" disabled title="Carries on after a pause."><span class="t">Resume</span></button><button class="key sm" type="button" data-busy="started" title="Starts now instead of waiting for you to step away. Your graphics card will be busy."><span class="t">Start now</span></button><button class="key sm" type="button" data-busy="uploads paused" title="Keeps indexing but stops sending files to the server, for example on a slow connection."><span class="t">Pause uploads</span></button><button class="key quiet sm" type="button" data-busy="cancel requested" title="Stops this batch. Clips already indexed stay in the archive."><span class="t">cancel batch</span></button></div>
+      </div>` : ''}
+      <h3>Batches</h3>
+      <div class="tabs" role="tablist"><button role="tab" aria-selected="true" title="Batches you started.">mine</button><button role="tab" aria-selected="false" title="Batches on every computer in the studio.">all computers</button></div>
+      ${busy ? `
+      <div class="batch run"><div class="bh"><b>Civil Defence Day 3</b><span>indexing on JSMITH-STUDIO</span></div><div>JSMITH-STUDIO &middot; heartbeat 4s ago &middot; good &middot; when idle</div><div>3 of 7 indexed &middot; 2 searchable &middot; 1 failed &middot; 0 already in the archive</div><div class="ba"><button class="key quiet sm" type="button"><span class="t">clips</span></button><button class="key quiet sm" type="button"><span class="t">cancel</span></button></div></div>
+      <div class="batch warn"><div class="bh"><b>Kinmen pickups</b><span>waiting: JSMITH-MBP stopped answering 3h ago</span></div><div>JSMITH-MBP &middot; heartbeat 3h ago &middot; good &middot; when idle</div><div>0 of 22 indexed &middot; 0 searchable &middot; 0 failed &middot; 0 already in the archive</div><div class="ba"><button class="key quiet sm" type="button"><span class="t">clips</span></button><button class="key quiet sm" type="button" data-busy="this computer has taken the batch on" title="The computer running this batch stopped answering. Carry it on here instead; clips already done are kept."><span class="t">take over on this computer</span></button><button class="key quiet sm" type="button"><span class="t">cancel</span></button></div></div>
+      <div class="batch bad"><div class="bh"><b>Night Market B-cam</b><span>finished, 3 could not be indexed</span></div><div>JSMITH-STUDIO &middot; heartbeat 2d ago &middot; best &middot; foreground</div><div>41 of 44 indexed &middot; 41 searchable &middot; 3 failed &middot; 5 already in the archive</div><div class="ba"><button class="key quiet sm" type="button"><span class="t">clips</span></button><button class="key quiet sm" type="button" data-busy="asked again"><span class="t">try the 3 failed again</span></button></div></div>
+      <div class="batch ok"><div class="bh"><b>Typhoon Prep aerials</b><span>finished</span></div><div>JSMITH-STUDIO &middot; heartbeat 6d ago &middot; good &middot; when idle</div><div>18 of 18 indexed &middot; 18 searchable &middot; 0 failed &middot; 0 already in the archive</div><div class="ba"><button class="key quiet sm" type="button"><span class="t">clips</span></button></div></div>`
+      : `<div class="empty">no batches yet</div>`}`;
+  }
+
+  let cfOpen = null;
+  const CF_TIP = { live: 'Live: the client link works.', revoked: 'Revoked: the link was switched off. Anyone opening it sees "not available".', expired: 'Expired: the link passed its end date and no longer works.' };
+  const ITEM_TIP = { indexed: 'Described by the model and in the archive.', 'original still owed': 'Indexed, but the full-quality original has not been uploaded yet.', indexing: 'Being described by the model now.', pending: 'Waiting its turn.', failed: 'Could not be indexed. The reason is beside it.' };
+  function cfChip(f) { return `<span title="${CF_TIP[f.status]}">${tag(f.status === 'live' ? 'ok' : f.status === 'revoked' ? 'err' : 'warn', f.status)}</span>`; }
+  function renderCf() {
+    const busy = mode === 'busy';
+    const intro = `<p class="lede">Curate clips for a prospective client and send them one link. They see the folder the way you browse the archive here (thumbnails, hover-scrub, a preview player and what is in each clip), with no login. Previews only, never originals.</p>`;
+    if (cfOpen) {
+      const f = FOLDERS.find(x => x.id === cfOpen);
+      const link = `https://nas-vault.tail0c1d2.ts.net:8443/broll/share/k4Qz9vXw2LmP7aTn3RbYc/`;
+      const note = f.status === 'revoked' ? 'This link is revoked: anyone opening it sees "not available". Reactivate or rotate to hand out a working one.'
+        : f.status === 'expired' ? 'This link has expired. Change the expiry (or clear it) to bring it back.'
+        : f.views ? `Opened ${f.views} times, last ${f.last || '20 Sep 2026, 11:02'}.` : 'Not opened yet.';
+      const clips = busy ? Array.from({ length: f.n }, (_, i) => HITS[i % HITS.length]) : [];
+      $('#cf-body').innerHTML = `${intro}
+        <div><button type="button" class="key quiet sm" id="cf-back"><span class="t">all folders</span></button></div>
+        <div class="inline"><b style="font-size:15px">${esc(f.title)}</b>${cfChip(f)}</div>
+        <div style="display:grid;gap:8px"><span class="hint" style="margin:0;text-transform:uppercase;letter-spacing:1.5px">client link</span>
+          <div class="inline" style="flex-wrap:nowrap"><input class="inp" readonly value="${link}" style="min-width:0"><button class="key primary sm" type="button" data-busy="Link copied" title="Copies the client link so you can paste it into an email."><span class="t">Copy</span></button><a class="key quiet sm" href="#" title="Opens the folder as the client sees it."><span class="t">open</span></a></div>
+          <span class="hint" style="margin:0">${note}</span>
+          <div class="inline">${f.status === 'revoked' ? '<button class="key sm" type="button" data-busy="link reactivated" title="Turns the same link back on."><span class="t">Reactivate link</span></button>' : '<button class="key sm" type="button" data-busy="link revoked" title="Switches the link off. Anyone opening it sees not available. You can turn it back on."><span class="t">Revoke link</span></button>'}<button class="key sm" type="button" data-busy="new link issued: the old one stops working now" title="Makes a different link. The old one stops working at once."><span class="t">New link</span></button></div></div>
+        <div class="form">
+          <div class="form-row"><span class="lbl">Title</span><input class="inp" value="${esc(f.title)}"></div>
+          <div class="form-row"><span class="lbl">Description<small>shown to the client</small></span><textarea class="area">Street-level and rooftop coverage of the annual air raid drill in Taipei, 2026.</textarea></div>
+          <div class="form-row"><span class="lbl">Contact for licensing<small>email or a line of text</small></span><input class="inp" value="licensing@example.org"></div>
+          <div class="form-row"><span class="lbl">Link expires</span><select class="sel">${f.expires ? `<option>keep (${f.expires})</option><option>never</option>` : '<option>never</option>'}<option>in 7 days</option><option>in 30 days</option><option>in 90 days</option></select></div>
+          <div><button class="key primary sm" type="button" data-busy="saved"><span class="t">Save details</span></button></div>
+        </div>
+        <h3>Clips (${clips.length})</h3>
+        ${clips.length ? `<div class="scroll-y" style="max-height:360px"><table class="tbl tight"><tbody>${clips.map((c, i) => `<tr><td>${esc(c[0])} <span class="muted">&middot; ${dur(c[1])}</span><div class="hint" style="margin:2px 0 0">${i === 0 ? 'note for the client: the siren starts at 0:21' : 'add a note for the client'}</div></td><td class="num"><span class="inline" style="justify-content:flex-end"><button class="key quiet sm" type="button" title="move up"><span class="t">up</span></button><button class="key quiet sm" type="button" title="move down"><span class="t">down</span></button><button class="key quiet sm" type="button" title="remove from this folder" data-dismiss="tr"><span class="t">remove</span></button></span></td></tr>`).join('')}</tbody></table></div>`
+          : '<div class="empty">Empty. Hover any thumbnail in the grid and press its + to add it here.</div>'}`;
+      return;
+    }
+    const list = busy ? FOLDERS : [];
+    $('#cf-body').innerHTML = `${intro}
+      ${busy ? '' : '<div class="note warn"><span class="grow">No public link base is set: links only work for people on the tailnet. Set it below once Funnel is on.</span></div>'}
+      <div class="inline"><button type="button" class="key primary sm" data-busy="Created &quot;New folder&quot;" title="Makes an empty client folder you can add clips to."><span class="t">New folder</span><span class="kbd">+</span></button><button type="button" class="key quiet sm" data-busy="refreshed" title="Reloads the list."><span class="t">refresh</span></button></div>
+      ${list.length ? `<div>${list.map(f => `<div class="ep" style="cursor:pointer" data-cf="${f.id}"><span class="ico">&#9642;</span><div><div class="nmline"><span class="nm">${esc(f.title)}</span>${cfChip(f)}</div><div class="meta"><span>${f.n} clips</span><span>by ${f.by}</span><span>${f.views ? `opened ${f.views}x` : 'never opened'}</span></div></div><div class="act"><span class="muted">&#9656;</span></div></div>`).join('')}</div>`
+        : '<div class="empty">No client folders yet. Make one, then add clips from the + on any thumbnail.</div>'}
+      <h3 title="The web address clients use to reach the folder. Tailscale Funnel is what makes the server reachable from outside the studio's private network (the tailnet).">Public link base</h3>
+      <p class="lede">The address your clients reach the viewer on: the NAS's Tailscale Funnel origin, scheme and host and port, no path. Blank means links are minted against this dashboard's own address, which only works for people already on the tailnet. Admins only. See docs/CLIENT_FOLDERS.md for the Funnel setup.</p>
+      <div class="inline" style="flex-wrap:nowrap"><input class="inp" type="url" placeholder="https://" spellcheck="false" value="${busy ? 'https://nas-vault.tail0c1d2.ts.net:8443' : ''}"><button class="key primary sm" type="button" data-busy="Public link base set"><span class="t">Save</span></button></div>`;
+  }
+
+  function renderPop(i, anchor) {
+    const r = results()[i];
+    $('#pop-body').innerHTML = (mode === 'busy' ? FOLDERS.filter(f => f.status === 'live') : []).map((f, k) => `<div class="row ${k === 0 && i === 0 ? 'on' : ''}" data-popf><span class="g">${k === 0 && i === 0 ? '&#9632;' : '&#9633;'}</span><span>${esc(f.title)}</span><span class="c">${f.n}</span></div>`).join('') ||
+      '<div class="hint" style="padding:4px 6px">No folders yet.</div>';
+    $('#pop-body').insertAdjacentHTML('beforeend', `<div class="inline" style="padding:6px 6px 2px;justify-content:space-between"><button type="button" class="key quiet sm" data-busy="Created &quot;New folder&quot; with ${esc(r.name)}"><span class="t">new folder</span></button><button type="button" class="key quiet sm" data-drawer="cf"><span class="t">manage folders</span></button></div>`);
+    const b = anchor.getBoundingClientRect();
+    const pop = $('#pop');
+    pop.classList.add('open');
+    const w = pop.offsetWidth;
+    pop.style.left = Math.max(12, Math.min(window.scrollX + b.right - w, window.scrollX + document.documentElement.clientWidth - w - 12)) + 'px';
+    pop.style.top = (window.scrollY + b.bottom + 6) + 'px';
+  }
+
+  function renderSub() {
+    $('#sub').innerHTML = `<b>4,812</b> clips &middot; <b>2</b> collections &middot; Resolve ${mode === 'busy' ? '<b>connected</b> (CC Sync tray v0.9.78)' : '<b>connected</b>'}${mode === 'busy' ? ' &middot; <span style="color:var(--hi)">1 batch indexing</span>' : ''}`;
+    $('#tray-status').innerHTML = `${led('')}<span>connected (Resolve: yes, v0.9.78)</span><button type="button" class="key quiet sm" data-busy="the CC Sync tray answered"><span class="t">recheck</span></button>`;
+  }
+  function pressChips() {
+    document.querySelectorAll('.chip[data-mode]').forEach(c => c.setAttribute('aria-pressed', String(c.dataset.mode === st.mode)));
+    document.querySelectorAll('.chip[data-src]').forEach(c => c.setAttribute('aria-pressed', String(c.dataset.src === st.src)));
+    document.querySelectorAll('.chip[data-flag]').forEach(c => c.setAttribute('aria-pressed', String(st.hide.has(c.dataset.flag))));
+  }
+  function load(m) {
+    mode = m;
+    Object.assign(st, m === 'busy'
+      ? { coll: 'downloads', cat: 'military/civil-defence', sel: 0, t: 38.4, inP: 30, outP: 74, sending: true, hide: new Set(['rolling_shutter']) }
+      : { coll: '', cat: '', sel: 0, t: 0, inP: null, outP: null, sending: false, hide: new Set() });
+    $('#q').value = m === 'busy' ? 'air raid drill' : '';
+    cfOpen = null;
+    renderAll();
+  }
+  function renderAll() { pressChips(); renderSub(); renderTree(); renderGrid(); renderDetail(); renderIngest(); renderCf(); }
+
+  const FLAG_TIP = { shaky: 'Shaky: the camera wobbles.', soft_focus: 'Soft focus: the picture is blurry.', overexposed: 'Overexposed: too bright, detail lost in the whites.', underexposed: 'Underexposed: too dark.', noisy: 'Noisy: grainy picture, usually from low light.', rolling_shutter: 'Rolling shutter: fast movement looks bent or wobbly.' };
+  $('#flags').insertAdjacentHTML('beforeend', ['shaky', 'soft_focus', 'overexposed', 'underexposed', 'noisy', 'rolling_shutter'].map(f => `<button type="button" class="chip" data-flag="${f}" title="${FLAG_TIP[f]} Pressed: clips with this problem are left out of the results.">${f.replace('_', ' ')}</button>`).join(''));
+  $('#flags .chips').append(...document.querySelectorAll('#flags > .chip'));
+
+  // --------------------------------------------------------- behaviour
+  function openDrawer(k) {
+    document.querySelectorAll('.drawer').forEach(d => d.classList.remove('open'));
+    $('#pop').classList.remove('open');
+    $('#dr-' + k).classList.add('open'); $('#dback').classList.add('open');
+  }
+  function closeDrawers() { document.querySelectorAll('.drawer').forEach(d => d.classList.remove('open')); $('#dback').classList.remove('open'); }
+  document.addEventListener('click', ev => {
+    const t = ev.target;
+    if (!t.closest('#pop') && !t.closest('[data-add]')) $('#pop').classList.remove('open');
+    const add = t.closest('[data-add]');
+    if (add) { ev.stopPropagation(); renderPop(+add.dataset.add, add); return; }
+    const pf = t.closest('[data-popf]');
+    if (pf) { pf.classList.toggle('on'); pf.querySelector('.g').innerHTML = pf.classList.contains('on') ? '&#9632;' : '&#9633;'; toast((pf.classList.contains('on') ? 'added to ' : 'removed from ') + pf.children[1].textContent); return; }
+    const dr = t.closest('[data-drawer]');
+    if (dr) { openDrawer(dr.dataset.drawer); return; }
+    if (t.closest('[data-close-drawer]') || t.id === 'dback') { closeDrawers(); return; }
+    const card = t.closest('.fcard[data-i]');
+    if (card) { st.sel = +card.dataset.i; const r = results()[st.sel]; st.t = r.hit || 0; st.inP = st.outP = null; st.sending = false; renderGrid(); renderDetail(); if (window.innerWidth < 1320) $('#detail').scrollIntoView({ behavior: 'smooth' }); return; }
+    const chip = t.closest('.chip');
+    if (chip) {
+      if (chip.dataset.mode) st.mode = chip.dataset.mode;
+      if (chip.dataset.src) st.src = chip.dataset.src;
+      if (chip.dataset.flag) { st.hide.has(chip.dataset.flag) ? st.hide.delete(chip.dataset.flag) : st.hide.add(chip.dataset.flag); }
+      pressChips(); return;
+    }
+    const n = t.closest('.vtree .n');
+    if (n) { if (st.coll === n.dataset.coll && st.cat === n.dataset.cat) { st.cat = n.dataset.cat.includes('/') ? n.dataset.cat.split('/').slice(0, -1).join('/') : ''; if (!st.cat && !n.dataset.cat) st.coll = ''; } else { st.coll = n.dataset.coll; st.cat = n.dataset.cat; } renderTree(); renderGrid(); return; }
+    if (t.id === 'tree-clear') { st.coll = ''; st.cat = ''; renderTree(); renderGrid(); return; }
+    const sk = t.closest('#seek');
+    if (sk) { const b = sk.getBoundingClientRect(); st.t = (ev.clientX - b.left) / b.width * results()[st.sel].dur; renderDetail(); return; }
+    const cue = t.closest('[data-seek]');
+    if (cue) { st.t = +cue.dataset.seek; renderDetail(); return; }
+    if (t.closest('#send')) { toast('Sent to Resolve: appended at the end of the timeline'); return; }
+    if (t.closest('#place')) { toast('Sent to Resolve: placed at the playhead'); return; }
+    if (t.closest('#back')) { $('#grid').scrollIntoView({ behavior: 'smooth' }); return; }
+    const th = t.closest('[data-theme]');
+    if (th) { ev.preventDefault(); $('#q').value = '"' + th.dataset.theme + '"'; renderGrid(); return; }
+    if (t.closest('[data-crumb]')) { ev.preventDefault(); toast('showing that folder'); return; }
+    const cf = t.closest('[data-cf]');
+    if (cf) { cfOpen = +cf.dataset.cf; renderCf(); return; }
+    if (t.closest('#cf-back')) { cfOpen = null; renderCf(); }
+  });
+  document.addEventListener('keydown', e => {
+    if (/input|select|textarea/i.test(e.target.tagName)) { if (e.key === 'Enter' && e.target.id === 'q') renderGrid(); return; }
+    const D = results()[st.sel].dur;
+    if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
+    else if (e.key === 'i' || e.key === 'I') { st.inP = st.t; if (st.outP != null && st.outP <= st.inP) st.outP = null; renderDetail(); }
+    else if (e.key === 'o' || e.key === 'O') { if (st.inP != null && st.t <= st.inP) { toast('Out point must be after in point.'); return; } st.outP = st.t; renderDetail(); }
+    else if (e.key === 'ArrowRight') { st.t = Math.min(D, st.t + 1 / FPS); renderDetail(); }
+    else if (e.key === 'ArrowLeft') { st.t = Math.max(0, st.t - 1 / FPS); renderDetail(); }
+    else if (e.key === 'Enter') { if (st.inP == null || st.outP == null) toast('Set both an in point (I) and an out point (O) first.'); else toast(e.shiftKey ? 'Sent to Resolve: placed at the playhead' : 'Sent to Resolve: appended at the end of the timeline'); }
+    else if (e.key === 'Escape') { closeDrawers(); $('#pop').classList.remove('open'); }
+  });
+
+  CC.page({ page: 'b-roll', onData: load });
+})();
+</script>
+</body>
+</html>

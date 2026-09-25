@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: invariants</title>
+<!-- The design bench (dashboard/design/README.md): Settings, INVARIANTS.
+     Mirrors templates/admin_invariants.html + partials/invariant_checks.html,
+     rendered by ui.page_admin_invariants from invariants.page_view (the
+     registry of fifteen checks, in its own order). Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/safety.css">
+</head>
+<body data-page="invariants">
+
+<div class="shell">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span title="An invariant is something that must always be true for sync to work, for example every ticked project being shared. This page re-checks each one."><span class="prompt">&gt;</span> INVARIANTS</span></h1>
+        <div class="sub" title="The server runs every check below on its own every 15 minutes. Nothing here needs a button.">re-checked every <b>15</b> minutes &middot; last pass <span id="last-pass">4 min ago</span></div>
+        <div class="sub" id="counts"></div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <p class="lede">Facts this system relies on, re-checked every 15 minutes. Everything here is enforced when it is first written down and was never asked about again: a project ticked while the sync engine was down, a folder renamed on the server by hand, a disk copied onto a second computer. <b>Nothing on this page changes anything.</b> It names what has stopped being true, and where to fix it.</p>
+      <div class="note"><span class="tag mute" title="Not checked: this server has no way to test this one. That is different from ok.">not checked</span><span class="grow"><b>Not checked is not OK.</b> It means this server cannot answer that one, and the reason is beside it.</span></div>
+
+      <div id="inv-win"></div>
+    </div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, win } = CC;
+  const $ = s => document.querySelector(s);
+
+  // invariants.INVARIANTS, verbatim titles / consequences / fixes, in order.
+  // The fixes name buttons by their NEW labels (no square brackets).
+  const REG = [
+    [1, 'every project ticked to sync is actually shared with that computer', 'error',
+      'A computer whose tick was never turned into a share receives nothing at all, and the tick looks exactly like it is working.',
+      'Untick and re-tick that project for that computer on its project page. If it comes back, check that computer has a sync device id on the SYNC STATUS page.'],
+    [2, 'what each computer that reports is set to sync', 'warn',
+      'A computer with nothing ticked syncs nothing, which is a fine way for a spare computer or a laptop between shoots to sit. This is here to be read, not acted on: it never reports a problem.',
+      'Nothing to do. If a computer should be syncing, tick projects for it on the SYNC STATUS page, or set it to wired in its own CC Sync settings if it works straight off the server.'],
+    [3, 'no two computers claim one identity', 'error',
+      'Two computers sharing an identity fight over one sync plan: each report moves the plan and the sync network place to whichever reported last, so both of them keep losing projects.',
+      'On the newer computer, quit CC Sync, delete .ccsync/machine.json in that user\'s home folder, and start CC Sync again. It mints a fresh identity.'],
+    [4, 'every project folder still carries its own identity file', 'error',
+      'A project folder that has lost or changed its CCSync marker stops being that project to this server: everyone\'s ticks for it quietly stop meaning anything and it can be set up a second time under a new name.',
+      'Restore the .ccsync-project file in each folder named below: copy the one from a working project and change its "slug" to the id this check names for that folder (the last part of the project\'s page address, /project/<id>). A missing or unreadable file in a folder Syncthing still serves is usually written back by the server itself within a few minutes; a file that names another id is never overwritten, so that one has to be corrected by hand.'],
+    [5, 'the project tree on the server still looks like the tree', 'error',
+      'If the storage is not mounted, the tree reads as empty: projects look deleted, and the computers that still hold the footage are told the server does not have it.',
+      'Check the storage is mounted on the NAS and that the CC Sync container still has the projects folder mapped in, then reload this page.'],
+    [6, 'no published build carries a floor that would brick the computers taking it', 'error',
+      'A build whose minimum version is above itself makes every computer that installs it refuse every future update, permanently, with no way back over the air.',
+      'On Settings, Packages: retract that build and publish one whose minimum version is at or below its own version number.'],
+    [7, 'every computer runs a build new enough for the plan it has been given', 'error',
+      'A computer running too old a build ignores the buttons on this dashboard in silence: the update push does nothing, Resume never arrives, and an upload-only project is downloaded anyway.',
+      'On Settings, Packages: press Update now for that computer. If it is below 0.9.3 that button cannot reach it, and somebody has to update it at the computer itself.'],
+    [8, 'deleted-file retention agrees between the server and the editors', 'warn',
+      'The server keeps deleted files for a year and editors\' computers keep them for a month, so where a deleted file can be recovered from depends on which computer you ask (R5).',
+      'Nothing to press. This one is a code change, tracked as R5 in KNOWN_BUGS.'],
+    [9, 'the customer\'s data is on a snapshot schedule', 'error',
+      'Without a snapshot schedule there is nothing to restore from: a deleted folder, a bad sync or a failed disk is simply gone.',
+      'On the NAS: Data Protection, Periodic Snapshot Tasks, add a task for each dataset named below (or for its parent, with Recursive ticked) and enable it.'],
+    [10, 'every proxy on the server has the original it was made from', 'warn',
+      'Proxies left behind by a half-finished reorganisation are downloaded by every editor for clips that no longer exist, and the project looks fuller than it is.',
+      'On the server, look at the Proxy folder named below: either put the original footage back beside it or delete the leftover Proxy folder.'],
+    [11, 'the newest CC Sync build the vendor offers is the one this server hands out', 'error',
+      'If this server cannot hand out the newest build, every computer stays on the one it has and this dashboard reports them all as up to date: the fleet\'s updates stop and nothing anywhere says so.',
+      'On Settings, Packages: check the vendor feed, and update the DASHBOARD first if the new build asks for a newer one. The computers are offered the new build straight after.'],
+    [12, 'this dashboard is new enough for every build in its own channel', 'error',
+      'A build that needs a newer dashboard than this one sits on the shelf for ever: it can be seen on the Packages page and can never be given to a computer.',
+      'On Settings, Packages: update the DASHBOARD, then make the build below current. Retract it instead if it was published here by mistake.'],
+    [13, 'the pages that install onto a phone are served without a sign-in', 'error',
+      'A phone fetches an app\'s details before anybody signs in. If the sign-in page is sent instead, Install makes a plain browser shortcut with the address bar showing rather than the full-screen app.',
+      'This one is a code change, not a setting: send us the file names below. They belong in the sign-in gate\'s open list (app._OPEN_EXACT).'],
+    [14, 'the Timeline Cards page on this server matches the checkout it was shipped from', 'warn',
+      'A page fixed by hand on the server is undone by the next deployment, and a page the deployment missed keeps a fault everybody thinks was fixed. Neither can be seen from here.',
+      'Nothing to press. Re-run the deployment (server/install_dashboard_app.py) if the page and the repository are thought to differ; it re-ships the whole tree from the checkout.'],
+    [15, 'there is somewhere for an alarm to go, and the last one sent arrived', 'warn',
+      'With no destination set, or one that has been refusing since Tuesday, everything this server finds waits on a page for somebody to open. That is how an outage runs for eighteen hours.',
+      'On Settings, Alerts: set an email or webhook destination and press Send a test. If one is set already, the reason the last message failed is under What was sent on the same page.'],
+  ];
+  const SKIP8 = 'the editor-side retention number lives in the companion build itself and no computer reports it, so this server can see only one of the two values it would have to compare';
+  const SKIP14 = 'nothing records which checkout the Timeline Cards page here was shipped from: the deployment copies the files and keeps no commit id, file list or checksum of them, so there is nothing to compare the served page against';
+
+  // [state, detail, subjects[[subject, detail]], checked]
+  const BUSY = {
+    1: ['broken', '1 of 23 full ticks is not shared', [['tchen / TCHEN-RIG / 2026/FF5/Civil Defence', 'ticked 3 days ago, never shared with that computer\'s sync device']], '4 min ago'],
+    2: ['ok', '6 computers report; 1 has nothing ticked (OWEN-RIG)', [], '4 min ago'],
+    3: ['broken', '1 identity collision', [['machine id 7f3a9c21', 'claimed by RIVERA-TOWER and RIVERA-LAPTOP, both reporting in the last hour']], '4 min ago'],
+    4: ['ok', '14 project markers present and matching', [], '4 min ago'],
+    5: ['ok', 'the tree holds 4 entries at the top level', [], '4 min ago'],
+    6: ['ok', '4 current builds, each with a workable floor', [], '4 min ago'],
+    7: ['broken', '1 of 6 computers is below its floor', [['tchen / TCHEN-RIG', 'runs 0.9.49; its upload-only tick on 2026/Shorts/Typhoon Prep needs 0.9.54 or newer']], '4 min ago'],
+    8: ['not_checked', SKIP8, [], ''],
+    9: ['broken', '2 enabled tasks, none covering tank/apps', [['tank/apps', 'no enabled periodic snapshot task covers it']], '4 min ago'],
+    10: ['broken', '7 of 4,812 proxy files, in 1 folder, have no original', [['2026/FF5/Repro Rights/Footage/Day_02/Proxy', '7 proxies whose originals are gone']], '4 min ago'],
+    11: ['ok', '2 platforms on the newest build the vendor offers (0.9.78)', [], '4 min ago'],
+    12: ['check_failed', 'OperationalError: database is locked', [], '4 min ago'],
+    13: ['ok', 'every phone install file is on the open list', [], '4 min ago'],
+    14: ['not_checked', SKIP14, [], ''],
+    15: ['broken', 'no destination is configured', [['the alerts destination', 'no destination is configured, so nothing this server finds reaches anybody']], '4 min ago'],
+  };
+  const CALM = {
+    1: ['ok', '24 full ticks, all shared', [], '2 min ago'],
+    2: ['ok', '6 computers report; 1 has nothing ticked (OWEN-RIG)', [], '2 min ago'],
+    3: ['ok', '6 computer identities and 6 hostnames, no two the same', [], '2 min ago'],
+    4: ['ok', '14 project markers present and matching', [], '2 min ago'],
+    5: ['ok', 'the tree holds 4 entries at the top level', [], '2 min ago'],
+    6: ['ok', '4 current builds, each with a workable floor', [], '2 min ago'],
+    7: ['ok', '6 computers new enough for their plan', [], '2 min ago'],
+    8: ['not_checked', SKIP8, [], ''],
+    9: ['ok', 'tank/projects and tank/apps are each covered by an enabled task', [], '2 min ago'],
+    10: ['ok', '4,805 proxy files across 14 projects, each with its original', [], '2 min ago'],
+    11: ['ok', '2 platforms on the newest build the vendor offers (0.9.78)', [], '2 min ago'],
+    12: ['ok', '4 builds, none needing a newer dashboard than 0.7.58', [], '2 min ago'],
+    13: ['ok', 'every phone install file is on the open list', [], '2 min ago'],
+    14: ['not_checked', SKIP14, [], ''],
+    15: ['ok', 'a destination is configured and the last message sent to it arrived', [], '2 min ago'],
+  };
+
+  // the one word in a check's title a non-technical admin may not know
+  const TERM_TIP = {
+    3: 'Identity: the id CC Sync gives each computer the first time it runs. A disk copied onto a second computer copies the id too.',
+    4: 'Identity file: a small hidden file (.ccsync-project) in each project folder that tells the server which project the folder is.',
+    6: 'Floor: the oldest version a computer may go back to. A floor set above the build itself locks computers out of every later update.',
+    7: 'Plan: the projects ticked for a computer, and how (full or upload only). Some settings need a newer CC Sync to be obeyed.',
+    8: 'Retention: how long a deleted file is kept somewhere it can be brought back from.',
+    9: 'Snapshot: a frozen copy of the storage at a moment in time that the NAS can restore from. A schedule takes them automatically.',
+    11: 'Vendor: the maker of CC Sync, who publishes new builds for every studio.',
+    13: 'Install onto a phone: adding a page to the phone home screen so it opens like an app.',
+    14: 'Checkout: the copy of the source code a deployment is shipped from.',
+  };
+  function stateTag(state, sev) {
+    if (state === 'ok') return '<span class="tag ok" title="Ok: this is true right now.">ok</span>';
+    if (state === 'broken') return `<span class="tag solid ${sev === 'error' ? 'err' : 'warn'}" title="Broken: this has stopped being true. What it breaks and how to fix it are below. ${sev === 'error' ? 'Red means sync is affected.' : 'Amber means worth fixing, not urgent.'}">broken</span>`;
+    if (state === 'check_failed') return '<span class="tag err" title="Could not run: the check itself hit an error, so nobody knows whether this is true. The error is below.">could not run</span>';
+    return '<span class="tag mute" title="Not checked: this server has no way to test this one. The reason is beside it. Not checked is not the same as ok.">not checked</span>';
+  }
+
+  function render(mode) {
+    const d = mode === 'calm' ? CALM : BUSY;
+    const n = { ok: 0, broken: 0, not_checked: 0, check_failed: 0 };
+    const rows = REG.map(([num, title, sev, cq, fix]) => {
+      const [state, detail, subjects, when] = d[num];
+      n[state]++;
+      const bad = state === 'broken' || state === 'check_failed';
+      return `<div class="vd ${state === 'ok' ? 'ok' : ''}">
+        <span class="st">${stateTag(state, sev)}</span>
+        <span class="ti"${TERM_TIP[num] ? ` title="${esc(TERM_TIP[num])}"` : ''}><span class="n">${String(num).padStart(2, '0')}</span>${esc(title)}</span>
+        <span class="when" title="When this check last ran.">${when ? esc(when) : 'never'}</span>
+        <div class="more">
+          ${bad ? `<div class="cq">${esc(cq)}</div>` : ''}
+          ${detail ? `<div class="dt">${esc(detail)}</div>` : ''}
+          ${subjects.map(s => `<div class="subj">${esc(s[0])}${s[1] ? ': ' + esc(s[1]) : ''}</div>`).join('')}
+          ${bad ? `<div class="fix">${esc(fix)}</div>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+    const meta = [
+      n.broken ? `<b style="color:var(--err)">${n.broken}</b> broken` : '',
+      n.check_failed ? `<b style="color:var(--err)">${n.check_failed}</b> could not run` : '',
+      `<b>${n.not_checked}</b> not checked`,
+      `<b style="color:var(--ok)">${n.ok}</b> ok`,
+    ].filter(Boolean).join(' &middot; ');
+    $('#counts').innerHTML = meta;
+    $('#inv-win').innerHTML = win('invariants', `<b>${REG.length}</b> checks`,
+      `<div class="scroll-y" style="max-height:calc(100vh - 150px)">${rows}</div>`);
+    $('#last-pass').textContent = mode === 'calm' ? '2 min ago' : '4 min ago';
+  }
+
+  CC.page({ page: 'invariants', onData: render });
+})();
+</script>
+</body>
+</html>

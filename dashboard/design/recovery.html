@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: get something back</title>
+<!-- The design bench (dashboard/design/README.md): Settings, RECOVERY.
+     Mirrors templates/admin_recovery.html + partials/recovery.html, rendered
+     from recovery.page_view: the protection lines that are not OK, the facts
+     about this NAS, the five PROBLEMS and their plans (a command is printed
+     only from confirmed facts, otherwise refused), the Resolve undo, the
+     restore preview and restore, the rehearsal and the restore history.
+     ?nosnap=1 shows the page when this server cannot read the snapshots.
+     Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/safety.css">
+</head>
+<body data-page="recovery">
+
+<div class="shell">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> GET SOMETHING BACK</span></h1>
+        <div class="sub" title="Every restore here copies files into a new folder. Nothing already on the server is replaced.">nothing on this page overwrites anything</div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <p class="lede">Something was deleted, overwritten or changed and you want it back. Start at <b>What went wrong?</b> below: where this server can do the recovery itself it says so, and where it cannot it prints the exact commands for THIS server, with its real names already in them.</p>
+      <p class="lede">Nothing on this page overwrites anything. A restore copies files into a new folder and leaves what is there alone, so picking the wrong snapshot costs disk space and nothing else.</p>
+
+      <div id="result-slot"></div>
+
+      <div class="cols-2">
+        <div id="prot-win"></div>
+        <div id="facts-win"></div>
+      </div>
+
+      <section class="win" id="wizard">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">what_went_wrong</span><span>&#9566;</span><span class="rule"></span><span>&#9552;&#9488;</span></div>
+        <div class="cols-2" style="gap:0">
+          <div class="choices" id="choices" role="radiogroup" aria-label="what went wrong" style="padding:8px 0; border-right:1px dashed var(--line)"></div>
+          <div id="plan" class="scroll-y plan-pane"></div>
+        </div>
+      </section>
+
+      <div id="restore-win"></div>
+
+      <section class="win">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">rehearse_a_restore</span><span>&#9566;</span><span class="rule"></span><span>&#9552;&#9488;</span></div>
+        <div class="body stack" style="gap:14px">
+          <p class="lede">Copies one real file out of the newest snapshot into a scratch folder, checks it came back exactly, deletes it again, and records the date on the protection page. It touches nothing else and takes a moment.</p>
+          <div><button class="key" type="button" id="drill" title="A practice run: brings one file back from the newest snapshot, checks it, deletes it again and records the date."><span class="t">Rehearse a restore now</span><span class="busy-t"><span class="spin"></span> rehearsing</span></button></div>
+          <div class="lines" id="drills"></div>
+        </div>
+      </section>
+
+      <div id="history-win"></div>
+
+      <div class="bench-var" title="Design bench only: switch between the states the real page can be in. Not part of the real page."><b>bench</b><span>snapshots:</span><a href="recovery.html" id="v-snap">readable</a><a href="recovery.html?nosnap=1" id="v-nosnap">this server cannot read them</a></div>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-back" id="confirm">
+  <section class="win dialog">
+    <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">restore</span><span>&#9566;</span><span class="rule"></span><span>&#9552;&#9488;</span></div>
+    <div class="body">
+      <div id="confirm-text"></div>
+      <div class="acts">
+        <button class="key quiet" type="button" data-close><span class="t">cancel</span></button>
+        <button class="key primary" type="button" id="confirm-go"><span class="t">Restore into a new folder</span></button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, win, toast } = CC;
+  const $ = s => document.querySelector(s);
+  const NOSNAP = new URLSearchParams(location.search).get('nosnap') === '1';
+  $(NOSNAP ? '#v-nosnap' : '#v-snap').setAttribute('aria-current', 'page');
+
+  const APPS_WHY = 'the NAS has 2 snapshot tasks and none of them covers tank/apps, so this server cannot confirm it is a dataset with snapshots behind it rather than a plain directory';
+  const SNAP_WHY = 'this deployment was never given a snapshot mount, so this server cannot read any snapshot (DASH_SNAPSHOT_DIR is not set on the dashboard container). Re-run the deploy, or mount the NAS\'s snapshots into the container read-only and set DASH_SNAPSHOT_DIR to that path.';
+
+  function facts(mode) {
+    const calm = mode === 'calm';
+    return {
+      platform: { label: 'which kind of NAS this is', value: 'TrueNAS', ok: true },
+      tree_dataset: { label: 'the project tree', value: 'tank/projects', ok: true },
+      apps_dataset: calm ? { label: 'this dashboard\'s own data', value: 'tank/apps', ok: true }
+        : { label: 'this dashboard\'s own data', value: 'tank/apps', ok: false, why: APPS_WHY,
+            fix: 'set up snapshots on the SETUP page, under \'Protect your data\', or correct the variable naming it' },
+      pool: { label: 'the storage pool the footage is on', value: 'tank', ok: true },
+      projects_dir: { label: 'where this dashboard reads the project tree', value: '/projects', ok: true },
+      snapshots: NOSNAP ? { label: 'snapshots this dashboard can read for itself', value: '', ok: false, why: SNAP_WHY,
+            fix: 're-run the deploy of this dashboard, which mounts them and sets DASH_SNAPSHOT_DIR; site.toml [tree] snapshot_dir names the directory where the deploy cannot work it out' }
+        : { label: 'snapshots this dashboard can read for itself', value: '48 snapshots, newest ccsync-20260925-1000', ok: true },
+      container: { label: 'what this dashboard\'s container is called', value: 'ccsync-dashboard', ok: true },
+    };
+  }
+
+  // A command block, or the refusal that replaces it (recovery._command_step).
+  function cmd(F, title, body, lines, needs) {
+    const missing = needs.filter(k => !F[k].ok);
+    if (missing.length) {
+      const why = missing.map(k => `${F[k].label}: ${F[k].why || 'not confirmed'} (${F[k].fix})`).join('; ');
+      return { kind: 'refusal', title: `${title}: this server will not print these commands`,
+        body: `Some of what these commands need is not something this server has been able to confirm, and it will not guess at it. ${why}. Until then, follow docs/BACKUP_RESTORE.md by hand with somebody who can check the answers on the NAS itself.` };
+    }
+    return { kind: 'command', title, body, commands: lines.map(l => l.replace(/\{(\w+)\}/g, (m, k) => F[k].value)) };
+  }
+  const STOP = { kind: 'action', title: 'Stop the fleet writing first', href: 'users.html',
+    body: 'Every editor\'s computer is still syncing. Press Stop all syncing on Settings, Users before you put anything back, or the computers will push the state you are undoing straight back up.' };
+
+  const PROBLEMS = [
+    ['project', 'Something on the server was deleted, overwritten or changed by mistake', 'One project, one folder or one file. The usual one.', F => {
+      const s = [
+        { kind: 'action', title: 'Restore it here, into a new folder beside the projects', href: '#restore',
+          body: 'Pick the project and a snapshot, see what is missing, and this server copies it back into a new folder called .restored-<date> at the top of the Projects folder on the server, under the project\'s own name. It is not sent to any editor\'s computer. Nothing that is there now is touched or overwritten, so picking the wrong snapshot costs disk space and nothing else. Then move what you want back yourself.' },
+        { kind: 'note', title: 'Look in the deleted-files folder first, if it was recent',
+          body: 'A file an editor overwrote or deleted in the last year is usually still in the .stversions folder inside that project on the server, with a timestamp in its name. That is a plain copy over the network share and needs nobody\'s help.' },
+      ];
+      if (!F.snapshots.ok) s.push(cmd(F, 'Restore it over SSH instead', 'This server cannot read the snapshots itself, so this is the manual route. Run it on the NAS, as an administrator, and change nothing else.',
+        ['ls /mnt/{tree_dataset}/.zfs/snapshot/', 'cp -a "/mnt/{tree_dataset}/.zfs/snapshot/<SNAPSHOT>/<PROJECT>/<FILE>" \\', '      "/mnt/{tree_dataset}/<PROJECT>/"', 'chown broll:editors "/mnt/{tree_dataset}/<PROJECT>/<FILE>"'],
+        ['platform', 'tree_dataset']));
+      return s;
+    }],
+    ['resolve', 'CC Sync changed clip paths in somebody\'s Resolve project and they are wrong', 'The clips point somewhere they should not, after a relink or a FIX ALL.', () => [
+      { kind: 'note', title: 'Undo it on that computer',
+        body: 'CC Sync writes down every clip path it changes, and the last change can be replayed backwards. Use Undo a clip-path change below, or on that computer open Settings from the CC Sync tray icon and press Undo last fix in the RESOLVE section.' },
+      { kind: 'note', title: 'If the undo cannot help',
+        body: 'CC Sync also exports a copy of the whole Resolve project before it changes anything. On that computer it is under .ccsync/resolve_edits, and it imports into Resolve as a separate project: nothing is overwritten, and the two can be compared. docs/RESOLVE_EDIT_SAFETY.md is the procedure.' },
+    ]],
+    ['dashboard_db', 'This dashboard has lost projects, editors or their ticks', 'The fleet page is empty or wrong, but the footage on the server is fine.', F => [
+      { kind: 'action', title: 'Put back one of this dashboard\'s own backups', href: 'packages.html',
+        body: 'This dashboard takes a backup of its databases before every update, and it can put one back by itself. That covers the case this almost always is: an update went wrong. It does NOT need a shell and it does not need the NAS.' },
+      { kind: 'note', title: 'What a restore of this database costs',
+        body: 'Footage is not in it. What is in it is who may sync what: projects, editors, computers and their ticks. After a restore, check the Projects page against the fleet: a tick made since the backup is not re-discoverable and has to be made again.' },
+      cmd(F, 'Restore it from a NAS snapshot instead', 'Only when the backups above are gone too. The container must be stopped first: it holds the file open, and copying over an open database is how a working one becomes a broken one.',
+        ['sudo docker stop {container}', 'sudo cp -a /mnt/{apps_dataset}/.zfs/snapshot/<SNAPSHOT>/ccsync-dashboard/data/dashboard.db \\', '           /mnt/{apps_dataset}/ccsync-dashboard/data/dashboard.db', 'sudo chown 3000:3000 /mnt/{apps_dataset}/ccsync-dashboard/data/dashboard.db', 'sudo docker start {container}'],
+        ['platform', 'apps_dataset', 'container']),
+    ]],
+    ['search_index', 'The b-roll or music search is empty or wrong', 'The index was published from a half-finished run.', () => [
+      { kind: 'note', title: 'The search index has its own rollback, and it takes a second',
+        body: 'Publishing an index leaves the previous one beside it on the server as .prev-<timestamp>, so nothing was lost when the bad one went live. Putting the previous one back needs no snapshot and no shell on the NAS.' },
+      { kind: 'note', title: 'Who can do it',
+        body: 'It is one command on the computer the index is published from: the studio computer that runs the indexing, not this server and not an editor\'s computer. If that is not yours, ask whoever publishes the b-roll or music search for you. Nothing else on this server is affected in the meantime: search shows the wrong results, and every other page is unaffected.' },
+      { kind: 'command', title: 'On the computer that publishes the index', body: '', commands: ['cd server', 'python publish_db.py --which broll --rollback --apply'] },
+    ]],
+    ['whole_tree', 'Everything on the server is wrong since a particular moment', 'The last resort, and the only one here that destroys anything.', F => [
+      STOP,
+      { kind: 'note', title: 'This is the one that cannot be undone',
+        body: 'Rolling the whole tree back destroys everything written since the snapshot, including snapshots taken after it. Restoring one project into a new folder (the first answer here) is almost always what is actually wanted, and it destroys nothing. Only carry on if everything since that moment really is expendable.' },
+      cmd(F, 'Roll the project tree back', 'On the NAS, as an administrator, with the fleet halted. Read the snapshot list first and be sure of the name.',
+        ['zfs list -t snapshot -r {tree_dataset}', 'zfs rollback -r {tree_dataset}@<SNAPSHOT>'], ['platform', 'tree_dataset']),
+      { kind: 'action', title: 'Afterwards: put back anything the rollback undid', href: 'home.html',
+        body: 'A project that was created after that moment is gone from the server with everything else written since. Create it again from the Projects page here: the folder is made with the right owner and permissions as it goes, which is what editors need to be able to write to it. Folders that existed in the snapshot come back exactly as they were and need nothing.' },
+      { kind: 'note', title: 'Then watch the first pass',
+        body: 'Let the fleet off hold and watch the first pass on the SYNC STATUS page. If an editor is refused access to a folder that came back, that one needs an administrator login on the NAS itself and nothing on this page can do it: ask whoever installed CC Sync for you.' },
+    ]],
+  ];
+
+  const KIND = {
+    action: '<span class="tag ok" title="A button in this dashboard does this step. No command line needed.">this server can do this</span>',
+    command: '<span class="tag warn" title="Someone with an administrator login on the NAS has to type these commands on the NAS itself.">on the NAS, as an administrator</span>',
+    refusal: '<span class="tag solid err" title="Not printed: the server is not sure of the names these commands need, so it will not guess and risk the wrong folder.">not printed</span>',
+    note: '',
+  };
+
+  const PROT = {
+    busy: [
+      ['broken', 'this dashboard\'s own data is on a snapshot schedule', 'the NAS has 2 snapshot tasks and none of them covers tank/apps'],
+      ['broken', 'the release signing key has been backed up', 'never recorded'],
+      ['broken', 'somebody has actually restored from a backup this year', 'last recorded 2025-06-14 by owen, more than a year ago'],
+      ['broken', 'files deleted on the server are kept for a year', '1 of 14 project folders keeps no deleted files'],
+      ['not_checked', 'deleted-file copies on editors\' computers are within their limit', 'TCHEN-RIG runs 0.9.49, which does not report its deleted-file copies'],
+      ['broken', 'somebody is told when this server finds a problem', 'no destination is configured'],
+    ],
+    calm: [],
+  };
+
+  const SNAPS = ['ccsync-20260925-1000', 'ccsync-20260925-0900', 'ccsync-daily-20260925', 'ccsync-daily-20260924', 'ccsync-daily-20260923', 'ccsync-daily-20260918'];
+  const PROJECTS = ['2025/FF4/CIA City', '2025/FF4/Kinmen', '2025/FF4/Taichung Drone Camp', '2026/FF5/Civil Defence', '2026/FF5/Elections', '2026/FF5/Repro Rights', '2026/Shorts/Night Market', '2026/Shorts/Typhoon Prep'];
+  const MISSING = ['Footage/Day_03/A-cam/A004_C012_0918FJ.mov', 'Footage/Day_03/A-cam/A004_C013_0918KL.mov', 'Footage/Day_03/A-cam/Proxy/A004_C012_0918FJ.mov', 'Footage/Day_03/A-cam/Proxy/A004_C013_0918KL.mov', 'Audio/Zoom/ZOOM0042_TR1.WAV', 'Audio/Zoom/ZOOM0042_TR2.WAV', 'Graphics/lower_thirds_v3.psd', 'Resolve/Elections_edit_v7.drp'];
+
+  let state = {};
+
+  function renderProt(mode) {
+    const rows = PROT[mode === 'calm' ? 'calm' : 'busy'];
+    const tag = s => s === 'broken' ? '<span class="tag solid err" title="Missing: this protection is not in place.">missing</span>' : s === 'check_failed' ? '<span class="tag err" title="The check itself hit an error.">could not run</span>' : '<span class="tag warn" title="Cannot verify: this server has no way to see it. Treat it as unprotected.">cannot verify</span>';
+    const missing = rows.filter(r => r[0] === 'broken').length;
+    const body = rows.length ? `<div class="scroll-y" style="max-height:340px">${rows.map(r => `<div class="vd no-when"><span class="st">${tag(r[0])}</span><span class="ti">${esc(r[1])}</span><div class="more"><div class="dt">${esc(r[2])}</div></div></div>`).join('')}</div>`
+      : '<div class="allclear"><span class="led"></span>Everything this server checks is in place.</div>';
+    $('#prot-win').innerHTML = win('protected_right_now', '',
+      `<div class="body" style="padding-bottom:0"><div class="lede" style="font-size:12px">${9 - rows.length} confirmed, ${missing} missing, ${rows.length - missing} this server cannot check. <a class="key quiet sm" href="protection.html" title="Opens the Protection page with every line and how to fix it."><span class="t">the full list</span></a></div></div>${body}`);
+  }
+
+  const FACT_TIP = {
+    'the project tree': 'A dataset is a named section of the NAS storage that can have its own snapshots. This is the one holding the projects.',
+    'this dashboard\'s own data': 'The NAS dataset holding this dashboard\'s settings and databases.',
+    'the storage pool the footage is on': 'A pool is the group of disks the datasets live on.',
+    'snapshots this dashboard can read for itself': 'A snapshot is a frozen copy of the storage at a moment in time. If this dashboard can read them, it can restore files itself.',
+    'what this dashboard\'s container is called': 'The container is the package this dashboard runs in on the NAS. Commands that stop or start it need its name.',
+  };
+  function renderFacts(F) {
+    const rows = Object.values(F).map(f => `<div class="vd no-when ${f.ok ? 'ok' : ''}">
+      <span class="st">${f.ok ? '<span class="tag ok" title="Confirmed: the server checked this itself.">confirmed</span>' : '<span class="tag warn" title="Not confirmed: the server could not check this, so it will not print commands that depend on it.">not confirmed</span>'}</span>
+      <span class="ti"${FACT_TIP[f.label] ? ` title="${esc(FACT_TIP[f.label])}"` : ''}>${esc(f.label)}${f.value ? `: <span style="color:var(--hi)">${esc(f.value)}</span>` : ''}</span>
+      ${f.ok ? '' : `<div class="more"><div class="cq">${esc(f.why)}</div>${f.fix ? `<div class="fix">${esc(f.fix)}</div>` : ''}</div>`}
+    </div>`).join('');
+    $('#facts-win').innerHTML = win('what_this_server_knows', '', `<div class="scroll-y" style="max-height:420px">${rows}</div>`);
+  }
+
+  function renderWizard() {
+    $('#choices').innerHTML = PROBLEMS.map(([k, q, d]) => `<div class="choice" role="radio" tabindex="0" data-problem="${k}" aria-checked="${state.problem === k}"><span class="g"></span><span class="q">${esc(q)}</span><span class="d">${esc(d)}</span></div>`).join('');
+    const p = PROBLEMS.find(x => x[0] === state.problem);
+    if (!p) {
+      $('#plan').innerHTML = '<div class="empty"><span class="glyph">&gt;_</span>Pick what went wrong, and what to do appears here.</div>';
+    } else {
+      const steps = p[3](state.F);
+      $('#plan').innerHTML = `<div class="body" style="padding-bottom:4px"><h2 class="sec" style="margin:0">what to do</h2><div class="lede" style="margin-top:6px">${esc(p[1])}</div></div>` +
+        steps.map(s => `<div class="plan-step">
+          <div class="h">${KIND[s.kind]}<span>${esc(s.title)}</span></div>
+          ${s.body ? `<div class="b">${esc(s.body)}</div>` : ''}
+          ${s.href ? `<div><a class="key sm" href="${s.href}" title="Opens the page where this step is done."><span class="t">go</span></a></div>` : ''}
+          ${s.commands ? `<pre class="code">${esc(s.commands.join('\n'))}</pre>` : ''}
+        </div>`).join('');
+    }
+    renderUndo();
+    $('#plan').scrollTop = 0;
+  }
+
+  // Round 2 ("nothing may shift"): the real page draws this section under
+  // the plan only when the Resolve problem is picked. Here it is drawn at
+  // the end of the plan pane itself, so picking a problem never moves the
+  // windows below the wizard.
+  function renderUndo() {
+    if (state.problem !== 'resolve') return;
+    const M = state.mode === 'calm' ? [] : [
+      { editor: 'jsmith', machine: 'JSMITH-STUDIO', journals: [
+        { id: 'j1', when: '2 h ago', project: 'FF5 Elections', clips: 38, asked: false },
+        { id: 'j2', when: 'yesterday', project: 'Night Market', clips: 4, asked: true }],
+        requests: [['1 h ago', 'owen', 'Night Market', 'waiting for JSMITH-STUDIO to report in and pick this up']] },
+      { editor: 'mrivera', machine: 'RIVERA-LAPTOP', journals: [
+        { id: 'j3', when: '3 days ago', project: 'Civil Defence', clips: 112, asked: false }],
+        requests: [['3 days ago', 'owen', 'Civil Defence', 'done: 112 clip paths put back']] },
+    ];
+    const body = M.length ? M.map(m => `
+      <div class="body" style="padding-bottom:6px"><b>${esc(m.editor)}</b> <span class="muted">${esc(m.machine)}</span></div>
+      <table class="tbl stack-sm"><thead><tr><th>when</th><th>project</th><th class="num" title="How many clips had their file path changed.">clips</th><th></th></tr></thead><tbody>
+      ${m.journals.map(j => `<tr><td>${esc(j.when)}</td><td><b>${esc(j.project)}</b></td><td class="num">${j.clips}</td><td><div class="acts">${j.asked
+        ? '<span class="tag warn" title="Undo asked: waiting for that computer to report in and pick it up. It needs that project open in its Resolve.">undo asked</span>'
+        : `<button class="key sm" type="button" data-undo="${esc(m.machine)}|${esc(j.project)}|${j.clips}" title="Puts the clip paths back the way they were, on that computer, when it next reports."><span class="t">Undo this change</span></button>`}</div></td></tr>`).join('')}
+      </tbody></table>
+      <div class="body lines" style="padding-top:8px">${m.requests.map(r => `<div><span class="t">${esc(r[0])}</span>${esc(r[1])} asked to undo ${esc(r[2])}: ${esc(r[3])}</div>`).join('')}</div>`).join('<hr style="border:0;border-top:1px dashed var(--line)">')
+      : '<div class="body"><p class="lede">No computer has told this server about a clip-path change it could undo. On the computer itself, Undo last fix is in the RESOLVE section of its tray\'s Settings.</p></div>';
+    $('#plan').insertAdjacentHTML('beforeend', `<div class="body" style="padding-bottom:0;border-top:1px dashed var(--line)"><h2 class="sec" style="margin:0 0 8px">undo a clip-path change</h2><p class="lede">Every time CC Sync changes where Resolve looks for clips, that computer writes the change down and tells this server. Undoing one puts those clip paths back on that computer, the same as Undo last fix in its tray's Settings. It happens when the computer next reports, and only while that project is open in its Resolve.</p></div>${body}`);
+  }
+
+  function renderRestore() {
+    let body;
+    if (!state.F.snapshots.ok) {
+      body = `<div class="body"><div class="note warn"><span class="grow"><b>This server cannot read this NAS's snapshots, so it cannot put anything back by itself.</b> ${esc(SNAP_WHY)}</span></div></div>`;
+    } else {
+      const pv = state.preview;
+      body = `<div class="body stack" style="gap:14px">
+        <p class="lede">Pick a project and a snapshot. Whatever is missing is copied into a new folder called <code style="color:var(--hi)">.restored-&lt;date&gt;</code> at the top of the Projects folder on the server, under the project's own name. It is not sent to any editor's computer. Nothing that is there now is changed, moved or deleted, so choosing the wrong snapshot costs disk space and nothing else.</p>
+        <div class="inline" style="gap:10px">
+          <label class="pick" style="flex:1 1 260px"><span>project</span><select id="r-proj">${PROJECTS.map(p => `<option ${pv && pv.label === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select></label>
+          <label class="pick" style="flex:1 1 220px" title="A snapshot is a frozen copy of the storage from that moment. The name carries its date and time."><span>snapshot</span><select id="r-snap">${SNAPS.map(s => `<option ${pv && pv.snapshot === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label>
+          <button class="key" type="button" id="r-see" style="align-self:end" title="Compares the snapshot with the server now and lists what is missing. Nothing is copied yet."><span class="t">See what is missing</span><span class="busy-t"><span class="spin"></span> comparing</span></button>
+        </div>
+        ${pv ? `
+        <div style="border-top:1px dashed var(--line); padding-top:14px" class="stack">
+          <div style="font-size:13px"><b>${esc(pv.label)}</b> in <span class="hi">${esc(pv.snapshot)}</span>:
+            <b style="color:var(--warn)">${pv.missing}</b> files missing from the server now, <b>${pv.changed}</b> that are there but different, <span class="dim">${pv.same.toLocaleString('en')} the same.</span></div>
+          <div class="lede" style="font-size:12px">${pv.earlier ? 'This snapshot was already restored on 2026-09-24 03:12 UTC: 8 files went into .restored-2026-09-24/Elections on the server. ' : ''}Nothing here is overwritten. Whatever you restore is copied into a new .restored folder at the top of the Projects folder on the server, under the project's own name, and the files that are there now are left exactly as they are.</div>
+          <pre class="code" style="max-height:200px;overflow-y:auto">${MISSING.map(m => '<span style="color:var(--ok)">+</span> ' + esc(m)).join('\n')}\n<span class="t" style="color:var(--muted)">... and ${pv.missing - MISSING.length} more</span></pre>
+          <label class="check"><input type="checkbox" id="r-changed"><span class="g"></span><span class="l">also bring back the ones that are there but different</span></label>
+          <div><button class="key primary" type="button" id="r-restore" title="Copies the missing files into a new .restored folder. You are asked first."><span class="t">Restore into a new folder</span><span class="busy-t"><span class="spin"></span> copying the files back</span></button></div>
+        </div>` : ''}
+        ${state.result ? `<div class="note ok"><span class="grow">Restored <b>${state.result.files}</b> files into <b>${esc(state.result.where)}</b>, at the top of the Projects folder on the server. A name that starts with a dot may be hidden in Explorer or Finder until hidden items are shown.</span></div>` : ''}
+      </div>`;
+    }
+    $('#restore-win').innerHTML = win('put_files_back', '', body).replace('<section class="win ', '<section id="restore" class="win ');
+  }
+
+  function renderDrills() {
+    const D = state.drills;
+    $('#drills').innerHTML = D.length ? D.slice(0, 5).map(d => `<div>${d.ok ? '<span class="tag ok" title="The file came back exactly as it was in the snapshot.">worked</span>' : '<span class="tag err" title="The file that came back did not match the snapshot. Backups need checking.">failed</span>'} <span class="t" style="margin-left:8px">${esc(d.when)}</span>from ${esc(d.snap)}: ${esc(d.detail)}</div>`).join('') : '';
+  }
+
+  function renderHistory() {
+    const H = state.history;
+    $('#history-win').innerHTML = H.length ? win('what_has_been_put_back', `<b>${H.length}</b>`,
+      `<div class="body lines">${H.slice(0, 10).map(r => `<div><span class="t">${esc(r[0])}</span><b>${esc(r[1])}</b>: ${r[2]} file${r[2] === 1 ? '' : 's'} from ${esc(r[3])} into ${esc(r[4])}</div>`).join('')}</div>`) : '';
+  }
+
+  function render(mode) {
+    const calm = mode === 'calm';
+    state = {
+      mode, F: facts(mode),
+      problem: calm ? '' : 'dashboard_db',
+      preview: calm || NOSNAP ? null : { label: '2026/FF5/Elections', snapshot: 'ccsync-daily-20260924', missing: 12, changed: 3, same: 4120, earlier: true },
+      result: null,
+      drills: calm ? [{ ok: true, when: '7 days ago', snap: 'ccsync-daily-20260918', detail: 'restored one file out of this snapshot and it came back byte for byte' }]
+        : [{ ok: true, when: '3 h ago', snap: 'ccsync-20260925-0700', detail: 'restored one file out of this snapshot and it came back byte for byte' },
+           { ok: false, when: '2025-06-14', snap: 'ccsync-daily-20250613', detail: 'the file that came back is NOT the file in the snapshot' }],
+      history: calm ? [] : [['1 day ago', 'owen', 8, 'ccsync-daily-20260923', '.restored-2026-09-24/Elections'], ['9 days ago', 'owen', 1, 'ccsync-20260916-1400', '.restored-2026-09-16/Night Market']],
+    };
+    renderProt(mode); renderFacts(state.F); renderWizard(); renderRestore(); renderDrills(); renderHistory();
+  }
+
+  document.addEventListener('click', e => {
+    const c = e.target.closest('[data-problem]');
+    if (c) { state.problem = c.dataset.problem; renderWizard(); return; }
+    if (e.target.closest('#r-see')) {
+      const b = e.target.closest('#r-see'); b.classList.add('busy');
+      setTimeout(() => { state.preview = { label: $('#r-proj').value, snapshot: $('#r-snap').value, missing: 12, changed: 3, same: 4120, earlier: false }; state.result = null; renderRestore(); }, 900);
+      return;
+    }
+    if (e.target.closest('#r-restore')) {
+      const pv = state.preview, ch = $('#r-changed').checked;
+      $('#confirm-text').innerHTML = `<p class="lede">${ch ? `Copy ${pv.missing} missing files, and the ${pv.changed} different ones, into a new folder?` : `Copy ${pv.missing} missing files into a new folder?`} Nothing there now changes.</p>`;
+      $('#confirm').classList.add('open'); return;
+    }
+    if (e.target.closest('#confirm-go')) {
+      $('#confirm').classList.remove('open');
+      const b = $('#r-restore'); b.classList.add('busy');
+      setTimeout(() => {
+        const pv = state.preview, n = pv.missing + ($('#r-changed').checked ? pv.changed : 0), name = pv.label.split('/').pop();
+        state.result = { files: n, where: `.restored-2026-09-25/${name}` };
+        state.history.unshift(['just now', 'owen', n, pv.snapshot, state.result.where]);
+        renderRestore(); renderHistory();
+      }, 1600);
+      return;
+    }
+    if (e.target.closest('[data-close]') || e.target.id === 'confirm') { $('#confirm').classList.remove('open'); return; }
+    if (e.target.closest('#drill')) {
+      const b = $('#drill'); b.classList.add('busy');
+      setTimeout(() => { b.classList.remove('busy'); state.drills.unshift({ ok: true, when: 'just now', snap: 'ccsync-20260925-1000', detail: 'restored one file out of this snapshot and it came back byte for byte' }); renderDrills(); toast('rehearsal worked: recorded on the protection page'); }, 1400);
+      return;
+    }
+    const u = e.target.closest('[data-undo]');
+    if (u) {
+      const [machine, project, clips] = u.dataset.undo.split('|');
+      if (confirm(`Put back the ${clips} clip paths CC Sync changed in ${project} on ${machine}?`)) {
+        u.outerHTML = '<span class="tag warn" title="Undo asked: waiting for that computer to report in and pick it up.">undo asked</span>';
+        toast(`undo asked: ${machine} picks it up when it next reports`);
+      }
+    }
+  });
+  document.addEventListener('keydown', e => {
+    const c = e.target.closest && e.target.closest('[data-problem]');
+    if (c && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); c.click(); }
+  });
+
+  CC.page({ page: 'recovery', onData: render });
+})();
+</script>
+</body>
+</html>

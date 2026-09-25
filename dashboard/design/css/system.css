@@ -1,0 +1,215 @@
+/* Builder "system" (2026-09-25): the few pieces site / alerts / health /
+ * history need that the shared sheets do not have. Loaded after
+ * cc-terminal.css and cc-components.css by those four pages only.
+ */
+
+/* the answer a save / import / undo gives, on the line beside its key */
+.res { font-size: 12px; color: var(--text-2); }
+.res.ok { color: var(--ok); }
+.res.bad { color: var(--err); }
+.res.bad::before { content: "\25B2  "; }
+
+/* a row of keys at the foot of a form or window */
+.foot-keys { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 4px; }
+.body.split { border-top: 1px dashed var(--line); }
+
+/* a collapsible group, drawn like a tree branch */
+details.fold > summary {
+  list-style: none;
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 10px var(--pad);
+  font-size: 12px; letter-spacing: 1px;
+  color: var(--text);
+  cursor: pointer;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: "\25B8"; color: var(--red); width: 1ch; }
+details.fold[open] > summary::before { content: "\25BE"; color: var(--hi); }
+details.fold > summary:hover { background: var(--row-hover); }
+details.fold > summary .dim { letter-spacing: 0; font-size: 12px; }
+details.fold + details.fold { border-top: 1px dashed var(--line); }
+
+/* a checks list: one line each, two columns on a desk, one on a phone */
+.checks { columns: 2; column-gap: 32px; padding: 10px var(--pad); font-size: 13px; }
+.checks li { list-style: none; break-inside: avoid; display: grid; grid-template-columns: 13ch minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 3px 0; color: var(--text-2); }
+.checks li .tag { justify-self: start; }
+
+/* a health / notice row's source label and its extra lines */
+.prob .src { color: var(--muted); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+.prob .subj { grid-column: 2 / -1; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.prob .seen { color: var(--muted); font-size: 12px; }
+.bands { display: flex; gap: 8px 16px; flex-wrap: wrap; }
+
+/* a digest group heading inside the send log */
+.tbl tr.grp td { color: var(--muted); font-size: 12px; padding-top: 14px; border-top: 1px solid var(--line); }
+.tbl tr.grp td b { color: var(--hi); font-weight: 500; }
+.tbl td.detail { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; max-width: 60ch; }
+.tbl td.detail .k { color: var(--text-2); }
+
+/* the what-is-running lines */
+.run-line { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+.run-line .lbl { color: var(--muted); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; min-width: 24ch; }
+.run-sub { margin-left: calc(24ch + 10px); color: var(--text-2); font-size: 12px; }
+
+@media (max-width: 760px) {
+  .checks { columns: 1; }
+  .run-line .lbl { min-width: 0; flex-basis: 100%; }
+  .run-sub { margin-left: 12px; }
+  .prob .subj { grid-column: 1; }
+  .tbl td.detail { max-width: none; }
+}
+
+/* [hidden] must win over .stack / .win display rules (tab panels) */
+[hidden] { display: none !important; }
+/* a problem row whose severity word is longer than "error" */
+.prob.wide { grid-template-columns: 17ch minmax(0, 1fr) auto; }
+@media (max-width: 760px) { .prob.wide { grid-template-columns: minmax(0, 1fr); } }
+/* a long bar meta truncates instead of pushing past the frame on a phone */
+@media (max-width: 760px) {
+  .bar .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .bar .rule { min-width: 8px; }
+}
+
+/* ================================================================
+   Round 2 (owner, 2026-09-25)
+   ================================================================ */
+
+/* A key whose label changes keeps its width: pages call hold(key) before
+   adding .busy, which pins min-width; .w-* reserve a width up front for keys
+   whose label swaps (install / update and the like). */
+.key.w-10 { min-width: 13ch; justify-content: center; }
+.key.w-14 { min-width: 17ch; justify-content: center; }
+.key.w-18 { min-width: 21ch; justify-content: center; }
+
+/* a tab strip's panels share one host; show() pins its min-height so a short
+   tab never pulls the page up under the reader */
+.tab-host { min-height: 60vh; }
+
+/* ---------------------------------------------------- AI providers */
+/* who answers what: one line per thing on this server that asks an AI */
+.who .ln { display: grid; grid-template-columns: 30ch minmax(0, 1fr); gap: 4px 16px; align-items: baseline; padding: calc(10px * var(--d)) var(--pad); border-top: 1px dashed var(--line); font-size: 13px; }
+.who .ln:first-child { border-top: 0; }
+.who .ln .k { color: var(--text); }
+.who .ln .k small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+.who .ln .v { color: var(--text-2); display: flex; gap: 4px 10px; align-items: baseline; flex-wrap: wrap; min-width: 0; }
+.who .ln .v b { color: var(--text); }
+.who .ln .v .why { color: var(--muted); font-size: 12px; }
+.who .ln .v.bad, .who .ln .v.bad b { color: var(--err); }
+.who .pinrow { display: grid; grid-template-columns: 30ch minmax(0, 420px) minmax(0, 1fr); gap: 6px 16px; align-items: center; padding: calc(10px * var(--d)) var(--pad); border-top: 1px solid var(--line); font-size: 13px; }
+.who .pinrow .lbl { color: var(--text); }
+.who .pinrow .hint { margin: 0; }
+
+/* the providers that are set up: two lines each, always, so a test result
+   or a state change never makes a row taller */
+.plist { min-height: calc(3 * 62px * var(--d)); }
+.prow {
+  position: relative;
+  display: grid;
+  grid-template-columns: 3ch minmax(0, 20ch) 17ch minmax(0, 1fr) auto;
+  grid-template-areas: "rk nm st dt mg";
+  gap: 2px 14px; align-items: center;
+  padding: calc(10px * var(--d)) var(--pad);
+  border-top: 1px dashed var(--line);
+  font-size: 13px;
+}
+.prow:first-child { border-top: 0; }
+.prow.new { animation: prow-new 1.8s ease-out; }
+@keyframes prow-new { from { background: rgb(var(--hi-rgb) / 0.14); } to { background: transparent; } }
+.prow .rk { grid-area: rk; color: var(--red); font-variant-numeric: tabular-nums; align-self: start; padding-top: 1px; }
+.prow .nm { grid-area: nm; min-width: 0; }
+.prow .nm b { color: var(--text); font-weight: 700; }
+.prow .nm small, .prow .st small { display: block; color: var(--muted); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; line-height: 1.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prow .st { grid-area: st; min-width: 0; }
+.prow .st small { text-transform: none; letter-spacing: 0; font-size: 12px; }
+.prow .st small.ok { color: var(--ok); }
+.prow .st small.bad { color: var(--err); }
+.prow .dt { grid-area: dt; min-width: 0; color: var(--text-2); }
+.prow .dt > span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prow .dt .use { color: var(--muted); font-size: 12px; }
+.prow .dt .use b { color: var(--hi); font-weight: 500; }
+.prow .mg { grid-area: mg; }
+.plist .none { padding: calc(22px * var(--d)) var(--pad); color: var(--text-2); font-size: 13px; display: grid; gap: 6px; }
+.plist .none b { color: var(--text); }
+
+/* the manage menu: a short list under its key */
+.mng {
+  position: absolute; right: var(--pad); top: calc(100% - 8px); z-index: 60;
+  width: 300px; max-width: calc(100vw - 48px);
+  display: none;
+  padding: 6px;
+  background: var(--win-solid);
+  border: 1px solid var(--red);
+  border-left: 3px solid var(--hi);
+  box-shadow: 0 10px 28px rgb(0 0 0 / 0.65);
+}
+.mng.open { display: grid; }
+.mng button {
+  display: grid; gap: 1px; text-align: left;
+  background: none; border: 0; padding: 7px 8px;
+  color: var(--text); font: inherit; font-size: 13px; cursor: pointer;
+}
+.mng button:hover, .mng button:focus-visible { background: var(--row-hover); color: var(--hi); outline: none; }
+.mng button small { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.mng button.danger { color: var(--err); }
+.mng .sep { border-top: 1px dashed var(--line); margin: 4px 0; }
+.mng .fixed { padding: 7px 8px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+
+/* add new: the key, then the picker, then that provider's own few steps */
+.addrow { display: flex; gap: 8px 14px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.pick { display: grid; border: 1px solid var(--line); }
+.pick button {
+  display: grid; grid-template-columns: 3ch minmax(0, 20ch) minmax(0, 1fr) 3ch;
+  gap: 2px 14px; align-items: baseline; text-align: left;
+  background: none; border: 0; border-top: 1px dashed var(--line);
+  padding: 11px 12px; color: var(--text-2); font: inherit; font-size: 13px; cursor: pointer;
+}
+.pick button:first-child { border-top: 0; }
+.pick button:hover, .pick button:focus-visible { background: var(--row-hover); outline: none; }
+.pick .rk { color: var(--red); }
+.pick .nm b { color: var(--text); }
+.pick .nm small { display: block; color: var(--muted); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+.pick .ds { color: var(--text-2); }
+.pick .ds small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.pick .go { color: var(--red); justify-self: end; }
+.pick button:hover .go { color: var(--hi); }
+
+.wz { border: 1px dashed var(--red); background: #050202; padding: 14px 16px; display: grid; gap: 12px; }
+.wz-head { display: flex; gap: 8px 18px; align-items: baseline; flex-wrap: wrap; padding-bottom: 10px; border-bottom: 1px dashed var(--line); }
+.wz-head h3 { font: 700 13px/1.4 var(--mono); color: var(--text); letter-spacing: 1px; text-transform: uppercase; }
+.wz-head h3 .p { color: var(--red); margin-right: 6px; }
+/* each step's body keeps one height, so the keys under it stay put */
+.wz-body { display: grid; gap: 10px; align-content: start; min-height: calc(340px * var(--d)); }
+.wz-body h4 { font: 700 13px/1.4 var(--mono); color: var(--text); display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.wz-body h4 .n { color: var(--red); font-weight: 400; }
+.wz-body p, .wz-body li { color: var(--text-2); font-size: 13px; max-width: 86ch; }
+.wz-body p b, .wz-body li b { color: var(--text); }
+.wz-body ol { padding-left: 3ch; display: grid; gap: 4px; }
+.wz-body .ctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.wz-body .ctl .inp { flex: 1 1 260px; max-width: 460px; width: auto; }
+.wz-body .ctl .sel { width: auto; min-width: 34ch; }
+.wz-body .meter { color: var(--hi); letter-spacing: 1px; font-size: 13px; white-space: nowrap; overflow: hidden; }
+.wz-body .out { font-size: 13px; min-height: 1.6em; color: var(--muted); }
+.wz-body .out.ok { color: var(--ok); }
+.wz-body .out.bad { color: var(--err); }
+.code-big { font-family: var(--disp); font-size: 22px; letter-spacing: 4px; color: var(--hi); }
+.wz-foot { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding-top: 10px; border-top: 1px dashed var(--line); }
+.wz-foot .grow { flex: 1; }
+.wz details.fold > summary { padding: 8px 0; flex-wrap: nowrap; }
+.wz details.fold > summary > span { flex: 1; min-width: 0; }
+
+.cli-line { display: flex; gap: 6px 12px; align-items: baseline; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.cli-line b { color: var(--text-2); font-weight: 500; }
+
+@media (max-width: 760px) {
+  .who .ln, .who .pinrow { grid-template-columns: minmax(0, 1fr); }
+  .prow { grid-template-columns: 3ch minmax(0, 1fr) auto; grid-template-areas: "rk nm mg" ". st st" ". dt dt"; }
+  .prow .st { display: flex; gap: 12px; align-items: baseline; }
+  .prow .st small { display: inline; }
+  .prow .dt > span { white-space: normal; }
+  .pick button { grid-template-columns: 3ch minmax(0, 1fr) 2ch; }
+  .pick .ds { grid-column: 2 / 3; }
+  .pick .go { grid-row: 1; grid-column: 3; }
+  .wz { padding: 12px; }
+  .wz-body { min-height: calc(480px * var(--d)); }
+  .wz-body .ctl .sel { min-width: 0; width: 100%; }
+}

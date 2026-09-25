@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: offline</title>
+<!-- The design bench (dashboard/design/README.md): OFFLINE. Mirrors
+     templates/offline.html (ui's /offline), the page the service worker
+     paints from its cache when a navigation cannot reach the server. It is
+     PRECACHED, so it says nothing that could be stale: no counts, no fleet
+     state, no name. Retry is a plain link to the URL that failed (the real
+     one works with no script loaded). Busy and calm are the same page. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/safety.css">
+</head>
+<body data-page="offline">
+
+<div class="shell">
+  <div class="page gate">
+    <section class="win">
+      <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">offline</span><span>&#9566;</span><span class="rule"></span><span class="meta" title="This phone has no connection to the dashboard: no network, or the dashboard is not answering."><span class="led off"></span> no connection</span><span>&#9552;&#9488;</span></div>
+      <div class="body stack" style="gap:18px">
+        <div class="empty" style="padding:8px 0 0"><span class="glyph">- - -</span></div>
+        <p class="lede">This phone cannot reach the dashboard right now. Nothing here is live: check the network, then try again.</p>
+        <a class="key primary wide" href="" title="Tries to reach the dashboard again." onclick="if (location.pathname.endsWith('/offline')) { location.href = '/'; return false; }"><span class="t">Retry</span></a>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+  CC.page({ page: 'offline', bare: true });
+</script>
+</body>
+</html>

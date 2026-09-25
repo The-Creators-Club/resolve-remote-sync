@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: music</title>
+<!-- The design bench (dashboard/design/README.md): the music library,
+     mounted at /music by the dashboard (dashboard music.py). Mirrors
+     music/web/static/index.html + app.js (search, the filter rail, the
+     track list and its player pane) and ingest.js (the add music drawer).
+     Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/apps.css">
+<style>
+  .page.music { max-width: 1500px; }
+  .searchrow { display: grid; grid-template-columns: minmax(0, 1fr) 170px auto auto; gap: 10px; align-items: center; }
+  @media (max-width: 760px) { .searchrow { grid-template-columns: minmax(0, 1fr) auto; } .searchrow .prompt-in { grid-column: 1 / -1; } .ex .chip:nth-of-type(n+4) { display: none; } }
+  @media (max-width: 1100px) { .app2 > main { order: -1; } }
+  .axis { display: grid; gap: 2px; margin-top: 10px; }
+  .axis .lab { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--text-2); }
+  .axis .lab .val { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .axis .lab .val.on { color: var(--hi); }
+  .range { display: grid; grid-template-columns: 5ch minmax(0, 1fr) minmax(0, 1fr); gap: 8px; align-items: center; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+  .range .inp { min-height: 32px; padding: 4px 8px; font-size: 12px; }
+  .rhead { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; padding: 10px var(--pad); border-bottom: 1px dashed var(--line); font-size: 13px; color: var(--text-2); }
+  .rhead .h { color: var(--text); font-weight: 700; }
+  .sortrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px var(--pad); border-bottom: 1px dashed var(--line); font-size: 12px; color: var(--muted); }
+  .sortrow .sel { width: auto; min-height: 30px; padding: 3px 28px 3px 8px; font-size: 12px; }
+  .ex { display: flex; flex-wrap: wrap; gap: 6px; }
+  .rstat { display: inline-flex; align-items: center; gap: 8px; }
+</style>
+</head>
+<body data-page="music">
+
+<div class="shell">
+  <div class="page one music">
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> MUSIC</span></h1>
+        <div class="sub" id="sub"></div>
+      </div>
+      <div class="acts">
+        <button class="key primary" type="button" data-drawer="ingest" title="Add music to the library, and see the batches already running"><span class="t">Add music</span><span class="kbd">+</span></button>
+      </div>
+    </div>
+
+    <section class="win">
+      <div class="bar"><span>┌─╡</span><span class="t">describe_the_vibe</span><span>╞</span><span class="rule"></span><span class="meta hide-sm" id="rstatus"></span><span>═┐</span></div>
+      <div class="body" style="display:grid;gap:12px">
+        <div class="searchrow">
+          <div class="prompt-in"><span class="p">&gt;</span><input id="q" type="search" autocomplete="off" placeholder="describe the vibe... tense driving synth pulse, warm nostalgic piano, hopeful build for a montage" aria-label="describe the vibe"><kbd>/</kbd></div>
+          <select class="sel" id="pool" title="Match any single 10 s moment, or the track's overall character"><option value="max">any moment</option><option value="mean">whole track</option></select>
+          <button class="key primary" type="button" id="go" title="Finds tracks that sound like your description."><span class="t">Search</span><span class="kbd">&#9166;</span></button>
+          <button class="key quiet" type="button" id="clear" title="Empties the search and every filter, and lists the whole library."><span class="t">clear</span></button>
+        </div>
+        <div class="chips ex" id="examples"><span class="lbl">try</span></div>
+      </div>
+    </section>
+
+    <div class="app2">
+      <aside class="stack">
+        <section class="win">
+          <div class="bar"><span>┌─╡</span><span class="t">feel</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+          <div class="body">
+            <div class="hint" style="margin:0" title="Each slider keeps only the tracks furthest towards its right-hand word. Further right keeps fewer.">One at a time: moving a slider clears the others.</div>
+            <div id="axes"></div>
+          </div>
+        </section>
+        <section class="win">
+          <div class="bar"><span>┌─╡</span><span class="t">tempo_and_length</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+          <div class="body">
+            <div class="range"><span title="Beats per minute: how fast the music is. 60 to 90 is slow, 120 and up is driving.">BPM</span><input class="inp" type="number" placeholder="min" min="0" max="300" id="bpmMin"><input class="inp" type="number" placeholder="max" min="0" max="300" id="bpmMax"></div>
+            <div class="range"><span title="Track length in seconds.">secs</span><input class="inp" type="number" placeholder="min" min="0"><input class="inp" type="number" placeholder="max" min="0"></div>
+            <button class="key sm" type="button" data-busy="filters applied" title="Keeps only tracks inside these tempo and length limits."><span class="t">Apply</span></button>
+            <label class="check" style="margin-top:12px;display:flex" id="unknownRow"><input type="checkbox" id="includeUnknown"><span class="g"></span><span class="l">Include tracks with no BPM or length <span class="hint" style="display:block;margin:2px 0 0" id="unknownCount"></span></span></label>
+          </div>
+        </section>
+        <div class="stack" id="facets"></div>
+      </aside>
+
+      <main class="win">
+        <div class="bar"><span>┌─╡</span><span class="t">tracks</span><span>╞</span><span class="rule"></span><span class="meta" id="tcount"></span><span>═┐</span></div>
+        <div class="sortrow">
+          <label for="sort">sort</label>
+          <select class="sel" id="sort" title="How the list below is ordered"><option value="filename">filename</option><option value="newest">newest</option><option value="bpm">bpm</option><option value="duration">length</option></select>
+          <span id="sortnote" hidden>search results are in order of match</span>
+        </div>
+        <div class="rhead" id="rhead"></div>
+        <div id="list" class="scroll-y" style="max-height:880px"></div>
+      </main>
+    </div>
+  </div>
+</div>
+
+<div class="drawer-back" id="dback"></div>
+<aside class="drawer win" id="dr-ingest" aria-label="Add music to the library">
+  <div class="bar"><span>┌─╡</span><span class="t">add_music</span><span>╞</span><span class="rule"></span><button type="button" class="act" data-close-drawer title="Closes this panel. Anything running keeps running.">close</button><span>═┐</span></div>
+  <div class="body" id="ingest-body"></div>
+</aside>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, toast, led } = CC;
+  const $ = s => document.querySelector(s);
+  const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+  const EXAMPLES = ['tense driving synth pulse', 'warm nostalgic piano', 'hopeful build for a montage payoff', 'sparse ominous drone under an interview', 'triumphant orchestral finale', 'playful quirky plucked strings', 'traditional east asian strings', 'gritty industrial percussion'];
+  const AXES = [['arousal', 'calm', 'intense'], ['valence', 'dark', 'bright'], ['tension', 'resolved', 'tense'], ['organic', 'electronic', 'acoustic']];
+  const FACETS = {
+    genre: [['orchestral', 212], ['ambient', 188], ['electronic', 164], ['synthwave', 61], ['post-rock', 58], ['east asian', 44], ['trailer epic', 39], ['lo-fi', 37], ['folk acoustic', 33], ['classical', 29]],
+    mood: [['tense', 141], ['ominous', 98], ['hopeful', 131], ['uplifting', 119], ['melancholy', 104], ['nostalgic', 77], ['mysterious', 71], ['urgent', 66], ['peaceful', 58], ['triumphant', 41]],
+    instrument: [['strings', 244], ['synth', 219], ['piano', 187], ['percussion', 176], ['guitar', 92], ['erhu', 18], ['guzheng', 14]],
+    use_case: [['documentary underscore', 301], ['montage', 142], ['opening titles', 64], ['interview bed', 88], ['chase', 31], ['end credits', 27]],
+  };
+  // [name, secs, bpm, key, genre, moods, instrument, use, match]
+  const TRACKS = [
+    ['Pulse_Grid_120_Am.wav', 184, 120, 'A minor', 'synthwave', ['tense', 'urgent'], 'synth', 'chase', 91],
+    ['Night_Transit_loop_A.wav', 142, 118, 'C minor', 'electronic', ['tense', 'mysterious'], 'synth', 'montage', 88],
+    ['Undertow_ticking_bed.mp3', 211, 96, 'D minor', 'ambient', ['tense', 'ominous'], 'percussion', 'documentary underscore', 84],
+    ['CountdownDrive_Full.wav', 157, 128, 'F minor', 'trailer epic', ['urgent', 'tense'], 'percussion', 'chase', 81],
+    ['Wire_and_Neon_30s.wav', 30, 124, 'E minor', 'synthwave', ['urgent', 'uplifting'], 'synth', 'opening titles', 77],
+    ['Cold_Room_drone.flac', 263, null, null, 'ambient', ['ominous', 'dark'], 'synth', 'interview bed', 74],
+    ['Harbour_Lights_arp.mp3', 176, 110, 'G minor', 'electronic', ['nostalgic', 'tense'], 'synth', 'montage', 71],
+    ['Last_Train_Out_stem_mix.wav', 199, 132, 'B minor', 'post-rock', ['urgent', 'hopeful'], 'guitar', 'montage', 69],
+    ['Signal_Loss_ambient.mp3', 305, 84, 'C# minor', 'ambient', ['mysterious', 'tense'], 'synth', 'documentary underscore', 66],
+    ['Typhoon_Warning_hits.wav', 95, 140, 'D minor', 'trailer epic', ['tense', 'dark'], 'percussion', 'chase', 63],
+  ];
+  const CALM_TRACKS = [
+    ['Afternoon_Tea_piano.mp3', 148, 76, 'F major', 'classical', ['peaceful', 'nostalgic'], 'piano', 'interview bed'],
+    ['Alishan_Morning_guzheng.wav', 201, 68, 'D major', 'east asian', ['peaceful', 'hopeful'], 'guzheng', 'documentary underscore'],
+    ['Arrival_strings_swell.wav', 132, 90, 'C major', 'orchestral', ['uplifting', 'hopeful'], 'strings', 'opening titles'],
+    ['Backstreet_lofi_beat.mp3', 164, 84, 'A minor', 'lo-fi', ['nostalgic', 'melancholy'], 'piano', 'montage'],
+    ['Blue_Hour_ambient_pad.flac', 244, null, null, 'ambient', ['peaceful', 'mysterious'], 'synth', 'interview bed'],
+    ['Bridge_of_Lanterns_erhu.wav', 187, 72, 'E minor', 'east asian', ['melancholy', 'nostalgic'], 'erhu', 'documentary underscore'],
+    ['Carry_the_Flag_brass.wav', 118, 104, 'B-flat major', 'orchestral', ['triumphant', 'uplifting'], 'strings', 'end credits'],
+    ['Coastline_fingerpick.mp3', 173, 92, 'G major', 'folk acoustic', ['hopeful', 'peaceful'], 'guitar', 'montage'],
+  ];
+  const BATCHES = [
+    ['run', 'working', 'JSMITH-STUDIO', 'when idle', '4/9 done &middot; 3 in the library &middot; 0 failed &middot; 1 duplicate', '2 min ago'],
+    ['warn', 'waiting for your computer', 'JSMITH-MBP', 'when idle', '0/3 done &middot; 0 in the library &middot; 0 failed &middot; 0 duplicate', '3 h ago'],
+    ['bad', 'finished, some tracks failed', 'JSMITH-STUDIO', 'foreground', '11/12 done &middot; 10 in the library &middot; 1 failed &middot; 1 duplicate', 'yesterday'],
+    ['ok', 'all done', 'JSMITH-STUDIO', 'when idle', '6/6 done &middot; 6 in the library &middot; 0 failed &middot; 0 duplicate', '5 d ago'],
+  ];
+
+  let mode = 'busy';
+  const st = { facet: null, axis: null, playing: 0, t: 0.34, paused: false, sending: true, unknown: false };
+
+  // A believable envelope, deterministic per track: a slow swell, a beat,
+  // and a little grain. Eight levels, one block character each.
+  function wave(seed, n) {
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const x = i / n;
+      const swell = 0.22 + 0.28 * Math.sin(x * 5.5 + seed) + 0.2 * Math.sin(x * 13 + seed * 2.3);
+      const beat = 0.18 * Math.abs(Math.sin(i * 0.9 + seed * 4.1));
+      const grain = ((Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453) % 1 + 1) % 1 * 0.2;
+      out.push(Math.max(0, Math.min(7, Math.round((swell + beat + grain) * 5.2))));
+    }
+    return out;
+  }
+  const BLOCKS = '▁▂▃▄▅▆▇█';
+  function drawWave(i, t) {
+    const n = 110, w = wave(i + 1, n), at = Math.min(n - 1, Math.round(n * t));
+    return w.map((v, k) => `<span class="${k < at ? 'pl' : k === at ? 'ph' : 'un'}">${k === at ? '│' : BLOCKS[v]}</span>`).join('');
+  }
+
+  // Plain-words tooltips (round 2, 2026-09-25).
+  const AXIS_TIP = {
+    arousal: 'Energy: from calm and still to intense and driving.',
+    valence: 'Mood colour: from dark and sad to bright and happy.',
+    tension: 'Tension: from settled and at rest to tense and unresolved.',
+    organic: 'Sound: from electronic (synths, beats) to acoustic (real instruments).',
+  };
+  function pills(t) {
+    let h = `<span class="pill" title="Length">${fmt(t[1])}</span>`;
+    if (t[2]) h += `<span class="pill" title="Tempo in beats per minute">${t[2]} bpm</span>`;
+    if (t[3]) h += `<span class="pill" title="Musical key: useful when two tracks must sound right one after the other">${esc(t[3])}</span>`;
+    h += `<span class="pill g click" data-facet="genre|${esc(t[4])}" title="Genre. Click to list every track of this genre.">${esc(t[4])}</span>`;
+    h += t[5].map(m => `<span class="pill m click" data-facet="mood|${esc(m)}" title="Mood. Click to list every track with this mood.">${esc(m)}</span>`).join('');
+    h += `<span class="pill i click" data-facet="instrument|${esc(t[6])}" title="Main instrument. Click to list every track with it.">${esc(t[6])}</span>`;
+    h += `<span class="pill u click" data-facet="use_case|${esc(t[7])}" title="What it suits in an edit. Click to list every track for this use.">${esc(t[7])}</span>`;
+    return h;
+  }
+  function pane(t, i) {
+    const noWave = !t[2];
+    const msg = st.sending ? `<div class="rmsg busy"><span class="spin"></span> syncing the track to this computer: 64%</div>` : `<div class="rmsg" id="rmsg"></div>`;
+    return `<div class="pane">
+      ${noWave ? `<div class="wave none">No waveform yet: this track was added by the fleet and the indexing computer has not analysed it. Seeking still works.</div>` : `<div class="wave" id="wave" title="click to seek">${drawWave(i, st.t)}</div>`}
+      <div class="pb">
+        <button class="key sm" type="button" id="pp" style="min-width:11ch;justify-content:center" title="Play or pause this track in the browser."><span class="t">${st.paused ? '&#9654; play' : '&#10074;&#10074; pause'}</span></button>
+        <span class="time" title="Where the playhead is, out of the track's length.">${fmt(t[1] * st.t)} / ${fmt(t[1])}</span>
+        <span class="inline">
+          <button class="key sm" type="button" data-rs="bin" title="Import into the Music bin in the media pool. Nothing is placed on a timeline." ${st.sending ? 'disabled' : ''}><span class="t">import to bin</span></button>
+          <button class="key sm" type="button" data-rs="under" title="Place at the playhead on the first free audio track from A2 down. Nothing moves." ${st.sending ? 'disabled' : ''}><span class="t">place underneath</span></button>
+          <button class="key sm" type="button" data-rs="insert" title="Ripple insert on A2: clips at or after the playhead on that track shift later. Refuses if that track is linked to video." ${st.sending ? 'disabled' : ''}><span class="t">insert at playhead</span></button>
+          <button class="key quiet sm" type="button" data-similar="${i}" title="Lists tracks that sound like this one."><span class="t">similar</span></button>
+          <button class="key quiet sm" type="button" data-reveal title="Shows the file in its folder on this computer."><span class="t">reveal</span></button>
+        </span>
+      </div>
+      ${msg}
+    </div>`;
+  }
+  function tracks() { return mode === 'busy' ? TRACKS : CALM_TRACKS; }
+  function renderList() {
+    const ts = tracks();
+    const searching = mode === 'busy';
+    $('#sort').disabled = searching;
+    $('#sort').title = searching ? 'Search results are ordered by how well they match. Clear the search to sort the library.' : 'How the list below is ordered';
+    $('#sortnote').hidden = !searching;
+    let head = searching ? `<span class="h">"${esc($('#q').value)}" &middot; ${$('#pool').value === 'mean' ? 'whole track' : 'any moment'}</span>` : `<span class="h">${st.facet ? esc(st.facet.replace('|', ': ').replace('_', ' ')) : 'All tracks'}</span>`;
+    head += `<span>${ts.length} tracks</span>`;
+    if (searching && !st.unknown) head += `<span>14 tracks have no bpm or length and are not shown</span><button type="button" class="key quiet sm" id="incl" title="Also show tracks the indexing computer has not measured yet. They have no tempo or length, so the limits cannot apply to them."><span class="t">include them</span></button>`;
+    $('#rhead').innerHTML = head;
+    $('#list').innerHTML = ts.map((t, i) => `
+      <div class="trk ${st.playing === i ? 'playing' : ''}" data-i="${i}">
+        <button class="play" type="button" data-play="${i}" aria-label="play ${esc(t[0])}" title="Play or pause this track.">${st.playing === i && !st.paused ? '&#10074;&#10074;' : '&#9654;'}</button>
+        <div style="min-width:0"><div class="nm">${esc(t[0])}</div><div class="pills">${pills(t)}</div></div>
+        <div class="rt">${searching ? `<span class="match" title="How closely this track fits your description. Higher is closer.">${t[8]}%</span>` : ''}<span class="inline"><button class="key quiet sm" type="button" data-similar="${i}" title="Lists tracks that sound like this one."><span class="t">similar</span></button><button class="key sm" type="button" data-open="${i}" title="Opens the choices for sending this track to your Resolve: into a bin, under the timeline, or inserted."><span class="t">&#8594; Resolve</span></button></span></div>
+        ${st.playing === i ? pane(t, i) : ''}
+      </div>`).join('');
+    $('#tcount').innerHTML = `<b>${ts.length}</b> shown`;
+  }
+  function renderRail() {
+    $('#axes').innerHTML = AXES.map(([a, lo, hi]) => {
+      const v = st.axis && st.axis[0] === a ? st.axis[1] : 0;
+      return `<div class="axis"><div class="lab"><span title="${AXIS_TIP[a]}">${a}: ${lo} &#8594; ${hi}</span><span class="val ${v ? 'on' : ''}" title="${v ? `Only the ${100 - v}% of tracks nearest ${hi} are shown.` : 'This slider is not filtering.'}">${v ? 'top ' + (100 - v) + '%' : 'off'}</span></div><input class="rng ${v ? 'on' : ''}" type="range" min="0" max="100" step="5" value="${v}" data-axis="${a}" aria-label="${a}"></div>`;
+    }).join('');
+    $('#facets').innerHTML = Object.entries(FACETS).map(([cat, list]) => `
+      <section class="win"><div class="bar"><span>┌─╡</span><span class="t">${cat.replace('_', ' ')}</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+      <div class="body chips">${list.map(([l, n]) => `<button type="button" class="chip ${st.facet === cat + '|' + l ? 'on' : ''}" data-facet="${cat}|${esc(l)}" title="List the ${n} tracks tagged ${esc(l)}. Click again to clear.">${esc(l)}<span class="n">${n}</span></button>`).join('')}</div></section>`).join('');
+    $('#unknownCount').textContent = '14 tracks have no BPM or length yet';
+    $('#includeUnknown').checked = st.unknown;
+  }
+  function renderSub() {
+    const on = mode === 'busy';
+    $('#sub').innerHTML = `<b>1,284</b> tracks &middot; <b>61</b>h &middot; <b>38</b> GB${on ? ' &middot; <span title="Some newly added tracks have not been tagged with genre and mood yet, so filters may miss them for now.">tags catching up</span>' : ''} &middot; <span class="rstat" title="Your Resolve, as the CC Sync tray on this computer sees it: the open project and timeline tracks are sent to.">${led(on ? 'hi' : '')} Resolve &middot; ${on ? 'FF5 Elections v12' : 'Civil Defence rough cut'}</span>`;
+    $('#rstatus').innerHTML = on ? 'project <b>FF5 Elections</b> &middot; timeline <b>v12</b>' : 'project <b>Civil Defence</b> &middot; timeline <b>rough cut</b>';
+  }
+  function renderIngest() {
+    const busy = mode === 'busy';
+    const items = [['analysed', 'Score_Cues/Cue_01_Arrival.wav'], ['analysed', 'Score_Cues/Cue_02_Harbour.wav'], ['analysed', 'Score_Cues/Cue_03_Siren.wav'], ['analysing', 'Score_Cues/Cue_04_Aftermath.wav'], ['waiting', 'Score_Cues/Cue_05_Rebuild.wav'], ['duplicate', 'Score_Cues/Cue_02_Harbour_alt.wav']];
+    const cls = s => s === 'analysed' ? 'done' : s === 'analysing' ? 'run' : s === 'failed' ? 'bad' : s === 'duplicate' ? 'owed' : '';
+    $('#ingest-body').innerHTML = `
+      <div class="inline">${led('')}<span title="The CC Sync tray app on this computer answered and the music model is downloaded.">connected (v0.9.78, model ready)</span><button type="button" class="key quiet sm" data-busy="the CC Sync tray answered" title="Asks the CC Sync tray on this computer again whether it is running."><span class="t">recheck</span></button></div>
+      <p class="lede">Your own computer does the work: the CC Sync tray converts, analyses with the <span title="CLAP is the program that listens to each track and works out what it sounds like, so it can be found by description.">CLAP model</span> and uploads the finished track to the library. The dashboard never sees the audio.</p>
+      <div class="dropzone">
+        <span class="dh">Drag audio or folders anywhere on this page</span>
+        <span>or choose from this computer...</span>
+        <span class="inline"><button type="button" class="key sm" data-busy="the file picker opens on your computer"><span class="t">Choose files</span></button><button type="button" class="key sm" data-busy="the folder picker opens on your computer"><span class="t">Choose a folder</span></button></span>
+        <span class="hint">Files chosen this way are analysed where they are: they are not copied into the browser first.</span>
+        ${busy ? '' : '<span class="hint">Nothing staged yet. Audio only: wav, mp3, flac, aac, m4a, aiff, opus. A folder brings everything audio inside it. Duplicates are spotted before anything uploads.</span>'}
+      </div>
+      ${busy ? `
+      <h3>Waiting for the indexing computer</h3>
+      <div class="note warn"><span class="grow">Waiting for the indexing computer: 2 tracks. They are in the library already and are not searchable until the indexing computer indexes them.</span></div>
+      <div class="items"><div class="it">&#9719; Rain_on_Tin_Roof.wav</div><div class="it">&#9719; Market_Chatter_bed.mp3</div></div>
+      <div class="note err"><span class="grow">1 could not be analysed. Nothing retries these on their own: fix the file and drop it again.</span></div>
+      <div class="items"><div class="it bad">&#10005; Broken_Master_v3.ogg - ffmpeg: Invalid data found when processing input</div></div>
+      <h3>Tracks</h3>
+      <div class="hint">3 tracks staged &middot; 1 already in the library (skipped)</div>
+      <table class="tbl tight"><tbody>
+        <tr><td><b>Drone_Camp_Theme.wav</b></td><td>new: Drone_Camp_Theme.wav</td></tr>
+        <tr><td><b>Drone_Camp_Theme_30s.wav</b></td><td>new: Drone_Camp_Theme_30s.wav</td></tr>
+        <tr><td><b>Kinmen_Waves.ogg</b></td><td>transcoded to mp3: Kinmen_Waves.mp3</td></tr>
+        <tr><td class="muted">Harbour_Lights_arp.mp3</td><td class="muted">already in the library</td></tr>
+      </tbody></table>
+      <h3>When to run</h3>
+      <div style="display:grid;gap:8px">
+        <label class="radio"><input type="radio" name="mw" checked><span class="g"></span><span class="l">Only when idle <span class="hint" style="display:block">Starts when you step away, pauses the moment you come back, the way proxy generation already works.</span></span></label>
+        <label class="radio"><input type="radio" name="mw"><span class="g"></span><span class="l">Foreground <span class="hint" style="display:block">Starts now and keeps going while you work. It uses one CPU core, not the GPU.</span></span></label>
+      </div>
+      <div class="hint">3 tracks to analyse on this computer, about 2 min</div>
+      <div class="inline"><button type="button" class="key primary" data-busy="batch queued: it starts when you step away"><span class="t">Run</span></button><button type="button" class="key quiet" data-busy="cleared"><span class="t">clear</span></button></div>
+      <h3>Running</h3>
+      <div class="batch run">
+        <div class="bh"><b>working</b><span>2 min ago</span></div>
+        <div title="Heartbeat: when the computer doing the work last checked in.">4/9 done &middot; 3 in the library &middot; 0 failed &middot; 1 duplicate &middot; heartbeat 3s ago</div>
+        <div class="items">${items.map(i => `<div class="it ${cls(i[0])}"><span class="st" title="${{ analysed: 'Listened to and in the library.', analysing: 'Being listened to now.', waiting: 'Waiting its turn.', duplicate: 'Already in the library, so it was skipped.' }[i[0]]}">${i[0]}</span> ${esc(i[1])}</div>`).join('')}</div>
+        <div class="ba"><button class="key sm" type="button" data-busy="paused" title="Stops analysing for now. Nothing is lost."><span class="t">Pause</span></button><button class="key sm" type="button" disabled title="Carries on after a pause."><span class="t">Resume</span></button><button class="key sm" type="button" data-busy="started" title="Starts now instead of waiting for you to step away."><span class="t">Start now</span></button><button class="key sm" type="button" data-busy="uploads paused" title="Keeps analysing but stops sending files to the server."><span class="t">Pause uploads</span></button><button class="key quiet sm" type="button" data-busy="Cancel requested: the computer stops within a heartbeat."><span class="t">cancel batch</span></button></div>
+      </div>` : ''}
+      <h3>Batches</h3>
+      <div class="tabs" role="tablist"><button role="tab" aria-selected="true" title="Batches you started.">mine</button><button role="tab" aria-selected="false" title="Batches on every computer in the studio.">all computers</button></div>
+      ${busy ? BATCHES.map(b => `<div class="batch ${b[0]}"><div class="bh"><b title="${b[1]}">${b[1]}</b><span class="muted">${b[5]}</span></div><div>${b[2]} &middot; ${b[3]}</div><div>${b[4]}</div>
+        <div class="ba"><button class="key quiet sm" type="button"><span class="t">tracks</span></button>${b[0] === 'run' || b[0] === 'warn' ? '<button class="key quiet sm" type="button"><span class="t">cancel</span></button>' : ''}${b[0] === 'warn' ? '<button class="key quiet sm" type="button" data-busy="This computer has taken the batch on." title="The computer running this batch stopped answering. Carry it on here instead; tracks already done are kept."><span class="t">take over on this computer</span></button>' : ''}${b[0] === 'bad' ? '<button class="key quiet sm" type="button" data-busy="asked again"><span class="t">try the failed tracks again</span></button>' : ''}</div></div>`).join('')
+        : '<div class="empty">no batches yet</div>'}`;
+  }
+
+  function renderAll() { renderSub(); renderRail(); renderList(); renderIngest(); }
+  function load(m) {
+    mode = m;
+    Object.assign(st, m === 'busy' ? { facet: null, axis: ['tension', 70], playing: 0, t: 0.34, paused: false, sending: true, unknown: false } : { facet: null, axis: null, playing: -1, t: 0, paused: true, sending: false, unknown: false });
+    $('#q').value = m === 'busy' ? 'tense driving synth pulse' : '';
+    $('#bpmMin').value = m === 'busy' ? '100' : '';
+    $('#bpmMax').value = m === 'busy' ? '140' : '';
+    renderAll();
+  }
+  $('#examples').insertAdjacentHTML('beforeend', EXAMPLES.map(e => `<button type="button" class="chip" data-ex="${esc(e)}">${esc(e)}</button>`).join(''));
+
+  document.addEventListener('input', e => {
+    if (e.target.dataset.axis) {
+      const v = +e.target.value;
+      st.axis = v ? [e.target.dataset.axis, v] : null;
+      renderRail();
+      const r = document.querySelector(`[data-axis="${e.target.dataset.axis}"]`); if (r) r.focus();
+    }
+  });
+  document.addEventListener('click', ev => {
+    const t = ev.target;
+    if (t.closest('[data-drawer]')) { $('#dr-ingest').classList.add('open'); $('#dback').classList.add('open'); return; }
+    if (t.closest('[data-close-drawer]') || t.id === 'dback') { $('#dr-ingest').classList.remove('open'); $('#dback').classList.remove('open'); return; }
+    const ex = t.closest('[data-ex]');
+    if (ex) { $('#q').value = ex.dataset.ex; mode = 'busy'; st.playing = -1; renderList(); return; }
+    const f = t.closest('[data-facet]');
+    if (f) { st.facet = st.facet === f.dataset.facet ? null : f.dataset.facet; $('#q').value = ''; mode = 'calm'; st.playing = -1; renderRail(); renderList(); return; }
+    const pl = t.closest('[data-play]');
+    if (pl) { const i = +pl.dataset.play; if (st.playing === i) st.paused = !st.paused; else { st.playing = i; st.t = 0; st.paused = false; st.sending = false; } renderList(); return; }
+    const op = t.closest('[data-open]');
+    if (op) { const i = +op.dataset.open; if (st.playing !== i) { st.playing = i; st.t = 0; st.paused = true; st.sending = false; } renderList(); return; }
+    if (t.closest('#pp')) { st.paused = !st.paused; renderList(); return; }
+    const w = t.closest('#wave');
+    if (w) { const b = w.getBoundingClientRect(); st.t = Math.max(0, Math.min(1, (ev.clientX - b.left) / b.width)); renderList(); return; }
+    const rs = t.closest('[data-rs]');
+    if (rs) { const m = $('#rmsg'); if (m) { m.className = 'rmsg ok'; m.textContent = rs.dataset.rs === 'bin' ? 'imported into the Music bin' : rs.dataset.rs === 'under' ? 'placed on A3 at the playhead' : 'inserted on A2 at the playhead'; } return; }
+    if (t.closest('[data-reveal]')) { const m = $('#rmsg'); if (m) { m.className = 'rmsg ok'; m.textContent = 'opened'; } return; }
+    const sim = t.closest('[data-similar]');
+    if (sim) { const name = tracks()[+sim.dataset.similar][0]; $('#rhead').querySelector('.h').textContent = 'Similar to ' + name; toast('similar to ' + name); return; }
+    if (t.closest('#incl')) { st.unknown = true; renderRail(); renderList(); return; }
+    if (t.closest('#clear')) { $('#q').value = ''; st.facet = null; st.axis = null; mode = 'calm'; st.playing = -1; renderRail(); renderList(); return; }
+    if (t.closest('#go')) { if ($('#q').value.trim()) { mode = 'busy'; st.playing = -1; } renderList(); }
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === '/' && !/input|select|textarea/i.test(e.target.tagName)) { e.preventDefault(); $('#q').focus(); }
+    if (e.key === 'Enter' && e.target.id === 'q') $('#go').click();
+    if (e.key === 'Escape') { $('#dr-ingest').classList.remove('open'); $('#dback').classList.remove('open'); }
+  });
+
+  CC.page({ page: 'music', onData: load });
+})();
+</script>
+</body>
+</html>

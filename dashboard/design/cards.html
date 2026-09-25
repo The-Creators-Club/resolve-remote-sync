@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: timeline cards</title>
+<!-- The design bench (dashboard/design/README.md): the Timeline Cards
+     episode picker. Mirrors templates/cards_landing.html (route
+     cards_landing.cards_landing, GET /cards/) and static/cards_landing.js/.css.
+     Invented data; the HUD, dock and TUNE come from shell.js. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/apps.css">
+<style>
+  .page.cards { max-width: 1180px; }
+  .tree-view .ep .path { display: none; }
+  #notes:empty { display: none; }
+</style>
+</head>
+<body data-page="cards">
+
+<div class="shell">
+  <div class="page one cards">
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> TIMELINE CARDS</span></h1>
+        <div class="sub" id="sub"></div>
+      </div>
+      <div class="acts" id="head-acts"></div>
+    </div>
+
+    <p class="lede">Your Resolve follows the last episode you went into. Two people in the <b>same</b> episode is fine: the cut list takes one edit at a time and both browsers see the same cards.</p>
+
+    <div class="stack" id="notes"></div>
+
+    <section class="win">
+      <div class="bar"><span>┌─╡</span><span class="t">find_an_episode</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+      <div class="body" style="display:grid;gap:14px">
+        <div class="prompt-in" id="searchbox">
+          <span class="p">&gt;</span>
+          <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="search episodes, shows, years" aria-label="Search episodes">
+          <kbd>/</kbd>
+          <button type="button" class="key quiet sm" id="q-clear" style="visibility:hidden" aria-label="Clear the search" title="Empties the search box and shows every episode again."><span class="t">clear</span></button>
+        </div>
+        <div class="chip-rows">
+          <div class="chips" role="group" aria-label="Order"><span class="lbl">order</span>
+            <button type="button" class="chip" data-sort="opened" title="The episodes you went into most recently first, then the ones anybody opened.">last opened</button>
+            <button type="button" class="chip" data-sort="modified" title="The episodes whose files changed most recently first.">date</button>
+            <button type="button" class="chip" data-sort="bytes" title="The biggest episodes on the server first.">largest</button>
+            <button type="button" class="chip" data-sort="name" title="Alphabetical by episode name.">A - Z</button>
+          </div>
+          <div class="chips" role="group" aria-label="Year" id="years"><span class="lbl">year</span></div>
+          <div class="chips" role="group" aria-label="View"><span class="lbl">view</span>
+            <button type="button" class="chip" data-view="tree" title="Episodes grouped by year and show, as they sit in the vault.">folders</button>
+            <button type="button" class="chip" data-view="list" title="Every episode in one flat list.">list</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="win" id="recent-win">
+      <div class="bar"><span>┌─╡</span><span class="t">your_recent</span><span>╞</span><span class="rule"></span><span class="meta hide-sm" title="Only episodes you opened yourself. Somebody else's visits do not count here.">the last 5 you went into</span><span>═┐</span></div>
+      <div class="body"><div class="tiles" id="tiles"></div></div>
+    </section>
+
+    <section class="win">
+      <div class="bar"><span>┌─╡</span><span class="t">episodes</span><span>╞</span><span class="rule"></span><span class="meta hide-sm" id="count"></span>
+        <span id="foldkeys"><button type="button" class="act" id="unfold" title="Opens every year and show folder below.">unfold all</button> &middot; <button type="button" class="act" id="refold" title="Closes every year and show folder below.">fold all</button></span><span>═┐</span></div>
+      <div id="eps" class="scroll-y" style="max-height:760px"></div>
+      <div class="empty" id="none" hidden><span class="glyph">&#9642;&#9642;&#9642;</span>Nothing matches.
+        <div style="margin-top:12px"><button type="button" class="key sm" id="reset"><span class="t">Show everything</span></button></div></div>
+    </section>
+
+    <p class="lede">An episode stays open behind you once it is open, so switching back is instant. You can close your own episode, or one nobody has been in for a while; closing one somebody else is in is for an admin.</p>
+  </div>
+</div>
+
+<div class="dialog-back" id="close-dlg" role="dialog" aria-modal="true" aria-labelledby="close-t">
+  <section class="win dialog">
+    <div class="bar"><span>┌─╡</span><span class="t" id="close-t">close_episode</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+    <div class="body">
+      <p id="close-q" style="font-size:13px;color:var(--text-2)"></p>
+      <div class="acts">
+        <button type="button" class="key quiet" id="close-no" title="Leaves the episode open. Nothing changes."><span class="t">keep it open</span></button>
+        <button type="button" class="key primary" id="close-yes" title="Closes the episode on the server, freeing a place for another one. Nothing in it is lost."><span class="t">Close</span></button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, toast } = CC;
+  const $ = s => document.querySelector(s);
+  const CAP = 2;
+  const MIN = 60, H = 3600, D = 86400;
+  const GB = 1024 ** 3;
+
+  // One row per episode, as cards_landing._catalogue_row shapes it. `ago`
+  // values are seconds before now; `mine` is when YOU last went in.
+  const BASE = [
+    { slug: 'elections-3f2a', name: 'Elections', parts: ['2026', 'FF5'], mine: 14 * MIN, any: 2 * MIN, by: 'jsmith', bytes: 412 * GB, modified: '24 Sep 2026', mts: 1 },
+    { slug: 'civil-defence-91bc', name: 'Civil Defence', parts: ['2026', 'FF5'], mine: 40, any: 40, by: 'owen', bytes: 238 * GB, modified: '22 Sep 2026', mts: 3 },
+    { slug: 'repro-rights-5d10', name: 'Repro Rights', parts: ['2026', 'FF5'], mine: 0, any: 2 * D, by: 'mrivera', bytes: 96 * GB, modified: '19 Sep 2026', mts: 6 },
+    { slug: 'night-market-c3e8', name: 'Night Market', parts: ['2026', 'Shorts'], mine: 3 * D, any: 3 * D, by: 'owen', bytes: 44 * GB, modified: '12 Sep 2026', mts: 13 },
+    { slug: 'typhoon-prep-0a77', name: 'Typhoon Prep', parts: ['2026', 'Shorts'], mine: 0, any: 0, by: '', bytes: -1, modified: '2 Sep 2026', mts: 23 },
+    { slug: 'kinmen-44f1', name: 'Kinmen', parts: ['2025', 'FF4'], mine: 0, any: 34 * D, by: 'tchen', bytes: 310 * GB, modified: '14 Aug 2025', mts: 407 },
+    { slug: 'cia-city-e2d9', name: 'CIA City', parts: ['2025', 'FF4'], mine: 12 * D, any: 12 * D, by: 'owen', bytes: 188 * GB, partial: true, modified: '30 Jul 2025', mts: 422 },
+    { slug: 'taichung-drone-camp-7b03', name: 'Taichung Drone Camp', parts: ['2025', 'FF4'], mine: 0, any: 0, by: '', bytes: 72 * GB, modified: '5 Jun 2025', mts: 477 },
+  ];
+  // The pool's side: state, who is in it, the seat stamps.
+  const POOL_BUSY = {
+    'elections-3f2a': { state: 'ready', occupants: ['jsmith', 'owen'] },
+    'civil-defence-91bc': { state: 'loading', openingFor: 4 * MIN },
+    'repro-rights-5d10': { state: 'failed', detail: 'this episode did not open (OSError). The dashboard log has the detail.', lastIn: ['mrivera', 22 * MIN] },
+  };
+  const ME = 'owen', ADMIN = true;
+
+  let eps = [];
+  let mode = 'busy';
+  let sort = 'opened', view = 'tree', year = '';
+  const openFolders = {};     // key -> bool, what the reader left unfolded
+  let refusal = '', want = null, lastIn = 'elections-3f2a';
+
+  function human(n) {
+    const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i < 2 ? Math.round(n) : n.toFixed(1)) + ' ' + u[i];
+  }
+  function ago(s) {
+    if (s < 90) return 'just now';
+    if (s < H) return Math.floor(s / MIN) + ' min ago';
+    if (s < D) return Math.floor(s / H) + ' h ago';
+    if (s < 30 * D) return Math.floor(s / D) + ' d ago';
+    return Math.floor(s / (30 * D)) + ' mo ago';
+  }
+  function openedPhrase(e) {
+    if (e.mine) return 'you opened it ' + ago(e.mine);
+    if (e.any) return (e.by === ME ? 'you' : e.by || 'somebody') + ' opened it ' + ago(e.any);
+    return 'never opened';
+  }
+  function lastInPhrase(e) {
+    if (!e.lastIn) return '';
+    const [who, s] = e.lastIn;
+    return s < 60 ? `${who} is in it now` : `${who} was last in ${Math.floor(s / 60)} min ago`;
+  }
+  const mayClose = e => !!e.state && (ADMIN || !e.occupants || !e.occupants.length || (e.occupants.length === 1 && e.occupants[0] === ME));
+  const liveCount = () => eps.filter(e => e.state === 'ready' || e.state === 'loading').length;
+  const searchText = e => (e.name + ' ' + e.parts[1] + ' ' + e.parts.join(' / ') + ' ' + e.parts[0]).toLowerCase();
+
+  // ------------------------------------------------------------ rows
+  function actions(e) {
+    let a = '';
+    if (e.state === 'ready') a += `<a class="key primary sm" href="#" data-enter="${e.slug}" title="Go into this episode. It is already open, so this is instant."><span class="t">Open</span></a>`;
+    else if (e.state === 'loading') a += `<span class="wait" aria-live="polite" title="The server is reading this episode off the vault. This page takes you in when it is ready; it gives up after 10 minutes."><span class="spin"></span> opening</span>`;
+    else a += `<button type="button" class="key sm" data-open="${e.slug}" title="${e.state === 'failed' ? 'Opening this episode failed last time. Try opening it again.' : `Opens this episode on the server. Up to ${CAP} can be open at once.`}"><span class="t">${e.state === 'failed' ? 'Try again' : 'Open'}</span></button>`;
+    if (mayClose(e)) a += `<button type="button" class="key quiet sm" data-close="${e.slug}" title="Closes this episode on the server so another one can open. You are asked first."><span class="t">close</span></button>`;
+    return a;
+  }
+  function badge(e) {
+    return e.state === 'ready' ? `<span title="Ready: open on the server, so going in is instant.">${CC.tag('ok', 'ready')}</span>` : e.state === 'loading' ? `<span title="Opening: the server is reading it off the vault.">${CC.tag('hi', 'opening')}</span>` : e.state === 'failed' ? `<span title="Failed: the episode did not open. The reason is below it.">${CC.tag('err', 'failed', true)}</span>` : '';
+  }
+  function mark(text, ts) {
+    if (!ts.length) return esc(text);
+    const lower = text.toLowerCase(); const m = new Array(text.length).fill(false);
+    ts.forEach(t => { let at = lower.indexOf(t); while (t && at >= 0) { for (let i = at; i < at + t.length; i++) m[i] = true; at = lower.indexOf(t, at + t.length); } });
+    let out = '', i = 0;
+    while (i < text.length) { let j = i; while (j < text.length && m[j] === m[i]) j++; const c = esc(text.slice(i, j)); out += m[i] ? `<mark>${c}</mark>` : c; i = j; }
+    return out;
+  }
+  function epRow(e, ts) {
+    const ico = e.state === 'ready' ? '&#9679;' : e.state === 'loading' ? '&#9684;' : e.state === 'failed' ? '&#215;' : '&#9642;';
+    const nm = e.state === 'ready' ? `<a href="#" class="nm" data-enter="${e.slug}">${mark(e.name, ts)}</a>` : `<span class="nm">${mark(e.name, ts)}</span>`;
+    const size = e.bytes >= 0 ? human(e.bytes) + (e.partial ? '+' : '') : 'sizing';
+    const notes = [];
+    if (e.state === 'failed' && e.detail) notes.push(`<div class="enote bad">${esc(e.detail)}</div>`);
+    if (e.state === 'loading' && e.openingFor >= 60) notes.push(`<div class="enote">opening for ${Math.floor(e.openingFor / 60)} min; it gives up at 10 min</div>`);
+    if (e.occupants && e.occupants.length) notes.push(`<div class="enote who">in it now: ${esc(e.occupants.join(', '))}</div>`);
+    else if (lastInPhrase(e)) notes.push(`<div class="enote was">${esc(lastInPhrase(e))}</div>`);
+    return `<div class="ep" data-state="${e.state || ''}" data-slug="${e.slug}">
+      <span class="ico" aria-hidden="true">${ico}</span>
+      <div><div class="nmline">${nm}${badge(e)}</div>
+        <div class="meta"><span class="${e.mine ? 'mine' : ''}">${esc(openedPhrase(e))}</span><span title="${e.bytes < 0 ? 'Sizing: the server is still adding up this episode\'s files.' : e.partial ? 'At least this big: some files could not be measured.' : 'Size of the episode on the server.'}">${size}</span><span title="When a file in this episode last changed.">changed ${esc(e.modified)}</span><span class="path">in ${esc(e.parts.join(' / '))}</span></div>
+        ${notes.join('')}</div>
+      <div class="act">${actions(e)}</div>
+    </div>`;
+  }
+
+  // ------------------------------------------------------------ order
+  function key(e) {
+    if (sort === 'opened') return [-(e.mine ? 1e9 - e.mine : 0), -(e.any ? 1e9 - e.any : 0)];
+    if (sort === 'modified') return [e.mts, 0];
+    if (sort === 'bytes') return [-e.bytes, 0];
+    return [0, 0];
+  }
+  function cmp(a, b) {
+    const ka = key(a), kb = key(b);
+    return (ka[0] - kb[0]) || (ka[1] - kb[1]) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+  }
+  function folderAgg(list) {
+    return {
+      name: '', mine: Math.min(...list.map(e => e.mine || Infinity)), any: Math.min(...list.map(e => e.any || Infinity)),
+      mts: Math.min(...list.map(e => e.mts)), bytes: list.reduce((s, e) => s + Math.max(0, e.bytes), 0),
+      unknown: list.some(e => e.bytes < 0 || e.partial),
+    };
+  }
+  function folderCmp(a, b) {
+    const x = { ...a.agg, name: a.name, mine: a.agg.mine === Infinity ? 0 : a.agg.mine, any: a.agg.any === Infinity ? 0 : a.agg.any };
+    const y = { ...b.agg, name: b.name, mine: b.agg.mine === Infinity ? 0 : b.agg.mine, any: b.agg.any === Infinity ? 0 : b.agg.any };
+    return cmp(x, y);
+  }
+
+  // ------------------------------------------------------------ render
+  function terms() { const q = $('#q').value.trim().toLowerCase(); return q ? q.split(/\s+/) : []; }
+  function matches(e, ts) {
+    if (year && e.parts[0] !== year) return false;
+    const s = searchText(e);
+    return ts.every(t => s.includes(t));
+  }
+
+  function renderList() {
+    const ts = terms();
+    const shown = eps.filter(e => matches(e, ts));
+    $('#count').innerHTML = shown.length === eps.length ? `<b>${eps.length}</b> episodes` : `<b>${shown.length}</b> of ${eps.length} episodes`;
+    $('#none').hidden = shown.length > 0;
+    $('#eps').hidden = shown.length === 0;
+    $('#foldkeys').style.visibility = view === 'list' ? 'hidden' : '';
+    $('#q-clear').style.visibility = ts.length ? '' : 'hidden';
+    if (view === 'list') {
+      $('#eps').className = 'scroll-y list-flat';
+      $('#eps').innerHTML = shown.slice().sort(cmp).map(e => epRow(e, ts)).join('');
+      return;
+    }
+    $('#eps').className = 'scroll-y tree-view tree-top';
+    const years = {};
+    eps.forEach(e => { ((years[e.parts[0]] = years[e.parts[0]] || {})[e.parts[1]] = years[e.parts[0]][e.parts[1]] || []).push(e); });
+    const yItems = Object.keys(years).map(y => {
+      const shows = Object.keys(years[y]).map(s => ({ name: s, key: y + '/' + s, list: years[y][s], agg: folderAgg(years[y][s]) }));
+      return { name: y, key: y, shows, list: shows.flatMap(s => s.list), agg: folderAgg(shows.flatMap(s => s.list)) };
+    }).sort(folderCmp);
+    const isOpen = (f, depth, vis) => ts.length ? vis > 0 : (f.key in openFolders ? openFolders[f.key] : depth === 0 || f.list.some(e => e.state));
+    const count = (f, vis) => (ts.length || year) && vis !== f.list.length ? `${vis} of ${f.list.length}` : String(f.list.length);
+    $('#eps').innerHTML = yItems.map(y => {
+      const yVis = y.list.filter(e => matches(e, ts)).length;
+      if (!yVis) return '';
+      const shows = y.shows.sort(folderCmp).map(s => {
+        const vis = s.list.filter(e => matches(e, ts));
+        if (!vis.length) return '';
+        return `<details class="fold d1" data-key="${esc(s.key)}" ${isOpen(s, 1, vis.length) ? 'open' : ''}>
+          <summary><span class="chev">&#9656;</span><span class="fnm">${esc(s.name)}</span><span class="fct" title="Episodes in this show.">${count(s, vis.length)}</span><span class="fsz" title="Total size of these episodes on the server.">${human(s.agg.bytes)}${s.agg.unknown ? '+' : ''}</span></summary>
+          <div class="kids">${vis.sort(cmp).map(e => epRow(e, ts)).join('')}</div></details>`;
+      }).join('');
+      return `<details class="fold d0" data-key="${esc(y.key)}" ${isOpen(y, 0, yVis) ? 'open' : ''}>
+        <summary><span class="chev">&#9656;</span><span class="fnm">${esc(y.name)}</span><span class="fct" title="Episodes in this year.">${count(y, yVis)}</span><span class="fsz" title="Total size of these episodes on the server.">${human(y.agg.bytes)}${y.agg.unknown ? '+' : ''}</span></summary>
+        <div class="kids">${shows}</div></details>`;
+    }).join('');
+  }
+
+  function renderTiles() {
+    const ts = terms();
+    const recent = eps.filter(e => e.mine).sort((a, b) => a.mine - b.mine).slice(0, 5)
+      .filter(e => !year || e.parts[0] === year);
+    // round 2 ("nothing may shift"): the window stays while you search, so
+    // the list below it does not jump up at the first letter; it only dims
+    $('#recent-win').hidden = !recent.length;
+    $('#recent-win').style.opacity = ts.length ? '0.45' : '';
+    $('#tiles').innerHTML = recent.map(e => `
+      <button type="button" class="tile" data-state="${e.state || ''}" title="${e.state === 'ready' ? 'Go into ' + esc(e.name) + '.' : e.state === 'loading' ? esc(e.name) + ' is opening.' : 'Open ' + esc(e.name) + ' on the server.'}" ${e.state === 'ready' ? `data-enter="${e.slug}"` : e.state === 'loading' ? 'disabled' : `data-open="${e.slug}"`}>
+        <span class="tn">${esc(e.name)}</span>
+        <span class="tp">${esc(e.parts.join(' / '))}</span>
+        <span class="tw">${badge(e)} ${esc(openedPhrase(e))}</span>
+      </button>`).join('');
+  }
+
+  function renderNotes() {
+    const out = [];
+    if (refusal) out.push(`<div class="note warn"><span class="tag solid warn" title="The episode was not opened because the server already has as many open as it allows.">not opened</span><span class="grow">${esc(refusal)}</span><button class="key quiet sm" type="button" data-dismiss=".note" title="Hides this message."><span class="t">dismiss</span></button></div>`);
+    if (want) {
+      const w = eps.find(e => e.slug === want);
+      if (w) {
+        const words = w.state === 'ready' ? `<b>${esc(w.name)} is open.</b>`
+          : w.state === 'loading' ? `<b>Opening ${esc(w.name)}.</b> This page takes you into it as soon as it is ready.`
+          : `<b>${esc(w.name)} is not open.</b> An episode closes when the dashboard restarts or somebody closes it. Open it again here.`;
+        out.push(`<div class="note"><span class="grow">${words}</span><span class="inline">${actions(w)}</span></div>`);
+      }
+    }
+    const opening = eps.filter(e => e.state === 'loading' && e.slug !== want);
+    if (opening.length) out.push(`<div class="note"><span class="spin" style="color:var(--hi)"></span><span class="grow"><b>Opening ${esc(opening.map(e => e.name).join(', '))}.</b> This reads the episode off the vault: it takes a moment, and this page updates itself when it is ready.</span></div>`);
+    $('#notes').innerHTML = out.join('');
+  }
+
+  function renderHead() {
+    const n = liveCount();
+    $('#sub').innerHTML = `<span title="The server keeps at most ${CAP} episodes open at the same time, to save memory. A third waits until one is closed.">up to <b>${CAP}</b> episodes at once on this server</span> &middot; <b>${n}</b> open now &middot; <b>${eps.length}</b> in the vault`;
+    const carry = eps.find(e => e.slug === lastIn && e.state === 'ready');
+    $('#head-acts').innerHTML = carry ? `<a class="key primary" href="#" data-enter="${carry.slug}" title="Back into the last episode you were in. It is still open, so this is instant."><span class="t">Carry on with ${esc(carry.name)}</span><span class="kbd">&#9166;</span></a>` : '';
+  }
+
+  function press() {
+    document.querySelectorAll('.chip[data-sort]').forEach(c => c.setAttribute('aria-pressed', String(c.dataset.sort === sort)));
+    document.querySelectorAll('.chip[data-view]').forEach(c => c.setAttribute('aria-pressed', String(c.dataset.view === view)));
+    document.querySelectorAll('.chip[data-year]').forEach(c => c.setAttribute('aria-pressed', String(c.dataset.year === year)));
+  }
+  function renderAll() { press(); renderHead(); renderNotes(); renderTiles(); renderList(); }
+
+  function load(m) {
+    mode = m;
+    eps = BASE.map(e => ({ ...e, ...(m === 'busy' ? POOL_BUSY[e.slug] || {} : {}) }));
+    if (m === 'calm') eps.forEach(e => { if (e.slug === 'civil-defence-91bc') { e.mine = 2 * H; e.any = 2 * H; } });
+    refusal = m === 'busy' ? `2 episodes are already open: Elections (jsmith, owen) and Civil Defence (nobody in the last 15 min). Ask whoever is in one to press Close beside it here, or close an idle one yourself. An admin can close any of them.` : '';
+    want = m === 'busy' ? 'civil-defence-91bc' : null;
+    const yrs = [...new Set(eps.map(e => e.parts[0]))].sort().reverse();
+    $('#years').innerHTML = '<span class="lbl">year</span><button type="button" class="chip" data-year="">all</button>' + yrs.map(y => `<button type="button" class="chip" data-year="${y}">${y}</button>`).join('');
+    renderAll();
+  }
+
+  // ------------------------------------------------------------ acts
+  let closing = null;
+  function openEp(slug) {
+    const e = eps.find(x => x.slug === slug);
+    if (!e) return;
+    if (e.state === 'failed') { e.state = ''; e.detail = ''; }
+    if (liveCount() >= CAP) {
+      const live = eps.filter(x => x.state === 'ready' || x.state === 'loading');
+      refusal = `${CAP} episodes are already open: ` + live.map(x => `${x.name} (${(x.occupants && x.occupants.join(', ')) || 'nobody in the last 15 min'})`).join(' and ') +
+        '. Ask whoever is in one to press Close beside it here, or close an idle one yourself. An admin can close any of them.';
+      renderAll(); window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+    refusal = '';
+    e.state = 'loading'; e.openingFor = 0; e.mine = 1; e.any = 1; e.by = ME;
+    renderAll();
+    setTimeout(() => {
+      if (e.state !== 'loading') return;
+      e.state = 'ready'; e.occupants = [];
+      if (want === slug) { toast('entering ' + e.name); }
+      else toast(e.name + ' is ready');
+      renderAll();
+    }, 3500);
+  }
+  function askClose(slug) {
+    const e = eps.find(x => x.slug === slug);
+    if (!e) return;
+    closing = e;
+    const who = e.occupants && e.occupants.length ? ` ${e.occupants.join(', ')} ${e.occupants.length > 1 ? 'are' : 'is'} in it now.` : lastInPhrase(e) ? ` ${lastInPhrase(e)}.` : '';
+    $('#close-q').textContent = `Close ${e.name}?${who} Anything an offline browser has not sent yet stays in that browser until it reconnects.`;
+    $('#close-dlg').classList.add('open');
+    $('#close-yes').focus();
+  }
+  $('#close-no').addEventListener('click', () => $('#close-dlg').classList.remove('open'));
+  $('#close-dlg').addEventListener('click', e => { if (e.target.id === 'close-dlg') $('#close-dlg').classList.remove('open'); });
+  $('#close-yes').addEventListener('click', () => {
+    $('#close-dlg').classList.remove('open');
+    if (!closing) return;
+    const name = closing.name;
+    closing.state = ''; closing.occupants = null; closing.detail = ''; closing.lastIn = null;
+    closing = null; refusal = '';
+    toast('closed ' + name);
+    renderAll();
+  });
+
+  document.addEventListener('click', ev => {
+    const t = ev.target;
+    const chip = t.closest('.chip');
+    if (chip) {
+      if (chip.dataset.sort) sort = chip.dataset.sort;
+      else if (chip.dataset.view) view = chip.dataset.view;
+      else if ('year' in chip.dataset) year = chip.dataset.year;
+      renderAll(); return;
+    }
+    const enter = t.closest('[data-enter]');
+    if (enter) { ev.preventDefault(); lastIn = enter.dataset.enter; toast('entering ' + eps.find(e => e.slug === lastIn).name + ': /cards/p/' + lastIn + '/'); return; }
+    const op = t.closest('[data-open]');
+    if (op) { openEp(op.dataset.open); return; }
+    const cl = t.closest('[data-close]');
+    if (cl) { askClose(cl.dataset.close); return; }
+    if (t.closest('#notes [data-dismiss]')) { refusal = ''; return; }
+    const sum = t.closest('summary');
+    if (sum && !terms().length) { const f = sum.parentElement; openFolders[f.dataset.key] = !f.open; return; }
+  });
+  $('#unfold').addEventListener('click', () => { document.querySelectorAll('#eps details').forEach(d => { d.open = true; openFolders[d.dataset.key] = true; }); });
+  $('#refold').addEventListener('click', () => { document.querySelectorAll('#eps details').forEach(d => { d.open = false; openFolders[d.dataset.key] = false; }); });
+  $('#reset').addEventListener('click', () => { year = ''; $('#q').value = ''; renderAll(); });
+  $('#q-clear').addEventListener('click', () => { $('#q').value = ''; renderAll(); $('#q').focus(); });
+  $('#q').addEventListener('input', () => { renderTiles(); renderList(); });
+  $('#q').addEventListener('keydown', e => {
+    if (e.key === 'Escape') { $('#q').value = ''; renderAll(); }
+    else if (e.key === 'Enter') {
+      const left = eps.filter(x => matches(x, terms()));
+      if (left.length !== 1) return;
+      e.preventDefault();
+      const x = left[0];
+      if (x.state === 'ready') { lastIn = x.slug; toast('entering ' + x.name); } else if (x.state !== 'loading') openEp(x.slug);
+    }
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === '/' && !/input|select|textarea/i.test(e.target.tagName) && !e.ctrlKey && !e.metaKey) { e.preventDefault(); $('#q').focus(); $('#q').select(); }
+    if (e.key === 'Escape') $('#close-dlg').classList.remove('open');
+  });
+  // The opening one ages while you watch, as the real row does between polls.
+  setInterval(() => { eps.forEach(e => { if (e.state === 'loading' && e.openingFor != null && e.openingFor >= 60) e.openingFor += 1; }); }, 1000);
+
+  CC.page({ page: 'cards', onData: load });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: your account</title>
+<!-- The design bench (dashboard/design/README.md): the personal page.
+     THERE IS NO REAL PAGE YET. What an editor can see or change about
+     themselves today is scattered: the topbar/drawer (sign out, sign out
+     everywhere: partials/topbar.html, ui.page_logout_everywhere), their own
+     computers on the sync status page (fleet.html + fleet_grid.html, scoped
+     by auth.scope_for), their ticks per computer (partials/my_queue.html,
+     ui.partial_toggle, PUT/DELETE /api/v1/selection with ?machine= and
+     ?mode=upload_only), and on each computer the tray's Settings window
+     (companion settings_window.build_settings_model). This page gathers
+     them; everything the product cannot do yet carries a NEW marker (the
+     "mark what is new" switch). Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/account.css">
+</head>
+<body data-page="account" class="acct-marknew">
+
+<div class="shell">
+  <div class="page one">
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> YOUR ACCOUNT</span><span id="role-badge"></span></h1>
+        <div class="sub" id="sub"></div>
+      </div>
+      <div class="acts">
+        <a class="key sm" href="#password" id="go-pw" title="Jump to the password window below. Changing your password here signs your other browsers out; this one stays signed in."><span class="t">change your password</span></a>
+        <div class="acct-bench" title="Bench only. The real page is always about whoever is signed in; this switch shows it as an editor or as an admin.">preview as
+          <div class="opts" id="persona"><button type="button" data-v="tchen" aria-pressed="true">tchen, editor</button><button type="button" data-v="owen">owen, admin</button></div>
+        </div>
+        <div class="acct-bench" title="Bench only. Outlines every control the product does not have yet, so you can see what would need building.">
+          <label class="switch"><input type="checkbox" id="marknew" checked><span class="off">OFF</span><span class="on">ON</span></label> mark what is new
+        </div>
+      </div>
+    </div>
+
+    <div class="note warn acct-legend">
+      <span class="tag warn">new</span>
+      <span class="grow">Controls outlined like this are <b>not in the product yet</b>: each needs a new route, and the name also needs a new column. Everything else on this page already exists somewhere (the sync status page, the drawer, or the computer's tray) and is gathered here.</span>
+    </div>
+
+    <div id="admin-note"></div>
+
+    <div class="stack">
+      <section class="win" id="you"></section>
+      <section class="win" id="password"></section>
+
+      <h2 class="sec">your computers <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none" id="pc-count"></span></h2>
+      <p class="lede">Each computer has <b>its own sync plan</b>: what you tick here syncs to that computer only. The project list on the sync status page ticks for every computer you use at once. A computer's other settings belong to the computer, so they are changed from its tray (the CC icon, then Settings), and this page shows what it last reported.</p>
+      <div class="acct-pcs" id="pcs"></div>
+
+      <h2 class="sec">your wired rigs <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none" id="rig-count"></span></h2>
+      <p class="lede">A wired rig works directly off the server share, so nothing is synced to it and it holds no ticks. It still reports in, and it can take fleet work.</p>
+      <div class="acct-pcs" id="rigs"></div>
+
+      <h2 class="sec">your settings</h2>
+      <section class="win">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">where_they_change</span><span>&#9566;</span><span class="rule"></span><span class="meta" id="set-meta"></span><span>&#9552;&#9488;</span></div>
+        <div class="lede" style="padding:10px var(--pad) 0">Every setting that is yours to change, what it is now, and where it changes. Settings kept on a computer take effect there, often only when CCSync next starts on it.</div>
+        <div class="scroll-x"><table class="tbl stack-sm" id="settings"><thead><tr><th>setting</th><th title="The value now. For a computer's own setting, what it said in its last report.">now</th><th title="The one place this setting can be changed. Some change only on the computer itself.">where it changes</th></tr></thead><tbody></tbody></table></div>
+      </section>
+
+      <section class="win" id="sessions"></section>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-back" id="dlg"><section class="win dialog">
+  <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t" id="dlg-t">confirm</span><span>&#9566;</span><span class="rule"></span><span>&#9552;&#9488;</span></div>
+  <div class="body"><div id="dlg-b"></div><div class="acts"><button class="key" type="button" id="dlg-no"><span class="t">cancel</span></button><button class="key primary" type="button" id="dlg-yes"><span class="t" id="dlg-y">confirm</span></button></div></div>
+</section></div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, tag, led, toast } = CC;
+  const $ = s => document.querySelector(s);
+  const NEW = '<span class="tag warn acct-newtag" title="Not in the product yet: this needs a new route (and sometimes a new column) before it can work.">new</span>';
+  // a state word with its explanation, for anything a non-technical admin
+  // might not read at a glance (round 2 tooltips rule)
+  const tagT = (tone, text, tip, solid) => `<span class="tag ${solid ? 'solid ' : ''}${tone || ''}"${tip ? ` title="${esc(tip)}"` : ''}>${esc(text)}</span>`;
+  const MIN_PW = 12;   // auth.MIN_PASSWORD_CHARS: the only password rule the product has
+  const bar = (name, meta, metaTip) => `<div class="bar"><span>┌─╡</span><span class="t">${name}</span><span>╞</span><span class="rule"></span>${meta ? `<span class="meta"${metaTip ? ` title="${esc(metaTip)}"` : ''}>${meta}</span>` : ''}<span>═┐</span></div>`;
+
+  // Every project a computer could be given (the demo tree), with proxy size.
+  const PROJECTS = [
+    ['2026/FF5/Elections', '412 GB'], ['2026/FF5/Civil Defence', '238 GB'], ['2026/FF5/Repro Rights', '96 GB'],
+    ['2026/Shorts/Night Market', '44 GB'], ['2026/Shorts/Typhoon Prep', '12 GB'],
+    ['2025/FF4/Kinmen', '310 GB'], ['2025/FF4/CIA City', '188 GB'], ['2025/FF4/Taichung Drone Camp', '72 GB'],
+  ];
+  const KINDS = [['whisper', 'Transcribe audio (uses the graphics card)'], ['proxy-480p', 'Make small preview copies of video'],
+    ['audio-extract', 'Pull the audio out of video'], ['peaks', 'Draw audio waveforms']];
+  const CURRENT = '0.9.77';
+
+  // ------------------------------------------------------------ the data
+  const P = {
+    tchen: {
+      name: 'T. Chen', login: 'tchen', admin: false, adminWhy: '',
+      keys: {
+        busy: [['SHA256:q3Rf...9KxT', 'TCHEN-RIG', 'approved', 'ok'], ['SHA256:7bLm...p2Qa', 'TCHEN-LAPTOP', 'waiting for your admin', 'warn']],
+        calm: [['SHA256:q3Rf...9KxT', 'TCHEN-RIG', 'approved', 'ok'], ['SHA256:7bLm...p2Qa', 'TCHEN-LAPTOP', 'approved', 'ok']],
+      },
+      pcs: {
+        busy: [
+          { name: 'TCHEN-RIG', os: 'Windows 11', led: 'off', state: 'not heard from in 2 h', seen: '2 h ago', since: 'last seen 07:58', ver: '0.9.49', vtag: ['err', '28 behind'],
+            drive: ['err', 'P:\\ present, 2 GB free of 4 TB'],
+            issues: [['err', 'sync engine down 2 h, 3 restarts failed'], ['err', 'update failed x3'], ['warn', '2 GB free']],
+            ticks: [['2026/FF5/Elections', 'full', '64%'], ['2026/FF5/Civil Defence', 'full', '100%'], ['2025/FF4/Kinmen', 'upload', '']],
+            jobs: { on: true, kinds: [], idle: '5 min away', gpu: 'RTX 4080, 16 GB', gate: ['warn', 'Not taking work: not heard from'], now: '' } },
+          { name: 'TCHEN-LAPTOP', os: 'macOS 15, Apple silicon', led: 'warn', state: 'online, sync drive unplugged', seen: '6 s ago', since: 'on since 09:40', ver: CURRENT, vtag: null,
+            drive: ['warn', 'external drive unplugged with 3.1 GB still to upload'],
+            issues: [['warn', 'sync drive unplugged: 3.1 GB owed']],
+            ticks: [['2026/Shorts/Night Market', 'upload', ''], ['2026/FF5/Elections', 'full', 'waiting for the drive']],
+            jobs: { on: false, kinds: ['proxy-480p', 'peaks'], idle: '5 min away', gpu: 'no separate graphics card', gate: ['mute', 'Not taking work: switched off on this computer'], now: '' } },
+        ],
+        calm: [
+          { name: 'TCHEN-RIG', os: 'Windows 11', led: '', state: 'online', seen: '3 s ago', since: 'on since 08:10', ver: CURRENT, vtag: null,
+            drive: ['ok', 'P:\\ present, 1.2 TB free of 4 TB'], issues: [],
+            ticks: [['2026/FF5/Elections', 'full', '100%'], ['2026/FF5/Civil Defence', 'full', '100%'], ['2025/FF4/Kinmen', 'upload', '']],
+            jobs: { on: true, kinds: [], idle: '5 min away', gpu: 'RTX 4080, 16 GB', gate: ['ok', 'Taking fleet work while you are away'], now: '' } },
+          { name: 'TCHEN-LAPTOP', os: 'macOS 15, Apple silicon', led: '', state: 'online', seen: '11 s ago', since: 'on since 09:40', ver: CURRENT, vtag: null,
+            drive: ['ok', 'external drive present, 380 GB free of 1 TB'], issues: [],
+            ticks: [['2026/Shorts/Night Market', 'upload', ''], ['2026/FF5/Elections', 'full', '100%']],
+            jobs: { on: false, kinds: ['proxy-480p', 'peaks'], idle: '5 min away', gpu: 'no separate graphics card', gate: ['mute', 'Not taking work: switched off on this computer'], now: '' } },
+        ],
+      },
+      rigs: { busy: [], calm: [] },
+      sessions: {
+        busy: [['100.64.3.21', 'Chrome, Windows', '2 d ago', 'now', true], ['100.64.3.40', 'Safari, iPhone', '5 d ago', '3 h ago', false], ['100.64.9.4', 'Firefox, Linux', '6 d ago', '6 d ago', false]],
+        calm: [['100.64.3.21', 'Chrome, Windows', '2 d ago', 'now', true]],
+      },
+    },
+    owen: {
+      name: 'Owen', login: 'owen', admin: true, adminWhy: 'on the server\'s admin list',
+      keys: { busy: [], calm: [] },
+      pcs: { busy: [], calm: [] },
+      rigs: {
+        busy: [{ name: 'OWEN-RIG', os: 'Windows 11', led: '', state: 'online', seen: '2 s ago', since: 'on since 07:12', ver: CURRENT, vtag: null,
+          drive: ['ok', 'the server share, mapped as P:\\'], issues: [['hi', 'job: peaks 42%']],
+          jobs: { on: true, kinds: [], idle: 'no wait (a wired rig is exempt)', gpu: 'RTX 4090, 24 GB', gate: ['ok', 'Taking fleet work'],
+            now: 'peaks on 2026/FF5/Elections: A004_C012_0918FJ.mov, 42%, started 3 min ago' } }],
+        calm: [{ name: 'OWEN-RIG', os: 'Windows 11', led: '', state: 'online', seen: '4 s ago', since: 'on since 07:12', ver: CURRENT, vtag: null,
+          drive: ['ok', 'the server share, mapped as P:\\'], issues: [],
+          jobs: { on: true, kinds: [], idle: 'no wait (a wired rig is exempt)', gpu: 'RTX 4090, 24 GB', gate: ['ok', 'Taking fleet work'],
+            now: '', last: 'proxy-480p on 2026/Shorts/Night Market: finished, 20 min ago' } }],
+      },
+      sessions: {
+        busy: [['100.64.1.10', 'Chrome, Windows', '1 d ago', 'now', true], ['100.64.1.33', 'Chrome, Android', '3 d ago', '40 min ago', false]],
+        calm: [['100.64.1.10', 'Chrome, Windows', '1 d ago', 'now', true]],
+      },
+    },
+  };
+  const SITE = {
+    busy: { prefix: 'P:\\', auto: 'off: your admin pushes each update', ytdl: 'on', halt: 'no' },
+    calm: { prefix: 'P:\\', auto: 'on: computers take a newer build by themselves', ytdl: 'on', halt: 'no' },
+  };
+
+  // ?as=owen / ?method=local|oidc open the page on that preview (handy for
+  // linking one state to the owner); the switches in the page do the same.
+  const QS = new URLSearchParams(location.search);
+  let persona = QS.get('as') === 'owen' ? 'owen' : 'tchen';
+  let method = ['local', 'oidc'].includes(QS.get('method')) ? QS.get('method') : 'smb';
+  let mode = 'busy';
+  document.querySelectorAll('#persona button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.v === persona)));
+
+  // ------------------------------------------------------------ pieces
+  function renderHead(p) {
+    $('#role-badge').innerHTML = p.admin ? tag('hi', 'admin', true) : '';
+    $('#sub').innerHTML = `signed in as <b>${esc(p.login)}</b> &middot; ${p.admin ? 'admin' : 'editor'} &middot; ${
+      { smb: 'server password', local: 'local account', oidc: 'single sign-on' }[method]} &middot; <b>${p.pcs[mode].length}</b> computer${p.pcs[mode].length === 1 ? '' : 's'}, <b>${p.rigs[mode].length}</b> wired rig${p.rigs[mode].length === 1 ? '' : 's'}`;
+    $('#admin-note').innerHTML = p.admin ? `<div class="note acct-adminnote"><span class="tag hi">admin</span><span class="grow">This page is about <b>you</b> only. To change someone else's password, sign them out, or look after their computers, use <b>Settings, Users</b>.</span><a class="key sm" href="users.html"><span class="t">Settings, Users</span></a></div>` : '';
+    // The HUD is shell.js's (always owen@admin); on this page it follows the
+    // persona, the way the real topbar follows the session: an editor has no
+    // problem or alert chips and no Settings entry.
+    const user = document.querySelector('.hud-meta .user');
+    if (user) user.innerHTML = p.admin ? `${esc(p.login)}<b>@admin</b>` : esc(p.login);
+    document.querySelectorAll('.hud-meta a:not(.user)').forEach(a => { a.style.display = p.admin ? '' : 'none'; });
+    document.querySelectorAll('.hud-nav a').forEach(a => { if (/health\.html$/.test(a.getAttribute('href'))) a.style.display = p.admin ? '' : 'none'; });
+  }
+
+  function renderYou(p) {
+    const keys = p.keys[mode];
+    const keyTip = { approved: 'Your admin has let this computer in: its uploads and proxy downloads can run.', 'waiting for your admin': 'This computer asked to join. Until your admin approves it, nothing uploads or downloads on it.' };
+    const keyRows = keys.length ? keys.map(k => `<div>${tagT(k[3], k[2], keyTip[k[2]])} <span class="num" title="The key's fingerprint: a short code that identifies it. You never need to type it.">${esc(k[0])}</span> <span class="muted">from ${esc(k[1])}</span></div>`).join('')
+      : `<span class="dim">none, and none needed: a wired rig syncs nothing</span>`;
+    const signs = {
+      smb: ['your account on the server', 'The same name and password as your account on the server (the NAS), which also opens its shared folders.'],
+      local: ['a local account kept by this dashboard', 'An account that exists only in this dashboard. It is not an account on the server.'],
+      oidc: ['your organisation\'s single sign-on', 'You sign in through your organisation\'s own sign-in page, the way you sign in to its email. This dashboard never sees that password.'],
+    }[method];
+    $('#you').innerHTML = bar('you', p.admin ? tagT('hi', 'admin', 'You can change settings for everyone and look after every computer.') : tagT('mute', 'editor', 'You see and change your own computers only.')) + `
+      <div class="body acct-you">
+        <div>
+          <div class="acct-who">
+            <span class="mono-name" id="shown-name">${esc(p.name)}</span>
+            <span class="login">signed in as ${esc(p.login)}</span>
+          </div>
+          <div class="form">
+            <div class="form-row">
+              <div class="lbl">Name${NEW}<small>What other people see beside your work: plan changes, history, who opened a Cards episode. Your sign-in name stays <b>${esc(p.login)}</b>.</small></div>
+              <div class="acct-new"><div class="inline"><input class="inp" id="name-in" style="flex:1;min-width:160px" value="${esc(p.name)}" maxlength="64" aria-label="your name" title="Up to 64 characters. Only how you are shown to other people; it does not change how you sign in."><button class="key sm" type="button" id="name-save" title="Save the name. Other people see it straight away."><span class="t">save</span></button></div></div>
+            </div>
+          </div>
+        </div>
+        <dl class="kv">
+          <dt title="The name you type to sign in, here and in each computer's CCSync.">sign-in name</dt><dd>${esc(p.login)} <span class="dim">(cannot be changed: it is the key every computer, plan and file uses)</span></dd>
+          <dt>role</dt><dd>${p.admin ? `admin <span class="dim">(${esc(p.adminWhy)})</span>` : 'editor <span class="dim">(you see and change your own computers only)</span>'}</dd>
+          <dt>signs in with</dt><dd><span title="${esc(signs[1])}">${esc(signs[0])}</span> <span class="dim">&middot;</span> <a href="#password">${method === 'oidc' ? 'about your password' : 'change your password'}</a></dd>
+          <dt>account</dt><dd>${tagT('ok', 'active', 'You can sign in. An admin can switch an account off, and then it cannot.')}</dd>
+          <dt title="What each of your computers uses to prove it is yours when it uploads or downloads. It is not your password.">sync keys${NEW}</dt><dd class="acct-new">${keyRows}<div class="hint">Your computers upload and download with these, not with your password. A key waiting for your admin means that computer's upload and proxy download cannot start yet.</div></dd>
+        </dl>
+      </div>`;
+    $('#name-save').addEventListener('click', () => {
+      const v = $('#name-in').value.trim();
+      if (!v) { $('#name-in').classList.add('bad'); toast('a name cannot be empty'); return; }
+      $('#name-in').classList.remove('bad');
+      p.name = v; $('#shown-name').textContent = v; toast('saved: other people now see ' + v);
+    });
+  }
+
+  // ------------------------------------------------------------ password
+  // Owner, 2026-09-25: "users should be able to change their passwords."
+  // There is NO self-service route today: only an admin can set one
+  // (POST /api/v1/admin/users/{u}/password and Settings, Users), which then
+  // signs that person out of every browser
+  // (api.revoke_sessions_after_password_reset). This proposes
+  // POST /api/v1/me/password: current + new, the same 12-character floor
+  // (auth.MIN_PASSWORD_CHARS via auth.check_password, the only rule), the
+  // current password checked the way /login checks it (the SMB probe, or
+  // local_users.verify_password) under the SAME login throttle, then
+  // local_users.set_password or the NAS backend's set_known_password (which
+  // refuses any account outside the editors group), then the same
+  // revocation with THIS browser kept (the helper's except_sid path).
+  // Report tokens are left alone, as the admin reset leaves them: they
+  // authenticate a machine. Sync is SFTP with keys, so it never used the
+  // password; the password DOES open the SMB share.
+  const PW_ANSWERS = {
+    smb: [['ok', 'changed', 'The server accepts the change.'], ['wrong', 'wrong current', 'The current password typed is not the one the server has.'],
+      ['throttled', 'too many tries', 'Several wrong current passwords in a row: the form waits, like the sign-in page does.'],
+      ['refused', 'not managed here', 'Your server account is not one this dashboard looks after (for example the NAS\'s own administrator account).'],
+      ['unreachable', 'server unreachable', 'The dashboard cannot reach the NAS at that moment.']],
+    local: [['ok', 'changed', 'The dashboard saves the new password.'], ['wrong', 'wrong current', 'The current password typed is not the one the dashboard has.'],
+      ['throttled', 'too many tries', 'Several wrong current passwords in a row: the form waits, like the sign-in page does.']],
+  };
+  let pwAnswer = 'ok';
+
+  const othersLine = n => `Right now that means <b>${n || 'no'}</b> other browser${n === 1 ? '' : 's'} (listed under <a href="#sessions">signed-in browsers</a>).`;
+
+  function pwFacts(p) {
+    const others = p.sessions[mode].filter(x => !x[4]).length;
+    // one sentence shape for every count, so the line never changes length
+    // when a change signs the others out
+    const othersNow = othersLine(others);
+    if (method === 'oidc') {
+      return `<dl class="kv acct-pw-facts">
+        <dt title="Single sign-on: you sign in with your organisation's account instead of a password kept here.">single sign-on</dt><dd>You sign in with your organisation's account, so <b>there is no password on this dashboard to change</b>. It never sees yours.</dd>
+        <dt>to change it</dt><dd>Change it wherever your organisation looks after its accounts: the same place you would for your work email. The next time you sign in here, use the new one.</dd>
+        <dt>your sign-in</dt><dd><span class="num" title="Your organisation's sign-in service. This dashboard sends you there when you press Sign in with your organisation.">login.example.org</span> <span class="dim">(your organisation's)</span></dd>
+        <dt>other browsers</dt><dd>Changing it with your organisation does not sign you out here. To be sure nobody else is using your account, press <b>sign out everywhere</b> at the bottom of this page.</dd>
+      </dl>`;
+    }
+    const changes = method === 'smb'
+      ? `<dd><b>Your account on the server</b> (the NAS). That one password is used for:
+          <ul class="acct-list">
+            <li>signing in to this dashboard</li>
+            <li>the server's <abbr title="SMB is how Windows and macOS open folders on the server. Windows usually remembers the password in Credential Manager, macOS in its Keychain.">shared folders</abbr>: browsing the server from Explorer or Finder, and grading straight off the server from the tray</li>
+          </ul>
+          <span class="dim">A computer that remembered the old password for the shared folders asks for the new one the next time it opens them.</span></dd>`
+      : `<dd><b>Your sign-in to this dashboard</b>, and nothing else. The password is kept here only, scrambled so that nobody, admins included, can read it.</dd>`;
+    const forgot = p.admin
+      ? `Another admin can set a new one for you in <b>Settings, Users</b>.${method === 'smb' ? ' It can also be reset in the NAS\'s own settings.' : ''}`
+      : 'Your admin can set a new one for you. That signs you out of every browser.';
+    return `<dl class="kv acct-pw-facts">
+        <dt>it changes</dt>${changes}
+        <dt>it leaves alone</dt><dd><b>Syncing.</b> Your computers upload and download with <span title="${method === 'smb' ? 'Uploads and proxy downloads run over SFTP with a key made on each computer, and the computer reports in with a sign-in of its own. Neither is your password.' : 'Each computer has a key and a sign-in of its own. Neither is your password.'}">their own key and sign-in</span>, not with this password, so they carry on and nobody has to sign in again on them.</dd>
+        <dt>afterwards${NEW}</dt><dd class="acct-new">Every <b>other</b> browser signed in as ${esc(p.login)} is signed out at once; this one stays signed in. <span id="pw-others">${othersNow}</span></dd>
+        <dt>forgotten it?</dt><dd>${forgot}</dd>
+        ${p.admin ? `<dt>someone else's</dt><dd>This changes <b>yours</b> only. Set another person's in <a href="users.html">Settings, Users</a>: that signs them out of every browser.</dd>` : ''}
+      </dl>`;
+  }
+
+  function pwForm(p) {
+    if (method === 'oidc') {
+      return `<div class="acct-pw-sso">
+          <div class="empty"><span class="glyph">&#9633;</span>No password here.<br>Your organisation looks after it.</div>
+          ${p.admin ? `<div class="note"><span class="grow"><b>Your emergency sign-in.</b> When your organisation's sign-in is down, an admin can still get in with the <b>Admin sign-in</b> link on the sign-in page. That uses your account on the server (the NAS), and its password is changed in the NAS's own settings, not here.</span></div>` : ''}
+        </div>`;
+    }
+    const answers = PW_ANSWERS[method];
+    if (!answers.some(a => a[0] === pwAnswer)) pwAnswer = 'ok';
+    return `<div class="acct-pw-form">
+        <div class="form acct-new">
+          <div class="form-row"><div class="lbl">current password<small>Proves it is you, in case this browser was left signed in somewhere.</small></div>
+            <input class="inp" type="password" id="pw0" autocomplete="current-password" aria-label="current password" title="The password you signed in with."></div>
+          <div class="form-row"><div class="lbl">new password<small>at least ${MIN_PW} characters: that is the only rule</small></div>
+            <div><input class="inp" type="password" id="pw1" autocomplete="new-password" aria-label="new password" title="At least ${MIN_PW} characters. Letters, numbers, spaces and symbols all count. A few unrelated words make a long password that is easy to remember.">
+              <div class="hint acct-pw-hint" id="pw-count"></div></div></div>
+          <div class="form-row"><div class="lbl">new password again<small>so a typo cannot lock you out</small></div>
+            <div><input class="inp" type="password" id="pw2" autocomplete="new-password" aria-label="new password again" title="Type the new password a second time, exactly the same.">
+              <div class="hint acct-pw-hint" id="pw-match"></div></div></div>
+          <div class="form-row"><div class="lbl"></div>
+            <div class="acct-pw-go">
+              <label class="check" title="Shows what you typed in the three boxes, to check for typos. Nothing is sent."><input type="checkbox" id="pw-show"><span class="g"></span><span class="l">show what I typed</span></label>
+              <button class="key primary" type="button" id="pw-go" title="Checks your current password, then changes it. Your other browsers are signed out; this one stays signed in."><span class="t">change password</span><span class="busy-t"><span class="spin"></span> changing</span></button>
+            </div></div>
+        </div>
+        <div class="acct-pw-result" id="pw-res" aria-live="polite"></div>
+        <div class="acct-bench acct-pw-bench" title="Bench only. Pick what the server answers when you press change password, to see each result.">the server answers
+          <span class="opts" id="pw-answer">${answers.map(([v, l, t]) => `<button type="button" data-v="${v}" aria-pressed="${v === pwAnswer}" title="${esc(t)}">${l}</button>`).join('')}</span>
+        </div>
+      </div>`;
+  }
+
+  // one slot, always filled, so a result never pushes anything down
+  function pwResult(tone, html) {
+    const r = $('#pw-res'); if (!r) return;
+    r.innerHTML = `<div class="note ${tone || 'acct-idle'}"><span class="grow">${html}</span></div>`;
+  }
+  const pwIdle = () => pwResult('', 'Fill in all three boxes, then press <b>change password</b>. Nothing changes until the server says so.');
+
+  function pwChecks() {
+    const a = $('#pw1').value, b = $('#pw2').value, n = a.length;
+    $('#pw-count').innerHTML = !n ? `<span class="dim">0 of ${MIN_PW} characters</span>`
+      : n < MIN_PW ? tagT('warn', `${n} of ${MIN_PW} characters`, `${MIN_PW - n} more to go.`) : tagT('ok', `${n} characters: long enough`, 'This clears the only rule the product has.');
+    $('#pw-match').innerHTML = !b ? '<span class="dim">type it again</span>'
+      : a === b ? tagT('ok', 'the two match') : tagT('warn', 'the two do not match yet');
+  }
+
+  function renderPassword(p) {
+    const pick = `<span class="acct-bench" title="Bench only. A real server has ONE sign-in method, chosen when it is set up. Switch to see this window for each.">preview <span class="opts" id="method">${
+      [['smb', 'server account'], ['local', 'local account'], ['oidc', 'single sign-on']].map(([v, l]) => `<button type="button" data-v="${v}" aria-pressed="${v === method}">${l}</button>`).join('')}</span></span>`;
+    $('#password').innerHTML = bar('change_your_password', method === 'oidc' ? tagT('mute', 'no password here', 'You sign in with your organisation\'s account, so its password is not kept here.') : NEW) + `
+      <div class="body acct-pw"><div class="acct-pw-pick">${pick}</div>${pwFacts(p)}${pwForm(p)}</div>`;
+    $('#method').addEventListener('click', e => {
+      const b = e.target.closest('button'); if (!b) return;
+      method = b.dataset.v; render(mode);
+    });
+    if (method === 'oidc') return;
+    pwIdle(); pwChecks();
+    ['#pw1', '#pw2'].forEach(s => $(s).addEventListener('input', pwChecks));
+    $('#pw-show').addEventListener('change', e => ['#pw0', '#pw1', '#pw2'].forEach(s => { $(s).type = e.target.checked ? 'text' : 'password'; }));
+    $('#pw-answer').addEventListener('click', e => {
+      const b = e.target.closest('button'); if (!b) return;
+      pwAnswer = b.dataset.v;
+      $('#pw-answer').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    });
+    const go = $('#pw-go');
+    const lock = on => ['#pw0', '#pw1', '#pw2', '#pw-show'].forEach(s => { $(s).disabled = on; });
+    go.addEventListener('click', () => {
+      const c = $('#pw0'), a = $('#pw1').value, b = $('#pw2').value;
+      [c, $('#pw1'), $('#pw2')].forEach(x => x.classList.remove('bad'));
+      // the three refusals the browser makes on its own, before any request
+      if (!c.value) { c.classList.add('bad'); pwResult('err', 'Type your <b>current password</b> first. Nothing changed.'); return; }
+      if (a.length < MIN_PW) { $('#pw1').classList.add('bad'); pwResult('err', `The new password is <b>${a.length}</b> characters. It needs at least ${MIN_PW}. Nothing changed.`); return; }
+      if (a !== b) { $('#pw2').classList.add('bad'); pwResult('err', 'The two new passwords are not the same. Nothing changed.'); return; }
+      go.classList.add('busy'); lock(true);
+      pwResult('', `<span class="spin"></span> Checking your current password${method === 'smb' ? ' with the server' : ''}, then changing it. This can take a few seconds.`);
+      setTimeout(() => {
+        go.classList.remove('busy'); lock(false);
+        const others = p.sessions[mode].filter(x => !x[4]).length;
+        const out = {
+          ok: ['ok', `<b>Password changed${method === 'smb' ? ' on the server' : ''}.</b> ${others ? `Signed out ${others} other browser${others === 1 ? '' : 's'}; this one stays signed in.` : 'No other browser was signed in; this one stays signed in.'}${method === 'smb' ? ' Use the new one for the shared folders too.' : ''}`],
+          wrong: ['err', '<b>That is not your current password</b>, so nothing changed. Several wrong tries in a row make this form wait, like the sign-in page.'],
+          throttled: ['err', '<b>Too many wrong passwords.</b> Try again in 6 minutes. Nothing changed.'],
+          refused: ['err', `<b>The server refused.</b> ${esc(p.login)} is not an account this dashboard looks after, so nothing changed. Change it in the NAS's own settings${p.admin ? '' : ', or ask your admin'}.`],
+          unreachable: ['err', `<b>Could not reach the server</b>, so nothing changed. Try again in a minute${p.admin ? '; if it keeps happening, see Settings, Health' : '; if it keeps happening, tell your admin'}.`],
+        }[pwAnswer];
+        pwResult(out[0], out[1]);
+        if (pwAnswer === 'ok') {
+          ['#pw0', '#pw1', '#pw2'].forEach(s => { $(s).value = ''; }); pwChecks();
+          // the browsers window follows: the others are gone
+          p.sessions[mode] = p.sessions[mode].filter(x => x[4]); renderSessions(p);
+          $('#pw-others').innerHTML = othersLine(0);
+        }
+        if (pwAnswer === 'wrong') c.classList.add('bad');
+      }, 1600);
+    });
+  }
+
+  function kindTags(kinds) {
+    if (!kinds.length) return '<span class="dim">every kind</span>';
+    return kinds.map(k => tag('hi', k)).join(' ');
+  }
+
+  function jobsBlock(pc, owner, isAdmin) {
+    const j = pc.jobs;
+    const facts = `<dl class="kv">
+        <dt title="Whether this computer is taking fleet work at the moment, and if not, why not.">now</dt><dd>${tag(j.gate[0], j.gate[1])}</dd>
+        ${j.now ? `<dt>running</dt><dd>${esc(j.now)}</dd>` : ''}
+        ${j.last ? `<dt>last job</dt><dd class="dim">${esc(j.last)}</dd>` : ''}
+        <dt title="The kinds of fleet work this computer accepts.">takes</dt><dd>${kindTags(j.kinds)}</dd>
+        <dt title="How long nobody must use the computer (no mouse or keyboard) before it starts fleet work, so it never slows you down.">starts after</dt><dd>${esc(j.idle)}</dd>
+        <dt title="The computer's graphics card. Transcribing audio needs a good one; the other kinds do not.">graphics</dt><dd>${esc(j.gpu)}</dd>
+      </dl>`;
+    const on = j.on;
+    const ctl = `<div class="jobs-ctl acct-new">
+        <label class="check" title="Fleet work is small background tasks (transcripts, preview copies, waveforms) that the server hands to idle computers. Untick to keep this computer out of all of it."><input type="checkbox" data-jobs="${esc(pc.name)}" ${on ? 'checked' : ''}><span class="g"></span><span class="l">Let the fleet use this computer${NEW}</span></label>
+        <div class="kinds">${KINDS.map(([k, l]) => `<label class="check" title="The job called ${k}. Untick to keep this computer out of this kind only."><input type="checkbox" data-kind="${esc(pc.name)}|${k}" ${(!j.kinds.length || j.kinds.includes(k)) ? 'checked' : ''} ${on ? '' : 'disabled'}><span class="g"></span><span class="l">${esc(l)}</span></label>`).join('')}</div>
+        <div class="hint">Asked of ${esc(pc.name)} on its next report, and it takes effect when CCSync next starts there. Fleet work only runs while nobody is using the computer.</div>
+      </div>`;
+    return `<div class="acct-h3">fleet jobs</div>${facts}${ctl}
+      <div class="acct-where">lend it now, or stop the job it is running: <b>tray, Take fleet jobs now</b> and <b>Settings, FLEET JOBS</b></div>`;
+  }
+
+  function projectsBlock(pc, owner) {
+    const ticked = pc.ticks.map(t => t[0]);
+    const rows = pc.ticks.length ? pc.ticks.map(([rel, m, pct]) => `
+      <tr data-row="${esc(pc.name)}|${esc(rel)}">
+        <td data-l="project"><b>${esc(rel.split('/').pop())}</b><br><span class="muted" style="font-size:11px">${esc(rel)}</span></td>
+        <td data-l="syncs">${m === 'upload' ? tagT('warn', 'upload only', 'This computer sends its new camera files up to the server and gets nothing back.') + '<br><span class="muted" style="font-size:11px">nothing comes down</span>' : tagT('ok', 'full', 'Uploads go up, and the project\'s proxies and edit files come down to this computer.') + (pct ? `<br><span class="muted" style="font-size:11px" title="How much of the project's proxies are on this computer now.">${esc(pct)}</span>` : '')}</td>
+        <td><div class="acts">
+          <button class="key sm acct-modekey" type="button" data-mode="${esc(pc.name)}|${esc(rel)}|${m === 'upload' ? 'full' : 'upload'}" title="${m === 'upload' ? 'Also bring the project\'s proxies down to this computer.' : 'Keep sending new files up, but stop bringing anything down to this computer.'}"><span class="t">${m === 'upload' ? 'sync fully' : 'upload only'}</span></button>
+          <button class="key quiet sm" type="button" data-untick="${esc(pc.name)}|${esc(rel)}" title="Stop syncing this project on this computer. Files already there stay on disk."><span class="t">untick</span></button>
+        </div></td>
+      </tr>`).join('')
+      : `<tr><td colspan="3"><div class="empty" style="padding:14px"><span class="glyph">&#9633;</span>Nothing is ticked for this computer.</div></td></tr>`;
+    const left = PROJECTS.filter(p => !ticked.includes(p[0]));
+    return `<div class="acct-h3">projects on this computer <span class="n">${pc.ticks.length} ticked</span></div>
+      <div class="projects scroll-y"><table class="tbl tight stack-sm"><tbody>${rows}</tbody></table></div>
+      <div class="add">
+        <select class="sel" aria-label="a project to tick for ${esc(pc.name)}" data-add-sel="${esc(pc.name)}">${left.map(p => `<option value="${esc(p[0])}">${esc(p[0])} (${esc(p[1])})</option>`).join('')}</select>
+        <button class="key sm" type="button" data-add="${esc(pc.name)}" data-add-mode="full" title="Sync the chosen project to this computer: uploads go up, proxies come down."><span class="t">tick</span></button>
+        <button class="key sm" type="button" data-add="${esc(pc.name)}" data-add-mode="upload" title="Only send this computer's new files for the chosen project up to the server. Nothing comes down."><span class="t">upload only</span></button>
+      </div>`;
+  }
+
+  function pcWin(pc, owner, isRig) {
+    const isAdmin = P[persona].admin;
+    const verLine = `${esc(pc.ver)} ${pc.vtag ? tagT(pc.vtag[0], pc.vtag[1], `This computer runs an older CCSync than the current ${CURRENT}. The number is how many releases it has missed.`) : tagT('ok', 'up to date', `The current CCSync, ${CURRENT}.`)}`;
+    const update = pc.vtag
+      ? (isAdmin ? `<button class="key sm" type="button" data-busy="asked ${esc(pc.name)} to update on its next report" title="Tell this computer to install ${CURRENT} the next time it reports in (within a minute when it is on). Nobody has to click anything there."><span class="t">update now</span><span class="busy-t"><span class="spin"></span> asking</span></button>`
+        : `<div class="acct-where">update it from its tray: <b>Settings, HELP, Update to ${CURRENT}</b>. Your admin can also push it.</div>`)
+      : '';
+    return `<section class="win acct-pc">
+      ${bar(esc(pc.name), `${led(pc.led)} ${esc(pc.state)}`, 'What this computer said in its last report. Computers report every few seconds while CCSync is running.')}
+      <div class="body">
+        <dl class="kv">
+          <dt>role</dt><dd>${isRig ? 'wired to the server <span class="dim">(works off the server share; syncs nothing)</span>' : 'remote editor <span class="dim">(syncs projects to its own drive)</span>'}</dd>
+          <dt title="The drive this computer keeps its synced projects on, and how much room is left on it.">sync drive</dt><dd><span class="${pc.drive[0] === 'err' ? 'red' : pc.drive[0] === 'warn' ? '' : ''}" style="${pc.drive[0] === 'warn' ? 'color:var(--warn)' : ''}">${esc(pc.drive[1])}</span></dd>
+          <dt>CCSync</dt><dd>${verLine}</dd>
+          <dt>system</dt><dd>${esc(pc.os)}</dd>
+          <dt>last report</dt><dd>${esc(pc.seen)} <span class="dim">&middot; ${esc(pc.since)}</span></dd>
+        </dl>
+        ${pc.issues.length ? `<div class="issues" title="What needs attention on this computer, worst first.">${pc.issues.map(i => tag(i[0], i[1])).join('')}</div>` : ''}
+        ${update}
+        ${isRig ? '' : projectsBlock(pc, owner)}
+        ${jobsBlock(pc, owner, isAdmin)}
+      </div>
+      <div class="foot">Remote or wired, pause, stop all syncing, YouTube sign-in: <b style="color:var(--text)">${esc(pc.name)}'s tray, Settings</b>.${isAdmin ? ' <a class="key quiet sm" href="#" data-busy="asked ' + esc(pc.name) + ' why; the answer arrives with its next report" title="Ask this computer to send its own explanation of what it is doing and what is stuck. The answer arrives with its next report."><span class="t">ask this computer why</span><span class="busy-t"><span class="spin"></span> asking</span></a>' : ''}</div>
+    </section>`;
+  }
+
+  function renderPcs(p) {
+    const pcs = p.pcs[mode], rigs = p.rigs[mode];
+    $('#pc-count').textContent = pcs.length ? `(${pcs.length})` : '';
+    $('#rig-count').textContent = rigs.length ? `(${rigs.length})` : '';
+    $('#pcs').innerHTML = pcs.length ? pcs.map(pc => pcWin(pc, p.login, false)).join('')
+      : `<section class="win" style="grid-column:1/-1"><div class="empty"><span class="glyph">&#9633; &#9633;</span>No remote computers have reported in as ${esc(p.login)}.<br>Install CCSync on a computer and sign in to it as ${esc(p.login)}: it appears here after its first report. <a class="key quiet sm" href="#"><span class="t">get the installer</span></a></div></section>`;
+    $('#rigs').innerHTML = rigs.length ? rigs.map(pc => pcWin(pc, p.login, true)).join('')
+      : `<section class="win" style="grid-column:1/-1"><div class="empty"><span class="glyph">&#9633;</span>No wired rigs. A computer becomes one from its tray: <b>Settings, THIS COMPUTER, Wired to the server</b>, then a restart of CCSync.</div></section>`;
+  }
+
+  function renderSettings(p) {
+    const pcs = p.pcs[mode], rigs = p.rigs[mode], all = pcs.concat(rigs), site = SITE[mode];
+    const per = f => all.length ? all.map(pc => `<span class="v">${esc(pc.name)}: ${f(pc)}</span>`).join('') : '<span class="dim">no computers yet</span>';
+    const pcsOnly = f => pcs.length ? pcs.map(pc => `<span class="v">${esc(pc.name)}: ${f(pc)}</span>`).join('') : '<span class="dim">no remote computers</span>';
+    const grp = (t, s) => `<tr class="grp"><td colspan="3">${t}<small>${s}</small></td></tr>`;
+    const row = (name, now, where, isNew) => `<tr${isNew ? ' class="acct-new"' : ''}><td data-l="setting"><b>${name}</b>${isNew ? NEW : ''}</td><td data-l="now">${now}</td><td data-l="where">${where}</td></tr>`;
+    const halted = mode === 'busy' && persona === 'owen' ? 'no' : 'no';
+    $('#settings tbody').innerHTML = [
+      grp('yours, kept by this dashboard', 'Changed on this page, and in effect at once.'),
+      row('Name', esc(p.name), 'here, under you', true),
+      row('What each computer syncs', pcsOnly(pc => `${pc.ticks.length} project${pc.ticks.length === 1 ? '' : 's'}${pc.ticks.some(t => t[1] === 'upload') ? `, ${pc.ticks.filter(t => t[1] === 'upload').length} upload only` : ''}`),
+        'here, per computer; the sync status page\'s project list ticks every computer at once', false),
+      row('Password', { smb: 'your server account', local: 'this dashboard', oidc: 'your organisation' }[method],
+        method === 'oidc' ? 'with your organisation, wherever it looks after your account' : '<a href="#password">here, under change your password</a>' + (p.admin ? '; another admin can also set one' : '; your admin can also set one'), method !== 'oidc'),
+      row('Signed-in browsers', `${p.sessions[mode].length}`, 'here, at the bottom; also the menu\'s Sign out everywhere', false),
+
+      grp('each computer\'s own, asked from here', 'Sent to the computer with its next report; it applies them when CCSync next starts there.'),
+      row('Let the fleet use this computer', per(pc => pc.jobs.on ? 'yes' : 'no'), 'here, per computer; also the tray: Settings, FLEET JOBS', true),
+      row('Kinds of fleet work', per(pc => pc.jobs.kinds.length ? esc(pc.jobs.kinds.join(', ')) : 'every kind'), 'here, per computer; also the tray: Settings, FLEET JOBS', true),
+
+      grp('each computer\'s own, changed from its tray', 'The computer is the only place these can change. This page shows what it last reported.'),
+      row('Remote editor or wired to the server', per(pc => rigs.includes(pc) ? 'wired' : 'remote'), 'tray: Settings, THIS COMPUTER (then restart CCSync)', false),
+      row('Pause syncing', per(pc => pc.led === 'off' ? '<span class="dim">not reporting</span>' : 'not paused'), 'tray menu: Pause syncing', false),
+      row('Stop all syncing on this computer', per(pc => pc.led === 'off' ? '<span class="dim">not reporting</span>' : 'not stopped'), 'tray: Settings, ADVANCED', false),
+      row('Lend this computer to the fleet now', per(pc => pc.jobs.on ? 'not lent' : '<span class="dim">fleet use is off</span>'), 'tray menu: Take fleet jobs now; how long: Settings, FLEET JOBS', false),
+      row('Drive reminder', pcsOnly(() => '<span class="dim">not reported</span>'), 'tray: Settings, SYNCING mutes one; the interval (every 30 min by default) is in the computer\'s config file', false),
+      row('YouTube terms and sign-in', per(() => '<span class="dim">not reported</span>'), 'tray: Settings, YOUTUBE', false),
+      row('Update CCSync', per(pc => esc(pc.ver) + (pc.vtag ? ` ${tag(pc.vtag[0], pc.vtag[1])}` : '')), 'tray: Settings, HELP' + (p.admin ? '; or push it from Settings, Packages' : '; your admin can also push it'), false),
+      row('Sign this computer in or out', per(() => 'signed in as ' + esc(p.login)), 'tray: Settings, THIS COMPUTER', false),
+
+      grp(p.admin ? 'set for everyone, by you and the other admins' : 'set for everyone by your admin', p.admin ? 'Changed under Settings, Site.' : 'Shown so you know; you cannot change these.'),
+      row('Drive letter for the project tree', esc(site.prefix), p.admin ? '<a class="key quiet sm" href="site.html"><span class="t">Settings, Site</span></a>' : 'your admin', false),
+      row('Automatic updates', esc(site.auto), p.admin ? '<a class="key quiet sm" href="site.html"><span class="t">Settings, Site</span></a>' : 'your admin', false),
+      row('YouTube downloads', esc(site.ytdl), p.admin ? '<a class="key quiet sm" href="site.html"><span class="t">Settings, Site</span></a>' : 'your admin', false),
+      row('<span title="An admin can stop all syncing on every computer at once, for example during a server repair. It restarts by itself after 24 hours.">Fleet stopped</span>', halted, p.admin ? '<a class="key quiet sm" href="home.html"><span class="t">sync status, Stop the fleet</span></a>' : 'your admin', false),
+    ].join('');
+    $('#set-meta').innerHTML = `<b>${all.length}</b> computer${all.length === 1 ? '' : 's'}`;
+  }
+
+  function renderSessions(p) {
+    const s = p.sessions[mode];
+    const others = s.filter(x => !x[4]).length;
+    $('#sessions').innerHTML = bar('signed-in_browsers', `<b>${s.length}</b> browser${s.length === 1 ? '' : 's'}`) + `
+      <div class="lede" style="padding:10px var(--pad) 0">Every browser signed in as ${esc(p.login)}. Signing one out takes effect within a second. Your computers' own sign-in is separate and is not affected.</div>
+      <div class="scroll-y acct-sess" style="max-height:260px"><table class="tbl stack-sm"><thead><tr><th title="The network address the browser signs in from. Addresses starting 100. are computers and phones on your private network.">from</th><th>browser</th><th>signed in</th><th title="When this browser last loaded a page.">last seen</th><th></th></tr></thead><tbody>
+      ${s.map(x => `<tr class="sess"><td data-l="from"><span class="num">${esc(x[0])}</span></td><td data-l="browser"><b>${esc(x[1])}</b>${x[4] ? ' ' + tagT('hi', 'this browser', 'The browser you are reading this in.') : ''}</td><td data-l="signed in">${esc(x[2])}</td><td data-l="last seen">${esc(x[3])}</td>
+        <td><div class="acts">${x[4] ? '' : `<span class="acct-new"><button class="key sm" type="button" data-dismiss=".sess" data-toast="signed out ${esc(x[1])}" title="Sign this one browser out. Whoever is using it has to sign in again."><span class="t">sign out</span></button>${NEW}</span>`}</div></td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="pager" style="justify-content:flex-start;gap:10px;flex-wrap:wrap">
+        ${others ? `<span class="acct-new"><button class="key" type="button" id="sign-others" title="Sign out every browser except this one. Asks first."><span class="t">sign out the others</span></button>${NEW}</span>` : '<span class="dim">Only this browser is signed in.</span>'}
+        <button class="key" type="button" id="sign-all" title="Sign out every browser, this one too. Your computers keep syncing: their sign-in is separate. Asks first."><span class="t">sign out everywhere</span></button>
+        <span class="muted" style="flex-basis:100%">Use these if a computer or a phone was lost.</span>
+      </div>`;
+    const so = $('#sign-others');
+    if (so) so.addEventListener('click', () => ask('sign out the others',
+      `Sign ${esc(p.login)} out of the other ${others} browser${others === 1 ? '' : 's'}? This one stays signed in.`, 'sign them out', () => {
+        document.querySelectorAll('#sessions tr.sess').forEach(r => { if (!r.querySelector('.tag.hi')) r.remove(); });
+        toast('signed out of ' + others + ' other browser' + (others === 1 ? '' : 's'));
+      }));
+    $('#sign-all').addEventListener('click', () => ask('sign out everywhere',
+      'Sign yourself out of every browser, including this one? You will need to sign in again to finish what you are doing.', 'sign out everywhere',
+      () => toast('signed out everywhere: the real page goes to sign in now')));
+  }
+
+  // ------------------------------------------------------------ dialog
+  let onYes = null;
+  function ask(title, text, yes, fn) {
+    $('#dlg-t').textContent = title; $('#dlg-b').innerHTML = `<p>${text}</p>`; $('#dlg-y').textContent = yes;
+    onYes = fn; $('#dlg').classList.add('open');
+  }
+  $('#dlg-no').addEventListener('click', () => $('#dlg').classList.remove('open'));
+  $('#dlg-yes').addEventListener('click', () => { $('#dlg').classList.remove('open'); if (onYes) onYes(); });
+  $('#dlg').addEventListener('click', e => { if (e.target.id === 'dlg') $('#dlg').classList.remove('open'); });
+
+  // ------------------------------------------------------------ behaviour
+  const findPc = name => P[persona].pcs[mode].concat(P[persona].rigs[mode]).find(x => x.name === name);
+  document.addEventListener('click', e => {
+    const t = e.target.closest('[data-toast]'); if (t) toast(t.dataset.toast);
+    const m = e.target.closest('[data-mode]');
+    if (m) {
+      const [name, rel, to] = m.dataset.mode.split('|'); const pc = findPc(name);
+      const tk = pc.ticks.find(x => x[0] === rel); tk[1] = to; if (to === 'full') tk[2] = 'starting';
+      renderPcs(P[persona]); renderSettings(P[persona]);
+      toast(to === 'upload' ? `${rel.split('/').pop()} on ${name}: upload only, nothing comes down` : `${rel.split('/').pop()} on ${name}: syncs fully`);
+    }
+    const u = e.target.closest('[data-untick]');
+    if (u) {
+      const [name, rel] = u.dataset.untick.split('|'); const pc = findPc(name);
+      ask('untick', `This removes ${esc(rel.split('/').pop())} from ${esc(name)}. Its copies stay on disk; nothing new comes down and proxy sync stops for it.`, 'untick', () => {
+        pc.ticks = pc.ticks.filter(x => x[0] !== rel); renderPcs(P[persona]); renderSettings(P[persona]);
+        toast(`unticked ${rel.split('/').pop()} for ${name}`);
+      });
+    }
+    const a = e.target.closest('[data-add]');
+    if (a) {
+      const name = a.dataset.add, pc = findPc(name);
+      const sel = document.querySelector(`[data-add-sel="${name}"]`); if (!sel || !sel.value) return;
+      const rel = sel.value, size = PROJECTS.find(x => x[0] === rel)[1], upload = a.dataset.addMode === 'upload';
+      const doIt = () => { pc.ticks.push([rel, upload ? 'upload' : 'full', upload ? '' : 'starting']); renderPcs(P[persona]); renderSettings(P[persona]); toast(`ticked ${rel.split('/').pop()} for ${name}${upload ? ', upload only' : ''}`); };
+      // UX-1: the capacity sentence, before a full tick onto a nearly full computer.
+      if (!upload && pc.drive[0] === 'err') ask('tick', `${esc(rel)} is ${esc(size)} of proxies. ${esc(name)} has 2 GB free. Sync it there anyway?`, 'sync it anyway', doIt);
+      else doIt();
+    }
+  });
+  document.addEventListener('change', e => {
+    const j = e.target.closest('[data-jobs]');
+    if (j) {
+      const pc = findPc(j.dataset.jobs); pc.jobs.on = j.checked; renderPcs(P[persona]); renderSettings(P[persona]);
+      toast(`asked ${pc.name} to ${j.checked ? 'take' : 'stop taking'} fleet work; it applies it when CCSync next starts there`);
+    }
+    const k = e.target.closest('[data-kind]');
+    if (k) {
+      const [name, kind] = k.dataset.kind.split('|'); const pc = findPc(name);
+      let cur = pc.jobs.kinds.length ? pc.jobs.kinds.slice() : KINDS.map(x => x[0]);
+      if (k.checked) cur.push(kind); else cur = cur.filter(x => x !== kind);
+      if (!cur.length) { k.checked = true; toast('That is the last kind of work this computer takes. Untick Let the fleet use this computer instead.'); return; }
+      // every kind ticked is written as "every kind" (an empty list), as the tray does
+      pc.jobs.kinds = cur.length === KINDS.length ? [] : KINDS.map(x => x[0]).filter(x => cur.includes(x));
+      renderPcs(P[persona]); renderSettings(P[persona]);
+      toast(`asked ${name} to ${k.checked ? 'take' : 'stop taking'} ${kind} work, from its next start`);
+    }
+  });
+  $('#persona').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    persona = b.dataset.v;
+    $('#persona').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    render(mode);
+  });
+  $('#marknew').addEventListener('change', e => document.body.classList.toggle('acct-marknew', e.target.checked));
+  // the head's shortcut: straight to the password window, cursor in the first box
+  $('#go-pw').addEventListener('click', e => {
+    e.preventDefault();
+    const w = $('#password'); w.classList.remove('collapsed');
+    w.scrollIntoView({ block: 'start' });
+    const f = $('#pw0'); if (f) f.focus({ preventScroll: true });
+  });
+
+  function render(m) {
+    mode = m;
+    const p = P[persona];
+    renderHead(p); renderYou(p); renderPassword(p); renderPcs(p); renderSettings(p); renderSessions(p);
+  }
+
+  CC.page({ page: 'account', onData: render });
+})();
+</script>
+</body>
+</html>

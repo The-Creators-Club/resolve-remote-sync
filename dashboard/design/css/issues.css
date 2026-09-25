@@ -1,0 +1,73 @@
+/* The issue variants (issues-variants.js), 2026-09-25. Each one lives in
+   the computer row's fixed three-line slot (.pc .issues). */
+
+.pc .issues:has(.iv-log, .iv-matrix, .iv-counts, .iv-bar, .iv-ticker) { gap: 0; }
+.iv-none { color: var(--muted); font-size: 12px; }
+.iv-none::first-letter { color: var(--ok); }
+.err { --sev: var(--err); }
+.warn { --sev: var(--warn); }
+.hi { --sev: var(--hi); }
+
+/* log / tree: one line each, the glyph in the severity colour, the words
+   in the reading colour so a long list stays calm */
+.iv-log { display: grid; grid-auto-rows: var(--lane-h, 22px); align-items: center; width: 100%; font-size: 12.5px; }
+.iv-l { display: grid; grid-template-columns: 2ch minmax(0, 1fr); align-items: baseline; gap: 4px; white-space: nowrap; min-width: 0; }
+.iv-l .g { color: var(--sev); text-shadow: 0 0 calc(var(--fx-glow) * 8px) var(--sev); font-size: 11px; }
+.iv-l .x { overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
+.iv-l.err .x { color: var(--text); }
+.iv-tree .iv-l { grid-template-columns: 2.5ch 2ch minmax(0, 1fr); }
+.iv-tree .br { color: var(--red-deep); }
+
+/* matrix: nine fixed cells, three lines tall, lit by severity */
+.iv-matrix {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: calc(var(--lane-h, 22px) - 2px);
+  gap: 2px;
+  width: 100%;
+  max-width: 210px;
+}
+.iv-c {
+  display: grid; place-items: center;
+  font-size: 10.5px; letter-spacing: 1.5px;
+  color: rgb(255 255 255 / 0.18);
+  border: 1px solid rgb(255 70 50 / 0.12);
+  cursor: help;
+}
+.iv-c.err, .iv-c.warn, .iv-c.hi {
+  color: #000; font-weight: 700;
+  background: var(--sev); border-color: var(--sev);
+  box-shadow: 0 0 calc(var(--fx-glow) * 10px) color-mix(in srgb, var(--sev) 55%, transparent);
+}
+.iv-c.hi { color: #001316; }
+
+/* counts: the numbers first, then the one thing that matters most */
+.iv-counts, .iv-bar { display: grid; grid-auto-rows: var(--lane-h, 22px); align-items: center; width: 100%; min-width: 0; font-size: 12.5px; }
+.iv-n { display: flex; gap: 14px; }
+.iv-n span { color: var(--sev); }
+.iv-n b { font-family: var(--disp); font-size: 15px; font-weight: 700; margin-right: 2px; }
+.iv-worst { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.iv-worst::before { content: "> "; color: var(--sev); }
+.iv-more { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* bar: one segment per issue, worst first */
+.iv-seg { display: flex; align-items: center; gap: 2px; height: 12px; }
+.iv-seg i { display: block; width: 12px; height: 12px; background: var(--sev); box-shadow: 0 0 calc(var(--fx-glow) * 6px) var(--sev); }
+.iv-segn { margin-left: 8px; font-size: 11px; color: var(--muted); }
+
+/* ticker: one line, faded at the edge, scroll sideways for the rest */
+.iv-ticker { width: 100%; overflow-x: auto; overflow-y: hidden; padding-top: 1px;
+  mask-image: linear-gradient(90deg, #000 85%, transparent); }
+.iv-tk { white-space: nowrap; font-size: 12.5px; line-height: var(--lane-h, 22px); }
+.iv-tk span { color: var(--text-2); }
+.iv-tk span.err { color: var(--text); }
+.iv-tk .g { color: var(--sev); text-shadow: 0 0 calc(var(--fx-glow) * 8px) var(--sev); }
+.iv-tk .dot { color: var(--red); margin: 0 8px; }
+
+/* the switcher in the computers window's title bar */
+.iv-switch { display: inline-flex; align-items: center; gap: 2px; font-size: 11px; text-shadow: none; }
+.iv-switch .lab { color: var(--muted); margin-right: 4px; }
+.iv-switch button { background: none; border: 1px solid transparent; color: var(--text-2); font: inherit; font-size: 11px; padding: 0 5px; }
+.iv-switch button:hover { color: var(--text); }
+.iv-switch button[aria-pressed="true"] { color: var(--hi); border-color: var(--hi); }
+@media (max-width: 760px) { .iv-switch .lab { display: none; } }

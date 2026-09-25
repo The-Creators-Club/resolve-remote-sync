@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: history</title>
+<!-- The design bench (dashboard/design/README.md): Settings > HISTORY.
+     Mirrors templates/admin_audit.html + partials/admin_audit.html
+     (ui.page_admin_audit, /admin/audit): the append-only fleet_audit ledger,
+     newest 200 rows, filtered by one search box. Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/system.css">
+</head>
+<body data-page="audit">
+
+<div class="shell">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> HISTORY</span></h1>
+        <div class="sub" id="sub"></div>
+      </div>
+    </div>
+
+    <p class="lede">What changed in this fleet, and who changed it. Every
+      state-changing action writes one line here: a project ticked or
+      unticked, syncing stopped fleet-wide or started again, proxy download
+      resumed for a computer, a user deleted, a computer forgotten, a build
+      published or made current, an update pushed, a file moved on the server,
+      site settings saved, a Syncthing device approved. <b>Nothing edits or
+      removes a line except the retention pass.</b></p>
+
+    <section class="win">
+      <div class="bar"><span>┌─╡</span><span class="t">what_changed</span><span>╞</span><span class="rule"></span><span class="meta" id="meta"></span><span>═┐</span></div>
+      <div class="body" style="display:grid;gap:10px">
+        <div class="lede">Every tick, stop, resume, deletion, publish and pushed update, with who did it. Kept for <b title="Older lines are removed by the retention pass, the only thing that ever removes one.">180 days</b>.</div>
+        <form class="inline" id="filter" autocomplete="off">
+          <div class="prompt-in" style="flex:1 1 320px;max-width:560px"><span class="p">&gt;</span><input id="q" type="search" placeholder="filter by project, editor, computer, version or action" aria-label="filter the timeline"><kbd title="Press / anywhere on this page to jump to the filter box.">/</kbd></div>
+          <button class="key primary" type="submit" title="Shows only the lines that contain what you typed, in any column."><span class="t">Filter</span><span class="kbd">&#9166;</span></button>
+          <button class="key quiet" type="button" id="clear" style="visibility:hidden" title="Shows every line again."><span class="t">clear</span></button>
+        </form>
+      </div>
+      <div class="scroll-y" id="list" style="max-height:620px;border-top:1px solid var(--line)">
+        <table class="tbl stack-sm">
+          <thead><tr><th style="width:12ch" title="How long ago. Hover a time for the exact moment, in UTC.">when</th><th style="width:10ch" title="The person signed in when it was done.">who</th><th style="width:22ch" title="What was done, as the server records it. Hover one for plain words.">action</th><th title="What it was done to: a person, a computer, a project or the whole fleet.">subject</th><th title="The extra facts the server stored with it, exactly as stored.">detail</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div id="empty"></div>
+      </div>
+      <div class="pager" id="pager"></div>
+    </section>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc } = CC;
+  const $ = s => document.querySelector(s);
+
+  // [ago, iso, actor, action, subject, detail json]
+  const ROWS = [
+    ['2 min ago', '2026-09-25T02:41:07+00:00', 'owen', 'plan.tick', 'jsmith / JSMITH-MBP / 2026/FF5/Elections', {mode: 'full', before: null}],
+    ['9 min ago', '2026-09-25T02:34:51+00:00', 'owen', 'site.settings_save', 'site', {keys: ['dashboard_url', 'features.auto_update'], count: 2}],
+    ['31 min ago', '2026-09-25T02:12:40+00:00', 'jsmith', 'plan.tick', 'jsmith / JSMITH-STUDIO / 2026/Shorts/Night Market', {mode: 'upload_only', before: 'full'}],
+    ['48 min ago', '2026-09-25T01:55:03+00:00', 'owen', 'machine.update_push', 'RIVERA-LAPTOP', {version: '0.9.78', platform: 'windows'}],
+    ['1h ago', '2026-09-25T01:40:22+00:00', 'owen', 'package.make_current', 'companion 0.9.78 windows', {previous: '0.9.77', signed: true}],
+    ['1h ago', '2026-09-25T01:38:10+00:00', 'owen', 'package.publish', 'companion 0.9.78 windows', {sha256: '4be1c0...a93f', size_mb: 88.4}],
+    ['2h ago', '2026-09-25T00:52:47+00:00', 'mrivera', 'file.move', '2026/FF5/Civil Defence', {from: 'Card_07/C0031.MP4', to: 'Interviews/C0031.MP4', machines: 3}],
+    ['3h ago', '2026-09-24T23:31:15+00:00', 'owen', 'fleet.halt_clear', 'fleet', {held_for_minutes: 42}],
+    ['4h ago', '2026-09-24T22:49:02+00:00', 'owen', 'fleet.halt_set', 'fleet', {reason: 'NAS pool scrub', expires_in_hours: 24}],
+    ['5h ago', '2026-09-24T21:10:33+00:00', 'owen', 'notice.dismiss', 'machine_disk_low / TCHEN-RIG', {severity: 'warn'}],
+    ['7h ago', '2026-09-24T19:02:11+00:00', 'tchen', 'plan.untick', 'tchen / TCHEN-RIG / 2025/FF4/Kinmen', {before: 'full'}],
+    ['9h ago', '2026-09-24T17:45:58+00:00', 'owen', 'device.approve', 'TCHEN-RIG', {device: 'Q7L2VXA...', folder_count: 4}],
+    ['13h ago', '2026-09-24T13:20:44+00:00', 'owen', 'alerts.settings', 'alerts', {sink: 'smtp', weekly: true, heartbeat: true}],
+    ['1d ago', '2026-09-24T02:05:19+00:00', 'owen', 'user.suspend', 'mrivera', {reason: 'away until October'}],
+    ['1d ago', '2026-09-24T01:58:02+00:00', 'owen', 'user.resume', 'mrivera', {}],
+    ['2d ago', '2026-09-23T08:16:40+00:00', 'owen', 'diagnostics.request', 'JSMITH-MBP', {trigger: 'admin_request'}],
+    ['2d ago', '2026-09-23T08:17:55+00:00', 'jsmith', 'diagnostics.received', 'JSMITH-MBP', {bytes: 18244}],
+    ['3d ago', '2026-09-22T05:40:12+00:00', 'owen', 'project.create', '2026/Shorts/Typhoon Prep', {template: 'short'}],
+    ['4d ago', '2026-09-21T10:11:09+00:00', 'owen', 'machine.forget', 'OLD-EDIT-02', {last_seen_days: 61}],
+    ['6d ago', '2026-09-19T03:22:48+00:00', 'owen', 'project.archive', '2025/FF4/CIA City', {size_gb: 188}],
+    ['8d ago', '2026-09-17T09:30:00+00:00', 'owen', 'site.android_save', 'site', {package_name: 'net.ts.example.nas.ccsync', fingerprints: 1}],
+    ['12d ago', '2026-09-13T06:05:31+00:00', 'owen', 'protection.ack', 'release_key_backup', {date: '2026-09-13'}],
+  ];
+
+  const ACTION_TIP = {
+    'plan.tick': 'A project was ticked for a computer, so it starts syncing there.',
+    'plan.untick': 'A project was unticked for a computer. Nothing on that computer is deleted.',
+    'site.settings_save': 'Site settings were saved.',
+    'site.android_save': 'The Android app settings were saved.',
+    'machine.update_push': 'An update was pushed to one computer, to install on its next report.',
+    'machine.forget': 'A computer was forgotten: it no longer shows or gets anything.',
+    'package.make_current': 'A published build became the one computers are offered.',
+    'package.publish': 'A new build was uploaded to this dashboard.',
+    'file.move': 'A file was moved on the server and on every computer holding it.',
+    'fleet.halt_set': 'Syncing was stopped for the whole fleet.',
+    'fleet.halt_clear': 'Syncing was started again for the whole fleet.',
+    'notice.dismiss': 'A problem the server found was hidden. It comes back if still true.',
+    'device.approve': "A computer's sync engine was let into the sync network.",
+    'alerts.settings': 'Where alerts go was changed.',
+    'user.suspend': "A person's computers were paused. Their plan was kept.",
+    'user.resume': "A paused person's computers were let back in.",
+    'diagnostics.request': 'An admin asked a computer to send its diagnostics.',
+    'diagnostics.received': 'A computer sent its diagnostics.',
+    'project.create': 'A new project folder was created.',
+    'project.archive': 'A project was archived.',
+    'protection.ack': 'An admin recorded that a safety check was done by hand.',
+  };
+  function detail(obj) {
+    const keys = Object.keys(obj);
+    if (!keys.length) return '{}';
+    return '{' + keys.map(k => `<span class="k">"${esc(k)}"</span>: ${esc(JSON.stringify(obj[k]))}`).join(', ') + '}';
+  }
+
+  let mode = 'busy';
+  let query = '';
+  function draw() {
+    const all = mode === 'calm' ? [] : ROWS;
+    const q = query.toLowerCase();
+    const rows = q ? all.filter(r => [r[2], r[3], r[4], JSON.stringify(r[5])].join(' ').toLowerCase().includes(q)) : all;
+    $('#rows').innerHTML = rows.map(r => `<tr>
+        <td style="white-space:nowrap;font-variant-numeric:tabular-nums" title="${esc(r[1])}">${esc(r[0])}</td>
+        <td><b>${esc(r[2])}</b></td>
+        <td style="white-space:nowrap"><span class="${/delete|forget|halt_set|suspend|untick|archive/.test(r[3]) ? 'red' : 'hi'}" title="${esc(ACTION_TIP[r[3]] || '')}">${esc(r[3])}</span></td>
+        <td>${esc(r[4])}</td>
+        <td class="detail">${detail(r[5])}</td></tr>`).join('');
+    $('#empty').innerHTML = rows.length ? '' : (q
+      ? `<div class="empty"><span class="glyph">&gt;_</span>Nothing in the timeline matches "${esc(query)}".</div>`
+      : `<div class="empty"><span class="glyph">&gt;_</span>Nothing has been recorded yet. Every tick, stop, deletion and publish from here on lands in this list.</div>`);
+    $('#meta').innerHTML = q ? `<b>${rows.length}</b> match` : `<b>${all.length}</b> lines`;
+    $('#sub').innerHTML = all.length ? `<b>${all.length}</b> changes recorded &middot; newest ${esc(all[0][0])} by <b>${esc(all[0][2])}</b>` : 'nothing recorded yet';
+    $('#pager').innerHTML = `<span>newest first &middot; the newest 200 lines are shown; filter to reach an older one</span>`;
+    $('#clear').style.visibility = q ? 'visible' : 'hidden';
+    // a filter that matches little keeps the window's height: nothing below moves
+    const list = $('#list');
+    if (!q) { list.style.minHeight = ''; list.style.minHeight = list.offsetHeight + 'px'; }
+  }
+
+  $('#filter').addEventListener('submit', e => { e.preventDefault(); query = $('#q').value.trim(); draw(); });
+  $('#clear').addEventListener('click', () => { $('#q').value = ''; query = ''; draw(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === '/' && !/input|select|textarea/i.test(e.target.tagName)) { e.preventDefault(); $('#q').focus(); }
+  });
+
+  CC.page({ page: 'audit', onData: m => { mode = m; draw(); } });
+})();
+</script>
+</body>
+</html>

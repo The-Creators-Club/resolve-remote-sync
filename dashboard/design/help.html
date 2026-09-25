@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: help</title>
+<!-- The design bench (dashboard/design/README.md): HELP. Mirrors
+     templates/help.html, rendered by ui.page_help from help.page_context:
+     the document index (help.document_groups, grouped by folder, the guide
+     first and labelled), the open document's contents list (built from its
+     headings) and the article (help.render_markdown). An admin sees the
+     Settings strip; an editor does not. The index here is what a customer's
+     server ships (published_docs.py): docs/HOW_IT_WORKS.md, EDITOR_SETUP.md
+     and docs/legal/. The calm data state is "help is not installed". -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/safety.css">
+</head>
+<body data-page="help">
+
+<div class="shell">
+  <div class="page">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> HELP</span></h1>
+        <div class="sub" id="sub"></div>
+      </div>
+    </div>
+
+    <aside class="side docs-first" id="side"></aside>
+    <main class="main" id="main"></main>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, win, toast } = CC;
+  const $ = s => document.querySelector(s);
+
+  // help.document_groups for an editor or admin on a customer's server.
+  // The legal titles carry an em dash in the real files; shown here with a
+  // colon, as the visible-text rule wants.
+  const GROUPS = [
+    ['docs/', [
+      ['HOW_IT_WORKS.md', 'How CC Sync works', 'the customer explainer'],
+      ['EDITOR_SETUP.md', 'Editor Setup: CC Sync', ''],
+    ]],
+    ['docs/legal/', [
+      ['legal/EULA.md', 'CC Sync: End User Licence Agreement', ''],
+      ['legal/PRIVACY.md', 'CC Sync: privacy policy', ''],
+      ['legal/TELEMETRY.md', 'CC Sync: telemetry disclosure', ''],
+      ['legal/THIRD_PARTY_NOTICES.md', 'CC Sync: third-party notices', ''],
+      ['legal/YOUTUBE_FEATURE_NOTICE.md', 'The YouTube downloader: what it is, and whose responsibility it is', ''],
+    ]],
+  ];
+
+  const TOC = [
+    [2, 'the-problem-it-solves', '1. The problem it solves'], [2, 'the-pieces', '2. The pieces'],
+    [3, 'the-nas', '2.1 The NAS (your storage server)'], [3, 'the-dashboard', '2.2 The dashboard'],
+    [3, '', '2.3 The companion (the tray app)'], [3, '', '2.4 Wired computers and remote computers'],
+    [3, '', '2.5 Tailscale (the private network)'], [3, '', '2.6 Resolve itself'],
+    [2, '', '3. The project tree'], [2, '', '4. The three ways files move'],
+    [2, '', '5. Day one for a new editor'], [2, '', '6. A day in the life of an editor'],
+    [2, '', '7. What the team admin sees and does'], [2, '', '8. Safety features, in plain terms'],
+    [2, '', '9. The b-roll library'], [2, '', '10. The music library'],
+    [2, '', '11. YouTube clip downloads (optional)'], [2, '', '12. How updates reach computers'],
+    [2, '', '13. What stays private, and how access works'], [2, '', '14. What the product does NOT do'],
+    [2, 'glossary', '15. Glossary'], [2, '', '16. Troubleshooting: if you see X, it means Y, do Z'],
+  ];
+
+  const GLOSSARY = [
+    ['Tick', 'To say that a project should sync to a computer. You tick a project on the dashboard; unticking stops new transfers and leaves what is already on the disk'],
+    ['Sync plan', 'The set of projects one computer holds. It belongs to the computer, not to the person: a desktop and a laptop have a plan each. The page is <b>Settings &gt; Sync plans</b>'],
+    ['Computer', 'Any editing machine running the companion. The product says "computer" everywhere a person reads; "device" is used only for a computer\'s sync identity on the network'],
+    ['Wired', 'A computer in the office, connected to the server directly, editing straight off it. It syncs nothing, and it cannot be ticked'],
+    ['Remote', 'A computer anywhere else, holding its own copy of the projects on its sync plan'],
+    ['Upload', 'Video originals going from your computer to the server. It never deletes anything on the server'],
+    ['Proxy download', 'Proxies coming from the server to your computer'],
+    ['Folder sync', 'Everything else (project files, audio, graphics, subtitles, stills, LUTs), both ways'],
+    ['Upload only', 'A tick that sends this computer\'s video originals for a project to the server and downloads nothing back: no proxies, no shared project files'],
+    ['Paused', 'Syncing is off because you turned it off, on this computer. You turn it back on the same way'],
+    ['Stopped by your admin', 'Your admin stopped syncing for the whole fleet. Only they can start it again, and it releases itself after a day unless they keep it stopped'],
+    ['Stopped itself', 'The companion stopped one thing on its own for safety: proxy download stops when the server does not look like the tree any more, or when your disk is nearly full. Nothing is deleted, and it stays stopped until a person clears it'],
+    ['Snapshot', 'A point-in-time copy of the server\'s tree, taken hourly and daily'],
+    ['Fleet', 'Every computer running the companion for your organisation'],
+  ];
+
+  const ARTICLE = `
+    <h1 id="how-cc-sync-works">How CC Sync works</h1>
+    <p>A plain-English guide for production company owners, producers and editors. It explains what the product is, what each piece does, what you will see day to day, and what to do when something looks wrong. Nothing here requires you to be a developer. Where a term is used for the first time, it is explained first; there is also a glossary at the end.</p>
+    <p>CC Sync is a companion for DaVinci Resolve Studio. DaVinci Resolve is a product of Blackmagic Design, licensed to you separately by them; CC Sync is not affiliated with, endorsed by or sponsored by Blackmagic Design.</p>
+    <hr>
+    <h2 id="the-problem-it-solves">1. The problem it solves</h2>
+    <p>A video production company usually keeps its footage in one place: a storage server in the office. Everyone who edits in the building works straight off it. The trouble starts when an editor is not in the building.</p>
+    <p>Camera originals are huge. Mirroring a whole project to every editor's home computer would take days and fill every drive. Resolve makes this worse in a specific way: it remembers the exact path of every clip (for example <code>P:\\Projects\\2026\\Series\\Episode\\B-roll\\clip.braw</code>). If the same project is opened on a computer where that path does not exist, every clip shows as "Media Offline".</p>
+    <p>CC Sync solves this with three ideas working together:</p>
+    <ol>
+      <li><b>One canonical folder tree</b>, held on your storage server, which every computer sees at the same path spelling. On Windows that is the <code>P:</code> drive. On a Mac, Resolve is told that <code>P:\\</code> means your local sync folder.</li>
+      <li><b>Each editing computer syncs only a slice of the tree</b>: the projects it has been assigned, and for video, only small proxy copies rather than the originals. Anything the editor adds goes back up automatically.</li>
+      <li><b>A small helper app on every computer</b> (the CC Sync companion, which lives in your system tray or menu bar) that watches Resolve, fixes paths, copies stray media into the right place, reports health to a dashboard, and refuses to do anything dangerous.</li>
+    </ol>
+    <p>The result is that an editor at home opens the shared project, the clips play from local proxies, the things they add appear for everyone else, and the team admin can see from one web page whether everybody's footage is syncing.</p>
+    <hr>
+    <h2 id="the-pieces">2. The pieces</h2>
+    <h3 id="the-nas">2.1 The NAS (your storage server)</h3>
+    <p>A NAS (network-attached storage) is a box of hard drives with its own small operating system, reachable over the network. CC Sync supports two makes: TrueNAS SCALE and Synology DSM. The NAS holds:</p>
+    <ul>
+      <li>the canonical project tree (the one true copy of everything),</li>
+      <li>the dashboard (a small web application running in a container on the NAS),</li>
+      <li>the sync engine services that editors' computers talk to,</li>
+      <li>Resolve's own shared project library (the Resolve Project Server), which is Blackmagic's feature and runs alongside CC Sync. CC Sync handles the media; Resolve handles the project database.</li>
+    </ul>
+    <p>The NAS also takes regular snapshots of the tree (see section 8), so that "somebody deleted a folder" is a restore, not a disaster.</p>
+    <h3 id="the-dashboard">2.2 The dashboard</h3>
+    <p>The dashboard is a web page served from the NAS. Every editor signs into it to choose which projects their computer should hold and to see how their sync is going. The team admin uses it to see the whole fleet, manage people and computers, publish updates, and stop everything in an emergency. The b-roll library, the music library and (if switched on) the YouTube downloader all live inside the dashboard as extra tabs.</p>
+    <p class="muted" style="font-size:12px">(design bench: sections 2.3 to 14 are not reproduced here)</p>
+    <h2 id="glossary">15. Glossary</h2>
+    <p>These are the words the product uses, and it uses only these: every page, tray line and message in CC Sync is written from this table. The dashboard links straight to a row here wherever one of them appears.</p>
+    <div class="scroll-x"><table class="tbl"><thead><tr><th>term</th><th>meaning</th></tr></thead><tbody>
+      ${GLOSSARY.map(([t, m]) => `<tr id="term-${t.toLowerCase().replace(/\s+/g, '-')}"><td style="white-space:nowrap"><b>${t}</b></td><td>${m}</td></tr>`).join('')}
+    </tbody></table></div>`;
+
+  let current = 'HOW_IT_WORKS.md';
+
+  function renderSide() {
+    $('#side').innerHTML = win('documents', `<b>${GROUPS.reduce((a, g) => a + g[1].length, 0)}</b>`,
+      `<nav class="body files" aria-label="documents">${GROUPS.map(([label, entries]) => `
+        <div class="grp" title="${label === 'docs/legal/' ? 'The legal documents: licence, privacy, what is collected, and the notices for software CC Sync uses.' : 'Guides for using CC Sync.'}">${esc(label)}</div>
+        ${entries.map(([rel, title, note]) => `<a href="#" data-rel="${esc(rel)}" ${rel === current ? 'aria-current="page"' : ''} title="Open ${esc(title)} in the reader on the right.">${esc(title)}<small>${esc(rel.split('/').pop())}</small>${note ? `<span class="fnote">${esc(note)}</span>` : ''}</a>`).join('')}`).join('')}
+      </nav>`);
+  }
+
+  function renderMain() {
+    if (current !== 'HOW_IT_WORKS.md') {
+      $('#main').innerHTML = `<div class="lede">${esc(current)}</div>` + win(esc(current.split('/').pop()), '',
+        `<div class="empty"><span class="glyph">&gt;_</span>The design bench mocks one open document, How CC Sync works. Every other entry opens in this same viewer, with its path above it and its contents list built from its headings.</div>`);
+      return;
+    }
+    $('#main').innerHTML = `
+      <p class="lede">How this system works, in plain English: what the pieces are, what you will see day to day, and what to do when something looks wrong. The <a class="hi" href="#glossary" title="Jumps to the list of every word the product uses, in plain terms.">glossary</a> is what every word on the other pages links back to.</p>
+      ${win('contents', `<b>${TOC.length}</b> sections`, `<nav class="body toc" aria-label="contents">${TOC.map(([l, id, t]) => `<a class="l${l}" href="#${id || 'the-pieces'}">${esc(t)}</a>`).join('')}</nav>`)}
+      ${win('how_it_works.md', '', `<article class="body doc" style="padding:calc(22px * var(--d)) calc(26px * var(--d))">${ARTICLE}</article>`)}`;
+  }
+
+  function render(mode) {
+    if (mode === 'calm') {
+      $('#sub').textContent = 'nothing to read on this server';
+      $('#side').style.display = 'none';
+      $('#main').style.gridColumn = '1 / -1';
+      $('#main').innerHTML = win('help', '', `<div class="empty"><span class="glyph">?_</span><div style="max-width:62ch;margin:0 auto">Help is not installed on this server. The documents ship as the docs/ tree (the guide itself is docs/HOW_IT_WORKS.md); ask whoever deployed this dashboard to put a copy beside the application.</div></div>`);
+      return;
+    }
+    $('#side').style.display = ''; $('#main').style.gridColumn = '';
+    $('#sub').innerHTML = `<b>7</b> documents on this server`;
+    renderSide(); renderMain();
+  }
+
+  document.addEventListener('click', e => {
+    const a = e.target.closest('[data-rel]');
+    if (!a) return;
+    e.preventDefault();
+    current = a.dataset.rel;
+    renderSide(); renderMain();
+    window.scrollTo(0, 0);
+  });
+
+  CC.page({ page: 'help', onData: render });
+})();
+</script>
+</body>
+</html>

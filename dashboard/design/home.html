@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: sync status</title>
+<!-- The design bench (dashboard/design/README.md): the home page. Invented
+     data; the HUD, Settings strip, dock and TUNE come from shell.js. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/issues.css">
+</head>
+<body data-page="home">
+
+<div class="shell">
+  <div class="page">
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> SYNC STATUS</span></h1>
+        <div class="sub"><span class="num" id="updated">updated 3 s ago</span> &middot; <b>5</b> computers &middot; <b>3</b> editors &middot; <b>14</b> projects</div>
+      </div>
+      <div class="acts">
+        <button class="key" type="button" title="Pauses syncing on every computer at once until you start it again. Nothing is deleted, and the pause ends by itself after 24 hours."><span class="t">Stop the fleet</span></button>
+        <button class="key primary" type="button" data-busy="checked just now" title="Asks the server to read every computer's latest report now, instead of waiting for its next check a few minutes from now."><span class="t">Check now</span><span class="busy-t"><span class="spin"></span> checking</span><span class="kbd">R</span></button>
+      </div>
+    </div>
+
+    <div class="alertline" id="alertline">
+      <span class="tag solid warn" title="Stale: the figures on this page are older than they should be, because the server could not refresh them.">stale</span>
+      <span class="grow">The server cannot reach Syncthing. <span class="dim">The numbers below may be up to 4 minutes old. Nothing is lost: every computer keeps syncing.</span></span>
+      <a class="key quiet sm" href="recovery.html" title="Opens the step-by-step fix on the Recovery page."><span class="t">what to do</span></a>
+    </div>
+
+    <aside class="side">
+      <section class="win">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">ticking_for</span><span>&#9566;</span><span class="rule"></span><span>&#9552;&#9488;</span></div>
+        <div class="body fieldset">
+          <label class="pick" title="Whose sync plan the ticks below change. Pick another editor to tick projects for them; the change reaches their computer on its next report."><span>editor</span><select id="acting"><option value="">owen (me)</option><option>jsmith</option><option>mrivera</option><option>tchen</option></select></label>
+          <div class="hint" id="acting-warn" style="color:var(--warn)" hidden>&#9650; acting as <b id="acting-who"></b>: a tick here starts a real sync on their computer</div>
+          <label class="pick" title="Which of that editor's computers the ticks below apply to. A sync plan belongs to a computer, not a person. Every computer ticks or unticks all of them at once."><span>computer</span><select><option>OWEN-RIG (this computer)</option><option>every computer</option></select></label>
+        </div>
+      </section>
+      <section class="win">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">projects</span><span>&#9566;</span><span class="rule"></span><span class="meta" id="proj-count"></span><span>&#9552;&#9488;</span></div>
+        <div class="body">
+          <div class="prompt-in"><span class="p">&gt;</span><input id="proj-q" type="search" placeholder="find a project" aria-label="find a project"><kbd>/</kbd></div>
+          <div class="tree" id="tree"></div>
+        </div>
+      </section>
+    </aside>
+
+    <main class="main">
+      <div class="readouts" id="readouts"></div>
+
+      <section class="win" id="problems">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">problems.log</span><span>&#9566;</span><span class="rule"></span><span class="meta" id="problems-meta"></span><a class="act" id="dismiss-all" href="#" title="Hides every problem in this list. A problem the server still finds on its next check comes back.">dismiss all</a><span>&#9552;&#9488;</span></div>
+        <div id="problems-list"></div>
+      </section>
+
+      <section class="win">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">computers</span><span>&#9566;</span><span class="rule"></span><span class="meta" id="iv-slot"></span><span class="meta" title="The collector is the server's regular check that reads every computer's report and the sync engine. It last ran 12 seconds ago."><span class="led" style="width:6px;height:6px"></span> collector <b>12 s</b> ago</span><span>&#9552;&#9488;</span></div>
+        <div class="pc head-row"><span></span><span title="The computer's name, and the editor signed in on it.">computer</span><span title="The three ways a computer syncs. Up: sends new original footage to the server. Down: brings the small edit copies (proxies) down. Share: keeps project files the same on every computer.">sync lanes</span><span title="Anything wrong on this computer, worst first. Hover a line for the detail.">issues</span><span title="The CC Sync app version on this computer, and how far behind the newest one it is.">version</span><span title="When this computer last sent the server its status. Computers report about every 30 seconds while they are on.">last report</span></div>
+        <div id="computers"></div>
+      </section>
+
+      <section class="win">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">transfers</span><span>&#9566;</span><span class="rule"></span><span class="meta" id="xf-meta"></span><a class="act" href="transfers.html" title="Every file moving right now, on every computer, with the queue behind it.">all transfers</a><span>&#9552;&#9488;</span></div>
+        <div id="xfers"></div>
+      </section>
+
+      <section class="win">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">plan_changes</span><span>&#9566;</span><span class="rule"></span><a class="act" href="history.html" title="The full record of who changed what, and when.">history</a><span>&#9552;&#9488;</span></div>
+        <table class="tbl"><thead><tr><th>when</th><th>who</th><th title="Ticked: the project now syncs to that computer. Unticked: it stops. Upload only: the computer sends its footage up but receives nothing.">what</th><th>project</th><th title="The computer the change applies to.">where</th></tr></thead><tbody id="plan"></tbody></table>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script src="issues-variants.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, meter, toast } = CC;
+  const $ = s => document.querySelector(s);
+
+  const BUSY = {
+    readouts: [
+      { k: 'online', big: '4', of: '/ 5', meter: [4, 5], tone: 'warn', foot: 'TCHEN-RIG silent 2 h' },
+      { k: 'moving', big: '38.2', of: 'GB', meter: [62, 100], tone: '', foot: '12 files on 3 computers' },
+      { k: 'problems', big: '4', of: 'open', meter: [4, 10], tone: 'err', foot: '2 need you today' },
+      { k: 'in sync', big: '11', of: '/ 14', meter: [11, 14], tone: 'ok', foot: '3 still catching up' },
+    ],
+    problems: [
+      { sev: 'err', title: 'The sync engine on this server is not answering', who: 'server', when: '2 min', what: 'No project is being shared, measured or updated for anybody while it is down. Every computer keeps what it already has.', todo: 'Start Syncthing on the server, then watch the collector turn green.', key: 'take me there' },
+      { sev: 'err', title: 'Nobody is told when this server finds a problem', who: 'alerts', when: '1 d', what: 'This server checks 62 things every few minutes. With no mail address or webhook, the first anyone hears of a stopped sync is an editor asking.', todo: 'Settings, Alerts: choose mail or a webhook, then send a test.', key: 'open alerts' },
+      { sev: 'warn', title: 'TCHEN-RIG has 2 GB free on its footage drive', who: 'tchen / TCHEN-RIG', when: '3 h', what: 'Proxy downloads for one project are 50 to 300 GB, so this computer is close to full, which stops it syncing and makes Resolve unusable on it too.', todo: 'Untick a project for that computer, or ask tchen to clear space.', key: 'open computer' },
+      { sev: 'warn', title: 'The B-roll page is switched off on this server', who: 'broll', when: '5 d', what: 'Editors will not see B-roll in the menu until it is switched back on.', todo: 'Check the container\'s bind mounts, then restart the dashboard.', key: 'show me how' },
+    ],
+    computers: [
+      { led: '', name: 'JSMITH-STUDIO', who: 'jsmith', lanes: [['up', 'ok', 100, 'up to date'], ['down', 'busy', 62, '12.4 GB left'], ['share', 'ok', 100, 'in sync']], issues: [], ver: '0.9.77', vtag: null, seen: '4 s ago', since: 'on since 08:02' },
+      { led: 'err', name: 'JSMITH-MBP', who: 'jsmith', lanes: [['up', 'ok', 100, 'idle'], ['down', 'err', 0, 'stopped itself'], ['share', 'ok', 100, 'in sync']], issues: [['err', 'proxy download stopped itself'], ['warn', '2 conflicts']], ver: '0.9.77', vtag: null, seen: '31 s ago', since: 'on since 07:40' },
+      { led: 'warn', name: 'RIVERA-TOWER', who: 'mrivera', lanes: [['up', 'idle', 0, 'paused'], ['down', 'idle', 0, 'paused'], ['share', 'idle', 0, 'paused']], issues: [['warn', 'stopped by your admin']], ver: '0.9.77', vtag: null, seen: '12 s ago', since: 'on since 09:15' },
+      { led: '', name: 'RIVERA-LAPTOP', who: 'mrivera', lanes: [['up', 'busy', 37, '3 files, 37%'], ['down', 'ok', 100, 'up to date'], ['share', 'ok', 100, 'in sync']], issues: [['hi', 'job: proxy-480p 37%']], ver: '0.9.76', vtag: ['warn', 'update ready'], seen: '2 s ago', since: 'on since 10:31' },
+      { led: 'off', name: 'TCHEN-RIG', who: 'tchen', lanes: [['up', 'warn', 0, 'not heard from'], ['down', 'warn', 0, 'not heard from'], ['share', 'err', 0, 'folder error']], issues: [['err', 'sync engine down 2 h, 3 restarts failed'], ['err', 'update failed x3'], ['err', 'clock 4 min behind'], ['warn', '2 GB free'], ['warn', '14 clips outside the tree'], ['warn', 'unfiltered folders: 2'], ['warn', 'crashes: 3'], ['warn', 'won\'t upload: 6']], ver: '0.9.49', vtag: ['err', '28 behind'], seen: '2 h ago', since: 'last seen 07:58' },
+    ],
+    xfers: [
+      { dir: 'down', file: 'A004_C012_0918FJ.mov', where: 'Elections / Interviews', pct: 73, speed: '84 MB/s', eta: '0:41' },
+      { dir: 'down', file: 'Night_Market_B-cam_0142.mp4', where: 'Night Market / Proxy', pct: 21, speed: '61 MB/s', eta: '3:12' },
+      { dir: 'up', file: 'C0031.MP4', where: 'Civil Defence / Card_07', pct: 48, speed: '22 MB/s', eta: '1:55' },
+    ],
+    plan: [['3 min ago', 'owen', 'ticked', 'FF5 Elections', 'RIVERA-LAPTOP'], ['1 h ago', 'jsmith', 'upload only', 'Night Market', 'JSMITH-MBP'], ['yesterday', 'owen', 'unticked', 'FF4 Kinmen', 'TCHEN-RIG']],
+    stale: true,
+  };
+  const CALM = {
+    readouts: [
+      { k: 'online', big: '5', of: '/ 5', meter: [5, 5], tone: 'ok', foot: 'everyone reported this minute' },
+      { k: 'moving', big: '0', of: 'GB', meter: [0, 100], tone: '', foot: 'nothing waiting' },
+      { k: 'problems', big: '0', of: 'open', meter: [0, 10], tone: 'ok', foot: 'nothing needs you' },
+      { k: 'in sync', big: '14', of: '/ 14', meter: [14, 14], tone: 'ok', foot: 'all caught up' },
+    ],
+    problems: [],
+    computers: BUSY.computers.map(c => ({ ...c, led: '', issues: [], vtag: null, ver: '0.9.77', seen: 'just now',
+      lanes: [['up', 'ok', 100, 'up to date'], ['down', 'ok', 100, 'up to date'], ['share', 'ok', 100, 'in sync']] })),
+    xfers: [],
+    plan: BUSY.plan,
+    stale: false,
+  };
+  const TREE = [
+    ['2026', true, [
+      ['FF5', true, [['Elections', true, '412 GB'], ['Civil Defence', true, '238 GB'], ['Repro Rights', false, '96 GB']]],
+      ['Shorts', false, [['Night Market', true, '44 GB'], ['Typhoon Prep', false, '12 GB']]],
+    ]],
+    ['2025', false, [
+      ['FF4', false, [['Kinmen', false, '310 GB'], ['CIA City', false, '188 GB'], ['Taichung Drone Camp', false, '72 GB']]],
+    ]],
+  ];
+
+  // Plain-words tooltips (round 2, 2026-09-25).
+  const TIP = {
+    readout: {
+      online: 'Computers that sent the server a report in the last few minutes, out of every approved computer.',
+      moving: 'How much footage is still waiting to move between the server and the computers.',
+      problems: 'Things the server found wrong that someone should look at. Each one is listed below with what to do.',
+      'in sync': 'Projects where every computer that ticked them has everything, out of every ticked project.',
+    },
+    lane: {
+      up: 'Up (upload): sends new original footage from this computer to the server.',
+      down: 'Down (proxy download): brings the small edit copies of the footage (proxies) from the server to this computer.',
+      share: 'Share (folder sync): keeps project files such as Resolve projects, graphics and audio the same on every computer.',
+    },
+    led: { '': 'Online and syncing normally.', err: 'Something on this computer has stopped. See its issues.', warn: 'Online, but something needs a look. See its issues.', off: 'Not heard from: the computer is off, asleep or offline.' },
+    state: {
+      'stopped itself': 'The download paused itself because too many files seemed to vanish from the server in one go. It stays paused until someone checks and presses Resume.',
+      'folder error': 'The shared project folder on this computer is missing or cannot be written, so project files are not syncing.',
+      'not heard from': 'The computer has not reported for a while, so its sync state is unknown.',
+      paused: 'Paused because an admin stopped this computer syncing. Nothing is lost.',
+      idle: 'Nothing to do right now.',
+    },
+    plan: { ticked: 'Ticked: this project now syncs to that computer.', unticked: 'Unticked: the project stops syncing to that computer. Nothing already there is deleted.', 'upload only': 'Upload only: the computer sends its footage up to the server but receives nothing back.' },
+  };
+  const vtip = t => /behind/.test(t) ? `This computer is ${t.replace(' behind', '')} versions behind the newest CC Sync. It updates itself when it is next on, or push it from Settings, Packages.` : 'A newer CC Sync is waiting. It installs when the editor accepts it, or you can push it from Settings, Packages.';
+
+  function renderTree() {
+    let on = 0, total = 0;
+    const rows = [];
+    TREE.forEach(([year, yOpen, shows], yi) => {
+      const yLast = yi === TREE.length - 1;
+      rows.push(`<div class="row dir" data-dir="${year}"><span class="br">${yLast ? '└─ ' : '├─ '}</span><span class="nm">${year}</span><span class="n">${shows.reduce((a, s) => a + s[2].length, 0)}</span></div>`);
+      shows.forEach(([show, sOpen, projects], si) => {
+        const sLast = si === shows.length - 1;
+        const pre1 = yLast ? '   ' : '│  ';
+        rows.push(`<div class="row dir${yOpen ? '' : ' hidden'}" data-parent="${year}" data-dir="${year}/${show}"><span class="br">${pre1}${sLast ? '└─ ' : '├─ '}</span><span class="nm">${show}</span><span class="n">${projects.length}</span></div>`);
+        projects.forEach(([p, ticked, size], pi) => {
+          total++; if (ticked) on++;
+          const pre2 = pre1 + (sLast ? '   ' : '│  ');
+          rows.push(`<div class="row proj ${ticked ? 'on' : ''}${yOpen && sOpen ? '' : ' hidden'}" data-parent="${year}/${show}" data-name="${esc(p)}" title="Click to tick or untick ${esc(p)} for the computer chosen above. Ticked means it syncs there."><span class="br">${pre2}${pi === projects.length - 1 ? '└─ ' : '├─ '}</span><span class="box">${ticked ? '■' : '□'}</span>${esc(p)}<span class="sz" title="Size of this project on the server.">${size}</span></div>`);
+        });
+      });
+    });
+    $('#tree').innerHTML = rows.join('');
+    $('#proj-count').innerHTML = `<b>${on}</b> of ${total} ticked`;
+  }
+
+  function render(mode) {
+    const d = mode === 'calm' ? CALM : BUSY;
+    $('#alertline').style.display = d.stale ? '' : 'none';
+    $('#readouts').innerHTML = d.readouts.map(r => `
+      <section class="win readout ${r.tone}">
+        <div class="bar" title="${esc(TIP.readout[r.k] || '')}"><span>┌─╡</span><span class="t">${r.k}</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+        <div class="body">
+          <div class="big">${r.big}<small>${r.of}</small></div>
+          <div class="meter" style="color:${r.tone === 'err' ? 'var(--err)' : r.tone === 'ok' ? 'var(--ok)' : r.tone === 'warn' ? 'var(--warn)' : 'var(--hi)'}">${meter(r.meter[0], r.meter[1], 16)}</div>
+          <div class="foot">${esc(r.foot)}</div>
+        </div>
+      </section>`).join('');
+    $('#problems-meta').innerHTML = d.problems.length ? `<b>${d.problems.length}</b> open` : '';
+    $('#problems-list').innerHTML = d.problems.length ? d.problems.map(p => `
+      <div class="prob">
+        <span class="sev"><span class="tag solid ${p.sev}" title="${p.sev === 'err' ? 'Error: something has stopped working and needs fixing.' : 'Warning: still working, but heading for trouble.'}">${p.sev === 'err' ? 'error' : 'warn'}</span></span>
+        <span class="title">${esc(p.title)}<span class="who">${esc(p.who)}</span></span>
+        <span class="when" title="How long the server has been seeing this problem.">${esc(p.when)} ago</span>
+        <div class="what">${esc(p.what)}</div>
+        <div class="todo"><span class="cmd">${esc(p.todo)}</span><span class="keys">
+          <button class="key sm" type="button"><span class="t">${esc(p.key)}</span></button>
+          <button class="key quiet sm" type="button" data-dismiss=".prob" title="Hides this problem. If the server still finds it on its next check, it comes back."><span class="t">dismiss</span></button></span></div>
+      </div>`).join('')
+      : ALLCLEAR;
+    $('#problems-list').style.minHeight = '';
+    $('#computers').innerHTML = d.computers.map(c => `
+      <div class="pc">
+        <span class="led ${c.led}" title="${TIP.led[c.led]}"></span>
+        <div class="name">${esc(c.name)}<small>${esc(c.who)}${c.issues.length > 3 ? ` <span class="issues-n">&middot; ${c.issues.length} issues</span>` : ''}</small></div>
+        <div class="lanes-wrap"><div class="lanes">${c.lanes.map(l => `
+          <div class="lane ${l[1]}"><span class="k" title="${TIP.lane[l[0]]}">${l[0]}</span><span class="m">${meter(l[2], 100, 12)}</span><span class="s"${TIP.state[l[3]] ? ` title="${TIP.state[l[3]]}"` : ''}>${esc(l[3])}</span></div>`).join('')}</div></div>
+        <div class="issues" tabindex="0" aria-label="issues on ${esc(c.name)}">${ISSUES.render(c.issues)}</div>
+        <div class="ver num">${esc(c.ver)}${c.vtag ? `<br><span class="tag ${c.vtag[0]}" title="${vtip(c.vtag[1])}">${esc(c.vtag[1])}</span>` : ''}</div>
+        <div class="seen">${esc(c.seen)}<small>${esc(c.since)}</small></div>
+      </div>`).join('');
+    $('#xf-meta').innerHTML = d.xfers.length ? `<b>${d.xfers.length}</b> moving` : '';
+    $('#xfers').innerHTML = d.xfers.length ? d.xfers.map(x => `
+      <div class="xf">
+        <span class="dir ${x.dir}" title="${x.dir === 'up' ? 'Uploading to the server' : 'Downloading from the server'}">${x.dir === 'up' ? '▲' : '▼'}</span>
+        <span class="file">${esc(x.file)}<small>${esc(x.where)}</small></span>
+        <span class="meter">${meter(x.pct, 100, 16)} <span style="color:var(--text)">${x.pct}%</span></span>
+        <span class="speed num">${esc(x.speed)}</span>
+        <span class="eta num" title="Time left for this file at the current speed.">${esc(x.eta)}</span>
+      </div>`).join('')
+      : `<div class="allclear"><span class="led"></span>Nothing is moving. Every ticked project is up to date.</div>`;
+    $('#plan').innerHTML = d.plan.map(r => `<tr><td>${esc(r[0])}</td><td><b>${esc(r[1])}</b></td><td><span class="tag ${r[2] === 'unticked' ? 'mute' : 'hi'}" title="${TIP.plan[r[2]] || ''}">${esc(r[2])}</span></td><td>${esc(r[3])}</td><td>${esc(r[4])}</td></tr>`).join('');
+  }
+
+  document.addEventListener('click', e => {
+    const dir = e.target.closest('.tree .row.dir');
+    if (dir) {
+      const key = dir.dataset.dir;
+      const kids = document.querySelectorAll(`.tree [data-parent="${key}"]`);
+      const opening = [...kids].some(k => k.classList.contains('hidden'));
+      kids.forEach(k => k.classList.toggle('hidden', !opening));
+      if (!opening) document.querySelectorAll(`.tree [data-parent^="${key}/"]`).forEach(k => k.classList.add('hidden'));
+    }
+    const proj = e.target.closest('.tree .row.proj');
+    if (proj) {
+      proj.classList.toggle('on');
+      proj.querySelector('.box').textContent = proj.classList.contains('on') ? '■' : '□';
+      toast((proj.classList.contains('on') ? 'ticked ' : 'unticked ') + proj.dataset.name + ' for OWEN-RIG');
+    }
+  });
+  // Dismissing a problem must not pull the windows below it up (round 2,
+  // "nothing may shift"): the list keeps the height it was drawn at, and the
+  // last dismissal leaves the all-clear line in the same space.
+  const ALLCLEAR = `<div class="allclear"><span class="led"></span>All clear. The server checks 62 things every few minutes and nothing needs you.</div>`;
+  function afterDismiss() {
+    setTimeout(() => {
+      const left = document.querySelectorAll('#problems-list .prob').length;
+      $('#problems-meta').innerHTML = left ? `<b>${left}</b> open` : '';
+      if (!left && !$('#problems-list .allclear')) $('#problems-list').insertAdjacentHTML('beforeend', ALLCLEAR);
+    }, 260);
+  }
+  document.addEventListener('click', e => {
+    const pl = $('#problems-list');
+    if (e.target.closest('#problems-list [data-dismiss], #dismiss-all') && !pl.style.minHeight) pl.style.minHeight = pl.offsetHeight + 'px';
+    if (e.target.closest('#problems-list [data-dismiss]')) afterDismiss();
+    if (e.target.closest('#dismiss-all')) {
+      e.preventDefault();
+      document.querySelectorAll('#problems-list .prob').forEach(r => { r.classList.add('gone'); setTimeout(() => r.remove(), 200); });
+      afterDismiss();
+    }
+  });
+  $('#acting').addEventListener('change', e => {
+    const who = e.target.value;
+    $('#acting-warn').hidden = !who;
+    $('#acting-who').textContent = who;
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === '/' && !/input|select|textarea/i.test(e.target.tagName)) { e.preventDefault(); $('#proj-q').focus(); }
+  });
+  $('#proj-q').addEventListener('input', e => {
+    const q = e.target.value.trim().toLowerCase();
+    if (!q) { renderTree(); return; }
+    document.querySelectorAll('.tree .row').forEach(r => {
+      if (r.classList.contains('proj')) r.classList.toggle('hidden', !r.dataset.name.toLowerCase().includes(q));
+      else r.classList.remove('hidden');
+    });
+  });
+  let s = 3;
+  setInterval(() => { s = (s + 1) % 15; $('#updated').textContent = `updated ${s} s ago`; }, 1000);
+
+  renderTree();
+  document.getElementById('iv-slot').appendChild(ISSUES.switcher(() => render(CC.data)));
+  CC.page({ page: 'home', onData: render });
+})();
+</script>
+</body>
+</html>

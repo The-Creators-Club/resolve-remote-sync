@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: sign in</title>
+<!-- The design bench (dashboard/design/README.md): SIGN IN. Mirrors
+     templates/login.html via ui.page_login / _login_context. Three shapes:
+       ?v=password  (default) DASH_AUTH_METHOD smb or local: the password
+                    form. NAS accounts and local accounts use the same form.
+       ?v=sso       oidc: the SSO key, and a link to the admin sign-in.
+       ?v=local     oidc with ?local=1: SSO plus the break-glass password
+                    form, which only an admin can pass.
+     Busy data shows a refused sign-in; calm shows the page as first opened.
+     The brand line is brand_org from the site manifest, falling back to the
+     product name. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/safety.css">
+</head>
+<body data-page="login">
+
+<div class="shell">
+  <div class="page gate">
+    <div class="brand">CC SYNC</div>
+    <section class="win" id="box"></section>
+    <div class="bench-var" title="Design bench only: switch between the states the real page can be in. Not part of the real page."><b>bench</b><span>sign-in method:</span>
+      <a href="login.html" data-v="password">password (NAS or local)</a>
+      <a href="login.html?v=sso" data-v="sso">single sign-on</a>
+      <a href="login.html?v=local" data-v="local">single sign-on, admin break-glass</a>
+    </div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc } = CC;
+  const $ = s => document.querySelector(s);
+  const V = new URLSearchParams(location.search).get('v') || 'password';
+  document.querySelector(`.bench-var [data-v="${V}"]`).setAttribute('aria-current', 'page');
+  const SSO = V === 'sso' || V === 'local';
+  const FORM = V === 'password' || V === 'local';
+  const REFUSED = 'Sign-in refused. Check your username and password, then try again.';
+  const THROTTLED = 'Too many sign-in attempts. Try again in 4 minutes.';
+
+  function render(mode) {
+    const err = mode === 'calm' ? '' : (V === 'local' ? THROTTLED : REFUSED);
+    $('#box').innerHTML = `
+      <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">sign_in</span><span>&#9566;</span><span class="rule"></span><span>&#9552;&#9488;</span></div>
+      <form class="body stack" style="gap:16px" onsubmit="event.preventDefault()">
+        ${err ? `<div class="note err"><span class="tag solid err" title="Refused: you were not signed in. The reason is beside this.">refused</span><span class="grow">${esc(err)}</span></div>` : ''}
+        ${SSO ? `<a class="key primary wide" href="#" title="Single sign-on: sign in with your studio's own work account instead of a separate password for this dashboard."><span class="t">Sign in with SSO</span><span class="kbd">&#9166;</span></a>` : ''}
+        ${FORM ? `
+          ${SSO ? '<div class="or" title="A spare way in for an admin, for when the work account sign-in is not working.">admin sign-in</div>' : ''}
+          <p class="lede">Use the username and password your admin gave you.</p>
+          <label class="fld"><span>username</span><input class="inp" type="text" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" ${mode === 'calm' ? 'autofocus' : 'value="jsmith"'}></label>
+          <label class="fld"><span>password</span><input class="inp" type="password" name="password" autocomplete="current-password"></label>
+          <button class="key ${SSO ? "" : "primary "}wide" type="submit" data-busy="${V === 'local' ? 'still waiting out the limit' : 'signed in: taking you to sync status'}"><span class="t">Sign in</span><span class="busy-t"><span class="spin"></span> checking</span><span class="kbd">&#9166;</span></button>
+          <p class="lede" style="font-size:12px">Your admin creates this account for you. If you do not have one yet, ask them before installing.</p>`
+        : `<p class="lede" style="font-size:12px">Single sign-on is configured for this dashboard. <a class="hi" href="login.html?v=local" title="A spare way in for an admin, with a username and password, for when the work account sign-in is down.">Admin sign-in</a> if the identity provider is down.</p>`}
+      </form>`;
+  }
+
+  CC.page({ page: 'login', bare: true, onData: render });
+})();
+</script>
+</body>
+</html>

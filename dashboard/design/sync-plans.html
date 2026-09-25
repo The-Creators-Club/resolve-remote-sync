@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: sync plans</title>
+<!-- The design bench (dashboard/design/README.md): Settings, Sync plans.
+     Mirrors templates/admin_assignments.html, static/assignments.js and the
+     view in assignments.py: one person, then one of their computers (or
+     every computer), a project x computer grid of ticks with the upload-only
+     qualifier, the column tools, the capacity preflight and the archived
+     list. Invented data.
+     Round 2 (owner, 2026-09-25): the page opens on the picker alone, in both
+     data modes, and nothing moves while ALL / NONE / COPY FROM run. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/fleet.css">
+</head>
+<body data-page="assignments">
+
+<div class="shell fl-page">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> SYNC PLANS</span></h1>
+        <div class="sub"><span title="people with a plan, or a computer, on this server"><b>4</b> people</span> &middot; <span title="computers that have reported in: each one has its own plan"><b>6</b> computers</span> &middot; <span title="active project folders on the server that can be ticked"><b id="n-proj">7</b> projects</span></div>
+      </div>
+    </div>
+
+    <p class="lede">
+      Choose a person, then one of their computers: a plan belongs to a <b>computer</b>, not to a person,
+      so this page shows one at a time. Tick a project onto that computer, or pull it back. A person with a
+      desktop and a laptop has a plan for each, and the two sync different things: pick <b>every computer</b>
+      to see them side by side. Every box here is the same write the checkboxes on Sync status make: there is
+      one list, not two. The small <span class="upm on" style="pointer-events:none">up</span> box beside a tick
+      makes it <a class="hi" href="help.html#upload-only">upload only</a>: that computer sends its video
+      originals for the project to the server and downloads nothing, for an editor who has the footage backed
+      up locally and does not want the rest of the project coming down. What the words on this page mean:
+      <a class="hi" href="help.html#glossary">the glossary</a>.
+    </p>
+
+    <section class="win">
+      <div class="bar"><span>┌─╡</span><span class="t">whose_plan</span><span>╞</span><span class="rule"></span><span class="meta">the choice is in the address, so a link lands here too</span><span>═┐</span></div>
+      <div class="body">
+        <div class="pickrow">
+          <label class="pick" title="Whose plan to show. Nothing is listed until you choose, so a studio with many editors never gets a grid too wide to read."><span>person</span><select id="p-ed"></select></label>
+          <label class="pick" title="Which of their computers. A plan belongs to one computer: a desktop and a laptop can sync different projects. 'every computer' puts them side by side."><span>computer</span><select id="p-m"></select></label>
+          <button class="key primary w-9" type="button" id="p-show" title="Show the plan for the person and computer chosen. Nothing is written until you tick a box."><span class="t">show</span><span class="kbd">&crarr;</span></button>
+          <span class="hint" id="p-hint"></span>
+        </div>
+      </div>
+    </section>
+
+    <div id="grid-area"></div>
+    <div id="archived-area"></div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, win, toast } = CC;
+  const $ = s => document.querySelector(s);
+  const GB = 1024 ** 3;
+
+  // ------------------------------------------------------------ data
+  const PEOPLE = {
+    jsmith: { presence: 'err', machines: ['JSMITH-STUDIO', 'JSMITH-MBP'] },
+    mrivera: { presence: 'warn', machines: ['RIVERA-TOWER', 'RIVERA-LAPTOP'] },
+    owen: { presence: '', machines: ['OWEN-RIG'] },
+    tchen: { presence: 'off', machines: ['TCHEN-RIG'] },
+  };
+  const PRESENCE = { err: 'something on one of their computers needs attention', warn: 'one of their computers has a warning', '': 'every computer of theirs is fine', off: 'not heard from lately' };
+  const FREE = { 'JSMITH-STUDIO': 2150 * GB, 'JSMITH-MBP': 180 * GB, 'RIVERA-TOWER': 3480 * GB, 'RIVERA-LAPTOP': 95 * GB, 'TCHEN-RIG': 2 * GB };
+  const WIRED = new Set(['OWEN-RIG']);
+  const PROJECTS0 = [
+    ['ff5-elections', '2026 / FF5 / Elections', 412],
+    ['ff5-civil-defence', '2026 / FF5 / Civil Defence', 238],
+    ['ff5-repro-rights', '2026 / FF5 / Repro Rights', 96],
+    ['shorts-night-market', '2026 / Shorts / Night Market', 44],
+    ['shorts-typhoon-prep', '2026 / Shorts / Typhoon Prep', 12],
+    ['ff4-cia-city', '2025 / FF4 / CIA City', 188],
+    ['ff4-taichung-drone-camp', '2025 / FF4 / Taichung Drone Camp', null],
+  ];
+  const TICKS0 = {
+    'ff5-elections|JSMITH-STUDIO': 'full', 'ff5-civil-defence|JSMITH-STUDIO': 'full', 'shorts-night-market|JSMITH-STUDIO': 'full',
+    'ff5-elections|JSMITH-MBP': 'up', 'shorts-night-market|JSMITH-MBP': 'full',
+    'ff5-elections|RIVERA-TOWER': 'full', 'ff5-civil-defence|RIVERA-TOWER': 'full', 'ff5-repro-rights|RIVERA-TOWER': 'full', 'ff4-cia-city|RIVERA-TOWER': 'full',
+    'ff5-elections|RIVERA-LAPTOP': 'full',
+    'ff5-elections|TCHEN-RIG': 'full', 'ff5-repro-rights|TCHEN-RIG': 'full', 'shorts-typhoon-prep|TCHEN-RIG': 'full',
+    'ff4-cia-city|OWEN-RIG': 'full',   // left over from before OWEN-RIG went wired: removable, not re-tickable
+  };
+  let PROJECTS = [], ARCHIVED = [], TICKS = {};
+  // OWNER, 2026-09-25: "By default when you open sync plan it should not
+  // show anyone, it just shows the picker so you can select someone." Both
+  // data modes open on the picker alone; after SHOW the choice is in the
+  // address (?editor=&machine=), so a link or a reload lands on it.
+  let view = { editor: '', machine: null, shown: false };
+
+  // ------------------------------------------------------------ the capacity preflight (health.capacity_warning's rule)
+  const RED_FREE = 20 * GB;
+  const fmt = n => n >= 1024 * GB ? (n / 1024 / GB).toFixed(1) + ' TB' : Math.round(n / GB) + ' GB';
+  function capacity(what, bytes, machine, free, verb) {
+    if (!bytes || free == null) return null;
+    if (bytes + RED_FREE <= free && bytes < free * 0.5) return null;
+    let s = `${what} ${verb || 'is'} ${fmt(bytes)} of proxies. ${machine} has ${fmt(free)} free.`;
+    if (bytes > free) s += ' That is more than will fit.';
+    return s + '\n\nSync it there anyway?';
+  }
+
+  // ------------------------------------------------------------ picker
+  // The computer select is ALWAYS there, disabled until a person is chosen:
+  // it used to appear on the first pick and push SHOW sideways.
+  function renderPicker() {
+    const eds = Object.keys(PEOPLE).sort();
+    $('#p-ed').innerHTML = `<option value="">choose a person…</option>` + eds.map(e => `<option ${e === view.editor ? 'selected' : ''}>${e}</option>`).join('');
+    const ms = view.editor ? PEOPLE[view.editor].machines : [];
+    $('#p-m').disabled = !view.editor;
+    $('#p-m').innerHTML = view.editor
+      ? `<option value="-">choose a computer…</option>` + (ms.length > 1 ? `<option value="*" ${view.machine === '*' ? 'selected' : ''}>every computer</option>` : '') +
+        ms.map(m => `<option ${m === view.machine ? 'selected' : ''}>${m}</option>`).join('')
+      : `<option value="-">choose a person first</option>`;
+    $('#p-show').disabled = !(view.editor && view.machine != null);
+    $('#p-hint').textContent = !view.editor ? 'Nothing is listed until you choose someone.'
+      : view.machine == null ? `Now one of ${view.editor}'s computers, or every computer.` : 'Press show, or Enter.';
+  }
+
+  // ------------------------------------------------------------ grid
+  const tickers = slug => new Set(Object.keys(TICKS).filter(k => k.startsWith(slug + '|')).map(k => Object.keys(PEOPLE).find(p => PEOPLE[p].machines.includes(k.split('|')[1])))).size;
+
+  function renderGrid() {
+    if (!view.shown) {
+      $('#grid-area').innerHTML = win('plan', 'nobody chosen', `<div class="plan-empty"><span class="glyph">· · ·</span>
+        <span>Choose a <b>person</b> above, then one of their <b>computers</b>, then <b>show</b>.</span>
+        <span class="muted">Nothing is listed until then: a company with many editors has a grid too wide to read, and a plan belongs to one computer anyway.</span></div>`);
+      return;
+    }
+    const cols = view.machine === '*' ? PEOPLE[view.editor].machines : [view.machine];
+    const pres = PEOPLE[view.editor].presence;
+    const head = cols.map(m => {
+      const wired = WIRED.has(m);
+      const sibs = PEOPLE[view.editor].machines.filter(x => x !== m);
+      const free = FREE[m];
+      return `<th><div class="ch">
+        <span class="nm">${m} <span class="led ${pres}" title="${esc(view.editor)}: ${PRESENCE[pres]}" style="width:7px;height:7px"></span></span>
+        <span class="who"><a class="who-link" href="user.html?u=${view.editor}" title="Open ${view.editor}'s page: every computer, what is ticked, what is synced and what is missing.">${view.editor}</a></span>
+        ${free != null ? `<span class="free ${free < 40 * GB ? 'low' : ''}" title="Free space this computer last reported on the drive its projects sync to. Ticking a project whose proxies would not fit asks first.">${fmt(free)} free</span>` : ''}
+        ${wired ? `<span class="wired" title="This computer works directly off the NAS tree, so it syncs nothing."><b>wired</b>: set on that computer (tray, Settings, This computer)</span>` : `
+        <span class="tools">
+          <button class="key sm fixw" type="button" data-col="all" data-m="${m}" title="Tick every project for ${m}. Asks first if the proxies would not fit. Press again while it runs to stop after the change in flight."><span class="t">all</span></button>
+          <button class="key sm fixw" type="button" data-col="none" data-m="${m}" title="Untick every project for ${m}. Asks first. Copies already on that computer stay on its disk; nothing new comes down."><span class="t">none</span></button>
+          ${sibs.length ? `<select class="sel sm" data-copy="${m}" title="Give ${m} the same projects as another of ${view.editor}'s computers. Asks first, and names anything ${m} would stop syncing." aria-label="copy a plan onto ${m}"><option value="">copy from…</option>${sibs.map(s => `<option>${s}</option>`).join('')}</select>` : ''}
+        </span>
+        <span class="colstat" data-stat="${m}" aria-live="polite"></span>`}
+      </div></th>`;
+    }).join('');
+    const rows = PROJECTS.map(([slug, label, gb]) => `<tr data-label="${esc(label.toLowerCase())}">
+      <td class="pcol"><div class="pname"><span class="nm" title="${esc(label)}">${esc(label)}</span><span class="sz" title="${gb == null ? 'The proxies of this project have not been measured yet, so a tick cannot warn about space.' : 'The size of this project\'s proxies on the server: roughly what a full tick brings down.'}">${gb == null ? 'not measured' : fmt(gb * GB)}</span>
+        <button class="key quiet sm" type="button" data-archive="${slug}" title="Take this project off every tick list, the queue and this grid. The folder, its files and the ticks themselves are kept, and unarchive brings it all back."><span class="t">archive</span></button></div></td>
+      ${cols.map(m => {
+        const st = TICKS[slug + '|' + m];
+        const wired = WIRED.has(m);
+        const dis = wired && !st;
+        const title = dis ? `${m} is wired to the NAS: it works directly off the tree, so a new sync cannot be ticked here. Change it on that computer: tray, Settings, This computer.`
+          : wired ? `${m} is wired to the NAS and syncs nothing: untick to clear this stale sync.` : `sync "${label}" to ${m}`;
+        return `<td class="cell"><button class="tick ${st ? 'on' : ''} ${st === 'up' ? 'up' : ''}" type="button" data-slug="${slug}" data-m="${m}" ${dis ? 'disabled' : ''} title="${esc(title)}" aria-pressed="${!!st}" aria-label="sync ${esc(label)} to ${m}"><span class="g"></span></button><button class="upm ${st === 'up' ? 'on' : ''}" type="button" data-up="${slug}" data-m="${m}" ${wired ? 'disabled' : ''} aria-pressed="${st === 'up'}" title="Upload only: ${m} sends its video originals for &quot;${esc(label)}&quot; to the server and downloads nothing. Press again for a full sync.">up</button></td>`;
+      }).join('')}
+    </tr>`).join('');
+    $('#grid-area').innerHTML = win(`plan <b>${view.editor}</b> / ${view.machine === '*' ? 'every computer' : view.machine}`,
+      `<b>${PROJECTS.length}</b> projects &times; <b>${cols.length}</b> computer${cols.length === 1 ? '' : 's'}`,
+      !PROJECTS.length ? `<div class="plan-empty"><span class="glyph">· · ·</span>No active projects yet.</div>` : `
+      <div class="body" style="padding-bottom:0"><div class="prompt-in" style="max-width:420px" title="Show only the projects whose name contains this. Filtering unticks nothing."><span class="p">&gt;</span><input id="flt" type="search" placeholder="filter projects" aria-label="filter projects"><kbd>/</kbd></div></div>
+      <div class="mx-wrap" style="margin-top:12px"><table class="mx"><thead><tr><th class="pcol">project</th>${head}</tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="legend"><span><span class="tick on"><span class="g"></span></span> synced: the project comes down and goes up</span>
+        <span><span class="tick on up"><span class="g"></span></span><span class="upm on">up</span> upload only: originals go up, nothing comes down</span>
+        <span><span class="tick"><span class="g"></span></span> not on this computer</span></div>`);
+  }
+
+  function renderArchived() {
+    if (!ARCHIVED.length) { $('#archived-area').innerHTML = ''; return; }
+    $('#archived-area').innerHTML = win('archived_projects', `<b>${ARCHIVED.length}</b>`, `
+      <div class="lede-in">Off every tick list and the queue. Nothing was deleted: the folders and the files are still on the server.</div>
+      <table class="tbl stack-sm"><tbody>${ARCHIVED.map(a => `<tr data-row><td data-label=""><b>${esc(a[1])}</b></td>
+        <td data-label="">archived ${a[2]} by ${a[3]}, <span title="how many people still have it ticked: their ticks are kept, and come back into force if it is unarchived">still ticked for ${a[4]} editor${a[4] === 1 ? '' : 's'}</span></td>
+        <td class="acts-cell" data-label=""><button class="key sm" type="button" data-unarchive="${a[0]}" title="Put this project back on every tick list and the queue. The ticks it had are still there, so it starts syncing again on the next cycle."><span class="t">unarchive</span></button></td></tr>`).join('')}</tbody></table>`);
+  }
+
+  function renderAll() { renderPicker(); renderGrid(); renderArchived(); $('#n-proj').textContent = PROJECTS.length; }
+
+  function onData(mode) {
+    PROJECTS = PROJECTS0.map(p => [...p]);
+    TICKS = { ...TICKS0 };
+    ARCHIVED = mode === 'calm' ? [] : [['ff4-kinmen', '2025 / FF4 / Kinmen', '12 d ago', 'owen', 2]];
+    view = { editor: '', machine: null, shown: false };
+    // ?editor=&machine= lands on a chosen plan, as the real page's GET form does
+    const q = new URLSearchParams(location.search);
+    if (PEOPLE[q.get('editor')]) {
+      view.editor = q.get('editor');
+      const m = q.get('machine');
+      view.machine = m === '*' || PEOPLE[view.editor].machines.includes(m) ? m : null;
+      view.shown = view.machine != null;
+    }
+    renderAll();
+  }
+
+  // ------------------------------------------------------------ dialog
+  document.body.insertAdjacentHTML('beforeend', `<div class="dialog-back" id="ask"><section class="win dialog" role="dialog" aria-modal="true">
+    <div class="bar"><span>┌─╡</span><span class="t">are_you_sure</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+    <div class="body"><div id="ask-x" style="white-space:pre-line"></div>
+      <div class="acts"><button class="key quiet" type="button" id="ask-no"><span class="t">cancel</span></button><button class="key primary" type="button" id="ask-ok"><span class="t" id="ask-ok-t">ok</span></button></div></div>
+  </section></div>`);
+  let yes = null, no = null;
+  const close = ok => { $('#ask').classList.remove('open'); const f = ok ? yes : no; yes = no = null; if (f) f(); };
+  const ask = (text, okLabel, onYes, onNo) => { yes = onYes; no = onNo; $('#ask-x').textContent = text; $('#ask-ok-t').textContent = okLabel; $('#ask').classList.add('open'); $('#ask-ok').focus(); };
+  $('#ask-no').onclick = () => close(false);
+  $('#ask-ok').onclick = () => close(true);
+  $('#ask').addEventListener('click', e => { if (e.target.id === 'ask') close(false); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && $('#ask').classList.contains('open')) close(false);
+    if (e.key === '/' && !/input|select|textarea/i.test(e.target.tagName) && $('#flt')) { e.preventDefault(); $('#flt').focus(); }
+  });
+
+  // ------------------------------------------------------------ writes (a pulse, then the result, painted in place)
+  function write(slug, m, state, done) {
+    const b = document.querySelector(`.tick[data-slug="${slug}"][data-m="${m}"]`);
+    if (b) b.classList.add('saving');
+    setTimeout(() => {
+      if (state) TICKS[slug + '|' + m] = state; else delete TICKS[slug + '|' + m];
+      paintCell(slug, m); if (done) done();
+    }, 260);
+  }
+  function paintCell(slug, m) {
+    const st = TICKS[slug + '|' + m];
+    const b = document.querySelector(`.tick[data-slug="${slug}"][data-m="${m}"]`);
+    const u = document.querySelector(`.upm[data-up="${slug}"][data-m="${m}"]`);
+    if (!b) return;
+    b.classList.remove('saving');
+    b.classList.toggle('on', !!st); b.classList.toggle('up', st === 'up'); b.setAttribute('aria-pressed', String(!!st));
+    u.classList.toggle('on', st === 'up'); u.setAttribute('aria-pressed', String(st === 'up'));
+    if (WIRED.has(m) && !st) { b.disabled = true; b.title = `${m} is wired to the NAS: it works directly off the tree, so a new sync cannot be ticked here`; }
+  }
+  const labelOf = slug => (PROJECTS.find(p => p[0] === slug) || [])[1] || slug;
+  const gbOf = slug => (PROJECTS.find(p => p[0] === slug) || [])[2];
+  const stat = (m, text, run) => {
+    const s = document.querySelector(`[data-stat="${m}"]`);
+    if (!s) return;
+    s.textContent = text; s.classList.toggle('run', !!run); s.title = text;
+  };
+
+  // A run of writes down one column. THE KEY KEEPS ITS SIZE (owner,
+  // 2026-09-25: "if you click all or none on the sync plan it shifts the
+  // spacing briefly"): it used to read "3 / 7 ..." inside the cap, which
+  // widened the key, the column and the whole grid for the length of the
+  // run. It now reads "stop" in the same fixed-width cap, and the count is
+  // on the status line under the tools, which never widens its column.
+  const running = {};
+  const idleTitle = (btn, m) => btn.dataset.col === 'all'
+    ? `Tick every project for ${m}. Asks first if the proxies would not fit. Press again while it runs to stop after the change in flight.`
+    : `Untick every project for ${m}. Asks first. Copies already on that computer stay on its disk; nothing new comes down.`;
+  function runWrites(m, todo, stateFor, btn, doneText) {
+    const t = btn ? btn.querySelector('.t') : null, idle = t ? t.textContent : '';
+    let i = 0;
+    running[m] = true;
+    if (t) { t.textContent = 'stop'; btn.title = 'Stop after the change that is in flight. What is already written stays written.'; }
+    (function next() {
+      const stopped = !running[m];
+      if (i >= todo.length || stopped) {
+        delete running[m];
+        if (t) { t.textContent = idle; btn.title = idleTitle(btn, m); }
+        const msg = stopped ? `stopped after ${i} of ${todo.length}` : doneText;
+        stat(m, msg); toast(`${m}: ${msg}`);
+        return;
+      }
+      const slug = todo[i++];
+      stat(m, `${i} / ${todo.length}: ${labelOf(slug).split(' / ').pop()}`, true);
+      write(slug, m, stateFor(slug), next);
+    })();
+  }
+
+  function runColumn(m, wanted, btn) {
+    const todo = PROJECTS.filter(p => !!TICKS[p[0] + '|' + m] !== wanted).map(p => p[0]);
+    if (!todo.length) { stat(m, 'nothing to change'); toast(`nothing to change on ${m}`); return; }
+    const go = () => runWrites(m, todo, () => wanted ? 'full' : null, btn, wanted ? `ticked ${todo.length} more` : `unticked all ${todo.length}`);
+    if (!wanted) {
+      ask(`Untick all ${todo.length} project${todo.length === 1 ? '' : 's'} for ${view.editor} on ${m}?\n\nTheir copies stay on disk. Nothing new comes down and proxy sync stops for all of them.`, 'untick all', go);
+      return;
+    }
+    const measured = todo.filter(s => gbOf(s) != null);
+    let what = `${todo.length} project${todo.length === 1 ? '' : 's'}`;
+    if (measured.length < todo.length) what += ` (${measured.length} of them measured)`;
+    const warn = capacity(what, measured.reduce((a, s) => a + gbOf(s) * GB, 0), m, FREE[m], todo.length === 1 ? 'is' : 'are');
+    if (warn) ask(warn, 'sync them anyway', go); else go();
+  }
+
+  document.addEventListener('click', e => {
+    const tick = e.target.closest('.tick[data-slug]');
+    if (tick && !tick.disabled) {
+      const { slug, m } = tick.dataset, on = !!TICKS[slug + '|' + m];
+      if (on) { write(slug, m, null); return; }
+      const warn = capacity(labelOf(slug), (gbOf(slug) || 0) * GB, m, FREE[m]);
+      if (warn) ask(warn, 'sync it anyway', () => write(slug, m, 'full')); else write(slug, m, 'full');
+      return;
+    }
+    const up = e.target.closest('.upm[data-up]');
+    if (up && !up.disabled) {
+      const slug = up.dataset.up, m = up.dataset.m;
+      write(slug, m, TICKS[slug + '|' + m] === 'up' ? 'full' : 'up');
+      return;
+    }
+    const col = e.target.closest('[data-col]');
+    if (col) {
+      if (running[col.dataset.m]) { running[col.dataset.m] = false; return; }
+      runColumn(col.dataset.m, col.dataset.col === 'all', col);
+      return;
+    }
+    const arc = e.target.closest('[data-archive]');
+    if (arc) {
+      const slug = arc.dataset.archive, n = tickers(slug), label = labelOf(slug);
+      ask(`Archive ${label}? ${n} editor${n === 1 ? '' : 's'} sync it now, and it stops being sent to their computers. Nothing is deleted: the folder and the files stay on the server, and UNARCHIVE puts it back.`, 'archive', () => {
+        PROJECTS = PROJECTS.filter(p => p[0] !== slug);
+        ARCHIVED = [[slug, label, 'just now', 'owen', n], ...ARCHIVED];
+        renderAll(); toast(`archived ${label}`);
+      });
+      return;
+    }
+    const un = e.target.closest('[data-unarchive]');
+    if (un) {
+      const a = ARCHIVED.find(x => x[0] === un.dataset.unarchive);
+      ARCHIVED = ARCHIVED.filter(x => x !== a);
+      PROJECTS.push([a[0], a[1], a[0] === 'ff4-kinmen' ? 310 : 50]);
+      renderAll(); toast(`${a[1]} is back on every list`);
+    }
+  });
+
+  // COPY FROM: the same writes, cell by cell, painted in place. It used to
+  // redraw the whole grid, which also threw away the filter and the scroll.
+  document.addEventListener('change', e => {
+    const sel = e.target.closest('[data-copy]');
+    if (!sel || !sel.value) return;
+    const target = sel.dataset.copy, source = sel.value;
+    const src = PROJECTS.filter(p => TICKS[p[0] + '|' + source]).map(p => p[0]);
+    const tgt = PROJECTS.filter(p => TICKS[p[0] + '|' + target]).map(p => p[0]);
+    if (!src.length) { sel.value = ''; stat(target, `${source} has nothing ticked`); toast(`${source} has no projects ticked. Copying it would leave ${target} with nothing.`); return; }
+    const losing = tgt.filter(s => !src.includes(s));
+    ask(`Replace ${target}'s ${tgt.length} project(s) with ${source}'s ${src.length}?\n\n` +
+      (losing.length ? `${target} stops syncing ${losing.length} of them: ${losing.map(labelOf).join(', ')}.` : `Nothing is removed from ${target}.`),
+      'replace the plan', () => {
+        const todo = PROJECTS.map(p => p[0]).filter(s => (TICKS[s + '|' + source] || null) !== (TICKS[s + '|' + target] || null));
+        sel.value = '';
+        if (!todo.length) { stat(target, `already the same as ${source}`); return; }
+        runWrites(target, todo, s => TICKS[s + '|' + source] || null, null, `copied from ${source}`);
+      }, () => { sel.value = ''; });
+  });
+
+  document.addEventListener('input', e => {
+    if (e.target.id !== 'flt') return;
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll('.mx tbody tr').forEach(r => r.classList.toggle('hidden', !!q && !r.dataset.label.includes(q)));
+  });
+
+  $('#p-ed').addEventListener('change', e => {
+    view.editor = e.target.value;
+    const ms = view.editor ? PEOPLE[view.editor].machines : [];
+    view.machine = ms.length === 1 ? ms[0] : null;
+    renderPicker();
+  });
+  $('#p-m').addEventListener('change', e => { view.machine = e.target.value === '-' ? null : e.target.value; renderPicker(); });
+  const show = () => {
+    if (!view.editor || view.machine == null) return;
+    view.shown = true; renderGrid();
+    try { history.replaceState(null, '', `?editor=${encodeURIComponent(view.editor)}&machine=${encodeURIComponent(view.machine)}${location.hash}`); } catch (err) { /* file:// */ }
+  };
+  $('#p-show').addEventListener('click', show);
+  document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.closest && e.target.closest('.pickrow select')) show(); });
+
+  CC.page({ page: 'assignments', onData });
+})();
+</script>
+</body>
+</html>

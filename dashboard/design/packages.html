@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: packages</title>
+<!-- The design bench (dashboard/design/README.md): Settings, Packages.
+     Mirrors templates/admin_packages.html, partials/admin_packages.html and
+     partials/admin_dashboard_update.html (with static/dashboard_update.js and
+     static/confirms.js): what is served, recalls and CPU gaps, the rollout,
+     the vendor feed, out-of-date computers and the dashboard's own code.
+     Invented data.
+     Round 2 (owner, 2026-09-25):
+       - UPDATE ALL comes first: one row per thing (dashboard, companion
+         windows / macos, onboard windows / macos), what runs now against the
+         newest available, one key per row and one for everything, and every
+         gate the product has said where it holds something back. It is a new
+         panel, built only from actions the page already has (apply a
+         dashboard bundle, publish, push to one computer, make current,
+         update now); it never uses a typed override.
+       - "we should never show all the previous versions": the list of every
+         build held here is gone. Old builds live in a "roll back to..."
+         dropdown on their kind and platform's row. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/fleet.css">
+</head>
+<body data-page="packages" class="fl-marknew">
+
+<div class="shell fl-page">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> PACKAGES</span></h1>
+        <div class="sub" id="sub"></div>
+      </div>
+      <div class="acts">
+        <a class="key quiet sm" href="#vendor" title="What your supplier publishes, the feed policy and CHECK NOW."><span class="t">the vendor feed</span></a>
+        <a class="key quiet sm" href="#dash" title="This dashboard's own code: its version, rollback and database backups."><span class="t">this dashboard</span></a>
+      </div>
+    </div>
+
+    <div class="bench" aria-label="design bench only">
+      <span class="bl">bench only</span>
+      <span class="grp" title="bench only: show the page while the fleet stop (Settings, Users) is on">fleet stop <span class="opts" id="b-halt"><button data-v="off">syncing</button><button data-v="on">stopped</button></span></span>
+      <span class="fl-benchsw" title="bench only: outline what the product does not have yet"><label class="switch"><input type="checkbox" id="marknew" checked><span class="off">OFF</span><span class="on">ON</span></label> mark what is new</span>
+    </div>
+
+    <div id="top-notes" class="stack" style="gap:10px"></div>
+    <div id="ua"></div>
+    <div class="stack" id="main"></div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, win, tag, toast, meter } = CC;
+  const $ = s => document.querySelector(s);
+  const NEW = '<span class="fl-newtag" title="not in the product yet: a new panel built from actions this page already has">new</span>';
+  const vcmp = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true });
+  const above = (a, b) => vcmp(a, b) > 0;
+
+  // ------------------------------------------------------------ data
+  const P = (kind, plat, ver, o) => ({ kind, plat, ver, when: '3 d ago', by: 'owen', size: '38.2 MB', sha: 'e4b1c09a7f3312d8', signed: true, codesig: false, ...o });
+  function busyPkgs() {
+    return [
+      P('companion', 'windows', '0.9.77', { current: true, when: '40 min ago', git: 'a91f3c2' }),
+      P('companion', 'windows', '0.9.76', { retracted: 'crashes on start when the Windows user folder has a non-ASCII name', when: '6 d ago', sha: '5d0e8b21c4aa7f19', git: '77be014', ever: true }),
+      P('companion', 'windows', '0.9.75', { when: '12 d ago', sha: 'b83f19d0e2c75a44', git: '3c10a9e', ever: true }),
+      P('companion', 'windows', '0.9.61', { when: '37 d ago', sha: '0a7c55e19b3d2f60', git: 'c07e2b1', dirty: true, signed: false, ever: true }),
+      P('companion', 'macos', '0.9.78', { when: '2 h ago', by: 'the vendor feed', size: '41.0 MB', sha: '6fd2a08c1b47e935', git: 'd42e7a0', arch: 'arm64', codesig: true, soak: { machines: 0, minutes: 0, crashes: 0, soak: 30, ok: false } }),
+      P('companion', 'macos', '0.9.77', { current: true, when: '40 min ago', size: '40.8 MB', sha: '9e41c7b2a05d38f1', git: 'a91f3c2', arch: 'arm64', codesig: true }),
+      P('companion', 'macos', '0.9.75', { when: '12 d ago', size: '40.5 MB', sha: '2c7d90e4f1b86a35', git: '3c10a9e', arch: 'arm64', codesig: true, ever: true }),
+      P('onboard', 'windows', '1.0.46', { current: true, when: '9 d ago', size: '12.0 MB', sha: '1b5a8d3e7c0f9246' }),
+      P('onboard', 'windows', '1.0.45', { when: '21 d ago', size: '11.9 MB', sha: 'f08d2c6b41e7a953', missing: true, ever: true }),
+      P('onboard', 'macos', '1.0.47', { when: '1 d ago', size: '14.4 MB', sha: '9c2e7f10ab34d6e8', arch: 'arm64', codesig: true }),
+      P('onboard', 'macos', '1.0.46', { current: true, when: '9 d ago', size: '14.3 MB', sha: '7a3e1f09c5d2b864', arch: 'arm64', codesig: true }),
+    ];
+  }
+  function calmPkgs() {
+    return busyPkgs().filter(p => !['0.9.78', '0.9.61', '1.0.47'].includes(p.ver)).map(p => ({ ...p, retracted: null, missing: false }));
+  }
+  const V = (kind, plat, ver, state, o) => ({ kind, plat, ver, state, when: '2 h ago', size: '38.4 MB', notes: '', signed: true, ...o });
+  const VENDOR = {
+    busy: [
+      V('companion', 'windows', '0.9.78', 'new', { notes: 'the tray keeps its place after sleep', needsDash: '0.7.59' }),
+      V('companion', 'macos', '0.9.78', 'held', { size: '41.0 MB', notes: 'the tray keeps its place after sleep' }),
+      V('onboard', 'windows', '1.0.47', 'new', { when: '1 d ago', size: '12.1 MB', notes: 'asks for the drive letter before the sign-in' }),
+      V('onboard', 'macos', '1.0.47', 'conflict', { when: '1 d ago', size: '14.4 MB', heldSha: '9c2e7f10ab34', feedSha: '41adf5c28e90' }),
+    ],
+    calm: [
+      V('companion', 'windows', '0.9.77', 'current', { when: '40 min ago' }),
+      V('companion', 'macos', '0.9.77', 'current', { when: '40 min ago', size: '40.8 MB' }),
+      V('onboard', 'windows', '1.0.46', 'current', { when: '9 d ago', size: '12.0 MB' }),
+      V('onboard', 'macos', '1.0.46', 'current', { when: '9 d ago', size: '14.3 MB' }),
+    ],
+  };
+  // every reporting computer, as the rollout and the out-of-date table read it
+  const M = (ed, m, plat, arch, run, seen, o) => ({ ed, m, plat, arch, run, seen, ...o });
+  function busyMachines() {
+    return [
+      M('jsmith', 'JSMITH-STUDIO', 'windows', 'x86_64', '0.9.77', '4 s ago'),
+      M('mrivera', 'RIVERA-TOWER', 'windows', 'x86_64', '0.9.76', '12 s ago', { refused: { ver: '0.9.77', reason: 'the offer is below this computer\'s signed floor (0.9.76 installed a floor of 0.9.76, and 0.9.77 carries min_version 0.9.78)', at: '14 min ago' } }),
+      M('mrivera', 'RIVERA-LAPTOP', 'windows', 'x86_64', '0.9.76', '2 s ago'),
+      M('tchen', 'TCHEN-RIG', 'windows', 'x86_64', '0.9.49', '2 h ago', { asked: '0.9.77', failed: 3, err: 'download stopped at 61%: the connection to the server was reset', lastTry: '2 h ago' }),
+      M('owen', 'OWEN-RIG', 'windows', 'x86_64', '0.9.76', '1 min ago', { crashed: '0.9.77' }),
+      M('jsmith', 'JSMITH-MBP', 'macos', 'x86_64', '0.9.75', '31 s ago', { asked: '0.9.77' }),
+    ];
+  }
+  function calmMachines() {
+    return busyMachines().map(o => ({ ed: o.ed, m: o.m, plat: o.plat, arch: o.plat === 'macos' ? 'arm64' : 'x86_64', run: '0.9.77', seen: o.seen }));
+  }
+
+  let S = {};
+  function reset(mode) {
+    const busy = mode !== 'calm';
+    S = {
+      mode, busy, halt: S.halt || 'off',
+      pkgs: busy ? busyPkgs() : calmPkgs(),
+      vendor: VENDOR[busy ? 'busy' : 'calm'].map(v => ({ ...v })),
+      machines: busy ? busyMachines() : calmMachines(),
+      feedErr: busy, checked: busy ? '19 h ago' : '3 h ago', next: busy ? 'next retry in about 12 min' : 'next in about 21 h',
+      policy: 'manual', rollbackBanner: null, lowDisk: busy,
+      rowStat: {}, running: false,
+      dash: busy ? {
+        running: '0.7.58', source: 'update tree 0.7.58', image: '0.7.57', runtime: '3f9c2a71b0de5e44', failed: 'verifying: the bundle for 0.7.59-rc1 is signed by a key this dashboard does not trust',
+        updates: [['0.7.59', '1.8 MB', '5 h ago', 'the Timeline Cards picker keeps its year']], older: ['0.7.57', '0.7.56'],
+        runtimeUpd: ['0.8.0'], tree: { ver: '0.7.58', applied: '2 d ago', prev: '0.7.57' },
+        schema: { safe: false, live: 58, target: 57, backup: 'pre-0.7.58-20260923T0412' },
+      } : {
+        running: '0.7.58', source: 'image', image: '0.7.58', runtime: '3f9c2a71b0de5e44', failed: null,
+        updates: [], older: ['0.7.57'], runtimeUpd: [], tree: null, retired: '0.7.57', schema: null,
+      },
+    };
+  }
+
+  // ------------------------------------------------------------ helpers
+  const btn = (label, cls, attrs) => `<button class="key sm ${cls || ''}" type="button" ${attrs || ''}><span class="t">${label}</span></button>`;
+  const bbtn = (label, busy, cls, attrs) => `<button class="key sm ${cls || ''}" type="button" ${attrs || ''}><span class="t">${label}</span><span class="busy-t"><span class="spin"></span> ${busy}</span></button>`;
+  const id = p => `${p.kind}/${p.plat}/${p.ver}`;
+  const who = ed => `<a class="who-link" href="user.html?u=${ed}" title="Open ${ed}'s page: every computer, what is ticked, what is synced and what is missing.">${ed}</a>`;
+  const pk = (k, pl) => S.pkgs.filter(p => p.kind === k && p.plat === pl);
+  const cur = (k, pl) => pk(k, pl).find(p => p.current);
+  const vend = (k, pl) => S.vendor.find(v => v.kind === k && v.plat === pl);
+  const onVer = (pl, v) => S.machines.filter(m => m.plat === pl && m.run === v).length;
+  const archOf = (k, pl, v) => { const p = pk(k, pl).find(x => x.ver === v); return p && p.arch; };
+
+  // ------------------------------------------------------------ UPDATE ALL: the plan per row
+  // Every sentence here is a gate the product really has:
+  //   dashboard first   package_store.blocks_on_dashboard_version (REL-4)
+  //   soak              db.soak_state: one computer, soak_minutes, no crash (REL-1)
+  //   signature         an unsigned record is refused without the typed version (UX-9)
+  //   crash-looped      db.upgrade_crash_looped: never offered that build again (APP-5)
+  //   refusing / arch   the companion's signed floor, REL-16's arch withholding
+  //   same bytes        a vendor version this server holds from different bytes
+  // The fleet stop is NOT a gate on updates in the product: see gatesStrip().
+  const ROWS = [['dashboard', null], ['companion', 'windows'], ['companion', 'macos'], ['onboard', 'windows'], ['onboard', 'macos']];
+  const rowKey = (k, pl) => pl ? `${k}/${pl}` : k;
+
+  function planDash() {
+    const d = S.dash, up = d.updates[0];
+    const r = { now: d.running, nowSub: `code from ${d.source}`, newest: up ? up[0] : d.running, newestSub: up ? `${up[1]} code bundle` : 'nothing newer', does: [], held: [], fine: [] };
+    if (up) r.does.push(`applies <b>${up[0]}</b>: offline about 10 s while it restarts, databases backed up first`);
+    d.runtimeUpd.forEach(v => r.held.push(['warn', 'new image', `${v} needs a new container image: update it in your NAS (Apps, ccsync, Update). It cannot be applied from here.`]));
+    if (d.failed && up) r.held.push(['warn', 'last try failed', esc(d.failed)]);
+    if (!r.does.length && !r.held.length) r.fine.push('up to date');
+    return r;
+  }
+
+  function planCompanion(pl) {
+    const c = cur('companion', pl), v = vend('companion', pl);
+    const staged = pk('companion', pl).filter(p => !p.current && !p.retracted && p.soak && above(p.ver, c.ver)).sort((a, b) => vcmp(b.ver, a.ver))[0];
+    const newVer = v && ['new', 'held'].includes(v.state) && above(v.ver, c.ver) ? v.ver : staged ? staged.ver : null;
+    const r = { now: c.ver, nowSub: `${onVer(pl, c.ver)} of ${S.machines.filter(m => m.plat === pl).length} computers on it`, newest: newVer || c.ver, newestSub: newVer ? (v && v.state === 'new' && v.ver === newVer ? 'on the vendor feed' : 'staged here') : 'nothing newer', does: [], held: [], fine: [] };
+    if (newVer) {
+      const needs = v && v.ver === newVer ? v.needsDash : null;
+      const arch = archOf('companion', pl, newVer) || (pl === 'macos' ? 'arm64' : 'x86_64');
+      if (v && v.state === 'new' && v.ver === newVer) r.does.push(`publishes <b>${newVer}</b> onto this server, staged`);
+      if (needs && above(needs, S.dash.running)) {
+        r.held.push(['warn', 'dashboard first', `${newVer} needs dashboard ${needs} (this one is ${S.dash.running}). It waits for the dashboard row, then goes out.`]);
+      } else {
+        const pushed = S.machines.find(m => m.plat === pl && m.asked === newVer);
+        const canary = S.machines.find(m => m.plat === pl && m.arch === arch && m.crashed !== newVer && !m.refused && !m.asked);
+        if (pushed) r.held.push(['warn', 'soak', `${pushed.m} is the canary. ${newVer} becomes current after it has run there 30 min without a crash; press again then.`]);
+        else if (canary) {
+          r.does.push(`pushes <b>${newVer}</b> to ${canary.m} as the canary`);
+          r.held.push(['warn', 'soak', `the rest of the fleet gets ${newVer} after it has run on ${canary.m} for 30 min without a crash`]);
+        } else r.held.push(['err', 'soak', `${newVer} cannot soak: no ${pl} computer can run it (the build is for ${arch})`]);
+      }
+    }
+    // computers behind the CURRENT build
+    const behind = S.machines.filter(m => m.plat === pl && above(c.ver, m.run));
+    const can = [];
+    behind.forEach(m => {
+      if (m.crashed === c.ver) r.held.push(['err', 'crash-looped', `${m.m} kept crashing on ${c.ver} and rolled itself back: it is not offered ${c.ver} again`]);
+      else if (m.refused) r.held.push(['err', 'refusing', `${m.m} refuses ${m.refused.ver}: below its signed floor`]);
+      else if (archOf('companion', pl, c.ver) && m.arch !== archOf('companion', pl, c.ver)) r.held.push(['err', 'no build', `${m.m} is ${m.arch} and ${c.ver} is for ${archOf('companion', pl, c.ver)}: nothing it can run`]);
+      else if (m.asked && m.failed) r.held.push(['warn', 'failing', `${m.m} is already asked and failed ${m.failed} times: see out of date computers`]);
+      else if (m.asked) r.held.push(['warn', 'asked', `${m.m} is already asked for ${m.asked}`]);
+      else can.push(m.m);
+    });
+    if (can.length) r.does.push(`asks ${can.join(', ')} to take <b>${c.ver}</b> now`);
+    if (!r.does.length && !r.held.length) r.fine.push('up to date: every computer is on the current build');
+    return r;
+  }
+
+  function planOnboard(pl) {
+    const c = cur('onboard', pl), v = vend('onboard', pl);
+    const r = { now: c.ver, nowSub: 'served by the Installer page', newest: v && above(v.ver, c.ver) ? v.ver : c.ver, newestSub: v && above(v.ver, c.ver) ? 'on the vendor feed' : 'nothing newer', does: [], held: [], fine: [] };
+    if (v && above(v.ver, c.ver)) {
+      if (v.state === 'conflict') r.held.push(['err', 'same bytes?', `this server holds ${v.ver} built from different bytes (${v.heldSha}): ask the vendor to publish it under a new version number`]);
+      else if (!v.signed) r.held.push(['err', 'signature', `${v.ver} has no release signature: never made current from here`]);
+      else if (v.state === 'new') r.does.push(`publishes <b>${v.ver}</b> and makes it current: new installs get it at once (installers have no soak)`);
+      else if (v.state === 'held') r.does.push(`makes <b>${v.ver}</b> current`);
+    }
+    if (!r.does.length && !r.held.length) r.fine.push('up to date');
+    return r;
+  }
+  const plan = (k, pl) => k === 'dashboard' ? planDash() : k === 'companion' ? planCompanion(pl) : planOnboard(pl);
+
+  function uaRow(k, pl, i) {
+    const r = plan(k, pl), key = rowKey(k, pl), st = S.rowStat[key] || {};
+    const can = r.does.length > 0 && !S.running;
+    const label = r.does.length ? (k === 'dashboard' ? `update to ${r.newest}` : 'update') : r.held.length ? 'held back' : 'up to date';
+    const newer = above(r.newest, r.now);
+    const det = r.does.map(d => `<div class="do">${d}</div>`).join('') +
+      r.held.map(h => `<div class="held ${h[0] === 'err' ? 'err' : ''}"><b title="${esc(GATE_TIPS[h[1]] || '')}">${h[1]}</b>: ${h[2]}</div>`).join('') +
+      r.fine.map(f => `<div class="fine">${f}</div>`).join('');
+    return `<div class="ua-row" data-ua="${key}">
+      <span class="n" title="The order UPDATE EVERYTHING runs in: the dashboard always first, because a companion can need a newer dashboard.">${i + 1}</span>
+      <span class="what"><b>${k}</b>${pl ? `<small>${pl}</small>` : '<small>this server</small>'}</span>
+      <span class="ver now" title="${k === 'dashboard' ? 'The code this dashboard is running.' : 'The build this server hands out now (current).'}"><b>${r.now}</b><small>${r.nowSub}</small></span>
+      <span class="ver newest" title="The newest build this server knows about, on the vendor feed or staged here."><span class="${newer ? 'hi' : ''}">${r.newest}</span><small>${r.newestSub}</small></span>
+      <div class="det" aria-live="polite">${det}</div>
+      <div class="go">${bbtn(label, 'working', can ? 'primary' : '', `data-ua-go="${key}" ${can ? '' : 'disabled'} title="${can ? 'Do what the line beside this key says, and nothing held back. Asks first.' : r.held.length ? 'Nothing can move here until what is held back is resolved: the lines beside this key say why.' : 'Nothing newer to take.'}"`)}
+        <span class="st ${st.tone || ''}" title="${esc(st.text || '')}">${st.text || ''}</span></div>
+    </div>`;
+  }
+
+  const GATE_TIPS = {
+    'dashboard first': 'A companion build can name the dashboard version it needs. It is never offered to the fleet until this dashboard is at least that version.',
+    soak: 'A new companion build is staged first. It is handed to every computer only after one computer has run it for the soak time (30 min) without crashing.',
+    'crash-looped': 'A computer whose companion kept crashing on a build rolled itself back. It is never offered that build again; a newer one reaches it as usual.',
+    refusing: 'The computer refuses the offer: it carries a signed minimum version above this build. Pushing it again will not change that.',
+    'no build': 'No build is published for this computer\'s processor, so it is offered nothing rather than a program that cannot start.',
+    failing: 'The computer was asked and the update keeps failing there. The out of date computers table has the error.',
+    asked: 'The computer has been asked already and takes it on its next report.',
+    signature: 'A build with no release signature is refused by every companion that checks, so making it current would stop the whole fleet updating.',
+    'same bytes?': 'This server already holds a build with this version number made from different bytes. Nothing is replaced; the vendor has to publish a new version number.',
+    'new image': 'Some dashboard updates bring new software the container does not have. Those come as a new image, installed from your NAS, not from this page.',
+    'last try failed': 'The previous dashboard update did not apply. Nothing changed, and the dashboard is still on the version shown.',
+  };
+
+  function gatesStrip() {
+    const blockedByDash = S.vendor.filter(v => v.kind === 'companion' && v.needsDash && above(v.needsDash, S.dash.running)).length;
+    const staged = S.pkgs.filter(p => p.kind === 'companion' && p.soak && !p.soak.ok && !p.current).length;
+    const unsigned = S.pkgs.filter(p => !p.signed).length;
+    const looped = S.machines.filter(m => m.crashed).length;
+    const g = (ok, name, text, tip) => `<span class="g" title="${esc(tip)}">${CC.led(ok ? '' : 'warn')} <b>${name}</b> ${text}</span>`;
+    return `<div class="ua-gates">
+      ${g(!blockedByDash, 'dashboard first', blockedByDash ? `${blockedByDash} build waits for it` : 'nothing waiting', GATE_TIPS['dashboard first'])}
+      ${g(!staged, 'soak 30 min', staged ? `${staged} build${staged === 1 ? '' : 's'} staged` : 'nothing staged', GATE_TIPS.soak)}
+      ${g(!unsigned, 'signatures', unsigned ? `${unsigned} old build unsigned` : 'every build signed', GATE_TIPS.signature + ' UPDATE ALL never uses the typed override.')}
+      ${g(!looped, 'crash-looped', looped ? `${looped} computer${looped === 1 ? '' : 's'} skipped` : 'none', GATE_TIPS['crash-looped'])}
+      ${S.halt === 'on'
+        ? `<span class="g" title="The fleet stop holds sync, not updates: updates still go out, and an updated companion comes back up stopped (the stop is kept on disk and sent on every report). Nothing syncs until you start the fleet again on Settings, Users.">${CC.led('err')} <b>fleet stop on</b> updates still go out</span>`
+        : `<span class="g" title="The fleet stop (Settings, Users) holds sync, not updates.">${CC.led('')} <b>fleet stop</b> off</span>`}
+    </div>`;
+  }
+
+  function uaWin() {
+    const any = ROWS.some(([k, pl]) => plan(k, pl).does.length);
+    const cnt = ROWS.filter(([k, pl]) => plan(k, pl).does.length).length;
+    return `<section class="win ua fl-new" id="ua-win">
+      <div class="bar"><span>┌─╡</span><span class="t">update_all</span><span>╞</span>${NEW}<span class="rule"></span><span class="meta">${any ? `<b>${cnt}</b> of ${ROWS.length} can move now` : 'everything is up to date'}</span><span>═┐</span></div>
+      <div class="ua-row head"><span></span><span title="What gets updated.">thing</span><span title="What runs, or is handed out, now.">runs now</span><span title="The newest build this server knows about.">newest</span><span title="What the key will do, and anything a gate holds back.">what it will do / what holds it back</span><span></span></div>
+      ${ROWS.map(([k, pl], i) => uaRow(k, pl, i)).join('')}
+      ${gatesStrip()}
+      <div class="ua-foot"><span class="grow">Runs every row that can move, <b>in order</b>: the dashboard first (a companion can need a newer one), then the companions, then the installers. Anything held back is left alone and says why. Old builds and overrides are further down, per kind and platform.</span>
+        ${bbtn('update everything', 'updating, row by row', any && !S.running ? 'primary' : '', `data-ua-all ${any && !S.running ? '' : 'disabled'} title="${any ? 'Run every row above that can move, dashboard first. Asks first and lists what it will skip.' : 'Nothing can move right now.'}"`)}</div>
+    </section>`;
+  }
+
+  // ------------------------------------------------------------ chips + served rows
+  function chips(p) {
+    const t = [];
+    if (p.dirty) t.push(`<span class="tag warn" title="built from uncommitted code">+dirty, ${p.git || 'no commit'}</span>`);
+    else if (p.git) t.push(`<span class="sha" title="the commit this build came from">${p.git}</span>`);
+    if (p.current) t.push(`<span class="tag ok" title="this is the build this server hands out for this kind and platform">current</span>`);
+    if (p.arch) t.push(`<span class="tag mute" title="the processor this build is for">${p.arch}</span>`);
+    if (p.missing) t.push(`<span class="tag err" title="the row exists but the file is gone from the packages folder">file missing</span>`);
+    if (!p.signed) t.push(`<span class="tag err" title="published without a release signature: companions that verify will refuse this build">unsigned</span>`);
+    if (p.signed && !p.codesig) t.push(`<span class="tag warn" title="the record is signed, but the program itself carries no Authenticode or Developer ID signature: fresh installs meet SmartScreen or Gatekeeper">no code sig</span>`);
+    return `<span class="tags">${t.join('')}</span>`;
+  }
+  const optFlags = p => [p.retracted ? 'recalled' : '', !p.signed ? 'unsigned' : '', p.dirty ? '+dirty' : '', p.missing ? 'file missing' : ''].filter(Boolean);
+
+  function servedRow(k, pl) {
+    const c = cur(k, pl);
+    if (!c) return '';
+    const machines = S.machines.filter(m => m.plat === pl);
+    const staged = pk(k, pl).filter(p => !p.current && above(p.ver, c.ver) && !p.retracted);
+    const older = pk(k, pl).filter(p => !p.current && !above(p.ver, c.ver)).sort((a, b) => vcmp(b.ver, a.ver));
+    let acts = '';
+    if (k === 'companion') acts += `<div class="muted" style="font-size:12px;margin-bottom:6px" title="computers reporting this exact build">${onVer(pl, c.ver)} of ${machines.length} computer${machines.length === 1 ? '' : 's'} on it</div>`;
+    staged.forEach(s => {
+      const sk = s.soak;
+      acts += `<div class="staged-line"><span title="A newer build held on this server, not handed out yet.">staged <b>${s.ver}</b>${sk ? `: canary ${sk.machines} computer${sk.machines === 1 ? '' : 's'}, ${sk.minutes} of ${sk.soak} min, ${sk.crashes} crashes` : ''}</span></div>
+        <div class="rb" style="margin-bottom:6px">${sk ? `<select class="sel sm" data-push-sel="${id(s)}" aria-label="a computer to push ${s.ver} to" title="The computer to try this build on first. It takes it on its next report."><option value="">push to one computer…</option>${machines.map(m => `<option value="${m.m}">${m.ed}/${m.m} (${m.run})</option>`).join('')}</select>
+          ${bbtn('push', 'asking', '', `data-do="push" data-id="${id(s)}" title="Ask the chosen computer to take ${s.ver} on its next report. Only that computer."`)}` : ''}
+          ${bbtn('make current', 'making it current', 'primary', `data-do="current" data-id="${id(s)}" title="Hand ${s.ver} to every computer. Refused until one computer has run it for the soak time; the refusal offers the typed override."`)}</div>`;
+    });
+    acts += `<div class="rb">${older.length ? `<select class="sel sm" data-rb="${k}/${pl}" aria-label="roll ${k} ${pl} back to" title="The older builds of ${k} for ${pl} still held on this server. Choose one to roll back to, or to delete.">
+        <option value="">roll back to…</option>${older.map(p => `<option value="${p.ver}" ${p.retracted ? 'disabled' : ''}>${p.ver} · ${p.when}${optFlags(p).length ? ' (' + optFlags(p).join(', ') + ')' : ''}</option>`).join('')}</select>
+        ${bbtn('roll back', 'making it current', '', `data-do="rollback-pick" data-kp="${k}/${pl}" title="Make the chosen older build current again. Every computer on a newer build is offered it on its next report. No soak: it was current before."`)}
+        ${btn('delete', 'quiet', `data-do="delete-pick" data-kp="${k}/${pl}" title="Delete the chosen old build. It goes to the trash for 30 days; after that you cannot roll back to it without republishing."`)}`
+      : `<span class="muted" style="font-size:12px" title="Nothing older is held here, so there is nothing to roll back to.">no older build held</span>`}</div>`;
+    return `<tr data-row><td data-label="version"><span class="muted" style="font-size:11px;letter-spacing:1px;text-transform:uppercase">${k} · ${pl}</span><br><b class="num">${c.ver}</b>${chips(c)}</td>
+      <td data-label="published">${c.when}${c.by ? ` by ${esc(c.by)}` : ''}</td>
+      <td data-label="size" title="sha256 ${c.sha}">${c.size}<span class="sha" style="display:block">sha ${c.sha.slice(0, 12)}…</span></td>
+      <td class="acts-cell" data-label="">${acts}</td></tr>`;
+  }
+
+  function servedWin() {
+    const recalls = S.pkgs.filter(p => p.retracted).map(p => {
+      const running = S.machines.filter(m => m.plat === p.plat && m.run === p.ver).length;
+      return `<div class="note err" style="margin-top:10px"><span class="grow">${tag('err', 'recalled', true)} <b>${p.kind} ${p.ver} ${p.plat}</b> was withdrawn by the vendor: ${esc(p.retracted)}. <b>${running}</b> computer${running === 1 ? ' is' : 's are'} still running it.
+        ${running ? `<span class="cell-form" style="margin-top:8px"><span class="muted">roll them onto</span><select class="sel sm" id="rb-to" aria-label="roll back to" title="The build every computer still on the recalled one should take.">${pk(p.kind, p.plat).filter(q => !q.retracted && !q.soak).sort((a, b) => vcmp(b.ver, a.ver)).map(q => `<option value="${q.ver}" ${q.current ? 'selected' : ''}>${q.ver}${q.current ? ' (current)' : ''}</option>`).join('')}</select>
+          ${btn('roll the fleet back', 'primary', `data-do="rollfleet" data-from="${p.ver}" data-plat="${p.plat}" title="Ask every computer still running the recalled build to take the chosen one on its next report."`)}</span>` : ''}</span></div>`;
+    }).join('');
+    const gaps = S.busy ? `<div class="note warn" style="margin-top:10px"><span class="grow"><b>No macos/x86_64 build published:</b> 1 computer reports that processor and the current build is for a different one, so it is offered nothing rather than a program that cannot run.</span></div>` : '';
+    const rows = [['companion', 'windows'], ['companion', 'macos'], ['onboard', 'windows'], ['onboard', 'macos']].map(([k, pl]) => servedRow(k, pl)).join('');
+    return win('currently_served', 'one build per kind and platform', `
+      <div class="lede-in">What this server hands out right now. <b>companion</b>: what the fleet updates itself to. <b>onboard</b>: the full installer served by the Installer page. Older builds are kept for a rollback, behind <b>roll back to</b> on their row.</div>
+      <div class="scroll-x"><table class="tbl pkg stack-sm"><colgroup><col class="c-ver"><col class="c-when"><col class="c-size"><col></colgroup>
+        <thead><tr><th title="the kind, the platform and the build handed out now">current build</th><th>published</th><th title="size, and the start of its checksum (hover for all of it)">size</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${recalls || gaps ? `<div style="padding:0 var(--pad) var(--pad)">${recalls}${gaps}</div>` : ''}`);
+  }
+
+  function rolloutWin() {
+    const plats = ['windows', 'macos'].map(pl => {
+      const c = cur('companion', pl), ms = S.machines.filter(m => m.plat === pl);
+      return [pl, ms.filter(m => m.run === c.ver).length, ms.length, c.ver, ms.filter(m => m.run !== c.ver), S.busy && pl === 'windows' ? 1 : 0, S.busy && pl === 'windows' ? 3 : 0, S.busy ? '40 min ago' : '2 d ago', ms.filter(m => m.refused)];
+    });
+    return win('rollout', 'did it reach the fleet', `<div class="scroll-x"><table class="tbl stack-sm">
+      <thead><tr><th>platform</th><th title="computers reporting the current build, of all the computers on that platform">on the current build</th><th title="computers still on an older build, and when each last reported">behind</th><th title="computers that installed the build and rolled themselves back">reverts</th><th title="update attempts that did not finish, across the fleet">failed attempts</th><th>current since</th></tr></thead>
+      <tbody>${plats.map(r => `<tr><td data-label="platform"><b>${r[0]}</b></td>
+        <td data-label="on the current build"><span style="color:${r[1] === r[2] ? 'var(--ok)' : 'var(--warn)'}">${meter(r[1], r[2], 10)}</span> <b>${r[1]}</b> of ${r[2]} on ${r[3]}
+          ${r[8].length ? `<span class="tag err" title="${esc(r[8].map(m => m.m + ': ' + m.refused.reason).join(' | '))}">${r[8].length} refusing</span>` : ''}</td>
+        <td data-label="behind" class="wrap">${r[4].length ? r[4].map(b => `${who(b.ed)} on <b>${b.m}</b> ${b.run}, ${b.seen}`).join('<br>') : '<span class="muted">none</span>'}</td>
+        <td data-label="reverts" class="num">${r[5]}</td><td data-label="failed attempts" class="num">${r[6]}</td><td data-label="current since">${r[7]}</td></tr>`).join('')}</tbody></table></div>`);
+  }
+
+  function vendorRow(v) {
+    let t = '', acts = '';
+    if (v.state === 'current') { t = `<span class="tag ok" title="this server already hands this build out">current here</span>`; acts = `<span class="muted">this server already hands this build to its fleet</span>`; }
+    else if (v.state === 'held') { t = `<span class="tag hi" title="downloaded onto this server, not handed out yet">staged, not current</span>`; acts = `<span class="muted">staged here: see its row under currently served</span>`; }
+    else if (v.state === 'conflict') {
+      t = `<span class="tag warn" title="this server holds this version built from different bytes (${v.heldSha})">same version, different bytes</span>`;
+      acts = `<span class="muted">this server holds this version from a different build; ask the vendor for a new version number</span>`;
+    } else if (v.state === 'recalled') { t = tag('warn', 'recalled'); acts = `<span class="muted">the vendor recalled this build; it cannot be made current</span>`; }
+    else acts = `<div class="cell-form" style="justify-content:flex-end">${bbtn('publish', 'downloading the build', '', `data-do="publish" data-id="${id(v)}" title="Download it onto this server, staged. Nothing reaches the fleet yet."`)}${bbtn('publish + make current', 'downloading the build', 'primary', `data-do="publish" data-mc="1" data-id="${id(v)}" title="Download it and hand it out. A companion build still waits for its soak, and for the dashboard it names."`)}</div>`;
+    if (v.needsDash && above(v.needsDash, S.dash.running)) t += `<span class="tag err" title="needs dashboard ${v.needsDash}, this dashboard is ${S.dash.running}: it can be published, but it stays staged until the dashboard is updated">update the dashboard first</span>`;
+    return `<tr data-row><td data-label="version"><span class="muted" style="font-size:11px;letter-spacing:1px;text-transform:uppercase">${v.kind} · ${v.plat}</span><br><b class="num">${v.ver}</b><span class="tags">${t}</span>${v.notes ? `<span class="sub">${esc(v.notes)}</span>` : ''}</td>
+      <td data-label="published">${v.when}</td><td data-label="size">${v.size}</td><td class="acts-cell" data-label="">${acts}</td></tr>`;
+  }
+
+  function vendorWin() {
+    const policies = [['manual', 'manual: check now and publish only'], ['stage', 'stage: auto-publish, not current'], ['current', 'current: auto-publish and make current']];
+    return `<div id="vendor">${win('available_from_the_vendor', S.feedErr ? `<span style="color:var(--err)">last check failed</span>` : 'feed answering', `
+      <div class="lede-in">What your supplier publishes. Nothing here reaches your fleet until it is published onto this server and made current. The feed carries only the newest build for each platform.</div>
+      <div class="body" style="display:grid;gap:12px">
+        <dl class="kv">
+          <dt>feed</dt><dd>https://releases.ccsync.example/channel.json</dd>
+          <dt>last checked</dt><dd>${S.checked} · checks every 24 h · ${S.next} ${S.feedErr ? `<span class="tag err" title="HTTP 503 from the feed host: Service Unavailable">last check failed</span>` : ''}</dd>
+          <dt title="What this server does by itself when the feed offers a new build.">policy</dt><dd><select class="sel sm" id="policy" aria-label="feed policy" title="manual: nothing happens until someone presses a key. stage: new builds are downloaded but not handed out. current: new builds are downloaded and handed to every computer (asks first).">${policies.map(p => `<option value="${p[0]}" ${p[0] === S.policy ? 'selected' : ''}>${p[1]}</option>`).join('')}</select></dd>
+        </dl>
+        <div>${bbtn('check now', 'checking the feed', 'w-12', 'data-do="check" title="Ask the vendor feed now instead of waiting for the next daily check. Nothing is published by checking."')}</div>
+        ${S.busy ? `<div class="note err"><span class="grow">${tag('err', 'refused', true)} This dashboard would not take <b>companion 0.9.74 macos (below this server's downgrade floor 0.9.75)</b> from the feed. Nothing was published. Ask whoever publishes these builds: it is the release record that is being refused, not the download.</span></div>` : ''}
+      </div>
+      <div class="scroll-x"><table class="tbl pkg stack-sm"><colgroup><col class="c-ver"><col class="c-when"><col class="c-size"><col></colgroup>
+        <thead><tr><th>newest on the feed</th><th>published</th><th>size</th><th></th></tr></thead><tbody>${S.vendor.map(vendorRow).join('')}</tbody></table></div>
+      ${S.busy ? `<div class="body" style="display:grid;gap:10px">
+        <div class="note warn"><span class="grow">${tag('warn', 'same version, different bytes', true)} <b>onboard 1.0.47 macos</b>: published here as <span class="sha">9c2e7f10ab34</span>, the vendor feed now offers <span class="sha">41adf5c28e90</span>. Nothing was replaced. Ask the vendor to publish it under a new version number.</span></div>
+        <div class="note err"><span class="grow">${tag('err', 'recalled by the vendor', true)} <b>companion 0.9.76 windows</b>: crashes on start when the Windows user folder has a non-ASCII name. It is not offered here under any policy.</span></div>
+        <div class="note"><span class="grow">image <b>0.8.0</b> available (running 0.7.58). Update it in your NAS: <b>Apps, ccsync, Update</b>.</span></div></div>` : ''}`)}</div>`;
+  }
+
+  // out of date computers: one line each, the long reasons in tooltips
+  function oodState(o) {
+    const c = cur('companion', o.plat).ver;
+    if (o.crashed === c) return [tag('err', 'kept crashing, rolled back'), `${o.crashed} kept crashing on this computer, so it rolled itself back and will not install it again. A newer build is offered as usual.`, null];
+    if (o.refused) return [tag('err', 'refusing ' + o.refused.ver), `This computer refuses the current build: ${o.refused.reason} (refused ${o.refused.at}). Pushing it again will not change that.`, null];
+    if (o.asked && o.arch !== archOf('companion', o.plat, o.asked) && archOf('companion', o.plat, o.asked)) return [tag('err', 'cannot be sent'), `Asked for ${o.asked}, but that build is for ${archOf('companion', o.plat, o.asked)} and this computer reports ${o.arch}. It still takes jobs. Withdraw the push or publish a build it can take.`, 'cancel'];
+    if (o.asked && o.failed) return [tag('err', `failed x${o.failed}`), `Asked for ${o.asked}. Last error (${o.lastTry}): ${o.err}.`, 'cancel'];
+    if (o.asked) return [tag('hi', 'asked for ' + o.asked), 'It takes the build on its next report, without its editor clicking.', 'cancel'];
+    return [`<span class="muted">not asked</span>`, 'The editor has not taken the update yet, and nobody has pushed it.', 'update'];
+  }
+  function outdatedWin() {
+    const rows = S.machines.filter(o => above(cur('companion', o.plat).ver, o.run));
+    return win('out_of_date_computers', rows.length ? `<b>${rows.length}</b> behind` : 'none', rows.length ? `
+      <div class="scroll-y box-h"><div class="scroll-x"><table class="tbl stack-sm ood">
+        <thead><tr><th>editor</th><th>computer</th><th title="the companion build it last reported">running</th><th title="where the update stands for this computer: hover for the detail">state</th><th>last report</th><th></th></tr></thead>
+        <tbody>${rows.map(o => { const [t, why, act] = oodState(o); return `<tr data-m="${o.m}"><td data-label="editor">${who(o.ed)}</td><td data-label="computer"><b>${o.m}</b> <span class="muted" style="font-size:11px">${o.plat}</span></td>
+          <td data-label="running">${tag('warn', o.run)}</td>
+          <td data-label="state"><span title="${esc(why)}">${t}</span></td>
+          <td data-label="last report">${o.seen}</td>
+          <td data-label="" class="upd">${act === 'update' ? btn('update now', 'primary', `data-do="upd" data-m="${o.m}" title="Update this computer to the current build on its next report, without waiting for its editor to click."`)
+            : act === 'cancel' ? btn('withdraw', '', `data-do="unask" data-m="${o.m}" title="Withdraw the request. The computer is offered the update as usual and its editor can still take it."`) : `<span class="muted" style="font-size:12px" title="${esc(why)}">nothing to push</span>`}</td></tr>`; }).join('')}</tbody></table></div></div>`
+      : `<div class="allclear"><span class="led"></span>All reporting computers are on the current version.</div>`);
+  }
+
+  function dashWin() {
+    const d = S.dash, b = [];
+    b.push(`<dl class="kv"><dt title="the code this dashboard runs">running</dt><dd><b>${d.running}</b></dd><dt title="a code bundle applied here, or the image's own code">code from</dt><dd>${d.source}</dd>${d.image ? `<dt title="the version the container image itself carries">image carries</dt><dd>${d.image}</dd>` : ''}<dt title="an id for the container image; a code bundle must match it">runtime</dt><dd title="${d.runtime}">${d.runtime.slice(0, 12)}</dd></dl>`);
+    if (d.retired) b.push(`<div class="lede">${d.retired} was applied here and has been retired: this image carries it.</div>`);
+    b.push(`<div id="dash-progress" style="min-height:60px">${d.failed ? `<div class="note err"><span class="grow">${tag('err', 'last update failed', true)} ${esc(d.failed)}</span></div>` : `<div class="allclear" style="padding:0"><span class="led"></span>${d.updates.length ? `${d.updates[0][0]} is ready: <b>update all</b> at the top applies it.` : 'No code update is available for this runtime.'}</div>`}</div>`);
+    d.runtimeUpd.forEach(v => b.push(`<div class="note warn"><span class="grow">${tag('warn', 'runtime update', true)} dashboard <b>${v}</b> needs a new container image: it brings software this container does not have. Apply it in your NAS's own UI: <b>Apps, ccsync, Update</b>.</span></div>`));
+    const opts = [...d.older.map(v => [v, 'an older bundle on the feed']), ...(d.tree ? [[d.tree.prev || 'image', 'the tree before this one']] : [])]
+      .filter((x, i, a) => a.findIndex(y => y[0] === x[0]) === i);
+    b.push(`<div class="rb" style="justify-content:flex-start"><select class="sel sm" id="dash-rb" aria-label="roll this dashboard back to" title="Older code this dashboard can go back to: a bundle still on the feed, or the tree it ran before."><option value="">roll back to…</option>${opts.map(o => `<option value="${o[0]}">${o[0]} (${o[1]})</option>`).join('')}</select>
+      ${btn('roll back', '', 'data-do="dash-rollback" title="Go back to the chosen code. Offline about ten seconds. The databases stay as they are unless you tick the box below."')}</div>
+      <label class="check" title="Put the databases back as they were before the update you are undoing. Everything recorded since that backup is lost."><input type="checkbox" id="restore-db" ${d.schema && d.schema.backup ? '' : 'disabled'}><span class="g"></span><span class="l">also restore the databases from <b>${d.schema && d.schema.backup ? d.schema.backup : 'no backup on record'}</b></span></label>
+      ${d.schema && !d.schema.safe ? `<div class="note err"><span class="grow">This database is on schema <b>v${d.schema.live}</b> and the build you would go back to knows <b>v${d.schema.target}</b>. Restore the backup alongside it, or the rollback is refused. Restoring also takes today's reports back to that moment.</span></div>` : ''}`);
+    const backups = [['2 d ago', 'pre-0.7.58-20260923T0412', '0.7.57', 'ccsync, broll, music', '184 MB'], ['9 d ago', 'pre-0.7.57-20260916T2210', '0.7.56', 'ccsync, broll, music', '181 MB'], ['12 d ago', 'pre-0.7.56-20260913T0930', '0.7.55', 'ccsync, broll, music', '179 MB']];
+    return `<div id="dash">${win('dashboard', 'its own code', `
+      <div class="lede-in">This dashboard's own code. The container image is the runtime; only a matching bundle can be applied from here. Updating it is the first row of <b>update all</b>.</div>
+      <div class="body" style="display:grid;gap:12px">${b.join('')}</div>`)}</div>` +
+      win('database_backups', 'taken before each update, under /data/backups', `<div class="scroll-x"><table class="tbl stack-sm">
+        <thead><tr><th>when</th><th>name</th><th title="the dashboard version that was running when it was taken">from</th><th>databases</th><th>size</th></tr></thead>
+        <tbody>${backups.map(r => `<tr><td data-label="when">${r[0]}</td><td data-label="name"><b>${r[1]}</b></td><td data-label="from">${r[2]}</td><td data-label="databases">${r[3]}</td><td data-label="size" class="num">${r[4]}</td></tr>`).join('')}</tbody></table></div>`);
+  }
+
+  function topNotes() {
+    const n = [];
+    if (S.rollbackBanner) n.push(`<div class="note warn"><span class="grow"><b>The computers were asked to roll back, but this dashboard is still handing out the build you rolled off:</b> ${esc(S.rollbackBanner)}</span></div>`);
+    if (S.lowDisk) n.push(`<div class="alertline" style="border-color:var(--err);background:rgb(255 46 46 / 0.08)"><span class="tag solid err">1.6 GB free</span><span class="grow"><b>1.6 GB free on the data volume</b> (/data). Publishing is refused below a safety floor, and a full volume stops every write this dashboard makes. <span class="dim">Old builds are pruned on publish; database backups and old code trees are pruned on each dashboard update.</span></span></div>`);
+    else n.push(`<div class="lede">data volume: <b>412 GB</b> free of 1.8 TB <span class="muted">/data</span></div>`);
+    n.push(`<div class="note warn fl-legend"><span class="tag warn">new</span><span class="grow">Outlined like this: <b>not in the product yet</b>. UPDATE ALL is a new panel; every step it takes is an action this page already has.</span></div>`);
+    return n.join('');
+  }
+
+  function render() {
+    const cw = cur('companion', 'windows');
+    const on = S.machines.filter(m => m.run === cur('companion', m.plat).ver).length;
+    $('#sub').innerHTML = `companion <b>${cw.ver}</b> served &middot; <span title="computers reporting the build their platform is handed"><b>${on}</b> of ${S.machines.length} computers on it</span> &middot; dashboard <b>${S.dash.running}</b>`;
+    $('#top-notes').innerHTML = topNotes();
+    renderUA();
+    $('#main').innerHTML = [servedWin(), rolloutWin(), vendorWin(), `<h2 class="sec">computers</h2>`, outdatedWin(),
+      `<p class="lede">New builds come from your supplier's release channel: <b>available from the vendor</b> above lists them, and <b>check now</b> fetches any the next scheduled check has not. Each computer's tray then offers the update. (A site that builds its own companion publishes with <span class="hi">tools\\ship.cmd</span> from its wired computer.)</p>`,
+      `<h2 class="sec">this dashboard</h2>`, dashWin()].join('');
+    document.querySelectorAll('#b-halt button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.v === S.halt)));
+  }
+  function renderUA() { $('#ua').innerHTML = uaWin(); }
+
+  // ------------------------------------------------------------ dialog (confirm, alert, or typed confirm)
+  document.body.insertAdjacentHTML('beforeend', `<div class="dialog-back" id="ask"><section class="win dialog" role="dialog" aria-modal="true">
+    <div class="bar"><span>┌─╡</span><span class="t" id="ask-t">are_you_sure</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+    <div class="body"><div id="ask-x" style="white-space:pre-line"></div>
+      <div id="ask-typed" hidden><input class="inp" id="ask-in" autocomplete="off"><div class="hint bad" id="ask-bad" style="min-height:1.4em"></div></div>
+      <div class="acts"><button class="key quiet" type="button" id="ask-no"><span class="t">cancel</span></button><button class="key primary" type="button" id="ask-ok"><span class="t" id="ask-ok-t">ok</span></button></div></div>
+  </section></div>`);
+  let yes = null, typed = null;
+  const close = ok => {
+    if (ok && typed && $('#ask-in').value.trim() !== typed) { $('#ask-bad').textContent = `type ${typed} exactly`; return; }
+    $('#ask').classList.remove('open'); const f = ok ? yes : null; yes = null; typed = null; if (f) f();
+  };
+  function ask(text, okLabel, onYes, o) {
+    o = o || {};
+    yes = onYes; typed = o.typed || null;
+    $('#ask-t').textContent = o.title || 'are_you_sure';
+    $('#ask-x').textContent = text; $('#ask-ok-t').textContent = okLabel;
+    $('#ask-no').hidden = !!o.alert;
+    $('#ask-typed').hidden = !typed; $('#ask-in').value = ''; $('#ask-in').placeholder = typed ? `type ${typed}` : ''; $('#ask-bad').textContent = '';
+    $('#ask').classList.add('open'); (typed ? $('#ask-in') : $('#ask-ok')).focus();
+  }
+  const refuse = text => ask(text, 'ok', null, { alert: true, title: 'not_done' });
+  $('#ask-no').onclick = () => close(false);
+  $('#ask-ok').onclick = () => close(true);
+  $('#ask').addEventListener('click', e => { if (e.target.id === 'ask') close(false); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#ask').classList.contains('open')) close(false); if (e.key === 'Enter' && e.target.id === 'ask-in') close(true); });
+
+  // ------------------------------------------------------------ UPDATE ALL: running a row
+  const setStat = (key, text, tone) => {
+    S.rowStat[key] = { text, tone };
+    const st = document.querySelector(`[data-ua="${key}"] .st`);
+    if (st) { st.textContent = text; st.className = 'st ' + (tone || ''); st.title = text; }
+  };
+  function steps(key, list, done) {
+    let i = 0;
+    (function next() {
+      if (i >= list.length) { done(); return; }
+      const [text, ms] = list[i++];
+      setStat(key, text, 'run');
+      setTimeout(next, ms);
+    })();
+  }
+  function applyRow(k, pl, done) {
+    const key = rowKey(k, pl), r = plan(k, pl);
+    if (!r.does.length) { done(); return; }
+    const keyEl = document.querySelector(`[data-ua-go="${key}"]`);
+    if (keyEl) { keyEl.style.minWidth = keyEl.offsetWidth + 'px'; keyEl.classList.add('busy'); }
+    let list, mutate;
+    if (k === 'dashboard') {
+      const v = r.newest;
+      list = [['downloading the bundle', 500], ['checking its signature', 450], ['backing up the databases', 500], ['swapping the code in', 450], ['restarting: back in ~10 s', 700]];
+      mutate = () => { S.dash.older = [S.dash.running, ...S.dash.older]; S.dash.running = v; S.dash.failed = null; S.dash.updates = []; S.dash.source = 'update tree ' + v; if (S.dash.tree) S.dash.tree = { ver: v, applied: 'just now', prev: S.dash.tree.ver }; };
+    } else if (k === 'companion') {
+      const v = vend(k, pl), c = cur(k, pl);
+      list = [];
+      mutate = () => {
+        if (v && v.state === 'new' && above(v.ver, c.ver)) {
+          S.pkgs.push(P(k, pl, v.ver, { when: 'just now', by: 'the vendor feed', size: v.size, sha: '3e8a1c07d5b92f46', git: 'd42e7a0', soak: { machines: 0, minutes: 0, crashes: 0, soak: 30, ok: false } }));
+          v.state = 'held';
+        }
+        const staged = pk(k, pl).find(p => p.soak && !p.current && above(p.ver, c.ver));
+        const blocked = v && v.needsDash && above(v.needsDash, S.dash.running);
+        if (staged && !blocked) {
+          const arch = staged.arch || (pl === 'macos' ? 'arm64' : 'x86_64');
+          const canary = S.machines.find(m => m.plat === pl && m.arch === arch && m.crashed !== staged.ver && !m.refused && !m.asked);
+          if (canary && !S.machines.some(m => m.plat === pl && m.asked === staged.ver)) { canary.asked = staged.ver; staged.soak.machines = 0; }
+        }
+        S.machines.filter(m => m.plat === pl && above(c.ver, m.run) && !m.asked && !m.refused && m.crashed !== c.ver).forEach(m => { m.asked = c.ver; });
+      };
+      if (v && v.state === 'new') list.push([`downloading ${v.ver}`, 700], ['checking its signature', 400]);
+      if (r.does.some(d => d.includes('canary'))) list.push(['asking the canary', 400]);
+      if (r.does.some(d => d.startsWith('asks'))) list.push(['asking the computers behind', 400]);
+    } else {
+      const v = vend(k, pl);
+      list = [[`downloading ${v.ver}`, 700], ['checking its signature', 400], ['making it current', 400]];
+      mutate = () => { pk(k, pl).forEach(p => { p.current = false; }); S.pkgs.push(P(k, pl, v.ver, { current: true, when: 'just now', by: 'the vendor feed', size: v.size, sha: '8b1d93e0c4a7f625' })); v.state = 'current'; };
+    }
+    steps(key, list, () => { mutate(); S.rowStat[key] = { text: 'done: ' + new Date().toLocaleTimeString('en-GB', { hour12: false }), tone: 'ok' }; done(); });
+  }
+
+  function confirmText(rows) {
+    const dashToo = rows.some(r => r[0] === 'dashboard');
+    const lines = rows.map(([k, pl], i) => `${i + 1}. ${k}${pl ? ' ' + pl : ''}: ` + plan(k, pl).does.map(d => d.replace(/<[^>]+>/g, '')).join('; ') +
+      (dashToo && plan(k, pl).held.some(h => h[1] === 'dashboard first') ? '; then, with the dashboard updated, pushes the new build to one computer as the canary' : ''));
+    const skipped = ROWS.filter(([k, pl]) => !plan(k, pl).does.length && plan(k, pl).held.length).map(([k, pl]) => `${k}${pl ? ' ' + pl : ''}`);
+    let t = lines.join('\n');
+    if (skipped.length) t += `\n\nLeft alone (held back): ${skipped.join(', ')}.`;
+    if (S.halt === 'on') t += '\n\nThe fleet is STOPPED. Updates still reach the computers; an updated companion comes back up stopped and syncs nothing until you start the fleet again.';
+    return t;
+  }
+
+  function runRows(rows) {
+    S.running = true; renderUA();
+    let i = 0;
+    (function next() {
+      if (i >= rows.length) { S.running = false; render(); toast('update all: done'); return; }
+      const [k, pl] = rows[i++];
+      // a later row is re-planned when its turn comes: the dashboard row may
+      // have just lifted the gate a companion build was waiting on
+      applyRow(k, pl, () => { render(); S.running = true; renderUA(); setTimeout(next, 250); });
+    })();
+  }
+
+  document.addEventListener('click', e => {
+    const one = e.target.closest('[data-ua-go]');
+    if (one && !one.disabled) {
+      const [k, pl] = one.dataset.uaGo.split('/');
+      ask(confirmText([[k, pl || null]]), 'update', () => runRows([[k, pl || null]]), { title: 'update_' + k + (pl ? '_' + pl : '') });
+      return;
+    }
+    if (e.target.closest('[data-ua-all]:not([disabled])')) {
+      // in order, and the companion rows are included when the dashboard row
+      // will lift their gate
+      const rows = ROWS.filter(([k, pl]) => plan(k, pl).does.length || (k === 'companion' && plan(k, pl).held.some(h => h[1] === 'dashboard first')));
+      ask('In this order:\n\n' + confirmText(rows.filter(([k, pl]) => plan(k, pl).does.length)) + (rows.some(([k, pl]) => !plan(k, pl).does.length) ? '\n\nThe companion builds waiting for the dashboard go out after row 1.' : ''),
+        'update everything', () => runRows(rows), { title: 'update_everything' });
+      return;
+    }
+    const el = e.target.closest('[data-do]');
+    if (!el) return;
+    const d = el.dataset.do, key = el.dataset.id;
+    const find = kk => { const [k, pl, v] = kk.split('/'); return S.pkgs.find(p => p.kind === k && p.plat === pl && p.ver === v); };
+    const makeCurrent = kk => {
+      const [k, pl, v] = kk.split('/');
+      S.pkgs.forEach(p => { if (p.kind === k && p.plat === pl) p.current = p.ver === v; });
+      S.vendor.forEach(x => { if (x.kind === k && x.plat === pl && x.ver === v) x.state = 'current'; });
+      render(); toast(`${k} ${v} is current for ${pl}`);
+    };
+    const busy = (ms, fn) => { el.style.minWidth = el.offsetWidth + 'px'; el.classList.add('busy'); setTimeout(() => { el.classList.remove('busy'); fn(); }, ms); };
+    if (d === 'current') {
+      const p = find(key);
+      busy(700, () => {
+        if (p.soak && !p.soak.ok) ask(`Not made current: ${p.kind} ${p.ver} for ${p.plat} has not run on any computer yet. It becomes current once one computer has run it for ${p.soak.soak} min without crashing: push it to one computer first.\n\nTo hand it to the whole fleet without waiting, type the version.`, 'make current anyway', () => makeCurrent(key), { typed: p.ver, title: 'not_made_current' });
+        else if (!p.signed) ask(`${p.kind} ${p.ver} has no release signature. Companions verify signatures, so making it current stops EVERY computer in the fleet from updating, silently.\n\nType the version to make it current anyway.`, 'make current anyway', () => makeCurrent(key), { typed: p.ver, title: 'unsigned' });
+        else makeCurrent(key);
+      });
+    } else if (d === 'push') {
+      const sel = document.querySelector(`[data-push-sel="${key}"]`);
+      if (!sel.value) { toast('pick a computer first'); return; }
+      busy(900, () => toast(`asked ${sel.value} to take ${key.split('/')[2]} on its next report`));
+    } else if (d === 'rollback-pick' || d === 'delete-pick') {
+      const [k, pl] = el.dataset.kp.split('/'), sel = document.querySelector(`[data-rb="${k}/${pl}"]`);
+      if (!sel || !sel.value) { toast('choose a build in "roll back to" first'); return; }
+      const p = pk(k, pl).find(x => x.ver === sel.value), kk = id(p);
+      if (d === 'delete-pick') {
+        ask(`Delete ${k} ${p.ver} for ${pl}? These are the bytes a rollback to that version needs. Once it is gone you cannot put the fleet back on it without rebuilding and republishing.`, 'delete it', () => { S.pkgs = S.pkgs.filter(x => x !== p); render(); toast(`${k} ${p.ver} moved to the trash for 30 days`); });
+      } else if (p.missing) refuse(`${k} ${p.ver} for ${pl} cannot be made current: its file is gone from the packages folder. Delete the row, or publish the build again.`);
+      else if (!p.signed) ask(`${k} ${p.ver} has no release signature. Companions verify signatures, so making it current stops EVERY computer in the fleet from updating, silently.\n\nType the version to roll back to it anyway.`, 'roll back anyway', () => makeCurrent(kk), { typed: p.ver, title: 'unsigned' });
+      else ask(`Roll ${k} for ${pl} back to ${p.ver}?\n\n${k === 'companion' ? `Every ${pl} computer on a newer build is offered ${p.ver} on its next report. There is no soak: it was current before.` : `The Installer page serves ${p.ver} from now on.`}`, 'roll back', () => busy(700, () => makeCurrent(kk)));
+    } else if (d === 'publish') {
+      busy(1400, () => {
+        const [k, pl, v] = key.split('/'), x = S.vendor.find(y => id(y) === key);
+        x.state = 'held';
+        const soak = k === 'companion' ? { machines: 0, minutes: 0, crashes: 0, soak: 30, ok: false } : null;
+        S.pkgs.push(P(k, pl, v, { when: 'just now', by: 'the vendor feed', size: x.size, sha: '3e8a1c07d5b92f46', soak }));
+        if (el.dataset.mc && !soak) makeCurrent(key);
+        else { render(); toast(el.dataset.mc ? `${k} ${v} published here and staged: it waits for its soak${x.needsDash ? ' and the dashboard' : ''}` : `${k} ${v} published here, staged`); }
+      });
+    } else if (d === 'check') {
+      busy(1300, () => { S.feedErr = false; S.checked = 'just now'; S.next = 'next in about 24 h'; render(); toast('the feed answered: nothing newer than what is listed'); });
+    } else if (d === 'rollfleet') {
+      const to = $('#rb-to').value, pl = el.dataset.plat, from = el.dataset.from;
+      const on = S.machines.filter(m => m.plat === pl && m.run === from);
+      on.forEach(m => { m.asked = to; });
+      const c = cur('companion', pl);
+      if (c && c.ver !== to) S.rollbackBanner = `${c.ver} is still current for ${pl}, so a computer that updates itself takes it again. Choose ${to} under roll back to if the whole fleet should be on it.`;
+      render(); toast(`asked ${on.length} computers on ${from} to take ${to}`);
+    } else if (d === 'upd') {
+      const o = S.machines.find(x => x.m === el.dataset.m); o.asked = cur('companion', o.plat).ver; render(); toast(`${o.m} updates on its next report`);
+    } else if (d === 'unask') {
+      const o = S.machines.find(x => x.m === el.dataset.m); delete o.asked; delete o.failed; render(); toast('request withdrawn');
+    } else if (d === 'dash-rollback') {
+      const to = $('#dash-rb').value;
+      if (!to) { toast('choose a version in "roll back to" first'); return; }
+      const restore = $('#restore-db') && $('#restore-db').checked, sc = S.dash.schema;
+      const warn = restore ? `The databases will be restored from ${sc.backup}, so everything recorded since that backup is discarded.`
+        : (sc && !sc.safe ? 'The databases stay where they are, and they are on a NEWER schema than the build you are going back to. Tick the restore box, or this will be refused.' : 'The databases are NOT restored: use a backup for that.');
+      ask(`Roll this dashboard back to ${to}?\n\nIt will be offline for about ten seconds. ${warn}`, 'roll back', () => {
+        if (!restore && sc && !sc.safe) { refuse(`Not applied: the database is on schema v${sc.live} and ${to} knows v${sc.target}. Tick the restore box and try again.`); return; }
+        S.dash.running = to; S.dash.source = 'update tree ' + to; S.dash.schema = null; render(); toast(`this dashboard is now ${to}`);
+      });
+    }
+  });
+
+  document.addEventListener('change', e => {
+    if (e.target.id === 'marknew') { document.body.classList.toggle('fl-marknew', e.target.checked); return; }
+    if (e.target.id !== 'policy') return;
+    const sel = e.target, was = S.policy;
+    if (sel.value === 'current') {
+      ask("Publish new builds automatically AND make them current? Every editor's computer will take each new build from the vendor feed without anyone approving it first. Choose 'stage' if you want to test a build before the fleet gets it.", 'make them current automatically',
+        () => { S.policy = 'current'; toast('policy: current'); });
+      $('#ask-no').onclick = () => { sel.value = was; close(false); $('#ask-no').onclick = () => close(false); };
+    } else { S.policy = sel.value; toast('policy: ' + sel.value); }
+  });
+  document.addEventListener('click', e => {
+    const b = e.target.closest('#b-halt button');
+    if (b) { S.halt = b.dataset.v; render(); }
+  });
+
+  CC.page({ page: 'packages', onData: mode => { reset(mode); render(); } });
+})();
+</script>
+</body>
+</html>

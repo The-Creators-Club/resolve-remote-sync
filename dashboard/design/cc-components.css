@@ -1,0 +1,237 @@
+/* CC Terminal: the shared page components (2026-09-25).
+ *
+ * cc-terminal.css holds the tokens, the HUD, the window and the home page's
+ * pieces; this file holds what every OTHER page of the bench is built from,
+ * so a page never invents its own form field or table. Loaded after
+ * cc-terminal.css by every page.
+ */
+
+/* ---------------------------------------------------- scrollbars
+   The site's (productions/css/style.css .work-body): thin, a deep-red
+   thumb, no track. Everywhere, so a scrolling panel never grows the
+   platform's grey bar. */
+* { scrollbar-width: thin; scrollbar-color: var(--red-deep) transparent; }
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--red-deep); }
+*::-webkit-scrollbar-thumb:hover { background: var(--red); }
+*::-webkit-scrollbar-corner { background: transparent; }
+
+.meter .rest, .m .rest, .rest { opacity: 0.28; }
+
+/* ---------------------------------------------------- the Settings strip */
+.snav {
+  grid-column: 1 / -1;
+  position: relative; z-index: 1;
+  display: flex; flex-wrap: wrap; gap: 8px 30px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--red);
+  background: rgb(10 5 4 / 0.8);
+  font-size: 12px;
+}
+.snav-g { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.snav-h { color: var(--muted); font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; }
+.snav-h::after { content: " :"; color: var(--red); }
+.snav a { color: var(--text-2); letter-spacing: 0.5px; }
+.snav a::before { content: ">"; color: var(--red); margin-right: 1px; }
+.snav a:hover { color: var(--text); }
+.snav a[aria-current="page"] { color: var(--hi); text-shadow: 0 0 calc(var(--fx-glow) * 8px) rgb(var(--hi-rgb) / 0.55); }
+.snav a[aria-current="page"]::before { color: var(--hi); }
+
+/* ---------------------------------------------------- the TUNE panel */
+.tune-key { position: fixed; right: 22px; bottom: 22px; z-index: 80; background: var(--win-solid); }
+.tune { position: fixed; right: 22px; bottom: 76px; z-index: 80; width: min(370px, calc(100vw - 28px)); max-height: calc(100vh - 110px); overflow: auto; display: none; }
+.tune.open { display: block; }
+.tune .body { display: grid; gap: 10px; font-size: 12px; }
+.tune .row { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 10px; }
+.tune .row > span { color: var(--muted); letter-spacing: 1px; text-transform: uppercase; font-size: 11px; }
+.opts { display: flex; flex-wrap: wrap; gap: 4px; }
+.opts button { background: none; border: 1px solid var(--line); color: var(--text-2); font: inherit; font-size: 11px; padding: 3px 8px; }
+.opts button[aria-pressed="true"] { border-color: var(--hi); color: var(--hi); }
+.swatch { width: 22px; height: 22px; border: 1px solid var(--line); }
+.swatch[aria-pressed="true"] { outline: 1px solid var(--text); outline-offset: 2px; }
+.tune select { background: var(--win-solid); color: var(--text); border: 1px solid var(--line); font: inherit; font-size: 12px; height: 28px; }
+
+/* ---------------------------------------------------- page shapes */
+.page.one { grid-template-columns: minmax(0, 1fr); }
+.page.narrow { max-width: 980px; grid-template-columns: minmax(0, 1fr); }
+.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: calc(26px * var(--d)); min-width: 0; }
+.cols-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: calc(26px * var(--d)); }
+.cols-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: calc(26px * var(--d)); }
+.lede { color: var(--text-2); max-width: 90ch; font-size: 13px; }
+.lede b { color: var(--text); }
+h2.sec {
+  font-family: var(--mono); font-weight: 700; font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--text); display: flex; align-items: center; gap: 10px; margin: 4px 0 -8px;
+}
+h2.sec::before { content: "//"; color: var(--red); font-weight: 400; }
+/* a window's body that scrolls inside a fixed height, with the site's bar */
+.scroll-y { overflow-y: auto; overscroll-behavior: contain; }
+
+/* ---------------------------------------------------- forms */
+.form { display: grid; gap: calc(14px * var(--d)); }
+.form-row { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; align-items: start; }
+.form-row > .lbl { padding-top: 8px; font-size: 12px; color: var(--text); }
+.form-row > .lbl small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; line-height: 1.45; }
+.inp, .sel, .area {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 10px;
+  background: var(--win-solid);
+  border: 1px solid var(--line);
+  border-bottom-color: var(--red);
+  color: var(--text);
+  font: inherit; font-size: 13px;
+  caret-color: var(--hi);
+}
+.area { min-height: 90px; resize: vertical; line-height: 1.5; }
+.sel { appearance: none; padding-right: 30px; background: var(--win-solid) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23ff2e2e'/%3E%3C/svg%3E") no-repeat right 11px center; }
+.inp:focus, .sel:focus, .area:focus { outline: none; border-color: var(--hi); box-shadow: 0 0 calc(var(--fx-glow) * 12px) rgb(var(--hi-rgb) / 0.2); }
+.inp::placeholder, .area::placeholder { color: var(--muted); }
+.inp.bad { border-color: var(--err); }
+.hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.hint.bad { color: var(--err); }
+.inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* checkbox and radio as terminal glyphs (square / round, filled in the live
+   colour when on) */
+.check, .radio { position: relative; display: inline-flex; align-items: baseline; gap: 8px; font-size: 13px; color: var(--text-2); user-select: none; }
+.check input, .radio input { position: absolute; opacity: 0; pointer-events: none; }
+.check .g, .radio .g { color: var(--muted); font-weight: 700; }
+.check .g::before { content: "\25A1"; }
+.radio .g::before { content: "\25CB"; }
+.check input:checked + .g, .radio input:checked + .g { color: var(--hi); text-shadow: 0 0 calc(var(--fx-glow) * 8px) rgb(var(--hi-rgb) / 0.6); }
+.check input:checked + .g::before { content: "\25A0"; }
+.radio input:checked + .g::before { content: "\25C9"; }
+.check input:checked ~ .l, .radio input:checked ~ .l { color: var(--text); }
+.check input:focus-visible + .g, .radio input:focus-visible + .g { outline: 1px solid var(--hi); outline-offset: 2px; }
+
+/* on/off switch: a two-state readout, ON in the live colour */
+.switch { position: relative; display: inline-flex; align-items: center; font-size: 11px; letter-spacing: 1px; border: 1px solid var(--line); user-select: none; }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch .off, .switch .on { padding: 4px 9px; color: var(--muted); }
+.switch input:not(:checked) ~ .off { background: rgb(255 255 255 / 0.08); color: var(--text); }
+.switch input:checked ~ .on { background: var(--hi); color: #000; font-weight: 700; box-shadow: 0 0 calc(var(--fx-glow) * 12px) rgb(var(--hi-rgb) / 0.4); }
+
+/* ---------------------------------------------------- tabs + stepper */
+.tabs { display: flex; border-bottom: 1px solid var(--red); flex-wrap: wrap; }
+.tabs a, .tabs button {
+  background: none; border: 1px solid transparent; border-bottom: 0;
+  color: var(--text-2); font: inherit; font-size: 12px; letter-spacing: 1px; text-transform: lowercase;
+  padding: 6px 14px; margin-bottom: -1px;
+}
+.tabs a:hover, .tabs button:hover { color: var(--text); }
+.tabs [aria-selected="true"] { color: var(--hi); border-color: var(--red); border-bottom: 1px solid var(--win-solid); background: var(--win-solid); }
+.steps { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; }
+.steps .s { color: var(--muted); }
+.steps .s b { color: inherit; font-weight: 400; margin-right: 6px; }
+.steps .s.done { color: var(--ok); }
+.steps .s.cur { color: var(--hi); text-shadow: 0 0 calc(var(--fx-glow) * 8px) rgb(var(--hi-rgb) / 0.5); }
+
+/* ---------------------------------------------------- callouts */
+.note { position: relative; z-index: 1; display: flex; gap: 12px; align-items: flex-start; padding: 10px 14px; border: 1px solid var(--line); border-left: 3px solid var(--hi); background: rgb(var(--hi-rgb) / 0.05); font-size: 13px; color: var(--text-2); }
+.note.warn { border-left-color: var(--warn); background: rgb(255 176 46 / 0.06); }
+.note.err { border-left-color: var(--err); background: rgb(255 46 46 / 0.07); }
+.note.ok { border-left-color: var(--ok); background: rgb(58 255 110 / 0.05); }
+.note b { color: var(--text); }
+.note .grow { flex: 1; }
+
+/* ---------------------------------------------------- key / value */
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 18px; font-size: 13px; }
+.kv dt { color: var(--muted); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; padding-top: 2px; }
+.kv dd { color: var(--text); margin: 0; overflow-wrap: anywhere; }
+.kv dd .dim { color: var(--text-2); }
+
+/* ---------------------------------------------------- code + log */
+.code, pre.log {
+  position: relative;
+  padding: 10px 12px;
+  background: #050202;
+  border: 1px solid var(--line);
+  color: var(--text-2);
+  font: 12px/1.6 var(--mono);
+  overflow-x: auto;
+  white-space: pre;
+}
+pre.log .t { color: var(--muted); }
+pre.log .e { color: var(--err); }
+pre.log .w { color: var(--warn); }
+pre.log .o { color: var(--ok); }
+
+/* ---------------------------------------------------- pagination, empty */
+.pager { display: flex; gap: 14px; align-items: center; justify-content: flex-end; padding: 10px var(--pad); font-size: 12px; color: var(--muted); border-top: 1px dashed var(--line); }
+.pager a { color: var(--text-2); }
+.pager a:hover { color: var(--hi); }
+.empty { padding: calc(28px * var(--d)) var(--pad); text-align: center; color: var(--muted); font-size: 13px; }
+.empty .glyph { display: block; font-size: 22px; color: var(--red); margin-bottom: 8px; letter-spacing: 4px; }
+
+/* ---------------------------------------------------- a confirm dialog */
+.dialog-back { position: fixed; inset: 0; z-index: 95; background: rgb(0 0 0 / 0.65); display: none; align-items: center; justify-content: center; padding: 16px; }
+.dialog-back.open { display: flex; }
+.dialog { width: min(520px, 100%); }
+.dialog .body { display: grid; gap: 14px; }
+.dialog .acts { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+
+/* ---------------------------------------------------- tables */
+.tbl.tight td { padding: 6px var(--pad); }
+.tbl td.num, .tbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl .acts { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+.scroll-x { overflow-x: auto; }
+/* A hidden row stays hidden: the phone .stack-sm rule sets display on every
+   tr, which beats the hidden attribute (sync builder, 2026-09-25). */
+.tbl tr[hidden], [hidden] { display: none !important; }
+
+@media (max-width: 1100px) {
+  .cols-2, .cols-3 { grid-template-columns: minmax(0, 1fr); }
+  .form-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .form-row > .lbl { padding-top: 0; }
+}
+@media (max-width: 760px) {
+  .tune-key { bottom: 72px; right: 12px; }
+  .tune { bottom: 120px; }
+  .snav { gap: 6px 18px; }
+  .tbl.stack-sm thead { display: none; }
+  .tbl.stack-sm tr { display: grid; padding: 8px 0; border-top: 1px dashed var(--line); }
+  .tbl.stack-sm td { border: 0; padding: 2px var(--pad); }
+}
+
+
+/* ---------------------------------------------------- folding windows
+   Every window folds from its title bar (owner, 2026-09-25: "every window
+   should be expandable / collapsible"). shell.js adds the marker and
+   remembers the state per page. */
+.win > .bar.can-fold { cursor: pointer; user-select: none; }
+.win > .bar .fold-g { color: var(--red); width: 1ch; display: inline-block; transition: transform 0.15s var(--ease); }
+.win.collapsed > .bar .fold-g { transform: rotate(-90deg); }
+.win.collapsed > :not(.bar) { display: none !important; }
+.win.collapsed > .bar { border-bottom-color: transparent; }
+/* A folded window is its title bar and nothing else: in a grid row it must
+   not be stretched to its neighbours' height (owner, 2026-09-25: "a large
+   black box instead of the correct visual behaviour"). */
+.win.collapsed { align-self: start; height: auto !important; min-height: 0 !important; }
+.win > .bar.can-fold:hover .t { color: var(--hi); }
+
+/* ---------------------------------------------------- tooltips
+   One look for every hint (owner: "give everything tooltips that need
+   it"): shell.js turns any title="" into this on hover or focus. */
+.cc-tip {
+  position: fixed; z-index: 120; pointer-events: none;
+  max-width: 340px;
+  padding: 6px 9px;
+  background: var(--win-solid);
+  border: 1px solid var(--red);
+  border-left: 3px solid var(--hi);
+  color: var(--text);
+  font: 12px/1.45 var(--mono);
+  white-space: pre-line;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.6);
+  opacity: 0; transform: translateY(3px);
+  transition: opacity 0.1s, transform 0.1s;
+}
+.cc-tip.show { opacity: 1; transform: none; }
+[data-tip] { cursor: help; }
+a[data-tip], button[data-tip], .key[data-tip], label[data-tip], input[data-tip], select[data-tip], summary[data-tip] { cursor: pointer; }
+
+/* every Settings page is one width, so moving between them moves nothing */
+.page:has(> .snav) { max-width: 1500px; grid-template-columns: minmax(0, 1fr); }

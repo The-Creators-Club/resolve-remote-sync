@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: a user</title>
+<!-- The design bench (dashboard/design/README.md): Settings, Users, one
+     person. NEW PAGE (owner, 2026-09-25): "Is there a place for admins to
+     look at a granular breakdown of each user? You click in to a user and
+     you can see what they have ticked, what is synced, what isn't, what is
+     missing, etc, rather than just the computers overview on the dashboard."
+     The product has no such page. Everything on it is built from what the
+     dashboard already stores (named in the comments beside each piece):
+       account        users / NAS account, known_editors.suspended_*,
+                      auth_sessions, editor_report_tokens, user_ssh_keys
+       computers      machines + machine_state (version, disk, breaker, halt,
+                      conflicts, stray folders, upgrade_*, cap_*, Resolve)
+       lanes          lane_report_current, active_transfers (per project)
+       ticked         selections (editor, machine, project, sync_mode,
+                      changed_at, created_by)
+       up / down      db.fetch_sync_backlog: editor_media vs nas_media, per
+                      (editor, machine, project), with its `uncertain` flag
+       folder sync    completion_current + missing_files (partials/
+                      missing_files.html), per project and device
+       Resolve        media_tree_clips.present
+       not ticked     editor_media_project rows for unselected projects
+       history        fleet_audit (plan changes), jobs
+     What it has no data for is outlined NEW. Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/fleet.css">
+</head>
+<body data-page="users" class="fl-marknew">
+
+<div class="shell fl-page">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> <span id="h-name">USER</span></span><span id="h-role"></span></h1>
+        <div class="sub" id="sub"></div>
+      </div>
+      <div class="acts">
+        <a class="key quiet sm" href="users.html" title="Back to every account, computer, session and token."><span class="t">all users</span></a>
+        <label class="pick" style="width:200px" title="Jump to another person's page."><span>another person</span><select id="who"></select></label>
+      </div>
+    </div>
+
+    <div class="bench" aria-label="design bench only">
+      <span class="bl">bench only</span>
+      <span class="fl-benchsw" title="bench only: outline what the product has no data or route for yet"><label class="switch"><input type="checkbox" id="marknew" checked><span class="off">OFF</span><span class="on">ON</span></label> mark what is new</span>
+    </div>
+
+    <div class="note warn fl-legend">
+      <span class="tag warn">new</span>
+      <span class="grow">This whole page is new, but everything on it is data the dashboard already keeps, gathered from Sync status, the project pages, Sync plans, Packages and Jobs. What is outlined like this has <b>no data yet</b>: it needs a new column or a new report field.</span>
+    </div>
+
+    <div id="alarm"></div>
+    <div class="readouts" id="readouts"></div>
+    <section class="win" id="person"></section>
+
+    <h2 class="sec">computers <span class="muted" style="font-weight:400;letter-spacing:0;text-transform:none" id="pc-n"></span></h2>
+    <div class="stack" id="pcs"></div>
+
+    <h2 class="sec">history</h2>
+    <div class="cols-2" id="hist"></div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, win, tag, led, toast, meter } = CC;
+  const $ = s => document.querySelector(s);
+  const NEWT = (tip) => `<span class="fl-newtag" title="${esc(tip || 'not in the product yet')}">new</span>`;
+  const GB = n => n >= 1000 ? (n / 1000).toFixed(1) + ' TB' : n >= 1 ? Math.round(n) + ' GB' : Math.round(n * 1000) + ' MB';
+
+  // ------------------------------------------------------------ data
+  // project rows: mode full|up; up = originals here / owed; down = proxies here / on the server / owed;
+  // folder = completion of the shared (non-video) files; off = clips offline in Resolve
+  const R = (slug, label, mode, o) => ({ slug, label, mode, ...o });
+  const PEOPLE = {
+    jsmith: {
+      full: 'Jordan Smith', role: 'editor', account: 'NAS account (uid 3001)', key: true, smb: true,
+      sessions: [['3 d ago', '4 min ago', '100.64.18.21 · Safari on iPhone'], ['9 d ago', '2 d ago', '100.64.18.30 · Chrome on Windows']],
+      tokens: [['studio desktop', '21 d ago', '4 s ago'], ['macbook', '21 d ago', '31 s ago']],
+      pcs: [
+        { m: 'JSMITH-STUDIO', plat: 'windows', mode: 'remote', ver: '0.9.77', upd: null, seen: '4 s ago', since: 'on since 08:02', led: '',
+          disk: [2150, 4000, 180], lanes: [['up', 'ok', 100, 'up to date'], ['down', 'busy', 62, '12.4 GB left'], ['share', 'ok', 100, 'in sync']],
+          resolve: 'Elections_v12 (open)', job: ['#415 whisper', 62], kinds: 'every kind', flags: [['warn', '1 folder outside the tree', 'A project folder on this computer that is not in the server\'s tree: 1 folder, 3.2 GB. Nothing syncs it.']],
+          ticked: [
+            R('ff5-elections', '2026 / FF5 / Elections', 'full', { up: [212, 0, 0], down: [1180, 1412, 232, 12.4], folder: [98, 14], off: 0, now: 'downloading 4 proxies', last: '3 min ago', by: ['owen', '12 d ago'] }),
+            R('ff5-civil-defence', '2026 / FF5 / Civil Defence', 'full', { up: [96, 3, 41], down: [640, 640, 0, 0], folder: [100, 0], off: 2, now: '', last: '2 h ago', by: ['jsmith', '5 d ago'] }),
+            R('shorts-night-market', '2026 / Shorts / Night Market', 'full', { up: [44, null, null], down: [88, 88, 0, 0], folder: [100, 0], off: 0, now: '', last: '1 d ago', by: ['jsmith', '9 d ago'] }),
+          ],
+          loose: [['2025 / FF4 / CIA City', 0, 188, 22, '6 min ago'], ['2025 / FF4 / Kinmen', 14, 0, 210, '6 min ago', 'archived']] },
+        { m: 'JSMITH-MBP', plat: 'macos', mode: 'remote', ver: '0.9.75', upd: ['err', 'update cannot be sent', 'Pushed 0.9.77, but that build is for arm64 and this Mac reports x86_64. See Settings, Packages.'], seen: '31 s ago', since: 'on since 07:40', led: 'err',
+          disk: [180, 500, 64], lanes: [['up', 'ok', 100, 'idle'], ['down', 'err', 0, 'stopped itself'], ['share', 'ok', 100, 'in sync']],
+          resolve: 'not running', job: null, kinds: 'audio, peaks', flags: [['err', 'proxy download stopped itself', 'The safety latch paused proxy download at 09:12: a pass would have moved 1,140 files to the trash. Only a person clears it: the editor at the tray, or RESUME on the home page.'], ['warn', '2 sync conflicts', 'Two files were changed on two computers at once, and both copies were kept. Their names end in .sync-conflict.']],
+          ticked: [
+            R('ff5-elections', '2026 / FF5 / Elections', 'up', { up: [38, 0, 0], down: null, folder: null, off: 0, now: '', last: '4 h ago', by: ['jsmith', '3 d ago'] }),
+            R('shorts-night-market', '2026 / Shorts / Night Market', 'full', { up: [0, 0, 0], down: [60, 88, 28, 1.9], folder: [100, 0], off: 28, now: '', last: '1 d ago', by: ['jsmith', '9 d ago'], paused: true }),
+          ],
+          loose: [] },
+      ],
+      audit: [['12 d ago', 'owen', 'ticked Elections on JSMITH-STUDIO'], ['9 d ago', 'jsmith', 'ticked Night Market on JSMITH-STUDIO, JSMITH-MBP'], ['5 d ago', 'jsmith', 'ticked Civil Defence on JSMITH-STUDIO'], ['3 d ago', 'jsmith', 'set Elections to upload only on JSMITH-MBP'], ['1 d ago', 'owen', 'unticked Typhoon Prep on JSMITH-STUDIO']],
+      jobs: [['#415', 'whisper', 'running', 'JSMITH-STUDIO', '48 min ago'], ['#414', 'whisper', 'done', 'JSMITH-STUDIO', '1 h ago'], ['#405', 'peaks', 'done', 'JSMITH-MBP', '6 h ago']],
+    },
+    mrivera: {
+      full: 'Maria Rivera', role: 'editor', account: 'NAS account (uid 3002)', key: true, smb: true,
+      suspended: ['owen', '2 d ago', 'on leave until 6 October'],
+      sessions: [['1 d ago', '38 min ago', '100.64.9.40 · Firefox on Windows']], tokens: [['editor laptop', '9 d ago', '2 s ago']],
+      pcs: [
+        { m: 'RIVERA-TOWER', plat: 'windows', mode: 'remote', ver: '0.9.76', upd: ['err', 'refusing 0.9.77', 'This computer refuses the current build: it is below its signed floor.'], seen: '12 s ago', since: 'on since 09:15', led: 'warn',
+          disk: [3480, 8000, 410], lanes: [['up', 'idle', 0, 'paused'], ['down', 'idle', 0, 'paused'], ['share', 'idle', 0, 'paused']],
+          resolve: 'not running', job: null, kinds: 'every kind', flags: [['warn', 'suspended', 'An admin paused this person: their computers are turned away and their projects unshared. The plan is kept.']],
+          ticked: [
+            R('ff5-elections', '2026 / FF5 / Elections', 'full', { up: [80, 0, 0], down: [1412, 1412, 0, 0], folder: [100, 0], off: 0, now: '', last: '2 d ago', by: ['mrivera', '20 d ago'] }),
+            R('ff5-civil-defence', '2026 / FF5 / Civil Defence', 'full', { up: [12, 0, 0], down: [600, 640, 40, 3.1], folder: [96, 6], off: 0, now: '', last: '2 d ago', by: ['mrivera', '18 d ago'] }),
+            R('ff5-repro-rights', '2026 / FF5 / Repro Rights', 'full', { up: [55, 7, 88], down: [301, 301, 0, 0], folder: [100, 0], off: 0, now: '', last: '2 d ago', by: ['owen', '7 d ago'] }),
+            R('ff4-cia-city', '2025 / FF4 / CIA City', 'full', { up: [0, 0, 0], down: [188, 188, 0, 0], folder: [100, 0], off: 0, now: '', last: '3 d ago', by: ['mrivera', '30 d ago'] }),
+          ], loose: [] },
+        { m: 'RIVERA-LAPTOP', plat: 'windows', mode: 'remote', ver: '0.9.76', upd: null, seen: '2 s ago', since: 'on since 10:31', led: 'warn',
+          disk: [95, 1000, 40], lanes: [['up', 'idle', 0, 'paused'], ['down', 'idle', 0, 'paused'], ['share', 'idle', 0, 'paused']],
+          resolve: 'Elections_rough (open)', job: ['#418 proxy 480p', 37], kinds: 'proxy, audio, peaks', flags: [['warn', 'suspended', 'An admin paused this person. The plan is kept.']],
+          ticked: [R('ff5-elections', '2026 / FF5 / Elections', 'full', { up: [9, 2, 18], down: [1412, 1412, 0, 0], folder: [100, 0], off: 0, now: '', last: '2 d ago', by: ['mrivera', '11 d ago'] })], loose: [] },
+      ],
+      audit: [['2 d ago', 'owen', 'suspended mrivera: on leave until 6 October'], ['7 d ago', 'owen', 'ticked Repro Rights on RIVERA-TOWER']],
+      jobs: [['#418', 'proxy 480p', 'running', 'RIVERA-LAPTOP', '12 min ago'], ['#410', 'proxy 480p', 'abandoned', 'RIVERA-TOWER', '3 h ago']],
+    },
+    tchen: {
+      full: 'Tao Chen', role: 'editor', account: 'NAS account (uid 3003)', key: false, smb: true,
+      sessions: [], tokens: [['', '40 d ago', '2 h ago']],
+      pcs: [
+        { m: 'TCHEN-RIG', plat: 'windows', mode: 'remote', ver: '0.9.49', upd: ['err', 'update failed x3', 'Asked for 0.9.77: the download stopped at 61% (the connection to the server was reset), three times.'], seen: '2 h ago', since: 'last seen 07:58', led: 'off',
+          disk: [2, 1000, 12], lanes: [['up', 'warn', 0, 'not heard from'], ['down', 'warn', 0, 'not heard from'], ['share', 'err', 0, 'folder error']],
+          resolve: 'unknown (not reporting)', job: null, kinds: 'every kind', flags: [['err', '2 GB free', 'The drive its projects sync to is nearly full. Proxy download stops itself below its floor.'], ['err', 'no ssh key on the account', 'Upload and proxy download cannot sign in until a key is added on Settings, Users.'], ['warn', 'clock 4 min behind', 'This computer\'s clock is 4 minutes behind the server.']],
+          ticked: [
+            R('ff5-elections', '2026 / FF5 / Elections', 'full', { up: [31, 6, 52], down: [900, 1412, 512, 26.8], folder: [71, 212], off: 44, now: '', last: '2 h ago', by: ['tchen', '15 d ago'], ferr: true }),
+            R('ff5-repro-rights', '2026 / FF5 / Repro Rights', 'full', { up: [18, 0, 0], down: [301, 301, 0, 0], folder: [100, 0], off: 0, now: '', last: '1 d ago', by: ['tchen', '15 d ago'] }),
+            R('shorts-typhoon-prep', '2026 / Shorts / Typhoon Prep', 'full', { up: [12, 12, 9.6], down: [0, 0, 0, 0], folder: [100, 0], off: 0, now: '', last: '2 h ago', by: ['tchen', '2 d ago'] }),
+          ], loose: [['2026 / Shorts / Night Market', 6, 0, 31, '2 h ago']] },
+      ],
+      audit: [['2 d ago', 'tchen', 'ticked Typhoon Prep on TCHEN-RIG']], jobs: [['#419', 'proxy 480p', 'queued', 'TCHEN-RIG', '3 h ago']],
+    },
+    owen: {
+      full: '', role: 'admin', account: 'NAS account (uid 3000), admin', key: true, smb: true,
+      sessions: [['2 h ago', 'just now', '100.64.12.8 · Chrome on Windows']], tokens: [],
+      pcs: [
+        { m: 'OWEN-RIG', plat: 'windows', mode: 'wired', ver: '0.9.76', upd: ['err', 'kept crashing on 0.9.77', 'It rolled itself back and is not offered 0.9.77 again.'], seen: '1 min ago', since: 'on since 06:50', led: '',
+          disk: [412, 1800, 220], lanes: [['up', 'idle', 0, 'wired'], ['down', 'idle', 0, 'wired'], ['share', 'idle', 0, 'wired']],
+          resolve: 'CIA_City_master (open)', job: null, kinds: 'every kind', flags: [['warn', 'uses the shared token', 'This computer still reports with the old shared fleet token. Mint it a token of its own on Settings, Users.']],
+          ticked: [R('ff4-cia-city', '2025 / FF4 / CIA City', 'full', { stale: true, by: ['owen', '40 d ago'] })], loose: [] },
+      ],
+      audit: [], jobs: [['#407', 'audio', 'failed', 'OWEN-RIG', '5 h ago']],
+    },
+  };
+
+  // the calm day: the same people, everything done
+  function calm(p) {
+    const c = JSON.parse(JSON.stringify(p));
+    delete c.suspended;
+    c.key = true;
+    c.pcs.forEach(pc => {
+      pc.led = ''; pc.upd = null; pc.flags = []; pc.job = null; pc.ver = '0.9.77';
+      if (pc.mode !== 'wired') pc.lanes = [['up', 'ok', 100, 'up to date'], ['down', 'ok', 100, 'up to date'], ['share', 'ok', 100, 'in sync']];
+      if (pc.disk[0] < 50) pc.disk[0] = 380;
+      pc.ticked.forEach(r => {
+        if (r.stale) return;
+        if (r.up) { r.up[1] = 0; r.up[2] = 0; }
+        if (r.down) { r.down[0] = r.down[1]; r.down[2] = 0; r.down[3] = 0; }
+        if (r.folder) r.folder = [100, 0];
+        r.off = 0; r.now = ''; r.paused = false; r.ferr = false;
+      });
+    });
+    return c;
+  }
+
+  let who = 'jsmith', mode = 'busy', P = null;
+
+  // ------------------------------------------------------------ pieces
+  const btn = (label, cls, attrs) => `<button class="key sm ${cls || ''}" type="button" ${attrs || ''}><span class="t">${label}</span></button>`;
+  const tipOf = { ok: 'nothing to do', busy: 'working now', warn: 'waiting, or not heard from', err: 'stopped: needs someone', idle: 'nothing running' };
+  const LANE_TIP = { up: 'up: sends new original footage from this computer to the server', down: 'down: brings the small edit copies (proxies) down from the server', share: 'share: keeps the project files (not video) the same on every computer' };
+
+  function sums() {
+    let ticked = 0, upN = 0, upGB = 0, upUnsure = 0, dnN = 0, dnGB = 0, miss = 0, off = 0;
+    P.pcs.forEach(pc => pc.ticked.forEach(r => {
+      if (r.stale) return;
+      ticked++;
+      if (r.up[1] == null) upUnsure++; else { upN += r.up[1]; upGB += r.up[2]; }
+      if (r.down) { dnN += r.down[2]; dnGB += r.down[3]; }
+      if (r.folder) miss += r.folder[1];
+      off += r.off || 0;
+    }));
+    return { ticked, upN, upGB, upUnsure, dnN, dnGB, miss, off };
+  }
+
+  function renderHead() {
+    $('#h-name').textContent = who.toUpperCase();
+    $('#h-role').innerHTML = `<span class="tag ${P.role === 'admin' ? 'hi' : 'mute'}" style="font-family:var(--mono);font-size:12px;letter-spacing:1px" title="${P.role === 'admin' ? 'admin: can use Settings and look after everyone' : 'editor: their own computers and projects only'}">${P.role}</span>`;
+    const s = sums();
+    $('#sub').innerHTML = `${esc(P.full || 'no full name on the account')} &middot; <b>${P.pcs.length}</b> computer${P.pcs.length === 1 ? '' : 's'} &middot; <b>${s.ticked}</b> ticked &middot; ${P.suspended ? '<span style="color:var(--warn)">suspended</span>' : 'active'}`;
+    $('#who').innerHTML = Object.keys(PEOPLE).sort().map(u => `<option ${u === who ? 'selected' : ''}>${u}</option>`).join('');
+    document.title = 'CC Sync: ' + who;
+  }
+
+  function renderAlarm() {
+    $('#alarm').innerHTML = P.suspended ? `<div class="alertline"><span class="tag solid warn">suspended</span><span class="grow"><b>${who} is suspended</b>: ${esc(P.suspended[2])}. <span class="dim">By ${P.suspended[0]} ${P.suspended[1]}. Their computers are turned away when they report and their projects are unshared. Nothing is deleted and the plan below is kept.</span></span>${btn('resume', 'w-12', `data-do="resume" title="Let ${who}'s computers sync again. Their projects come back on the next cycle."`)}</div>` : '';
+    $('#alarm').style.display = P.suspended ? '' : 'none';
+  }
+
+  function renderReadouts() {
+    const s = sums(), bad = P.pcs.filter(pc => pc.led === 'err' || pc.led === 'off').length;
+    const ro = (k, tone, big, small, foot, tip) => `<section class="win readout ${tone}"><div class="bar" title="${esc(tip)}"><span>┌─╡</span><span class="t">${k}</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+      <div class="body"><div class="big">${big}<small>${small}</small></div><div class="foot">${foot}</div></div></section>`;
+    $('#readouts').innerHTML = [
+      ro('computers', bad ? 'err' : 'ok', P.pcs.length, bad ? `${bad} need${bad === 1 ? 's' : ''} you` : 'all fine', P.pcs.map(pc => pc.m).join(', '), 'The computers signed in as this person. Each has its own sync plan.'),
+      ro('owed up', s.upN ? 'warn' : 'ok', s.upN, s.upN ? `files · ${GB(s.upGB)}` : 'files', s.upUnsure ? `${s.upUnsure} project${s.upUnsure === 1 ? '' : 's'}: cannot tell` : 'originals not on the server yet', 'Video originals on their computers that the server does not have yet: footage that exists on one disk only.'),
+      ro('owed down', s.dnN ? 'warn' : 'ok', s.dnN, s.dnN ? `proxies · ${GB(s.dnGB)}` : 'proxies', 'edit copies still to come down', 'Proxies on the server that have not reached their computers yet.'),
+      ro('missing', s.miss || s.off ? 'warn' : 'ok', s.miss, 'files', s.off ? `${s.off} clips offline in Resolve` : 'project files not in their copy', 'Shared project files (not video) their copy lacks, and clips their Resolve cannot find.'),
+    ].join('');
+  }
+
+  function renderPerson() {
+    const ses = P.sessions, tok = P.tokens;
+    $('#person').innerHTML = `<div class="bar"><span>┌─╡</span><span class="t">person</span><span>╞</span><span class="rule"></span><span class="meta">${P.account}</span><span>═┐</span></div>
+      <div class="body u-who">
+        <dl class="kv">
+          <dt title="where the account lives: the NAS, or this dashboard's own list">account</dt><dd>${P.account}${P.full ? ` · ${esc(P.full)}` : ''}</dd>
+          <dt>role</dt><dd>${P.role}</dd>
+          <dt title="their browser sign-ins to this dashboard">signed in</dt><dd>${ses.length ? `${ses.length} browser${ses.length === 1 ? '' : 's'} · last seen ${ses[0][1]} <span class="dim">(${esc(ses[0][2])})</span>` : '<span class="dim">no browser signed in</span>'}</dd>
+          <dt title="the credential each of their computers reports with">report tokens</dt><dd>${tok.length ? `${tok.length} · last used ${tok[0][2]}` : '<span class="dim">none: their computers use the shared token</span>'}</dd>
+          <dt title="what their upload and proxy download sign in to the server with">ssh key</dt><dd>${P.key ? tag('ok', 'set') : `${tag('err', 'no ssh key')} <span class="dim">upload and proxy download cannot run</span>`}</dd>
+          <dt title="suspended: paused by an admin, plan kept">status</dt><dd>${P.suspended ? `${tag('warn', 'suspended')} <span class="dim">${esc(P.suspended[2])}, by ${P.suspended[0]} ${P.suspended[1]}</span>` : tag('ok', 'active')}</dd>
+        </dl>
+        <div class="acts">
+          ${P.suspended ? btn('resume', 'w-16', `data-do="resume" title="Let ${who}'s computers sync again. Their projects come back on the next cycle."`) : btn('suspend', 'w-16', `data-do="suspend" title="Pause syncing for ${who}: their computers are turned away and their projects unshared. The plan is kept, and resume puts it back."`)}
+          ${btn('sign out everywhere', 'w-16', `data-do="signout" ${ses.length ? '' : 'disabled'} title="Sign ${who} out of every browser. Their computers keep syncing: the companion's own token is separate."`)}
+          <a class="key sm w-16" href="sync-plans.html?editor=${who}&machine=*" title="Change what is ticked on each of ${who}'s computers."><span class="t">edit their plan</span></a>
+          <a class="key sm quiet" href="users.html" title="Passwords, SSH keys, tokens and deleting the account are on Settings, Users.">password, keys, tokens</a>
+        </div>
+      </div>`;
+  }
+
+  // one project, one computer
+  function projRow(pc, r) {
+    const label = `<b>${esc(r.label)}</b>`;
+    if (r.stale) return `<tr><td class="pn" data-label="project">${label}<span class="s">ticked by ${r.by[0]} ${r.by[1]}</span></td>
+      <td data-label="ticked" title="left over from before this computer went wired: removable, not re-tickable"><span class="tk on">■</span> stale</td>
+      <td colspan="5" data-label="" class="dim" style="white-space:normal">This computer is <b>wired</b>: it works directly off the server's tree and syncs nothing, so this tick does nothing. Untick it on Sync plans.</td></tr>`;
+    const up = r.up[1] == null
+      ? `<span class="m warn" title="This computer's list of originals was cut short (too many files), so nobody can tell whether all of them reached the server.">cannot tell</span><span class="s">${r.up[0]} originals here, list capped</span>`
+      : r.up[1] ? `<span class="m warn">${meter(r.up[0] - r.up[1], r.up[0], 8)}</span> <b>${r.up[1]}</b> owed<span class="s">${GB(r.up[2])} not on the server yet</span>`
+      : `<span class="m ok">${meter(1, 1, 8)}</span> all up<span class="s">${r.up[0]} originals here</span>`;
+    const down = !r.down ? `<span class="dim" title="Upload only: nothing comes down to this computer for this project.">not downloaded</span><span class="s">upload only</span>`
+      : `<span class="m ${r.down[2] ? (r.paused ? 'warn' : '') : 'ok'}">${meter(r.down[0], r.down[1] || 1, 8)}</span> ${r.down[0]}/${r.down[1]}<span class="s">${r.down[2] ? `${r.down[2]} to come · ${GB(r.down[3])}${r.paused ? ', paused' : ''}` : 'all proxies here'}</span>`;
+    const folder = !r.folder ? `<span class="dim" title="Upload only is not shared with this computer at all: no project files come down.">not shared</span><span class="s">upload only</span>`
+      : r.ferr ? `<span style="color:var(--err)" title="The server's copy of this folder has an error, so these figures are stale.">folder error</span><span class="s">${r.folder[0]}% when last good</span>`
+      : `<span class="m ${r.folder[1] ? '' : 'ok'}">${meter(r.folder[0], 100, 8)}</span> ${r.folder[0]}%<span class="s">${r.folder[1] ? `${r.folder[1]} files not here` : 'in sync'}</span>`;
+    const nMiss = (r.folder ? r.folder[1] : 0) + (r.down ? r.down[2] : 0) + (r.up[1] || 0) + (r.off || 0);
+    const miss = nMiss ? btn(`see all ${nMiss}`, '', `data-miss="${pc.m}|${r.slug}" title="Open the list: project files not here, proxies not here, originals not on the server, and clips offline in Resolve."`) : `<span class="muted" title="Nothing missing in either direction.">none</span>`;
+    return `<tr><td class="pn" data-label="project">${label}<span class="s" title="who ticked it, and when">ticked by ${r.by[0]} ${r.by[1]}</span></td>
+      <td data-label="ticked">${r.mode === 'up' ? `<span class="tk on up" title="upload only: originals go up, nothing comes down">■</span> upload only` : `<span class="tk on" title="full: the project comes down and goes up">■</span> full`}</td>
+      <td data-label="up">${up}</td>
+      <td data-label="down">${down}</td>
+      <td data-label="folder sync">${folder}</td>
+      <td class="miss" data-label="missing">${miss}</td>
+      <td data-label="activity">${r.now ? `<span class="hi">${r.now}</span>` : '<span class="muted">idle</span>'}<span class="s fl-new" style="outline-offset:1px" title="NEW: the history of finished transfers does not record which project a file belonged to, so this line needs a new column.">last file ${r.last}</span></td></tr>`;
+  }
+
+  function pcWin(pc) {
+    const wired = pc.mode === 'wired';
+    const lanes = `<div class="lanes">${pc.lanes.map(l => `<div class="lane ${l[1]}"><span class="k" title="${LANE_TIP[l[0]]}">${l[0]}</span><span class="m" title="${tipOf[l[1]]}">${meter(l[2], 100, 10)}</span><span class="s">${esc(l[3])}</span></div>`).join('')}</div>`;
+    const flags = pc.flags.length || pc.upd
+      ? [...(pc.upd ? [pc.upd] : []), ...pc.flags].map(f => `<span class="tag ${f[0]}" title="${esc(f[2])}">${esc(f[1])}</span>`).join('')
+      : `<span class="muted" style="font-size:12px"><span style="color:var(--ok)">✓</span> nothing wrong on this computer</span>`;
+    const loose = pc.loose.length ? `<div class="u-sub">not ticked, but files are here <span class="n">${pc.loose.length}</span><span class="grow"></span></div>
+      <div class="scroll-y u-mini"><div class="scroll-x"><table class="tbl stack-sm uproj">
+        <thead><tr><th>project</th><th title="video originals found on this computer's disk for this project">originals here</th><th title="proxies found on this computer's disk">proxies here</th><th>size</th><th title="NEW: whether every one of these originals is on the server. The per-file list is only kept for ticked projects, so today only the counts are known.">on the server? ${NEWT('the per-file list is only kept for ticked projects')}</th><th title="when this computer last listed its disk">reported</th><th></th></tr></thead>
+        <tbody>${pc.loose.map(l => `<tr><td class="pn" data-label="project"><b>${esc(l[0])}</b>${l[5] ? ` <span class="tag mute" title="archived: off every tick list, files kept">${l[5]}</span>` : ''}</td><td data-label="originals here">${l[1]}</td><td data-label="proxies here">${l[2]}</td><td data-label="size">${GB(l[3])}</td>
+          <td data-label="on the server?" class="fl-new">${l[1] ? '<span class="muted">unknown</span>' : '<span class="muted">no originals</span>'}</td><td data-label="reported">${l[4]}</td>
+          <td class="acts-cell" data-label="">${l[5] ? '' : btn('tick it here', 'w-9', `data-tick="${pc.m}|${esc(l[0])}" title="Tick this project on ${pc.m}: its missing proxies come down and its new originals go up."`)}</td></tr>`).join('')}</tbody></table></div></div>
+      <div class="foot-in" style="border-top:0">Folders on this computer's disk that are not on its plan. Nothing syncs them: a copy made by hand, or a project unticked with its files left behind.</div>` : '';
+    return `<section class="win u-pc">
+      <div class="bar"><span>┌─╡</span><span class="t">${pc.m}</span><span>╞</span><span class="rule"></span><span class="meta">${led(pc.led)} ${pc.plat} · ${wired ? 'wired' : 'remote'} · ${pc.ver} · <span title="the last time it sent its status">reported ${pc.seen}</span></span><span>═┐</span></div>
+      <div class="u-facts">
+        <div class="f"><span class="k">sync</span>${lanes}</div>
+        <div class="f"><span class="k" title="free space on the drive its projects sync to, and on the system drive">disk</span><b>${GB(pc.disk[0])}</b> free of ${GB(pc.disk[1])}<br>system drive ${GB(pc.disk[2])} free</div>
+        <div class="f"><span class="k">this computer</span>${wired ? '<b>wired</b>: works off the server tree' : '<b>remote</b>: syncs its own copy'}<br>CC Sync <b>${pc.ver}</b> · ${esc(pc.since)}<br><span title="the Resolve project open on it, as it last reported">Resolve: ${esc(pc.resolve)}</span></div>
+        <div class="f"><span class="k" title="fleet work (transcripts, proxies, audio, waveforms) this computer takes on">jobs</span>${pc.job ? `holding <b>${pc.job[0]}</b><br><span class="hi">${meter(pc.job[1], 100, 10)}</span> ${pc.job[1]}%` : '<span class="dim">holding nothing</span>'}<br><span class="dim">takes: ${pc.kinds}</span></div>
+      </div>
+      <div class="u-flags">${flags}</div>
+      <div class="u-sub">ticked here <span class="n">${pc.ticked.length}</span><span class="grow"></span><a class="key quiet sm" href="sync-plans.html?editor=${who}&machine=${pc.m}" title="Open ${pc.m}'s plan on Sync plans to tick or untick projects."><span class="t">edit this plan</span></a></div>
+      ${pc.ticked.length ? `<div class="scroll-y u-box"><div class="scroll-x"><table class="tbl stack-sm uproj">
+        <thead><tr><th>project</th><th title="full: comes down and goes up. upload only: originals go up, nothing comes down.">ticked</th><th title="video originals on this computer, and how many the server does not have yet">up</th><th title="proxies here, of the proxies on the server, and what is still to come down">down</th><th title="the shared project files (not video): how complete this computer's copy is">folder sync</th><th title="everything this computer should have and does not, both ways. Opens the list.">missing</th><th title="what it is doing for this project now, and the last file that moved">activity ${NEWT('last file moved needs a project column on the transfer history')}</th></tr></thead>
+        <tbody>${pc.ticked.map(r => projRow(pc, r)).join('')}</tbody></table></div></div>`
+        : `<div class="empty">Nothing ticked on this computer.</div>`}
+      ${loose}
+    </section>`;
+  }
+
+  function renderPcs() {
+    $('#pc-n').textContent = P.pcs.length;
+    $('#pcs').innerHTML = P.pcs.map(pcWin).join('');
+  }
+
+  function renderHist() {
+    const st = { running: 'hi', done: 'ok', queued: 'mute', failed: 'err', abandoned: 'err' };
+    $('#hist').innerHTML = win('plan_changes', `<b>${P.audit.length}</b> in 30 days`, P.audit.length ? `<div class="scroll-y u-mini"><table class="tbl tight"><tbody>${P.audit.slice().reverse().map(a => `<tr><td style="white-space:nowrap">${a[0]}</td><td><b>${a[1]}</b></td><td>${esc(a[2])}</td></tr>`).join('')}</tbody></table></div>`
+        : `<div class="empty">No changes to their plan in 30 days.</div>`) +
+      win('fleet_jobs', 'their computers, last 24 h', P.jobs.length ? `<div class="scroll-y u-mini"><table class="tbl tight"><tbody>${P.jobs.map(j => `<tr><td><b>${j[0]}</b></td><td>${j[1]}</td><td>${tag(st[j[2]] || 'mute', j[2])}</td><td>${j[3]}</td><td style="white-space:nowrap">${j[4]}</td></tr>`).join('')}</tbody></table></div><div class="foot-in"><a class="hi" href="jobs.html" title="The whole queue, and why a job is waiting.">all jobs</a></div>`
+        : `<div class="empty">No fleet jobs on their computers in 24 h.</div>`) +
+      win('signed_in_browsers', `<b>${P.sessions.length}</b>`, P.sessions.length ? `<table class="tbl stack-sm"><thead><tr><th>signed in</th><th>last seen</th><th>from</th></tr></thead><tbody>${P.sessions.map(s => `<tr><td data-label="signed in">${s[0]}</td><td data-label="last seen">${s[1]}</td><td data-label="from">${esc(s[2])}</td></tr>`).join('')}</tbody></table>`
+        : `<div class="empty">No browser signed in.</div>`) +
+      win('report_tokens', `<b>${P.tokens.length}</b>`, P.tokens.length ? `<table class="tbl stack-sm"><thead><tr><th>label</th><th>created</th><th title="the last report signed with it">last used</th></tr></thead><tbody>${P.tokens.map(t => `<tr><td data-label="label">${esc(t[0] || '-')}</td><td data-label="created">${t[1]}</td><td data-label="last used">${t[2]}</td></tr>`).join('')}</tbody></table>`
+        : `<div class="empty">No token of their own: mint one on Settings, Users.</div>`);
+  }
+
+  function render() {
+    P = mode === 'calm' ? calm(PEOPLE[who]) : JSON.parse(JSON.stringify(PEOPLE[who]));
+    renderHead(); renderAlarm(); renderReadouts(); renderPerson(); renderPcs(); renderHist();
+  }
+
+  // ------------------------------------------------------------ the missing-files drill-down (a dialog: nothing on the page moves)
+  document.body.insertAdjacentHTML('beforeend', `<div class="dialog-back" id="mdlg"><section class="win dialog wide" role="dialog" aria-modal="true">
+    <div class="bar"><span>┌─╡</span><span class="t" id="m-t">missing</span><span>╞</span><span class="rule"></span><span class="meta" id="m-meta"></span><span>═┐</span></div>
+    <div class="body"><div class="miss-head" id="m-head"></div><div class="tabs" id="m-tabs" role="tablist"></div><div class="miss-list scroll-y" id="m-list"></div>
+      <div class="acts"><button class="key primary" type="button" id="m-close"><span class="t">close</span></button></div></div>
+  </section></div>
+  <div class="dialog-back" id="ask"><section class="win dialog" role="dialog" aria-modal="true">
+    <div class="bar"><span>┌─╡</span><span class="t">are_you_sure</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+    <div class="body"><div id="ask-x" style="white-space:pre-line"></div>
+      <div class="acts"><button class="key quiet" type="button" id="ask-no"><span class="t">cancel</span></button><button class="key primary" type="button" id="ask-ok"><span class="t" id="ask-ok-t">ok</span></button></div></div>
+  </section></div>`);
+
+  const fname = (i, kind, slug) => {
+    const base = slug.includes('elections') ? 'Elections' : slug.includes('civil') ? 'CivilDefence' : slug.includes('night') ? 'NightMarket' : slug.includes('repro') ? 'ReproRights' : slug.includes('typhoon') ? 'TyphoonPrep' : 'CIA_City';
+    const n = String(i + 1).padStart(4, '0');
+    return kind === 'folder' ? `Project Files/${base}_${['script', 'notes', 'grade', 'subs'][i % 4]}_${n}.${['docx', 'txt', 'drx', 'srt'][i % 4]}`
+      : kind === 'down' ? `Proxy/A00${1 + i % 7}_C0${String(10 + i).slice(-2)}_${n}.mov`
+      : kind === 'up' ? `Footage/Card_0${1 + i % 3}/C${n}.MP4`
+      : `${base} / Interviews / A00${1 + i % 4}_C0${String(10 + i).slice(-2)}`;
+  };
+  let MISS = null;
+  function openMiss(m, slug) {
+    const pc = P.pcs.find(x => x.m === m), r = pc.ticked.find(x => x.slug === slug);
+    MISS = { pc, r, tabs: [
+      ['folder', 'project files not here', r.folder ? r.folder[1] : 0, 50, 'The shared project files (scripts, notes, Resolve files, subtitles) the server has and this computer\'s copy lacks. The sync engine brings them; the list refreshes every minute.'],
+      ['down', 'proxies not here', r.down ? r.down[2] : 0, 50, 'Edit copies on the server that have not come down to this computer yet.'],
+      ['up', 'originals not on the server', r.up[1] || 0, 50, 'Video originals on this computer that the server does not have yet. Until they go up they exist on one disk only.'],
+      ['res', 'offline in Resolve', r.off || 0, 200, 'Clips in this computer\'s Resolve bins whose file Resolve cannot find.'],
+    ].filter(t => t[2] > 0) };
+    $('#m-t').textContent = `missing_on_${m}`;
+    $('#m-meta').textContent = r.label;
+    $('#m-head').innerHTML = `<b>${esc(r.label)}</b> on <b>${m}</b> (${who}). <span class="muted">Refreshed 1 min ago.</span>`;
+    $('#m-tabs').innerHTML = MISS.tabs.map((t, i) => `<button type="button" role="tab" data-mtab="${i}" aria-selected="${i === 0}" title="${esc(t[4])}">${t[1]}<span class="c">${t[2]}</span></button>`).join('');
+    showTab(0);
+    $('#mdlg').classList.add('open'); $('#m-close').focus();
+  }
+  function showTab(i) {
+    const [kind, , n, cap] = MISS.tabs[i];
+    document.querySelectorAll('[data-mtab]').forEach(b => b.setAttribute('aria-selected', String(+b.dataset.mtab === i)));
+    const shown = Math.min(n, cap);
+    const size = k => kind === 'folder' ? (12 + (k * 37) % 900) + ' KB' : kind === 'res' ? '' : ((kind === 'up' ? 3.1 : 0.05) * (1 + (k % 5))).toFixed(1) + ' GB';
+    $('#m-list').innerHTML = Array.from({ length: shown }, (_, k) => `<div class="row"><span class="p" title="${esc(fname(k, kind, MISS.r.slug))}">${esc(fname(k, kind, MISS.r.slug))}</span><span class="z">${size(k)}</span></div>`).join('') +
+      (n > cap ? `<div class="cap">… and ${n - cap} more (the list is capped at ${cap})</div>` : '');
+    $('#m-list').scrollTop = 0;
+  }
+  $('#m-close').onclick = () => $('#mdlg').classList.remove('open');
+  $('#mdlg').addEventListener('click', e => { if (e.target.id === 'mdlg') $('#mdlg').classList.remove('open'); const t = e.target.closest('[data-mtab]'); if (t) showTab(+t.dataset.mtab); });
+
+  let yes = null;
+  const closeAsk = ok => { $('#ask').classList.remove('open'); const f = ok ? yes : null; yes = null; if (f) f(); };
+  const ask = (text, okLabel, onYes) => { yes = onYes; $('#ask-x').textContent = text; $('#ask-ok-t').textContent = okLabel; $('#ask').classList.add('open'); $('#ask-ok').focus(); };
+  $('#ask-no').onclick = () => closeAsk(false);
+  $('#ask-ok').onclick = () => closeAsk(true);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeAsk(false); $('#mdlg').classList.remove('open'); } });
+
+  document.addEventListener('click', e => {
+    const m = e.target.closest('[data-miss]');
+    if (m) { const [pc, slug] = m.dataset.miss.split('|'); openMiss(pc, slug); return; }
+    const t = e.target.closest('[data-tick]');
+    if (t) { const [pc, label] = t.dataset.tick.split('|'); ask(`Tick ${label} on ${pc}?\n\nIts missing proxies come down and its new originals go up, on this computer only.`, 'tick it', () => toast(`${label} ticked on ${pc}`)); return; }
+    const d = e.target.closest('[data-do]');
+    if (!d) return;
+    if (d.dataset.do === 'suspend') ask(`Pause syncing for ${who}? Their computers are turned away when they report and their projects are unshared. Their sync plan is kept and resume puts it back.`, 'suspend', () => { PEOPLE[who].suspended = ['owen', 'just now', 'paused from this page']; render(); toast(`${who} suspended`); });
+    if (d.dataset.do === 'resume') { delete PEOPLE[who].suspended; render(); toast(`${who} resumed: projects come back on the next cycle`); }
+    if (d.dataset.do === 'signout') ask(`Sign ${who} out of every browser? Their computers keep syncing.`, 'sign out', () => toast(`${who} signed out of every browser`));
+  });
+  document.addEventListener('change', e => {
+    if (e.target.id === 'marknew') document.body.classList.toggle('fl-marknew', e.target.checked);
+    if (e.target.id === 'who') { who = e.target.value; try { history.replaceState(null, '', '?u=' + who + location.hash); } catch (err) { /* file:// */ } render(); }
+  });
+
+  const q = new URLSearchParams(location.search).get('u');
+  if (PEOPLE[q]) who = q;
+  CC.page({ page: 'users', onData: m => { mode = m; render(); } });
+})();
+</script>
+</body>
+</html>

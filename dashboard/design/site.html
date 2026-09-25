@@ -1,0 +1,903 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: site settings</title>
+<!-- The design bench (dashboard/design/README.md): Settings > SITE.
+     Mirrors templates/admin_settings.html (ui.page_admin_settings,
+     /admin/settings): the three field groups (YOUR STUDIO, THE TREE, HOW
+     EDITORS CONNECT - ADVANCED) with every FIELD_HINT, the auto-derived
+     fields (Tailscale sidecar / the site's Syncthing) and the env hint, NAS
+     KIND, template + shared asset folders, the feature flags, the b-roll
+     indexing model; static/site_settings.js (AI PROVIDERS over
+     ai_providers.py + cli_tools.py; EXPORT / IMPORT with its dry-run
+     confirm; CHANGE HISTORY + UNDO LAST CHANGE); and
+     partials/android_settings.html (ANDROID).
+     Round 2 (owner, 2026-09-25): AI providers shows only what is set up, a
+     manage menu per row, and ADD NEW opens a picker, then a short wizard
+     for the provider picked (API key: get, paste, test; CLI: allow,
+     install, sign in, test, with the type-its-full-path fallback). Tabs and
+     wizard steps keep their height so nothing moves.
+     Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/system.css">
+</head>
+<body data-page="site">
+
+<div class="shell">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> SITE SETTINGS</span></h1>
+        <div class="sub">Who this deployment is: names, tree, NAS and sync settings every editor's companion reads. <b>Changes apply on save</b>, no redeploy needed.</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="tabs" role="tablist" id="tabs">
+        <button type="button" role="tab" data-tab="site" aria-selected="true" title="Your studio's names, where the footage lives, the NAS and how editors connect. One form with one save.">studio and tree</button>
+        <button type="button" role="tab" data-tab="features" title="Optional parts of the product, switched on for this site only, and which model indexes b-roll.">features</button>
+        <button type="button" role="tab" data-tab="ai" title="Which AI answers the YouTube downloader, Timeline Cards and the server check, and adding a new one.">ai providers</button>
+        <button type="button" role="tab" data-tab="history" title="Download or paste the whole settings file, and see or undo recent changes.">export and history</button>
+        <button type="button" role="tab" data-tab="android" title="The proof the Android app needs before it opens without a browser address bar.">android</button>
+      </div>
+
+      <div class="tab-host" id="tab-host">
+      <form id="settings-form" autocomplete="off">
+        <!-- =========================================== studio and tree -->
+        <div class="stack" data-panel="site" style="margin-top:22px">
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">your_studio</span><span>╞</span><span class="rule"></span><span class="meta">header, login page, every tray</span><span>═┐</span></div>
+            <div class="body form">
+              <div class="lede">Who this deployment is. These names appear in the header, on the login page and in every editor's tray.</div>
+              <div id="g-studio" class="form"></div>
+            </div>
+          </section>
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">the_tree</span><span>╞</span><span class="rule"></span><span class="meta">server and every editor's disk</span><span>═┐</span></div>
+            <div class="body form">
+              <div class="lede">Where the footage lives, on the server and on every editor's computer.</div>
+              <div id="g-tree" class="form"></div>
+            </div>
+          </section>
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">how_editors_connect</span><span>╞</span><span class="rule"></span><span class="meta"><span class="red" title="Set once when the server was installed. Change these only if support asks you to.">advanced</span></span><span>═┐</span></div>
+            <details class="fold">
+              <summary title="Open the seven fields that say how editors' computers reach this server.">show the seven connection fields <span class="dim">Set up once when the server was installed. A wrong value here stops syncing for everybody.</span></summary>
+              <div class="body form" id="g-connect" style="border-top:1px dashed var(--line)"></div>
+            </details>
+          </section>
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">nas_and_folders</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+            <div class="body form">
+              <div class="form-row"><label class="lbl" for="nas_kind" title="The brand of storage server (NAS) this dashboard runs on. Installers read it to set editors' computers up the right way.">NAS kind<small>Which NAS this dashboard drives. Published to installers in the site manifest.</small></label>
+                <select class="sel" id="nas_kind" style="max-width:260px"><option value="truenas">truenas</option><option value="synology">synology</option></select></div>
+              <div class="form-row"><label class="lbl" for="template_folders" title="The folders every new project is created with.">Template folders<small>comma-separated</small></label>
+                <input class="inp" id="template_folders"></div>
+              <div class="form-row"><label class="lbl" for="shared_asset_folders" title="Folders inside the tree that every editor gets, whatever projects they ticked, such as the LUT library.">Shared asset folders<small>comma-separated paths inside the tree</small></label>
+                <input class="inp" id="shared_asset_folders"></div>
+            </div>
+          </section>
+          <div class="foot-keys"><button class="key primary" type="submit" title="Saves every field on this tab and the features tab. Editors' companions pick it up on their next report."><span class="t">Save</span><span class="busy-t"><span class="spin"></span> saving</span><span class="kbd">S</span></button><span class="res save-res" role="status" aria-live="polite"></span></div>
+        </div>
+
+        <!-- ================================================== features -->
+        <div class="stack" data-panel="features" hidden style="margin-top:22px">
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">features</span><span>╞</span><span class="rule"></span><span class="meta">published to every companion</span><span>═┐</span></div>
+            <div class="body form" id="features"></div>
+          </section>
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">b-roll_indexing_model</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+            <div class="body form">
+              <div class="lede">The indexer on your wired computer reads this choice from the dashboard; it can be overridden per computer in the indexer's config.</div>
+              <label class="radio" title="The smaller model. It fits more graphics cards and indexes about twice as fast."><input type="radio" name="tier" value="good"><span class="g"></span><span class="l"><b>Good</b><span class="dim">: Qwen3-VL 4B. Needs an NVIDIA GPU with 8 GB <span title="VRAM is the graphics card's own memory. The model has to fit in it.">VRAM</span> (or Apple Silicon with 16 GB); about 20 s per clip on an RTX 3080.</span></span></label>
+              <label class="radio" title="The larger model. Reads on-screen text a little better, at half the speed."><input type="radio" name="tier" value="best"><span class="g"></span><span class="l"><b>Best</b><span class="dim">: Qwen3-VL 8B. Needs 12 GB VRAM (or Apple Silicon with 24 GB); a little sharper on on-screen text and vocabulary, about 2x slower.</span></span></label>
+            </div>
+          </section>
+          <div class="foot-keys"><button class="key primary" type="submit" title="Saves every field on this tab and the studio and tree tab."><span class="t">Save</span><span class="busy-t"><span class="spin"></span> saving</span><span class="kbd">S</span></button><span class="res save-res" role="status" aria-live="polite"></span></div>
+        </div>
+      </form>
+
+      <!-- ================================================ ai providers -->
+      <div class="stack" data-panel="ai" hidden style="margin-top:22px" id="ai">
+        <p class="lede">Which AI answers the things on this server that ask one. When nothing is pinned, the <b>first available</b> provider in the order is used. Only the providers you have set up are listed; <b>add new</b> walks you through another.</p>
+
+        <section class="win">
+          <div class="bar"><span>┌─╡</span><span class="t">who_answers</span><span>╞</span><span class="rule"></span><span class="meta" id="who-meta"></span><span>═┐</span></div>
+          <div class="who">
+            <div id="who-lines"></div>
+            <div class="pinrow">
+              <label class="lbl" for="pin" title="Pinning makes one provider answer everything, whatever the order says. Auto uses the first one that works.">prefer</label>
+              <select class="sel" id="pin"></select>
+              <div class="hint">A pinned provider that is not available is a refusal, not a fallback: nothing else is used in its place.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="win">
+          <div class="bar"><span>┌─╡</span><span class="t">your_ai_providers</span><span>╞</span><span class="rule"></span><span class="meta" id="prov-meta"></span><span>═┐</span></div>
+          <div class="plist" id="plist"></div>
+          <div class="body split" id="add"></div>
+          <div class="body split cli-line" id="cli-line"></div>
+        </section>
+      </div>
+
+      <!-- =========================================== export and history -->
+      <div class="stack" data-panel="history" hidden style="margin-top:22px">
+        <div class="cols-2">
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">export_import</span><span>╞</span><span class="rule"></span><span class="meta" title="The site's settings as one text file, in the TOML format.">site.toml</span><span>═┐</span></div>
+            <div class="body form">
+              <div class="lede">site.toml-shaped text, for a NAS migration or a backup.</div>
+              <div><a class="key" href="#" data-busy="site.toml downloaded" title="Downloads every site setting as one text file. No password or AI key is in it."><span class="t">Export site.toml</span><span class="busy-t"><span class="spin"></span> exporting</span></a></div>
+              <textarea class="area" id="import-text" rows="8" placeholder="paste a site.toml here"></textarea>
+              <div class="foot-keys"><button class="key" type="button" id="import-key" title="Reads the pasted text, shows you every setting it would change and asks first. Nothing changes until you say yes."><span class="t">Import</span><span class="busy-t"><span class="spin"></span> reading</span></button><span class="res" id="import-res" role="status" aria-live="polite"></span></div>
+            </div>
+          </section>
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">change_history</span><span>╞</span><span class="rule"></span><span class="meta" id="hist-meta"></span><span>═┐</span></div>
+            <div class="body form">
+              <div class="lede">The last few times a save or an import changed these settings. Undo puts back the values from just before the most recent one.</div>
+              <div id="hist" style="min-height:190px"></div>
+              <div class="foot-keys"><button class="key" type="button" id="undo-key" title="Puts back the values from just before the most recent save or import. Asks first."><span class="t">Undo last change</span></button><span class="res" id="undo-res" role="status" aria-live="polite"></span></div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- ===================================================== android -->
+      <div class="stack" data-panel="android" hidden style="margin-top:22px">
+        <section class="win">
+          <div class="bar"><span>┌─╡</span><span class="t">android</span><span>╞</span><span class="rule"></span><span class="meta" title="The address Android reads to check that this site and the app belong together.">/.well-known/assetlinks.json</span><span>═┐</span></div>
+          <div class="body form">
+            <div class="lede">The app wrapper's proof that this site owns it. Without it the installed app opens with a browser URL bar across the top and nothing says why. Build the app with your supplier's Android notes, paste what the build printed, then reopen the app.</div>
+            <div class="form-row"><label class="lbl" for="pkg" title="The app's own name inside Android, which the build printed.">Package name</label>
+              <div><input class="inp" id="pkg" placeholder="net.ts.your-tailnet.your-host.ccsync"><div class="hint">The application id the APK was built with. Blank turns the app off: this site then serves an empty statement.</div></div></div>
+            <div class="form-row"><label class="lbl" for="fps" title="The fingerprint of the certificate the app was signed with: a long code of letter and number pairs.">SHA-256 cert fingerprints<small>one per line</small></label>
+              <div><textarea class="area" id="fps" rows="4" placeholder="AA:BB:CC:...:FF"></textarea><div class="hint">32 colon-separated hex pairs, as keytool -list and Play Console print them. Keep the OLD key here while you hand over to a new one: dropping it mid-rollout breaks every installed copy.</div></div></div>
+            <div class="foot-keys">
+              <button class="key primary" type="button" id="and-save" title="Saves the package name and fingerprints. The app picks them up when it is next opened."><span class="t">Save</span></button>
+              <button class="key" type="button" id="and-check" title="Reads back what this site is serving right now, as the app would see it."><span class="t">Check</span><span class="busy-t"><span class="spin"></span> reading</span></button>
+              <span class="hint" style="margin:0">Check reads back what this site is serving at /.well-known/assetlinks.json.</span>
+            </div>
+          </div>
+          <div id="and-out"></div>
+        </section>
+      </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-back" id="dlg">
+  <section class="win dialog" role="dialog" aria-modal="true" aria-labelledby="dlg-t">
+    <div class="bar"><span>┌─╡</span><span class="t" id="dlg-t">confirm</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+    <div class="body">
+      <p id="dlg-text"></p>
+      <div class="acts"><button class="key quiet" type="button" id="dlg-no"><span class="t">cancel</span></button><button class="key primary" type="button" id="dlg-yes"><span class="t">Yes</span></button></div>
+    </div>
+  </section>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, tag, meter, toast } = CC;
+  const $ = s => document.querySelector(s);
+  const now = () => new Date().toLocaleTimeString('en-GB', { hour12: false });
+  // a key keeps its width while its label changes (round 2: nothing moves)
+  const hold = k => { if (k) k.style.minWidth = k.offsetWidth + 'px'; };
+
+  // ---------------------------------------------------------- the fields
+  // [key, label, hint] in the three groups, with the product's own hints.
+  const GROUPS = {
+    'g-studio': [
+      ['org_name', 'Org name', "Your company's full name, shown in the header, on the login page and in every editor's tray. Example: Northlight Films Ltd."],
+      ['org_short', 'Short name', 'The short form used where space is tight (the header, a browser tab). Example: Northlight.'],
+      ['product_name', 'Product name', "What this software is called in your fleet. Leave it as the product's own name unless you have a reason. Example: CC Sync."],
+      ['brand_logo', 'Tray logo', "Your studio's mark in every editor's tray and window title. Blank wears the product's own. A bare name (cc_mark_white.png) selects a mark the companion build already ships; anything with a slash is a path on the EDITOR's computer. It must be WHITE on transparent: the tray tints it to carry sync status, so a pre-coloured logo comes out a solid blob."],
+    ],
+    'g-tree': [
+      ['tree_name', 'Tree name', "The name of the top folder that holds every project on the server, and the same folder on every editor's disk. Changing it does not move anything. Example: Creators_Club."],
+      ['canonical_prefix', 'Drive letter', "The drive every editor's Resolve sees the footage at. It is written into every clip path, so it must be the same on every computer. Example: P:\\"],
+      ['remote_root', 'Remote root', 'The full path to the tree on the server itself, as the server sees it. Example: /mnt/tank/creators/Creators_Club'],
+      ['smb_unc', 'SMB UNC', 'The Windows network address editors map that drive to. Example: \\\\nas\\creators'],
+      ['dashboard_url', 'Dashboard URL', 'The address of THIS dashboard. Example: https://nas.example.ts.net'],
+    ],
+    'g-connect': [
+      ['sftp_host', 'SFTP host', 'The address uploads and proxy downloads connect to. Usually the same machine as this dashboard. Example: nas.example.ts.net'],
+      ['sftp_port', 'SFTP port', 'The port for that connection. 22 unless your server was set up differently. Example: 22'],
+      ['sftp_chunk_size', 'SFTP chunk size', 'How much data is sent at a time. Bigger is faster on a good link and worse on a poor one. Leave it alone unless we ask. Example: 64M'],
+      ['sftp_concurrency', 'SFTP concurrency', 'How many transfers run at once. Leave it alone unless we ask. Example: 8'],
+      ['sftp_shell_type', 'SFTP shell type', 'Which kind of shell the server offers. Leave it as it was set up; a wrong value stops every upload. Example: unix'],
+      ['rclone_remote', 'Rclone remote', 'The internal name of the upload connection. It is generated for you; change it only if we ask. Example: ccnas'],
+      ['nas_syncthing_id', 'NAS Syncthing ID', "The server's own sync identity, so editors' computers know they are talking to the right one. It is filled in for you when the server is set up."],
+    ],
+  };
+  // Plain-words glosses for the labels that are jargon (the hint under each
+  // field already says what to type).
+  const LABEL_TIPS = {
+    smb_unc: 'SMB is Windows file sharing. A UNC is its address, written \\\\server\\share.',
+    canonical_prefix: 'Resolve stores this letter inside every clip path, which is why every computer must use the same one.',
+    sftp_host: 'SFTP is the secure file transfer that uploads and proxy downloads use.',
+    sftp_port: 'SFTP is the secure file transfer that uploads and proxy downloads use.',
+    sftp_chunk_size: 'SFTP is the secure file transfer that uploads and proxy downloads use.',
+    sftp_concurrency: 'SFTP is the secure file transfer that uploads and proxy downloads use.',
+    sftp_shell_type: 'SFTP is the secure file transfer that uploads and proxy downloads use.',
+    rclone_remote: 'Rclone is the program on each computer that runs uploads.',
+    nas_syncthing_id: 'Syncthing is the sync engine that runs on the server and on every computer.',
+  };
+  const FLAGS = { dashboard_url: 'This must be exactly the address editors type in their browser, or Send to Resolve stops working.' };
+  const VALUES = {
+    org_name: 'Harbour Lane Films', org_short: 'Harbour Lane', product_name: 'CC Sync', brand_logo: 'cc_mark_white.png',
+    tree_name: 'Harbour_Lane', canonical_prefix: 'P:\\', remote_root: '/mnt/tank/studio/Harbour_Lane', smb_unc: '\\\\nas\\studio',
+    dashboard_url: 'https://nas.example.ts.net', sftp_host: 'nas.example.ts.net', sftp_port: '22', sftp_chunk_size: '64M',
+    sftp_concurrency: '8', sftp_shell_type: 'unix', rclone_remote: 'ccnas', nas_syncthing_id: 'NASX7Q2-4TB3KLM-QW7ZP2D-RR5CVNB-H8Y2WQE-M3TZXJK-L9D4PFA-2GHQ7VU',
+  };
+  const AUTO_BUSY = {
+    dashboard_url: 'the bundled Tailscale sidecar is signed in as nas.example.ts.net',
+    nas_syncthing_id: "this site's Syncthing reports device id NASX7Q2...",
+  };
+  const ENV_BUSY = { dashboard_url: 'http://100.64.0.12:8480' };
+
+  const FEATURES = [
+    ['youtube_download', 'YouTube downloader', '', 'Turns on the YouTube page and its download worker for this site.'],
+    ['youtube_unblock', 'YouTube anti-automation bypass', '', "Adds the helpers that get past YouTube's bot checks. Only needed when YouTube refuses downloads."],
+    ['auto_update', 'Automatic companion updates', "editors' computers take a newer published build without anyone clicking", 'A computer never goes backwards and never updates in the middle of a popup.'],
+    ['ai_cli_providers', 'AI CLI providers', 'set on AI providers, where accepting the notice turns it on', 'Lets this server use Claude Code or Codex. It is switched on from the AI providers tab, after its notice.', true],
+    ['ai_cli_auto_update', 'Keep Claude Code up to date', "once a day, this server installs the publisher's newer Claude Code (checked against the publisher's checksum) so new Claude models work without anyone clicking update", 'Only does anything once Claude Code is installed from the AI providers tab.'],
+  ];
+
+  function drawFields(busy) {
+    const auto = busy ? AUTO_BUSY : {}, env = busy ? ENV_BUSY : {};
+    Object.entries(GROUPS).forEach(([id, fields]) => {
+      $('#' + id).innerHTML = fields.map(([k, label, hint]) => `
+        <div class="form-row"><label class="lbl" for="f-${k}" ${LABEL_TIPS[k] ? `title="${esc(LABEL_TIPS[k])}"` : ''}>${esc(label)}${auto[k] ? `<small><span class="hi" title="Read from the running server, so the box is locked. Change the thing it comes from instead.">auto-derived</span>: ${esc(auto[k])}</small>` : ''}</label>
+          <div><input class="inp" id="f-${k}" name="${k}" value="${esc(VALUES[k])}" ${auto[k] ? 'readonly style="color:var(--text-2);border-bottom-color:var(--line)"' : ''}>
+          <div class="hint">${esc(hint)}</div>
+          ${FLAGS[k] ? `<div class="hint" style="color:var(--warn)">&#9650; ${esc(FLAGS[k])}</div>` : ''}
+          ${env[k] ? `<div class="hint" title="A value set where the server was deployed. The saved value above wins over it.">env DASH_SITE_${k.toUpperCase()}=${esc(env[k])} (not applied: the value above is what is live; edit it, or import a site.toml, to change it)</div>` : ''}</div></div>`).join('');
+    });
+    $('#nas_kind').value = 'truenas';
+    $('#template_folders').value = 'Footage, Proxy, Audio, Project, Exports';
+    $('#shared_asset_folders').value = busy ? 'Assets/Luts, Assets/Music' : 'Assets/Luts';
+    const on = busy ? { youtube_download: 1, youtube_unblock: 1, auto_update: 1, ai_cli_providers: 1, ai_cli_auto_update: 1 } : {};
+    $('#features').innerHTML = FEATURES.map(([k, label, note, tip, locked]) => `
+      <label class="check" title="${esc(tip)}"><input type="checkbox" name="features.${k}" ${on[k] ? 'checked' : ''} ${locked ? 'disabled' : ''}><span class="g"></span>
+        <span class="l">${esc(label)}${note ? `<span class="dim"> - ${locked ? 'set on <a class="hi" href="#" data-goto="ai">AI providers</a>, where accepting the notice turns it on' : esc(note)}</span>` : ''}</span></label>`).join('');
+    document.querySelectorAll('input[name=tier]').forEach(r => { r.checked = r.value === (busy ? 'best' : 'good'); });
+  }
+
+  // =====================================================================
+  // AI providers (ai_providers.PROVIDER_ORDER, labels and kinds; the setup
+  // steps are cli_tools.py's; every refusal is the product's own sentence)
+  // =====================================================================
+  const CAT = [
+    { name: 'claude_code', rank: 1, label: 'Claude Code', kind: 'cli', bin: 'claude', login: 'claude auth login', vendor: 'Anthropic', dir: 'claude-code',
+      what: "Anthropic's own command-line tool, signed in with your Claude subscription.",
+      needs: 'Spends your Claude subscription, not a bill per call. Needs CLI tools allowed and about 300 MB on this server. The only one the server check can use.',
+      from: "from Anthropic (downloads.claude.ai), checked against the sha256 in Anthropic's own release manifest before anything runs",
+      ver: '2.1.240', next: '2.1.241', mib: 313.2 },
+    { name: 'anthropic_api', rank: 2, label: 'Claude API', kind: 'api', env: 'ANTHROPIC_API_KEY', file: 'anthropic_api_key', vendor: 'Anthropic', prefix: 'sk-ant-',
+      what: 'A key from the Anthropic Console. The supported path: nothing is installed.',
+      needs: 'Pay per use, billed to your own Anthropic account. Answers the YouTube downloader and Timeline Cards.',
+      site: 'console.anthropic.com', url: 'https://console.anthropic.com/settings/keys',
+      get: ['Sign in at <b>console.anthropic.com</b> with the account that should pay for it.', 'Open <b>Settings, API keys</b> and press <b>Create key</b>. Name it after this server so you can tell it apart later.', 'Copy the key. It starts <b>sk-ant-</b> and Anthropic shows it only once.'] },
+    { name: 'codex', rank: 3, label: 'Codex', kind: 'cli', bin: 'codex', login: 'codex login', vendor: 'OpenAI', dir: 'codex',
+      what: "OpenAI's own command-line tool, signed in with your ChatGPT subscription.",
+      needs: 'Spends your ChatGPT subscription. Needs CLI tools allowed. YouTube downloader only: Timeline Cards is written for Claude.',
+      from: "from OpenAI's releases on github.com/openai/codex, checked against the release's own codex-package_SHA256SUMS before anything runs",
+      ver: '0.63.0', next: '0.64.0', mib: 41.7 },
+    { name: 'openai_api', rank: 4, label: 'OpenAI API', kind: 'api', env: 'OPENAI_API_KEY', file: 'openai_api_key', vendor: 'OpenAI', prefix: 'sk-',
+      what: 'A key from the OpenAI platform.',
+      needs: 'Pay per use, billed to your own OpenAI account. YouTube downloader only.',
+      site: 'platform.openai.com', url: 'https://platform.openai.com/api-keys',
+      get: ['Sign in at <b>platform.openai.com</b> with the account that should pay for it.', 'Open <b>API keys</b> and press <b>Create new secret key</b>.', 'Copy the key. It starts <b>sk-</b> and is shown only once.'] },
+    { name: 'deepseek_api', rank: 5, label: 'DeepSeek API', kind: 'api', env: 'DEEPSEEK_API_KEY', file: 'deepseek_api_key', vendor: 'DeepSeek', prefix: 'sk-',
+      what: 'A key from the DeepSeek platform.',
+      needs: 'Pay per use, billed to your own DeepSeek account. YouTube downloader only.',
+      site: 'platform.deepseek.com', url: 'https://platform.deepseek.com/api_keys',
+      get: ['Sign in at <b>platform.deepseek.com</b> with the account that should pay for it.', 'Open <b>API keys</b> and press <b>Create new API key</b>.', 'Copy the key. It starts <b>sk-</b> and is shown only once.'] },
+  ];
+  const BY = Object.fromEntries(CAT.map(c => [c.name, c]));
+  const CLAUDE = ['claude_code', 'anthropic_api'];
+  const STATUS = {
+    available: ['ok', 'available', 'It works: this provider can answer right now.'],
+    not_configured: ['err', 'not configured', 'No key is stored for it yet.'],
+    not_installed: ['err', 'not installed', 'The tool is not on this server yet.'],
+    not_signed_in: ['warn', 'not signed in', 'The tool is installed but has no account signed in, so it cannot answer yet.'],
+    disabled_by_site: ['mute', 'disabled by site', 'CLI tools are turned off for this site, so this one is not even checked.'],
+    unknown: ['warn', 'unknown', 'Not checked since the server started. Test it to find out.'],
+  };
+  const NOTICE_TITLE = 'This uses YOUR subscription, on a shared server';
+  const NOTICE = [
+    'Claude Code and Codex are signed in with a personal Claude or ChatGPT subscription. Every YouTube search this dashboard runs, for every editor, will be spent on the account you are about to sign in. Using a personal subscription to power a service may breach its terms: that is your decision, not ours.',
+    "CC Sync does not ship, bundle or update either tool. When you click INSTALL, this container downloads the publisher's own build, from the publisher's own servers, and checks it against the publisher's own checksum before it is used. Nothing is installed until you click.",
+    'The supported alternative is an API key (Claude API, OpenAI, DeepSeek) entered on this page, billed to your own account, with no subscription terms in question.',
+  ];
+  const NOTICE_CHECK = 'I understand this uses my own subscription for a shared server';
+  const TOS = "Claude Code and Codex are signed in with a personal Claude or ChatGPT subscription. Using a personal subscription to power a service may breach its terms: that is your decision, not ours. Neither CLI is shipped, bundled or updated by CC Sync. SET UP downloads the publisher's own build, from the publisher's own servers, at your click, and checks it against the publisher's own checksum. The API keys above are the supported path.";
+
+  const mask = v => !v ? '' : v.length < 12 ? '\u2026' : v.slice(0, 3) + '\u2026' + v.slice(-4);
+  const blank = () => ({ key: '', src: '', installed: false, via: '', ver: '', signed: false, account: '', path: '', test: null });
+  let S = null;          // the site's AI state
+  let add = 'idle';      // idle | pick | wiz
+  let W = null;          // the open wizard
+  let menuOpen = '';     // provider whose manage menu is open
+  let flash = '';        // row to highlight once
+  let dataMode = 'busy';
+
+  function seed(busy) {
+    S = { cliOn: busy, pin: 'auto', p: Object.fromEntries(CAT.map(c => [c.name, blank()])) };
+    if (busy) {
+      Object.assign(S.p.claude_code, { installed: true, via: 'setup', ver: '2.1.240' });
+      Object.assign(S.p.anthropic_api, { key: 'sk-ant-api03-Zx81...q7Fd', src: 'file' });
+      Object.assign(S.p.deepseek_api, { key: 'sk-4f0e2b...9a2c', src: 'env' });
+    }
+  }
+  const status = n => {
+    const c = BY[n], p = S.p[n];
+    if (c.kind === 'api') return p.key ? 'available' : 'not_configured';
+    if (!S.cliOn) return 'disabled_by_site';
+    if (!p.installed) return 'not_installed';
+    return p.signed ? 'available' : 'not_signed_in';
+  };
+  const isSetUp = n => BY[n].kind === 'api' ? !!S.p[n].key : S.p[n].installed;
+  const avail = n => status(n) === 'available';
+  const ord = n => ['1st', '2nd', '3rd', '4th', '5th'][BY[n].rank - 1];
+
+  // ai_providers.resolve_provider, word for word
+  function resolve() {
+    if (S.pin !== 'auto') {
+      if (avail(S.pin)) return { name: S.pin, label: BY[S.pin].label, reason: 'pinned by an admin', pinned: true };
+      return { name: '', reason: `${BY[S.pin].label} is pinned but not available. Nothing else will be used in its place: clear the pin to fall back to the chain.`, pinned: true };
+    }
+    const up = CAT.filter(c => avail(c.name));
+    if (!up.length) return { name: '', reason: 'no provider has a working credential' };
+    const first = up[0];
+    const others = up.slice(1).map(c => c.label);
+    return { name: first.name, label: first.label, reason: others.length ? `first available in the chain (ahead of ${others.join(', ')})` : 'first available in the chain' };
+  }
+
+  function whoLines() {
+    const r = resolve();
+    const yt = r.name
+      ? `<span class="v"><b>${esc(r.label)}</b><span class="why">${esc(r.reason)}</span></span>`
+      : `<span class="v bad"><b>no usable AI provider</b><span class="why" style="color:var(--err)">${esc(r.reason)}</span></span>`;
+    const cards = !r.name
+      ? `<span class="v bad"><b>nothing to answer</b><span class="why" style="color:var(--err)">${esc(r.reason)}</span></span>`
+      : CLAUDE.includes(r.name)
+        ? `<span class="v"><b>${esc(r.label)}</b><span class="why">the same answer, and it is Claude</span></span>`
+        : `<span class="v bad"><b>refused</b><span class="why" style="color:var(--err)">this site's AI provider is ${esc(r.label)}, and Timeline Cards' translate, semantic search and summaries are written for Claude. Set an ANTHROPIC_API_KEY (Settings -&gt; AI providers), or pin Claude.</span></span>`;
+    const cc = S.p.claude_code;
+    const check = !S.cliOn
+      ? `<span class="v"><b>cannot run</b><span class="why">Claude Code is switched off on this server (the site feature ai_cli_providers)</span></span>`
+      : !cc.installed
+        ? `<span class="v"><b>cannot run</b><span class="why">Claude Code is not installed on this server (Settings, AI providers)</span></span>`
+        : cc.signed
+          ? `<span class="v"><b>Claude Code</b><span class="why">always Claude Code, whatever the order or the pin say</span></span>`
+          : `<span class="v"><b>Claude Code</b><span class="why" style="color:var(--warn)">installed but not signed in: its runs fail and mail a plain summary until it is</span></span>`;
+    $('#who-lines').innerHTML = `
+      <div class="ln"><span class="k" title="The YouTube page asks an AI twice per search: once to write search terms, once to judge which results are relevant.">YouTube downloader<small>search terms, then relevance</small></span>${yt}</div>
+      <div class="ln"><span class="k" title="Timeline Cards' translations, transcript search and section summaries. They only run on Claude (Claude Code or the Claude API).">Timeline Cards<small>translate, semantic search, summaries</small></span>${cards}</div>
+      <div class="ln"><span class="k" title="The scheduled check that reads what is open on this server and mails you what needs a person. It is switched on under Settings, Alerts.">Server check<small>on the alerts page, when it is on</small></span>${check}</div>`;
+    $('#who-meta').innerHTML = r.pinned ? (r.name ? `pinned to <b>${esc(r.label)}</b>` : '<span class="red">pinned, not available</span>') : 'auto: first available';
+    const pin = $('#pin');
+    const opts = CAT.filter(c => isSetUp(c.name) || c.name === S.pin);
+    pin.innerHTML = `<option value="auto">auto: first available in the order</option>` + opts.map(c => `<option value="${c.name}">${c.rank}. ${esc(c.label)}${isSetUp(c.name) ? '' : ' (not set up)'}</option>`).join('');
+    pin.value = S.pin;
+  }
+
+  function useLine(n, r) {
+    const st = status(n);
+    if (st === 'disabled_by_site') return 'not used: CLI tools are off for this site';
+    if (st === 'not_signed_in') return 'not used until it is signed in';
+    if (st !== 'available') return 'not used: it cannot answer';
+    if (r.name === n) {
+      const what = CLAUDE.includes(n) ? 'YouTube downloader, Timeline Cards' : 'YouTube downloader';
+      return `${r.pinned ? 'pinned, answers' : 'in use for'} <b>${what}</b>${n === 'claude_code' && S.p.claude_code.signed ? '<b>, server check</b>' : ''}`;
+    }
+    if (r.pinned) return `standing by: ${esc(r.name ? BY[r.name].label : BY[S.pin].label)} is pinned`;
+    if (n === 'claude_code' && S.p.claude_code.signed) return 'answers the <b>server check</b>; standing by for the rest';
+    return `standing by: ${esc(r.label)} is ahead of it in the order`;
+  }
+
+  function detailLine(n) {
+    const c = BY[n], p = S.p[n];
+    if (c.kind === 'api') return p.src === 'env'
+      ? `key <b>${esc(mask(p.key))}</b>, set by the deployment (${esc(c.env)})`
+      : `key <b>${esc(mask(p.key))}</b>, stored on this server`;
+    const who = p.via === 'path' ? `your own copy at ${esc(p.path)}` : `${esc(c.label)} ${esc(p.ver)}, installed by set up`;
+    return who + (p.signed ? `, signed in as ${esc(p.account)}` : '');
+  }
+
+  function menu(n) {
+    const c = BY[n], p = S.p[n], st = status(n);
+    const b = (act, t, sub, cls) => `<button type="button" data-act="${act}" data-n="${n}" class="${cls || ''}">${t}${sub ? `<small>${sub}</small>` : ''}</button>`;
+    let h = b('test', 'Test', 'one real call, to prove it answers now');
+    h += S.pin === n ? b('unpin', 'Unpin', 'back to the order: first available answers') : b('pin', 'Pin as preferred', 'it answers everything; if it stops working nothing else is used');
+    h += '<div class="sep"></div>';
+    if (c.kind === 'api') {
+      if (p.src === 'env') h += `<div class="fixed">Set by the deployment (${esc(c.env)} in the container's environment); the value here cannot change it, and it cannot be removed from this page.</div>`;
+      else h += b('replace', 'Replace key', 'paste a new key over this one') + b('clear', 'Remove key', 'deletes the stored key from this server', 'danger');
+    } else if (st === 'disabled_by_site') {
+      h += `<div class="fixed">CLI tools are off for this site. Turn them on under the list to use it again.</div>` + b('remove', 'Remove', 'deletes it and its sign-in from this server', 'danger');
+    } else {
+      h += p.signed ? b('signout', 'Sign out', `signs ${esc(p.account)} out of it on this server`) : b('signin', 'Finish setting up: sign in', 'opens the sign-in step');
+      if (p.via === 'setup') h += b('update', 'Update', `install the publisher's newer build, checked the same way`);
+      h += b('path', p.via === 'path' ? 'Change its path' : 'Use my own copy', 'type the full path to a copy you installed yourself');
+      h += b('remove', 'Remove', 'deletes it and its sign-in from this server', 'danger');
+    }
+    return h;
+  }
+
+  function drawList() {
+    const r = resolve();
+    const set = CAT.filter(c => isSetUp(c.name));
+    $('#prov-meta').innerHTML = `<b>${set.length}</b> of 5 set up &middot; in order`;
+    $('#plist').innerHTML = set.length ? set.map(c => {
+      const n = c.name, p = S.p[n], st = STATUS[status(n)];
+      const t = p.test;
+      const testLine = !t ? '<small>&nbsp;</small>'
+        : t === 'run' ? '<small>testing...</small>'
+        : `<small class="${t.ok ? 'ok' : 'bad'}" title="${esc((t.ok ? 'OK: ' : 'FAILED: ') + t.detail)}">${t.ok ? 'test ok' : 'test failed'}, ${t.s}s</small>`;
+      return `<div class="prow ${flash === n ? 'new' : ''}" data-row="${n}">
+        <span class="rk" title="Its place in the order. With nothing pinned, the first one that works answers.">${c.rank}.</span>
+        <span class="nm"><b>${esc(c.label)}</b><small title="${c.kind === 'cli' ? 'A program installed on this server and signed in with a personal subscription.' : 'A key from the provider, billed per use to your own account.'}">${c.kind === 'cli' ? 'command-line tool' : 'api key'}</small></span>
+        <span class="st"><span title="${esc(st[2])}">${tag(st[0], st[1], st[0] === 'err')}</span>${testLine}</span>
+        <span class="dt"><span>${detailLine(n)}</span><span class="use">${useLine(n, r)}</span></span>
+        <span class="mg"><button class="key sm" type="button" data-menu="${n}" aria-expanded="${menuOpen === n}" title="Test it, pin it, and the rest of what you can do with this provider.">manage &#9662;</button></span>
+        <div class="mng ${menuOpen === n ? 'open' : ''}" role="menu">${menu(n)}</div>
+      </div>`;
+    }).join('') : `<div class="none"><b>No AI provider is set up.</b><span>The YouTube downloader cannot search, Timeline Cards cannot translate and the server check mails a plain summary. Add one below: an API key takes a minute.</span></div>`;
+    flash = '';
+  }
+
+  function drawCliLine() {
+    $('#cli-line').innerHTML = `<span title="${esc(TOS)}">CLI tools (Claude Code, Codex):</span>` + (S.cliOn
+      ? `<b>allowed for this site</b><button class="key quiet sm" type="button" id="cli-toggle" title="Stops this server using Claude Code and Codex. Nothing is uninstalled; they just stop being asked.">turn off</button>`
+      : `<b>not allowed</b><span>Adding Claude Code or Codex shows the notice and asks first.</span><button class="key quiet sm" type="button" id="cli-toggle" title="Allows Claude Code and Codex on this site. Read the notice first: it spends a personal subscription.">turn on</button>`);
+  }
+
+  // ------------------------------------------------------ add new: picker
+  function drawAdd() {
+    const left = CAT.filter(c => !isSetUp(c.name));
+    const box = $('#add');
+    if (add === 'idle' || !left.length && add === 'pick') {
+      box.innerHTML = `<div class="addrow">${left.length
+        ? `<button class="key" type="button" id="add-new" title="Pick a provider that is not set up yet, then follow its few steps.">+ add new</button><span>${left.length} more you can set up: ${left.map(c => esc(c.label)).join(', ')}</span>`
+        : '<span>All five providers are set up.</span>'}</div>`;
+      return;
+    }
+    if (add === 'pick') {
+      box.innerHTML = `<div class="wz">
+        <div class="wz-head"><h3><span class="p">+</span>add a provider</h3><div class="steps"><span class="s cur"><b>1</b>pick one</span><span class="s"><b>2</b>set it up</span></div></div>
+        <div class="pick" role="list">${left.map(c => `
+          <button type="button" data-pick="${c.name}" role="listitem" title="Set up ${esc(c.label)}: ${c.kind === 'api' ? 'get a key, paste it, test it.' : 'allow CLI tools, install, sign in, test.'}">
+            <span class="rk">${c.rank}.</span>
+            <span class="nm"><b>${esc(c.label)}</b><small>${c.kind === 'cli' ? 'command-line tool' : 'api key'}</small></span>
+            <span class="ds">${esc(c.what)}<small>${esc(c.needs)}</small></span>
+            <span class="go">&gt;</span></button>`).join('')}</div>
+        <div class="wz-foot"><span class="hint grow" style="margin:0">Listed in the order they are tried. Only the ones not set up yet are here.</span><button class="key quiet sm" type="button" data-wz="cancel">cancel</button></div>
+      </div>`;
+      return;
+    }
+    drawWizard();
+  }
+
+  // ---------------------------------------------------------- the wizard
+  const API_STEPS = ['get a key', 'paste it', 'test'];
+  const CLI_STEPS = ['allow cli tools', 'install', 'sign in', 'test'];
+  function openWizard(n, step, extra) {
+    const c = BY[n];
+    W = Object.assign({ name: n, step: step || 0, saved: false, keyErr: '', testOut: null,
+      accepted: S.cliOn, pct: 0, running: false, refused: '', fallback: false,
+      sign: 'idle', left: 300, code: '', signErr: '', mode: 'subscription', done: false, replace: false }, extra || {});
+    if (c.kind === 'cli' && step === undefined) W.step = S.cliOn ? 1 : 0;
+    add = 'wiz'; menuOpen = '';
+    drawAll();
+    const box = $('#add'); if (box && box.getBoundingClientRect().top > innerHeight - 120) box.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+
+  function stepsHtml(labels) {
+    const doneTo = W.step;
+    return `<span class="s done" data-back-pick title="Go back and pick a different provider."><b>&#10003;</b>pick</span>` + labels.map((s, i) =>
+      `<span class="s ${i < doneTo ? 'done' : ''} ${i === W.step ? 'cur' : ''}"><b>${i < doneTo ? '&#10003;' : i + 1}</b>${s}</span>`).join('');
+  }
+
+  function drawWizard() {
+    const c = BY[W.name], p = S.p[W.name];
+    const labels = c.kind === 'api' ? API_STEPS : CLI_STEPS;
+    let body = '', canNext = false, last = W.step === labels.length - 1;
+    if (c.kind === 'api') {
+      if (W.step === 0) {
+        body = `<h4><span class="n">1.</span>Get a key from ${esc(c.vendor)}</h4>
+          <ol>${c.get.map(g => `<li>${g}</li>`).join('')}</ol>
+          <div class="ctl"><a class="key sm" href="${c.url}" target="_blank" rel="noopener noreferrer" title="Opens ${esc(c.site)} in a new tab. Come back here with the key.">open ${esc(c.site)} &#8599;</a></div>
+          <p>${esc(c.needs)} Any spending limit is set there, on ${esc(c.vendor)}'s side.</p>`;
+        canNext = true;
+      } else if (W.step === 1) {
+        body = `<h4><span class="n">2.</span>${W.replace ? 'Paste the new key' : 'Paste it here'} ${W.saved ? tag('ok', 'saved') : ''}</h4>
+          <div class="ctl"><input class="inp" id="wz-key" type="password" autocomplete="off" placeholder="${W.saved ? esc(mask(p.key)) : 'paste the ' + esc(c.label) + ' key'}" aria-label="${esc(c.label)} API key">
+            <button class="key primary sm w-10" type="button" data-wz="savekey" title="Stores the key on this server. It is never shown again, only its first and last characters."><span class="t">Save key</span><span class="busy-t"><span class="spin"></span> saving</span></button></div>
+          <div class="out ${W.keyErr ? 'bad' : W.saved ? 'ok' : ''}" id="wz-keyout">${W.keyErr ? '&#9650; could not save the key: ' + esc(W.keyErr) : W.saved ? `Stored as <b>${esc(mask(p.key))}</b>.` : ''}</div>
+          <p>Paste the key alone, with no <b>Bearer</b> in front. It travels to this server once, in the body of one request, and is kept in its own file under <b title="The dashboard's data folder on the NAS. Only the dashboard can read the file.">&lt;data&gt;/secrets/ai/${esc(c.file)}</b>, readable only by the dashboard. From then on this page shows it masked, like <b>sk-&hellip;abcd</b>, and never sends the key back.</p>`;
+        canNext = W.saved;
+      } else {
+        const r = resolve();
+        body = `<h4><span class="n">3.</span>Test it</h4>
+          <p>One real call to ${esc(c.vendor)} with the key, to prove it answers now. Nothing is spent beyond that one call.</p>
+          <div class="ctl"><button class="key primary sm w-10" type="button" data-wz="test"><span class="t">Test key</span><span class="busy-t"><span class="spin"></span> testing</span></button></div>
+          <div class="out ${W.testOut ? (W.testOut.ok ? 'ok' : 'bad') : ''}">${W.testOut ? esc((W.testOut.ok ? 'OK: ' : 'FAILED: ') + W.testOut.detail + ' (' + W.testOut.s + 's)') : ''}</div>
+          <p>It is <b>${ord(W.name)}</b> in the order. ${r.name === W.name ? `<b>It answers from now on</b>: ${esc(r.reason)}.` : r.name ? `${esc(r.label)} still answers first; this one stands by behind it.` : 'Nothing is answering yet: test the key, or pick another.'}${CLAUDE.includes(W.name) ? '' : ' Timeline Cards will not use it: it only runs on Claude.'}</p>`;
+        canNext = true;
+      }
+    } else {
+      if (W.step === 0) {
+        body = `<h4><span class="n">1.</span>${esc(NOTICE_TITLE)}</h4>${NOTICE.map(t => `<p>${esc(t)}</p>`).join('')}
+          <label class="check" title="Ticking this and pressing next turns on CLI tools for this whole site."><input type="checkbox" id="wz-ok" ${W.accepted ? 'checked' : ''}><span class="g"></span><span class="l">${esc(NOTICE_CHECK)}</span></label>
+          <p class="hint" style="margin:0">Accepting this notice turns on <b>AI CLI providers</b> for this site (the <span title="The site setting behind the switch under the providers list.">ai_cli_providers</span> feature). You can turn it off again under the list.</p>`;
+        canNext = W.accepted;
+      } else if (W.step === 1) {
+        const inst = p.installed && p.via === 'setup';
+        body = `<h4><span class="n">2.</span>Install ${esc(c.label)} ${p.installed ? tag('ok', 'done') : ''}</h4>
+          <p>${esc(c.from)}. It goes into this server's data folder, <b>&lt;data&gt;/tools/${esc(c.dir)}</b>, and nowhere else.</p>
+          <div class="ctl"><button class="key ${inst ? '' : 'primary'} sm w-10" type="button" data-wz="install" ${W.running ? 'disabled' : ''} title="${inst ? "Downloads the publisher's newer build, checked the same way, and swaps it in." : "Downloads the publisher's build and checks it before anything runs."}"><span class="t">${inst ? 'Update' : W.refused ? 'Try again' : 'Install'}</span></button>
+            <span class="meter" id="wz-meter">${W.running ? `${meter(W.pct, 100, 24)} <span style="color:var(--text)">${W.pct}%</span>` : ''}</span></div>
+          <div class="out" id="wz-inst">${W.running ? `downloading ${esc(W.ver)}: ${(W.pct * c.mib / 100).toFixed(1)} MiB of ${c.mib} MiB` : inst ? `installed: <b style="color:var(--text)">${esc(p.ver)}</b>` : p.via === 'path' ? `using your own copy at ${esc(p.path)}` : ''}</div>
+          ${W.refused ? `<div class="note err"><span class="grow">&#9650; ${esc(W.refused)}</span></div>` : ''}
+          ${fallbackHtml(c, p)}`;
+        canNext = p.installed && !W.running;
+      } else if (W.step === 2) {
+        const waiting = W.sign === 'waiting';
+        body = `<h4><span class="n">3.</span>Sign in to ${esc(c.label)} ${p.signed ? tag('ok', 'done') : ''}</h4>`;
+        if (p.signed) {
+          body += `<p>Signed in as <b>${esc(p.account)}</b>.</p>`;
+        } else {
+          if (c.name === 'claude_code') body += `<div class="ctl"><label class="lbl" for="wz-mode" title="Which kind of Claude account pays: a personal or team subscription, or Anthropic Console with per-use billing." style="min-width:14ch;color:var(--muted)">account type</label>
+            <select class="sel" id="wz-mode" ${waiting ? 'disabled' : ''}><option value="subscription">Claude subscription</option><option value="console">Anthropic Console (API billing)</option></select></div>`;
+          body += `<div class="ctl"><button class="key ${waiting ? '' : 'primary'} sm w-18" type="button" data-wz="signin" title="Opens the publisher's own sign-in page in a new tab. You sign in there, not here.">open ${esc(c.label)} sign-in &#8599;</button></div>`;
+          if (waiting && c.name === 'claude_code') {
+            body += `<p>A tab opened on Anthropic's sign-in page. Sign in there, then paste the code it shows you.</p>
+              <div class="ctl"><input class="inp" id="wz-code" autocomplete="off" placeholder="paste the code from that page" aria-label="Claude Code sign-in code">
+              <button class="key primary sm w-10" type="button" data-wz="code"><span class="t">Submit code</span><span class="busy-t"><span class="spin"></span> checking</span></button></div>`;
+          } else if (waiting) {
+            body += `<p>A tab opened on OpenAI's sign-in page. Type this code on that page:</p><div class="code-big" title="A one-time code. It only works for this sign-in, for five minutes.">K7QD-93XM</div>`;
+          }
+          body += `<div class="out ${W.signErr ? 'bad' : ''}" id="wz-signout">${W.signErr ? '&#9650; ' + esc(W.signErr) : waiting ? `waiting for the sign-in to finish (<span id="wz-left">${W.left}</span>s left)` : ''}</div>`;
+          if (waiting) body += `<div class="ctl"><button class="key quiet sm" type="button" data-wz="cancelsign" title="Stops this sign-in. Nothing is signed in.">cancel the sign-in</button></div>`;
+          body += `<p class="hint" style="margin:0">The sign-in window is five minutes, the publisher's own. Or run <b>${esc(c.login)}</b> on the host yourself, then test.</p>`;
+        }
+        canNext = p.signed;
+      } else {
+        body = `<h4><span class="n">4.</span>Test and finish</h4>
+          <p>${esc(c.label)}${p.via === 'path' ? '' : ' ' + esc(p.ver)} - ${p.signed ? 'signed in' : 'not signed in'}</p>
+          <div class="ctl"><button class="key primary sm w-10" type="button" data-wz="test"><span class="t">Test</span><span class="busy-t"><span class="spin"></span> testing</span></button></div>
+          <div class="out ${W.testOut ? (W.testOut.ok ? 'ok' : 'bad') : ''}">${W.testOut ? esc((W.testOut.ok ? 'OK: ' : 'FAILED: ') + W.testOut.detail + ' (' + W.testOut.s + 's)') : ''}</div>
+          <p>It is <b>${ord(W.name)}</b> in the order. ${W.name === 'claude_code' ? 'The server check uses it whatever the order says.' : 'YouTube downloader only: Timeline Cards is written for Claude.'}</p>`;
+        canNext = true;
+      }
+    }
+    $('#add').innerHTML = `<div class="wz">
+      <div class="wz-head"><h3><span class="p">+</span>${W.replace ? 'replacing the key for' : W.done ? 'managing' : 'adding'} ${esc(c.label)}</h3><div class="steps">${stepsHtml(labels)}</div></div>
+      <div class="wz-body">${body}</div>
+      <div class="wz-foot">
+        <button class="key quiet sm" type="button" data-wz="back" ${W.step === 0 ? 'disabled style="visibility:hidden"' : ''}>back</button>
+        <span class="grow"></span>
+        <button class="key quiet sm" type="button" data-wz="cancel" title="Closes this without going further. Anything already saved stays saved.">cancel</button>
+        <button class="key primary sm w-10" type="button" data-wz="${last ? 'finish' : 'next'}" ${canNext ? '' : 'disabled'}>${last ? 'Finish' : 'Next'}</button>
+      </div></div>`;
+    // A step never gives height back while this wizard is open, so the keys
+    // under it only ever stay put or move down with new content.
+    const bodyEl = $('#add .wz-body');
+    if (bodyEl) { W.minH = Math.max(W.minH || 0, bodyEl.offsetHeight); bodyEl.style.minHeight = W.minH + 'px'; }
+  }
+
+  function fallbackHtml(c, p) {
+    return `<details class="fold" ${W.fallback ? 'open' : ''} id="wz-fb">
+      <summary title="If you installed ${esc(c.label)} on the server yourself, point this page at it instead."><span>installed it yourself? type its full path</span></summary>
+      <div style="display:grid;gap:8px">
+        <div class="ctl"><input class="inp" id="wz-path" value="${esc(p.via === 'path' ? p.path : '')}" placeholder="full path to \`${esc(c.bin)}\` (blank = search PATH)" aria-label="${esc(c.label)} executable path">
+          <button class="key sm w-10" type="button" data-wz="path"><span class="t">Save path</span><span class="busy-t"><span class="spin"></span> saving</span></button></div>
+        <p class="hint" style="margin:0">A typed path wins over anything set up installed: you are telling this server about a copy you installed and vouch for. Sign it in on the next step, or run <b>${esc(c.login)}</b> on the host.</p>
+      </div></details>`;
+  }
+
+  // ------------------------------------------------------------ timers
+  let instTimer = null, signTimer = null;
+  function stopTimers() { clearInterval(instTimer); clearInterval(signTimer); instTimer = signTimer = null; }
+  function runInstall() {
+    const c = BY[W.name], p = S.p[W.name];
+    const update = p.installed && p.via === 'setup';
+    W.ver = update ? c.next : c.ver; W.refused = '';
+    if (c.name === 'codex' && dataMode === 'busy') {
+      // cli_tools._install_codex: no published checksum is a refusal
+      W.refused = `the publisher published no checksum for codex-x86_64-unknown-linux-musl.tar.gz in Codex ${c.ver}, so this install cannot be verified and was not done. Install Codex on the dashboard host yourself and type its full path below, or try again when the publisher ships codex-package_SHA256SUMS with the release.`;
+      W.fallback = true; drawWizard(); return;
+    }
+    W.running = true; W.pct = 0; drawWizard();
+    instTimer = setInterval(() => {
+      if (!W) return stopTimers();
+      W.pct = Math.min(100, W.pct + 7);
+      if (W.pct >= 100) {
+        clearInterval(instTimer); W.running = false;
+        Object.assign(p, { installed: true, via: 'setup', ver: W.ver, path: '' });
+        drawAll(); return;
+      }
+      const m = $('#wz-meter'), o = $('#wz-inst');
+      if (m) m.innerHTML = `${meter(W.pct, 100, 24)} <span style="color:var(--text)">${W.pct}%</span>`;
+      if (o) o.textContent = `downloading ${W.ver}: ${(W.pct * c.mib / 100).toFixed(1)} MiB of ${c.mib} MiB`;
+    }, 350);
+  }
+  function startSignIn() {
+    W.sign = 'waiting'; W.left = 300; W.signErr = ''; drawWizard();
+    clearInterval(signTimer);
+    signTimer = setInterval(() => {
+      if (!W || W.sign !== 'waiting') return clearInterval(signTimer);
+      W.left--;
+      if (W.name === 'codex' && W.left === 294) { finishSignIn(); return; }
+      if (W.left <= 0) { clearInterval(signTimer); W.sign = 'idle'; W.signErr = 'timed out. The sign-in has five minutes; open it again to start over.'; drawWizard(); return; }
+      const l = $('#wz-left'); if (l) l.textContent = W.left;
+    }, 1000);
+  }
+  function finishSignIn() {
+    clearInterval(signTimer); W.sign = 'idle'; W.signErr = '';
+    Object.assign(S.p[W.name], { signed: true, account: 'owen@example.com' });
+    drawAll();
+  }
+
+  function runTest(n, done) {
+    const c = BY[n], p = S.p[n], st = status(n);
+    const s = (0.8 + Math.random() * 2.6).toFixed(1);
+    let res;
+    if (c.kind === 'api') {
+      if (!p.key) res = { ok: false, detail: `no key is configured for ${c.label}` };
+      else if (p.src === 'file' && !p.key.startsWith(c.prefix)) res = { ok: false, detail: `the key was refused (HTTP 401). {"error":{"type":"authentication_error","message":"invalid api key"}}` };
+      else res = { ok: true, detail: `${c.label} accepted the key${p.src === 'env' ? ' (set by the deployment)' : ''}` };
+    } else if (st === 'disabled_by_site') res = { ok: false, detail: 'CLI providers are off for this site ([features] ai_cli_providers)' };
+    else if (!p.installed) res = { ok: false, detail: `no \`${c.bin}\` on this host` };
+    else if (!p.signed) res = { ok: false, detail: `installed but not signed in. Click SET UP and finish the sign-in step, or run \`${c.login}\` on this host. [not logged in]` };
+    else res = { ok: true, detail: `${c.label} answered (${p.via === 'path' ? p.path : c.label + ' ' + p.ver})` };
+    res.s = s;
+    setTimeout(() => done(res), 1000);
+  }
+
+  function drawAll() { whoLines(); drawList(); drawAdd(); drawCliLine(); }
+
+  // ------------------------------------------------------------ events
+  document.addEventListener('change', e => {
+    if (e.target.id === 'wz-ok') { W.accepted = e.target.checked; drawWizard(); }
+    if (e.target.id === 'wz-mode') W.mode = e.target.value;
+    if (e.target.id === 'pin') {
+      S.pin = e.target.value;
+      const r = resolve();
+      toast(S.pin === 'auto' ? 'auto: first available in the order' : r.name ? `pinned to ${BY[S.pin].label}` : `pinned to ${BY[S.pin].label}: it is not available, so nothing answers`);
+      drawAll();
+    }
+  });
+  document.addEventListener('toggle', e => { if (e.target.id === 'wz-fb' && W) W.fallback = e.target.open; }, true);
+
+  document.addEventListener('click', e => {
+    const m = e.target.closest('[data-menu]');
+    if (m) { menuOpen = menuOpen === m.dataset.menu ? '' : m.dataset.menu; drawList(); return; }
+    if (menuOpen && !e.target.closest('.mng')) { menuOpen = ''; drawList(); }
+
+    const a = e.target.closest('.mng [data-act]');
+    if (a) {
+      const n = a.dataset.n, c = BY[n], p = S.p[n];
+      menuOpen = '';
+      switch (a.dataset.act) {
+        case 'test': p.test = 'run'; drawList(); runTest(n, r => { p.test = r; drawList(); }); break;
+        case 'pin': S.pin = n; toast(`pinned to ${c.label}`); drawAll(); break;
+        case 'unpin': S.pin = 'auto'; toast('auto: first available in the order'); drawAll(); break;
+        case 'replace': openWizard(n, 1, { replace: true }); break;
+        case 'clear':
+          confirmBox(`Remove the stored ${c.label} key from this server? The YouTube downloader will fall back to the next available provider.`, 'Remove', () => {
+            Object.assign(p, blank()); toast(`${c.label} key removed`); drawAll();
+          }); break;
+        case 'signin': openWizard(n, 2, { done: true }); break;
+        case 'signout': Object.assign(p, { signed: false, account: '', test: null }); toast(`signed out of ${c.label}`); drawAll(); break;
+        case 'update': openWizard(n, 1, { done: true }); break;
+        case 'path': openWizard(n, 1, { done: true, fallback: true }); break;
+        case 'remove':
+          confirmBox(`Remove ${c.label} and its sign-in from this server? The YouTube downloader will fall back to the next available provider.`, 'Remove', () => {
+            Object.assign(p, blank()); if (W && W.name === n) { W = null; add = 'idle'; stopTimers(); } toast(`${c.label} removed`); drawAll();
+          }); break;
+      }
+      return;
+    }
+
+    if (e.target.closest('#add-new')) { add = 'pick'; drawAdd(); return; }
+    const pk = e.target.closest('[data-pick]');
+    if (pk) { openWizard(pk.dataset.pick); return; }
+    if (e.target.closest('[data-back-pick]') && W && !W.done && !W.replace) { stopTimers(); W = null; add = 'pick'; drawAdd(); return; }
+    if (e.target.closest('#cli-toggle')) {
+      S.cliOn = !S.cliOn;
+      if (!S.cliOn && W && BY[W.name].kind === 'cli') { stopTimers(); W = null; add = 'idle'; }
+      toast(S.cliOn ? 'CLI providers turned on for this site' : 'CLI providers turned off for this site');
+      drawAll(); return;
+    }
+
+    const w = e.target.closest('[data-wz]');
+    if (!w) return;
+    const act = w.dataset.wz;
+    if (act === 'cancel') { stopTimers(); W = null; add = 'idle'; drawAdd(); return; }
+    if (!W) return;
+    const c = BY[W.name], p = S.p[W.name];
+    switch (act) {
+      case 'back': stopTimers(); W.running = false; W.sign = 'idle'; W.step = Math.max(0, W.step - 1); drawWizard(); break;
+      case 'next':
+        if (c.kind === 'cli' && W.step === 0 && !S.cliOn) { S.cliOn = true; toast('CLI providers turned on for this site'); }
+        W.step++; W.testOut = null; W.keyErr = '';
+        drawAll(); break;
+      case 'finish': {
+        const n = W.name; stopTimers(); W = null; add = 'idle'; flash = n; drawAll();
+        toast(`${c.label} is set up`); break;
+      }
+      case 'savekey': {
+        const v = ($('#wz-key').value || '').trim();
+        const err = !v ? 'the key is blank' : v.length > 512 ? 'that key is longer than 512 characters'
+          : /[\x00-\x1f\x7f]/.test(v) ? 'the key contains control characters: paste it again'
+          : /\s/.test(v) ? "the key contains a space: paste the key alone, with no 'Bearer' prefix" : '';
+        if (err) { W.keyErr = err; drawWizard(); break; }
+        hold(w); w.classList.add('busy');
+        setTimeout(() => { Object.assign(p, { key: v, src: 'file', test: null }); W.saved = true; W.keyErr = ''; drawAll(); }, 700);
+        break;
+      }
+      case 'test':
+        hold(w); w.classList.add('busy');
+        runTest(W.name, r => { if (!W) return; W.testOut = r; p.test = r; drawAll(); });
+        break;
+      case 'install': runInstall(); break;
+      case 'path': {
+        const v = ($('#wz-path').value || '').trim();
+        hold(w); w.classList.add('busy');
+        setTimeout(() => {
+          if (!v) { W.refused = ''; Object.assign(p, { installed: false, via: '', path: '' }); toast(`no \`${c.bin}\` on this server's PATH`); drawAll(); return; }
+          Object.assign(p, { installed: true, via: 'path', path: v, ver: '' });
+          W.refused = ''; W.step = 2; toast('path saved'); drawAll();
+        }, 600);
+        break;
+      }
+      case 'signin': startSignIn(); break;
+      case 'cancelsign': clearInterval(signTimer); W.sign = 'idle'; W.signErr = 'cancelled'; drawWizard(); break;
+      case 'code': {
+        const v = ($('#wz-code').value || '').trim();
+        if (!v) { W.signErr = 'that code is blank'; const o = $('#wz-signout'); o.className = 'out bad'; o.innerHTML = '&#9650; that code is blank'; W.signErr = ''; break; }
+        hold(w); w.classList.add('busy');
+        setTimeout(finishSignIn, 900);
+        break;
+      }
+    }
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && menuOpen) { menuOpen = ''; drawList(); } });
+
+  // ------------------------------------------- export, import, history
+  const HIST_BUSY = [
+    ['save', 'owen', '9m ago', '2026-09-25T02:34:51+00:00', 2],
+    ['save', 'owen', '2d ago', '2026-09-23T06:12:09+00:00', 1],
+    ['import', 'owen', '8d ago', '2026-09-17T09:02:44+00:00', 14],
+    ['save', 'owen', '12d ago', '2026-09-13T03:40:18+00:00', 3],
+    ['setup', 'owen', '41d ago', '2026-08-15T01:05:00+00:00', 16],
+  ];
+  const HIST_TIPS = { save: 'Somebody pressed save on this page.', import: 'A pasted site.toml was applied.', setup: 'The first values, written when the server was installed.' };
+  let hist = [];
+  function drawHistory() {
+    $('#hist-meta').innerHTML = hist.length ? `<b>${hist.length}</b> recorded` : '';
+    $('#hist').innerHTML = hist.length ? `<table class="tbl tight"><tbody>${hist.map(h => `<tr><td><span class="hi" title="${esc(HIST_TIPS[h[0]] || '')}">${esc(h[0])}</span> by <b>${esc(h[1])}</b></td><td title="${esc(h[3])}">${esc(h[2])}</td><td class="num">${h[4]} setting${h[4] === 1 ? '' : 's'}</td></tr>`).join('')}</tbody></table>`
+      : `<div class="empty" style="padding:10px 0;text-align:left">No site setting changes recorded yet.</div>`;
+    $('#undo-key').disabled = !hist.length;
+  }
+  $('#undo-key').addEventListener('click', () => {
+    const h = hist[0];
+    confirmBox(`Put back the ${h[4]} setting${h[4] === 1 ? '' : 's'} changed by ${h[1]} ${h[2]} (${h[3]})?`, 'Undo', () => {
+      hist.shift(); drawHistory(); const r = $('#undo-res'); r.className = 'res ok'; r.textContent = 'put back; the page reloads with the old values';
+    });
+  });
+  $('#import-key').addEventListener('click', () => {
+    const txt = $('#import-text').value.trim(), r = $('#import-res');
+    if (!txt) { r.className = 'res bad'; r.textContent = 'could not import: paste a site.toml first'; return; }
+    if (!/=/.test(txt)) { r.className = 'res bad'; r.textContent = 'could not import: that is not site.toml-shaped text (line 1)'; return; }
+    r.className = 'res'; r.textContent = '';
+    confirmBox('This will change 4 settings, including org_name from Harbour Lane Films to Harbour Lane Pictures, tree_name from Harbour_Lane to HLP, dashboard_url from https://nas.example.ts.net to https://nas2.example.ts.net, and 1 more. Apply it?', 'Apply', () => {
+      hist.unshift(['import', 'owen', '0s ago', new Date().toISOString(), 4]); drawHistory(); r.className = 'res ok'; r.textContent = 'imported at ' + now();
+    });
+  });
+
+  // ---------------------------------------------------------- android
+  function drawAndroid(busy) {
+    $('#pkg').value = busy ? 'net.ts.example.nas.ccsync' : '';
+    $('#fps').value = busy ? '5C:1E:8A:0F:77:D2:4B:9E:31:AA:60:C8:12:FE:9D:04:B7:3A:E5:52:6F:88:0C:D1:49:BE:27:93:F0:1A:6D:C4' : '';
+    $('#and-out').innerHTML = '';
+  }
+  $('#and-save').addEventListener('click', () => {
+    const bad = $('#fps').value.split('\n').map(s => s.trim()).filter(Boolean).find(f => !/^([0-9A-F]{2}:){31}[0-9A-F]{2}$/i.test(f));
+    $('#and-out').innerHTML = bad
+      ? `<div class="body split"><div class="note err"><span class="grow">&#9650; Not saved: "${esc(bad.slice(0, 24))}..." is not 32 colon-separated hex pairs.</span></div></div>`
+      : `<div class="body split"><div class="note ok"><span class="grow">Saved. Reopen the app to pick it up.</span></div></div>`;
+  });
+  $('#and-check').addEventListener('click', () => {
+    const k = $('#and-check'); hold(k); k.classList.add('busy');
+    setTimeout(() => {
+      k.classList.remove('busy');
+      const pkg = $('#pkg').value.trim(), fps = $('#fps').value.split('\n').filter(s => s.trim());
+      $('#and-out').innerHTML = `<div class="body split" style="display:grid;gap:8px;font-size:13px">` + (pkg && fps.length
+        ? `<div class="inline">${tag('ok', 'serving', true)}<span>/.well-known/assetlinks.json carries 1 statement for <b>${esc(pkg)}</b> with ${fps.length} fingerprint(s):</span></div><pre class="code">${fps.map(esc).join('\n')}</pre>`
+        : `<div class="inline">${tag('warn', 'empty', true)}<span>/.well-known/assetlinks.json answers <span class="hi">[]</span>. An app installed against this origin will open with a URL bar until both a package name and a fingerprint are saved above.</span></div>`)
+        + `<div class="dim">Google decides, not this page. Open this from a computer that can reach this site's public URL and read what it says:</div>
+           <pre class="code" style="white-space:pre-wrap;overflow-wrap:anywhere">https://digitalassetlinks.googleapis.com/v1/statements:list?source.web.site=https://nas.example.ts.net&amp;relation=delegate_permission/common.handle_all_urls</pre></div>`;
+    }, 900);
+  });
+
+  // ----------------------------------------------------- save + dialog
+  $('#settings-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const keys = document.querySelectorAll('#settings-form .key.primary');
+    const lines = document.querySelectorAll('.save-res');
+    const bad = !$('#f-dashboard_url').value.trim().startsWith('http');
+    keys.forEach(k => { hold(k); k.classList.add('busy'); });
+    lines.forEach(l => { l.className = 'res save-res'; l.textContent = 'saving...'; });
+    setTimeout(() => {
+      keys.forEach(k => k.classList.remove('busy'));
+      lines.forEach(l => {
+        l.className = 'res save-res ' + (bad ? 'bad' : 'ok');
+        l.textContent = bad ? 'could not save: dashboard_url must start with http:// or https://' : 'saved at ' + now();
+      });
+      if (!bad) { hist.unshift(['save', 'owen', '0s ago', new Date().toISOString(), 1]); drawHistory(); }
+    }, 900);
+  });
+  let onYes = null;
+  function confirmBox(text, yes, fn) { $('#dlg-text').textContent = text; $('#dlg-yes .t').textContent = yes; onYes = fn; $('#dlg').classList.add('open'); }
+  $('#dlg-no').addEventListener('click', () => $('#dlg').classList.remove('open'));
+  $('#dlg-yes').addEventListener('click', () => { $('#dlg').classList.remove('open'); if (onYes) onYes(); onYes = null; });
+
+  // --------------------------------------------------------------- tabs
+  // Nothing may move on a tab switch: the host keeps at least the height
+  // the reader is scrolled into, so a short tab never drags the page up.
+  function show(name) {
+    const host = $('#tab-host');
+    const need = window.scrollY + window.innerHeight - (host.getBoundingClientRect().top + window.scrollY);
+    host.style.minHeight = Math.max(need, window.innerHeight * 0.6) + 'px';
+    document.querySelectorAll('#tabs [data-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
+    document.querySelectorAll('[data-panel]').forEach(p => { p.hidden = p.dataset.panel !== name; });
+    if (menuOpen) { menuOpen = ''; drawList(); }
+  }
+  document.addEventListener('click', e => {
+    const t = e.target.closest('#tabs [data-tab]');
+    if (t) { show(t.dataset.tab); history.replaceState(null, '', '#' + t.dataset.tab); }
+    const g = e.target.closest('[data-goto]');
+    if (g) { e.preventDefault(); show(g.dataset.goto); }
+  });
+  document.addEventListener('keydown', e => {
+    if ((e.key === 's' || e.key === 'S') && !/input|select|textarea/i.test(e.target.tagName) && !e.ctrlKey && !e.metaKey
+        && (!$('[data-panel=site]').hidden || !$('[data-panel=features]').hidden)) $('#settings-form').requestSubmit();
+  });
+  const start = new URLSearchParams(location.hash.slice(1)).get('tab') || location.hash.slice(1);
+
+  function render(m) {
+    dataMode = m;
+    const busy = m !== 'calm';
+    drawFields(busy);
+    stopTimers(); W = null; add = 'idle'; menuOpen = '';
+    seed(busy);
+    drawAll();
+    hist = busy ? HIST_BUSY.slice() : [];
+    drawHistory();
+    drawAndroid(busy);
+    document.querySelectorAll('.save-res, #import-res, #undo-res').forEach(l => { l.textContent = ''; });
+  }
+  CC.page({ page: 'site', onData: render });
+  if (['site', 'features', 'ai', 'history', 'android'].includes(start)) show(start);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: transfers</title>
+<!-- The design bench (dashboard/design/README.md): /transfers.
+     Mirrors templates/transfers.html + partials/transfers.html (LIVE,
+     QUEUED, HISTORY) and ui.py page_transfers / safe_to_close. An admin
+     sees every editor (EDITOR column, no safe-to-close line); an editor
+     sees their own files and the one sentence about closing the lid.
+     Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/sync.css">
+</head>
+<body data-page="transfers">
+
+<div class="shell">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> TRANSFERS</span></h1>
+        <div class="sub xf-sub" id="sub"></div>
+      </div>
+      <div class="acts">
+        <div class="bench" title="bench only: the real page picks this from who is signed in">preview as
+          <div class="opts" id="scope"><button type="button" data-v="admin" aria-pressed="true" title="Bench only: what an admin sees, every editor's transfers.">owen, admin: every editor</button><button type="button" data-v="editor" title="Bench only: what an editor sees, only their own files.">jsmith, editor: own files</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div id="safe"></div>
+
+      <section class="win">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">live</span><span>&#9566;</span><span class="rule"></span><span class="meta" id="live-meta"></span><span>&#9552;&#9488;</span></div>
+        <div class="scroll-y" style="max-height:340px" id="live"></div>
+      </section>
+
+      <section class="win">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">queued</span><span>&#9566;</span><span class="rule"></span><span class="meta" id="q-meta"></span><span>&#9552;&#9488;</span></div>
+        <div class="lede" id="q-lede" style="padding:10px var(--pad) 0"></div>
+        <div class="scroll-y" style="max-height:520px" id="queues"></div>
+      </section>
+
+      <section class="win">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">history</span><span>&#9566;</span><span class="rule"></span><span class="meta" title="Finished transfers stay in this list for 7 days, then drop off.">kept 7 days</span><span>&#9552;&#9488;</span></div>
+        <div class="lede" style="padding:10px var(--pad) 0">Recently completed files: what the companions report, plus files arriving at the server.</div>
+        <div class="scroll-y" style="max-height:360px" id="history"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, meter, tag } = CC;
+  const $ = s => document.querySelector(s);
+  let scope = 'admin';
+  let mode = 'busy';
+
+  const LIVE = [
+    { ed: 'jsmith', m: 'JSMITH-STUDIO', dir: 'down', name: 'Elections/Proxy/A004_C012_0918FJ.mov', pct: 73, speed: '84 MB/s', bps: 84, eta: '41 s' },
+    { ed: 'jsmith', m: 'JSMITH-MBP', dir: 'up', name: 'Elections/B-roll/Card_07/C0031.MP4', pct: 48, speed: '22 MB/s', bps: 22, eta: '1 m' },
+    { ed: 'mrivera', m: 'RIVERA-LAPTOP', dir: 'up', name: 'Civil Defence/Interviewees/A002_C007_0921KT.braw', pct: 12, speed: '31 MB/s', bps: 31, eta: '6 m' },
+    { ed: 'mrivera', m: 'RIVERA-TOWER', dir: 'down', name: '2026/Shorts/Night Market', project: true, pct: null, speed: '9 MB/s', bps: 9, eta: '4 m' },
+    { ed: 'tchen', m: 'TCHEN-RIG', dir: 'down', name: 'Kinmen/Proxy/Drone/DJI_0412.mp4', pct: 91, speed: '47 MB/s', bps: 47, eta: '3 s' },
+    { ed: 'jsmith', m: 'JSMITH-STUDIO', dir: 'down', name: 'Elections/Proxy/A004_C013_0918FJ.mov', pct: 4, speed: '', bps: 0, eta: '' },
+  ];
+  const f = (n, s) => ({ n, s });
+  const QUEUES = [
+    { ed: 'jsmith', m: 'JSMITH-STUDIO', label: '2026/FF5/Elections', dir: 'down', lane: 'b', n: 212, bytes: '38.4 GB',
+      files: [f('A004_C014_0918FJ.mov', '412 MB'), f('A004_C015_0918FJ.mov', '388 MB'), f('A004_C016_0918FJ.mov', '1.1 GB'), f('A005_C001_0919TR.mov', '640 MB'), f('A005_C002_0919TR.mov', '702 MB'), f('A005_C003_0919TR.mov', '96 MB'), f('B001_C020_0919XX.mov', '1.4 GB'), f('B001_C021_0919XX.mov', '1.3 GB'), f('Rally_wide_0142.mp4', '220 MB'), f('Rally_wide_0143.mp4', '231 MB')], truncated: true },
+    { ed: 'jsmith', m: 'JSMITH-MBP', label: '2026/FF5/Elections', dir: 'up', lane: 'a', n: 13, bytes: '6.0 GB',
+      files: [f('B-roll/Card_07/C0032.MP4', '480 MB'), f('B-roll/Card_07/C0033.MP4', '466 MB'), f('B-roll/Card_07/C0034.MP4', '512 MB'), f('B-roll/Card_07/C0035.MP4', '430 MB')], truncated: true },
+    { ed: 'mrivera', m: 'RIVERA-LAPTOP', label: '2026/FF5/Civil Defence', pending: true },
+    { ed: 'mrivera', m: 'RIVERA-TOWER', label: '2026/Shorts/Night Market', pending: true, upload_only: true },
+    { ed: 'mrivera', m: 'RIVERA-TOWER', label: '2026/FF5/Elections', dir: 'down', lane: 'c', n: 31, bytes: '1.2 GB',
+      files: [f('Elections.drp', '48 MB'), f('Graphics/lower_third_v4.png', '2 MB'), f('Audio/Music/Opening_theme.wav', '88 MB')], truncated: true },
+    { ed: 'tchen', m: 'TCHEN-RIG', label: '2026/FF5/Repro Rights', dir: 'down', lane: 'b', n: 48, bytes: '11.2 GB', files: [], capped: true,
+      held: { s: 'Not syncing: this computer\'s clock is 4 minutes out from the server, so proxy download transfers nothing', since: '2 h ago' } },
+    { ed: 'tchen', m: 'TCHEN-RIG', label: '2025/FF4/Kinmen', dir: 'up', lane: 'a', n: 0, bytes: '0 B', files: [], uncertain: true },
+  ];
+  const HISTORY = [
+    ['jsmith', 'down', 'Elections/Proxy/A004_C011_0918FJ.mov', '2 min ago'],
+    ['jsmith', 'up', 'Elections/B-roll/Card_07/C0030.MP4', '4 min ago'],
+    ['mrivera', 'up', 'Civil Defence/Interviewees/A002_C006_0921KT.braw', '9 min ago'],
+    ['tchen', 'down', 'Kinmen/Proxy/Drone/DJI_0411.mp4', '12 min ago'],
+    ['jsmith', 'down', 'Elections/Proxy/A004_C010_0918FJ.mov', '14 min ago'],
+    ['mrivera', 'up', 'Civil Defence/Interviewees/A002_C005_0921KT.braw', '31 min ago'],
+    ['tchen', 'down', 'Kinmen/Proxy/Drone/DJI_0410.mp4', '48 min ago'],
+    ['jsmith', 'up', 'Night Market/B-cam/Night_Market_B-cam_0141.mp4', '1 h ago'],
+    ['mrivera', 'down', 'Night Market/Proxy/NM_A001_0102.mov', '3 h ago'],
+    ['jsmith', 'down', 'Elections/Proxy/A003_C019_0917FJ.mov', 'yesterday'],
+    ['tchen', 'up', 'Repro Rights/Interviewees/C0101.MP4', '2 days ago'],
+    ['owen', 'down', 'Typhoon Prep/Proxy/TP_0003.mov', '5 days ago'],
+  ];
+
+  // Plain-words tooltips (round 2, 2026-09-25).
+  const KIND_TIP = {
+    upload: 'Upload: new original footage going from the computer to the server.',
+    'proxy download': 'Proxy download: small edit copies (proxies) coming from the server to the computer.',
+    'folder sync': 'Folder sync: project files such as Resolve projects, graphics and audio kept the same on every computer.',
+  };
+  const dirTip = d => d === 'up' ? 'Up: from the computer to the server.' : 'Down: from the server to the computer.';
+
+  const mine = r => scope === 'admin' || (r.ed || r[0]) === 'jsmith';
+  const arrow = d => d === 'up' ? '&#8673;' : '&#8675;';
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+  function render() {
+    const busy = mode === 'busy';
+    const admin = scope === 'admin';
+    const live = busy ? LIVE.filter(mine) : [];
+    const queues = busy ? QUEUES.filter(mine) : [];
+    const hist = busy ? HISTORY.filter(mine) : [];
+    const speed = live.reduce((a, t) => a + t.bps, 0);
+
+    $('#sub').innerHTML = `<span title="Every transfer running right now, added together."><span class="led ${speed ? 'warn' : ''}" style="width:7px;height:7px"></span> <b>${speed ? speed + ' MB/s' : '0 B/s'}</b> total</span> &middot; ${admin ? 'every editor' : 'your files, on every computer you use'}`;
+
+    // safe_to_close: an editor's view only (None for the fleet-wide one)
+    // Round 2 ("nothing may shift"): the admin's page has no such line, but
+    // the bench's preview switch must not move the windows below, so the
+    // editor's line is kept invisibly in its place on the admin view.
+    if (admin) $('#safe').innerHTML = `<div class="note warn" style="visibility:hidden" aria-hidden="true"><span class="tag solid warn">not yet</span><span class="grow"><b>Not yet: 14 files still uploading from JSMITH-MBP (6.2 GB), about 5 m.</b> Leave that computer running.</span></div>`;
+    else if (busy) $('#safe').innerHTML = `<div class="note warn"><span class="tag solid warn" title="Not yet: closing or unplugging this computer now would stop files half-way. Leave it running until this says safe.">not yet</span><span class="grow"><b>Not yet: 14 files still uploading from JSMITH-MBP (6.2 GB), about 5 m.</b> Leave that computer running.</span></div>`;
+    else $('#safe').innerHTML = `<div class="note ok"><span class="tag ok" title="Safe: nothing of yours is moving, so you can shut down or unplug.">safe</span><span class="grow"><b>Safe to close: nothing is transferring.</b></span></div>`;
+
+    // LIVE
+    $('#live-meta').innerHTML = live.length ? `<b>${live.length}</b> moving` : '';
+    $('#live').innerHTML = live.length ? `
+      <table class="tbl stack-sm fixed xft"><colgroup>${admin ? '<col style="width:17ch">' : ''}<col style="width:5ch"><col><col style="width:26ch"><col style="width:12ch"><col style="width:9ch"></colgroup><thead><tr>${admin ? '<th>editor</th>' : ''}<th></th><th>file</th><th title="How much of this file has moved.">progress</th><th class="num" title="How fast this file is moving right now.">speed</th><th class="num" title="Time left for this file at the current speed.">eta</th></tr></thead><tbody>
+      ${live.map(t => `<tr>
+        ${admin ? `<td class="who c-who">${esc(t.ed)}<small>${esc(t.m)}</small></td>` : ''}
+        <td class="dir ${t.dir} c-dir" title="${dirTip(t.dir)}">${arrow(t.dir)}</td>
+        <td class="file c-file" title="${esc(t.name)}">${esc(t.name)}${t.project ? ` <span title="${KIND_TIP['folder sync']} The sync engine reports the whole project here, not single files.">${tag('mute', 'folder sync')}</span>` : ''}</td>
+        <td class="c-prog">${t.pct == null ? '<span class="muted">-</span>' : `<span class="mtr hi">${meter(t.pct, 100, 14)}</span> <b>${t.pct}%</b>`}</td>
+        <td class="num c-speed">${t.speed ? esc(t.speed) : '<span class="muted">-</span>'}</td>
+        <td class="num c-eta">${t.eta ? esc(t.eta) : '<span class="muted">-</span>'}</td>
+      </tr>`).join('')}</tbody></table>`
+      : `<div class="allclear"><span class="led"></span>Nothing is transferring right now.</div>`;
+
+    // QUEUED
+    const counted = queues.filter(q => !q.pending);
+    const nFiles = counted.reduce((a, q) => a + q.n, 0);
+    $('#q-meta').innerHTML = queues.length ? `<b>${nFiles}</b> files &middot; <b>${admin ? '56.8 GB' : '44.4 GB'}</b> waiting` : '';
+    $('#q-lede').innerHTML = queues.length
+      ? `${plural(nFiles, 'file')} waiting behind the transfers above, from the last disk lists the computers reported. <span class="muted">May lag a few minutes.</span>`
+      : '';
+    $('#q-lede').style.display = queues.length ? '' : 'none';
+    $('#queues').innerHTML = queues.length ? queues.map(q => {
+      const who = admin ? `<b>${esc(q.ed)}</b> <span class="muted">${esc(q.m)}</span> &middot; ` : `<span class="muted">${esc(q.m)}</span> &middot; `;
+      let rest;
+      if (q.pending) {
+        rest = `<span title="Getting ready: the project was just ticked, and the computer and server are setting it up. Nothing needs doing.">${tag('warn', 'getting ready')}</span><span class="why">${q.upload_only
+          ? 'Just ticked as upload only. Waiting for this computer\'s first file list, then its video originals start uploading (nothing is downloaded).'
+          : 'Just ticked. Sharing and first file lists are being set up; syncing starts within a minute or two.'}</span>`;
+      } else {
+        const kind = q.lane === 'c' ? 'folder sync' : q.dir === 'up' ? 'upload' : 'proxy download';
+        rest = `<span class="${q.dir === 'up' ? 'red' : 'hi'}" title="${dirTip(q.dir)}">${arrow(q.dir)}</span>
+          <span style="color:${q.n ? 'var(--warn)' : 'var(--muted)'}">${plural(q.n, 'file')} &middot; ${esc(q.bytes)}</span>
+          <span title="${KIND_TIP[kind]}">${tag('mute', kind)}</span>
+          ${q.held ? `<span title="On hold: something on this computer stops the transfer until it is fixed. The reason is on the next line.">${tag('err', 'on hold', true)}</span>` : ''}
+          ${q.uncertain && !q.n ? '<span class="why">None counted, but this computer could not list every original: some may still need to upload.</span>' : ''}
+          ${q.held ? `<span class="why" style="color:var(--err)">${esc(q.held.s)} (since ${esc(q.held.since)}).</span>` : ''}`;
+      }
+      let body = '';
+      if (!q.pending) {
+        const lines = q.files.map(x => `<li><span class="g muted">&middot;</span><span class="nm" title="${esc(x.n)}">${esc(x.n)}</span><span class="sz">${esc(x.s)}</span></li>`);
+        if (q.truncated && q.files.length) lines.push(`<li class="more">... and ${q.n - q.files.length} more</li>`);
+        if (q.dir === 'up' && q.uncertain) lines.push('<li class="note-line">This computer has more video originals than it can list to the dashboard, so the upload count may be low.</li>');
+        if (q.dir !== 'up' && q.capped && !q.files.length) lines.push('<li class="note-line">This computer\'s proxy list was capped, so the count is worked out from its totals and no file names are shown.</li>');
+        body = `<div class="fold-body"><ul class="files cap">${lines.join('') || '<li class="more">no file names reported</li>'}</ul></div>`;
+      }
+      return `<details class="fold"${q.pending ? '' : ''}><summary><span class="mk">&#9656;</span><span>${who}${esc(q.label)}</span>${rest}</summary>${body}</details>`;
+    }).join('')
+      : `<div class="allclear"><span class="led"></span>Everything that should be somewhere is there.</div>`;
+
+    // HISTORY
+    $('#history').innerHTML = hist.length ? `
+      <table class="tbl stack-sm fixed xft hist"><colgroup>${admin ? '<col style="width:17ch">' : ''}<col style="width:5ch"><col><col style="width:14ch"></colgroup><tbody>${hist.map(h => `<tr>
+        ${admin ? `<td class="who c-who">${esc(h[0])}</td>` : ''}
+        <td class="dir ${h[1]} c-dir" title="${dirTip(h[1])}">${arrow(h[1])}</td>
+        <td class="file c-file" title="${esc(h[2])}">${esc(h[2])}</td>
+        <td class="num muted nowrap c-eta">${esc(h[3])}</td></tr>`).join('')}</tbody></table>`
+      : `<div class="allclear"><span class="led off"></span>Nothing completed recently.</div>`;
+  }
+
+  $('#scope').addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    scope = b.dataset.v;
+    $('#scope').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    // round 2: switching the preview must not pull the windows up; each
+    // list keeps at least the height it had (a data-mode change resets it)
+    ['#safe', '#live', '#queues', '#history'].forEach(s => { const el = $(s); el.style.minHeight = el.offsetHeight + 'px'; });
+    render();
+  });
+
+  // ?as=editor opens the bench on the editor's view (for screenshots)
+  if (/[?&]as=editor/.test(location.search)) {
+    scope = 'editor';
+    $('#scope').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.v === 'editor')));
+  }
+  CC.page({ page: 'transfers', settings: true, onData: m => { mode = m; ['#safe', '#live', '#queues', '#history'].forEach(s => { $(s).style.minHeight = ''; }); render(); } });
+})();
+</script>
+</body>
+</html>

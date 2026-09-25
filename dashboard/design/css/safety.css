@@ -1,0 +1,155 @@
+/* Builder "safety" (2026-09-25): the few pieces the invariants, protection,
+ * recovery, help, login, setup and offline mocks need that the shared sheets
+ * do not have. Loaded after cc-terminal.css and cc-components.css. Nothing
+ * here restyles a shared class.
+ */
+
+/* ---------------------------------------------------- verdict rows
+   One check per row: its state (a tag that says which of the three or four
+   states it is in), what the check is, and, when it is not fine, what that
+   costs and what to do. Used by invariants, protection and recovery so the
+   three read as one family, as the real partials do. */
+.vd {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr) 96px;
+  gap: 4px 16px;
+  padding: calc(12px * var(--d)) var(--pad);
+  border-top: 1px dashed var(--line);
+  font-size: 13px;
+}
+.vd:first-child { border-top: 0; }
+.vd.no-when { grid-template-columns: 128px minmax(0, 1fr); }
+.vd:hover { background: var(--row-hover); }
+.vd .st { padding-top: 1px; }
+.vd .ti { color: var(--text); font-weight: 500; }
+.vd .ti .n { color: var(--muted); font-weight: 400; margin-right: 8px; font-variant-numeric: tabular-nums; }
+.vd .when { color: var(--muted); font-size: 12px; text-align: right; white-space: nowrap; }
+.vd .more { grid-column: 2 / -1; display: grid; gap: 4px; }
+.vd .cq { color: var(--text-2); max-width: 100ch; }
+.vd .dt { color: var(--muted); font-size: 12px; max-width: 100ch; }
+.vd .subj { color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+.vd .subj::before { content: "- "; color: var(--red); }
+.vd .fix { color: var(--text); max-width: 100ch; margin-top: 2px; }
+.vd .fix::before { content: "> what to do: "; color: var(--hi); }
+.vd.ok .ti { color: var(--text-2); font-weight: 400; }
+
+/* ---------------------------------------------------- a date you record */
+.ack { display: grid; grid-template-columns: minmax(0, 1fr) 190px 210px; gap: 10px 16px; align-items: end; padding: calc(14px * var(--d)) var(--pad); border-top: 1px dashed var(--line); }
+.ack:first-child { border-top: 0; }
+.ack .q { font-size: 13px; color: var(--text); }
+.ack .q small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.ack .q small b { color: var(--text-2); font-weight: 500; }
+.ack .inp[type="date"] { color-scheme: dark; }
+.ack .key { justify-content: center; }
+/* JetBrains Mono draws "--" as one long rule, which reads as an em dash in a
+   command line such as --apps-root. */
+.vd, .plan-step, .doc, .lines, .ack { font-variant-ligatures: none; }
+
+/* ---------------------------------------------------- one question, several answers */
+.choices { display: grid; gap: 2px; align-content: start; }
+.choice { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 2px 8px; padding: 9px var(--pad); border-left: 3px solid transparent; cursor: pointer; }
+.choice:hover { background: var(--row-hover); }
+.choice .g { color: var(--muted); font-weight: 700; }
+.choice .g::before { content: "\25CB"; }
+.choice .q { color: var(--text-2); font-size: 13px; }
+.choice .d { grid-column: 2; color: var(--muted); font-size: 12px; }
+.choice[aria-checked="true"] { border-left-color: var(--hi); background: rgb(var(--hi-rgb) / 0.05); }
+.choice[aria-checked="true"] .g { color: var(--hi); }
+.choice[aria-checked="true"] .g::before { content: "\25C9"; }
+.choice[aria-checked="true"] .q { color: var(--text); }
+
+/* ---------------------------------------------------- plan steps */
+.plan-step { display: grid; gap: 6px; padding: calc(14px * var(--d)) var(--pad); border-top: 1px dashed var(--line); }
+.plan-step:first-child { border-top: 0; }
+.plan-step .h { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--text); font-weight: 500; }
+.plan-step .b { color: var(--text-2); font-size: 13px; max-width: 90ch; }
+.plan-step .code { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ---------------------------------------------------- a list of short dated lines */
+.lines { display: grid; gap: 4px; font-size: 13px; color: var(--text-2); }
+.lines .t { color: var(--muted); margin-right: 8px; }
+.lines b { color: var(--text); font-weight: 500; }
+
+/* ---------------------------------------------------- the document viewer */
+.files { font-size: 13px; }
+.files .grp { color: var(--muted); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; margin: 14px 0 4px; }
+.files .grp:first-child { margin-top: 0; }
+.files a { display: grid; grid-template-columns: minmax(0, 1fr); padding: 5px 8px; border-left: 2px solid transparent; color: var(--text-2); }
+.files a:hover { color: var(--text); background: var(--row-hover); }
+.files a small { color: var(--muted); font-size: 11px; }
+.files a .fnote { color: var(--hi); font-size: 11px; }
+.files a[aria-current="page"] { border-left-color: var(--hi); color: var(--text); background: rgb(var(--hi-rgb) / 0.05); }
+.toc { font-size: 13px; columns: 2 260px; column-gap: 28px; }
+.toc a { display: block; color: var(--text-2); padding: 2px 0; break-inside: avoid; }
+.toc a::before { content: "> "; color: var(--red); }
+.toc a:hover { color: var(--hi); }
+.toc a.l3 { padding-left: 2.2ch; color: var(--muted); font-size: 12px; }
+.toc a.l3::before { content: "- "; }
+.doc { font-size: 14px; line-height: 1.7; color: var(--text-2); max-width: 88ch; }
+.doc > * + * { margin-top: 12px; }
+.doc h1 { font-family: var(--disp); font-weight: 700; font-size: 22px; letter-spacing: 2px; color: var(--text); line-height: 1.25; }
+.doc h2 { font-size: 15px; font-weight: 700; color: var(--text); margin-top: 28px; padding-bottom: 4px; border-bottom: 1px dashed var(--line); }
+.doc h2::before { content: "## "; color: var(--red); font-weight: 400; }
+.doc h3 { font-size: 14px; font-weight: 700; color: var(--text); margin-top: 20px; }
+.doc h3::before { content: "### "; color: var(--red-deep); font-weight: 400; }
+.doc b, .doc strong { color: var(--text); }
+.doc code { font: inherit; font-size: 13px; color: var(--hi); background: rgb(var(--hi-rgb) / 0.06); padding: 0 4px; }
+.doc ul, .doc ol { padding-left: 3ch; }
+.doc li + li { margin-top: 4px; }
+.doc ul li::marker { content: "- "; color: var(--red); }
+.doc hr { border: 0; border-top: 1px dashed var(--line); margin: 22px 0; }
+.doc a { color: var(--hi); border-bottom: 1px dotted rgb(var(--hi-rgb) / 0.5); }
+.doc .tbl { font-size: 13px; }
+.doc .tbl td { vertical-align: top; }
+
+/* ---------------------------------------------------- the bare pages (sign in, offline) */
+.page.gate { max-width: 460px; grid-template-columns: minmax(0, 1fr); padding-top: calc(9vh + 10px); }
+.gate .brand { font-family: var(--disp); font-weight: 800; font-size: 24px; letter-spacing: 5px; color: var(--text); text-align: center; margin-bottom: 4px; }
+.gate .brand small { display: block; font-family: var(--mono); font-weight: 400; font-size: 12px; letter-spacing: 1px; color: var(--muted); margin-top: 4px; }
+.gate .key.wide { width: 100%; justify-content: center; }
+.gate .or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; }
+.gate .or::before, .gate .or::after { content: ""; flex: 1; border-top: 1px dashed var(--line); }
+.gate .fld { display: grid; gap: 4px; }
+.gate .fld > span { color: var(--muted); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; }
+
+/* ---------------------------------------------------- the setup stepper
+   Each step is a plain window. Round 2 (2026-09-25): folding a whole window
+   is shell.js's job on every page, so the stepper's own one-open-at-a-time
+   accordion was removed; setup.html only chooses which steps START folded. */
+.acc { display: grid; grid-template-columns: minmax(0, 1fr); gap: calc(14px * var(--d)); }
+.acc .win > .bar .num { color: var(--hi); font-variant-numeric: tabular-nums; }
+.steps a.s:hover { color: var(--text); }
+.eula-text { max-height: 13rem; }
+
+/* ---------------------------------------------------- the bench-only variant switch */
+.bench-var { position: relative; z-index: 1; display: flex; gap: 10px 16px; flex-wrap: wrap; align-items: baseline; font-size: 11px; color: var(--muted); letter-spacing: 1px; padding: 8px 12px; border: 1px dashed var(--line); }
+.bench-var b { color: var(--text-2); font-weight: 500; text-transform: uppercase; }
+.bench-var a { color: var(--text-2); }
+.bench-var a::before { content: ">"; color: var(--red); margin-right: 2px; }
+.bench-var a[aria-current="page"] { color: var(--hi); }
+
+@media (max-width: 1100px) {
+  .side.docs-first { order: 0; }   /* help: the index is the block above the document on a phone */
+  .side.docs-first .files { max-height: 260px; overflow-y: auto; }
+  .ack { grid-template-columns: minmax(0, 1fr) auto; }
+  .ack .q { grid-column: 1 / -1; }
+}
+@media (max-width: 760px) {
+  .tbl.stack-sm td.task-acts .acts { justify-content: flex-start; }
+  .vd, .vd.no-when { grid-template-columns: minmax(0, 1fr) auto; }
+  .vd .st { grid-column: 1; grid-row: 1; }
+  .vd .when { grid-column: 2; grid-row: 1; }
+  .vd .ti, .vd .more { grid-column: 1 / -1; }
+  .ack { grid-template-columns: minmax(0, 1fr); }
+  .page.gate { padding-top: 28px; }
+  .toc { columns: 1; }
+}
+
+/* an unfilled slot (the Resolve undo, the restore history) takes no gap */
+.stack > div:empty { display: none; }
+
+/* round 2 ("nothing may shift", 2026-09-25): the recovery wizard's answer
+   pane is one fixed height and scrolls, so picking a different problem
+   (whose plans run from two steps to six) never moves the page below */
+.plan-pane { height: 560px; overscroll-behavior: contain; }
+@media (max-width: 760px) { .plan-pane { height: 460px; border-top: 1px dashed var(--line); } }

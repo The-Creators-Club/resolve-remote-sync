@@ -1,0 +1,138 @@
+/* The personal page's own pieces (design bench builder "account",
+ * 2026-09-25, round 2). Loaded after cc-terminal.css and cc-components.css
+ * by account.html only. Everything is prefixed acct- so it cannot collide
+ * with another builder's sheet.
+ *
+ *   .acct-bench     a control that exists only on the bench (preview as)
+ *   .acct-new       a control the product does NOT have yet; outlined while
+ *                   the page's "mark what is new" switch is on
+ *   .acct-you       the person window: name on the left, facts on the right
+ *   .acct-pw        the password window: what it changes, then the form
+ *   .acct-pc        one computer's window: facts, projects, fleet jobs
+ *   .acct-h3        a sub-heading inside a window body
+ *   .acct-where     "change it in the tray: ..." pointer under a read-only fact
+ *   .tbl .grp       a group header row inside a settings table
+ *
+ * Round 2: no boxes around state words. The NEW marker is the shared .tag
+ * (square + word); this sheet only decides when it shows.
+ */
+
+.acct-bench { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+.acct-bench .opts button { text-transform: none; letter-spacing: 0; }
+
+/* ---------------------------------------------------- NEW markers */
+.acct-newtag { display: none; }
+body.acct-marknew .acct-newtag { display: inline-flex; margin-left: 8px; vertical-align: middle; }
+body.acct-marknew .acct-new { outline: 1px dashed var(--warn); outline-offset: 4px; }
+.acct-legend { display: none; }
+body.acct-marknew .acct-legend { display: flex; }
+
+/* ---------------------------------------------------- the person */
+.acct-you { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px 40px; align-items: start; }
+.acct-who { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+.acct-who .mono-name { font-weight: 700; font-size: 18px; color: var(--text); }
+.acct-who .login { color: var(--muted); font-size: 13px; }
+.acct-you .form-row { grid-template-columns: 160px minmax(0, 1fr); }
+
+/* ---------------------------------------------------- the password
+   Facts on the left, the form on the right. Nothing in it may move: the
+   result slot is always filled (idle line, busy line, answer) and has room
+   for the longest answer; the key keeps one width for both labels; the
+   hints under the boxes are one line each, always present. The window is
+   tall enough for its tallest method, so the bench's method switch does not
+   move the page below it. */
+.acct-pw { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 20px 40px; align-items: start; align-content: start; min-height: 512px; }
+.acct-pw-facts { grid-template-columns: 124px minmax(0, 1fr); gap: 10px 18px; line-height: 1.5; }
+.acct-pw-facts a, .acct-you a { color: var(--hi); }
+.acct-list { margin: 4px 0 6px; padding-left: 18px; }
+.acct-list li { margin: 2px 0; }
+.acct-list li::marker { color: var(--red); }
+abbr {  text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
+.acct-pw-form { display: grid; gap: 14px; }
+.acct-pw-form .form-row { grid-template-columns: 170px minmax(0, 1fr); }
+.acct-pw-hint { height: 18px; white-space: nowrap; overflow: hidden; }
+.acct-pw-go { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+/* both labels sit in one grid cell, so the key is always as wide as the
+   wider one and "changing" never narrows it */
+#pw-go { display: inline-grid; place-items: center; }
+#pw-go > .t, #pw-go > .busy-t { grid-area: 1 / 1; display: inline; }
+#pw-go > .busy-t, #pw-go.busy > .t { visibility: hidden; }
+#pw-go.busy > .busy-t { visibility: visible; }
+.acct-pw-pick { grid-column: 1 / -1; }
+/* the bar holds "new" or "no password here": one height for both */
+#password > .bar { height: 30px; box-sizing: border-box; }
+.acct-pw-result { min-height: 66px; }
+.acct-pw-result .note { min-height: 66px; box-sizing: border-box; align-items: center; }
+.acct-pw-result .note.acct-idle { border-left-color: var(--line); background: none; color: var(--muted); }
+.acct-pw-result .spin { color: var(--hi); margin-right: 4px; }
+.acct-pw-bench { padding-top: 10px; border-top: 1px dashed var(--line-soft); }
+.acct-pw-sso { display: grid; gap: 14px; }
+.acct-pw-sso .empty { padding: 28px 12px; }
+.inp:disabled { opacity: 0.6; }
+
+/* ---------------------------------------------------- a computer */
+.acct-pcs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: calc(26px * var(--d)); align-items: stretch; }
+.acct-pc { display: flex; flex-direction: column; min-width: 0; }
+.acct-pc > .body { display: grid; gap: 14px; flex: 1; align-content: start; }
+.acct-pc .bar .meta { display: inline-flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.acct-pc .bar .meta .led { flex: none; }
+.acct-pc .issues { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.acct-pc .issues .tag { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.acct-pc .kv .tag { white-space: normal; }
+/* the list keeps its height when rows are unticked: the window below the
+   list does not jump up under the pointer */
+.acct-pc .projects { height: 190px; border: 1px solid var(--line-soft); }
+.acct-pc .projects .tbl td { vertical-align: middle; }
+.acct-modekey { min-width: 12ch; justify-content: center; }
+.acct-pc .add { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.acct-pc .add .sel { width: auto; flex: 1; min-width: 180px; }
+.acct-pc .jobs-ctl { display: grid; gap: 8px; }
+.acct-pc .kinds { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; }
+.acct-pc .foot { border-top: 1px dashed var(--line); padding: 10px var(--pad); font-size: 12px; color: var(--text-2); }
+
+.acct-h3 { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text); display: flex; align-items: center; gap: 8px; }
+.acct-h3::before { content: "//"; color: var(--red); letter-spacing: 0; }
+.acct-h3 .n { color: var(--muted); letter-spacing: 0; text-transform: none; }
+.acct-where { font-size: 12px; color: var(--muted); }
+.acct-where::before { content: "\25B8 "; color: var(--red); }
+.acct-where b { color: var(--text-2); font-weight: 500; }
+
+/* ---------------------------------------------------- settings table */
+.tbl tr.grp td {
+  padding-top: 14px; border-top: 1px solid var(--line);
+  color: var(--text); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase;
+}
+.tbl tr.grp td small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; letter-spacing: 0; text-transform: none; }
+.tbl tr.grp:hover td { background: none; }
+.tbl td .v { color: var(--text); }
+.tbl td .v + .v { display: block; }
+.tbl td a { color: var(--hi); }
+/* a whole settings row is marked by its tag alone: a dashed outline on
+   every table row read as noise */
+body.acct-marknew tr.acct-new { outline: 0; }
+
+/* signed-in browsers: signing some out does not collapse the window */
+.acct-sess { min-height: 150px; }
+
+@media (max-width: 1100px) {
+  .acct-pcs { grid-template-columns: minmax(0, 1fr); }
+  .acct-you, .acct-pw { grid-template-columns: minmax(0, 1fr); }
+  .acct-pw { min-height: 0; }
+  .acct-you .form-row, .acct-pw-form .form-row { grid-template-columns: minmax(0, 1fr); }
+  .acct-pw-form .form-row > .lbl:empty { display: none; }
+}
+@media (max-width: 760px) {
+  .acct-pc .kinds { grid-template-columns: minmax(0, 1fr); }
+  .acct-pc .projects { height: auto; max-height: 260px; min-height: 150px; }
+  .tbl.stack-sm tr.grp { padding-top: 10px; }
+  .tbl.stack-sm td[data-l]::before { content: attr(data-l) ": "; color: var(--muted); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+  .acct-adminnote { flex-wrap: wrap; }
+  .acct-adminnote .grow { flex-basis: calc(100% - 80px); }
+  .acct-pw-facts { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
+  .acct-pw-facts dd { margin-bottom: 8px; }
+  .acct-pw-result, .acct-pw-result .note { min-height: 128px; }
+  .acct-pw-go { flex-direction: column-reverse; align-items: stretch; }
+  #pw-go { width: 100%; }
+  .head .acts #go-pw { order: -1; }
+  #password .bar .meta .tag.mute { display: none; }
+}

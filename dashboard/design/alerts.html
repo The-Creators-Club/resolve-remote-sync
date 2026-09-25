@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: alerts</title>
+<!-- The design bench (dashboard/design/README.md): Settings > ALERTS.
+     Mirrors templates/admin_alerts.html + partials/admin_alerts.html
+     (ui.page_admin_alerts, /admin/alerts): CURRENTLY OPEN (live alerts.scan),
+     WHERE ALERTS GO (sink, time zone, weekly report, heartbeat, digest, mail,
+     webhook, SERVER CHECK = the triage agent), the SMTP password's own form,
+     SEND A TEST / PREVIEW, WHAT WAS SENT (grouped by message) and WHAT THIS
+     SERVER CHECKS (alerts.ALERT_KINDS, all 62, in registry order).
+     Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/system.css">
+</head>
+<body data-page="alerts">
+
+<div class="shell">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> ALERTS</span></h1>
+        <div class="sub" id="sub"></div>
+      </div>
+      <div class="acts">
+        <a class="key" href="#" target="_blank" rel="noopener" data-busy="preview opened in a new tab" title="Opens this week's Monday report in a new tab, built from what is open now. Nothing is sent."><span class="t">Preview this week's report</span><span class="busy-t"><span class="spin"></span> building</span></a>
+        <button class="key primary" type="button" id="test-key" title="Sends one test message through the saved channel. Save first if you changed anything below."><span class="t">Send a test</span><span class="busy-t"><span class="spin"></span> sending</span></button>
+      </div>
+    </div>
+
+    <div class="stack">
+      <p class="lede">What this server checks about itself and the fleet, what it
+        found, and where it sends it. Every alarm this product raises used to be
+        pull-only: it was on a page, and somebody had to have the page open.
+        This is the same information, <b>pushed</b>, plus a report every Monday
+        morning.</p>
+      <div id="result"></div>
+
+      <!-- ================================================ currently open -->
+      <h2 class="sec">currently open</h2>
+      <section class="win">
+        <div class="bar"><span>┌─╡</span><span class="t">currently_open</span><span>╞</span><span class="rule"></span><span class="meta" id="open-meta"></span><span>═┐</span></div>
+        <div class="body lede" id="open-lede" style="padding-bottom:4px"></div>
+        <div class="scroll-y" style="max-height:560px" id="open"></div>
+      </section>
+
+      <!-- ============================================== where alerts go -->
+      <h2 class="sec">where alerts go</h2>
+      <p class="lede" style="margin-top:-8px">Off by default. <b>Nothing here ever leaves this NAS unless you set a channel.</b> One save checks every field below together, and refuses the whole form on one bad field.</p>
+      <form class="stack" id="alerts-form" autocomplete="off">
+        <div class="cols-2">
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">channel</span><span>╞</span><span class="rule"></span><span class="meta" id="sink-meta"></span><span>═┐</span></div>
+            <div class="body form">
+              <div class="form-row"><span class="lbl">Send alerts by</span>
+                <div class="inline" id="sinks">
+                  <label class="radio" title="Nothing leaves this NAS. Problems still show on the Health page."><input type="radio" name="sink" value="none"><span class="g"></span><span class="l">none</span></label>
+                  <label class="radio" title="Sends email through your own mail server, set up under mail."><input type="radio" name="sink" value="smtp"><span class="g"></span><span class="l">mail (smtp)</span></label>
+                  <label class="radio" title="Posts each finding to a web address as JSON, for a chat tool or a monitoring service."><input type="radio" name="sink" value="webhook"><span class="g"></span><span class="l">webhook</span></label>
+                </div></div>
+              <div class="form-row"><label class="lbl" for="tz">Time zone<small>An <span title="The official name of a time zone: a region, a slash, then a city, such as Asia/Taipei.">IANA</span> name such as Europe/London.</small></label>
+                <div><input class="inp" id="tz" placeholder="UTC"><div class="hint">The weekly report goes out at 08:00 on Monday in this zone.</div></div></div>
+              <div class="form-row"><label class="lbl" for="weekly" title="A summary every Monday morning: what is open, what changed and which computers are behind.">Weekly report</label>
+                <select class="sel" id="weekly"><option value="1">on (Monday 08:00)</option><option value="0">off</option></select></div>
+              <div class="form-row"><label class="lbl" for="hb">Daily "still here" message<small>One short message a day while a channel is set up.</small></label>
+                <div><select class="sel" id="hb"><option value="1">on (one a day)</option><option value="0">off</option></select>
+                <div class="hint">If these stop arriving, the server itself is down. It is not the weekly report: a proof of life a week wide leaves six days in which no mail means nothing.</div></div></div>
+              <div class="form-row"><label class="lbl" for="digest" title="Whether one check that finds three problems sends one message or three.">How many messages</label>
+                <div><select class="sel" id="digest"><option value="">whatever suits the channel</option><option value="1">one message per check</option><option value="0">one message per problem</option></select>
+                <div class="hint">One message per check keeps a mailbox readable: everything found in that check is in it, worst first. A webhook gets one POST per finding, because its consumer wants events.</div></div></div>
+            </div>
+          </section>
+
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">server_check</span><span>╞</span><span class="rule"></span><span class="meta" id="triage-meta"></span><span>═┐</span></div>
+            <div class="body form">
+              <div class="lede">Claude Code reads everything this server knows is open, stuck or failing and mails you what needs a person, at these hours in the time zone set under channel. It only reads; a reply to its email can carry out the actions it offers.</div>
+              <div class="form-row"><span class="lbl">Server check<small>It runs Claude Code on this server, so it needs Claude Code set up on <a class="hi" href="site.html#ai">Site, AI providers</a>.</small></span>
+                <div><label class="switch" title="Turns the scheduled server check on or off. It runs Claude Code, so Claude Code must be set up."><input type="checkbox" id="triage"><span class="off">off</span><span class="on">on</span></label></div></div>
+              <div class="form-row"><label class="lbl" for="hours">At these hours<small>0 to 23, separated by commas. At most four.</small></label>
+                <input class="inp" id="hours" placeholder="6,18"></div>
+              <div class="form-row"><label class="lbl" for="reply">Reply address<small>The only mail the server ever reads.</small></label>
+                <div><input class="inp" id="reply" placeholder="you+ccsync@example.com"><div class="hint">Replies to the check's email go here. Blank means the email cannot be replied to.</div></div></div>
+              <div class="form-row"><label class="lbl" for="imap" title="IMAP is how mail is read from a mailbox. Your mail provider publishes the host name.">IMAP host<small>Read with the SMTP user and password.</small></label>
+                <div><input class="inp" id="imap" placeholder="imap.example.com"><div class="hint">Where replies are read from. Blank works it out from the SMTP host.</div></div></div>
+            </div>
+            <div class="body split" id="triage-status" style="display:grid;gap:6px;font-size:13px"></div>
+          </section>
+        </div>
+
+        <div class="cols-2">
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">mail</span><span>╞</span><span class="rule"></span><span class="meta" id="mail-meta"></span><span>═┐</span></div>
+            <div class="body form">
+              <div class="form-row"><label class="lbl" for="host" title="SMTP is how mail is sent. Your mail provider gives you the host, port, user and password.">SMTP host</label><input class="inp" id="host"></div>
+              <div class="form-row"><label class="lbl" for="port" title="Usually 587 with STARTTLS on, or 465 for mail servers that want it.">SMTP port</label><input class="inp" id="port" style="max-width:12ch"></div>
+              <div class="form-row"><label class="lbl" for="user">SMTP user</label><input class="inp" id="user"></div>
+              <div class="form-row"><label class="lbl" for="from">From</label><input class="inp" id="from"></div>
+              <div class="form-row"><label class="lbl" for="to">To<small>One or more addresses, separated by commas.</small></label><input class="inp" id="to"></div>
+              <div class="form-row"><label class="lbl" for="tls" title="Encrypts the connection to the mail server. Leave it on unless your provider says otherwise.">STARTTLS</label><select class="sel" id="tls"><option value="1">on</option><option value="0">off</option></select></div>
+              <div class="form-row"><label class="lbl" for="verify">Verify the mail server's certificate</label>
+                <div><select class="sel" id="verify"><option value="1">on</option><option value="0">off (a server with its own certificate)</option></select>
+                <div class="hint">Off only for a mail server with its own certificate. When on, a certificate that does not match the host is a refusal, never a silent fallback.</div></div></div>
+            </div>
+            <div class="body split form" id="pw"></div>
+          </section>
+
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">webhook</span><span>╞</span><span class="rule"></span><span class="meta" id="hook-meta"></span><span>═┐</span></div>
+            <div class="body form">
+              <div class="form-row"><label class="lbl" for="hook" title="The web address that receives each finding. Chat tools and monitoring services give you one.">Webhook URL<small>https only.</small></label>
+                <div><input class="inp" id="hook" placeholder="https://"><div class="hint">The body is {subject, text} as JSON. A stored URL is shown masked; type a new one to replace it.</div></div></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="foot-keys">
+          <button class="key primary" type="submit" id="save" title="Checks every field together and saves them all, or nothing if one is wrong."><span class="t">Save</span><span class="busy-t"><span class="spin"></span> saving</span><span class="kbd">S</span></button>
+          <span class="res" id="save-res" role="status" aria-live="polite"></span>
+        </div>
+      </form>
+
+      <!-- ================================================ what was sent -->
+      <h2 class="sec">what was sent</h2>
+      <section class="win">
+        <div class="bar"><span>┌─╡</span><span class="t">sent.log</span><span>╞</span><span class="rule"></span><span class="meta" id="log-meta"></span><span>═┐</span></div>
+        <div class="body lede" style="padding-bottom:4px">Newest first, grouped by the message each one went out in. A failed send is kept: a channel that has been refusing since Tuesday is worse than no channel, because you believe you have one.</div>
+        <div class="scroll-y" style="max-height:440px">
+          <table class="tbl stack-sm"><thead><tr><th style="width:12ch">when</th><th style="width:20ch" title="Which check the message was about. heartbeat, weekly and test are the channel's own messages.">kind</th><th>subject</th><th>to</th><th style="width:22ch" title="sent, or the reason the channel refused it.">result</th></tr></thead><tbody id="log"></tbody></table>
+        </div>
+      </section>
+
+      <!-- ====================================== what this server checks -->
+      <h2 class="sec">what this server checks</h2>
+      <section class="win">
+        <div class="bar"><span>┌─╡</span><span class="t">checks</span><span>╞</span><span class="rule"></span><span class="meta" id="checks-meta"></span><span>═┐</span></div>
+        <div class="body lede" style="padding-bottom:0">So that silence is provably checked, not unchecked.</div>
+        <div class="scroll-y" style="max-height:420px"><ul class="checks" id="checks"></ul></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, tag } = CC;
+  const $ = s => document.querySelector(s);
+
+  // alerts.ALERT_KINDS, in registry order: [kind, severity, title, what]
+  const KINDS = [
+    ['breaker_tripped', 'error', 'proxy download stopped itself', "a computer's proxy download brake"],
+    ['fleet_halt', 'warn', 'syncing is stopped for the whole fleet', 'the fleet-wide stop'],
+    ['fleet_halt_expired', 'warn', 'a fleet-wide stop expired by itself', 'a fleet-wide stop past its expiry'],
+    ['disk_park', 'error', 'a computer stopped its own downloads for space', 'a computer that stopped itself below its disk floor'],
+    ['disk_low', 'error', 'a computer is running out of space', "free space on editors' sync drives"],
+    ['machine_silent', 'error', 'a computer has gone quiet', 'computers silent for more than a day'],
+    ['report_refused', 'error', 'a computer is being turned away', 'computers this server is refusing'],
+    ['clock_skew', 'error', "a computer's clock is wrong", 'clocks more than five minutes out'],
+    ['engine_down', 'error', 'the sync engine is down on a computer', "a computer's sync engine down for an hour"],
+    ['nas_engine_down', 'error', "the server's sync engine is unreachable", "the server's own sync engine"],
+    ['lane_stalled', 'error', 'a sync transfer is stuck', 'transfers busy with nothing moving'],
+    ['lane_error', 'error', 'a sync transfer has been failing', 'transfers in error for an hour'],
+    ['folders_unfiltered', 'warn', 'a shared folder has no filter', 'shared folders with no ignore filter'],
+    ['thread_restarts', 'warn', 'CC Sync keeps restarting itself', 'computers restarting their own sync threads'],
+    ['crashes', 'warn', 'background tasks have crashed', "crash reports on editors' computers"],
+    ['upgrade_failed', 'error', 'an update will not install', 'computers failing the same update'],
+    ['upgrade_reverted', 'warn', 'a computer rolled an update back', 'computers that rolled a build back'],
+    ['collector_kind_failed', 'error', 'a server background job is failing', "the server's background jobs"],
+    ['collector_stale', 'error', "the server's collector has stopped", "the collector's own liveness"],
+    ['watchdog_restart', 'error', 'the server restarted its collector', 'collector watchdog restarts'],
+    ['enforce_refusal', 'error', 'a sharing change was refused', 'the sharing blast-radius brake'],
+    ['deactivation_refusal', 'error', 'a mass project deactivation was refused', 'the project deactivation brake'],
+    ['enforce_plan', 'warn', 'a sharing change is held', 'held sharing plans'],
+    ['ignored_sections', 'warn', 'computers are reporting things nobody reads', 'report sections this build drops'],
+    ['feed_stale', 'warn', 'this dashboard cannot check for updates', 'the vendor update feed'],
+    ['feed_runtime_mismatch', 'warn', 'updates cannot install on this NAS', 'offered builds against this container'],
+    ['data_disk', 'error', 'the server is running out of space', "free space on the server's own volume"],
+    ['nas_tree', 'error', 'the project tree is missing', 'the project tree canary'],
+    ['notice_error', 'error', 'the server found a problem', 'open problems the server recorded'],
+    ['out_of_tree', 'warn', 'footage is outside the tree', 'clips referenced from outside the tree'],
+    ['stray_projects', 'warn', 'project folders outside the tree', 'stray project folders'],
+    ['moved_project_dir', 'warn', 'a project folder has moved', 'project folders not where the tree expects'],
+    ['ingest_staging', 'warn', 'footage is waiting in a drop folder', 'unfiled footage in drop folders'],
+    ['broll_archive_unreadable', 'error', 'the b-roll archive cannot be read', "this server's own view of the b-roll archive"],
+    ['file_move_expired', 'warn', 'a file move was never confirmed', 'file moves a computer never answered'],
+    ['versions_behind', 'warn', 'a computer is several releases behind', 'computers behind on CC Sync'],
+    ['soak_failed', 'warn', 'a trial build is failing', 'builds on trial before the fleet'],
+    ['retracted_running', 'error', 'a recalled build is still running', 'computers on recalled builds'],
+    ['key_drain', 'warn', 'computers are still on the old sign-in key', 'the sign-in key rotation drain'],
+    ['weekly_send_failed', 'error', 'the weekly report could not be sent', 'the alert channel itself'],
+    ['invariant_broken', 'error', 'something this system relies on is not true', 'the invariant checks (SYS-9)'],
+    ['protection_missing', 'error', 'a safety net is not there', 'the protection panel (SYS-14)'],
+    ['protection_unverifiable', 'warn', 'a safety net this server cannot check', 'safety mechanisms this server can verify'],
+    ['jobs_starved', 'warn', 'work is queued and nobody is taking it', 'the fleet job queue'],
+    ['jobs_abandoned', 'warn', 'the fleet gave up on some work', 'jobs the fleet abandoned'],
+    ['jobs_pinned_no_executor', 'error', 'a job is pinned here and nothing here can run it', "pinned jobs against this dashboard's own worker"],
+    ['upgrade_refused', 'error', 'a computer is refusing every update', 'computers refusing the offer outright'],
+    ['rollout_stalled', 'warn', 'a new build is not being taken', 'adoption of the current build'],
+    ['code_not_applied', 'error', 'this server is not running the update that was applied to it', 'which code this container booted'],
+    ['platform_channel_stale', 'warn', "one platform's build is behind", "the two platforms' channels against each other"],
+    ['ytdlp_stale', 'warn', "a computer's YouTube downloader is old", "each computer's yt-dlp"],
+    ['ytdlp_failed', 'error', 'a computer has no working YouTube downloader', 'computers with no usable yt-dlp'],
+    ['media_sidecar_failed', 'warn', 'a computer could not install its media tools', "each computer's ffmpeg/ffprobe/deno sidecar"],
+    ['loopback_down', 'warn', 'Send to Resolve cannot work on a computer', 'the 8899 loopback on each computer'],
+    ['ytdl_worker_dead', 'error', 'the YouTube downloader is not running', 'the download worker on this server'],
+    ['ytdl_downloads_failing', 'warn', 'YouTube downloads are failing', 'downloads on this server'],
+    ['ytdl_pot_provider_unreachable', 'warn', 'the YouTube anti-bot helper is not answering', 'the PO-token sidecar'],
+    ['ytdl_plugin_install_failed', 'warn', 'the YouTube anti-bot plugin did not install', 'the plugin install at boot'],
+    ['ytdl_stale', 'warn', "this server's YouTube downloader is old", 'yt-dlp on this server'],
+    ['broll_batch_stuck', 'warn', 'a b-roll indexing job has stopped', 'b-roll ingest batches'],
+    ['broll_share_expiring', 'warn', 'a client link is about to expire', 'client links near their expiry'],
+    ['red_unexplained', 'error', 'a computer is not syncing', 'computers red with no specific cause'],
+  ];
+  const TITLE = Object.fromEntries(KINDS.map(k => [k[0], k[2]]));
+  const KIND_TIP = { heartbeat: 'The daily still-here message. If these stop, the server is down.', weekly: 'The Monday report.', test: 'A test message sent from this page.' };
+
+  // [kind, severity, diagnosis, subject, detail, fix]
+  const OPEN_BUSY = [
+    ['nas_engine_down', 'error', 'No project is being shared, measured or updated for anybody while it is down.', 'the server', 'http://syncthing:8384: connection refused, 3 cycles', 'Start the Syncthing app on the NAS. This clears itself on the next check.'],
+    ['machine_silent', 'error', 'A computer that does not report cannot be synced, updated or asked anything.', 'TCHEN-RIG', 'tchen, last report 26 h ago', 'Ask tchen whether it is on and CC Sync is in the tray. If it was retired, forget it on Users.'],
+    ['upgrade_failed', 'error', 'The same build failed three times in a row on this computer.', 'TCHEN-RIG', '0.9.78: the installer exited 1603', 'Ask this computer why from its row on the home page, and read the answer on Health.'],
+    ['invariant_broken', 'error', 'A project is ticked for a computer that is not being sent it.', '2026/FF5/Elections', 'JSMITH-MBP', 'Open Invariants for the fact and its fix.'],
+    ['notice_error', 'error', 'The server recorded a problem it refused to work around.', 'plan_without_share', 'jsmith / JSMITH-MBP', 'Open Health, problems the server found.'],
+    ['out_of_tree', 'warn', 'Those clips are offline on every other computer, because nothing outside the tree is synced.', '2026/FF5/Civil Defence', '14 clips point at E:\\Cards', 'Copy them into the project with FIX ALL in the companion, then relink.'],
+    ['versions_behind', 'warn', 'This computer is 28 releases behind the build the fleet is offered.', 'TCHEN-RIG', '0.9.49, current is 0.9.78', 'Push the update from Packages, or ask tchen to click it in the tray.'],
+    ['protection_unverifiable', 'warn', 'This server cannot ask the NAS about its snapshot schedule.', 'NAS snapshots', 'no TRUENAS_API_KEY in the container', 'Open Protection for the fix.'],
+  ];
+
+  const SETTINGS_BUSY = { sink: 'smtp', tz: 'Asia/Taipei', weekly: '1', hb: '1', digest: '', host: 'smtp.example.com', port: '587', user: 'alerts@example.com', from: 'CC Sync <alerts@example.com>', to: 'owen@example.com, ops@example.com', tls: '1', verify: '1', hook: 'https://hooks.example.com/...', triage: true, hours: '6,18', reply: 'owen+ccsync@example.com', imap: '', pw: 'file' };
+  const SETTINGS_CALM = { sink: 'none', tz: '', weekly: '1', hb: '0', digest: '', host: '', port: '587', user: '', from: '', to: '', tls: '1', verify: '1', hook: '', triage: false, hours: '', reply: '', imap: '', pw: 'none' };
+
+  // groups: [at, count, rows[[when, kind, subject, to, ok, detail]]]
+  const LOG_BUSY = [
+    ['4 min ago', 3, [
+      ['4 min ago', 'nas_engine_down', "the server's sync engine is unreachable", 'owen@example.com, ops@example.com', true, ''],
+      ['4 min ago', 'machine_silent', 'a computer has gone quiet: TCHEN-RIG', 'owen@example.com, ops@example.com', true, ''],
+      ['4 min ago', 'upgrade_failed', 'an update will not install: TCHEN-RIG', 'owen@example.com, ops@example.com', true, '']]],
+    ['1d ago', 1, [['1d ago', 'heartbeat', 'still here: 0 open problems', 'owen@example.com, ops@example.com', true, '']]],
+    ['2d ago', 2, [
+      ['2d ago', 'out_of_tree', 'footage is outside the tree: 2026/FF5/Civil Defence', 'owen@example.com, ops@example.com', false, 'SMTP 535: authentication failed'],
+      ['2d ago', 'versions_behind', 'a computer is several releases behind: TCHEN-RIG', 'owen@example.com, ops@example.com', false, 'SMTP 535: authentication failed']]],
+    ['3d ago', 1, [['3d ago', 'weekly', 'weekly report: 5 computers, 11 of 14 projects in sync', 'owen@example.com, ops@example.com', true, '']]],
+    ['9d ago', 1, [['9d ago', 'test', 'test message from this server', 'owen@example.com', true, '']]],
+  ];
+
+  let mode = 'busy';
+  function render(m) {
+    mode = m;
+    const busy = m !== 'calm';
+    const open = busy ? OPEN_BUSY : [];
+    const s = busy ? SETTINGS_BUSY : SETTINGS_CALM;
+    const nErr = open.filter(o => o[1] === 'error').length, nWarn = open.length - nErr;
+    const sinkWord = { none: 'none', smtp: 'mail', webhook: 'webhook' }[s.sink];
+
+    $('#sub').innerHTML = `channel: <b>${sinkWord}</b> &middot; <b>${open.length}</b> open &middot; checked against <b>${KINDS.length}</b> things every <b>10</b> minutes`;
+    $('#result').innerHTML = s.sink === 'none' ? `<div class="note warn"><span class="tag solid warn" title="No channel is set, so no one is told.">off</span><span class="grow"><b>Nobody is told when this server finds a problem.</b> Choose mail or a webhook under where alerts go, save, then send a test.</span></div>`
+      : `<div class="note ok"><span class="grow">Sending by <b>${sinkWord}</b> to ${esc(s.to)}. The last test went out 9 days ago.</span></div>`;
+    $('#open-meta').innerHTML = open.length ? `<b>${nErr}</b> problems &middot; <b>${nWarn}</b> to look at` : 'nothing open';
+    $('#open-lede').innerHTML = `What this server believes is wrong right now. ${nErr} problem(s), ${nWarn} to look at, checked against ${KINDS.length} things every 10 minutes.`;
+    $('#open').innerHTML = open.length ? `<table class="tbl stack-sm"><thead><tr><th style="width:10ch" title="error needs a person; warn is worth a look before it gets worse.">severity</th><th>what</th><th style="width:26ch" title="The computer, project or part of the server it is about.">where</th><th style="width:34%">what to do</th></tr></thead><tbody>${open.map(o => `<tr>
+        <td><span title="${o[1] === 'error' ? 'Something is wrong and needs a person.' : 'Worth checking before it gets worse.'}">${tag(o[1] === 'error' ? 'err' : 'warn', o[1], true)}</span></td>
+        <td><b>${esc(TITLE[o[0]])}</b><div class="muted">${esc(o[2])}</div></td>
+        <td>${esc(o[3])}<div class="muted" style="font-size:12px">${esc(o[4])}</div></td>
+        <td>${esc(o[5])}</td></tr>`).join('')}</tbody></table>`
+      : `<div class="allclear"><span class="led"></span>Nothing is wrong that this server can see. All ${KINDS.length} checks ran and found nothing.</div>`;
+
+    // settings
+    document.querySelectorAll('#sinks input').forEach(r => { r.checked = r.value === s.sink; });
+    [['tz', 'tz'], ['weekly', 'weekly'], ['hb', 'hb'], ['digest', 'digest'], ['host', 'host'], ['port', 'port'], ['user', 'user'], ['from', 'from'], ['to', 'to'], ['tls', 'tls'], ['verify', 'verify'], ['hook', 'hook'], ['hours', 'hours'], ['reply', 'reply'], ['imap', 'imap']]
+      .forEach(([id, k]) => { $('#' + id).value = s[k]; });
+    $('#triage').checked = s.triage;
+    $('#imap').placeholder = busy ? 'imap.example.com (from the SMTP host)' : 'imap.example.com';
+    sinkTags();
+
+    $('#pw').innerHTML = s.pw === 'env'
+      ? `<div class="form-row"><span class="lbl">SMTP password</span><div>in use: <b>••••••••vbqk</b><div class="hint">This password comes from the deployment's own environment, so it cannot be changed here: change it where this server is deployed.</div></div></div>`
+      : `<div class="form-row"><label class="lbl" for="pwi">SMTP password<small>Kept in its own file on the server, never in the database, never shown.</small></label>
+          <div style="display:grid;gap:8px"><input class="inp" id="pwi" type="password" autocomplete="new-password" placeholder="${s.pw === 'file' ? 'stored: ••••••••vbqk' : 'not set'}">
+          <div class="inline"><button class="key sm" type="button" data-busy="password stored" title="Stores the password typed above in its own file on the server. It is never shown again."><span class="t">Set password</span><span class="busy-t"><span class="spin"></span> storing</span></button>
+          <button class="key quiet sm" type="button" data-busy="password cleared" title="Deletes the stored password. Mail stops until a new one is set."><span class="t">clear</span><span class="busy-t"><span class="spin"></span> clearing</span></button></div></div></div>`;
+
+    $('#triage-meta').innerHTML = s.triage ? '<b>on</b> &middot; 06:00, 18:00' : 'off';
+    $('#triage-status').innerHTML = busy
+      ? `<div>Server check is <b class="hi">on</b>.</div>
+         <div class="dim">Last check: 6h ago, report sent. <a class="hi" href="#" target="_blank" rel="noopener">read its report</a></div>
+         <div class="dim">Replies last read <span title="2026-09-25T02:30:04+00:00">4 min ago</span>: no new replies.</div>
+         <div class="inline" style="margin-top:4px"><button class="key sm" type="button" data-busy="a check started: its report arrives by mail" title="Runs the server check now instead of at its next hour. The report arrives by mail."><span class="t">Run now</span><span class="busy-t"><span class="spin"></span> starting</span></button></div>`
+      : `<div>Server check is <b>off</b>. <span class="dim">It cannot run its analysis: Claude Code is not set up on this server. Each check will mail a plain summary instead.</span></div>
+         <div class="dim">No check has run yet.</div>
+         <div class="inline" style="margin-top:4px"><button class="key sm" type="button" data-busy="a check started" title="Runs the server check now. With no Claude Code it mails a plain summary instead."><span class="t">Run now</span><span class="busy-t"><span class="spin"></span> starting</span></button></div>`;
+
+    // log
+    const log = busy ? LOG_BUSY : [];
+    const sent = log.reduce((a, g) => a + g[2].length, 0);
+    const failed = log.reduce((a, g) => a + g[2].filter(r => !r[4]).length, 0);
+    $('#log-meta').innerHTML = sent ? `<b>${sent}</b> findings in <b>${log.length}</b> messages${failed ? ` &middot; <span class="red">${failed} failed</span>` : ''}` : '';
+    $('#log').innerHTML = log.length ? log.map(g => `${g[1] > 1 ? `<tr class="grp"><td colspan="5"><span title="2026-09-25T02:37:00+00:00">${esc(g[0])}</span>: one message, <b>${g[1]}</b> findings</td></tr>` : ''}
+      ${g[2].map(r => `<tr><td style="white-space:nowrap">${esc(r[0])}</td><td class="hi" title="${esc(TITLE[r[1]] || KIND_TIP[r[1]] || '')}">${esc(r[1])}</td><td><b>${esc(r[2])}</b></td><td>${esc(r[3])}</td>
+        <td>${r[4] ? `<span title="The channel accepted it.">${tag('ok', 'sent')}</span>` : `<span title="The channel refused it. The message is kept here so a broken channel cannot hide.">${tag('err', r[5] || 'failed', true)}</span>`}</td></tr>`).join('')}`).join('')
+      : `<tr><td colspan="5"><div class="empty" style="padding:14px 0"><span class="glyph">&gt;_</span>Nothing has been sent yet.</div></td></tr>`;
+
+    // checks
+    const openKinds = Object.fromEntries(open.map(o => [o[0], o[1]]));
+    $('#checks-meta').innerHTML = `<b>${KINDS.length}</b> checks &middot; ${open.length} found something`;
+    $('#checks').innerHTML = KINDS.map(k => `<li><span title="${openKinds[k[0]] ? 'This check found something. It is under currently open.' : 'This check ran and found nothing wrong.'}">${openKinds[k[0]] ? tag(openKinds[k[0]] === 'error' ? 'err' : 'warn', 'found', true) : tag('ok', 'ok')}</span><span title="${esc(k[2])}">${esc(k[3])}</span></li>`).join('');
+  }
+
+  function sinkTags() {
+    const v = (document.querySelector('#sinks input:checked') || {}).value || 'none';
+    $('#sink-meta').innerHTML = v === 'none' ? 'nothing leaves this NAS' : `sending by <b>${v === 'smtp' ? 'mail' : 'webhook'}</b>`;
+    $('#mail-meta').innerHTML = v === 'smtp' ? '<b>in use</b>' : 'not in use';
+    $('#hook-meta').innerHTML = v === 'webhook' ? '<b>in use</b>' : 'not in use';
+  }
+  $('#sinks').addEventListener('change', sinkTags);
+
+  $('#alerts-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const hours = $('#hours').value.split(',').map(x => x.trim()).filter(Boolean);
+    const res = $('#save-res');
+    const bad = hours.find(h => !/^\d+$/.test(h) || +h > 23);
+    if (bad !== undefined || hours.length > 4) {
+      res.className = 'res bad';
+      res.textContent = bad !== undefined ? `could not save: "${bad}" is not an hour from 0 to 23. Nothing was saved.` : 'could not save: at most four hours. Nothing was saved.';
+      $('#hours').classList.add('bad');
+      return;
+    }
+    $('#hours').classList.remove('bad');
+    const k = $('#save'); k.style.minWidth = k.offsetWidth + 'px'; k.classList.add('busy');
+    setTimeout(() => { k.classList.remove('busy'); res.className = 'res ok'; res.textContent = 'saved at ' + new Date().toLocaleTimeString('en-GB', { hour12: false }); }, 900);
+  });
+  $('#test-key').addEventListener('click', () => {
+    const k = $('#test-key'); k.style.minWidth = k.offsetWidth + 'px'; k.classList.add('busy');
+    const v = (document.querySelector('#sinks input:checked') || {}).value;
+    setTimeout(() => {
+      k.classList.remove('busy');
+      $('#result').innerHTML = v === 'none'
+        ? `<div class="note err"><span class="grow"><b>Not sent.</b> The channel is none: choose mail or a webhook and save first.</span></div>`
+        : `<div class="note ok"><span class="grow"><b>Test sent</b> to owen@example.com, ops@example.com. If it does not arrive in a few minutes, the send log below says why.</span></div>`;
+    }, 1200);
+  });
+  document.addEventListener('keydown', e => {
+    if ((e.key === 's' || e.key === 'S') && !/input|select|textarea/i.test(e.target.tagName) && !e.ctrlKey && !e.metaKey) $('#alerts-form').requestSubmit();
+  });
+
+  CC.page({ page: 'alerts', onData: render });
+})();
+</script>
+</body>
+</html>

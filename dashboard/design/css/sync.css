@@ -1,0 +1,231 @@
+/* Builder "sync" (2026-09-25): the few pieces transfers / project /
+ * project-setup / installer need that the shared sheets do not have.
+ * Loaded after cc-terminal.css and cc-components.css.
+ *
+ *   .fold        a collapsible group row (<details>): the real pages' QUEUED
+ *                groups, MEDIA PRESENCE per computer and its Resolve bins
+ *   .files       a file list inside a fold (name left, size right)
+ *   .lrow        one line of a list that is not a table (shared folders,
+ *                moves): tags, then words, then keys on the right
+ *   .tree .cur   the project the page is about, in the side tree
+ *   .crumbs      a folder path you can click back up
+ *   .dirlist     a browsable folder listing
+ *   .pick-plat   the installer's two platform windows
+ *   .bench       a control that exists only on the bench (preview-as, state)
+ */
+
+/* ---------------------------------------------------- fold */
+.fold { border-top: 1px dashed var(--line); }
+.fold:first-child { border-top: 0; }
+.fold > summary {
+  list-style: none;
+  position: relative;
+  padding-left: calc(var(--pad) + 1ch + 12px) !important;
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px;
+  padding: 9px var(--pad);
+  font-size: 13px; color: var(--text-2);
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary:hover { background: var(--row-hover); }
+.fold > summary .mk { position: absolute; left: var(--pad); color: var(--red); width: 1ch; transition: transform 0.12s; }
+.fold .fold > summary .mk { left: 0; }
+.fold[open] > summary .mk { transform: rotate(90deg); color: var(--hi); }
+.fold > summary b { color: var(--text); font-weight: 700; }
+.fold > summary .grow { flex: 1; min-width: 0; }
+.fold > summary .why { flex-basis: 100%; color: var(--text-2); font-size: 12px; }
+.fold > summary .tag { align-self: center; }
+.fold .fold-body { padding: 0 var(--pad) 12px calc(var(--pad) + 1ch + 12px); }
+.fold .fold > summary { padding-left: calc(1ch + 12px) !important; padding-right: 0; }
+.fold .fold { border-top-style: dotted; }
+.fold .fold .fold-body { padding-left: calc(1ch + 12px); padding-right: 0; }
+
+/* ---------------------------------------------------- files */
+.files { list-style: none; display: grid; gap: 2px; font-size: 12px; }
+.files li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: baseline; }
+.files li .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.files li .sz { color: var(--muted); font-variant-numeric: tabular-nums; }
+.files li .g { width: 1.5ch; text-align: center; }
+.files li .g.ok { color: var(--ok); }
+.files li .g.err { color: var(--err); }
+.files li .g.up { color: var(--hi); }
+.files li.more { display: block; color: var(--muted); }
+.files li.note-line { display: block; color: var(--warn); }
+.files.cap { max-height: 220px; overflow-y: auto; overscroll-behavior: contain; padding-right: 6px; }
+
+/* ---------------------------------------------------- list rows */
+.lrow {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px;
+  padding: 10px var(--pad);
+  border-top: 1px dashed var(--line);
+  font-size: 13px; color: var(--text-2);
+}
+.lrow:first-child { border-top: 0; }
+.lrow .tag { align-self: center; }
+.lrow .path { color: var(--text); overflow-wrap: anywhere; }
+.lrow .grow { flex: 1; min-width: 0; }
+.lrow .keys { display: flex; gap: 6px; margin-left: auto; }
+.lrow .sub { flex-basis: 100%; padding-left: 2ch; font-size: 12px; color: var(--text-2); }
+.lrow .sub::before { content: "\2514\2500 "; color: var(--red-deep); }
+.lrow a.link { color: var(--hi); }
+.lrow a.link:hover { text-decoration: underline; }
+.sec-h { padding: 10px var(--pad) 4px; color: var(--muted); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; border-top: 1px solid var(--line); }
+.sec-h:first-child { border-top: 0; }
+.sec-h .dim { text-transform: none; letter-spacing: 0; margin-left: 8px; }
+
+/* ---------------------------------------------------- a form strip inside a window */
+.strip { display: grid; gap: 10px; padding: var(--pad); border-top: 1px dashed var(--line); }
+.strip:first-child { border-top: 0; }
+.strip .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.strip .row .inp, .strip .row .sel { width: auto; flex: 1 1 220px; min-width: 0; }
+.strip .row .sep { color: var(--red); }
+.strip .lbl { color: var(--muted); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; }
+
+/* ---------------------------------------------------- tree: the page's project */
+.tree .row.proj.cur { color: var(--hi); background: rgb(var(--hi-rgb) / 0.06); }
+.tree .row.proj.cur::after { content: " <"; color: var(--hi); }
+
+/* ---------------------------------------------------- the per-computer table */
+.tbl .who { color: var(--text); font-weight: 700; }
+.tbl .who small { display: block; font-weight: 400; color: var(--muted); font-size: 11px; }
+.tbl .lanes-t { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.tbl .mtr { white-space: nowrap; letter-spacing: 1px; }
+.tbl .conn { font-size: 11px; letter-spacing: 1px; }
+.tbl .conn.on { color: var(--ok); }
+.tbl .conn.off { color: var(--muted); }
+.tbl td.dir { color: var(--hi); width: 3ch; }
+.tbl td.dir.up { color: var(--red-hot); }
+.tbl td.file { color: var(--text); max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tbl td.file small { color: var(--muted); margin-left: 8px; }
+.tbl tr.drawer td { border-top: 0; padding-top: 0; }
+.tbl tr.drawer:hover td { background: none; }
+.drawer-box { border: 1px solid var(--line); border-left: 3px solid var(--hi); padding: 10px 12px; background: #050202; display: grid; gap: 8px; }
+.drawer-box .h { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text); }
+.drawer-box .h .dim { text-transform: none; letter-spacing: 0; margin-left: 8px; color: var(--muted); }
+
+/* ---------------------------------------------------- crumbs + folder list */
+.crumbs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; font-size: 13px; }
+.crumbs a { color: var(--text-2); border-bottom: 1px dotted var(--muted); }
+.crumbs a:hover { color: var(--hi); border-color: var(--hi); }
+.crumbs .sep { color: var(--red); }
+.crumbs .here { color: var(--hi); }
+.dirlist { display: grid; }
+.dirlist .d {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center;
+  padding: 7px var(--pad); border-top: 1px dashed var(--line); font-size: 13px;
+}
+.dirlist .d:first-child { border-top: 0; }
+.dirlist .d:hover { background: var(--row-hover); }
+.dirlist .d .nm { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-width: 0; }
+.dirlist .d a.go { color: var(--text); }
+.dirlist .d a.go:hover { color: var(--hi); }
+.dirlist .d .go.parent::after { content: " /"; color: var(--red); }
+.dirlist .d .gl { color: var(--red); }
+.dirlist .d .plain { color: var(--text); }
+
+/* ---------------------------------------------------- installer */
+.pick-plat.here { border-color: var(--hi); box-shadow: 0 0 calc(var(--fx-glow) * 26px) rgb(var(--hi-rgb) / 0.15), inset 0 0 60px rgb(0 0 0 / 0.5); }
+.pick-plat.here .bar { border-bottom-color: var(--hi); }
+.pick-plat .body { display: grid; gap: 14px; align-content: start; }
+.pick-plat .ver { font-family: var(--disp); font-weight: 700; font-size: 26px; letter-spacing: 1px; line-height: 1.1; }
+.pick-plat .ver small { font-family: var(--mono); font-weight: 400; font-size: 12px; color: var(--muted); margin-left: 8px; letter-spacing: 0; }
+.phone-only { display: none; }
+
+/* ---------------------------------------------------- bench-only controls */
+.bench { display: inline-flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+.bench .opts button { text-transform: none; letter-spacing: 0; }
+.bench .opts button[aria-pressed="true"] { border-color: var(--hi); color: var(--hi); }
+
+@media (max-width: 760px) {
+  .phone-only { display: flex; }
+  .fold .fold-body { padding-left: var(--pad); }
+  .lrow .keys { margin-left: 0; }
+  .tbl td.file { max-width: none; white-space: normal; overflow-wrap: anywhere; }
+  .tbl.stack-sm td[data-l]::before { content: attr(data-l); display: inline-block; min-width: 9ch; color: var(--muted); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; }
+  .tbl.stack-sm tr.drawer { border-top: 0; padding-top: 0; }
+  .dirlist .d { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+}
+
+/* fixed-layout tables: a long file name ellipsises in its own column
+   instead of squeezing the others (desktop only; phones stack) */
+.tbl.fixed { table-layout: fixed; }
+.nowrap { white-space: nowrap; }
+@media (max-width: 760px) { .tbl.fixed { table-layout: auto; } .tbl.fixed colgroup { display: none; } }
+
+/* the transfer tables on a phone: direction + who + eta, then the file on
+   its own line (the widest thing, and the one nobody can afford cropped),
+   then progress + speed */
+@media (max-width: 760px) {
+  .tbl.xft tr { grid-template-columns: 3ch minmax(0, 1fr) auto; grid-template-areas: "dir who eta" "file file file" "prog prog speed"; column-gap: 8px; }
+  .tbl.xft.hist tr { grid-template-columns: 3ch minmax(0, 1fr); grid-template-areas: "dir file" ". eta"; }
+  .tbl.xft.hist .c-eta { text-align: left; font-size: 11px; }
+  .tbl.xft td { padding: 1px 0; }
+  .tbl.xft td:first-child { padding-left: var(--pad); }
+  .tbl.xft .c-dir { grid-area: dir; padding-left: var(--pad); }
+  .tbl.xft .c-who { grid-area: who; }
+  .tbl.xft .c-who small { display: inline; margin-left: 6px; }
+  .tbl.xft .c-file { grid-area: file; padding: 2px var(--pad); }
+  .tbl.xft.hist .c-file { padding: 1px 0; }
+  .tbl.xft.hist .c-who { display: none; }
+  .tbl.xft .c-prog { grid-area: prog; padding-left: var(--pad); }
+  .tbl.xft .c-speed { grid-area: speed; padding-right: var(--pad); }
+  .tbl.xft .c-eta { grid-area: eta; padding-right: var(--pad); }
+}
+
+/* the project page's per-computer table: nine columns in the main column,
+   so tighter cells and no wrapping inside a number */
+.tbl.pct td, .tbl.pct th { padding-left: 10px; padding-right: 10px; }
+.tbl.pct td:first-child, .tbl.pct th:first-child { padding-left: var(--pad); width: 3ch; }
+.tbl.pct td.num { white-space: nowrap; }
+.tbl.pct .who small { white-space: nowrap; }
+.tbl.pct .key.quiet { padding: 0 2px; }
+@media (max-width: 760px) {
+  .tbl.pct tr { grid-template-columns: 3ch minmax(0, 1fr); }
+  .tbl.pct td { grid-column: 2; padding: 1px 0; }
+  .tbl.pct td.c-led { grid-column: 1; grid-row: 1; padding-left: var(--pad); padding-top: 4px; }
+  .tbl.pct tr.drawer td { grid-column: 1 / -1; padding: 4px var(--pad); }
+}
+
+/* phone fixes for the project page (and any page of this builder) */
+.strip { grid-template-columns: minmax(0, 1fr); }
+.note .grow { overflow-wrap: anywhere; min-width: 0; }
+.tbl.pct tr.drawer td:first-child { width: auto; }
+@media (max-width: 760px) {
+  .note { flex-wrap: wrap; }
+  .note .grow { flex-basis: 100%; }
+  .bar .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .bar a.act { display: none; }
+  .strip .key { white-space: normal; text-align: left; line-height: 1.3; padding-top: 6px; padding-bottom: 6px; }
+  .tbl.pct td.num { text-align: left; }
+  .lrow .path { flex-basis: 100%; }
+}
+
+/* a stacked row (display:grid) must still obey [hidden] */
+.tbl tr[hidden] { display: none !important; }
+.lrow .sub { overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .lrow .tag { max-width: 100%; white-space: normal; }
+  .tbl.pct tr { grid-template-columns: calc(var(--pad) + 2ch) minmax(0, 1fr); }
+}
+
+/* round 2 ("nothing may shift", 2026-09-25): the project page's tick and
+   mode keys change their words when pressed, so each one reserves the width
+   of its longest label and the key beside it never moves */
+.key.w-tick, .key.w-mode { justify-content: center; }
+.key.w-tick { min-width: min(42ch, 100%); }
+.key.w-mode { min-width: min(26ch, 100%); }
+#tick-one { min-height: calc(28px * var(--d)); display: flex; align-items: center; }
+.here-row { min-height: calc(28px * var(--d)); }
+@media (max-width: 760px) {
+  /* on a phone the per-computer keys and the "you are in" line wrap to two
+     or three lines; reserve them so ticking or walking folders moves nothing */
+  #tick-one { min-height: calc(66px * var(--d)); align-items: flex-start; }
+  .here-row { min-height: 134px; align-items: flex-start; }
+  #pickers { min-height: 4.7em; }
+  #sub.xf-sub { min-height: 3.1em; }
+}
+@media (max-width: 760px) {
+  /* the tick and mode keys are full width on a phone: the longest label
+     wraps inside the key instead of running off the window */
+  .key.w-tick, .key.w-mode { width: 100%; white-space: normal; text-align: center; line-height: 1.3; padding-top: 6px; padding-bottom: 6px; }
+  .key.w-tick { min-height: 50px; }
+}

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: installer</title>
+<!-- The design bench (dashboard/design/README.md): /installer, and what
+     /download paints when the browser names neither platform. Mirrors
+     templates/installer.html and ui.py _installer_page / page_installer /
+     page_download / page_download_platform: two platform picks (this
+     computer marked), version / size / published / sha256, the download,
+     the "Windows protected your PC" paragraph, the phone sentence, and
+     "nothing published" as a normal state. No Settings strip, on purpose
+     (it is not a hub page). Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/sync.css">
+</head>
+<body data-page="home">
+
+<div class="shell">
+  <div class="page narrow">
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> INSTALLER</span></h1>
+        <div class="sub">for a new editor computer, or to repair one</div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <p class="lede">The full clean-install and repair package for a new editor computer. <b>Save it to that computer's own disk:</b> running it off the shared drive locks the file for everyone, and the setup wizard refuses it.</p>
+
+      <div class="note phone-only"><span class="grow">On a phone: this package cannot be run here. Download it and send it to the editor's own computer, Windows or macOS, and run it there.</span></div>
+
+      <div class="cols-2" id="picks"></div>
+
+      <h2 class="sec">what the download link does</h2>
+      <section class="win">
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">/download</span><span>&#9566;</span><span class="rule"></span><span class="meta">the installer entry in the menu</span><span>&#9552;&#9488;</span></div>
+        <div class="body" style="display:grid;gap:12px">
+          <p class="lede">The menu's installer entry goes straight to the package for the browser's own platform, so the click <b>is</b> the download. This page only appears when the browser names neither Windows nor macOS, and for setting up the other platform (a Mac, from a Windows computer). The file keeps its version in its name, so "which installer did you run?" has an answer.</p>
+          <p class="lede">When nothing has been published for that platform, the link answers with plain text instead of a file:</p>
+          <pre class="code" id="none-text" style="white-space:pre-wrap"></pre>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, tag } = CC;
+  const $ = s => document.querySelector(s);
+  const PKG = {
+    windows: { version: '1.0.44', size: '188 MB', published: '3 days ago', sha: '9f2c41d07ab35e18c6d4f0b9a27e51c83d6f94b0e1a2c7d85f3b69e0d4c1a728', file: 'CCSync-Setup-1.0.44.exe' },
+    macos: { version: '1.0.44', size: '164 MB', published: '3 days ago', sha: '4be8a1c9d27f063e5b14a9c2f8d07e36b5a91c4d2e7f80b3c6a15d9e42f07b18', file: 'CCSync-Setup-1.0.44.pkg' },
+  };
+  const detected = /Mac/.test(navigator.platform) ? 'macos' : 'windows';
+
+  function render(mode) {
+    const pk = mode === 'calm' ? { windows: PKG.windows, macos: null } : PKG;
+    $('#picks').innerHTML = [['windows', 'windows'], ['macos', 'macos']].map(([plat, label]) => {
+      const p = pk[plat], here = plat === detected;
+      const body = p ? `
+        <div class="ver" title="The installer's version number. The file name carries it too, so you can always tell which one was run.">${esc(p.version)}<small>${esc(p.size)} &middot; published ${esc(p.published)}</small></div>
+        <dl class="kv"><dt title="The file's fingerprint. If the fingerprint of the file you downloaded matches this one, the file is exactly what was published.">sha256</dt><dd title="The full fingerprint:&#10;${esc(p.sha)}"><span class="num">${esc(p.sha.slice(0, 16))}</span><span class="muted">...</span></dd></dl>
+        <div><a class="key primary" href="#" data-busy="downloading ${esc(p.file)}" title="Downloads ${esc(p.file)}. Save it to the editor computer's own disk, then run it there."><span class="t">Download for ${label === 'macos' ? 'macOS' : 'Windows'}</span><span class="busy-t"><span class="spin"></span> starting</span></a></div>
+        ${plat === 'windows' ? `<div class="note warn"><span class="grow">Windows will say <b>Windows protected your PC</b> when you run this. Click <b>More info</b>, then <b>Run anyway</b>: the installer is not code-signed yet. The sha256 above is the file's own fingerprint if you want to check it first.</span></div>` : ''}`
+        : `<div class="empty"><span class="glyph">&#9617;&#9617;&#9617;</span>Nothing published for this platform yet.</div>`;
+      return CC.win(label, here ? '<b title="Your browser says it is running on this kind of computer.">this computer</b>' : '', `<div class="body">${body}</div>`, 'pick-plat' + (here ? ' here' : ''));
+    }).join('');
+    const miss = 'macos';
+    $('#none-text').textContent = `No ${miss} installer has been published for this fleet yet, so there is nothing to download. Ask whoever set this dashboard up for the installer.\n\nAdmins: publish one with \`tools/publish_latest.py --kind onboard --platform ${miss}\` (or upload it on Settings > Packages).`;
+  }
+  CC.page({ page: 'home', onData: render });
+})();
+</script>
+</body>
+</html>

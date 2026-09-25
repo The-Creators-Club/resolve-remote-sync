@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: health</title>
+<!-- The design bench (dashboard/design/README.md): Settings > HEALTH, the
+     Settings landing page. Mirrors templates/admin_health.html
+     (ui.page_admin_health: WHAT IS RUNNING + the ranked open list over
+     notices, alerts, invariants and protection) and carries the three panels
+     that today render inside the home page's fleet grid:
+     partials/notices.html + notice_checks.html (PROBLEMS THE SERVER FOUND,
+     WHAT THE SERVER CHECKS), partials/collector_health.html (COLLECTOR,
+     PENDING SHARE CHANGES) and partials/admin_diagnostics.html (WHAT THESE
+     COMPUTERS SAID). Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/system.css">
+</head>
+<body data-page="health">
+
+<div class="shell">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> HEALTH</span></h1>
+        <div class="sub" id="sub"></div>
+      </div>
+      <div class="acts bands" id="bands"></div>
+    </div>
+
+    <div class="stack">
+      <p class="lede">Everything this server currently has open, worst first:
+        problems it found, alerts, facts that have stopped being true, and
+        safety mechanisms it cannot confirm. Each line says what it means and
+        what to do, in the words of the page it came from. <b>Nothing here
+        changes anything.</b></p>
+      <div class="note"><span class="tag mute" title="This server could not find the answer. It is shown so that silence is never mistaken for fine.">not checked</span><span class="grow"><b>Not checked is not OK.</b> It means this server cannot answer that one, and the reason is beside it.</span></div>
+
+      <section class="win">
+        <div class="bar"><span>┌─╡</span><span class="t">what_is_running</span><span>╞</span><span class="rule"></span><span class="meta" id="feed-meta"></span><a class="act" href="packages.html" title="Open Packages: publish a build, make it current, push an update.">packages</a><span>═┐</span></div>
+        <div class="body" style="display:grid;gap:8px" id="running"></div>
+      </section>
+
+      <div>
+        <div class="tabs" role="tablist" id="tabs">
+          <button type="button" role="tab" data-tab="open" aria-selected="true" title="Everything open from all four sources, worst first.">open findings <span id="n-open"></span></button>
+          <button type="button" role="tab" data-tab="notices" title="Things the server refused to do or found wrong, with the fix for each, and the list of every check it runs.">problems the server found <span id="n-notices"></span></button>
+          <button type="button" role="tab" data-tab="collector" title="The background jobs that keep the fleet in step, and the sharing changes they are about to make.">collector</button>
+          <button type="button" role="tab" data-tab="diag" title="Diagnostics that editors' computers uploaded, newest first.">what computers said</button>
+        </div>
+
+        <div class="tab-host" id="tab-host">
+        <!-- ================================================ open findings -->
+        <div class="stack" data-panel="open" style="margin-top:22px">
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">open.log</span><span>╞</span><span class="rule"></span><span class="meta" id="open-meta"></span><span>═┐</span></div>
+            <div class="scroll-y" style="max-height:760px" id="open"></div>
+          </section>
+          <p class="lede">The four pages behind this one are
+            <a class="hi" href="#" data-goto="notices">the problems the server found</a>,
+            <a class="hi" href="alerts.html">alerts</a>,
+            <a class="hi" href="invariants.html">invariants</a> and
+            <a class="hi" href="protection.html">protection</a>. Each holds the
+            full list, including everything that is currently fine.</p>
+        </div>
+
+        <!-- ================================ problems the server found -->
+        <div class="stack" data-panel="notices" hidden style="margin-top:22px">
+          <section class="win" id="server-notices">
+            <div class="bar"><span>┌─╡</span><span class="t">problems_the_server_found</span><span>╞</span><span class="rule"></span><span class="meta" id="notices-meta"></span><span>═┐</span></div>
+            <div class="body lede" id="notices-lede" style="padding-bottom:0"></div>
+            <div class="scroll-y" style="max-height:620px" id="notices"></div>
+          </section>
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">what_the_server_checks</span><span>╞</span><span class="rule"></span><span class="meta" id="checks-meta"></span><span>═┐</span></div>
+            <details class="fold" id="checks-fold">
+              <summary title="Open the full list of checks and what each one found.">show every check <span class="dim">silence has to read as checked and fine, never as nobody wrote a check</span></summary>
+              <div class="scroll-y" style="max-height:520px;border-top:1px dashed var(--line)"><ul class="checks" id="checks"></ul></div>
+            </details>
+          </section>
+        </div>
+
+        <!-- ================================================== collector -->
+        <div class="stack" data-panel="collector" hidden style="margin-top:22px">
+          <div id="collector-stale"></div>
+          <section class="win" id="fleet-collector">
+            <div class="bar"><span>┌─╡</span><span class="t">collector</span><span>╞</span><span class="rule"></span><span class="meta" id="coll-meta"></span><span>═┐</span></div>
+            <table class="tbl stack-sm">
+              <thead><tr><th style="width:3ch"></th><th style="width:16ch" title="One background job. Each runs on its own timer, every minute or so.">cycle</th><th style="width:14ch">last run</th><th title="Anything the job skipped or could not finish on its last run. Nothing means it did everything.">what it did not do</th></tr></thead>
+              <tbody id="cycles"></tbody>
+            </table>
+          </section>
+          <section class="win">
+            <div class="bar"><span>┌─╡</span><span class="t">pending_share_changes</span><span>╞</span><span class="rule"></span><span class="meta" title="This panel only shows. Nothing here changes a share.">read only</span><span>═┐</span></div>
+            <div id="held"></div>
+            <div id="plan"></div>
+          </section>
+        </div>
+
+        <!-- ======================================= what computers said -->
+        <div class="stack" data-panel="diag" hidden style="margin-top:22px">
+          <section class="win" id="fleet-diagnostics">
+            <div class="bar"><span>┌─╡</span><span class="t">what_these_computers_said</span><span>╞</span><span class="rule"></span><span class="meta">diagnostics each companion uploaded, newest first</span><span>═┐</span></div>
+            <div id="crash"></div>
+            <div id="bundles"></div>
+          </section>
+        </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-back" id="dlg">
+  <section class="win dialog" role="dialog" aria-modal="true" aria-labelledby="dlg-t">
+    <div class="bar"><span>┌─╡</span><span class="t" id="dlg-t">dismiss</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+    <div class="body">
+      <p>Dismiss this? It is only hidden. If the server finds the same problem again it comes straight back, so <b>dismissing it is not a fix</b>.</p>
+      <div class="acts"><button class="key quiet" type="button" id="dlg-no"><span class="t">keep it</span></button><button class="key primary" type="button" id="dlg-yes"><span class="t">Dismiss</span></button></div>
+    </div>
+  </section>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, tag, led } = CC;
+  const $ = s => document.querySelector(s);
+
+  // --------------------------------------------------------------- data
+  const RUNNING_BUSY = {
+    dash: { running: '0.7.58', vendor: '0.7.59', behind: true },
+    companions: [
+      { platform: 'windows', current: '0.9.78', published: '1h ago', vendor: '0.9.78', behind: false,
+        builds: [[3, '0.9.78', true, '1h ago'], [1, '0.9.76', false, '6d ago'], [1, '0.9.49', false, '41d ago']] },
+      { platform: 'macos', current: '0.9.77', published: '5d ago', vendor: '0.9.78', behind: true,
+        builds: [[1, '0.9.77', true, '5d ago']] },
+    ],
+    disagreements: ['A newer CC Sync build for macos (0.9.78) is on offer and the computers here are being offered 0.9.77. Update the dashboard first: it is 0.7.58 and the vendor is offering 0.7.59.'],
+    note: 'dashboard 0.7.59 was published 22 min ago and the soak is 60 min',
+    checked: '4 min ago',
+  };
+  const RUNNING_CALM = {
+    dash: { running: '0.7.58', vendor: '0.7.58', behind: false },
+    companions: [
+      { platform: 'windows', current: '0.9.78', published: '1h ago', vendor: '0.9.78', behind: false, builds: [[5, '0.9.78', true, '1h ago']] },
+      { platform: 'macos', current: '0.9.78', published: '1h ago', vendor: '0.9.78', behind: false, builds: [[1, '0.9.78', true, '1h ago']] },
+    ],
+    disagreements: [], note: '', checked: '4 min ago',
+  };
+
+  // band, source, source label, title, subject, diagnosis, fix, [href, label], [detail page, label]
+  const OPEN_BUSY = [
+    ['error', 'notice', 'problem the server found', 'the sync engine on this server is not answering', 'http://syncthing:8384 refused the connection',
+      'No project is being shared, measured or updated for anybody while it is down. Every computer keeps what it already has.',
+      'Start the Syncthing app on the NAS, then come back: this line clears itself on the next collector cycle.', ['recovery.html', 'recovery'], ['#notices', 'notices']],
+    ['error', 'alert', 'alert', 'a computer has gone quiet', 'TCHEN-RIG (tchen), last report 2h ago',
+      'A computer that does not report cannot be synced, updated or asked anything. Its editor may be working on files nobody else can see.',
+      'Ask tchen whether the computer is on and CC Sync is in the tray. If it was retired, forget it on the Users page.', null, ['alerts.html', 'alerts']],
+    ['error', 'alert', 'alert', 'an update will not install', 'TCHEN-RIG: 0.9.78 failed 3 times',
+      'The same build has failed on this computer three times in a row, so it will keep running 0.9.49 until somebody looks.',
+      'Ask this computer why (Home, the computer row), then read its answer under What computers said.', null, ['alerts.html', 'alerts']],
+    ['error', 'invariant', 'invariant', 'Every ticked project is shared with the computer it is ticked for', '1 project: 2026/FF5/Elections on JSMITH-MBP',
+      'jsmith ticked Elections on JSMITH-MBP and that computer is not being sent it, so it will never arrive there.',
+      'Open Sync plans and untick then tick it again; if it comes back, the collector log names the refusal.', null, ['invariants.html', 'invariants']],
+    ['warn', 'notice', 'problem the server found', "an editor's computer is nearly out of room for footage", 'TCHEN-RIG: 2.1 GB free on D:',
+      'Proxy downloads for one project are 50 to 300 GB, so this computer will stop syncing soon and Resolve will struggle on it too.',
+      'Untick a project for that computer, or ask tchen to clear space.', ['home.html', 'open computer'], ['#notices', 'notices']],
+    ['warn', 'alert', 'alert', 'footage is outside the tree', '14 clips in 2026/FF5/Civil Defence point at E:\\Cards',
+      'Those clips are offline on every other computer, because nothing outside the tree is synced.',
+      'Copy the files into the project with FIX ALL in the companion, then relink in Resolve.', null, ['alerts.html', 'alerts']],
+    ['warn', 'protection', 'protection', 'Restore drill', 'last drill 97 days ago',
+      'A backup nobody has restored from is a backup nobody knows works. The drill is older than the 90 days this page allows.',
+      'Follow the drill on the Recovery page, then record today\'s date on the Protection page.', null, ['protection.html', 'protection']],
+    ['unknown', 'invariant', 'invariant', 'Every project folder has exactly one Syncthing folder', 'not checked: the sync engine did not answer',
+      'This fact could not be checked on the last pass, so it is unknown, not true.',
+      'Nothing to do here: it is checked again once the sync engine answers.', null, ['invariants.html', 'invariants']],
+    ['unknown', 'protection', 'protection', 'NAS snapshots of the project tree', 'not checked: no TRUENAS_API_KEY in the container',
+      'This server cannot ask the NAS about its snapshot schedule, so it cannot say whether one exists.',
+      'Create an API key with server/create_api_key.py and give it to the dashboard container.', null, ['protection.html', 'protection']],
+  ];
+
+  // severity, kind, subject, body, fix, [href,label], first seen, last seen
+  const NOTICES_BUSY = [
+    ['error', 'syncthing_unreachable', 'http://syncthing:8384',
+      'The sync engine on this server did not answer the last 3 collector cycles. No project is being shared, measured or updated for anybody while it is down.',
+      'Start the Syncthing app on the NAS, then watch the collector turn green.', ['recovery.html', 'take me there'], '2h ago', '1 min ago'],
+    ['error', 'plan_without_share', 'jsmith / JSMITH-MBP / 2026/FF5/Elections',
+      'This project is ticked for JSMITH-MBP and the enforce cycle is not sending it there.',
+      'Untick and tick it again on Sync plans. If it comes back, the collector note for enforce names why.', ['sync-plans.html', 'open sync plans'], '5h ago', '1 min ago'],
+    ['warn', 'machine_disk_low', 'TCHEN-RIG',
+      'D: has 2.1 GB free. The companion stops its own downloads below 5 GB.',
+      'Untick a project for that computer, or ask tchen to clear space.', ['home.html', 'open computer'], '3h ago', '4 min ago'],
+    ['warn', 'pending_device_approval', 'RIVERA-LAPTOP (Q7L2VXA)',
+      'A computer has asked to join the sync network and has been waiting 26 hours.',
+      'Approve it on the Users page if you know it. If you do not, leave it: nothing is shared with it until you do.', ['users.html', 'open users'], '1d ago', '4 min ago'],
+  ];
+  const OPEN_KINDS_BUSY = { syncthing_unreachable: 'error', plan_without_share: 'error', machine_disk_low: 'warn', pending_device_approval: 'warn' };
+  const NEVER_RAN = ['file_moves_dropped', 'triage_reply_refused', 'duplicate_slug_dirs'];
+
+  const NOTICE_KINDS = [
+    ['ai_cli_update_failed', 'warn', 'this server could not keep Claude Code up to date by itself'],
+    ['alerts_delivery_slow', 'warn', 'sending the alerts took so long that some were left for the next pass'],
+    ['alerts_sink_none', 'warn', 'nobody is being told when this server finds a problem'],
+    ['broll_archive_unreadable', 'error', 'this server cannot list the b-roll archive, so every clip sent to Resolve is the small preview'],
+    ['collector_cycle_failed', 'error', 'one of the background jobs that keeps the fleet in step is failing'],
+    ['collector_db_write_failed', 'error', 'the dashboard could not write to its own database'],
+    ['collector_watchdog_restart', 'warn', 'the background job thread died and had to be restarted'],
+    ['dashboard_disk_low', 'error', 'the volume this dashboard writes to is nearly full'],
+    ['db_busy', 'warn', 'a page or a companion was told to try again because the database was busy'],
+    ['deactivation_refusal', 'error', 'too many projects would have been marked gone at once, so none were'],
+    ['dev_insecure', 'error', 'this server is running with its security checks relaxed'],
+    ['duplicate_device_id', 'error', 'one Syncthing device id claimed by two computers'],
+    ['duplicate_machine_id', 'error', 'one computer identity claimed by two hostnames (a cloned computer)'],
+    ['duplicate_slug_dirs', 'error', 'one project identity claimed by two directories on the server'],
+    ['duplicate_syncthing_folder', 'error', 'two Syncthing folders over one directory, only one of which editors are on'],
+    ['editor_without_machine', 'info', 'an editor account no computer has ever reported for'],
+    ['enforce_refusal', 'error', 'too many share removals in one pass, so none were applied'],
+    ['feature_not_mounted', 'warn', 'one of the extra pages (b-roll, music, YouTube, cards) did not start on this server'],
+    ['feed_publish_refused', 'error', 'a new build for the fleet cannot be handed out until this dashboard is updated'],
+    ['feed_runtime_mismatch', 'warn', 'a build on offer was made for a different system than this one'],
+    ['feed_unreachable', 'warn', 'the vendor release feed cannot be reached, so no new builds arrive'],
+    ['file_move_detected', 'info', 'files moved by hand on the server, which the computers are now following'],
+    ['file_moves_dropped', 'error', 'more file moves were made on the server in one go than could be followed'],
+    ['ignored_report_sections', 'warn', 'a computer is sending information this dashboard is too old to store'],
+    ['insecure_secret', 'error', "a password or token in this server's configuration has quotes or spaces around it"],
+    ['invariant_broken', 'error', 'a fact this system relies on has stopped being true (the invariant checks)'],
+    ['invariant_check_failed', 'error', 'one of the invariant checks could not run, so that fact is unchecked'],
+    ['inventory_refused', 'error', "the server's file count collapsed, so the last good one is being kept"],
+    ['machine_disk_low', 'warn', "an editor's computer is nearly out of room for footage"],
+    ['machine_forgotten', 'warn', 'a computer stopped reporting long enough that we gave up asking about it'],
+    ['machine_trash_oversize', 'warn', 'deleted-file safety copies on a computer have grown large'],
+    ['pending_device_approval', 'warn', 'a computer has been waiting to be approved for the sync network'],
+    ['plan_without_share', 'error', 'a project is ticked for a computer that is not being sent it'],
+    ['project_container_marker', 'error', 'a project marker dropped on a folder that CONTAINS projects, which hides them all'],
+    ['project_links_failed', 'warn', 'a shared-folder link between projects could not be resolved'],
+    ['project_nested_marker', 'error', 'a project marker inside another project, which projects may not do'],
+    ['projects_dir_missing', 'error', 'the projects folder on the server is missing or not mounted'],
+    ['protection_missing', 'error', 'a safety net this system relies on is not there (snapshots, signing, backups)'],
+    ['protection_unverifiable', 'warn', 'a safety net this server cannot check, so it is unknown rather than fine'],
+    ['provision_failed', 'error', 'a project folder that could not be set up for syncing'],
+    ['server_crash_report', 'error', "this server's own background tasks have crashed since it started"],
+    ['server_error', 'error', 'a page or an API call failed with an error'],
+    ['share_without_plan', 'warn', 'a computer is being sent a project nobody ticked for it'],
+    ['shared_assets_failed', 'error', 'the shared asset libraries (the LUT library) could not be set up'],
+    ['slow_poll', 'warn', "one of this server's background passes is taking longer than a cycle"],
+    ['slow_write', 'warn', 'one write held the database longer than a request waits, so others waited on it'],
+    ['syncthing_unreachable', 'error', 'the sync engine on this server is not answering'],
+    ['triage_reply_refused', 'warn', 'a reply to the server check email was not acted on because it failed a check'],
+    ['unreadable_project_marker', 'warn', 'a damaged .ccsync-project marker, so that folder is not a project to anyone'],
+  ];
+
+  // status, kind, last run, ok, note
+  const CYCLES_BUSY = [
+    ['err', 'provision', '1 min ago', false, 'Syncthing did not answer: connection refused (http://syncthing:8384)'],
+    ['err', 'config', '1 min ago', false, 'Syncthing did not answer: connection refused'],
+    ['err', 'enforce', '1 min ago', false, 'skipped: the sync engine is down, so no share was checked or changed'],
+    ['', 'inventory', '3 min ago', true, ''],
+    ['warn', 'connections', '1 min ago', true, '2 of 6 devices not asked: the sync engine is down'],
+    ['', 'completion', '1 min ago', true, ''],
+    ['warn', 'remoteneed', '2 min ago', true, 'stopped at 3 pages of 200: 1 folder not fully listed'],
+    ['', 'prune', '41 min ago', true, ''],
+    ['', 'invariants', '6 min ago', true, ''],
+    ['', 'alerts', '1 min ago', true, ''],
+  ];
+  const CYCLES_CALM = CYCLES_BUSY.map(c => ['', c[1], c[1] === 'prune' ? '41 min ago' : c[1] === 'inventory' ? '3 min ago' : '1 min ago', true, '']);
+
+  const PLAN_BUSY = {
+    at: '1 min ago', add: 2, remove: 1,
+    folders: [['ff5-elections', ['JSMITHM', 'Q7L2VXA'], []], ['shorts-night-market', [], ['T3HCN4R']]],
+    held: [['NAS Syncthing refused the folder ff5-elections: connection refused', '1 min ago']],
+  };
+
+  const BUNDLES_BUSY = [
+    ['jsmith', 'JSMITH-MBP', 'lane_error', '3 min ago', '2026-09-25 10:38:14 +08:00',
+      'CC Sync 0.9.77 (macos 15.6, arm64)\nmachine_id 7f3c...e21  hostname JSMITH-MBP  mode remote\n\nlane A  ok      last pass 10:37  0 files\nlane B  paused  breaker tripped 10:31: 212 of 1,840 proxies gone from the NAS listing (11.5%)\nlane C  ok      4 folders, 0 out of sync\n\nbreaker  ~/.ccsync/state/lane_b_breaker.json\n  tripped_at 2026-09-25T02:31:07Z  scope 2026/FF5/Elections\n  moved-not-deleted probe: 0 of 212 matched by name and size\n\nresolve  connected (script server ready, host registered)\ndisk     /Volumes/SYNC  412 GB free'],
+    ['mrivera', 'RIVERA-LAPTOP', 'admin_request', '2h ago', '',
+      'CC Sync 0.9.76 (windows 11 26100, x64)\nmachine_id 0a91...77c  hostname RIVERA-LAPTOP  mode remote\n\nlane A  syncing 3 files, 37%\nlane B  ok\nlane C  ok\n\nupgrade  0.9.78 offered, deferred: a popup was open\njobs     proxy-480p held 37%'],
+    ['tchen', 'TCHEN-RIG', 'button', '1d ago', '2026-09-24 09:02:51 +08:00',
+      'CC Sync 0.9.49 (windows 10 19045, x64)\nhostname TCHEN-RIG  mode wired\n\nlane C  error  folder ff4-kinmen: folder path missing\nsyncthing  restarted 3 times in 1h\nupgrade   0.9.78 failed: the installer exited 1603'],
+  ];
+
+  // --------------------------------------------------------------- draw
+  let mode = 'busy';
+  const BAND_TIP = { error: 'Something is wrong and needs a person.', warn: 'Not broken yet, but worth checking before it is.', unknown: 'This server could not find out. That is not the same as fine.' };
+  const tip = (html, t) => html.replace('<span class="tag', `<span title="${esc(t)}" class="tag`);
+  const bandTag = b => tip(b === 'error' ? tag('err', 'needs attention', true) : b === 'warn' ? tag('warn', 'worth a look', true) : tag('mute', 'not checked'), BAND_TIP[b]);
+  const SRC_TIP = {
+    notice: "Found by the server's own checks. The full list is under problems the server found.",
+    alert: 'From the alert checks. The Alerts page decides who is told.',
+    invariant: 'A fact the whole system relies on, re-checked every few minutes.',
+    protection: 'A safety net, such as snapshots, backups or the signing key.',
+  };
+  const CYCLE_TIP = {
+    provision: 'Sets up a sync folder on the server for each new project folder.',
+    config: "Reads the server's sync engine settings into the dashboard.",
+    enforce: 'Shares each project with exactly the computers it is ticked for, and unshares the rest.',
+    inventory: 'Counts the files and sizes of every project on the server.',
+    connections: "Asks which computers' sync engines are connected right now.",
+    completion: 'Asks how far each computer has got with each project.',
+    remoteneed: 'Lists the files each computer still needs, a few pages at a time.',
+    prune: 'Deletes history older than its keep-for period.',
+    invariants: 'Re-checks the facts the whole system relies on.',
+    alerts: 'Runs the alert checks and sends anything new.',
+  };
+
+  function drawRunning(d) {
+    const vend = (v, behind) => tip(v ? tag(behind ? 'warn' : 'mute', 'vendor: ' + v) : tag('mute', 'vendor: not checked'),
+      v ? (behind ? 'The vendor has published a newer build than the one here.' : 'The newest build the vendor has published. You are on it.') : 'The vendor channel could not be read, so this is unknown.');
+    let h = `<div class="run-line"><span class="lbl" title="The version of this dashboard running on the server now.">this dashboard</span><b>${esc(d.dash.running)}</b>${vend(d.dash.vendor, d.dash.behind)}</div>`;
+    h += d.companions.map(c => `<div class="run-line"><span class="lbl" title="The build this dashboard hands to ${esc(c.platform)} computers when they ask for an update.">${esc(c.platform)} computers are offered</span><b>${esc(c.current)}</b><span class="muted">published ${esc(c.published)}</span>${vend(c.vendor, c.behind)}</div>
+      ${c.builds.map(b => `<div class="run-sub">${b[0]} on ${esc(b[1])}${b[2] ? ' <span class="hi" title="The build computers are being offered now.">(current)</span>' : ''}, published ${esc(b[3])}</div>`).join('')}`).join('');
+    h += d.disagreements.length
+      ? d.disagreements.map(t => `<div class="note warn" style="margin-top:6px"><span class="grow">${esc(t)}</span></div>`).join('')
+      : `<div class="note ok" style="margin-top:6px"><span class="grow">Everything here agrees: this server, the vendor's channel and the computers reporting in.</span></div>`;
+    if (d.note) h += `<div class="hint">${esc(d.note)}</div>`;
+    $('#running').innerHTML = h;
+    $('#feed-meta').innerHTML = `<span title="Where the vendor publishes new builds. This server looks there by itself.">vendor channel</span> last checked <b>${esc(d.checked)}</b>`;
+  }
+
+  function drawOpen(rows) {
+    const c = { error: 0, warn: 0, unknown: 0 };
+    rows.forEach(r => c[r[0]]++);
+    $('#bands').innerHTML = rows.length
+      ? (c.error ? tip(tag('err', c.error + ' needs attention', true), BAND_TIP.error) : '') + (c.warn ? tip(tag('warn', c.warn + ' worth a look', true), BAND_TIP.warn) : '') + (c.unknown ? tip(tag('mute', c.unknown + ' not checked'), BAND_TIP.unknown) : '')
+      : tip(tag('ok', 'nothing open'), 'Every check answered and none found a problem.');
+    $('#sub').innerHTML = rows.length ? `<b>${rows.length}</b> open across notices, alerts, invariants and protection` : 'nothing open &middot; every check answered';
+    $('#n-open').textContent = rows.length ? `(${rows.length})` : '';
+    $('#open-meta').innerHTML = rows.length ? `<b>${rows.length}</b> open, worst first` : '';
+    $('#open').innerHTML = rows.length ? rows.map(r => `
+      <div class="prob wide">
+        <span class="sev">${bandTag(r[0])}</span>
+        <span class="title">${esc(r[3])}<span class="who">${esc(r[2])}</span></span>
+        <span class="src" title="${esc(SRC_TIP[r[1]])}">${esc(r[1])}</span>
+        <div class="subj">${esc(r[4])}</div>
+        <div class="what">${esc(r[5])}</div>
+        <div class="todo"><span class="cmd">${esc(r[6])}</span><span class="keys">
+          ${r[7] ? `<a class="key sm" href="${r[7][0]}"><span class="t">${esc(r[7][1])}</span></a>` : ''}
+          <a class="key quiet sm" href="${r[8][0]}" ${r[8][0].startsWith('#') ? `data-goto="${r[8][0].slice(1)}"` : ''}><span class="t">${esc(r[8][1])}</span></a></span></div>
+      </div>`).join('')
+      : `<div class="allclear"><span class="led"></span>Nothing is open. Every check this server runs answered, and none of them found a problem.</div>`;
+  }
+
+  function drawNotices(rows, openKinds) {
+    const sev = s => tip(s === 'error' ? tag('err', 'error', true) : s === 'warn' ? tag('warn', 'warn', true) : tag('mute', s),
+      s === 'error' ? 'Something is wrong and needs a person.' : s === 'warn' ? 'Worth checking before it gets worse.' : 'For your information.');
+    $('#n-notices').textContent = rows.length ? `(${rows.length})` : '';
+    const total = NOTICE_KINDS.length, never = NEVER_RAN.length;
+    $('#notices-meta').innerHTML = rows.length ? `<b>${rows.length}</b> open` : 'nothing open';
+    $('#notices-lede').innerHTML = rows.length
+      ? 'Things this server refused to do, and what to do about them. Each one comes back by itself if it is still true after you dismiss it.'
+      : `Nothing. <b>${total - never} of ${total}</b> checks ran and found nothing wrong. ${never ? tag('warn', never + ' never ran') + ' <span class="muted">a check registered with nothing behind it yet reports neither OK nor a problem; the list below says which.</span>' : ''}`;
+    $('#notices').innerHTML = rows.map((n, i) => `
+      <div class="prob" data-n="${i}">
+        <span class="sev">${sev(n[0])}</span>
+        <span class="title">${esc(n[2])}<span class="who" title="The name of the check that found it.">${esc(n[1])}</span></span>
+        <span class="when">last seen ${esc(n[7])}</span>
+        <div class="what">${esc(n[3])}</div>
+        <div class="todo"><span class="cmd">${esc(n[4])}</span><span class="keys">
+          ${n[5] ? `<a class="key sm" href="${n[5][0]}"><span class="t">${esc(n[5][1])}</span></a>` : ''}
+          <button class="key quiet sm" type="button" data-ask-dismiss title="Hides it. It comes straight back if the server finds it again, so this is not a fix."><span class="t">dismiss</span></button></span></div>
+        <div class="subj">first seen ${esc(n[6])}</div>
+      </div>`).join('');
+    const found = Object.keys(openKinds).length;
+    $('#checks-meta').innerHTML = `<b>${total}</b> checks &middot; ${found} found &middot; ${never} not checked`;
+    $('#checks').innerHTML = NOTICE_KINDS.map(([k, s, what]) => {
+      const t = openKinds[k] ? tip(tag(openKinds[k] === 'error' ? 'err' : 'warn', 'found', true), 'This check found something. It is in the list above.')
+        : NEVER_RAN.includes(k) ? `<span class="tag mute" title="Registered, but nothing in this build has ever run it, so it is neither OK nor a problem.">not checked</span>` : tip(tag('ok', 'ok'), 'This check ran and found nothing wrong.');
+      return `<li>${t}<span>${esc(what)}</span></li>`;
+    }).join('');
+  }
+
+  function drawCollector(busy) {
+    const cyc = busy ? CYCLES_BUSY : CYCLES_CALM;
+    $('#collector-stale').innerHTML = busy ? `<div class="note warn"><span class="tag solid warn" title="Older than it should be: the jobs have not reported for longer than a few cycles.">stale</span><span class="grow">The last collector cycle finished too long ago: everything below is the last thing it managed to do, <b>not the state now</b>.</span></div>` : '';
+    $('#coll-meta').innerHTML = `<b>${cyc.length}</b> cycles`;
+    $('#cycles').innerHTML = cyc.map(c => `<tr>
+      <td>${led(c[0])}</td><td><b title="${esc(CYCLE_TIP[c[1]] || '')}">${esc(c[1])}</b></td><td>${esc(c[2])}</td>
+      <td>${!c[3] ? tip(tag('err', 'failed', true), 'The job stopped on an error and did none of its work this time.') + ' ' + esc(c[4] || 'no reason recorded') : c[4] ? tip(tag('warn', 'incomplete'), 'The job ran but skipped part of its work. The reason is beside it.') + ' ' + esc(c[4]) : '<span class="muted">nothing</span>'}</td></tr>`).join('');
+    if (busy) {
+      const p = PLAN_BUSY;
+      $('#held').innerHTML = p.held.map(h => `<div class="note err" style="margin:var(--pad) var(--pad) 0"><span class="grow">Sharing change held: ${esc(h[0])} <span class="muted">(${esc(h[1])})</span></span></div>`).join('');
+      $('#plan').innerHTML = `<div class="body lede">What the enforce cycle would apply, as of ${esc(p.at)}: <b>${p.add}</b> share(s) to add, <b>${p.remove}</b> to remove. Read only, nothing on this page changes a share.</div>
+        <table class="tbl stack-sm"><thead><tr><th title="The project's sync folder on the server.">folder</th><th title="Computers that will start being sent this project.">add</th><th title="Computers that will stop being sent this project. Nothing is deleted from them.">remove</th></tr></thead><tbody>
+        ${p.folders.map(f => `<tr><td><b>${esc(f[0])}</b></td><td>${f[1].length ? f[1].map(d => tip(tag('ok', '+ ' + d), "A computer's sync ID, first seven characters.")).join(' ') : '<span class="muted">-</span>'}</td><td>${f[2].length ? f[2].map(d => tip(tag('err', '- ' + d), "A computer's sync ID, first seven characters.")).join(' ') : '<span class="muted">-</span>'}</td></tr>`).join('')}
+        </tbody></table>`;
+    } else {
+      $('#held').innerHTML = '';
+      $('#plan').innerHTML = `<div class="allclear"><span class="led"></span>Nothing pending: every folder's shares matched the plan as of 1 min ago.</div>`;
+    }
+  }
+
+  function drawDiag(busy) {
+    const trig = { lane_error: ['warn', 'lane error', 'a sync job failed, so this computer sent its own diagnostics'],
+      admin_request: ['hi', 'admin request', 'an admin asked this computer why'],
+      button: ['hi', 'button', 'the editor used Copy diagnostics in the companion (Tray > Settings > HELP > COPY DIAGNOSTICS FOR YOUR ADMIN)'] };
+    $('#crash').innerHTML = busy ? `<div class="body split" style="border-top:0"><div class="inline"><span>This server has <b>2</b> saved crash reports of its own.</span><a class="key sm" href="#" data-busy="crash-reports.zip downloaded" title="Downloads this server's own crash reports as one zip, to send to support."><span class="t">download crash reports</span><span class="busy-t"><span class="spin"></span> zipping</span></a></div></div>` : '';
+    $('#bundles').innerHTML = busy ? BUNDLES_BUSY.map((b, i) => `
+      <details class="fold" ${i === 0 ? 'open' : ''} style="border-top:1px dashed var(--line)">
+        <summary><b>${esc(b[0])}</b> <span>${esc(b[1])}</span> <span class="tag ${trig[b[2]][0]}" title="${esc(trig[b[2]][2])}">${esc(trig[b[2]][1])}</span>
+          <span class="dim">${esc(b[3])}${b[4] ? ' &middot; the computer said ' + esc(b[4]) : ''}</span></summary>
+        <div style="padding:0 var(--pad) var(--pad)"><pre class="log" style="max-height:280px;overflow:auto">${esc(b[5])}</pre></div>
+      </details>`).join('')
+      : `<div class="empty"><span class="glyph">&gt;_</span>No computer has uploaded diagnostics yet. Use <b class="hi">ask this computer why</b> on a computer row on the home page, or have the editor open Tray &gt; Settings &gt; HELP &gt; COPY DIAGNOSTICS FOR YOUR ADMIN in the companion. Companions older than the build that added this cannot send any.</div>`;
+  }
+
+  function render(m) {
+    mode = m;
+    const busy = m !== 'calm';
+    drawRunning(busy ? RUNNING_BUSY : RUNNING_CALM);
+    drawOpen(busy ? OPEN_BUSY : []);
+    drawNotices(busy ? NOTICES_BUSY : [], busy ? OPEN_KINDS_BUSY : {});
+    drawCollector(busy);
+    drawDiag(busy);
+    $('#notices').style.minHeight = '';
+  }
+
+  // --------------------------------------------------------------- tabs
+  // Nothing may move on a tab switch: the host keeps at least the height the
+  // reader is scrolled into, so a short tab never drags the page up.
+  function show(name) {
+    const host = $('#tab-host');
+    const need = window.scrollY + window.innerHeight - (host.getBoundingClientRect().top + window.scrollY);
+    host.style.minHeight = Math.max(need, window.innerHeight * 0.6) + 'px';
+    document.querySelectorAll('#tabs [data-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
+    document.querySelectorAll('[data-panel]').forEach(p => { p.hidden = p.dataset.panel !== name; });
+  }
+  document.addEventListener('click', e => {
+    const t = e.target.closest('#tabs [data-tab]');
+    if (t) show(t.dataset.tab);
+    const g = e.target.closest('[data-goto]');
+    if (g) { e.preventDefault(); show(g.dataset.goto); $('#tabs').scrollIntoView({ block: 'start', behavior: 'smooth' }); }
+    const d = e.target.closest('[data-ask-dismiss]');
+    if (d) { pending = d.closest('.prob'); $('#dlg').classList.add('open'); }
+  });
+  let pending = null;
+  $('#dlg-no').addEventListener('click', () => { $('#dlg').classList.remove('open'); pending = null; });
+  $('#dlg-yes').addEventListener('click', () => {
+    $('#dlg').classList.remove('open');
+    if (pending) {
+      const row = pending, list = row.parentElement;
+      list.style.minHeight = list.offsetHeight + 'px';   // the window keeps its height
+      row.classList.add('gone');
+      setTimeout(() => {
+        row.remove();
+        if (!list.querySelector('.prob')) list.innerHTML = `<div class="allclear"><span class="led"></span>Nothing left open here. Anything dismissed comes back by itself if the server finds it again.</div>`;
+      }, 200);
+      CC.toast('dismissed: it comes back if it is still true');
+    }
+    pending = null;
+  });
+
+  CC.page({ page: 'health', onData: render });
+})();
+</script>
+</body>
+</html>

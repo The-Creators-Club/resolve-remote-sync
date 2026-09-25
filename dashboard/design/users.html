@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: users</title>
+<!-- The design bench (dashboard/design/README.md): Settings, Users. Mirrors
+     templates/admin_users.html and its partials (admin_users, admin_sessions,
+     admin_report_tokens, minted_secret, fleet_halt, fleet_halt_banner,
+     admin_suspend_button). Invented data. The dashed BENCH strip is not
+     product UI: it shows the page's other real states (the sign-in backend,
+     the fleet stop). -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/fleet.css">
+</head>
+<body data-page="users">
+
+<div class="shell fl-page">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> USERS</span></h1>
+        <div class="sub" id="sub"></div>
+      </div>
+      <div class="acts">
+        <a class="key quiet sm" href="#halt"><span class="t">stop syncing everywhere</span></a>
+        <a class="key quiet sm" href="#create"><span class="t">create an account</span></a>
+      </div>
+    </div>
+
+    <div class="bench" aria-label="design bench only">
+      <span class="bl">bench only</span>
+      <span class="grp">sign-in <span class="opts" id="b-auth"><button data-v="nas">NAS accounts</button><button data-v="local">local accounts</button><button data-v="nonas">NAS not connected</button></span></span>
+      <span class="grp">fleet stop <span class="opts" id="b-halt"><button data-v="off">syncing</button><button data-v="on">stopped</button><button data-v="expired">expired</button></span></span>
+    </div>
+
+    <!-- fleet_halt_banner.html: on EVERY page for everyone while the fleet is stopped -->
+    <div id="halt-banner"></div>
+
+    <!-- minted_secret.html: the one-time slot, above every polled panel -->
+    <div id="minted"></div>
+
+    <div class="stack" id="main"></div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, win, tag, led, toast } = CC;
+  const $ = s => document.querySelector(s);
+
+  // ------------------------------------------------------------ data
+  const NAS_EDITORS = [
+    { u: 'jsmith', uid: 3001, key: true, smb: true, locked: false },
+    { u: 'mrivera', uid: 3002, key: true, smb: true, locked: false },
+    { u: 'tchen', uid: 3003, key: false, smb: true, locked: false },
+  ];
+  const LOCAL = [
+    { u: 'owen', role: 'admin', disabled: false, keys: [['SHA256:q9Xw2pL1mZ7rT0bV4kC8aE3nY6uH5sJdG1fR2tW8xQ', 'OWEN-RIG']] },
+    { u: 'jsmith', role: 'editor', disabled: false, keys: [['SHA256:Kd82mQpX0aL5vN3cR7tY1wE9zB4hJ6sF2gU8iO0pMk', 'JSMITH-STUDIO'], ['SHA256:7fTn1WqZ3xC9vB5mL2kJ8hG4dS6aP0oI1uY7tR3eWq', 'JSMITH-MBP']] },
+    { u: 'mrivera', role: 'editor', disabled: false, keys: [['SHA256:Zp4Lq9Wm2Xc7Vb1Nk5Jh8Gf3Ds6Aq0Ow2Ie4Ru7Ty1', '']] },
+    { u: 'tchen', role: 'editor', disabled: true, keys: [] },
+  ];
+  const COMPUTERS = [
+    ['jsmith', 'JSMITH-STUDIO', 'windows', 'editor', '0.9.77', 3, '4 s ago', 'a3F2K7Q-9LMW4XT-...'],
+    ['jsmith', 'JSMITH-MBP', 'macos', 'editor', '0.9.75', 2, '31 s ago', 'Q7PL2ZD-RT0K8VN-...'],
+    ['mrivera', 'RIVERA-TOWER', 'windows', 'editor', '0.9.76', 4, '12 s ago', 'M4XZQ1B-7HT2PLW-...'],
+    ['mrivera', 'RIVERA-LAPTOP', 'windows', 'editor', '0.9.76', 1, '2 s ago', 'VN8K3TQ-2WJX9LZ-...'],
+    ['tchen', 'TCHEN-RIG', 'windows', 'editor', '0.9.49', 3, '2 h ago', 'T0CH3NR-1G5Y2XK-...'],
+    ['owen', 'OWEN-RIG', 'windows', 'base', '0.9.76', 0, '1 min ago', 'OW3NR1G-8B4SE2R-...'],
+  ];
+  const PENDING_DEV = [
+    { id: 'P7VQ2XK-LM4T8ZD-W3NR6YH-J9BC1QF-5GTX0AE-K2PL7MV-R8DW3SN-Y6QZ4HU', status: 'pending', name: 'TCHEN-LAPTOP', owner: 'tchen' },
+    { id: 'C3ZK8WN-Q1TR5LX-H7VM2PD-B4YS9JG-6NFA0QE-X2LU8TK-M5RC3WZ-D9HV1PY', status: 'unmapped', name: 'rivera-laptop', owner: '' },
+  ];
+  const PENDING_KEYS = [
+    ['tchen', 'SHA256:Wn5Q2kPz8Lx1Vc4Tb7Mj0Hy3Gd6Fs9Ra2Ue5Io8Kl1Z', 'TCHEN-LAPTOP', '6 min ago'],
+  ];
+  const SESSIONS = [
+    ['owen', '2 h ago', 'just now', '100.64.12.8 · Chrome on Windows'],
+    ['jsmith', '3 d ago', '4 min ago', '100.64.18.21 · Safari on iPhone'],
+    ['mrivera', '1 d ago', '38 min ago', '100.64.9.40 · Firefox on Windows'],
+  ];
+  const TOKENS = [
+    ['jsmith', 'studio desktop', '21 d ago', '4 s ago'],
+    ['jsmith', 'macbook', '21 d ago', '31 s ago'],
+    ['mrivera', 'editor laptop', '9 d ago', '2 s ago'],
+    ['tchen', '', '40 d ago', '2 h ago'],
+  ];
+  const HISTORY = [
+    ['3 d ago', 'released', 'owen', 'NAS back from the scrub'],
+    ['3 d ago', 'kept on', 'owen', 'NAS scrub still running'],
+    ['4 d ago', 'stopped', 'owen', 'NAS scrub, back tomorrow'],
+    ['19 d ago', 'expired', 'system', 'moving the Elections folder'],
+    ['19 d ago', 'stopped', 'owen', 'moving the Elections folder'],
+  ];
+
+  let S = { auth: 'nas', halt: 'on', suspended: new Set(['mrivera']), mode: 'busy', minted: null };
+
+  // ------------------------------------------------------------ pieces
+  const btn = (label, cls, attrs) => `<button class="key sm ${cls || ''}" type="button" ${attrs || ''}><span class="t">${label}</span></button>`;
+  const busyBtn = (label, busy, cls, attrs) => `<button class="key sm ${cls || ''}" type="button" ${attrs || ''}><span class="t">${label}</span><span class="busy-t"><span class="spin"></span> ${busy}</span></button>`;
+  const who = u => `<a class="who-link" href="user.html?u=${u}" title="Open ${u}'s page: their computers, what is ticked on each, what is synced, what is missing, their sign-ins and tokens."><b>${u}</b></a>`;
+  const ask = (text, ok) => `data-ask="${esc(text)}" data-ok="${esc(ok)}"`;
+
+  function suspendBtn(u) {
+    const on = S.suspended.has(u);
+    return on
+      ? btn('resume', 'w-9', `data-do="resume" data-u="${u}" title="let this person's computers sync again. Their sync plan was never touched, so the projects they had come back on the next cycle."`)
+      : btn('suspend', 'w-9', `data-do="suspend" data-u="${u}" ${ask(`Pause syncing for ${u}? Their sync plan is kept and RESUME puts it back.`, 'suspend')} title="their computers are turned away when they report and their projects are unshared, without touching a file or a tick. This is the reversible way to stop somebody: DELETE is not."`);
+  }
+  const suspTag = u => S.suspended.has(u) ? `<span class="tag warn" title="an admin paused this person: their computers are turned away and their projects are unshared. The sync plan is kept. RESUME puts it back.">suspended</span>` : '';
+
+  // ------------------------------------------------------------ sections
+  function devicesWin() {
+    const rows = S.mode === 'calm' ? [] : PENDING_DEV;
+    const body = rows.length ? `
+      <div class="scroll-x"><table class="tbl stack-sm">
+        <thead><tr><th title="the long id the sync engine on that computer introduced itself with">device id</th><th title="pending: asked to join. unmapped: joined under a name that is not a person.">status</th><th>computer name</th><th title="the person this computer belongs to">owner (editor)</th></tr></thead>
+        <tbody>${rows.map(d => `<tr data-row>
+          <td data-label="device id" class="wrap"><span class="num" style="font-size:12px;overflow-wrap:anywhere">${esc(d.id)}</span></td>
+          <td data-label="status">${d.status === 'pending' ? tag('warn', 'pending') : tag('err', 'unmapped')}</td>
+          <td data-label="computer name">${esc(d.name)}</td>
+          <td data-label="owner (editor)"><div class="cell-form">
+            <input class="inp sm" list="known-editors" value="${esc(d.owner)}" placeholder="editor username" style="width:16ch" aria-label="owner of ${esc(d.name)}">
+            ${d.owner ? tag('ok', 'reported') : ''}
+            <label class="check"><input type="checkbox"><span class="g"></span><span class="l">create new editor</span></label>
+            ${btn('approve', 'primary', `data-do="approve" title="Add this computer to the person named beside it. Their projects are shared with it on the next cycle."`)}
+          </div></td></tr>`).join('')}</tbody>
+      </table></div>
+      <datalist id="known-editors"><option value="jsmith"><option value="mrivera"><option value="tchen"><option value="owen"></datalist>
+      <div class="foot-in">Pick the <b>person</b> who owns this computer, never the computer's own name. One editor can own several computers, so a second computer takes the SAME username as their first. A row marked <span class="tag ok">reported</span> was filled in from what that computer's companion already told the dashboard.</div>`
+      : `<div class="empty"><span class="glyph">· · ·</span>No device is waiting. A new computer appears here when its Syncthing asks to join.</div>`;
+    return win('devices_awaiting_approval', rows.length ? `<b>${rows.length}</b> waiting` : 'none pending', body);
+  }
+
+  function sshPendingWin() {
+    if (S.mode === 'calm') return '';
+    return win('ssh_keys_awaiting_approval', `<b>${PENDING_KEYS.length}</b> waiting`, `
+      <div class="lede-in">Sent up by an editor's installer. Their upload and proxy download cannot authenticate until one is approved.</div>
+      <div class="scroll-x"><table class="tbl stack-sm">
+        <thead><tr><th>editor</th><th title="a short, unique summary of the key: compare it with what the editor sees">fingerprint</th><th title="the computer the installer ran on">from</th><th>sent</th><th></th></tr></thead>
+        <tbody>${PENDING_KEYS.map(k => `<tr data-row>
+          <td data-label="editor">${who(k[0])}</td>
+          <td data-label="fingerprint" class="wrap"><span style="font-size:12px;overflow-wrap:anywhere">${k[1]}</span></td>
+          <td data-label="from">${k[2]}</td><td data-label="sent">${k[3]}</td>
+          <td class="acts-cell" data-label=""><span class="acts">
+            ${btn('approve', 'primary', `data-do="drop" data-msg="key installed on ${k[0]}'s account" title="installs this key on ${k[0]}'s account. It is what their upload and proxy download authenticate with."`)}
+            ${btn('dismiss', 'quiet', `${ask(`Throw away this key for ${k[0]}? Their computer can offer it again.`, 'throw it away')} data-do="drop" title="removes the offer only. Nothing on the account changes and that computer can offer the key again."`)}
+          </span></td></tr>`).join('')}</tbody>
+      </table></div>`);
+  }
+
+  function nasAccountsWin() {
+    const body = `
+      <div class="scroll-x"><table class="tbl stack-sm">
+        <thead><tr><th title="click a name for everything about that person">username</th><th title="the account's number on the NAS; files they write carry it">uid</th><th title="the key their upload and proxy download sign in with">ssh key</th><th title="whether the account can open the NAS shares (the P: drive)">smb</th><th title="locked on the NAS, or paused here (suspended)">locked</th><th title="their NAS password, which is also their dashboard password">set password</th><th></th></tr></thead>
+        <tbody>${NAS_EDITORS.map(e => `<tr>
+          <td data-label="username">${who(e.u)}</td>
+          <td data-label="uid">${e.uid}</td>
+          <td data-label="ssh key">${e.key ? tag('ok', 'set') : `${tag('err', 'no ssh key')}<span class="sub">upload and proxy download will not run until a key is added</span>`}
+            <div class="cell-form"><input class="inp sm w-key" placeholder="ssh-ed25519 AAAA... user@host" aria-label="ssh key for ${e.u}">
+            ${e.key ? btn('update ssh key', '', `${ask(`Replace ${e.u}'s SSH key? Their upload and proxy download stop until it is in use.`, 'replace it')} data-do="toast" data-msg="SSH key replaced for ${e.u}"`)
+                    : btn('add ssh key', '', `data-do="toast" data-msg="SSH key added for ${e.u}" title="installs this public key on the NAS account. It is what upload and proxy download authenticate with."`)}</div></td>
+          <td data-label="smb">${e.smb ? tag('ok', 'on') : tag('err', 'off')}</td>
+          <td data-label="locked">${e.locked ? tag('err', 'locked') : (suspTag(e.u) || '<span class="muted">-</span>')}</td>
+          <td data-label="set password"><div class="cell-form"><input class="inp sm w-pw" type="password" placeholder="new password" aria-label="new password for ${e.u}">
+            ${btn('set', '', `${ask(`Set a new password for ${e.u}? It is their NAS login too.`, 'set it')} data-do="toast" data-msg="new password set for ${e.u}" title="this is their NAS account password: the dashboard, SMB and SFTP all stop working with the old one the moment this lands. It is not shown again."`)}</div></td>
+          <td class="acts-cell" data-label=""><span class="acts">${suspendBtn(e.u)}
+            ${btn('delete', 'quiet', `${ask(`Delete ${e.u}: their NAS account, their computers and their sync plans?`, 'delete ' + e.u)} data-do="toast" data-msg="${e.u} deleted. TrueNAS keeps their home directory." title="SUSPEND pauses them instead and keeps all of this. DELETE: their NAS account, browser sessions and report tokens go, and so do all of their computers: sync plans, status rows and Syncthing devices (they stop receiving projects). Files already on their computers stay there, and nothing in the project tree is touched."`)}</span></td>
+        </tr>`).join('')}</tbody>
+      </table></div>`;
+    return win('editor_accounts', `<b>${NAS_EDITORS.length}</b> on the NAS`, body);
+  }
+
+  function nasCreateWin() {
+    return `<div id="create">${win('create_new_editor_account', '', `<div class="body"><div class="form">
+      <div class="form-row"><span class="lbl">username</span><input class="inp" id="new-u" placeholder="username (e.g. jsmith)" style="max-width:320px"></div>
+      <div class="form-row"><span class="lbl">full name<small>optional</small></span><input class="inp" placeholder="full name" style="max-width:320px"></div>
+      <div class="form-row"><span class="lbl">ssh public key<small>optional</small></span><div><textarea class="area" placeholder="ssh-ed25519 AAAA... user@host" style="max-width:560px;min-height:64px"></textarea>
+        <div class="hint">Leave this blank if they have not installed yet: their installer sends the key up on first sign-in and you approve it on this page. Upload and proxy download do not run until a key is on the account.</div></div></div>
+      <div class="form-row"><span class="lbl">known password<small>optional</small></span><div><input class="inp" type="password" placeholder="otherwise randomized and unusable for dashboard login" style="max-width:420px"></div></div>
+      <div class="form-row"><span></span><div class="inline">${busyBtn('create', 'creating the account on the NAS', 'primary', 'data-busy="account created on the NAS"')}
+        <span class="hint" style="margin:0">This can take up to two minutes: the NAS creates the account, its group and its home directory. Leave the page open.</span></div></div>
+    </div></div>`)}</div>`;
+  }
+
+  function localAccountsWin() {
+    const body = `
+      <div class="scroll-x"><table class="tbl stack-sm">
+        <thead><tr><th title="click a name for everything about that person">username</th><th title="admin: can use Settings. editor: their own computers and projects only.">role</th><th title="active, disabled (cannot sign in) or suspended (cannot sync)">status</th><th title="keys that let them use SFTP to the server">ssh keys</th><th>set password</th><th></th></tr></thead>
+        <tbody>${LOCAL.map(u => `<tr>
+          <td data-label="username">${who(u.u)}</td>
+          <td data-label="role">${u.role}</td>
+          <td data-label="status"><span class="tags" style="margin:0">${u.disabled ? tag('err', 'disabled') : (S.suspended.has(u.u) ? '' : tag('ok', 'active'))}${suspTag(u.u)}</span></td>
+          <td data-label="ssh keys"><div class="key-list">${u.keys.length ? u.keys.map(k => `<div class="kl"><span style="overflow-wrap:anywhere">${k[0].slice(0, 22)}...</span>${k[1] ? `<span class="muted">(${k[1]})</span>` : ''}
+              ${btn('revoke', 'quiet', `${ask(`Revoke this SSH key for ${u.u}? Their SFTP stops now.`, 'revoke it')} data-do="drop-kl" title="their SFTP access through this key stops immediately, and the key text is not stored anywhere this page can put it back from: they have to send it again."`)}</div>`).join('') : '<span class="muted">none</span>'}</div>
+            <div class="cell-form"><input class="inp sm w-key" placeholder="ssh-ed25519 AAAA... (add key)" aria-label="add a key for ${u.u}">${btn('add', '', `data-do="toast" data-msg="key added for ${u.u}"`)}</div></td>
+          <td data-label="set password"><div class="cell-form"><input class="inp sm w-pw" type="password" placeholder="new password" aria-label="new password for ${u.u}">
+            ${btn('set', '', `${ask(`Set a new password for ${u.u}? Their old one stops working now.`, 'set it')} data-do="toast" data-msg="new password set for ${u.u}" title="the old password stops working the moment this lands, so they cannot sign in until you tell them the new one. This page does not show it again."`)}</div></td>
+          <td class="acts-cell" data-label=""><span class="acts">
+            ${u.disabled ? btn('enable', 'w-9', `data-do="toast" title="Let this account sign in again. Its computers are welcomed back on their next report." data-msg="${u.u} can sign in again"`)
+              : btn('disable', 'w-9', `${ask(`Stop ${u.u} signing in? Their computers keep their projects until you untick them.`, 'disable')} data-do="toast" data-msg="${u.u} can no longer sign in" title="a disabled account cannot sign into the dashboard or SFTP, its sessions and report tokens are revoked, and its computers are turned away when they report. The files already on those computers stay there, and ENABLE here undoes all of it."`)}
+            ${suspendBtn(u.u)}
+            ${btn('delete', 'quiet', `${ask(`Delete ${u.u}, their computers and their sync plans? DISABLE only stops logins.`, 'delete ' + u.u)} data-do="toast" data-msg="${u.u} deleted" title="their login, SSH keys, browser sessions and report tokens go, and so do all of their computers: sync plans, status rows and Syncthing devices (they stop receiving projects). Files already on their computers stay there."`)}</span></td>
+        </tr>`).join('')}</tbody>
+      </table></div>`;
+    return win('local_accounts', `<b>${LOCAL.length}</b> accounts`, body);
+  }
+
+  function localCreateWin() {
+    return `<div id="create">${win('create_local_account', '', `<div class="body"><div class="form">
+      <div class="form-row"><span class="lbl">username</span><input class="inp" id="new-u" placeholder="username (e.g. jsmith)" style="max-width:320px"></div>
+      <div class="form-row"><span class="lbl">role</span><select class="sel" style="max-width:320px"><option>editor</option><option>admin</option></select></div>
+      <div class="form-row"><span class="lbl">ssh public key<small>optional, for SFTP</small></span><textarea class="area" placeholder="ssh-ed25519 AAAA... user@host" style="max-width:560px;min-height:64px"></textarea></div>
+      <div class="form-row"><span class="lbl">password<small>optional</small></span><div><input class="inp" type="password" id="new-pw" placeholder="leave blank to generate a one-time password" style="max-width:420px">
+        <div class="hint">Blank generates a password that is shown once, above this panel.</div></div></div>
+      <div class="form-row"><span></span><div>${busyBtn('create', 'creating the account', 'primary', 'data-do="create-local"')}</div></div>
+    </div></div>`)}</div>`;
+  }
+
+  function noNasNote() {
+    return `<div class="note warn"><span class="grow">This dashboard has no NAS password, so editor accounts cannot be created here. Set it on <a class="hi" href="setup.html#nas_connect">Settings, Setup (Connect to your NAS)</a>, or set <b>DASH_NAS_PW</b> in the container.</span></div>`;
+  }
+
+  function computersWin() {
+    const rows = COMPUTERS.map(c => S.mode === 'calm' ? [...c.slice(0, 4), '0.9.77', ...c.slice(5)] : c);
+    return win('computers', `<b>${rows.length}</b> computers`, `
+      <div class="lede-in">Every computer that has reported in. <b>Remove</b> forgets it: its sync plan, its status rows and its Syncthing device.</div>
+      <div class="scroll-y box-h"><div class="scroll-x"><table class="tbl stack-sm">
+        <thead><tr><th title="click a name for everything about that person">editor</th><th title="hover a name for its sync device id">computer</th><th>platform</th><th title="editor: syncs its own copy. base: wired to the server, syncs nothing.">mode</th><th title="the CC Sync app version it last reported">running</th><th title="how many projects are ticked for this computer">plan</th><th>last report</th><th></th></tr></thead>
+        <tbody>${rows.map(c => `<tr data-row>
+          <td data-label="editor">${who(c[0])}</td>
+          <td data-label="computer" title="Syncthing device ${c[7]}"><b>${c[1]}</b></td>
+          <td data-label="platform">${c[2]}</td>
+          <td data-label="mode">${c[3] === 'base' ? '<span title="wired: works off the server tree and syncs nothing">base</span>' : 'editor'}</td>
+          <td data-label="running">${c[4]}</td>
+          <td data-label="plan">${c[5]} project${c[5] === 1 ? '' : 's'}</td>
+          <td data-label="last report">${c[6]}</td>
+          <td class="acts-cell" data-label="">${btn('remove', 'quiet', `${ask(`Forget ${c[1]}? It stops receiving projects. A running companion re-registers.`, 'forget ' + c[1])} data-do="drop" title="its sync plan, its status rows and its Syncthing device go. Files already on it stay there. If the companion on it is still running and signed in it registers itself again on its next report: uninstall the companion first, or delete the user instead, if it should stay gone."`)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div></div>`);
+  }
+
+  function orphansWin() {
+    if (S.mode === 'calm') return '';
+    return win('editors_without_an_account', '<b>1</b>', `
+      <div class="lede-in">Known to the fleet (a device, a plan or a report), but no account here. Usually a computer approved under its own name instead of its owner's.</div>
+      <table class="tbl stack-sm"><thead><tr><th>username</th><th></th></tr></thead><tbody>
+        <tr data-row><td data-label="username"><b>rivera-laptop</b></td>
+        <td class="acts-cell" data-label="">${btn('delete', '', `${ask('Delete rivera-laptop from the fleet, with their computers and sync plans?', 'delete')} data-do="drop" title="all of their computers go: sync plans, status rows and Syncthing devices (they stop receiving projects). Any report tokens and browser sessions in their name are revoked. Files already on their computers stay there."`)}</td></tr>
+      </tbody></table>`);
+  }
+
+  function sessionsWin() {
+    return win('signed_in_browsers', `<b>${SESSIONS.length}</b> signed in`, `
+      <div class="lede-in">Revoking signs that account out everywhere within a second. The companion's own identity token is separate and is not affected.</div>
+      <div id="sess-msg"></div>
+      <div class="scroll-x"><table class="tbl stack-sm">
+        <thead><tr><th>username</th><th>signed in</th><th title="the last time that browser loaded a page">last seen</th><th title="the address and browser it signed in from">from</th><th></th></tr></thead>
+        <tbody>${SESSIONS.map(s => {
+          const me = s[0] === 'owen';
+          return `<tr data-row><td data-label="username">${who(s[0])}${me ? ' <span class="hi">(you)</span>' : ''}</td>
+            <td data-label="signed in">${s[1]}</td><td data-label="last seen">${s[2]}</td><td data-label="from">${esc(s[3])}</td>
+            <td class="acts-cell" data-label="">${me
+              ? btn('sign me out everywhere', '', ask('Sign yourself out of every browser, including this one? You will need to sign in again to finish what you are doing.', 'sign me out') + ' data-do="toast" data-msg="signed out everywhere (bench: you stay here)"')
+              : btn('revoke all', '', ask(`Sign ${s[0]} out of every browser? They will need to sign in again. Their computer's own sync is not affected.`, 'revoke') + ` data-do="revoke" data-u="${s[0]}"`)}</td></tr>`;
+        }).join('')}</tbody>
+      </table></div>`);
+  }
+
+  function tokensWin() {
+    const shared = S.mode === 'calm'
+      ? `<div class="note ok"><span class="grow">All 6 reporting computers use per-editor tokens. The shared token is no longer used by anything: it is safe for whoever installed this server to switch it off.</span></div>`
+      : `<div class="note warn"><span class="grow"><b>1 computer still reports with the SHARED fleet token:</b> <span class="num">owen/OWEN-RIG</span>. Once this is empty, ask whoever installed this server to switch the shared token off: it is a container setting, not something this page can change.</span></div>`;
+    return win('report_tokens', `<b>${TOKENS.length}</b> tokens`, `
+      <div class="lede-in">One credential per editor, revocable on its own. It replaces the single shared fleet token every companion used to hold.</div>
+      <div style="padding:6px var(--pad) 4px">${shared}</div>
+      <div class="scroll-x"><table class="tbl stack-sm">
+        <thead><tr><th>editor</th><th title="a note to tell one editor's tokens apart">label</th><th>created</th><th title="the last report signed with it">last used</th><th></th></tr></thead>
+        <tbody>${TOKENS.map(t => `<tr data-row><td data-label="editor">${who(t[0])}</td><td data-label="label">${esc(t[1] || '-')}</td>
+          <td data-label="created">${t[2]}</td><td data-label="last used">${t[3]}</td>
+          <td class="acts-cell" data-label="">${btn('revoke', 'quiet', ask(`Revoke ${t[0]}'s report token? Their companion stops reporting and stops syncing until you issue a new token and they enter it. The old token cannot be shown again.`, 'revoke') + ' data-do="drop"')}</td></tr>`).join('')}</tbody>
+      </table></div>
+      <div class="foot-in"><div class="inline"><b style="letter-spacing:1px">MINT A TOKEN</b>
+        <input class="inp sm" id="mint-u" placeholder="editor username" style="width:18ch" aria-label="editor username">
+        <input class="inp sm" placeholder="label (e.g. 'editor laptop')" style="width:24ch" aria-label="label">
+        ${btn('mint', 'primary', 'data-do="mint" title="Make a new report token for that editor. It is shown once, at the top of this page."')}</div></div>`);
+  }
+
+  function haltWin() {
+    let body;
+    if (S.halt === 'on') {
+      body = `
+        <div class="alarm"><div class="h"><span class="led err"></span>Syncing is stopped on every computer</div>
+          <div class="why">NAS scrub running until Saturday morning</div>
+          <div>set by <b>owen</b> 5 h ago (5 hours so far, 6 computers in the fleet)</div>
+          <div>releases itself in 19 h unless you keep it stopped (kept on 1 time)</div></div>
+        <p class="lede" style="margin-top:12px">Each companion picks this up on its next report (within a minute) and shows the reason in its tray. Editors cannot start syncing again themselves; only this button can.</p>
+        <div class="inline" style="margin-top:12px">
+          ${btn('start syncing again', 'primary', 'data-do="halt-off" title="Let every computer sync again. Each one picks it up on its next report, within a minute."')}
+          ${btn('keep it stopped', '', ask("Keep every computer in the fleet stopped for another day? Nobody's uploads, proxy downloads or shared project files move until you start them again here.", 'keep it stopped') + ' data-do="toast" data-msg="kept stopped for another day" title="The stop releases itself after a day. This keeps it on for one more day from now."')}
+        </div>`;
+    } else {
+      body = (S.halt === 'expired' ? `
+        <div class="note warn"><span class="grow"><b>The last stop EXPIRED and syncing started again everywhere 2 h ago.</b> It was set by owen 1 d ago: NAS scrub running until Saturday morning.</span></div>
+        <div style="margin-top:10px">${btn('ok, it can stay off', '', 'data-do="halt-ack" title="takes the expired-stop notice off every page. Syncing is already running everywhere, and this changes nothing on any computer."')}</div>` : '') + `
+        <div class="inline" style="margin-top:${S.halt === 'expired' ? 14 : 0}px">
+          <input class="inp" id="halt-why" placeholder="why (shown in every editor's tray)" style="flex:1;min-width:min(24rem,100%);max-width:520px" aria-label="why">
+          ${btn('stop all syncing', 'primary', ask('Stop syncing on EVERY computer in the fleet? Uploads, proxy downloads and shared project files stop everywhere until you start them again here. Nothing is deleted. Work done while it is stopped will not reach anyone until you start them again.', 'stop everything') + ' data-do="halt-on" title="Stop uploads, proxy downloads and shared project files on every computer. Nothing is deleted. The reason you type is shown in every tray."')}
+        </div>`;
+    }
+    const hist = `<details class="fold" data-key="halt-history" style="margin-top:16px">
+        <summary><span class="caret">&#9656;</span> <b style="letter-spacing:1.5px">PREVIOUS STOPS</b> <span class="muted">${HISTORY.length}</span></summary>
+        <table class="tbl stack-sm" style="margin-top:6px"><thead><tr><th>when</th><th>what</th><th>who</th><th>why</th></tr></thead>
+        <tbody>${HISTORY.map(h => `<tr><td data-label="when">${h[0]}</td><td data-label="what">${tag(h[1] === 'stopped' ? 'err' : h[1] === 'kept on' ? 'warn' : 'mute', h[1])}</td><td data-label="who"><b>${h[2]}</b></td><td data-label="why">${esc(h[3])}</td></tr>`).join('')}</tbody></table>
+      </details>`;
+    return `<div id="halt">${win('stop_syncing_everywhere', S.halt === 'on' ? '<span style="color:var(--err)">stopped</span>' : 'syncing', `
+      <div class="lede-in">Stops uploads, proxy downloads and shared project files on every editor's computer. Nothing is deleted; it is fully reversible. A computer that is off right now takes the stop the moment it reports again.</div>
+      <div class="body">${body}${hist}</div>`)}</div>`;
+  }
+
+  function haltBanner() {
+    if (S.halt === 'on') return `<div class="alertline" style="border-color:var(--err);background:rgb(255 46 46 / 0.08)">
+      <span class="tag solid err">stopped</span>
+      <span class="grow"><b>Syncing is stopped on every computer</b> (5 hours so far, 6 computers in the fleet). NAS scrub running until Saturday morning. <span class="dim">Set by owen 5 h ago; it releases itself in 19 h unless somebody keeps it on.</span></span>
+      <a class="key quiet sm" href="#halt"><span class="t">start syncing again</span></a></div>`;
+    if (S.halt === 'expired') return `<div class="alertline">
+      <span class="tag solid warn">expired</span>
+      <span class="grow"><b>The fleet-wide stop has expired</b> and syncing has started again everywhere. It was set for: NAS scrub running until Saturday morning. <span class="dim">Set by owen 1 d ago, expired 2 h ago.</span></span>
+      <a class="key quiet sm" href="#halt"><span class="t">take this notice down</span></a></div>`;
+    return '';
+  }
+
+  function mintedBox() {
+    if (!S.minted) return '';
+    const m = S.minted;
+    return win(`new_${m.kind}_for_${m.u}`, 'shown once', `<div class="body">
+      <div class="lede">Copy it now. It is shown once, and the panels on this page refresh by themselves.</div>
+      <div class="secret"><code id="minted-value">${esc(m.value)}</code>${btn('copy', 'primary', 'data-do="copy"')}${btn('done, hide it', 'quiet', 'data-do="unmint"')}</div>
+      <div class="lede">${m.kind === 'password'
+        ? `Give it to ${m.u} and have them change it after they sign in. Nothing here can show it again: the next one has to be a new password.`
+        : `Send it to whoever set up ${m.u}'s computer: it goes into the companion's own settings file, and the companion has to be restarted (tray, then Restart CC Sync) before it takes effect. It outranks the shared token and survives every tray sign-in.`}</div>
+    </div>`);
+  }
+
+  // ------------------------------------------------------------ render
+  function render(mode) {
+    if (mode) S.mode = mode;
+    const calm = S.mode === 'calm';
+    let parts = [];
+    if (S.auth === 'local') {
+      parts = [localAccountsWin(), localCreateWin()];
+    } else if (S.auth === 'nonas') {
+      parts = [noNasNote()];
+    } else {
+      parts = [devicesWin(), nasAccountsWin(), nasCreateWin()];
+    }
+    parts.push(sshPendingWin(), computersWin(), orphansWin());
+    parts.push(`<h2 class="sec">browsers, tokens and the fleet stop</h2>`, sessionsWin(), tokensWin(), haltWin());
+    $('#main').innerHTML = parts.filter(Boolean).join('');
+    $('#halt-banner').innerHTML = haltBanner();
+    $('#halt-banner').style.display = S.halt === 'off' ? 'none' : '';
+    $('#minted').innerHTML = mintedBox();
+    $('#minted').style.display = S.minted ? '' : 'none';
+    const accounts = S.auth === 'local' ? LOCAL.length : NAS_EDITORS.length;
+    $('#sub').innerHTML = `<b>${accounts}</b> accounts &middot; <b>${COMPUTERS.length}</b> computers &middot; ` +
+      (calm ? 'nothing waiting for approval' : `<b>${(S.auth === 'nas' ? PENDING_DEV.length : 0) + PENDING_KEYS.length}</b> waiting for approval`) +
+      ` &middot; ${S.suspended.size ? `<b>${S.suspended.size}</b> suspended` : 'nobody suspended'}`;
+    document.querySelectorAll('#b-auth button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === S.auth)));
+    document.querySelectorAll('#b-halt button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === S.halt)));
+  }
+
+  function onData(mode) {
+    S.mode = mode;
+    S.halt = mode === 'calm' ? 'off' : 'on';
+    S.suspended = new Set(mode === 'calm' ? [] : ['mrivera']);
+    S.minted = mode === 'calm' ? null : { kind: 'token', u: 'mrivera', value: 'cce1.bXJpdmVyYQ.7Hq2Lw9ZpX4tKc0VbN8sRj3mYd6FgA1uEo5' };
+    render();
+  }
+
+  // ------------------------------------------------------------ the confirm dialog
+  document.body.insertAdjacentHTML('beforeend', `<div class="dialog-back" id="ask"><section class="win dialog" role="dialog" aria-modal="true" aria-labelledby="ask-t">
+    <div class="bar"><span>┌─╡</span><span class="t" id="ask-t">are_you_sure</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+    <div class="body"><div id="ask-x" style="color:var(--text)"></div>
+      <div class="acts"><button class="key quiet" type="button" id="ask-no"><span class="t">cancel</span></button><button class="key primary" type="button" id="ask-ok"><span class="t" id="ask-ok-t">ok</span></button></div></div>
+  </section></div>`);
+  let pending = null;
+  const closeAsk = () => { $('#ask').classList.remove('open'); pending = null; };
+  $('#ask-no').addEventListener('click', closeAsk);
+  $('#ask').addEventListener('click', e => { if (e.target.id === 'ask') closeAsk(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAsk(); });
+  $('#ask-ok').addEventListener('click', () => { const p = pending; closeAsk(); if (p) act(p); });
+
+  function act(el) {
+    const d = el.dataset.do, u = el.dataset.u;
+    const row = el.closest('[data-row]');
+    const gone = r => { if (r) { r.style.transition = 'opacity .2s'; r.style.opacity = '0'; setTimeout(() => r.remove(), 200); } };
+    switch (d) {
+      case 'toast': toast(el.dataset.msg || 'done'); break;
+      case 'drop': gone(row); toast(el.dataset.msg || 'done'); break;
+      case 'drop-kl': gone(el.closest('.kl')); toast('key revoked: their SFTP stops now'); break;
+      case 'approve': gone(row); toast('approved: the computer is added to its owner'); break;
+      case 'suspend': S.suspended.add(u); render(); toast(`${u} suspended: computers turned away, plan kept`); break;
+      case 'resume': S.suspended.delete(u); render(); toast(`${u} resumed: projects come back on the next cycle`); break;
+      case 'revoke': $('#sess-msg').innerHTML = `<div class="note" style="margin:6px var(--pad)"><span class="grow">revoked 1 session(s) for ${u}</span></div>`; gone(row); break;
+      case 'halt-on': {
+        const why = ($('#halt-why') || {}).value || '';
+        if (!why.trim()) { toast('say why: it is shown in every editor\'s tray'); $('#halt-why').focus(); return; }
+        S.halt = 'on'; render(); toast('stopped on every computer'); break;
+      }
+      case 'halt-off': S.halt = 'off'; render(); toast('syncing again everywhere'); break;
+      case 'halt-ack': S.halt = 'off'; render(); toast('notice taken down'); break;
+      case 'mint': {
+        const who = ($('#mint-u').value || 'jsmith').trim().toLowerCase();
+        S.minted = { kind: 'token', u: who, value: 'cce1.' + btoa(who).replace(/=/g, '') + '.Rt8Kq2Zm5Lx9Vp1Wc4Nb7Hj0Gd3Fs6Ya' };
+        render(); window.scrollTo({ top: 0, behavior: 'smooth' }); break;
+      }
+      case 'create-local': {
+        el.classList.add('busy');
+        setTimeout(() => {
+          el.classList.remove('busy');
+          const who = ($('#new-u').value || 'newhire').trim().toLowerCase();
+          if (!($('#new-pw').value || '').trim()) {
+            S.minted = { kind: 'password', u: who, value: 'tidal-Harbor-49-quiet-Lantern' };
+            render(); window.scrollTo({ top: 0, behavior: 'smooth' });
+          } else toast(`created ${who}`);
+        }, 1200);
+        break;
+      }
+      case 'copy': toast('copied'); break;
+      case 'unmint': S.minted = null; render(); break;
+    }
+  }
+
+  document.addEventListener('click', e => {
+    const bench = e.target.closest('.bench .opts button');
+    if (bench) {
+      const g = bench.parentElement.id;
+      if (g === 'b-auth') S.auth = bench.dataset.v; else S.halt = bench.dataset.v;
+      render(); return;
+    }
+    const el = e.target.closest('[data-do]');
+    if (!el) return;
+    if (el.dataset.ask) {
+      pending = el;
+      $('#ask-x').textContent = el.dataset.ask;
+      $('#ask-ok-t').textContent = el.dataset.ok || 'ok';
+      $('#ask').classList.add('open');
+      $('#ask-ok').focus();
+      e.stopImmediatePropagation();
+      return;
+    }
+    act(el);
+  }, true);
+
+  CC.page({ page: 'users', onData });
+})();
+</script>
+</body>
+</html>

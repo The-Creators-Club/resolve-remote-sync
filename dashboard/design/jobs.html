@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CC Sync: fleet jobs</title>
+<!-- The design bench (dashboard/design/README.md): Settings, Jobs. Mirrors
+     templates/admin_jobs.html + partials/admin_jobs.html and ui._jobs_context:
+     the queue's depth, the per-kind fleet caps, pinning, every open job with
+     the per-computer answer to "why is nobody running this", cancel, and the
+     finished list with TRY AGAIN. The per-computer sentences are the ones
+     jobs.explain() writes. Invented data. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="cc-terminal.css">
+<link rel="stylesheet" href="cc-components.css">
+<link rel="stylesheet" href="css/fleet.css">
+</head>
+<body data-page="jobs">
+
+<div class="shell fl-page">
+  <div class="page one">
+    <div id="settings-nav"></div>
+
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt">&gt;</span> FLEET JOBS</span></h1>
+        <div class="sub"><span id="upd">refreshed 3 s ago</span> &middot; refreshes every 15 s</div>
+      </div>
+      <div class="acts" id="head-acts"></div>
+    </div>
+
+    <p class="lede">
+      Work the fleet does for itself: transcriptions, 480p proxies, audio extractions and waveform peaks.
+      A job is offered to every computer that can do it and claimed by the first one to ask, so nothing here
+      is assigned to anybody. This page is for the opposite case: <b>a queue that is not moving, and why</b>.
+      That answer is under each job, per computer, in words.
+    </p>
+
+    <div id="main" class="stack"></div>
+  </div>
+</div>
+
+<script src="shell.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { esc, win, tag, toast, meter } = CC;
+  const $ = s => document.querySelector(s);
+
+  // ------------------------------------------------------------ data
+  const JOBS = [
+    { id: 415, kind: 'WHISPER', forced: true, state: 'running', where: 'jsmith/JSMITH-STUDIO', pct: 62, age: '48 min ago',
+      why: 'jsmith/JSMITH-STUDIO is holding this job (lease until 10:52:30)', machines: [] },
+    { id: 418, kind: 'PROXY 480p', state: 'running', where: 'mrivera/RIVERA-LAPTOP', pct: 37, age: '12 min ago',
+      why: 'mrivera/RIVERA-LAPTOP is holding this job (lease until 10:51:04)', machines: [] },
+    { id: 421, kind: 'WHISPER', state: 'queued', where: '', pct: null, age: '2 h ago',
+      why: "1 whisper job(s) are already running, which is this fleet's limit (1); it starts as soon as one finishes",
+      machines: [
+        [true, 'mrivera/RIVERA-TOWER', 'this computer can take it (choice 1 of 2; it is being offered the job now too)'],
+        [false, 'jsmith/JSMITH-STUDIO', 'this computer is already holding job #415 (whisper)'],
+        [false, 'jsmith/JSMITH-MBP', 'this computer cannot do this kind of work: no GPU with room for this model'],
+        [true, 'owen/OWEN-RIG', 'this computer can take it (choice 2 of 2; the first choice has a GPU with room for this model and this computer has not; it is offered the job too in 40s if nobody ahead of it has taken it by then)'],
+        [false, 'tchen/TCHEN-RIG', 'this computer has not reported since 08:41 (2 h ago), so it cannot claim anything until it is switched on'],
+      ] },
+    { id: 422, kind: 'AUDIO', state: 'queued', where: '', pct: null, age: '31 min ago', attempts: 1, err: 'ffmpeg exited 1: Output file #0 does not contain any stream',
+      why: 'no computer can take this job right now: 3 of 5 have somebody sitting at them',
+      machines: [
+        [false, 'jsmith/JSMITH-STUDIO', 'somebody is at this computer (idle 14s, audio-extract needs 60s)'],
+        [false, 'jsmith/JSMITH-MBP', 'somebody is at this computer (idle 3s, audio-extract needs 60s)'],
+        [false, 'mrivera/RIVERA-LAPTOP', 'this computer is already holding job #418 (proxy-480p)'],
+        [false, 'mrivera/RIVERA-TOWER', 'somebody is at this computer (idle 41s, audio-extract needs 60s)'],
+        [false, 'owen/OWEN-RIG', 'this computer is cooling down until 10:58 (failed job #422 two minutes ago)'],
+      ] },
+    { id: 419, kind: 'PROXY 480p', target: 'TCHEN-RIG', state: 'queued', where: '', pct: null, age: '3 h ago',
+      why: 'this job is for tchen/TCHEN-RIG only, and it cannot take it: the ffmpeg install on this computer is failing (3 tries): SSL: CERTIFICATE_VERIFY_FAILED fetching the ffmpeg build',
+      machines: [
+        [false, 'tchen/TCHEN-RIG', 'the ffmpeg install on this computer is failing (3 tries): SSL: CERTIFICATE_VERIFY_FAILED fetching the ffmpeg build', 'the sidecar installer could not verify the download host certificate'],
+        [false, 'jsmith/JSMITH-STUDIO', 'this job is for tchen/TCHEN-RIG only'],
+        [false, 'mrivera/RIVERA-TOWER', 'this job is for tchen/TCHEN-RIG only'],
+      ] },
+    { id: 423, kind: 'PEAKS', state: 'pinned', where: '', pct: 80, age: '1 h ago', attempts: 2, err: 'peaks: input ended early (clip still being copied?)',
+      why: "pinned: the fleet spent its retry budget on it, so this server's own Timeline Cards worker is running it", machines: [] },
+  ];
+  const FINISHED = [
+    { id: 414, kind: 'WHISPER', state: 'done', what: 'vault:2026/FF5/Elections/Interviews/A004_C012_0918FJ.mov', who: 'jsmith/JSMITH-STUDIO', when: '1 h ago', why: '', attempts: 1 },
+    { id: 410, kind: 'PROXY 480p', state: 'abandoned', what: 'tree:2026/Shorts/Night Market/Footage/B-cam/Night_Market_B-cam_0142.mp4', who: 'mrivera/RIVERA-TOWER', when: '3 h ago',
+      why: 'ffmpeg exited 183: [h264 @ 0x55d1] Invalid NAL unit size (1920 > 1143). Error while decoding stream #0:0: Invalid data found when processing input', attempts: 3 },
+    { id: 407, kind: 'AUDIO', state: 'failed', what: 'tree:2026/FF5/Civil Defence/Card_07/C0031.MP4', retryOf: 402, who: 'owen/OWEN-RIG', when: '5 h ago', why: 'cancelled by owen', attempts: 1 },
+    { id: 405, kind: 'PEAKS', state: 'done', what: 'vault:2025/FF4/CIA City/Audio/zoom_0823.wav', who: 'jsmith/JSMITH-MBP', when: '6 h ago', why: '', attempts: 1 },
+  ];
+  const KINDS_BUSY = [['WHISPER', 1, 1], ['PROXY 480p', 1, 4], ['AUDIO', 0, 4], ['PEAKS', 0, 4]];
+
+  let S = {};
+  function reset(mode) {
+    const busy = mode !== 'calm';
+    S = { busy, jobs: busy ? JOBS.map(j => ({ ...j })) : [], finished: FINISHED.map(f => ({ ...f })), showFinished: false, abandoned: busy ? 4 : 0, notice: null };
+  }
+
+  const btn = (label, cls, attrs) => `<button class="key sm ${cls || ''}" type="button" ${attrs || ''}><span class="t">${label}</span></button>`;
+  const toggle = () => btn(S.showFinished ? 'hide finished' : 'show finished', 'w-12', `data-do="toggle" title="jobs that ended in the last 24 hours: what was done, what failed, and what the fleet gave up on"`);
+
+  const KIND_TIPS = { WHISPER: 'whisper: turns the sound of an interview into a transcript. Needs a GPU with enough memory.', 'PROXY 480p': 'a small edit copy of a clip, for phones and Timeline Cards', AUDIO: 'the sound of a clip, taken out into its own file', PEAKS: 'the waveform picture of the sound of a clip' };
+  const STATE_TIPS = { running: 'a computer has claimed it and is working on it now', queued: 'waiting for a computer that can take it: the lines under it say who could, and why not', pinned: 'the fleet gave up on it, so the worker on this server is running it', claimed: 'a computer has taken it and is about to start', done: 'finished', failed: 'ended without finishing: cancelled, or it could not be done', abandoned: 'every try failed and the retry budget ran out' };
+  const whoLink = w => { const [ed, m] = w.split('/'); return `<a class="who-link" href="user.html?u=${ed}" title="Open ${ed}'s page: their computers and what each is doing.">${ed}</a>/<b>${m}</b>`; };
+  function queueWin() {
+    const q = S.jobs.filter(j => j.state === 'queued').length, r = S.jobs.filter(j => j.state === 'running').length, p = S.jobs.filter(j => j.state === 'pinned').length;
+    const running = k => S.jobs.filter(j => j.kind === k && j.state === 'running').length;
+    const meta = `<b>${q}</b> queued, <b>${r}</b> running${p ? `, <b>${p}</b> pinned here` : ''}${S.abandoned ? `, <b>${S.abandoned}</b> abandoned in the last 24 h` : ''}${S.jobs.length ? ' &middot; the oldest has waited 3 h' : ''}`;
+    return win('the_queue', meta, `<div class="body"><div class="caps">
+      ${KINDS_BUSY.map(([k, , cap]) => { const n = running(k); const full = n >= cap; return `<span class="cap ${full ? 'full' : ''}" title="${n} of at most ${cap} ${k.toLowerCase()} jobs are running across the whole fleet${full ? ' - the next one waits for a free slot' : ''}"><span class="k">${k}</span><span class="v">${n}/${cap}</span></span>`; }).join('')}
+      <span class="tag ok" title="pinning is on: a media job the fleet cannot finish is handed to this dashboard's own Timeline Cards worker instead of being abandoned">pin: this server</span>
+    </div>
+    <div class="hint" style="margin-top:8px">Each kind shows how many are running out of the most the whole fleet may run at once. A job the fleet gives up on can be pinned to this server; whisper never is.</div></div>`);
+  }
+
+  function jobsWin() {
+    if (!S.jobs.length) {
+      return win('jobs', 'nothing open', `<div class="empty" style="min-height:420px;display:grid;place-content:center"><span class="glyph">· · ·</span>Nothing is queued or running.${S.abandoned ? `<br>${S.abandoned} jobs were abandoned in the last 24 h.` : ''}</div><div class="foot-in slot-line">${toggle()}<span class="msg">${esc(S.notice || '')}</span></div>`);
+    }
+    const stTag = j => {
+      const tone = { running: 'hi', queued: 'mute', pinned: 'warn', claimed: 'hi' }[j.state] || 'mute';
+      return `<span title="${STATE_TIPS[j.state] || ''}">${tag(tone, j.state)}</span>`;
+    };
+    const rows = S.jobs.map(j => `
+      <tr data-job="${j.id}">
+        <td data-label="job"><b class="num">#${j.id}</b></td>
+        <td data-label="kind"><span class="tags" style="margin:0"><b title="${esc(KIND_TIPS[j.kind] || '')}">${j.kind}</b>${j.forced ? `<span class="tag warn" title="forced: every capable computer is asked at once, without waiting for anybody to leave their desk. A stop, an update, a proxy download that stopped itself and the capability filter still refuse it.">now</span>` : ''}${j.target ? `<span class="tag hi" title="this job is for ${j.target} only - no other computer is offered it, however idle it is">&rarr; ${j.target}</span>` : ''}</span></td>
+        <td data-label="state">${stTag(j)}</td>
+        <td data-label="where">${j.where ? whoLink(j.where) : '<span class="muted" title="no computer holds it yet">nobody</span>'}</td>
+        <td data-label="progress">${j.pct != null ? `<span class="pct">${meter(j.pct, 100, 10)}<span class="n">${j.pct}%</span></span>` : '<span class="muted">-</span>'}</td>
+        <td data-label="age" title="when the job was put on the queue">${j.age}</td>
+        <td class="acts-cell" data-label="">${j.cancelling ? btn('stopping', 'w-9', 'disabled title="The cancel is on its way: the computer holding it kills it on its next report and says so."') : btn('cancel', 'w-9', `data-do="cancel" data-id="${j.id}" title="Stop this job. A queued job is taken off; one a computer is running is killed there and not retried anywhere."`)}</td>
+      </tr>
+      <tr class="why-row"><td colspan="7" data-label=""><div class="job-why">
+        <div class="sum">${esc(j.why)}${j.attempts ? ` <span class="muted">(${j.attempts} attempt${j.attempts === 1 ? '' : 's'}${j.err ? ': ' + esc(j.err.slice(0, 120)) : ''})</span>` : ''}</div>
+        ${j.machines.map(m => `<div class="m ${m[0] ? 'yes' : 'no'}"><span class="yn">${m[0] ? 'yes' : 'no'}</span><span><span class="who">${m[1]}</span>: ${esc(m[2])}${m[3] ? ` <span class="tag warn" title="${esc(m[3])}">sidecar failed</span>` : ''}</span></div>`).join('')}
+      </div></td></tr>`).join('');
+    return win('jobs', `open jobs`, `
+      <div class="scroll-y" style="max-height:760px;min-height:420px"><table class="tbl jobs stack-sm">
+        <thead><tr><th title="the job's number: tools/jobs.py and the Timeline Cards page use it too">job</th><th title="what kind of work it is: hover a kind for what it makes">kind</th><th>state</th><th title="the person and computer holding it">where</th><th title="how far the computer says it has got">progress</th><th>age</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      <div class="foot-in slot-line">${toggle()}<span class="msg" title="${esc(S.notice || '')}">${esc(S.notice || '')}</span></div>`);
+  }
+
+  function finishedWin() {
+    if (!S.showFinished) return '';
+    return win('finished_in_the_last_24_hours', `<b>${S.finished.length}</b>`, S.finished.length ? `
+      <div class="scroll-y box-h"><div class="scroll-x"><table class="tbl stack-sm">
+        <thead><tr><th>job</th><th>kind</th><th>state</th><th title="the file it worked on: vault is the Timeline Cards vault, tree is the project tree">what</th><th title="the last computer that held it">last held by</th><th>when</th><th>why it ended</th><th></th></tr></thead>
+        <tbody>${S.finished.map(f => `<tr>
+          <td data-label="job"><b class="num">#${f.id}</b></td><td data-label="kind">${f.kind}</td>
+          <td data-label="state"><span class="tags" style="margin:0"><span title="${STATE_TIPS[f.state] || ''}">${tag(f.state === 'done' ? 'ok' : 'err', f.state)}</span>${f.state === 'abandoned' ? `<span class="tag warn" title="every attempt failed and the retry budget for this kind ran out. Nothing will pick it up again on its own.">gave up</span>` : ''}</span></td>
+          <td data-label="what" class="wrap" style="overflow-wrap:anywhere;font-size:12px">${esc(f.what)}${f.retryOf ? ` <span class="muted" title="this job was itself a new attempt at job #${f.retryOf}">(retry of #${f.retryOf})</span>` : ''}</td>
+          <td data-label="last held by">${f.who.includes('/') ? whoLink(f.who) : `<b>${f.who}</b>`}</td><td data-label="when" style="white-space:nowrap">${f.when}</td>
+          <td data-label="why it ended" class="wrap" style="font-size:12px;min-width:26ch">${f.why ? esc(f.why) : '<span class="muted">-</span>'} <span class="muted">(${f.attempts} attempt${f.attempts === 1 ? '' : 's'})</span></td>
+          <td class="acts-cell" data-label="">${['failed', 'abandoned'].includes(f.state) ? btn('try again', '', `data-do="retry" data-id="${f.id}" title="the same work, on the queue again under a new number. This row stays as it is, so the attempt history is still true."`) : ''}</td>
+        </tr>`).join('')}</tbody></table></div></div>` : `<div class="empty">Nothing has finished in the last 24 hours.</div>`);
+  }
+
+  function render() {
+    $('#main').innerHTML = [queueWin(), jobsWin(), finishedWin()].join('');
+    $('#head-acts').innerHTML = S.jobs.length ? '' : '';
+  }
+
+  // ------------------------------------------------------------ dialog
+  document.body.insertAdjacentHTML('beforeend', `<div class="dialog-back" id="ask"><section class="win dialog" role="dialog" aria-modal="true">
+    <div class="bar"><span>┌─╡</span><span class="t">are_you_sure</span><span>╞</span><span class="rule"></span><span>═┐</span></div>
+    <div class="body"><div id="ask-x" style="white-space:pre-line"></div>
+      <div class="acts"><button class="key quiet" type="button" id="ask-no"><span class="t">cancel</span></button><button class="key primary" type="button" id="ask-ok"><span class="t" id="ask-ok-t">ok</span></button></div></div>
+  </section></div>`);
+  let yes = null;
+  const close = ok => { $('#ask').classList.remove('open'); const f = ok ? yes : null; yes = null; if (f) f(); };
+  const ask = (text, okLabel, onYes) => { yes = onYes; $('#ask-x').textContent = text; $('#ask-ok-t').textContent = okLabel; $('#ask').classList.add('open'); $('#ask-ok').focus(); };
+  $('#ask-no').onclick = () => close(false);
+  $('#ask-ok').onclick = () => close(true);
+  $('#ask').addEventListener('click', e => { if (e.target.id === 'ask') close(false); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#ask').classList.contains('open')) close(false); });
+
+  let nextId = 430;
+  document.addEventListener('click', e => {
+    const el = e.target.closest('[data-do]');
+    if (!el) return;
+    const d = el.dataset.do, jid = Number(el.dataset.id);
+    if (d === 'toggle') { S.showFinished = !S.showFinished; render(); }
+    if (d === 'cancel') {
+      ask(`Stop job #${jid}? It is killed where it runs and not retried.`, 'stop it', () => {
+        const j = S.jobs.find(x => x.id === jid);
+        if (j.state === 'queued') {
+          S.jobs = S.jobs.filter(x => x !== j);
+          S.finished.unshift({ id: j.id, kind: j.kind, state: 'failed', what: 'tree:2026/FF5/Repro Rights/Footage/A002_C004.mov', who: 'nobody', when: 'just now', why: 'cancelled by owen', attempts: j.attempts || 0 });
+          S.notice = `job #${jid} cancelled`;
+        } else {
+          j.cancelling = true;
+          S.notice = j.state === 'pinned' ? `job #${jid}: this server's worker stops it at the next safe point` : `job #${jid}: ${j.where} is told on its next report, kills it and reports it cancelled`;
+        }
+        render();
+      });
+    }
+    if (d === 'retry') {
+      ask(`Queue job #${jid} again? It goes back on as a new job.`, 'queue it again', () => {
+        const f = S.finished.find(x => x.id === jid);
+        S.jobs.unshift({ id: nextId, kind: f.kind, state: 'queued', where: '', pct: null, age: 'just now', why: '4 computers can take this job; it is waiting to be claimed on their next report', machines: [] });
+        toast(`queued as job #${nextId++}`);
+        render();
+      });
+    }
+  });
+
+  let s = 3;
+  setInterval(() => { s = (s + 1) % 15; $('#upd').textContent = `refreshed ${s} s ago`; }, 1000);
+  CC.page({ page: 'jobs', onData: mode => { reset(mode); render(); } });
+})();
+</script>
+</body>
+</html>

@@ -109,7 +109,9 @@ def test_a_notice_carries_its_take_me_there_link(env):
                  "something happened", "do the thing")
     conn.commit()
     page = as_user(client).get("/admin/health")
-    assert href in page.text and label in page.text
+    # UI port phase 7 (D8): the registry holds the plain label; the classic
+    # page wraps it as the key it has always drawn.
+    assert href in page.text and f"[ {label.upper()} ]" in page.text
 
 
 def test_a_broken_protection_line_reaches_the_page(env):

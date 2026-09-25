@@ -326,7 +326,7 @@ def test_new_project_over_an_archived_one_is_refused_and_names_unarchive(env):
     slug = _archived_shoot(client, conn, projects)
     resp = client.post("/api/v1/projects", json={"parent_rel": "", "name": "Shoot"})
     assert resp.status_code == 422, resp.text
-    assert "UNARCHIVE" in resp.json()["detail"]
+    assert "\"Unarchive\"" in resp.json()["detail"]  # D8 wording, UI port phase 7
     assert "—" not in resp.json()["detail"]
     row = conn.execute("SELECT active, archived_at FROM projects WHERE slug=?",
                        (slug,)).fetchone()
@@ -339,7 +339,7 @@ def test_use_this_folder_on_an_archived_project_is_refused(env):
     assert provision.read_marker(projects / "Shoot") is not None
     resp = client.post("/api/v1/projects/link", json={"rel": "Shoot"})
     assert resp.status_code == 422, resp.text
-    assert "UNARCHIVE" in resp.json()["detail"]
+    assert "\"Unarchive\"" in resp.json()["detail"]  # D8 wording, UI port phase 7
 
 
 def test_an_unmarked_folder_whose_slug_is_archived_is_refused_before_the_marker(env):

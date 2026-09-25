@@ -658,4 +658,16 @@ the Zero-Clause BSD licence (0BSD), which requires no notice to accompany it.
 `ytdl/web` has no environment of its own, so the generator reports it as
 skipped. It runs inside the dashboard container, and its runtime dependencies
 are the container's: they appear in the dashboard-container table above.
+
+### Fonts (the dashboard's terminal look)
+
+EMBEDDED (A) in the dashboard image under `dashboard/static/fonts/`, served to
+the dashboard's own pages and the three mounted apps. Both are licensed under
+the SIL Open Font License, Version 1.1; the full licence text ships beside the
+font files (`OFL-JetBrainsMono.txt`, `OFL-Orbitron.txt`).
+
+| Font | Files | Licence | Home page | Notes |
+|---|---|---|---|---|
+| JetBrains Mono | `jetbrains-mono-regular.woff2`, `jetbrains-mono-medium.woff2`, `jetbrains-mono-bold.woff2` | OFL-1.1, Copyright 2020 The JetBrains Mono Project Authors | https://github.com/JetBrains/JetBrainsMono | Subset to Latin, Latin-1, Latin Extended-A, punctuation, symbols, arrows and box drawing; no Reserved Font Name. |
+| Orbitron | `orbitron-variable.woff2` | OFL-1.1, Copyright 2018 The Orbitron Project Authors, Reserved Font Name "Orbitron" | https://github.com/theleagueof/orbitron | Shipped whole (the upstream variable font, converted to WOFF2 without subsetting), because Orbitron carries a Reserved Font Name. |
 <!-- END HAND-MAINTAINED -->

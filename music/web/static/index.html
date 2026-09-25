@@ -3,6 +3,32 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+/* UI port phase 1 (7.0): the dashboard's terminal HUD arrives by fetch, so
+   its height is held before first paint when the dashboard's readable
+   cookie says it is coming. The cookie is dot-separated, read with split,
+   never a regex literal. The loader in app.js clears the hold when the
+   fetch settles; this timer is the safety net. */
+(function () {
+  try {
+    var v = '';
+    var parts = document.cookie.split('; ');
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i].indexOf('ccsync_ui_effective=') === 0) { v = parts[i].slice(20); break; }
+    }
+    var groups = v.split('.');
+    var cl = document.documentElement.classList;
+    if (groups.indexOf('chrome') !== -1) {
+      cl.add('cc-chrome');
+      cl.add('cc-chrome-pending');
+      setTimeout(function () { cl.remove('cc-chrome-pending'); }, 3000);
+    }
+    /* UI port phase 6: the terminal body look, before first paint. The
+       injected topbar's data-ui-apps marker is authoritative afterwards. */
+    if (groups.indexOf('apps') !== -1) cl.add('cc');
+  } catch (e) { /* no cookie access: no hold */ }
+})();
+</script>
 <title>CC SYNC // MUSIC</title>
 <!-- Document-relative on purpose: mounted at /music/ a leading slash would
      resolve against the dashboard's origin root. See tests/test_mounted_prefix.py. -->
@@ -53,7 +79,7 @@
 
 <div id="browse-layout">
   <aside id="filters" class="filter-rail">
-    <section>
+    <section data-cc-win="feel">
       <h2>Feel</h2>
       <!-- MUSIC-16 (2026-09-03): the four sliders are mutually exclusive - the
            API takes ONE axis - and moving a second one silently zeroed the
@@ -62,7 +88,7 @@
       <p class="axis-hint muted">One at a time: moving a slider clears the others.</p>
       <div id="axes"></div>
     </section>
-    <section>
+    <section data-cc-win="tempo_and_length">
       <h2>Tempo &amp; length</h2>
       <div class="rangerow">
         <label>BPM</label>
@@ -89,7 +115,7 @@
     <div id="facets"></div>
   </aside>
 
-  <main id="results">
+  <main id="results" data-cc-win="tracks">
     <!-- MUSIC-9 (2026-09-04): there was no sort control at all, so a cue added
          a minute ago sat somewhere alphabetical among hundreds of rows. An
          ingest that finishes switches this to newest by itself. -->
@@ -229,6 +255,10 @@
 <div id="toast" class="toast hidden"></div>
 
 <audio id="audio" preload="none"></audio>
+<!-- UI port phase 6: the terminal look's helper (folds, tips, confirm,
+     unbracketed labels). Inert unless html.cc is set; loaded first so
+     window.ccSpa exists when app.js runs. -->
+<script src="cc_spa.js"></script>
 <script src="app.js"></script>
 <!-- A second classic script, not a module: it shares app.js's helpers
      ($, el, toast, fmtDur, COMPANION) through the global scope, and its URLs

@@ -544,7 +544,7 @@ def test_the_cap_refusal_names_a_place_that_exists_and_an_act_that_works():
     _entry, refusal = pool.open("X:/Vault/FF5/Talent Gap")
     assert "Settings" not in refusal
     assert "leave it" not in refusal
-    assert "CLOSE" in refusal
+    assert '"Close"' in refusal  # D8, UI port phase 7
 
 
 def test_an_editor_can_close_the_episode_they_are_in_and_an_idle_one():

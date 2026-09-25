@@ -3,6 +3,32 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+/* UI port phase 1 (7.0): the dashboard's terminal HUD arrives by fetch, so
+   its height is held before first paint when the dashboard's readable
+   cookie says it is coming. The cookie is dot-separated, read with split,
+   never a regex literal. The loader in app.js clears the hold when the
+   fetch settles; this timer is the safety net. */
+(function () {
+  try {
+    var v = '';
+    var parts = document.cookie.split('; ');
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i].indexOf('ccsync_ui_effective=') === 0) { v = parts[i].slice(20); break; }
+    }
+    var groups = v.split('.');
+    var cl = document.documentElement.classList;
+    if (groups.indexOf('chrome') !== -1) {
+      cl.add('cc-chrome');
+      cl.add('cc-chrome-pending');
+      setTimeout(function () { cl.remove('cc-chrome-pending'); }, 3000);
+    }
+    /* UI port phase 6: the terminal body look, before first paint. The
+       injected topbar's data-ui-apps marker is authoritative afterwards. */
+    if (groups.indexOf('apps') !== -1) cl.add('cc');
+  } catch (e) { /* no cookie access: no hold */ }
+})();
+</script>
 <title>CC SYNC // B-ROLL</title>
 <!-- Document-relative on purpose: mounted at /broll/ a leading slash would
      resolve against the dashboard's origin root. See tests/test_mounted_prefix.py. -->
@@ -30,7 +56,7 @@
   </div>
   <div class="rule">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</div>
 
-  <div class="header-controls">
+  <div class="header-controls" data-cc-win="search">
     <div class="search-bar">
       <input id="q-input" type="text" placeholder='search segments&hellip; e.g. sailors pier "harbor exercise"' autocomplete="off">
       <select id="category-select">
@@ -75,7 +101,7 @@
 </header>
 
 <div id="browse-layout">
-  <nav id="folder-tree" class="folder-tree" aria-label="Browse by subject">
+  <nav id="folder-tree" class="folder-tree" aria-label="Browse by subject" data-cc-win="browse">
     <div class="folder-tree-head">
       <span>Browse</span>
       <button type="button" id="folder-clear" class="text-btn" title="Show everything">clear</button>
@@ -83,7 +109,7 @@
     <div id="folder-tree-body"></div>
   </nav>
 
-  <main id="grid-view">
+  <main id="grid-view" data-cc-win="results">
     <div id="results-meta" class="results-meta"></div>
     <div id="results-grid" class="results-grid"></div>
     <div id="pager" class="pager">
@@ -94,7 +120,7 @@
   </main>
 </div>
 
-<section id="detail-view" class="hidden">
+<section id="detail-view" class="hidden" data-cc-win="clip">
   <button id="detail-back" class="text-btn">&larr; back to results</button>
 
   <div class="detail-layout">
@@ -346,6 +372,10 @@
 
 <!-- Sprite-sheet geometry FIRST: app.js reads its globals, and so does the
      client folder viewer page (share.html), which is why it is its own file. -->
+<!-- UI port phase 6: the terminal look's helper (folds, tips, confirm,
+     unbracketed labels), byte-identical with music's and ytdl's. Inert
+     unless html.cc is set; before app.js so window.ccSpa exists. -->
+<script src="static/cc_spa.js"></script>
 <script src="static/sprite.js"></script>
 <script src="static/app.js"></script>
 <!-- Classic scripts, not modules: they share app.js's helpers

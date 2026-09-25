@@ -1,0 +1,140 @@
+/* CC Terminal: the home and project pages (UI port phase 2, group `home`).
+   Loaded only by cc/fleet.html and cc/project.html, after the shared sheets.
+   Everything is scoped to .home-page so no other page can see it. */
+
+/* ---- computers: the fixed row keeps health's headline as its first line
+   (5.1, wave 6), so the slot is four lines tall; heights in em so text
+   scaling cannot overlap the lanes (WCAG 1.4.4). */
+.home-page .pc { --lane-h: 1.7em; }
+.home-page .pc.home-pc { --pc-h: calc(var(--lane-h) * 4); height: auto; grid-template-rows: auto auto; }
+.home-page .pc.home-pc > .lanes-wrap,
+.home-page .pc.home-pc > .issues { min-height: var(--pc-h); }
+.home-page .pc.home-pc > .issues { height: var(--pc-h); }
+.home-page .pc .hl { height: var(--lane-h); line-height: var(--lane-h); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text-2); }
+.home-page .pc .hl.err { color: var(--err); }
+.home-page .pc .hl.warn { color: var(--warn); }
+.home-page .pc .hl.muted { color: var(--muted); }
+.home-page .pc .led.off { opacity: 0.5; }
+.home-page .pc > details.more { grid-column: 1 / -1; grid-row: auto; font-size: 13px; }
+.home-page .pc > details.more > summary { cursor: pointer; color: var(--muted); list-style: none; width: max-content; max-width: 100%; }
+.home-page .pc > details.more > summary::-webkit-details-marker { display: none; }
+.home-page .pc > details.more > summary .caret { color: var(--hi); display: inline-block; transition: transform 0.15s; }
+.home-page .pc > details.more[open] > summary .caret { transform: rotate(90deg); }
+.home-page .pc .row-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.home-page .pc .kv { margin-top: 8px; }
+.home-page .cliplist { margin: 4px 0 0; padding-left: 2ch; }
+
+/* A row's issues scroll inside their slot on a fine pointer only (5.1, wave
+   5): on a phone or a touch screen a swipe that starts on them moves the
+   page, and every issue is simply listed. */
+@media (pointer: coarse), (max-width: 760px) {
+  .home-page .pc.home-pc > .issues { height: auto; min-height: 0; max-height: none; overflow: visible; }
+  .home-page .pc.home-pc > .lanes-wrap { min-height: 0; }
+}
+
+/* ---- sub-windows nested in a body (banners, lost computers, collector,
+   projects overview, answers, media presence) */
+.home-page .grid-banners { display: grid; gap: 8px; padding: var(--pad) var(--pad) 4px; }
+.home-page .grid-banners .alertline { grid-column: auto; }
+.home-page details.sub-win { border-top: 1px dashed var(--line); padding: 8px var(--pad); font-size: 13px; }
+.home-page details.sub-win > summary { color: var(--text); padding: 4px 0; }
+.home-page details.sub-win > summary .dim { color: var(--muted); font-size: 12px; }
+.home-page details.sub-win .tbl td, .home-page details.sub-win .tbl th { padding-left: 0; }
+.home-page .grid-scope { padding: 6px var(--pad); }
+.home-page h3.sec { margin: 14px 0 6px; font-weight: 400; font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); }
+.home-page .hint.warn { color: var(--warn); }
+.home-page .dim { color: var(--muted); }
+.home-page pre.log { max-height: 420px; overflow: auto; margin: 8px 0 0; padding: 10px; border: 1px solid var(--line); background: var(--win-solid); font: inherit; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-2); }
+
+.home-page .proj-overview,
+.home-page .link-list,
+.home-page .missing-list,
+.home-page .browse-list,
+.home-page .clips,
+.home-page .checks { list-style: none; margin: 6px 0 0; padding: 0; }
+.home-page .proj-overview li,
+.home-page .link-list li,
+.home-page .browse-list li,
+.home-page .clips li,
+.home-page .checks li { padding: 4px 0; border-top: 1px dashed var(--line); overflow-wrap: anywhere; }
+.home-page .proj-overview li:first-child,
+.home-page .link-list li:first-child,
+.home-page .browse-list li:first-child,
+.home-page .clips li:first-child,
+.home-page .checks li:first-child { border-top: 0; }
+.home-page .proj-overview a { color: var(--text); }
+.home-page .missing-list li { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+.home-page .missing-list .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.home-page .missing-list .fsize { color: var(--muted); flex: none; }
+.home-page .missing { padding: 6px 0; }
+
+/* ---- transfers / queue */
+.home-page .xf-close { padding: 8px var(--pad) 0; min-height: 1.7em; }
+.home-page .xf .pct { color: var(--text); }
+.home-page .queue-box > .hint { padding: 0 0 6px; }
+.home-page .queue-box tr.current td { color: var(--hi); }
+.home-page .fix-root { margin-top: 10px; font-size: 13px; }
+.home-page .fix-root-machines { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.home-page .fix-root-machines .key[aria-current] { border-color: var(--hi); color: var(--hi); }
+.home-page .root-line { margin-top: 6px; color: var(--text-2); overflow-wrap: anywhere; }
+
+/* ---- the projects tree: real controls (5.1, wave 6). A project is a label
+   around a visually hidden checkbox; the square is drawn from its state. */
+.home-page .tree-count { margin-top: 10px; font-size: 11px; color: var(--muted); letter-spacing: 0.5px; }
+.home-page .tree-count b { color: var(--hi); font-weight: 500; }
+.home-page .tree details.proj-group > summary { list-style: none; }
+.home-page .tree details.proj-group > summary::-webkit-details-marker { display: none; }
+.home-page .tree details.proj-group > summary.row.dir .nm::before { content: "+ "; color: var(--red-deep); }
+.home-page .tree details.proj-group[open] > summary.row.dir .nm::before { content: "- "; }
+.home-page .tree .kids { padding-left: 2ch; border-left: 1px dashed var(--red-deep); margin-left: 0.5ch; }
+.home-page .tree .row.proj { gap: 0; white-space: nowrap; }
+.home-page .tree .row.proj .tick { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+.home-page .tree .row.proj .box::before { content: "\25A1"; }
+.home-page .tree .row.proj .proj-check:checked + .box::before { content: "\25A0"; }
+.home-page .tree .row.proj .proj-check:checked + .box { color: var(--hi); text-shadow: 0 0 calc(var(--fx-glow) * 8px) rgb(var(--hi-rgb) / 0.7); }
+.home-page .tree .row.proj .proj-check:focus-visible + .box { outline: 2px solid var(--hi); outline-offset: 1px; }
+.home-page .tree .row.proj .proj-check:disabled + .box { opacity: 0.4; }
+.home-page .tree .row.proj .nm { color: inherit; text-decoration: none; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.home-page .tree .row.proj .nm:hover { color: var(--hi); }
+.home-page .tree .row.proj.current .nm { color: var(--hi); }
+.home-page .tree .row.proj .tag { margin-left: 6px; flex: none; }
+.home-page .tree .cc-filtered { display: none !important; }
+.home-page .tree .empty { text-align: left; padding: 8px 0; }
+.home-page .tree-nomatch { color: var(--muted); padding: 6px 0; }
+.home-page .acting-warn { color: var(--warn); }
+.home-page .key.acting { border-color: var(--warn); }
+
+/* ---- the project page */
+.home-page .project-notes { grid-column: 1 / -1; display: grid; gap: 8px; }
+.home-page .project-notes > div:empty { display: none; }
+.home-page #project-detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: calc(26px * var(--d)); min-width: 0; }
+.home-page .tick-keys, .home-page .tick-one { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+.home-page .strip { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-top: 12px; }
+.home-page .field { display: grid; gap: 4px; min-width: 0; }
+.home-page .field.grow { flex: 1 1 220px; }
+.home-page .field > span:not(.vh) { color: var(--muted); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; }
+.home-page .field input, .home-page .field select {
+  height: 36px; min-width: 0; width: 100%;
+  padding: 0 10px;
+  background: var(--win-solid);
+  border: 1px solid var(--line); border-bottom-color: var(--red);
+  color: var(--text); font: inherit; font-size: 13px;
+}
+.home-page .field input:focus, .home-page .field select:focus { outline: none; border-color: var(--hi); }
+/* The move key wraps (a long CJK project name must not push it off a
+   390 px screen, 2.2). */
+.home-page .move-form .move-key { white-space: normal; height: auto; min-height: 36px; text-align: left; }
+.home-page .move-form .move-key .t { white-space: normal; }
+.home-page tr.drawer td { padding-top: 0; }
+.home-page tr.drawer td:empty, .home-page tr.drawer div:empty { padding: 0; }
+.home-page .roots-box > .hint, .home-page .pres-head { padding: 0 0 8px; }
+.home-page #media-presence .pres-head { padding: 10px var(--pad) 4px; }
+.home-page details.bin { margin-left: 2ch; }
+.home-page .clip-name { overflow-wrap: anywhere; }
+.home-page .crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+
+@media (max-width: 760px) {
+  /* iOS zooms into a field under 16 px; phone.css sets the floor, this
+     keeps the scoped field rule from undercutting it. */
+  .home-page .field input, .home-page .field select { font-size: 16px; }
+}

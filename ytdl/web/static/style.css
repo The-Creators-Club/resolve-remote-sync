@@ -1243,3 +1243,712 @@ input[type="range"]:disabled {
   outline-offset: 2px;
 }
 /* ==== theme-common END ==================================================== */
+
+/* ==== the terminal HUD (UI port phase 1, 2026-09-25) ======================
+   Its face, relative to THIS sheet's served URL (the fonts are the
+   dashboard's own, precached, offline, OFL). Painting nothing by itself:
+   only .hud* rules name the family. */
+@font-face {
+  font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: optional;
+  src: url(../static/fonts/jetbrains-mono-regular.woff2) format('woff2');
+  unicode-range: U+0000-017F, U+2000-206F, U+2100-214F, U+2190-21FF, U+2200-22FF, U+2300-23FF, U+2500-25FF, U+2600-26FF, U+2700-27BF;
+}
+@font-face {
+  font-family: 'JetBrains Mono'; font-style: normal; font-weight: 500; font-display: optional;
+  src: url(../static/fonts/jetbrains-mono-medium.woff2) format('woff2');
+  unicode-range: U+0000-017F, U+2000-206F, U+2100-214F, U+2190-21FF, U+2200-22FF, U+2300-23FF, U+2500-25FF, U+2600-26FF, U+2700-27BF;
+}
+@font-face {
+  font-family: 'JetBrains Mono'; font-style: normal; font-weight: 700; font-display: optional;
+  src: url(../static/fonts/jetbrains-mono-bold.woff2) format('woff2');
+  unicode-range: U+0000-017F, U+2000-206F, U+2100-214F, U+2190-21FF, U+2200-22FF, U+2300-23FF, U+2500-25FF, U+2600-26FF, U+2700-27BF;
+}
+
+/* ==== hud-common BEGIN (byte-identical in cc/hud.css and the three SPA sheets) ====
+   The terminal HUD: the top bar, the phone dock, the user menu, the "more"
+   sheet and the Settings strip (UI redesign port, phase 1, 2026-09-25).
+
+   The dashboard serves this markup from partials (topbar, stamp,
+   settings_nav) into every page, and the three SPAs inject the topbar with
+   innerHTML and paint it with THEIR OWN sheet. So the same bytes live in
+   four files and a test in each suite compares them: fix a drift by copying
+   the whole block, never by editing one side.
+
+   Rules for everything between the markers:
+   - every selector is a .hud* or .snav* class, header.hud-host or the
+     #dash-topbar reset; no html, body, root or bare element rule, because
+     the b-roll sheet is also the client share page's;
+   - tokens are --cc-* and declared here (each SPA has its own --red);
+   - no quote, backtick or parenthesis directly before a slash, comments
+     included (the ytdl mounted-prefix scan reads this raw);
+   - no long dash anywhere; nothing animates for more than about 5 s;
+   - no backdrop blur (it would trap the fixed dock and costs a repaint
+     over every playing video);
+   - popover base rules declare no display (an author display beats the
+     UA rule that keeps a closed popover hidden). */
+
+.hud, .hud-dock, .hud-more, .hud-menu, .snav {
+  --cc-bg: #070403;
+  --cc-bg-2: #0b0605;
+  --cc-red: #ff2e2e;
+  --cc-line: rgb(255 70 50 / 0.2);
+  --cc-text: #ffffff;
+  --cc-text-2: #cbbfa8;
+  --cc-muted: #8a8378;
+  --cc-hi-rgb: 0 229 255;
+  --cc-hi: rgb(var(--cc-hi-rgb));
+  --cc-ok: #3aff6e;
+  --cc-warn: #ffb02e;
+  --cc-err: #ff2e2e;
+  --cc-mono: 'JetBrains Mono', ui-monospace, Consolas, Menlo, monospace;
+  --cc-glow: 1;
+  --cc-tap: 44px;
+  --cc-hud-h: 58px;
+}
+
+/* The hosts are transparent for layout, so the sticky bar sticks against
+   the page rather than inside a wrapper exactly as tall as itself. */
+header.hud-host { display: contents; }
+#dash-topbar:has(> .hud) { display: contents; padding: 0; margin: 0; border: 0; }
+#dash-topbar:has(> .hud) > * { flex: initial; white-space: normal; }
+
+/* ------------------------------------------------------------ the bar */
+.hud {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  width: 100%;
+  height: var(--cc-hud-h);
+  margin: 0;
+  padding: 0 max(24px, env(safe-area-inset-right, 0px)) 0 max(24px, env(safe-area-inset-left, 0px));
+  background: linear-gradient(180deg, rgb(7 4 3 / 0.97), rgb(7 4 3 / 0.9));
+  border-bottom: 1px solid var(--cc-line);
+  color: var(--cc-text);
+  font-family: var(--cc-mono);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 1px;
+  text-transform: none;
+  -webkit-font-smoothing: antialiased;
+}
+.hud a, .hud-dock a, .hud-more a, .hud-menu a, .snav a { color: inherit; text-decoration: none; }
+.hud-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  color: var(--cc-text);
+}
+.hud-mark {
+  flex: none;
+  width: 36px;
+  height: 17px;
+  color: var(--cc-red);
+  fill: currentColor;
+  filter: drop-shadow(0 0 calc(var(--cc-glow) * 6px) rgb(255 46 46 / 0.55));
+}
+/* The brand is SITE DATA (org_short, any length, any script), so it is in
+   the mono face and it is the thing that gives way, never the counts. */
+.hud-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+.hud-nav { display: flex; align-items: center; gap: 18px; flex: none; }
+.hud-nav a { color: var(--cc-text); opacity: 0.8; white-space: nowrap; }
+.hud-nav a:hover { opacity: 1; }
+.hud-slash { color: var(--cc-red); }
+.hud-nav a[aria-current="page"] {
+  color: var(--cc-hi);
+  opacity: 1;
+  text-shadow: 0 0 calc(var(--cc-glow) * 8px) rgb(var(--cc-hi-rgb) / 0.55);
+}
+.hud-nav a[aria-current="page"] .hud-slash { color: var(--cc-hi); }
+.hud-more-btn { display: none; }
+.hud-spacer { flex: 1 1 0; min-width: 0; }
+.hud-meta { display: flex; align-items: center; gap: 16px; flex: none; white-space: nowrap; }
+.hud-meta a { display: inline-flex; align-items: center; gap: 7px; color: var(--cc-text-2); }
+.hud-meta a:hover { color: var(--cc-hi); }
+.hud-count b { color: var(--cc-text); font-weight: 500; }
+.hud-user b { color: var(--cc-hi); font-weight: 500; }
+.hud-stamp { display: inline-flex; align-items: center; gap: 10px; color: var(--cc-muted); font-variant-numeric: tabular-nums; }
+.hud-stale { display: inline-flex; align-items: center; gap: 6px; color: var(--cc-warn); }
+.hud-key {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--cc-line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--cc-text-2);
+  font: inherit;
+  letter-spacing: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.hud-key:hover { color: var(--cc-hi); border-color: var(--cc-hi); }
+
+/* status LEDs: a square. The blink stops after four beats (WCAG 2.2.2). */
+.hud-led {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  background: var(--cc-ok);
+  box-shadow: 0 0 calc(var(--cc-glow) * 8px) var(--cc-ok);
+}
+.hud-led.hud-warn { background: var(--cc-warn); box-shadow: 0 0 calc(var(--cc-glow) * 8px) var(--cc-warn); }
+.hud-led.hud-err {
+  background: var(--cc-err);
+  box-shadow: 0 0 calc(var(--cc-glow) * 8px) var(--cc-err);
+  animation: hud-blink 1.2s steps(1) 4;
+}
+@keyframes hud-blink { 50% { opacity: 0.25; } }
+
+/* Visually hidden, still read aloud. */
+.hud-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------- the menus (popovers) */
+.hud-menu, .hud-more {
+  position: fixed;
+  box-sizing: border-box;
+  height: auto;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--cc-red);
+  background: var(--cc-bg-2);
+  color: var(--cc-text);
+  font-family: var(--cc-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  letter-spacing: 0.5px;
+  box-shadow: 0 0 calc(var(--cc-glow) * 26px) rgb(255 46 46 / 0.12);
+}
+.hud-menu {
+  inset: calc(var(--cc-hud-h) + 4px) max(12px, env(safe-area-inset-right, 0px)) auto auto;
+  width: min(300px, calc(100vw - 24px));
+  max-height: calc(100vh - var(--cc-hud-h) - 24px);
+}
+.hud-more {
+  inset: auto 0 0 0;
+  width: auto;
+  max-height: 80vh;
+  padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  border-width: 1px 0 0;
+}
+.hud-menu:popover-open, .hud-more:popover-open { display: flex; flex-direction: column; gap: 2px; }
+.hud-menu::backdrop, .hud-more::backdrop { background: rgb(0 0 0 / 0.5); }
+.hud-mi {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 6px 2px;
+  border: 0;
+  background: none;
+  color: var(--cc-text-2);
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hud-mi:hover { color: var(--cc-hi); }
+.hud-mi[aria-current="page"] { color: var(--cc-hi); }
+.hud-mi b { color: var(--cc-text); font-weight: 500; }
+.hud-mi-h {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--cc-line);
+  color: var(--cc-muted);
+  font-size: 12px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+.hud-mi-form { display: block; margin: 0; }
+.hud-mi-who { color: var(--cc-muted); overflow-wrap: anywhere; }
+
+/* ------------------------------------------------ the phone dock */
+.hud-dock { display: none; }
+.hud-g { font-size: 16px; line-height: 1; color: var(--cc-red); }
+
+/* ------------------------------------------------ the Settings strip */
+.snav {
+  grid-column: 1 / -1;
+  position: relative;
+  z-index: 1;
+  box-sizing: border-box;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 30px;
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border: 1px solid var(--cc-line);
+  border-left: 3px solid var(--cc-red);
+  background: rgb(10 5 4 / 0.8);
+  color: var(--cc-text-2);
+  font-family: var(--cc-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+.snav-g { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.snav-h { color: var(--cc-muted); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; }
+.snav-h::after { content: " :"; color: var(--cc-red); }
+.snav a { color: var(--cc-text-2); letter-spacing: 0.5px; white-space: nowrap; }
+.snav a::before { content: ">"; color: var(--cc-red); margin-right: 1px; }
+.snav a:hover { color: var(--cc-text); }
+.snav a[aria-current="page"] {
+  color: var(--cc-hi);
+  text-shadow: 0 0 calc(var(--cc-glow) * 8px) rgb(var(--cc-hi-rgb) / 0.55);
+}
+.snav a[aria-current="page"]::before { color: var(--cc-hi); }
+
+/* Focus: 2 px in the live colour, because a 1 px red ring vanishes in a UI
+   whose every frame is 1 px red. */
+.hud :focus-visible, .hud-dock :focus-visible, .hud-more :focus-visible,
+.hud-menu :focus-visible, .snav :focus-visible {
+  outline: 2px solid var(--cc-hi);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------ tablet: 601 to 900 px
+   The lower-priority modules move into the "more" sheet, which needs its
+   own opener here because the dock only exists at 600 and below. */
+@media (min-width: 601px) and (max-width: 900px) {
+  .hud { gap: 16px; }
+  .hud-nav { gap: 12px; }
+  .hud-lowpri { display: none; }
+  .hud-more-btn { display: inline-flex; }
+  .hud-more {
+    inset: calc(var(--cc-hud-h) + 4px) 12px auto auto;
+    width: min(320px, calc(100vw - 24px));
+    max-height: calc(100vh - var(--cc-hud-h) - 24px);
+    border-width: 1px;
+  }
+}
+
+/* ------------------------------------------- phone: 600 px and below
+   THE dock query. Everything that makes room for the dock uses this same
+   width (the --cc-dock-h lift blocks outside this block). */
+@media (max-width: 600px) {
+  .hud {
+    --cc-hud-h: 52px;
+    gap: 12px;
+    padding: 0 max(14px, env(safe-area-inset-right, 0px)) 0 max(14px, env(safe-area-inset-left, 0px));
+  }
+  .hud-nav, .hud-hide-sm { display: none; }
+  .hud-name { font-size: 13px; letter-spacing: 1px; }
+  .hud-meta { gap: 12px; }
+  .hud-dock {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 50;
+    box-sizing: border-box;
+    height: calc(58px + env(safe-area-inset-bottom, 0px));
+    padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+    background: rgb(7 4 3 / 0.96);
+    border-top: 1px solid var(--cc-red);
+    font-family: var(--cc-mono);
+    font-size: 12px;
+    line-height: 1.2;
+    letter-spacing: 0;
+  }
+  .hud-dock a, .hud-dock button {
+    appearance: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    border: 0;
+    background: none;
+    color: var(--cc-text-2);
+    font: inherit;
+    letter-spacing: 0;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .hud-dock [aria-current="page"] { color: var(--cc-hi); }
+  .hud-dock [aria-current="page"] .hud-g { color: var(--cc-hi); }
+  .hud-menu, .hud-more { font-size: 14px; }
+  .hud-mi-h { font-size: 12px; }
+  .snav { gap: 6px 18px; }
+  .snav-h { font-size: 12px; }
+  .snav.scroll-x { flex-wrap: nowrap; overflow-x: auto; scroll-snap-type: x proximity; }
+  .snav.scroll-x .snav-g { flex-wrap: nowrap; }
+  .snav.scroll-x a[aria-current="page"] { scroll-snap-align: center; }
+}
+
+/* Touch: every HUD control is a 44 px target. */
+@media (pointer: coarse) {
+  .hud-nav a, .hud-key, .hud-more-btn, .hud-mi, .hud-meta a, .hud-dock a, .hud-dock button {
+    min-height: var(--cc-tap);
+  }
+  .snav a { display: inline-flex; align-items: center; min-height: var(--cc-tap); }
+}
+
+/* The installed app paints under the notch: the bar pays the top inset. */
+@media (display-mode: standalone) {
+  .hud {
+    height: calc(var(--cc-hud-h) + env(safe-area-inset-top, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+}
+
+/* Forced colours: an LED and the current entry keep a visible border,
+   since their meaning is otherwise only a colour. */
+@media (forced-colors: active) {
+  .hud-led { forced-color-adjust: none; border: 1px solid CanvasText; }
+  .hud-nav a[aria-current="page"], .hud-dock [aria-current="page"],
+  .hud-mi[aria-current="page"], .snav a[aria-current="page"] {
+    outline: 1px solid Highlight;
+    text-decoration: underline;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-led { animation: none; }
+}
+/* ==== hud-common END ====================================================== */
+
+/* ---------------------------------------------------------------------
+   Outside hud-common: this app's own lifts for the terminal HUD (UI port
+   phase 1, plan 2.2, 7.0, R6, R22). Every rule is scoped to the HUD's
+   presence or to html.cc-chrome-pending, so the page without the HUD (and,
+   in b-roll, the client share page, which loads this sheet) is untouched. */
+@media (max-width: 600px) {
+  html:has(.hud-dock) { --cc-dock-h: calc(58px + env(safe-area-inset-bottom, 0px)); }
+}
+html:has(.hud) {
+  scroll-padding-top: calc(58px + 8px + env(safe-area-inset-top, 0px));
+  scroll-padding-bottom: var(--cc-dock-h, 0px);
+}
+@media (max-width: 600px) {
+  html:has(.hud) { scroll-padding-top: calc(52px + 8px + env(safe-area-inset-top, 0px)); }
+}
+/* The box-drawing rule under the fallback header goes with the HUD. */
+#dash-topbar:has(> .hud) + .rule { display: none; }
+/* First paint (7.0): while the topbar fetch is in flight and the cookie
+   says the HUD is coming, hold its height and hide the fallback row, so
+   nothing below moves when the HUD lands. The page script removes
+   cc-chrome-pending when the fetch settles, or after about 3 s. */
+html.cc-chrome-pending #dash-topbar:not(:has(> .hud)) { min-height: 58px; box-sizing: border-box; }
+html.cc-chrome-pending #dash-topbar:not(:has(> .hud)) > * { visibility: hidden; }
+html.cc-chrome-pending #dash-topbar + .rule { display: none; }
+@media (max-width: 600px) {
+  html.cc-chrome-pending #dash-topbar:not(:has(> .hud)) { min-height: 52px; }
+}
+/* R6: the toast clears the dock. */
+body:has(.hud-dock) .toast { bottom: calc(14px + var(--cc-dock-h, 0px)); }
+
+/* ==== cc-spa-common BEGIN (byte-identical in the music and youtube sheets) ====
+   UI port phase 6 (plan 7.1 row 6): the terminal body look. Every rule is
+   under html.cc, which only the dashboard's apps group turns on, so the
+   classic page is untouched. Paints what cc_spa.js adds (windows, bars, the
+   fold button, tips, the confirm dialog) and re-points this app's own tokens
+   at the terminal palette, so its existing rules take the new colours. No
+   quote or paren before a slash and no long dash anywhere in this block. */
+html.cc {
+  --bg: #070403;
+  --panel: #0b0605;
+  --field: #140807;
+  --red: #ff2e2e;
+  --red-hot: #ff5a3c;
+  --red-dim: #8c0d0d;
+  --green: #3aff6e;
+  --amber: #ffb02e;
+  --text: #ffffff;
+  --muted: #8a8378;
+  --border: rgb(255 70 50 / 0.2);
+  --mono: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  --ccs-hi: #00e5ff;
+  --ccs-hi-rgb: 0 229 255;
+  --ccs-text-2: #cbbfa8;
+  --ccs-win: rgb(10 5 4 / 0.94);
+  --ccs-bar: rgb(22 5 4 / 0.9);
+  --ccs-line: rgb(255 70 50 / 0.2);
+  --ccs-pad: 16px;
+  color-scheme: dark;
+}
+html.cc body { background: var(--bg); color: var(--text); font-family: var(--mono); line-height: 1.55; }
+html.cc ::placeholder { color: var(--muted); opacity: 1; }
+html.cc :focus-visible { outline: 2px solid var(--ccs-hi); outline-offset: 2px; }
+
+/* Windows (cc_spa.js decorates [data-cc-win]). */
+html.cc .cc-win {
+  position: relative;
+  background: var(--ccs-win);
+  border: 1px solid var(--red);
+  box-shadow: 0 0 26px rgb(255 46 46 / 0.1), inset 0 0 60px rgb(0 0 0 / 0.5);
+  padding: 0 var(--ccs-pad) var(--ccs-pad);
+  margin-bottom: 16px;
+}
+html.cc .cc-win > .cc-bar {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 calc(-1 * var(--ccs-pad)) 12px;
+  padding: 0 10px;
+  min-height: 32px;
+  background: var(--ccs-bar);
+  border-bottom: 1px solid var(--red);
+  color: var(--red);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  text-shadow: 0 0 8px rgb(255 46 46 / 0.4);
+}
+html:not(.cc) .cc-bar { display: none; }
+html.cc .cc-fold {
+  display: inline-flex; align-items: center; gap: 8px;
+  min-height: 32px; padding: 0;
+  background: none; border: 0;
+  color: var(--text); font: inherit; font-size: 12px; letter-spacing: 0.04em;
+  text-transform: none; text-shadow: none; cursor: pointer;
+}
+html.cc .cc-fold:hover .t { color: var(--ccs-hi); }
+html.cc .cc-fold-g { color: var(--red); display: inline-block; width: 1ch; transition: transform 0.15s; }
+html.cc .cc-win.cc-folded > .cc-bar .cc-fold-g { transform: rotate(-90deg); }
+html.cc .cc-rule {
+  flex: 1; min-width: 16px; height: 1px;
+  background: repeating-linear-gradient(90deg, rgb(255 46 46 / 0.55) 0 8px, transparent 8px 13px);
+}
+html.cc .cc-win.cc-folded { padding-bottom: 0; }
+html.cc .cc-win.cc-folded > .cc-bar { margin-bottom: 0; border-bottom-color: transparent; }
+html.cc .cc-win.cc-folded > :not(.cc-bar) { display: none !important; }
+
+/* The terminal tip and the confirm dialog. */
+.cc-spa-tip {
+  position: fixed; z-index: 200; pointer-events: none;
+  max-width: 340px; padding: 6px 9px;
+  background: #0b0605; color: #ffffff;
+  border: 1px solid #ff2e2e; border-left: 3px solid #00e5ff;
+  font: 12px/1.45 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  white-space: pre-line;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.6);
+  opacity: 0; visibility: hidden;
+}
+.cc-spa-tip.show { opacity: 1; visibility: visible; }
+html.cc [data-cc-tip] { cursor: help; }
+html.cc button[data-cc-tip], html.cc a[data-cc-tip], html.cc label[data-cc-tip], html.cc input[data-cc-tip], html.cc select[data-cc-tip] { cursor: pointer; }
+.cc-spa-dialog {
+  max-width: min(480px, calc(100vw - 32px));
+  padding: 0;
+  background: #0b0605; color: #ffffff;
+  border: 1px solid #ff2e2e;
+  box-shadow: 0 0 26px rgb(255 46 46 / 0.2);
+  font: 13px/1.55 'JetBrains Mono', ui-monospace, Consolas, monospace;
+}
+.cc-spa-dialog::backdrop { background: rgb(0 0 0 / 0.7); }
+.cc-spa-dialog form { display: grid; gap: 16px; padding: 18px; }
+.cc-spa-q { margin: 0; white-space: pre-line; }
+.cc-spa-acts { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+.cc-spa-key {
+  min-height: 34px; padding: 0 14px;
+  background: none; color: #ffffff;
+  border: 1px solid #cbbfa8; border-bottom-width: 3px;
+  font: 500 12px/1 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer;
+}
+.cc-spa-key.primary { background: #d01818; border-color: #ff5a3c; border-bottom-color: #8c0d0d; }
+.cc-spa-key:hover { border-color: #00e5ff; }
+
+/* Keys: the app's own button classes drawn as terminal keys. */
+html.cc .primary-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 34px; padding: 0 14px;
+  background: #d01818; color: #ffffff;
+  border: 1px solid var(--red-hot); border-bottom: 3px solid var(--red-dim);
+  font: 500 12px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase;
+  text-shadow: none; white-space: nowrap;
+}
+html.cc .primary-btn:hover { background: #b81414; color: #ffffff; border-color: #ffffff; border-bottom-color: var(--red-dim); box-shadow: 0 0 20px rgb(255 46 46 / 0.55); text-shadow: none; }
+html.cc .primary-btn:disabled, html.cc .primary-btn[disabled] { opacity: 0.6; cursor: not-allowed; box-shadow: none; }
+html.cc .text-btn {
+  display: inline-flex; align-items: center; gap: 2px;
+  min-height: 28px; padding: 0 6px;
+  background: none; border: 0;
+  color: var(--ccs-text-2); font: 500 11px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase;
+  text-shadow: none; white-space: nowrap;
+}
+html.cc .text-btn::before { content: "\25B8"; color: var(--red); margin-right: 4px; }
+html.cc .text-btn:hover { color: var(--ccs-hi); text-shadow: none; }
+html.cc .text-btn:disabled { opacity: 0.6; }
+
+/* Fields. */
+html.cc input[type="text"], html.cc input[type="search"], html.cc input[type="number"], html.cc input[type="date"], html.cc select, html.cc textarea {
+  background-color: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--ccs-line);
+  border-bottom-color: var(--red);
+  border-radius: 0;
+  font-family: var(--mono);
+  caret-color: var(--ccs-hi);
+}
+html.cc input:focus, html.cc select:focus, html.cc textarea:focus { outline: none; border-color: var(--ccs-hi); box-shadow: 0 0 12px rgb(var(--ccs-hi-rgb) / 0.2); }
+html.cc input[type="checkbox"], html.cc input[type="radio"], html.cc input[type="range"] { accent-color: var(--ccs-hi); }
+
+/* Chips, status, notes, toast. */
+html.cc .chip { background: none; border: 1px solid var(--ccs-line); color: var(--ccs-text-2); }
+html.cc .chip:hover { border-color: var(--ccs-hi); color: var(--ccs-hi); }
+html.cc .chip.on { border-color: var(--ccs-hi); color: var(--ccs-hi); background: rgb(var(--ccs-hi-rgb) / 0.08); box-shadow: none; }
+html.cc .chip.on .n { color: var(--ccs-hi); }
+html.cc .rstatus { border-color: var(--ccs-line); color: var(--ccs-text-2); }
+html.cc .rstatus.on { color: var(--green); border-color: rgb(58 255 110 / 0.45); }
+html.cc .rstatus.warn { color: var(--amber); border-color: rgb(255 176 46 / 0.45); }
+html.cc .rstatus.off { color: var(--red); border-color: rgb(255 46 46 / 0.45); }
+html.cc .toast {
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--red); border-left: 3px solid var(--ccs-hi);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.6);
+}
+html.cc .muted { color: var(--muted); }
+html.cc .empty { color: var(--muted); }
+
+@media (pointer: coarse) {
+  html.cc .primary-btn, html.cc .text-btn, html.cc .cc-fold, html.cc .chip { min-height: 44px; }
+}
+@media (max-width: 600px) {
+  html.cc .text-btn, html.cc .chip, html.cc .rstatus, html.cc .muted, html.cc .cc-spa-tip { font-size: 12px; }
+  html.cc .cc-win { --ccs-pad: 12px; }
+  /* Fields at 16px so a phone does not zoom on focus. */
+  html.cc input[type="text"], html.cc input[type="search"], html.cc input[type="number"], html.cc input[type="date"], html.cc select, html.cc textarea { font-size: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html.cc .cc-fold-g { transition: none; }
+}
+/* ==== cc-spa-common END ======================================================= */
+
+/* ---------------------------------------------------------------------
+   The youtube body in the terminal look (UI port phase 6, design bench
+   youtube.html). Live ids and classes kept; every rule under html.cc. The
+   panels that fold with this app's own toggle (review, downloads, recent
+   searches, download history) keep it: their header is drawn as the bar. */
+html.cc #app-header { background: var(--bg); }
+html.cc .header-controls { padding: 12px 1.2rem 8px; }
+html.cc #q, html.cc #urls { min-height: 36px; font-size: 13px; padding: 7px 10px; }
+html.cc .shotcaption { color: var(--muted); font-size: 11px; letter-spacing: 0.12em; }
+html.cc .shotnote { font-size: 11px; }
+html.cc .modebtn {
+  min-height: 28px; padding: 2px 10px;
+  background: none; border: 1px solid var(--ccs-line); color: var(--ccs-text-2);
+  font-size: 12px; text-transform: none; letter-spacing: 0.02em;
+}
+html.cc .modebtn:hover { color: var(--ccs-hi); border-color: var(--ccs-hi); }
+html.cc .modebtn.on { color: var(--ccs-hi); border-color: var(--ccs-hi); background: rgb(var(--ccs-hi-rgb) / 0.08); box-shadow: none; }
+html.cc .shothead { color: var(--muted); font-size: 11px; letter-spacing: 0.12em; }
+html.cc .shot { border: 1px solid var(--ccs-line); color: var(--ccs-text-2); background: none; font-size: 12px; }
+html.cc .shot:hover { border-color: var(--ccs-hi); color: var(--ccs-hi); }
+html.cc .shot.on { border-color: var(--ccs-hi); color: var(--ccs-hi); background: rgb(var(--ccs-hi-rgb) / 0.08); box-shadow: none; }
+html.cc .shot input { accent-color: var(--ccs-hi); }
+html.cc .switch { border: 1px solid var(--ccs-line); color: var(--ccs-text-2); }
+html.cc .switch input { accent-color: var(--ccs-hi); }
+html.cc .daterange { color: var(--muted); font-size: 12px; }
+html.cc .warnline {
+  border: 1px solid var(--ccs-line); border-left: 3px solid var(--amber);
+  background: rgb(255 176 46 / 0.06); color: var(--ccs-text-2); font-size: 12px; padding: 6px 12px;
+}
+html.cc .warnline.bad { border-left-color: var(--red); background: rgb(255 46 46 / 0.07); color: var(--text); }
+
+/* Windows. */
+html.cc .panel.cc-win, html.cc #review.cc-win { background: var(--ccs-win); border-color: var(--red); padding: 0 var(--ccs-pad) var(--ccs-pad); margin-bottom: 16px; }
+html.cc .cc-win > h2:not(#attesttitle) { display: none; }
+html.cc #attesttitle { color: var(--text); font-size: 13px; font-weight: 700; text-transform: none; letter-spacing: 0; border: 0; margin: 0 0 8px; }
+html.cc .attesttext { color: var(--ccs-text-2); background: #050202; border: 1px solid var(--ccs-line); padding: 12px; max-height: 300px; overflow-y: auto; font-size: 12px; line-height: 1.6; }
+html.cc .cc-win[data-cc-own-fold] > .panelhead {
+  display: flex; align-items: center; gap: 12px;
+  margin: 0 calc(-1 * var(--ccs-pad)) 12px; padding: 0 10px;
+  min-height: 32px;
+  background: var(--ccs-bar);
+  border-bottom: 1px solid var(--red);
+}
+html.cc .ptoggle {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 32px;
+  color: var(--text); font-size: 12px; text-transform: lowercase; letter-spacing: 0.04em; text-shadow: none;
+}
+html.cc .ptoggle::before { content: "\25BE"; color: var(--red); display: inline-block; width: 1ch; transition: transform 0.15s; }
+html.cc .ptoggle[aria-expanded="false"]::before { transform: rotate(-90deg); }
+html.cc .ptoggle:hover { color: var(--ccs-hi); text-shadow: none; }
+html.cc .ptoggle:focus-visible { outline: 2px solid var(--ccs-hi); }
+html.cc .psum { color: var(--ccs-text-2); font-size: 12px; margin-left: auto; }
+html.cc .cc-win[data-cc-own-fold] > .panelhead:has(> .ptoggle[aria-expanded="false"]) { margin-bottom: 0; border-bottom-color: transparent; }
+html.cc .cc-win[data-cc-own-fold]:has(> .panelhead > .ptoggle[aria-expanded="false"]) { padding-bottom: 0; }
+html.cc #downloads.cc-win:has(> .panelhead > .ptoggle[aria-expanded="false"]) { padding-bottom: var(--ccs-pad); }
+html.cc .phase { color: var(--ccs-hi); font-size: 12px; }
+html.cc .bar { background: rgb(255 46 46 / 0.12); height: 6px; }
+html.cc .barfill { background: var(--ccs-hi); box-shadow: 0 0 8px rgb(var(--ccs-hi-rgb) / 0.5); }
+html.cc .barfill.done { background: var(--green); }
+
+/* Inside the review window. */
+html.cc #reviewbody > .panel { background: none; border: 0; border-bottom: 1px dashed var(--ccs-line); padding: 0 0 12px; margin: 0 0 12px; }
+html.cc #reviewbody > .panel > h2 { color: var(--muted); border: 0; font-size: 11px; letter-spacing: 0.12em; }
+html.cc .termhint { font-size: 12px; color: var(--muted); }
+html.cc .chip.user { border-style: dashed; }
+html.cc .termrow { border-left: 2px solid transparent; }
+html.cc .termrow:hover { border-left-color: var(--ccs-hi); background: rgb(255 46 46 / 0.06); }
+html.cc .termrow .tag { font-size: 11px; }
+html.cc .resulthead { color: var(--ccs-text-2); font-size: 12px; }
+html.cc .card { background: var(--panel); border: 1px solid var(--ccs-line); }
+html.cc .card:hover { border-color: var(--red); }
+html.cc .card.on { border-color: var(--ccs-hi); box-shadow: inset 2px 0 0 var(--ccs-hi); background: rgb(var(--ccs-hi-rgb) / 0.05); }
+html.cc .card .pick { accent-color: var(--ccs-hi); }
+html.cc .card .meta { font-size: 12px; }
+html.cc .card .sub, html.cc .card .why { font-size: 11px; }
+html.cc .badge { border-radius: 0; font-size: 11px; }
+html.cc .gridfoot { color: var(--ccs-text-2); font-size: 12px; border-top: 1px dashed var(--ccs-line); padding-top: 10px; }
+
+/* Lists. */
+html.cc .dlmode { border-color: var(--ccs-line); color: var(--ccs-text-2); }
+html.cc .dlmode.local { color: var(--green); border-color: rgb(58 255 110 / 0.45); }
+html.cc .dlnote { border-left: 3px solid var(--red); background: rgb(255 46 46 / 0.07); color: var(--text); }
+html.cc .dllist, html.cc .queuelist, html.cc .recentlist, html.cc .historylist { font-size: 12px; }
+html.cc .dlrow, html.cc .queuerow, html.cc .recentrow, html.cc .histrow { border-bottom: 1px dashed var(--ccs-line); }
+html.cc .recentrow:hover, html.cc .histrow:hover { background: rgb(255 46 46 / 0.06); color: var(--ccs-hi); }
+html.cc .histrow:hover .name { color: var(--ccs-hi); }
+html.cc .dlrow.done .st { color: var(--green); }
+html.cc .dlrow.failed .st { color: var(--red); }
+html.cc .queuerow .qpos { color: var(--ccs-hi); }
+html.cc .histmeta .sub, html.cc .recentrow .modesum, html.cc .recentrow .scopesum, html.cc .recentrow .shotsum, html.cc .recentrow .capsum { font-size: 11px; }
+html.cc .legal { color: var(--muted); font-size: 12px; border-top: 1px dashed var(--ccs-line); padding-top: 12px; }
+@media (max-width: 600px) {
+  html.cc .shotcaption, html.cc .shotnote, html.cc .shothead, html.cc .card .sub, html.cc .card .why, html.cc .badge,
+  html.cc .histmeta .sub, html.cc .recentrow .modesum, html.cc .recentrow .scopesum, html.cc .recentrow .shotsum, html.cc .recentrow .capsum,
+  html.cc .termrow .tag, html.cc .modebtn, html.cc .shot { font-size: 12px; }
+  html.cc .header-controls { padding-left: 16px; padding-right: 16px; }
+  html.cc #main { padding-left: 16px; padding-right: 16px; }
+}
+@media (pointer: coarse) {
+  html.cc .modebtn, html.cc .shot, html.cc .ptoggle { min-height: 44px; }
+}

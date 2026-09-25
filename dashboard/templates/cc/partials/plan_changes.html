@@ -1,0 +1,41 @@
+{# plan_changes, the terminal home window's BODY (UI redesign port phase 2;
+   plan 5.1). Served by /partials/plan-changes into the window's body, and
+   by an UNDO, which targets #plan-changes outerHTML: so the root element is
+   always #plan-changes, even with nothing to show, and the frame and its
+   bar stay in cc/fleet.html. Same context as the classic panel
+   (ui._plan_changes_context). UNDO stays (5.1: "plan-change UNDO stays in
+   the plan_changes window"). #}
+<div id="plan-changes">
+  {% if plan_error %}<div class="note err error-banner"><span class="grow">{{ plan_error }}</span></div>{% endif %}
+  {% if plan_notice %}<div class="note ok result-banner"><span class="grow">{{ plan_notice }}</span></div>{% endif %}
+  {% if plan_changes %}
+  <div class="scroll-x"><table class="tbl stack-sm">
+    <thead><tr><th>when</th><th>who</th><th title="Ticked: the project now syncs to that computer. Unticked: it stops. Nothing already there is deleted.">what</th><th>project</th><th>editor</th><th title="The computer the change applies to.">where</th><th></th></tr></thead>
+    <tbody>
+    {% for row in plan_changes %}
+      <tr>
+        <td data-label="when" class="dim">{{ row.at | ago }}</td>
+        <td data-label="who" title="{{ row.actor }}"><b>{{ row.actor | shown_as }}</b></td>
+        <td data-label="what">{% if row.action == "plan.untick" %}<span class="tag mute" title="Unticked: the project stops syncing to that computer. Nothing already there is deleted."><span class="w">unticked</span></span>{% else %}<span class="tag hi" title="Ticked: this project now syncs to that computer."><span class="w">ticked</span></span>{% endif %}</td>
+        <td data-label="project" title="{{ row.detail.slug }}">{{ row.label or row.detail.slug }}</td>
+        <td data-label="editor" title="{{ row.detail.editor }}">{{ row.detail.editor | shown_as }}</td>
+        <td data-label="where" class="dim">{% if row.detail.scope == "person" %}every computer{% if row.detail.before | length > 1 %} ({{ row.detail.before | length }}){% endif %}{% else %}{{ row.detail.machine or "unassigned" }}{% endif %}</td>
+        <td data-label="">
+          {% if row.undone %}<span class="dim">put back</span>
+          {% else %}
+          <form class="inline" hx-post="/partials/plan-changes/{{ row.id }}/undo"
+                hx-target="#plan-changes" hx-swap="outerHTML"
+                data-confirm-key="plan-undo:{{ row.id }}"
+                {% if row.undo_removes %}hx-confirm="This removes {{ row.label or row.detail.slug }} from {{ row.detail.editor }}'s {{ row.undo_removes | length }} computer{{ 's' if row.undo_removes | length != 1 }} ({{ row.undo_removes | join(', ') }}). Their copies stay on disk; nothing new comes down and proxy sync stops for it."{% endif %}>
+            <button class="key sm" type="submit" title="Puts this change back exactly as it was, on the same computers and in the same mode."><span class="t">Undo</span></button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}
+  <div class="allclear"><span class="led off" aria-hidden="true"></span>No tick or untick in the last hour. Older changes are in the history.</div>
+  {% endif %}
+</div>

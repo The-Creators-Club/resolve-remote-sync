@@ -34,6 +34,7 @@
   var countEl = page.querySelector('.cl-count');
   var foldBox = page.querySelector('.cl-fold');
   var recent = page.querySelector('.cl-recent');
+  var terminal = document.documentElement.getAttribute('data-ui') === 'cc';
 
   var KEY = 'ccsync.cards.picker';
   var QKEY = 'ccsync.cards.picker.q';
@@ -245,7 +246,14 @@
         t.hidden = !ok;
         if (ok) any++;
       });
-      recent.hidden = searching || any === 0;
+      // The terminal look (UI port phase 6): "nothing shifts", so the window
+      // stays while a search runs and only dims. Classic is unchanged.
+      if (terminal) {
+        recent.hidden = any === 0;
+        recent.classList.toggle('cl-dim', searching);
+      } else {
+        recent.hidden = searching || any === 0;
+      }
     }
     if (countEl) {
       var total = rows.length;

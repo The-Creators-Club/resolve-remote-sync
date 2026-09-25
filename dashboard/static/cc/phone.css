@@ -1,0 +1,282 @@
+/* CC Terminal: every phone rule in one place (UI port phase 0). The body
+   layout switches at the bench's 760; the dock's query (600) is hud-common's
+   and lives in cc/hud.css. */
+
+@media (max-width: 760px) {
+  .page { padding: 18px 14px calc(18px + var(--cc-dock-h, 0px)); }
+  .head h1 { font-size: 22px; letter-spacing: 2px; }
+  .prob { grid-template-columns: minmax(0, 1fr); }
+  .prob .when { order: -1; }
+  .prob .what, .prob .todo { grid-column: 1; }
+  .xf { grid-template-columns: 3ch minmax(0, 1fr) 7ch; }
+  .xf .meter, .xf .eta { display: none; }
+  .lane { grid-template-columns: 5ch 12ch minmax(0, 1fr); gap: 8px; }
+  .lane .m { letter-spacing: 0; }
+  .toast { bottom: calc(18px + var(--cc-dock-h, 0px)); }
+  .alertline { flex-wrap: wrap; }
+  .alertline .grow { flex-basis: 100%; order: 2; }
+  .pc .seen small { display: none; }
+  .win::after { display: none; }
+  .tbl.stack-sm thead { display: none; }
+  .tbl.stack-sm tr { display: grid; padding: 8px 0; border-top: 1px dashed var(--line); }
+  .tbl.stack-sm td { border: 0; padding: 2px var(--pad); }
+  /* ---- account.css ---- */
+  .acct-pc .kinds { grid-template-columns: minmax(0, 1fr); }
+  .acct-pc .projects { height: auto; max-height: 260px; min-height: 150px; }
+  .tbl.stack-sm tr.grp { padding-top: 10px; }
+  .tbl.stack-sm td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-size: 12px; letter-spacing: 1px; text-transform: uppercase; }
+  .acct-adminnote { flex-wrap: wrap; }
+  .acct-adminnote .grow { flex-basis: calc(100% - 80px); }
+  .acct-pw-facts { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
+  .acct-pw-facts dd { margin-bottom: 8px; }
+  .acct-pw-result, .acct-pw-result .note { min-height: 128px; }
+  .acct-pw-go { flex-direction: column-reverse; align-items: stretch; }
+  #pw-go { width: 100%; }
+  .head .acts #go-pw { order: -1; }
+  #password .bar .meta .tag.mute { display: none; }
+  /* ---- apps.css ---- */
+  .wave { font-size: 12px; padding: 6px; }
+  .fgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .frame { font-size: 12px; }
+  .frame .fn { left: 9px; right: 9px; top: 7px; }
+  .frame .ftc { right: 6px; bottom: 6px; }
+  .frame .fhit { left: 6px; bottom: 6px; }
+  .tiles { grid-template-columns: minmax(0, 1fr); }
+  .ep { grid-template-columns: 2ch minmax(0, 1fr); }
+  .ep .act { grid-column: 2; justify-content: flex-start; margin-top: 6px; }
+  .dirfold > .kids { margin-left: 6px; }
+  .dirfold > summary { grid-template-columns: 2ch minmax(0, 1fr) auto; }
+  .dirfold > summary .fsz { display: none; }
+  .trk { grid-template-columns: 34px minmax(0, 1fr); }
+  .trk .rt { grid-column: 2; justify-content: space-between; }
+  .dl { grid-template-columns: 64px minmax(0, 1fr); }
+  .dl .st { grid-column: 2; text-align: left; }
+  .hist { grid-template-columns: 64px minmax(0, 1fr); }
+  .hist .when { grid-column: 2; }
+  .recent { grid-template-columns: minmax(0, 1fr) auto; }
+  .recent .nm { grid-column: 1 / -1; }
+  .jrow { grid-template-columns: 3ch minmax(0, 1fr); }
+  .jrow .acts { grid-column: 2; justify-content: flex-start; }
+  .drawer { width: 100vw; }
+  .drawer .form-row { grid-template-columns: minmax(0, 1fr); }
+  .vtree.scroll-y { max-height: 260px !important; }
+  .pop { width: min(270px, calc(100vw - 24px)); }
+  .note { flex-wrap: wrap; }
+  .note > .grow { flex-basis: 100%; order: 2; }
+  .note > .inline, .note > .key { order: 3; }
+  .bar .hide-sm, .prompt-in kbd { display: none; }
+  /* ---- fleet.css ---- */
+  .tbl.stack-sm td[data-label]::before {
+    content: attr(data-label); display: block;
+    color: var(--muted); font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 4px;
+  }
+  .tbl.stack-sm td[data-label=""]::before { display: none; }
+  .fl-page .tbl.stack-sm, .fl-page .tbl.stack-sm tbody { display: block; width: 100%; }
+  .fl-page .tbl.stack-sm colgroup { display: none; }
+  .fl-page .tbl.stack-sm td.num { text-align: left; }
+  .tbl.stack-sm td.acts-cell { text-align: left; white-space: normal; }
+  .tbl.stack-sm .cell-form { justify-content: flex-start !important; }
+  .tbl.stack-sm td.acts-cell .acts { justify-content: flex-start; }
+  .tbl.stack-sm tr.grp-kind, .tbl.stack-sm tr.grp-plat { padding: 4px 0; border-top: 0; }
+  .tbl.stack-sm tr.grp-kind { border-top: 1px solid var(--red); }
+  .tbl.stack-sm .canary { text-align: left; }
+  .tbl.stack-sm td { white-space: normal; }
+  .tbl.stack-sm tr.why-row { border-top: 0; padding-top: 0; }
+  .job-why { padding-left: var(--pad); }
+  .tbl.jobs.stack-sm tr[data-job] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tbl.jobs.stack-sm tr[data-job] td.acts-cell { grid-column: 1 / -1; }
+  .mx .pcol { min-width: 132px; max-width: 150px; }
+  .mx .pname { flex-direction: column; gap: 0; }
+  .mx .pname .nm { white-space: normal; }
+  .mx .ch { min-width: 120px; }
+  .mx th, .mx td { padding: 6px 8px; }
+  .inp.sm.w-key { width: 100%; }
+  .secret code { font-size: 12px; flex-basis: 100%; }
+  .fl-page .pickrow .pick { width: 100%; }
+  .mx .ch .tools .sel.sm { width: 100%; }
+  .ua-row { grid-template-columns: 3ch minmax(0, 1fr) minmax(0, 1fr); gap: 8px 10px; }
+  .ua-row .what { grid-column: 2 / -1; grid-row: 1; }
+  .ua-row .ver.now { grid-column: 2; grid-row: 2; }
+  .ua-row .ver.newest { grid-column: 3; grid-row: 2; }
+  .ua-row .det { grid-column: 2 / -1; grid-row: 3; height: calc(5 * 1.5em); }
+  .ua-row .go { grid-column: 2 / -1; grid-row: 4; justify-items: stretch; }
+  .ua-row .go .st { text-align: left; }
+  .ua-foot .key { width: 100%; }
+  .rb { justify-content: flex-start; }
+  .rb .sel.sm { width: 100%; }
+  .staged-line { justify-content: flex-start; }
+  .tbl.pkg td.acts-cell { min-width: 0; }
+  .tbl.ood td.upd { width: auto; text-align: left; }
+  .u-who { grid-template-columns: minmax(0, 1fr); }
+  .u-who .acts { grid-template-columns: minmax(0, 1fr); }
+  .u-who .acts .key { width: 100%; }
+  .u-facts { grid-template-columns: minmax(0, 1fr); }
+  .u-facts .f { border-left: 0; }
+  .u-facts .f + .f { border-top: 1px dashed var(--line); }
+  .tbl.uproj th, .tbl.uproj td { white-space: normal; }
+  .tbl.stack-sm.uproj tr { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tbl.stack-sm.uproj td.pn, .tbl.stack-sm.uproj td.miss { grid-column: 1 / -1; }
+  .miss-list { height: 260px; }
+  /* ---- safety.css ---- */
+  .tbl.stack-sm td.task-acts .acts { justify-content: flex-start; }
+  .vd, .vd.no-when { grid-template-columns: minmax(0, 1fr) auto; }
+  .vd .st { grid-column: 1; grid-row: 1; }
+  .vd .when { grid-column: 2; grid-row: 1; }
+  .vd .ti, .vd .more { grid-column: 1 / -1; }
+  .ack { grid-template-columns: minmax(0, 1fr); }
+  .page.gate { padding-top: 28px; }
+  .toc { columns: 1; }
+  .plan-pane { height: 460px; border-top: 1px dashed var(--line); }
+  /* ---- sync.css ---- */
+  .phone-only { display: flex; }
+  .fgroup .fgroup-body { padding-left: var(--pad); }
+  .lrow .keys { margin-left: 0; }
+  .tbl td.file { max-width: none; white-space: normal; overflow-wrap: anywhere; }
+  .tbl.stack-sm td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 9ch; color: var(--muted); font-size: 12px; letter-spacing: 1px; text-transform: uppercase; }
+  .tbl.stack-sm tr.drawer { border-top: 0; padding-top: 0; }
+  .dirlist .d { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .tbl.fixed { table-layout: auto; }
+  .tbl.fixed colgroup { display: none; }
+  .tbl.xft tr { grid-template-columns: 3ch minmax(0, 1fr) auto; grid-template-areas: "dir who eta" "file file file" "prog prog speed"; column-gap: 8px; }
+  .tbl.xft.hist tr { grid-template-columns: 3ch minmax(0, 1fr); grid-template-areas: "dir file" ". eta"; }
+  .tbl.xft.hist .c-eta { text-align: left; font-size: 12px; }
+  .tbl.xft td { padding: 1px 0; }
+  .tbl.xft td:first-child { padding-left: var(--pad); }
+  .tbl.xft .c-dir { grid-area: dir; padding-left: var(--pad); }
+  .tbl.xft .c-who { grid-area: who; }
+  .tbl.xft .c-who small { display: inline; margin-left: 6px; }
+  .tbl.xft .c-file { grid-area: file; padding: 2px var(--pad); }
+  .tbl.xft.hist .c-file { padding: 1px 0; }
+  .tbl.xft.hist .c-who { display: none; }
+  .tbl.xft .c-prog { grid-area: prog; padding-left: var(--pad); }
+  .tbl.xft .c-speed { grid-area: speed; padding-right: var(--pad); }
+  .tbl.xft .c-eta { grid-area: eta; padding-right: var(--pad); }
+  .tbl.pct tr { grid-template-columns: 3ch minmax(0, 1fr); }
+  .tbl.pct td { grid-column: 2; padding: 1px 0; }
+  .tbl.pct td.c-led { grid-column: 1; grid-row: 1; padding-left: var(--pad); padding-top: 4px; }
+  .tbl.pct tr.drawer td { grid-column: 1 / -1; padding: 4px var(--pad); }
+  .note { flex-wrap: wrap; }
+  .note .grow { flex-basis: 100%; }
+  .bar .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .strip .key { white-space: normal; text-align: left; line-height: 1.3; padding-top: 6px; padding-bottom: 6px; }
+  .tbl.pct td.num { text-align: left; }
+  .lrow .path { flex-basis: 100%; }
+  .lrow .tag { max-width: 100%; white-space: normal; }
+  .tbl.pct tr { grid-template-columns: calc(var(--pad) + 2ch) minmax(0, 1fr); }
+  #tick-one { min-height: calc(66px * var(--d)); align-items: flex-start; }
+  .here-row { min-height: 134px; align-items: flex-start; }
+  #pickers { min-height: 4.7em; }
+  #sub.xf-sub { min-height: 3.1em; }
+  .key.w-tick, .key.w-mode { width: 100%; white-space: normal; text-align: center; line-height: 1.3; padding-top: 6px; padding-bottom: 6px; }
+  .key.w-tick { min-height: 50px; }
+  /* ---- system.css ---- */
+  .checks { columns: 1; }
+  .run-line .lbl { min-width: 0; flex-basis: 100%; }
+  .run-sub { margin-left: 12px; }
+  .prob .subj { grid-column: 1; }
+  .tbl td.detail { max-width: none; }
+  .prob.wide { grid-template-columns: minmax(0, 1fr); }
+  .bar .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .bar .rule { min-width: 8px; }
+  .who .ln, .who .pinrow { grid-template-columns: minmax(0, 1fr); }
+  .prow { grid-template-columns: 3ch minmax(0, 1fr) auto; grid-template-areas: "rk nm mg" ". st st" ". dt dt"; }
+  .prow .st { display: flex; gap: 12px; align-items: baseline; }
+  .prow .st small { display: inline; }
+  .prow .dt > span { white-space: normal; }
+  .pick button { grid-template-columns: 3ch minmax(0, 1fr) 2ch; }
+  .pick .ds { grid-column: 2 / 3; }
+  .pick .go { grid-row: 1; grid-column: 3; }
+  .wz { padding: 12px; }
+  .wz-body { min-height: calc(480px * var(--d)); }
+  .wz-body .ctl .sel { min-width: 0; width: 100%; }
+  /* phone tables: every cell names its column (2.1) */
+  .tbl.stack-sm td[data-label]::before { content: attr(data-label); display: block; color: var(--muted); font-size: 12px; letter-spacing: 1px; text-transform: uppercase; }
+  /* wrap rules (2.2, wave 5) */
+  .body .key { white-space: normal; height: auto; text-align: left; }
+  .tree .row .nm { white-space: normal; overflow-wrap: anywhere; }
+  .tbl td, .files li .nm, .xf .file { overflow-wrap: anywhere; }
+  /* the 12px floor (MOBILE_PLAN): body text the bench set at 10-11px */
+  .key .kbd,
+  .key.sm,
+  .pc .issues-n,
+  .pc.head-row,
+  .pc .seen small,
+  .tbl th,
+  .pick > span,
+  .prompt-in kbd,
+  .tree .row.dir .n,
+  .tree .row.proj .sz,
+  .form-row > .lbl small,
+  .hint,
+  .switch,
+  .kv dt,
+  .acct-h3,
+  .tbl tr.grp td,
+  .tbl tr.grp td small,
+  .chips .lbl,
+  .toggle .n,
+  .toggle .gloss,
+  .frame,
+  .fgrid .sep,
+  .tc .k,
+  .keyhelp,
+  .cue .t,
+  .pill,
+  .dirfold > summary .fct, .dirfold > summary .fsz,
+  .ep .enote.who::before,
+  .ep .enote.was::before,
+  .drawer h3,
+  .pop .row .c,
+  .dl .frame,
+  .vcard .badge,
+  .vcard .vs,
+  .vcard .why,
+  .hist .frame,
+  .hist .frame .fg,
+  .recent .nm .sm span,
+  .vtree .n .k,
+  .sha,
+  .tbl .sub,
+  .tbl tr.grp-kind td,
+  .tbl tr.grp-plat td,
+  .mx thead .pcol,
+  .mx .pname .sz,
+  .mx .ch .who,
+  .mx .ch .free,
+  .mx .ch .wired,
+  .upm,
+  .mx .ch .colstat,
+  .ua-row.head,
+  .ua-row .what small, .ua-row .ver small,
+  .ua-row .det .held::before,
+  .ua-row .go .st,
+  .u-facts .f .k,
+  .u-sub,
+  .tbl.uproj td .s,
+  .iv-l .g,
+  .filenav .grp,
+  .filenav a small,
+  .filenav a .fnote,
+  .gate .or,
+  .gate .fld > span,
+  .sec-h,
+  .strip .lbl,
+  .tbl .who small,
+  .tbl .conn,
+  .drawer-box .h,
+  .prob .src,
+  .run-line .lbl,
+  .who .ln .k small,
+  .prow .nm small, .prow .st small,
+  .mng button small,
+  .mng .fixed,
+  .pick .nm small { font-size: 12px; }
+}
+@media (pointer: coarse) {
+  .key, .tabs button, .fold, .tip-btn, .check, .radio, .switch, .tree .row, .tag[title], .led[title], [data-chip-detail], .pick select, .inp, .sel { min-height: var(--tap); }
+}
+/* Fields at 16px on phones, written to win over every smaller field rule
+   above (iOS zooms the page on a focused field under 16px). Keep LAST. */
+@media (max-width: 760px) {
+  html[data-ui="cc"] :is(input:not([type=checkbox], [type=radio], [type=range]), select, textarea) { font-size: 16px; }
+}

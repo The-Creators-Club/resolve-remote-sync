@@ -313,14 +313,17 @@ function cfRenderFolder() {
   if (folder.status === "revoked") {
     linkActions.appendChild(cfActionBtn("Reactivate link", () => cfFolderAction("reactivate")));
   } else {
-    linkActions.appendChild(cfActionBtn("Revoke link", () => {
-      if (window.confirm("Revoke this link? Anyone who has it will see \"not available\" until you reactivate it.")) {
+    linkActions.appendChild(cfActionBtn("Revoke link", async () => {
+      // UI port phase 6: the terminal look asks through its own dialog.
+      const q = "Revoke this link? Anyone who has it will see \"not available\" until you reactivate it.";
+      if (((window.ccSpa && window.ccSpa.active()) ? await window.ccSpa.confirm(q) : window.confirm(q))) {
         cfFolderAction("revoke");
       }
     }));
   }
-  linkActions.appendChild(cfActionBtn("New link", () => {
-    if (window.confirm("Issue a new link? The old one stops working immediately.")) {
+  linkActions.appendChild(cfActionBtn("New link", async () => {
+    const q = "Issue a new link? The old one stops working immediately.";
+    if (((window.ccSpa && window.ccSpa.active()) ? await window.ccSpa.confirm(q) : window.confirm(q))) {
       cfFolderAction("rotate");
     }
   }));
@@ -366,7 +369,8 @@ function cfRenderFolder() {
   // --- danger -----------------------------------------------------------
   const danger = el("div", { className: "cf-actions cf-danger" });
   danger.appendChild(cfActionBtn("Delete folder", async () => {
-    if (!window.confirm(`Delete "${folder.title}" and its link? This cannot be undone.`)) return;
+    const q = `Delete "${folder.title}" and its link? This cannot be undone.`;
+    if (!((window.ccSpa && window.ccSpa.active()) ? await window.ccSpa.confirm(q) : window.confirm(q))) return;
     try {
       await fetchJson(`api/client-folders/${folder.id}`, { method: "DELETE" });
       toast("Folder deleted", "success");

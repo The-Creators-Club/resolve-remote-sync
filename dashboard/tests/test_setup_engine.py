@@ -878,7 +878,7 @@ def test_software_todo_when_nothing_is_published(conn):
     assert state.status == "todo"
     # UX-7 / REL-10: the packages table has been at /admin/packages since the
     # 2026-08-18 redesign; this detail used to send a new customer to Users.
-    assert "Settings, then PACKAGES" in state.detail
+    assert "Settings, then Packages" in state.detail  # D8, UI port phase 7
     assert "Users page" not in state.detail
 
 

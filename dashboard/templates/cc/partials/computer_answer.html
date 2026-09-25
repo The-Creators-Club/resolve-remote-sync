@@ -1,0 +1,31 @@
+{# what_computers_said, the terminal home window's BODY (UI redesign port
+   phase 2; plan 1.5, 5.1, R15). A NEW name on /partials/computer-answer:
+   the classic admin_diagnostics partial stays classic. "Read the answer" on
+   a computer's row fills #fleet-diagnostics with this, outside the grid
+   body so the 15 s poll never swaps it away; "every computer" targets THIS
+   route and this window, never the classic /partials/admin/diagnostics.
+   Admin only: a bundle names an editor's paths and Resolve project. #}
+{% set trig = {
+  'lane_error': ('warn', 'lane error', 'a sync job failed, so this computer sent its own diagnostics'),
+  'admin_request': ('hi', 'admin request', 'an admin asked this computer why'),
+  'button': ('hi', 'button', 'the editor used Copy diagnostics in the companion (' ~ COMPANION_DIAGNOSTICS_PATH ~ ')')} %}
+{% if crash_reports %}
+<div class="hint">This server has <b>{{ crash_reports }}</b> saved crash report(s) of its own.
+  <a class="key sm" href="/admin/diagnostics/crash-reports.zip" title="Downloads this server's own crash reports as one zip, to send to support."><span class="t">download crash reports</span></a></div>
+{% endif %}
+{% if diagnostics.bundles %}
+  {% for b in diagnostics.bundles %}
+  {% set t = trig.get(b.trigger, ('mute', (b.trigger or 'upload') | replace('_', ' '), 'uploaded by this computer')) %}
+  <details class="fold sub-win" data-key="answer:{{ b.editor }}:{{ b.machine }}:{{ loop.index }}"{% if loop.first %} open{% endif %}>
+    <summary><span class="caret" aria-hidden="true">&#9656;</span> <b>{{ b.editor }}</b> {{ b.machine }} <span class="tag {{ t[0] }}" title="{{ t[2] }}"><span class="w">{{ t[1] }}</span></span>
+      <span class="dim">{{ b.received_at | ago }}{% if b.at and b.at != b.received_at %}, the computer said {{ b.at }}{% endif %}</span></summary>
+    <pre class="log">{{ b.text }}</pre>
+  </details>
+  {% endfor %}
+  {% if diagnostics.machine or diagnostics.editor %}
+  <div class="hint">Showing {{ diagnostics.machine or diagnostics.editor }} only.
+    <button class="key quiet sm" type="button" hx-get="/partials/computer-answer" hx-target="#fleet-diagnostics" hx-swap="innerHTML"><span class="t">every computer</span></button></div>
+  {% endif %}
+{% else %}
+<div class="allclear">No computer has uploaded diagnostics yet. Press "Ask this computer why" in a computer's details, or have the editor open {{ COMPANION_DIAGNOSTICS_PATH }} in the companion. Companions older than the build that added this cannot send any.</div>
+{% endif %}

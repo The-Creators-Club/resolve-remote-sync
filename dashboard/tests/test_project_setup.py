@@ -451,7 +451,7 @@ def test_create_over_existing_folder_offers_it_instead(env):
         parent_rel="2026/CCT", name="Website Highlights"))
     assert resp.status_code == 422
     detail = resp.json()["detail"]
-    assert "already exists" in detail and "USE THIS FOLDER" in detail
+    assert "already exists" in detail and '"Use this folder"' in detail  # D8, UI port phase 7
     # nothing was created or claimed
     assert not (existing / "Website Highlights").exists()
     assert not (existing / "B-roll").exists()

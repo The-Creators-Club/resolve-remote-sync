@@ -647,8 +647,8 @@ def main() -> int:
                  "to their whole fleet on their next check (default: daily; a container "
                  "restart checks 10 s after boot). Their own soak gate still applies: a "
                  "build no computer there has run is staged until one has.")
-            step("  Sites on `manual` need Settings > Packages > [ CHECK NOW ] > "
-                 "[ PUBLISH ].")
+            step("  Sites on `manual` need Settings > Packages > \"Check now\" > "
+                 "\"Publish\".")
         else:
             step("published and STAGED: the channel's `current` pointer was NOT moved, "
                  "so nobody is offered this yet, on any policy. Re-run with "

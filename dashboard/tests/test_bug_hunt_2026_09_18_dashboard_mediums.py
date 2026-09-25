@@ -291,7 +291,7 @@ def test_moves_dropped_by_the_cap_become_a_problem_the_server_found(conn):
     card = rows[notices.MOVES_DROPPED_KIND]
     assert card["severity"] == "error"
     assert "200" in card["body"] and "700" in card["body"]
-    assert "MOVE ON THE SERVER" in card["fix"]
+    assert "\"Move on the server and on every computer\"" in card["fix"]  # D8/R12, UI port phase 7
     assert notices.MOVES_DROPPED_KIND in dbmod.NOTICE_KINDS
 
 

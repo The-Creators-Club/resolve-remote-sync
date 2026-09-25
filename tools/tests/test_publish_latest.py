@@ -221,9 +221,11 @@ class TestTheClosingSentenceAndTheOrderingGate:
 
     def test_it_says_what_happens_on_both_kinds_of_site(self):
         assert "policy = current" in self.SOURCE
-        assert "Sites on `manual` need Settings > Packages > [ CHECK NOW ] > " \
+        # D8 (UI port phase 7): the control is named in quotes, sentence case.
+        assert 'Sites on `manual` need Settings > Packages > \\"Check now\\" > ' \
             in self.SOURCE
-        assert "[ PUBLISH ]." in self.SOURCE
+        assert '\\"Publish\\".' in self.SOURCE
+        assert "[ CHECK NOW ]" not in self.SOURCE
 
     def test_the_recall_command_is_in_the_same_block(self):
         """The sentence you want in front of you at the moment you learn the

@@ -135,7 +135,7 @@ def test_machine_forgotten_fires_past_the_give_up_line_and_names_forget(conn):
     assert [r["subject"] for r in rows] == ["jsmith/OLD-LAPTOP"]
     assert "OLD-LAPTOP" in rows[0]["body"] and "jsmith" in rows[0]["body"]
     assert "last reported" in rows[0]["body"]
-    assert "[ FORGET ]" in rows[0]["fix"]
+    assert '"Forget"' in rows[0]["fix"]  # D8, UI port phase 7
     assert dbmod.notice_href("machine_forgotten")[0] == "/"
     assert notices.SILENT_GIVE_UP_DAYS == 14
 
@@ -221,7 +221,7 @@ def test_alerts_sink_none_stands_open_while_nobody_is_told(conn):
     assert rows
     assert rows[0]["body"].startswith(
         "Nobody is being told when this server finds a problem.")
-    assert "[ SEND A TEST ]" in rows[0]["fix"]
+    assert '"Send a test"' in rows[0]["fix"]  # D8, UI port phase 7
 
 
 def test_alerts_sink_none_clears_once_a_sink_is_configured(conn):
@@ -258,9 +258,11 @@ def test_server_crash_report_counts_files_written_since_this_boot(conn, tmp_path
     rows = [r for r in dbmod.open_notices(conn) if r["kind"] == "server_crash_report"]
     assert rows
     assert "crashed 1 time(s) since it started" in rows[0]["body"]
-    assert "[ DOWNLOAD CRASH REPORTS ]" in rows[0]["fix"]
+    assert '"Download crash reports"' in rows[0]["fix"]  # D8, UI port phase 7
+    # The registry holds the plain label; each variant's template draws it
+    # (classic wraps it as [ LABEL ], plan 2.6).
     assert dbmod.notice_href("server_crash_report") == (
-        "/admin/diagnostics/crash-reports.zip", "[ DOWNLOAD CRASH REPORTS ]")
+        "/admin/diagnostics/crash-reports.zip", "Download crash reports")
 
 
 def test_server_crash_report_ignores_a_report_from_a_previous_run(conn, tmp_path):

@@ -267,7 +267,10 @@ def test_the_setup_tasks_name_pages_that_exist() -> None:
     labels = {label for _k, label, _h, _a in ui.SETTINGS_NAV}
     src = (Path(setup_engine.__file__)).read_text(encoding="utf-8")
     assert "publish one on the Users page" not in src
-    assert "PACKAGES" in src and "PACKAGES" in labels
+    # UI port phase 7 (D8): the copy names the page in sentence case now.
+    flat = __import__("re").sub(r'"\s*\n\s*"', "", src)
+    assert "open Settings, then Packages" in flat
+    assert "PACKAGES" in labels
     assert "USERS" in labels
 
 
@@ -354,6 +357,8 @@ VOCABULARY_FILES: tuple[str, ...] = (
     # CR-179 (wave 4): ui.py is where the chip explanations and every htmx
     # refusal live, so it belongs in the same scan as the modules above.
     "ui.py",
+    # UI port phase 7 (2026-09-25, plan R12): their D8 rewrites are new copy.
+    "recovery.py", "cards_pool.py", "release_feed.py", "account_ui.py",
 )
 
 RETIRED_WORDS: dict[str, str] = {
@@ -392,11 +397,6 @@ VOCABULARY_ALLOWED: tuple[tuple[str, str, str], ...] = (
      "a file name on the editor's disk: the bytes, not a word"),
     ("notices.py", ".ccsync/machine.json", "the same file name"),
     ("invariants.py", ".ccsync/machine.json", "the same file name"),
-    ("alerts.py", "[ MOVE ON THE SERVER AND ON EVERY MACHINE ]",
-     "quoting a button LABEL back to the reader; the label lives in the "
-     "templates and is renamed there or nowhere"),
-    ("notices.py", "[ MOVE ON THE SERVER AND ON EVERY MACHINE ]",
-     "the same button label"),
     ("ui.py", "{lane} on this computer made no progress",
      "the PLACEHOLDER is called lane; what is substituted into it is "
      "ui.lane_word(...), so the sentence a person reads begins "

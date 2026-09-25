@@ -1,0 +1,90 @@
+{# Fleet-wide sync stop, terminal look (phase 4; classic twin
+   partials/fleet_halt.html, COMMERCIAL_READINESS item 9, UX-8). The BODY of
+   the page's "stop_syncing_everywhere" window (plan 3.1). #admin-fleet-halt
+   is on this div, never on the window, and every form here targets it. #}
+<div class="admin-users-box" id="admin-fleet-halt">
+  <div class="lede-in">Stops uploads, proxy downloads and shared project files on every editor's computer.
+    Nothing is deleted; it is fully reversible. A computer that is off right now takes the stop the moment it reports again.</div>
+  <div class="body">
+  {% if error %}
+    <div class="note err error-banner"><span class="grow">{{ error }}</span></div>
+  {% endif %}
+
+  {% if halt.active %}
+    <div class="alarm">
+      <div class="h"><span class="led err" aria-hidden="true"></span>Syncing is stopped on every computer</div>
+      <div class="why">{{ halt.reason }}</div>
+      <div>set by <b>{{ halt.set_by }}</b> <span title="{{ halt.set_at }}">{{ halt.set_at | ago }}</span>
+        ({{ halt_hours }} hour{{ "s" if halt_hours != 1 }} so far,
+        {{ halt_machines }} computer{{ "s" if halt_machines != 1 }} in the fleet)</div>
+      {% if halt.expires_at %}
+      <div>releases itself {{ halt.expires_at | until }} unless you keep it stopped{% if halt.extended %}
+        (kept on {{ halt.extended }} time{{ "s" if halt.extended != 1 }}){% endif %}</div>
+      {% endif %}
+    </div>
+    <p class="lede sp-gap">Each companion picks this up on its next report (within a minute) and shows the
+      reason in its tray. Editors cannot start syncing again themselves; only this
+      button can.</p>
+    <div class="inline sp-gap">
+      <form class="inline-form" hx-post="/partials/admin/fleet-halt"
+            hx-target="#admin-fleet-halt" hx-swap="outerHTML">
+        <input type="hidden" name="active" value="0">
+        <button class="key primary" type="submit" title="Let every computer sync again. Each one picks it up on its next report, within a minute."><span class="t">start syncing again</span></button>
+      </form>
+      <form class="inline-form" hx-post="/partials/admin/fleet-halt"
+            hx-target="#admin-fleet-halt" hx-swap="outerHTML"
+            hx-confirm="Keep every computer in the fleet stopped for another day? Nobody's uploads, proxy downloads or shared project files move until you start them again here.">
+        <input type="hidden" name="active" value="1">
+        <input type="hidden" name="extend" value="1">
+        <button class="key" type="submit" title="The stop releases itself after a day. This keeps it on for one more day from now."><span class="t">keep it stopped</span></button>
+      </form>
+    </div>
+  {% else %}
+    {% if halt.expired %}
+    <div class="note warn"><span class="grow"><b>The last stop EXPIRED and syncing started again everywhere
+      {{ halt.expires_at | ago }}.</b> It was set by {{ halt.set_by }} {{ halt.set_at | ago }}{% if halt.reason %}: {{ halt.reason }}{% endif %}.</span></div>
+    {# logic-admin-3 (2026-09-25): clears the stored stop without stopping
+       anything; `ack_expired` makes the route refuse a NEW stop. #}
+    <div class="sp-gap">
+      <form class="inline-form" hx-post="/partials/admin/fleet-halt"
+            hx-target="#admin-fleet-halt" hx-swap="outerHTML">
+        <input type="hidden" name="active" value="0">
+        <input type="hidden" name="ack_expired" value="1">
+        <input type="hidden" name="reason" value="the expired stop was acknowledged">
+        <button class="key" type="submit"
+                title="Takes the expired-stop notice off every page. Syncing is already running everywhere, and this changes nothing on any computer."><span class="t">ok, it can stay off</span></button>
+      </form>
+    </div>
+    {% endif %}
+    <form class="inline-form inline sp-gap" hx-post="/partials/admin/fleet-halt"
+          hx-target="#admin-fleet-halt" hx-swap="outerHTML"
+          hx-confirm="Stop syncing on EVERY computer in the fleet? Uploads, proxy downloads and shared project files stop everywhere until you start them again here. Nothing is deleted. Work done while it is stopped will not reach anyone until you start them again.">
+      <input type="hidden" name="active" value="1">
+      <input class="inp sp-halt-why" type="text" name="reason" required aria-label="why"
+             placeholder="why (shown in every editor's tray)">
+      <button class="key primary" type="submit" title="Stop uploads, proxy downloads and shared project files on every computer. Nothing is deleted. The reason you type is shown in every tray."><span class="t">stop all syncing</span></button>
+    </form>
+  {% endif %}
+
+  {% if halt_history %}
+  {# data-key (ui-dash-admin-4): the keeper knows a <details> by it. #}
+  <details class="fold sp-gap" data-key="halt-history">
+    <summary><span class="caret" aria-hidden="true">&#9656;</span> <b class="sp-caps">previous stops</b>
+      <span class="muted">{{ halt_history | length }}</span></summary>
+    <div class="scroll-x"><table class="tbl stack-sm">
+      <thead><tr><th>when</th><th>what</th><th>who</th><th>why</th></tr></thead>
+      <tbody>
+      {% for h in halt_history %}
+        <tr class="editor-row">
+          <td data-label="when">{{ h.at | ago }}</td>
+          <td data-label="what"><span class="tag {{ 'err' if h.action == 'stopped' else 'warn' if h.action == 'kept on' else 'mute' }}">{{ h.action | lower }}</span></td>
+          <td data-label="who"><b>{{ h.by }}</b></td>
+          <td data-label="why">{{ h.reason }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+  </details>
+  {% endif %}
+  </div>
+</div>

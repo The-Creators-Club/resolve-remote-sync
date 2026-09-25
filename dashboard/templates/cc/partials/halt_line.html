@@ -1,0 +1,29 @@
+{# The fleet halt, terminal shell furniture (phase 1; UX-8 for the why).
+
+   A NEW name on purpose (R15): classic pages keep partials/fleet_halt_banner
+   and its CSS, and only cc/shell.html polls /partials/halt-line. Same
+   context as the banner (_halt_banner_context). Renders nothing while the
+   fleet is syncing. The state word is fixed and lowercase; data sits in
+   .v spans, so nothing a person typed is ever case-folded. #}
+{% if halt.active %}
+<div class="alertline err" id="fleet-halt-line" role="status">
+  <span class="tag solid err" title="Every computer has stopped syncing because an admin stopped the fleet."><span class="w">stopped</span></span>
+  <span class="grow">Syncing is stopped on every computer
+    ({{ halt_hours }} hour{{ "s" if halt_hours != 1 }} so far, {{ halt_machines }} computer{{ "s" if halt_machines != 1 }} in the fleet).
+    {% if halt.reason %}<span class="v">{{ halt.reason }}</span>{% endif %}
+    <span class="dim">Set by {{ halt.set_by }} {{ halt.set_at | ago }}{% if halt.expires_at %}; it releases itself {{ halt.expires_at | until }} unless somebody keeps it on{% endif %}.</span></span>
+  {% if session_is_admin %}
+  <a class="key quiet sm" href="/admin/users#admin-fleet-halt" title="Settings, Users: the switch that starts syncing again"><span class="t">Start syncing again</span></a>
+  {% endif %}
+</div>
+{% elif halt.expired %}
+<div class="alertline warn" id="fleet-halt-line" role="status">
+  <span class="tag solid warn" title="The fleet-wide stop reached its expiry and syncing started again by itself."><span class="w">expired</span></span>
+  <span class="grow">The fleet-wide stop has expired and syncing has started again everywhere.
+    {% if halt.reason %}<span class="dim">It was set for:</span> <span class="v">{{ halt.reason }}</span>{% endif %}
+    <span class="dim">Set by {{ halt.set_by }} {{ halt.set_at | ago }}, expired {{ halt.expires_at | ago }}.</span></span>
+  {% if session_is_admin %}
+  <a class="key quiet sm" href="/admin/users#admin-fleet-halt" title="Settings, Users: take this notice down"><span class="t">Take this notice down</span></a>
+  {% endif %}
+</div>
+{% endif %}

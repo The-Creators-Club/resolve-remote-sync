@@ -349,6 +349,11 @@ class Settings:
     # pattern as release_feed_policy below), never upward to the heavier
     # model a typo did not actually ask for.
     site_indexer_model_tier: str = "good"
+    # The terminal look (UI_REDESIGN_PORT_PLAN.md 7.0): which page groups are
+    # drawn in it, and who may preview it. Dashboard-only defaults; a stored
+    # site_settings row always wins, so neither is a rollback path.
+    site_ui_terminal_groups: str = ""
+    site_ui_preview: str = "off"
 
     # OPTIONAL FEATURES this site has turned on, published in the manifest as
     # `features` (COMMERCIAL_READINESS.md items 2 + 3, 2026-08-17). BOTH
@@ -848,6 +853,8 @@ class Settings:
             site_rclone_remote=env.get("DASH_SITE_RCLONE_REMOTE", "").strip(),
             site_nas_syncthing_id=env.get("DASH_SITE_NAS_SYNCTHING_ID", "").strip(),
             site_dashboard_url=env.get("DASH_SITE_DASHBOARD_URL", "").strip().rstrip("/"),
+            site_ui_terminal_groups=env.get("DASH_SITE_UI_TERMINAL_GROUPS", "").strip().lower(),
+            site_ui_preview=env.get("DASH_SITE_UI_PREVIEW", "").strip().lower() or "off",
             site_indexer_model_tier=(
                 env.get("DASH_SITE_INDEXER_MODEL_TIER", "").strip().lower() or "good"),
             # "1" and nothing else, matching DASH_BROLL_ENABLED: an unset,

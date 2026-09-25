@@ -501,7 +501,7 @@ def test_a_computer_below_current_is_still_sent_to_update_now(conn):
         _FleetCtx(conn, [_mac(version="0.9.66")]))
     [f] = findings
     assert f["subject"] == "leso/Mac" or "leso" in f["subject"]
-    assert "[ UPDATE NOW ]" in f["fix"]
+    assert '"Update now"' in f["fix"]  # D8, UI port phase 7
 
 
 def test_a_platform_with_nothing_current_is_not_called_the_current_build(conn):
@@ -570,7 +570,11 @@ def test_the_vendor_site_still_gets_the_mac_commands(conn):
 # ------------------------------------------------------- ui-copy-1
 
 def _labels(text: str) -> set[str]:
-    return set(re.findall(r"\[ [A-Z][A-Z ,']+ \]", text))
+    """The controls a sentence names. D8 (UI port phase 7, 2026-09-25): a
+    control is its sentence-case label in double quotes (`press "Resume"`);
+    returned as the classic key's text, `[ RESUME ]`, which is what the
+    classic panels below still draw (the terminal key uppercases by CSS)."""
+    return {f"[ {q.upper()} ]" for q in re.findall(r'"([A-Z][a-z][^"]*)"', text)}
 
 
 def test_every_button_the_halt_alerts_name_is_on_the_halt_panel(conn):
@@ -657,9 +661,14 @@ def test_the_named_collector_panel_is_where_the_copy_says():
         encoding="utf-8")
     flat = re.sub(r'"\s*\n\s*"', "", src)      # join implicit string concatenation
     assert "bottom of SYNC STATUS" not in flat
-    assert flat.count("under the computers table on SYNC STATUS") >= 4
+    # UI port phase 7 (R13): the copy names the panel, never a page region,
+    # because the terminal variant moves the panel; /go/collector resolves it.
+    assert "under the computers table" not in flat
+    assert flat.count("the Collector panel") >= 4
     fix = notices._JOB_MEANING["config"][1]
-    assert "[ COLLECTOR ]" in fix and "under the computers table on SYNC STATUS" in fix
+    assert "Collector panel" in fix
+    from ccsync_dashboard import ui_variant
+    assert ui_variant.go_href("collector", frozenset()) == "/#fleet-collector"
 
 
 def test_the_resolve_undo_step_claims_no_dashboard_button_that_does_not_exist():
@@ -678,8 +687,8 @@ def test_the_resolve_undo_step_claims_no_dashboard_button_that_does_not_exist():
     assert undo.href == "#resolve-undo"
     assert "Pick the computer and the change" not in undo.body
     assert "no button for this" not in " ".join(s.body for s in steps)
-    assert "[ UNDO THIS CHANGE ]" in undo.body
-    assert "[ UNDO LAST FIX ]" in undo.body and "RESOLVE" in undo.body
+    assert '"Undo this change"' in undo.body  # D8, UI port phase 7
+    assert '"Undo last fix"' in undo.body and "Resolve section" in undo.body
     panel = (TEMPLATES / "partials" / "recovery.html").read_text(encoding="utf-8")
     gate = panel.index("{% if recovery_problem == 'resolve' %}")
     anchor = panel.index('id="resolve-undo"')
@@ -714,7 +723,7 @@ def test_the_rollback_plans_create_step_names_a_page_the_dashboard_serves():
     assert step.href != "/projects"
     assert not step.href                       # a bare /project-setup is a redirect
     assert "/project-setup?resolve_project=" in step.body
-    assert "[ CREATE & LINK ]" in step.body
+    assert '"Create & link"' in step.body  # D8, UI port phase 7
     assert "Projects page" not in step.body
     setup = (TEMPLATES / "partials" / "project_setup_panel.html").read_text(encoding="utf-8")
     assert "[ CREATE &amp; LINK ]" in setup
@@ -1309,10 +1318,10 @@ def test_the_named_controls_exist_under_the_names_the_copy_uses():
     from ccsync_dashboard import collector, invariants
     corpus = "".join(p.read_text(encoding="utf-8") for p in TEMPLATES.rglob("*.html"))
     assert "[ ASK THIS COMPUTER WHY ]" in corpus
-    assert "[ ASK THIS COMPUTER WHY ], then" in _code(alerts)
+    assert '\\"Ask this computer why\\", then' in _code(alerts)  # D8
     assert "[ ASK WHY ]" not in _code(alerts)
     assert "[ UPDATE THE DASHBOARD ]" not in _code(notices)
-    assert "[ UPDATE NOW ] in the [ DASHBOARD ] panel" in _code(notices)
+    assert 'press \\"Update now\\" in the Dashboard panel' in _code(notices)
     upd = (TEMPLATES / "partials" / "admin_dashboard_update.html").read_text(encoding="utf-8")
     assert "[ DASHBOARD ]" in upd and "[ UPDATE NOW ]" in upd
     for module in (collector, invariants):

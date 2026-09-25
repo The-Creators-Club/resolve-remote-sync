@@ -1,0 +1,50 @@
+{# sync_queue, the terminal home window's BODY (UI redesign port phase 2;
+   plan 5.1, R15). A NEW name on /partials/home-queue: the classic
+   queue_section / my_queue stay classic (the account page's person_queue is
+   phase 3's). Polled every 10 s into the window's .queue-box body, carrying
+   the computer and the ?as= the page is viewed under. An untick posts
+   ?view=home-queue and gets THIS markup back (ui_home.toggle_answer), with
+   queue_machine as a VIEW key, never machine=: the untick is the person's
+   (the confirm names every computer), the panel stays about one computer.
+   READ AND UNTICK only: ticking lives in the projects tree. #}
+{% if safe_to_close is defined and safe_to_close %}
+<div class="hint xf-close{{ ' warn' if not safe_to_close.safe }}">{{ safe_to_close.sentence }}</div>
+{% endif %}
+<div class="hint">For <b>{{ queue.editor }}</b>{% if queue_machine is defined and queue_machine %} on <b>{{ queue_machine }}</b>{% endif %}: one project at a time, top to bottom.</div>
+{% set qm = ('&queue_machine=' ~ (queue_machine | urlencode)) if queue_machine is defined and queue_machine else '' %}
+{% if queue.queue %}
+<div class="scroll-x"><table class="tbl stack-sm">
+  <thead><tr><th>#</th><th></th><th>project</th><th title="How much of this project is on the computer already.">synced</th><th>left</th><th></th></tr></thead>
+  <tbody>
+  {% for item in queue.queue %}
+    {% set st = {'red': 'err', 'amber': 'warn', 'green': ''}.get(item.status, 'off') %}
+    <tr{% if item.is_current %} class="current"{% endif %}>
+      <td data-label="#" class="dim">{{ loop.index }}</td>
+      <td data-label="status"><span class="led {{ st }}"><span class="vh">{{ item.status }}</span></span></td>
+      <td data-label="project"><b>{{ item.label }}</b>
+        {% if item.is_current %}<span class="tag hi"><span class="w">syncing now</span></span>{% endif %}
+        {% if item.upload_only %}<a class="tag warn" href="{{ term_href('Upload only') }}" title="Upload only: video originals go to the server, nothing comes down."><span class="w">upload only</span></a>{% endif %}
+        {% if item.missing_project %}<span class="tag err" title="This project no longer exists on the server."><span class="w">gone</span></span>{% endif %}
+        {% for inc in item.includes %}<div class="hint">shares {{ inc.sub_rel }} from {{ inc.lender_label }}</div>{% endfor %}</td>
+      <td data-label="synced">{% if item.upload_only %}<span class="dim" title="Nothing comes down to this computer for this project: only the upload runs.">upload only</span>{% elif item.completion is not none %}<span class="meter" aria-hidden="true">{{ cc_meter(item.completion, 100, 10) }}</span> {{ "%.0f" | format(item.completion) }}%{% else %}<span class="dim">no data yet</span>{% endif %}</td>
+      <td data-label="left">
+        {% if item.need_items %}{{ item.need_items }} files, {{ item.need_bytes | human_bytes }}{% if item.rate_bytes_per_sec and item.rate_bytes_per_sec > 1 %}, {{ item.rate_bytes_per_sec | human_bytes }}/s{% endif %}{% if item.eta_seconds %}, about {{ item.eta_seconds | eta }} left{% endif %}
+        {% elif item.completion == 100 %}synced
+        {% else %}<span class="dim">-</span>{% endif %}
+      </td>
+      <td data-label="">
+        <button class="key quiet sm" type="button"
+                hx-post="/partials/selection/{{ queue.editor }}/{{ item.slug }}/toggle?view=home-queue{{ qm }}"
+                data-confirm-key="untick:{{ item.slug }}"
+                {% if queue.machines %}hx-confirm="This removes {{ item.label }} from {{ queue.editor }}'s {{ queue.machines | length }} computer{{ 's' if queue.machines | length != 1 }} ({{ queue.machines | join(', ') }}). Their copies stay on disk; nothing new comes down and proxy sync stops for it."{% endif %}
+                hx-target="closest .queue-box" hx-swap="innerHTML"
+                title="Stop syncing this project to {{ queue.editor }}'s computers. Nothing already there is deleted."><span class="t">Untick</span></button>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<div class="allclear"><span class="led off" aria-hidden="true"></span>Nothing ticked, so nothing syncs to this computer. Tick a project in the projects list.</div>
+{% endif %}
+{% include "partials/home_fix_root.html" %}

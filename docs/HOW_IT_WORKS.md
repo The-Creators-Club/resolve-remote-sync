@@ -175,12 +175,12 @@ belongs to two projects: an interview shot for one episode and reused in
 another. Copying it doubles the storage and the two copies drift apart the
 moment anyone renames or deletes one side. Instead, a project can *borrow* a
 folder from another project: on the borrowing project's dashboard page,
-[ SHARE A FOLDER INTO THIS PROJECT ] takes the folder's path (for example
+"Share a folder into this project" takes the folder's path (for example
 `2026/FF5/Elections/Interviewees/...`). From then on, everyone syncing the
 borrowing project also receives that folder, at its original path, through
 the same three ways; nothing is copied and nothing needs relinking in
 Resolve. The project page lists what a project shares from others (and what
-is shared out of it), and a red [ LINK ] chip in the sidebar means one of
+is shared out of it), and a red LINK marker in the projects list means one of
 those declarations needs attention. Whole projects cannot be borrowed (tick
 both projects instead), and `Proxy` folders cannot be borrowed directly
 (share their parent).
@@ -227,7 +227,7 @@ to the computer, not to you. If you have a desktop and a laptop, each has its
 own plan, and a new computer starts with **nothing** ticked, on purpose:
 nobody wants a laptop to start pulling 50 GB because a desktop had it.
 
-- On the dashboard's main page, the checkboxes in the sidebar are for **you as
+- On the dashboard's main page, the checkboxes in the projects list are for **you as
   a person**: ticking there means "every computer I use". Unticking there
   removes the project from all of them.
 - The per-computer lists are on **Settings > Sync plans**, a grid of projects
@@ -261,11 +261,11 @@ project's folder is never shared with that computer at all.
 - Nothing comes back. No proxies, no shared project files, no other editor's
   work.
 - It is set per computer, like every tick. On the project page it is
-  **[ UPLOAD ONLY FOR ME ]**, and a project already ticked normally offers
-  **[ SWITCH TO UPLOAD ONLY ]**; the admin's grid on Settings > Sync plans has
+  **"Upload only for me"**, and a project already ticked normally offers
+  **"Switch to upload only"**; the admin's grid on Settings > Sync plans has
   a small box beside each tick. A person whose desktop syncs a project fully
   and whose laptop only uploads it is marked
-  **[ UPLOAD ONLY ON ONE COMPUTER ]**.
+  **"Upload only on one computer"**.
 - Untick it the way you untick anything else. Removing the files from the
   computer still asks first whether the originals have reached the server.
 
@@ -288,7 +288,7 @@ What a new editor goes through, from an empty computer to a playing timeline.
    external SSD you edit from.
 2. **Get the installer.** The admin sends you the dashboard address and a
    username and password. Open the dashboard in a browser, sign in, and
-   download the installer for your platform from the menu's [ INSTALLER ]
+   download the installer for your platform from the menu's "Installer"
    entry.
 3. **The wizard.** The installer is a four-step wizard:
    - *Step 1: How is this computer connected.* "I'm a remote editor" or "I'm
@@ -449,14 +449,14 @@ open, and every section is present only when it has something to say.
 
 | Section | What is in it |
 |---|---|
-| **THIS COMPUTER** | This computer's name and its role: **[ REMOTE EDITOR ]** or **[ WIRED TO THE SERVER ]**, which you set here and nowhere else. Who you are signed in as, sign in or out, and **[ RESTART CCSYNC NOW ]** |
+| **THIS COMPUTER** | This computer's name and its role: **"REMOTE EDITOR"** or **"WIRED TO THE SERVER"**, which you set here and nowhere else. Who you are signed in as, sign in or out, and **"RESTART CCSYNC NOW"** |
 | **SYNCING** | Upload, proxy download and folder sync, a line each, with what is moving and what stopped. The buttons that belong to a stopped state appear here: resume proxy download, start syncing again, accept the licence |
 | **PROJECTS ON THIS COMPUTER** | Every project on this computer's sync plan, and which are **upload only** (section 4.2) |
 | **RESOLVE** | What the companion can see of your Resolve: clips whose files it cannot find, proxies it could not attach, and what it did about them |
-| **FLEET JOBS** | Whether this computer is taking work for the team, what it is running right now with a **[ STOP THIS JOB ]** button, and the last few jobs it finished |
+| **FLEET JOBS** | Whether this computer is taking work for the team, what it is running right now with a **"STOP THIS JOB"** button, and the last few jobs it finished |
 | **YOUTUBE** | Only if your admin has enabled YouTube downloads: signing in to YouTube, and stopping a download |
 | **ADVANCED** | Scan a whole project; bring an existing project's media into the synced folder; undo the last clip-path change; grade from server originals (Windows: swap `P:` for a session); stop ALL syncing on this computer; remove a project from this computer |
-| **HELP** | **[ COPY DIAGNOSTICS FOR YOUR ADMIN ]** puts a summary of this computer's state on the clipboard to paste into a message. **[ OPEN LOG ]**. **[ HOW CC SYNC WORKS ]** and **[ WHAT DO THESE MEAN? ]** open this document, and the version this computer is running is at the bottom |
+| **HELP** | **"COPY DIAGNOSTICS FOR YOUR ADMIN"** puts a summary of this computer's state on the clipboard to paste into a message. **"OPEN LOG"**. **"HOW CC SYNC WORKS"** and **"WHAT DO THESE MEAN?"** open this document, and the version this computer is running is at the bottom |
 
 HELP moves to the top of the window whenever something is wrong, because that
 is when somebody needs it.
@@ -473,12 +473,12 @@ transfer is running the companion also keeps the computer from sleeping.
 
 | Dashboard page | What it is for |
 |---|---|
-| **Sync status** (the front page) | Every project with a health dot; per project, each editor and computer, how complete it is and what is missing. The sidebar ticks are here |
+| **Sync status** (the front page) | Every project with a health dot; per project, each editor and computer, how complete it is and what is missing. Your own ticks (every computer you use) are made here, in the projects list |
 | **Transfers** | Live queue: what is moving right now, speed, ETA, what is queued and what is still "getting ready" |
-| **Fleet** grid | One row per computer: online, version, what upload, proxy download and folder sync are each doing, and the coloured chips that mark an unusual state (proxy download stopped itself, stopped by the admin, indexing, needs proxies, will not upload). A [ RESUME ] button appears beside a computer whose proxy download stopped itself |
-| **Settings > Users** | People, their computers, approving a new computer's sync device, per-editor tokens, active sessions, and the switch that **stops syncing for the whole fleet** |
+| **Fleet** grid | One row per computer: online, version, what upload, proxy download and folder sync are each doing, and the coloured chips that mark an unusual state (proxy download stopped itself, stopped by the admin, indexing, needs proxies, will not upload). A "Resume" button appears beside a computer whose proxy download stopped itself |
+| **Settings > Users** | People, their computers, approving a new computer's sync device, per-editor tokens, active sessions, and **"Stop all syncing"**, which stops syncing for the whole fleet |
 | **Settings > Sync plans** | The project-by-computer grid with "copy from" |
-| **Settings > Packages** | Published companion builds, which one is current, [ UPDATE NOW ] per out-of-date computer, and the vendor's release feed |
+| **Settings > Packages** | Published companion builds, which one is current, "Update now" per out-of-date computer, and the vendor's release feed |
 | **Settings** (site) | The organisation's name, addresses, feature switches, AI provider keys for optional features |
 | **Project setup** | Create a new project folder from the template, straight from the browser |
 
@@ -491,10 +491,11 @@ The dashboard does not keep its own bad news in a log file. Every few minutes
 the server checks what it can see of itself and the fleet, and anything it
 finds opens a row that stays open until it stops being true.
 
-- **PROBLEMS THE SERVER FOUND**, on the front page above the grid. It is
+- **PROBLEMS THE SERVER FOUND**, on the front page (on Settings > Health
+  instead, where the new terminal look is switched on for Settings). It is
   there only when something is open, so a healthy fleet does not show a
   panel. Each row says what happened, what it means and **WHAT TO DO**, and
-  most carry a **[ TAKE ME THERE ]** button that opens the page where you fix
+  most carry a **"Take me there"** button that opens the page where you fix
   it. Dismissing a row is allowed; it comes back by itself if it is still
   true.
 - **Settings > HEALTH** is the one page that answers "is everything all
@@ -502,7 +503,7 @@ finds opens a row that stays open until it stops being true.
   that have stopped being true, and the safety mechanisms the server cannot
   currently confirm. Each line is printed in the words of the page it came
   from, and links back to it. Nothing on that page changes anything.
-- **[ NOT CHECKED ] is not [ OK ].** Where the server cannot answer a check,
+- **NOT CHECKED is not OK.** Where the server cannot answer a check,
   it says so and gives the reason, rather than showing a green tick it has
   not earned. This is deliberate, and it is the point of the whole panel.
 
@@ -536,11 +537,11 @@ files were simply *moved* on the NAS rather than deleted, which is not an
 alarm.
 
 **What you see.** The tray line reads "PROXY DOWNLOAD STOPPED (safety)" with
-the reason, and a red chip appears on the admin's fleet grid. Upload and folder sync
+the reason, and a red marker appears beside your computer on the admin's Sync status page. Upload and folder sync
 keep running: your uploads and the shared files are unaffected.
 
 **What to do.** Tell the admin. Once they have confirmed the NAS is healthy,
-either they click [ RESUME ] beside your computer on the fleet grid, or you
+either they press "Resume" for your computer on the Sync status page, or you
 choose **Resume proxy download** in the tray and confirm. Nothing clears it
 automatically, on purpose: this is precisely the moment somebody should
 look.
@@ -724,8 +725,8 @@ related to it runs on any computer.
 When it is on:
 
 - The **YOUTUBE** page takes a topic ("offshore wind protest, drone show") or
-  pasted links. [ GET LINKS ] searches and shows a review grid of candidate
-  videos; you untick what you do not want, then [ DOWNLOAD ]. Pasted links
+  pasted links. "Get links" searches and shows a review grid of candidate
+  videos; you untick what you do not want, then "Download". Pasted links
   skip the review and download exactly those.
 - Before the first use, the page and the tray both show a notice about rights
   and YouTube's terms; you accept it once per person and once per computer
@@ -759,7 +760,7 @@ is told a different version is current.
   running app, and swaps itself over. It will not do this in the middle of
   a FIX ALL or a consolidate.
 - **The admin can push.** Settings > Packages lists out-of-date computers with
-  an [ UPDATE NOW ] button each. The request reaches that computer on its
+  an "Update now" button each. The request reaches that computer on its
   next report and it installs the same signed build the click would have.
 - **Unattended updates** are a per-site switch, off by default. With it on,
   a companion takes any newer build on its own, but never an older one.
@@ -881,10 +882,10 @@ links straight to a row here wherever one of them appears.
 | "Accept the licence agreement to start syncing" | The licence was not accepted on this computer (often after an update) | Click the menu item, read, accept |
 | The admin says they cannot see your computer | You are not signed in at the tray, or the companion is not running | Check the tray says "Signed in as you"; start the companion if the icon is missing |
 | The tray shows no project lines, or "no selection" | This computer's sync plan is empty (a new computer starts empty), or the dashboard could not be reached to read it | Tick projects on the dashboard, or ask the admin to copy another computer's plan |
-| "PROXY DOWNLOAD STOPPED (safety): ..." | Proxy download stopped itself; uploads and shared files still run | Tell the admin. After they confirm the NAS is healthy: admin clicks [ RESUME ] on the fleet grid, or you choose **Resume proxy download** |
+| "PROXY DOWNLOAD STOPPED (safety): ..." | Proxy download stopped itself; uploads and shared files still run | Tell the admin. After they confirm the NAS is healthy: admin presses "Resume" for your computer on the Sync status page, or you choose **Resume proxy download** |
 | A proxy you had has vanished | Proxy download mirrored a removal | Look in `.ccsync-trash` at the top of your local tree, newest folder |
 | "Your administrator stopped syncing for everyone" or "Syncing is STOPPED on this computer" | The admin stopped the whole fleet, or you used *Stop ALL syncing* | Stopped by your admin: wait for them. Stopped by you: *Start syncing again* |
-| "N file(s) won't upload" or a [ WON'T UPLOAD ] chip | A file with the same name but a different size already exists on the NAS; the upload never overwrites | Rename your file, or ask the admin to remove the server copy |
+| "N file(s) won't upload" or a WON'T UPLOAD marker | A file with the same name but a different size already exists on the NAS; the upload never overwrites | Rename your file, or ask the admin to remove the server copy |
 | "N need proxies" in the tray | Your uploaded originals have no proxy yet, so others cannot see them | Nothing; a wired computer makes them when idle. Ask the admin if the count never falls |
 | A CC Sync popup lists clips | You cut in media from outside the synced tree | Pick destinations, **FIX ALL**; or **IGNORE** for this session |
 | "Media Offline" for clips other people can see | Their proxy has not arrived yet, the project is not ticked on this computer, or `P:` is not mapped | Check the project is ticked for this computer and the tray shows it syncing; on Windows check `P:` exists; on Mac check the mapped mount |

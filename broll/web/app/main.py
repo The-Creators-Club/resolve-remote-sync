@@ -102,11 +102,29 @@ app.mount("/share/assets", ShareAssets(directory=config.STATIC_DIR), name="share
 app.include_router(share_router)
 
 
+# R16 (UI port phase 1, 2026-09-25): the dashboard's /partials/topbar is
+# always fresh, and the terminal HUD it now serves is painted by THIS app's
+# style.css. A heuristically cached old sheet (plain StaticFiles sends
+# Last-Modified and no Cache-Control) would pair the new bar with an old
+# sheet that cannot paint it. no-cache keeps the validators, so an unchanged
+# file still costs only a 304.
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+class RevalidatedStaticFiles(StaticFiles):
+    """StaticFiles whose every answer must be revalidated before reuse."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers.update(NO_CACHE)
+        return response
+
+
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(config.STATIC_DIR / "index.html")
+    return FileResponse(config.STATIC_DIR / "index.html", headers=NO_CACHE)
 
 
 # Serve app.js/style.css/etc. Mounted last so API/media routes above take
 # precedence over any same-named static path.
-app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
+app.mount("/static", RevalidatedStaticFiles(directory=config.STATIC_DIR), name="static")

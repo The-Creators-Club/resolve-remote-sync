@@ -143,6 +143,61 @@ PROVIDERS: dict[str, ProviderSpec] = {
     ),
 }
 
+# What the terminal Settings page's ADD NEW picker and wizard say about each
+# provider (UI redesign port phase 4, 2026-09-25): what it is, what it costs
+# and answers, and for a key provider where the key comes from and what it
+# starts with. Kept beside PROVIDERS, not in the page's JS, so a console that
+# moves is one edit here and the API answer carries the same words
+# (plan 5.3). Third-party console names are plain text: nothing here is a
+# credential.
+PROVIDER_HELP: dict[str, dict] = {
+    CLAUDE_CODE: {
+        "what": "Anthropic's own command-line tool, signed in with your Claude subscription.",
+        "needs": ("Spends your Claude subscription, not a bill per call. Needs CLI "
+                  "tools allowed and about 300 MB on this server. The only one the "
+                  "server check can use."),
+    },
+    ANTHROPIC_API: {
+        "what": "A key from the Anthropic Console. The supported path: nothing is installed.",
+        "needs": ("Pay per use, billed to your own Anthropic account. Answers the "
+                  "YouTube downloader and Timeline Cards."),
+        "vendor": "Anthropic", "site": "console.anthropic.com",
+        "url": "https://console.anthropic.com/settings/keys", "prefix": "sk-ant-",
+        "steps": [
+            "Sign in at console.anthropic.com with the account that should pay for it.",
+            "Open Settings, API keys and press Create key. Name it after this server so you can tell it apart later.",
+            "Copy the key. It starts sk-ant- and Anthropic shows it only once.",
+        ],
+    },
+    CODEX: {
+        "what": "OpenAI's own command-line tool, signed in with your ChatGPT subscription.",
+        "needs": ("Spends your ChatGPT subscription. Needs CLI tools allowed. YouTube "
+                  "downloader only: Timeline Cards is written for Claude."),
+    },
+    OPENAI_API: {
+        "what": "A key from the OpenAI platform.",
+        "needs": "Pay per use, billed to your own OpenAI account. YouTube downloader only.",
+        "vendor": "OpenAI", "site": "platform.openai.com",
+        "url": "https://platform.openai.com/api-keys", "prefix": "sk-",
+        "steps": [
+            "Sign in at platform.openai.com with the account that should pay for it.",
+            "Open API keys and press Create new secret key.",
+            "Copy the key. It starts sk- and is shown only once.",
+        ],
+    },
+    DEEPSEEK_API: {
+        "what": "A key from the DeepSeek platform.",
+        "needs": "Pay per use, billed to your own DeepSeek account. YouTube downloader only.",
+        "vendor": "DeepSeek", "site": "platform.deepseek.com",
+        "url": "https://platform.deepseek.com/api_keys", "prefix": "sk-",
+        "steps": [
+            "Sign in at platform.deepseek.com with the account that should pay for it.",
+            "Open API keys and press Create new API key.",
+            "Copy the key. It starts sk- and is shown only once.",
+        ],
+    },
+}
+
 API_PROVIDERS = tuple(n for n in PROVIDER_ORDER if PROVIDERS[n].kind == "api")
 CLI_PROVIDERS = tuple(n for n in PROVIDER_ORDER if PROVIDERS[n].kind == "cli")
 
@@ -948,6 +1003,8 @@ def _snapshot(conn: sqlite3.Connection, settings: Any, *, probe: bool = True,
         "preference": preference(conn),
         "cli_enabled": cli_enabled(conn, settings),
         "cli_tos_note": CLI_TOS_NOTE,
+        # The picker's and wizard's words (terminal Settings page, phase 4).
+        "help": PROVIDER_HELP,
         "resolved": {"name": choice.name, "label": choice.label,
                      "reason": choice.reason, "pinned": choice.pinned},
     }

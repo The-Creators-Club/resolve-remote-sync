@@ -114,7 +114,19 @@ KEYS: dict[str, str] = {
     # dropping the old one mid-rollout bricks every installed copy.
     "android.package_name": "str",
     "android.sha256_cert_fingerprints": "csv",
+    # The terminal look (docs/UI_REDESIGN_PORT_PLAN.md 7.0, R24, 2026-09-25).
+    # DASHBOARD ONLY: never in `api_site`'s manifest or its `features`, never
+    # exported, refused by import. `ui_terminal_groups` is the list of page
+    # groups drawn in the new look (`none`, or names from
+    # ui_variant.GROUPS, `chrome` required); `ui_preview` is who may preview
+    # it with the per-browser cookie (off / admins / everyone).
+    "ui_terminal_groups": "csv",
+    "ui_preview": "str",
 }
+
+# Keys the general Settings save, the history snapshots and site.toml never
+# carry (R24): a look change is recorded under its own meta key.
+UI_KEYS = frozenset({"ui_terminal_groups", "ui_preview"})
 
 # What `keytool -list` and Play Console both print: 32 hex byte pairs, colon
 # separated. Pinned as a regex because a fingerprint that is one pair short
@@ -398,6 +410,12 @@ def validate(key: str, raw: str) -> str:
         return _validate_android_package(raw)
     if key == "android.sha256_cert_fingerprints":
         return _validate_android_fingerprints(raw)
+    if key == "ui_terminal_groups":
+        from . import ui_variant
+        return ui_variant.validate_groups_value(raw)
+    if key == "ui_preview":
+        from . import ui_variant
+        return ui_variant.validate_preview_value(raw)
     if kind == "int":
         return _validate_int(key, raw)
     if kind == "bool":
@@ -452,6 +470,15 @@ def set_many(
             (key, value, now, updated_by),
         )
     return normalized
+
+
+def delete_key(conn: sqlite3.Connection, key: str) -> bool:
+    """Remove one row, so the key falls back to its default again (R24's
+    `site` value: "follow the vendor default"). Caller commits."""
+    if key not in KEYS:
+        raise SiteValidationError(key, "not a recognised site setting")
+    cur = conn.execute(f"DELETE FROM {TABLE} WHERE key = ?", (key,))
+    return bool(cur.rowcount)
 
 
 def _looks_secret(key: str) -> bool:
@@ -671,6 +698,9 @@ def _shape(db_values: Mapping[str, str], settings: Any) -> dict[str, Any]:
                 if p.strip()
             ],
         },
+        # The terminal look (UI port 7.0): read by ui_variant only.
+        "ui_terminal_groups": pick("ui_terminal_groups") or "none",
+        "ui_preview": pick("ui_preview") or "off",
         # For the Settings page: which fields the DB actually overrides,
         # vs. which are still falling through to Settings/defaults.
         "_from_db": sorted(k for k in KEYS if k in db_values),
@@ -767,7 +797,12 @@ def manifest_for_app(app: Any, settings: Any = None) -> dict[str, Any]:
     except Exception as exc:                                       # noqa: BLE001
         log.warning("could not read the site manifest for this render (%s); "
                     "falling back to the deploy-time values", exc)
-        manifest = _shape({}, settings)
+        # UI port 7.0: the fallback is for THIS render only, never cached. A
+        # transient `database is locked` on the first render after boot used
+        # to pin the deploy-time shape until the next site write, which after
+        # the port would flip the whole studio to the classic look for the
+        # life of the process.
+        return _shape({}, settings)
     if state is not None:
         setattr(state, _CACHE_ATTR, manifest)
     return manifest
@@ -836,6 +871,8 @@ def _settings_fallback(key: str, settings: Any) -> str:
         # Android app configured", which is what a fresh site is.
         "android.package_name": "",
         "android.sha256_cert_fingerprints": "",
+        "ui_terminal_groups": str(getattr(settings, "site_ui_terminal_groups", "") or "none"),
+        "ui_preview": str(getattr(settings, "site_ui_preview", "") or "off"),
     }
     return str(mapping.get(key, ""))
 
@@ -983,6 +1020,15 @@ def import_toml(text: str) -> dict[str, str]:
                 "or rename the folder on the server "
                 "(docs/TREE_LAYOUT_AGNOSTICISM.md section 3.2)",
             )
+    # UI port R24: the look is never set by a pasted file. A `[site]
+    # ui_terminal_groups = ...` would re-enable a group just rolled back and be
+    # recorded as an ordinary import.
+    for table in data.values():
+        if isinstance(table, dict) and UI_KEYS & set(table):
+            raise SiteValidationError(
+                "ui_terminal_groups",
+                "the look is not imported: use the look groups form on Settings, "
+                "or tools/ui_variant.py")
     reverse_toml_key = {v: k for k, v in _TOML_KEY_NAMES.items()}
     out: dict[str, str] = {}
     for section, keys in _SECTIONS:

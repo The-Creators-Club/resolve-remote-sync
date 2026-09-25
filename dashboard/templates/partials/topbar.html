@@ -37,7 +37,9 @@
    PREFIXES lists /broll/, /music/ and /ytdl/, and dashboard/README.md records
    what each owner has to do to come off that list. Publishing it here first
    means the change on their side is one header, not a new endpoint. #}
-<a class="brand" data-dash-topbar data-csrf="{{ csrf_token or '' }}" href="/">{{ brand_org | upper }} <span class="dim">//</span> SYNC STATUS</a>
+{# data-ui-apps (UI port 7.0): whether the `apps` group is in THIS request's
+   set, never which bar was served. Classic here unless apps is on. #}
+<a class="brand" data-dash-topbar data-csrf="{{ csrf_token or '' }}" data-ui-apps="{{ 'cc' if 'apps' in ui_groups else 'classic' }}" href="/">{{ brand_org | upper }} <span class="dim">//</span> SYNC STATUS</a>
 {# UX-10 (2026-08-28): the count of problems the server has found, on every
    page, linked to the panel that names them. Admin-only and full-page only
    (see ui._render), and absent rather than zero when there is nothing wrong:

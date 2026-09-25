@@ -1,0 +1,159 @@
+{# THE TERMINAL SHELL (UI redesign port, phase 1, 2026-09-25; plan 2.5).
+
+   Every ported page extends this, never classic base.html (the overlay
+   would otherwise wrap every classic page in it, 7.0). It is base.html's
+   head with the terminal sheets instead of style.css + mobile.css, and
+   everything the classic shell does that a page relies on is kept: the
+   CSRF meta and hx-headers, the manifest and PWA tags, the details and
+   popover keeper, the deep-link scroller.
+
+   - Every static URL goes through asset_url(): a content hash, so a
+     same-version redeploy still changes the URL the service worker keys on.
+   - hx-headers carries X-CC-UI (the group set this page was drawn with),
+     X-CC-UI-Gen and X-CC-UI-Sig after the CSRF token (R23): a partial
+     follows the page that asked for it, not the setting of the moment.
+   - Scripts: pwa.js (shared, before htmx so it can slow polls on a coarse
+     pointer), htmx, htmx_errors.js, the cc copy of copy_value.js (never the
+     classic one: two delegated handlers would both run), tab_memory.js,
+     then cc/cc.js. All deferred, in that order.
+   - Body: the HUD in a bare host, the halt line on its own route, the page,
+     the hint sheet, the one confirm dialog and the one toast slot. #}
+{%- set ui_hdrs = dict(ui_hx_headers) -%}
+<!doctype html>
+<html lang="en" data-ui="cc" data-ui-groups="{{ ui_groups_attr }}" data-ui-gen="{{ ui_hdrs.get('X-CC-UI-Gen', '') }}" data-ui-sig="{{ ui_hdrs.get('X-CC-UI-Sig', '') }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>{% block title %}{{ brand_org | upper }}{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="{{ asset_url('favicon.svg') }}">
+  <link rel="alternate icon" type="image/png" href="{{ asset_url('favicon.png') }}">
+  <meta name="csrf" content="{{ csrf_token or '' }}">
+  {# hud.css first: hud-common is the ONLY home of the HUD, dock and strip
+     rules, and the page sheets never restate them (2.1). #}
+  <link rel="stylesheet" href="{{ asset_url('cc/hud.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('cc/terminal.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('cc/components.css') }}">
+  <link rel="stylesheet" href="{{ asset_url('cc/phone.css') }}">
+  {% block head %}{% endblock %}
+  <link rel="manifest" href="/manifest.webmanifest">
+  {# theme-color is the terminal --bg, so the phone's status bar matches. #}
+  <meta name="theme-color" content="#070403">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="apple-touch-icon" href="{{ asset_url('icons/icon-180.png') }}">
+  <script src="{{ asset_url('pwa.js') }}" defer></script>
+  <script src="{{ asset_url('htmx.min.js') }}" defer></script>
+  <script src="{{ asset_url('htmx_errors.js') }}" defer></script>
+  <script src="{{ asset_url('cc/copy_value.js') }}" defer></script>
+  <script src="{{ asset_url('tab_memory.js') }}" defer></script>
+  <script src="{{ asset_url('cc/cc.js') }}" defer></script>
+  <script>
+    // The details / popover keeper and the deep-link scroller, as in
+    // base.html (ui-dash-main-1, ui-dash-main-8, DUI-7): htmx swaps must not
+    // slam folds shut or close an open sheet, and a deep link to a panel
+    // that arrives by a load trigger is scrolled to once it exists.
+    function liveRoot(evt) {
+      var t = evt.detail && evt.detail.target;
+      if (t && t.isConnected === false && evt.target && evt.target.nodeType === 1) {
+        return evt.target;
+      }
+      return t;
+    }
+    (function () {
+      var state = {};
+      var sheets = {};
+      function isOpen(el) {
+        try { return el.matches(":popover-open"); } catch (e) { return false; }
+      }
+      document.addEventListener("htmx:beforeSwap", function (evt) {
+        var t = evt.detail.target;
+        if (!t || !t.querySelectorAll) return;
+        var seen = {};
+        t.querySelectorAll("details[data-key]").forEach(function (d) {
+          seen[d.getAttribute("data-key")] = d.hasAttribute("open");
+        });
+        state[t.id || "_"] = seen;
+        var open = [];
+        var pops = t.querySelectorAll("[popover][id]");
+        if (t.matches && t.matches("[popover][id]")) open.push({id: t.id, top: t.scrollTop});
+        pops.forEach(function (p) {
+          if (isOpen(p)) open.push({id: p.id, top: p.scrollTop});
+        });
+        sheets[t.id || "_"] = open;
+      });
+      document.addEventListener("htmx:afterSwap", function (evt) {
+        var key = (evt.detail.target && evt.detail.target.id) || "_";
+        var t = liveRoot(evt);
+        if (!t || !t.querySelector) return;
+        var seen = state[key] || {};
+        Object.keys(seen).forEach(function (k) {
+          var sel = 'details[data-key="' + CSS.escape(k) + '"]';
+          var d = (t.matches && t.matches(sel)) ? t : t.querySelector(sel);
+          if (!d) return;
+          if (seen[k]) d.setAttribute("open", "");
+          else d.removeAttribute("open");
+        });
+        var reopen = sheets[key] || [];
+        delete sheets[key];
+        reopen.forEach(function (s) {
+          var p = document.getElementById(s.id);
+          if (!p || !p.showPopover || isOpen(p)) return;
+          try { p.showPopover(); } catch (e) { return; }
+          p.scrollTop = s.top;
+        });
+      });
+    })();
+    (function () {
+      var done = false;
+      document.addEventListener("htmx:afterSwap", function (evt) {
+        if (done || !location.hash || location.hash.length < 2) return;
+        var t = liveRoot(evt);
+        if (!t || !t.querySelector) return;
+        var id = location.hash.slice(1);
+        var el = null;
+        try {
+          el = t.querySelector("#" + CSS.escape(id));
+        } catch (e) {
+          return;
+        }
+        if (!el && t.id === id) el = t;
+        if (!el) return;
+        done = true;
+        el.scrollIntoView();
+      });
+    })();
+  </script>
+</head>
+<body hx-headers='{"X-CSRF-Token": {{ (csrf_token or "") | tojson }}{% for k, v in ui_hx_headers %}, {{ k | tojson }}: {{ v | tojson }}{% endfor %}}'>
+  {# `hud` is empty on the bare pages (sign in): no HUD, as the bench draws them. #}
+  {% block hud %}<header class="hud-host">
+    {% include "partials/topbar.html" %}
+  </header>{% endblock %}
+  {% if session_user %}
+  {# UX-8: the fleet halt on every page, its own load plus a 60 s poll that
+     skips hidden tabs. Renders nothing while the fleet is syncing. #}
+  <div class="halt-slot" hx-get="/partials/halt-line"
+       hx-trigger="load, every 60s [document.visibilityState === 'visible']"
+       hx-swap="innerHTML"></div>
+  {% endif %}
+  <div class="shell">
+    {% block layout %}{% endblock %}
+  </div>
+  {% include "partials/hint_sheet.html" %}
+  {# The one confirm dialog (3.2): a real modal <dialog>, opened by
+     cc/cc.js's htmx:confirm handler with showModal(); Cancel is focused. #}
+  <dialog id="cc-confirm" class="win dialog" aria-labelledby="cc-confirm-t">
+    <form method="dialog">
+      <div class="bar"><h2 class="t" id="cc-confirm-t">are you sure</h2></div>
+      <div class="body">
+        <p class="cc-confirm-q" data-cc-confirm-q></p>
+        <div class="acts">
+          <button class="key" type="submit" value="cancel" autofocus data-cc-confirm-cancel><span class="t">Cancel</span></button>
+          <button class="key primary" type="submit" value="ok" data-cc-confirm-ok><span class="t">Yes, do it</span></button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+  <div class="toast" id="cc-toast" role="status" aria-live="polite"><span class="p" aria-hidden="true">&gt;</span><span class="tt"></span></div>
+</body>
+</html>

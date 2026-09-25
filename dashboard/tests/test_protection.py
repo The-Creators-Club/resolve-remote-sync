@@ -438,8 +438,9 @@ def test_the_panel_and_the_weekly_report_both_carry_it(conn):
 
     subject, text = alerts.compose_weekly(conn, NOW, _settings())
     assert "WHAT IS PROTECTED" in text
-    assert "[ MISSING ]" in text
-    assert "[ CANNOT VERIFY ]" in text
+    assert "  MISSING: " in text
+    assert "  CANNOT VERIFY: " in text
+    assert "[ MISSING ]" not in text
     # The standing red line SYS-8 asked for, with the action beside it.
     assert protection.BY_KEY["release_keys"].fix.split(".")[0] in text
 
@@ -544,7 +545,8 @@ def test_the_alarm_being_switched_off_is_an_error_line_on_this_panel(conn):
     assert line.severity == "error"
     assert line.title == "somebody is told when this server finds a problem"
     assert line.what == "whether a problem here reaches a person"
-    assert "[ SEND A TEST ]" in line.fix
+    assert '"Send a test"' in line.fix
+    assert "[ SEND A TEST ]" not in line.fix
 
 
 def test_the_consequence_counts_the_checks_rather_than_claiming_a_number(conn):

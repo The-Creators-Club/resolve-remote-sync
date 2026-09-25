@@ -1,0 +1,81 @@
+/* Settings, run the fleet, second half: Users, Sync plans, Jobs, History
+   and Setup (UI redesign port, phase 4, builder P4b, 2026-09-25). Everything
+   else is components.css; only what these five pages add lives here, every
+   class `sp-` prefixed or a live hook the pages already carry. */
+
+.sp-stack { display: grid; gap: calc(22px * var(--d)); }
+.sp-stack > div:empty { display: none; }
+.sp-stack > .lede, .sp-page > .lede { margin: 0; }
+.sp-gap { margin-top: 12px; }
+.sp-tight { padding-top: 8px; padding-bottom: 8px; }
+.sp-small { font-size: 12px; }
+.sp-caps { display: block; color: var(--muted); font-size: 11px; font-weight: 400; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 6px; }
+.sp-fp { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.sp-path, .sp-detail, .sp-why { overflow-wrap: anywhere; }
+.sp-why { color: var(--text-2); }
+
+/* Field widths: fixed, so a form row never reflows as it fills. */
+.sp-w-key { width: 28ch; max-width: 100%; }
+.sp-w-pw { width: 16ch; max-width: 100%; }
+.sp-w-name { width: 18ch; max-width: 100%; }
+.sp-w-label { width: 24ch; max-width: 100%; }
+.sp-w-md { width: 32ch; max-width: 100%; }
+.sp-w-lg { width: 100%; min-height: 5.5em; }
+.sp-w-step { width: 26%; }
+.sp-halt-why { flex: 1 1 28ch; min-width: 0; }
+
+/* Long lists live in a window of fixed height (the owner's rule). */
+.sp-jobs-h { max-height: 60vh; }
+.sp-audit-h { max-height: 70vh; }
+.sp-check-h { max-height: 70vh; }
+.sp-eula { max-height: 14rem; white-space: pre-wrap; margin: 0; }
+
+.sp-filter { margin-bottom: 8px; }
+.sp-filter input { width: 100%; }
+
+/* A key whose label swaps for a busy word keeps its box (nothing shifts). */
+form.htmx-request .sp-busy { pointer-events: none; opacity: 0.7; }
+
+/* The one-time secret: never foldable, always seen (plan 3.1, wave 5). */
+.sp-minted { border-color: var(--hi); }
+.sp-minted .bar { cursor: default; }
+
+/* Sync plans. */
+.sp-inert { pointer-events: none; }
+.sp-tick { display: inline-flex; }
+.sp-led-sm { transform: scale(0.8); }
+/* Six beats, never forever (owner rule: nothing moves forever). */
+.assign-grid .proj-check.is-saving,
+.assign-grid .matrix-upmode.is-saving { animation: sp-saving 0.9s ease-in-out 6; }
+.assign-cell .check:has(.is-saving) .g { animation: sp-saving 0.9s ease-in-out 6; }
+@keyframes sp-saving { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* assignments.js's own messages: fixed to the corner, above the dock, so a
+   note never pushes the grid. */
+.sp-notes {
+  position: fixed; right: 16px; bottom: calc(16px + var(--cc-dock-h, 0px) + env(safe-area-inset-bottom, 0px));
+  z-index: 60; display: grid; gap: 6px; max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.sp-notes .assign-note {
+  pointer-events: auto; background: var(--win-solid, var(--bg)); border: 1px solid var(--line);
+  border-left: 3px solid var(--ok); padding: 8px 12px; font-size: 13px; color: var(--text);
+}
+.sp-notes .assign-note.err { border-left-color: var(--err); cursor: pointer; }
+
+/* Setup's step status in each bar. */
+.setup-step-status .tag { white-space: nowrap; }
+#setup-tasks-body .task-actions { text-align: right; }
+#setup-tasks-body .task-actions .inline { justify-content: flex-end; }
+
+@media (prefers-reduced-motion: reduce) {
+  .assign-grid .proj-check.is-saving,
+  .assign-grid .matrix-upmode.is-saving,
+  .assign-cell .check:has(.is-saving) .g { animation: none; opacity: 0.6; }
+}
+
+@media (max-width: 760px) {
+  .sp-w-key, .sp-w-pw, .sp-w-name, .sp-w-label, .sp-w-md { width: 100%; }
+  .sp-w-step { width: auto; }
+  #setup-tasks-body .task-actions, #setup-tasks-body .task-actions .inline { text-align: left; justify-content: flex-start; }
+}

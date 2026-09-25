@@ -1,0 +1,13 @@
+{# The per-browser look switch (UI_REDESIGN_PORT_PLAN.md 3.4, phase 0). Plain
+   links, because an installed app has its own cookie jar and no URL bar: this
+   page is how a phone changes its own look. The new look is offered only when
+   the site's `ui_preview` setting allows this account. #}
+<section class="account-panel" id="account-look">
+  <div class="side-head">[ HOW THIS BROWSER LOOKS ]
+    <span class="muted">Changes this browser only.</span></div>
+  <p style="margin-top:0.4rem">
+    {% if ui_can_preview(request) %}<a class="btn tap" href="/ui/preview?variant=cc&amp;next=/account">[ USE THE NEW LOOK ]</a>{% endif %}
+    <a class="btn tap" href="/ui/preview?variant=classic&amp;next=/account">[ USE THE CLASSIC LOOK ]</a>
+    <a class="btn tap" href="/ui/preview?variant=site&amp;next=/account">[ FOLLOW THE SITE ]</a>
+  </p>
+</section>

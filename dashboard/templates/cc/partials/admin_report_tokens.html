@@ -1,0 +1,62 @@
+{# Per-editor report tokens, terminal look (phase 4; classic twin
+   partials/admin_report_tokens.html, COMMERCIAL_READINESS item 15). The BODY
+   of the page's "report_tokens" window (plan 3.1). The minted token rides out
+   of band into #minted-secret, first, at the top level (DUI-1). #}
+{% include "partials/minted_secret.html" %}
+<div class="admin-users-box" id="admin-report-tokens">
+  <div class="lede-in">One credential per editor, revocable on its own. It replaces the single shared
+    fleet token every companion used to hold.</div>
+
+  {% if error %}
+    <div class="body"><div class="note err error-banner"><span class="grow">{{ error }}</span></div></div>
+  {% endif %}
+
+  {% if report_tokens.shared_machines %}
+    <div class="body sp-tight"><div class="note warn"><span class="grow">
+      <b>{{ report_tokens.shared_count }} computer{{ "s" if report_tokens.shared_count != 1 }} still {{ "reports" if report_tokens.shared_count == 1 else "report" }} with the SHARED fleet token:</b>
+      <span class="sp-fp">{{ report_tokens.shared_machines | join(", ") }}</span>.
+      Once this is empty, ask whoever installed this server to switch the shared token off: it is a container setting, not something this page can change.
+    </span></div></div>
+  {% elif report_tokens.editor_count %}
+    <div class="body sp-tight"><div class="note ok"><span class="grow">
+      All {{ report_tokens.editor_count }} reporting computer{{ "s" if report_tokens.editor_count != 1 }} {{ "uses" if report_tokens.editor_count == 1 else "use" }} per-editor tokens.
+      The shared token is no longer used by anything: it is safe for whoever installed this
+      server to switch it off.
+    </span></div></div>
+  {% endif %}
+
+  <div class="scroll-x"><table class="tbl stack-sm">
+    <thead><tr><th>editor</th><th title="A note to tell one editor's tokens apart.">label</th><th>created</th><th title="The last report signed with it.">last used</th><th></th></tr></thead>
+    <tbody>
+    {% for t in report_tokens.tokens %}
+      <tr class="editor-row">
+        <td class="who" data-label="editor"><b>{{ t.editor_username }}</b></td>
+        <td data-label="label">{{ t.label or "-" }}</td>
+        <td data-label="created" title="{{ t.created_at }}">{{ t.created_at | ago }}</td>
+        <td data-label="last used" title="{{ t.last_used_at or '' }}">{{ t.last_used_at | ago }}</td>
+        <td class="acts-cell" data-label="actions">
+          {# C-8: the confirm is pinned by test_report_tokens.py. #}
+          <form class="inline-form" hx-post="/partials/admin/report-tokens/revoke"
+                hx-target="#admin-report-tokens" hx-swap="outerHTML"
+                hx-confirm="Revoke {{ t.editor_username }}'s report token? Their companion stops reporting and stops syncing until you issue a new token and they enter it. The old token cannot be shown again.">
+            <input type="hidden" name="token_id" value="{{ t.token_id }}">
+            <button class="key quiet sm" type="submit"><span class="t">revoke</span></button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="muted" data-label="">no per-editor tokens yet</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+
+  <div class="foot-in">
+    <form class="inline-form inline" hx-post="/partials/admin/report-tokens/create"
+          hx-target="#admin-report-tokens" hx-swap="outerHTML">
+      <b class="sp-caps">mint a token</b>
+      <input class="inp sm sp-w-name" type="text" name="username" placeholder="editor username" required aria-label="editor username">
+      <input class="inp sm sp-w-label" type="text" name="label" placeholder="label (e.g. 'editor laptop')" aria-label="label">
+      <button class="key primary sm" type="submit" title="Make a new report token for that editor. It is shown once, at the top of this page."><span class="t">mint</span></button>
+    </form>
+  </div>
+</div>

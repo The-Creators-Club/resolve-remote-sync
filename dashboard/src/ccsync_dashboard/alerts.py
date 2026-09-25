@@ -1396,7 +1396,8 @@ def _check_breaker(ctx: Ctx) -> list[Finding]:
             f"it, that computer gets no new proxies, so the editor cannot see "
             f"anyone else's footage. Uploads from it are still running and "
             f"nothing has been deleted.",
-            "On the dashboard: FLEET, then [ RESUME ] on that computer's row. "
+            "On the dashboard: Sync status, then press \"Resume\" on that "
+            "computer's row. "
             "Check the server looks right first: the brake exists because the "
             "NAS stopped looking like the tree.",
             str(g.get("breaker_reason") or "")))
@@ -1417,8 +1418,9 @@ def _check_fleet_halt(ctx: Ctx) -> list[Finding]:
         # for a [ RELEASE THE HALT ] button no template has ever had. The
         # control is partials/fleet_halt.html, on Settings, Users (the
         # target the halt banner links to), under these two labels.
-        "On the dashboard: Settings, Users, then [ START SYNCING AGAIN ] when "
-        "whatever it was set for is over, or [ KEEP IT STOPPED ] if it is not.",
+        "On the dashboard: Settings, Users, then press \"Start syncing again\" "
+        "when whatever it was set for is over, or \"Keep it stopped\" if it "
+        "is not.",
         str(halt.get("reason") or ""))]
 
 
@@ -1450,8 +1452,8 @@ def _check_fleet_halt_expired(ctx: Ctx) -> list[Finding]:
         f"The fleet-wide stop set {_age_words(halt.get('set_at'), ctx.now)} has run "
         f"past its own expiry time, so syncing has started again on its own. "
         f"If the reason it was set is still true, nobody has been told.",
-        "On the dashboard: Settings, Users, and either [ STOP ALL SYNCING ] "
-        "again or leave it running if the stop is no longer needed.",
+        "On the dashboard: Settings, Users, and either press \"Stop all "
+        "syncing\" again or leave it running if the stop is no longer needed.",
         f"expires_at={halt.get('expires_at')}")]
 
 
@@ -1539,7 +1541,8 @@ def _check_silent(ctx: Ctx) -> list[Finding]:
             f"green row there means nothing right now.",
             "Ask that editor to check the CC Sync tray icon is running and "
             "that the computer is on and online. If that computer is gone for "
-            "good, open FLEET and press [ FORGET ] on its row so this stops.",
+            "good, open Sync status and press \"Forget\" on its row so this "
+            "stops.",
             f"last known state: {_lane_words(e)}",
             repeat=not given_up))
     return out
@@ -2058,8 +2061,8 @@ def _check_feed_stale(ctx: Ctx) -> list[Finding]:
         f"This dashboard has not been able to check for new CC Sync builds "
         f"since {_age_words(last, ctx.now)}. Nobody in the fleet will be "
         f"offered a fix that has been released since then.",
-        "Check the NAS can reach the internet, then press [ CHECK NOW ] on "
-        "SETTINGS, PACKAGES.",
+        "Check the NAS can reach the internet, then press \"Check now\" on "
+        "Settings, Packages.",
         str(feed.get("last_error") or ""))]
 
 
@@ -2359,8 +2362,8 @@ def _check_moved_project_dirs(ctx: Ctx) -> list[Finding]:
             f"{count} project folder(s) on {who} are not where the tree says "
             f"they should be. Syncing for those projects will look busy and "
             f"move nothing, and files moved by hand come back.",
-            "Move the folder back, or use [ MOVE ON THE SERVER AND ON EVERY "
-            "MACHINE ] on the project page so every computer follows.",
+            "Move the folder back, or use \"Move on the server and on every "
+            "computer\" on the project page so every computer follows.",
             f"moved_project_dirs_count={count}"))
     return out
 
@@ -2427,8 +2430,8 @@ def _check_file_moves(ctx: Ctx) -> list[Finding]:
             f"({_age_words(r['expired_at'], ctx.now)}). That computer still holds "
             f"the file at the old path, so it will re-upload it and the move will "
             f"undo itself.",
-            "Open the project page and use [ MOVE ON THE SERVER AND ON EVERY "
-            "MACHINE ] again once that computer is back online.",
+            "Open the project page and use \"Move on the server and on every "
+            "computer\" again once that computer is back online.",
             f"expired_at={r['expired_at']}"))
     if stranded:
         out.append(_f(
@@ -2510,8 +2513,8 @@ def _check_versions_behind(ctx: Ctx) -> list[Finding]:
             f"{e.get('current_companion_version') or 'unknown'}). Every fix "
             f"since then is missing on that computer, including ones that "
             f"affect whether its footage syncs at all.",
-            "On the dashboard: SETTINGS, PACKAGES, then [ UPDATE NOW ] on that "
-            "computer.",
+            "On the dashboard: Settings, Packages, then press \"Update now\" "
+            "for that computer.",
             f"behind={len(newer)}"))
     for platform, has_current in sorted(on_current):
         rows = on_current[(platform, has_current)]
@@ -2528,7 +2531,7 @@ def _check_versions_behind(ctx: Ctx) -> list[Finding]:
                 f"{names} {'is' if one_row else 'are'} {behind} releases behind "
                 f"on CC Sync ({'it runs' if one_row else 'they run'} {running}), "
                 f"and this dashboard has no current {platform} build at all. "
-                f"[ UPDATE NOW ] cannot help, because it sends the current "
+                f"\"Update now\" cannot help, because it sends the current "
                 f"build and there is none to send.",
                 f"On the dashboard: SETTINGS, PACKAGES. If a newer {platform} "
                 f"build is listed, make it current there. If none is listed, "
@@ -2548,7 +2551,7 @@ def _check_versions_behind(ctx: Ctx) -> list[Finding]:
             + f"The newer builds exist but none of them is current here: they are "
             f"staged on Settings, Packages (a build held for its trial is made "
             f"current by hand), or offered by the vendor and not accepted by "
-            f"this dashboard. [ UPDATE NOW ] cannot help, because it sends the "
+            f"this dashboard. \"Update now\" cannot help, because it sends the "
             f"current build, which {'it already runs' if one_row else 'they already run'} "
             f"or is ahead of.",
             "On the dashboard: SETTINGS, PACKAGES. If a newer build is listed as "
@@ -2625,8 +2628,8 @@ def _check_retracted_running(ctx: Ctx) -> list[Finding]:
             f"has been recalled. Stopping it being offered to new computers "
             f"says nothing about the ones already on it, which are the ones a "
             f"recall is about.",
-            "On the dashboard: SETTINGS, PACKAGES, then [ UPDATE NOW ] on that "
-            "computer to move it onto a good build.",
+            "On the dashboard: Settings, Packages, then press \"Update now\" "
+            "for that computer to move it onto a good build.",
             str(reason or "no reason given")))
     return out
 
@@ -2674,8 +2677,8 @@ def _check_weekly_send(ctx: Ctx) -> list[Finding]:
         f"The weekly fleet report could not be delivered "
         f"({_age_words(row.get('at'), ctx.now)}). Nobody is being told "
         f"anything by mail, including the alerts on this page.",
-        "On the dashboard: SETTINGS, ALERTS, then [ SEND A TEST ] and fix what "
-        "it says.",
+        "On the dashboard: Settings, Alerts, then press \"Send a test\" and "
+        "fix what it says.",
         str(row.get("detail") or ""))]
 
 
@@ -2887,7 +2890,7 @@ def _check_jobs_abandoned(ctx: Ctx) -> list[Finding]:
         f"The fleet gave up on {len(rows)} job(s) in the last day ({kinds}). "
         f"Whatever they were for did not happen: a proxy was not made, a "
         f"transcript was not written, and nothing anywhere else says so.",
-        "Settings, JOBS, [ SHOW FINISHED ], then [ TRY AGAIN ] once the "
+        "Settings, Jobs, \"Show finished\", then \"Try again\" once the "
         "computer that failed it is fixed.",
         f"ids={ids} last_error={first_error[:120]}")]
 
@@ -2957,7 +2960,7 @@ def _check_jobs_pinned_no_executor(ctx: Ctx) -> list[Finding]:
             f"now, and nothing has reported progress on them for over an hour. "
             f"That is what a container restarted mid-encode leaves behind, and "
             f"nothing releases them on its own.",
-            "Settings, JOBS, then [ CANCEL ] on each one and queue it again.",
+            "Settings, Jobs, then \"Cancel\" on each one and queue it again.",
             f"ids={ids}"))
     return out
 
@@ -3008,9 +3011,9 @@ def _check_upgrade_refused(ctx: Ctx) -> list[Finding]:
             f"reason: {reason}. It never downloaded anything, so it will keep "
             f"refusing, and pressing the update button on this dashboard "
             f"cannot change that.",
-            "Settings, PACKAGES: publish a build that computer will accept, or "
-            "install it there by hand from the INSTALLER link. [ UPDATE NOW ] "
-            "cannot fix a refusal.",
+            "Settings, Packages: publish a build that computer will accept, or "
+            "install it there by hand from the \"Installer\" link. \"Update "
+            "now\" cannot fix a refusal.",
             f"refused={r['upgrade_refused_version']} "
             f"at={r['upgrade_refused_at']}"))
     return out
@@ -3115,8 +3118,9 @@ def _check_rollout_stalled(ctx: Ctx) -> list[Finding]:
             f"{channel.get('machines_total')} have taken it. {len(live)} "
             f"computer(s) have reported since then and are still on an older "
             f"build: {names}.",
-            "Settings, PACKAGES, then [ UPDATE NOW ] on each computer that is "
-            "behind. One that is refusing the offer is reported separately.",
+            "Settings, Packages, then press \"Update now\" for each computer "
+            "that is behind. One that is refusing the offer is reported "
+            "separately.",
             f"platform={channel.get('platform')} "
             f"reverts={channel.get('reverts')} "
             f"failed_attempts={channel.get('failed_attempts')}"))
@@ -3573,8 +3577,8 @@ def _check_ytdl_stale(ctx: Ctx) -> list[Finding]:
         f"{snap.get('yt_dlp_age_days')} days old. YouTube breaks these tools "
         f"deliberately, so downloads here will start failing, and the newer "
         f"one arrives with a dashboard update.",
-        "Settings, then [ CHECK NOW ] under the dashboard update panel, and "
-        "install the build it offers.",
+        "Settings, Packages, then press \"Check now\" and install the build "
+        "the Dashboard panel offers.",
         f"version={snap.get('yt_dlp_version')} "
         f"age_days={snap.get('yt_dlp_age_days')}")]
 
@@ -3693,8 +3697,9 @@ def _check_red_unexplained(ctx: Ctx) -> list[Finding]:
               "computer has reported.",
             # ui-copy-3 (2026-09-25): the button is [ ASK THIS COMPUTER WHY ]
             # (partials/fleet_grid.html); "[ ASK WHY ]" named nothing.
-            "Open that computer's row on the SYNC STATUS page and press "
-            "[ ASK THIS COMPUTER WHY ], then send us the diagnostics it returns.",
+            "Open that computer's row on the Sync status page and press "
+            "\"Ask this computer why\", then send us the diagnostics it "
+            "returns.",
             f"status={e.get('status')} reason={e.get('status_reason') or ''}"))
     return out
 
@@ -5013,7 +5018,7 @@ def _record_delivery_budget(
                       f"accepts the connection and then does not answer. "
                       f"Nothing has been lost: anything still wrong is offered "
                       f"again every cycle."),
-                fix=("On Settings, Alerts: press [ SEND A TEST ] and time it. If "
+                fix=("On Settings, Alerts: press \"Send a test\" and time it. If "
                      "it hangs, correct the mail server or webhook address, or "
                      "switch the channel off until it is fixed."),
                 now=now)

@@ -1,0 +1,14 @@
+{# The freshness stamp, terminal twin (phase 1; DUI-2 for the why).
+
+   Polled into #topbar-stamp by the HUD every 30 s. On a phone (600 px and
+   below, hud-common) the bar keeps only the compact warning: an LED and the
+   word "stale" when Syncthing is unreachable, and nothing when all is well.
+   The full sentence is the warning's own title / data-tip, which the hint
+   sheet reads on a tap, so it is never a second copy that could go stale. #}
+{% if stamp_at %}
+  {% if not stamp_syncthing_reachable %}
+    <span class="hud-stale" data-tip="Syncthing is unreachable: the data on this page may be stale."
+          title="Syncthing is unreachable: the data on this page may be stale."><span class="hud-led hud-warn" aria-hidden="true"></span>stale<span class="hud-hide-sm">: syncthing unreachable, data may be stale</span></span>
+  {% endif %}
+  <span class="hud-stamp-at hud-hide-sm" title="when this page last heard back from the server">updated {{ stamp_at | ago }}</span>
+{% endif %}

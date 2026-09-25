@@ -977,9 +977,11 @@ async function miRun() {
   if (clap.cached === false && clap.download_bytes) {
     // Consent for the download, with the byte count, BEFORE anything starts:
     // 280 MB on a hotel connection is the editor's business, not ours.
-    if (!window.confirm(
-      `The music indexing model isn't on this computer yet. Running this batch ` +
-      `downloads it first (about ${miBytes(clap.download_bytes)}). Continue?`)) return;
+    const q = `The music indexing model isn't on this computer yet. Running this batch ` +
+      `downloads it first (about ${miBytes(clap.download_bytes)}). Continue?`;
+    // UI port phase 6: the terminal look asks through its own dialog.
+    const ok = (window.ccSpa && window.ccSpa.active()) ? await window.ccSpa.confirm(q) : window.confirm(q);
+    if (!ok) return;
   }
 
   $('#mi-run').disabled = true;
@@ -1161,9 +1163,11 @@ function miCancelBatch() {
 }
 
 async function miCancelUid(uid) {
-  if (!window.confirm(
-    'Stop this batch? Tracks already in the library stay there; the rest are ' +
-    'dropped and their staged files are kept.')) return;
+  const q = 'Stop this batch? Tracks already in the library stay there; the rest are ' +
+    'dropped and their staged files are kept.';
+  // UI port phase 6: the terminal look asks through its own dialog.
+  const ok = (window.ccSpa && window.ccSpa.active()) ? await window.ccSpa.confirm(q) : window.confirm(q);
+  if (!ok) return;
   try {
     await miApi(`api/ingest-batches/${encodeURIComponent(uid)}/cancel`, {method: 'POST'});
   } catch (e) {

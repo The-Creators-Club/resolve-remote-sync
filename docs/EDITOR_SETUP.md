@@ -78,8 +78,8 @@ it install the companion (the tray app) for you -- otherwise you'd copy
 from there. Don't keep it anywhere else; that folder is the only one the
 script starts at logon.
 
-**Mac** -- get the script from the dashboard: sign in, open the menu (the
-three bars at the top left) and click `[ INSTALLER ]`, which downloads
+**Mac** -- get the script from the dashboard: sign in, open the menu and
+click "Installer", which downloads
 `ccsync-onboard-<version>.sh` to a Mac browser. To fetch the OTHER platform's
 package (an admin on Windows setting a Mac up), open `/installer`, which shows
 both. Then, in Terminal:
@@ -180,7 +180,7 @@ Two things follow from that:
   it another of your machines' lists in one click (Settings -> Assignments,
   the `copy from…` box in that computer's column), or you tick what you want
   on it.
-- **The sidebar checkboxes are the PERSON**: ticking there means "every
+- **The projects-list checkboxes are the PERSON**: ticking there means "every
   computer I use". Per-computer lists live on the assignments grid. Unticking
   anywhere removes it everywhere, which is the safe direction -- "stop
   syncing this" must not leave it running on your other machine.
@@ -461,7 +461,7 @@ xattr -d com.apple.quarantine ~/.local/ccsync/bin/ccsync-companion
 - Anything you drop into your local project folder under `Audio/`,
   `AE/`, `Subs/`, etc. syncs both ways automatically (Syncthing, lane C).
 - **A folder shared from another project** (dashboard: project page →
-  [ SHARE A FOLDER INTO THIS PROJECT ]) arrives at its *original* path --
+  "Share a folder into this project") arrives at its *original* path --
   e.g. a borrowed interview under the other project's `Interviewees/` --
   and behaves exactly like your own project's folders: proxies down,
   uploads up, small files both ways. You do not need the other project

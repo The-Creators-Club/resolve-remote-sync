@@ -72,6 +72,15 @@ def appjs():
                     media_type='application/javascript')
 
 
+@app.get('/cc_spa.js')
+def ccspajs():
+    """The terminal look's helper (UI port phase 6): folds, tips, the confirm
+    dialog and unbracketed labels, inert unless the page carries html.cc. A
+    sibling route like the others, for the same reason."""
+    return Response((config.STATIC_DIR / 'cc_spa.js').read_text(encoding='utf-8'),
+                    media_type='application/javascript')
+
+
 @app.get('/style.css')
 def css():
     return Response((config.STATIC_DIR / 'style.css').read_text(encoding='utf-8'),

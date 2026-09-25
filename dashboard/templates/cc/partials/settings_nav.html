@@ -1,0 +1,18 @@
+{# The Settings strip, terminal twin (phase 1). Same groups, same keys and
+   the same admin_only rule per entry as partials/settings_nav.html, from
+   ui.SETTINGS_NAV_GROUPS. Labels are lowercase words with a ">" drawn by
+   CSS (hud-common .snav), never brackets. One sideways-scrolling row at
+   600 px and below; `scroll-x` stays in the class list because the phone
+   sweep exempts exactly that class from its overflow check. #}
+<nav class="snav scroll-x" aria-label="settings">
+  {% for group, entries in SETTINGS_NAV_GROUPS %}
+    {% set visible = entries | selectattr("3", "equalto", false) | list if not session_is_admin else entries %}
+    {% if visible %}
+      <div class="snav-g"><span class="snav-h">{{ group }}</span>
+      {% for key, label, href, admin_only in visible %}
+        <a href="{{ href }}"{{ ' aria-current="page"' | safe if nav_current == key }}>{{ label | lower }}</a>
+      {% endfor %}
+      </div>
+    {% endif %}
+  {% endfor %}
+</nav>

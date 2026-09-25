@@ -1,0 +1,17 @@
+{# The files one computer still waits for, opened inline under its row in
+   the project page's computers window (UI redesign port phase 2). Drawn
+   into #missing-<device id>, which is hx-preserve'd, so the 10 s beat of
+   #project-detail leaves an opened list alone (3.3). #}
+<div class="missing">
+  <div class="hint">missing on <b>{{ editor_label }}</b>, refreshed {{ missing.refreshed_at | ago }}</div>
+  {% if missing.files %}
+  <ul class="missing-list">
+    {% for f in missing.files %}
+    <li><span class="fname" title="{{ f.name }}">{{ f.name }}</span><span class="fsize num">{{ f.size | human_bytes }}</span></li>
+    {% endfor %}
+  </ul>
+  {% if missing.truncated %}<div class="hint warn">and {{ need_items - (missing.files | length) }} more (the list stops at {{ missing.files | length }})</div>{% endif %}
+  {% else %}
+  <div class="hint">Nothing listed yet. The collector refreshes these lists every minute for computers that are behind.</div>
+  {% endif %}
+</div>

@@ -1,0 +1,141 @@
+{# The dashboard's own code updates, terminal look (UI redesign port,
+   phase 4, group `settings-fleet`, builder P4a, 2026-09-25; classic twin
+   partials/admin_dashboard_update.html).
+
+   This is the BODY of the page's this_dashboard window: the window and its
+   bar live in cc/admin_packages.html, so static/cc/dashboard_update.js
+   replacing #dashboard-update (outerHTML, by hand, after a fetch) can never
+   touch the fold. It carries NO oob fragment (3.1): a fetch() inserts it raw.
+
+   The two older-code flows stay two select-plus-key pairs, never one merged
+   list (5.3): an older bundle on the feed runs the update flow
+   (data-dashupd-apply + data-dashupd-older="1"), going back to the tree or
+   the image runs the rollback flow (data-dashupd-rollback +
+   #dashupd-restore-db). The cc script copies each select's value onto its
+   key's data-dashupd-* attribute. #}
+<div id="dashboard-update" class="sf-dash" data-running="{{ dash_update.running }}">
+  {% if error %}
+    <div class="note err"><span class="grow">{{ error }}</span></div>
+  {% endif %}
+
+  <dl class="kv">
+    <dt>running</dt><dd><b class="num">{{ dash_update.running }}</b></dd>
+    <dt title="Where the code this dashboard runs was read from: the container image itself, or an update applied on top of it.">code from</dt><dd>{{ dash_update.source or "?" }}</dd>
+    {% if dash_update.image %}<dt title="The version the container image itself carries.">image carries</dt><dd>{{ dash_update.image }}</dd>{% endif %}
+    {% if dash_update.runtime_id %}<dt title="The set of libraries this container provides. An update must match it.">runtime</dt><dd><span class="sha" title="{{ dash_update.runtime_id }}">{{ dash_update.runtime_id[:12] }}</span></dd>{% endif %}
+  </dl>
+
+  {% if dash_update.current.reverted_reason %}
+    <div class="note warn"><span class="grow">Reverted automatically: {{ dash_update.current.reverted_reason }}</span></div>
+  {% endif %}
+  {% if dash_update.current.revert_refused_reason %}
+    <div class="note err"><span class="grow">This dashboard did not roll itself back automatically: {{ dash_update.current.revert_refused_reason }}</span></div>
+  {% endif %}
+  {% if dash_update.current.retired_from %}
+    <div class="lede-in dim">{{ dash_update.current.retired_from }} was applied here and has been retired: {{ dash_update.current.retired_reason or "this image carries it" }}.</div>
+  {% endif %}
+
+  {% if not dash_update.image_mode %}
+    <div class="empty">This deployment updates from your wired computer, not over the air: its code is read straight off the server rather than from an installed package. Ask whoever installed this server to move it onto the update channel if you want to update from this page.</div>
+  {% else %}
+    <div id="dashupd-progress" class="muted" role="status" aria-live="polite"
+         data-in-progress="{{ 1 if dash_update.in_progress else 0 }}"
+         data-step="{{ dash_update.step }}">
+      {% if dash_update.in_progress %}
+        working: {{ dash_update.step }}, {{ dash_update.message }}
+      {% elif dash_update.last_error %}
+        <span class="tag err solid">last update failed</span> {{ dash_update.last_error }}
+      {% endif %}
+    </div>
+
+    {% if dash_update.code_updates %}
+      <div class="scroll-x">
+      <table class="tbl stack-sm">
+        <thead><tr><th>version</th><th>size</th><th>published</th><th>notes</th><th></th></tr></thead>
+        <tbody>
+        {% for u in dash_update.code_updates %}
+          <tr>
+            <td data-label="version"><b class="num">{{ u.version }}</b></td>
+            <td data-label="size">{{ u.size_bytes | human_bytes }}</td>
+            <td class="muted" data-label="published">{{ u.published_at | ago if u.published_at else "" }}</td>
+            <td class="muted" data-label="notes">{{ u.notes }}</td>
+            <td data-label="">
+              <button class="key sm primary w-12" type="button" data-dashupd-apply="{{ u.version }}" title="Update this dashboard to {{ u.version }}. It is offline for about ten seconds; the databases are backed up first. Asks first."><span class="t">update now</span></button>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    {% else %}
+      <div class="empty">No code update is available for this runtime.</div>
+    {% endif %}
+
+    {% if dash_update.rollback_candidates %}
+      <div class="cell-form rb sf-rb-line">
+        <span class="muted" title="Older bundles still on the feed. Applying one is a rollback, not an update.">older bundles on the feed</span>
+        <select class="sel sm" id="dashupd-older-sel" data-dashupd-for="dashupd-older-key" aria-label="an older bundle to go back to">
+          <option value="">roll back to...</option>
+          {% for u in dash_update.rollback_candidates %}<option value="{{ u.version }}">{{ u.version }}</option>{% endfor %}
+        </select>
+        <button class="key sm w-12" type="button" id="dashupd-older-key" data-dashupd-apply="" data-dashupd-older="1" disabled
+                title="Go back to the chosen older bundle. Offline about ten seconds; the databases are backed up and stay as they are. Asks first."><span class="t">roll back</span></button>
+      </div>
+    {% endif %}
+
+    {% for u in dash_update.runtime_updates %}
+      <div class="note warn"><span class="grow"><span class="tag warn solid">runtime update</span>
+        dashboard <b>{{ u.version }}</b> needs a new container image: it brings dependencies this container does not have. Apply it in your NAS's own UI: <b>{{ dash_update.nas_hint }}</b></span></div>
+    {% endfor %}
+
+    {% if dash_update.current.version %}
+      <div class="cell-form rb sf-rb-line">
+        <span class="muted">installed tree <b class="num">{{ dash_update.current.version }}</b>{% if dash_update.current.applied_at %}, applied {{ dash_update.current.applied_at | ago }}{% endif %}</span>
+        {# One target today (the tree before this one, or the image), so the
+           select has one option; it is still a select plus a key so the two
+           rollback flows read the same way. #}
+        <select class="sel sm" id="dashupd-rollback-sel" data-dashupd-for="dashupd-rollback-key" aria-label="the code to go back to">
+          <option value="{{ dash_update.current.previous or '' }}" selected>{% if dash_update.current.previous %}{{ dash_update.current.previous }} (the tree before){% else %}the image's own build{% endif %}</option>
+        </select>
+        <button class="key sm w-12" type="button" id="dashupd-rollback-key" data-dashupd-rollback="{{ dash_update.current.previous or '' }}"
+                title="Go back to the chosen code. Offline about ten seconds. The databases stay as they are unless you tick the box below. Asks first."><span class="t">roll back</span></button>
+      </div>
+      {# REL-10: rolling the CODE back leaves the DATABASE migrated forward. #}
+      <div id="dashupd-schema"
+           data-safe="{{ 1 if dash_update.schema and dash_update.schema.safe else 0 }}"
+           data-backup="{{ dash_update.schema.backup if dash_update.schema else '' }}">
+        <label class="check" title="Put the databases back to the copy taken before the last update. Everything recorded since is lost.">
+          <input type="checkbox" id="dashupd-restore-db"
+                 value="{{ dash_update.schema.backup if dash_update.schema else '' }}"
+                 {{ "disabled" if not (dash_update.schema and dash_update.schema.backup) }}><span class="g"></span>
+          <span class="l">also restore the databases from <span class="sha">{{ dash_update.schema.backup if dash_update.schema and dash_update.schema.backup else "no backup on record" }}</span></span>
+        </label>
+        {% if dash_update.schema and not dash_update.schema.safe %}
+          <div class="note err"><span class="grow">This database is on schema v{{ dash_update.schema.live }} and the build you would go back to knows v{{ dash_update.schema.target }}. Restore the backup alongside it, or the rollback is refused. Restoring also takes today's reports back to that moment.</span></div>
+        {% elif dash_update.schema and dash_update.schema.unknown %}
+          <div class="lede-in dim">This database is on schema v{{ dash_update.schema.live }}; what the build you would go back to knows is not recorded (the image's own code, or a tree applied before this was tracked). The rollback is allowed and the database stays where it is.</div>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    {% if dash_update.backups %}
+      <h2 class="sec" title="A copy of the databases is taken before each update.">database backups <span class="dim">taken before each update, under /data/backups</span></h2>
+      <div class="scroll-x">
+      <table class="tbl stack-sm">
+        <thead><tr><th>when</th><th>name</th><th>from</th><th>databases</th><th>size</th></tr></thead>
+        <tbody>
+        {% for b in dash_update.backups[:10] %}
+          <tr>
+            <td class="muted" data-label="when">{{ b.created_at | ago if b.created_at else "" }}</td>
+            <td data-label="name"><span class="sha">{{ b.name }}</span></td>
+            <td class="muted" data-label="from">{{ b.from_version }}</td>
+            <td class="muted" data-label="databases">{{ b.databases | join(", ") }}</td>
+            <td data-label="size">{{ b.size_bytes | human_bytes }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    {% endif %}
+  {% endif %}
+</div>

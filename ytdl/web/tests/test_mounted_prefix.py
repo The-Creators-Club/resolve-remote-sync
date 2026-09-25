@@ -26,7 +26,7 @@ STATIC = Path(__file__).resolve().parent.parent / 'static'
 
 # Every asset the app serves to a browser. Scanned as files AND as served
 # bytes, so neither a bad commit nor a future generated asset gets through.
-ASSETS = ('app.js', 'index.html', 'style.css', 'favicon.svg')
+ASSETS = ('app.js', 'cc_spa.js', 'index.html', 'style.css', 'favicon.svg')
 
 # DENY BY DEFAULT: any quoted or url()-wrapped leading slash, whatever it
 # points at. The old pattern listed the roots it knew about

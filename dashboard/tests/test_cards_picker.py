@@ -17,6 +17,7 @@ page still draws when every one of those facts is missing:
 from __future__ import annotations
 
 import json
+import os
 import time
 
 import pytest
@@ -47,11 +48,19 @@ def test_opening_is_remembered_per_person_and_for_anybody(tmp_path):
 
 
 def test_a_reload_loop_is_not_a_write_loop(tmp_path, monkeypatch):
+    """The clock is moved on between the two calls: on Windows two calls in
+    a row share one `time.time()` tick, so a test that did not move it
+    passed with the throttle switched off (Fable review, 2026-09-25)."""
     s = _S(tmp_path)
+    clock = [1_000_000.0]
+    monkeypatch.setattr(cards_catalog.time, "time", lambda: clock[0])
     cards_catalog.note_opened(s, "ep-throttle", "owen")
-    first = cards_catalog.opened(s, "owen")[1]["ep-throttle"]
+    clock[0] += 5
     cards_catalog.note_opened(s, "ep-throttle", "owen")
-    assert cards_catalog.opened(s, "owen")[1]["ep-throttle"] == first
+    assert cards_catalog.opened(s, "owen")[1]["ep-throttle"] == 1_000_000.0
+    clock[0] += cards_catalog.OPENED_THROTTLE_SECONDS
+    cards_catalog.note_opened(s, "ep-throttle", "owen")
+    assert cards_catalog.opened(s, "owen")[1]["ep-throttle"] == clock[0]
 
 
 def test_a_corrupt_file_is_an_empty_answer_and_is_rewritten(tmp_path):
@@ -206,3 +215,47 @@ def test_no_em_dash_in_what_the_picker_says():
     for rel in ("templates/cards_landing.html", "static/cards_landing.js",
                 "static/cards_landing.css"):
         assert "—" not in (root / rel).read_text(encoding="utf-8"), rel
+
+
+def test_one_year_folder_still_gives_the_year(tmp_path, fake_src, monkeypatch):
+    """The live shape is /vault/Vault/2026/FF5/<episode>: every episode shares
+    the year folder, strip_common removes it from the DRAWN path, and the
+    year must still come from it, not from the folder's mtime (Fable review,
+    2026-09-25)."""
+    monkeypatch.delenv("CARDS_SRC", raising=False)
+    vault = tmp_path / "vault"
+    old = 1_718_000_000                          # June 2024: not the folder's year
+    for show, name in (("FF5", "Civil Defence"), ("FF6", "Repro Rights")):
+        ep = vault / "Vault" / "2026" / show / name
+        (ep / "Interviewees").mkdir(parents=True)
+        os.utime(ep / "Interviewees", (old, old))
+        os.utime(ep, (old, old))
+    app = create_app(make_settings(
+        tmp_path, cards_enabled=True, cards_src=fake_src,
+        cards_vault_root=str(vault), cards_engines=2))
+    with TestClient(app) as client:
+        client.cookies.set(auth.COOKIE_NAME,
+                           auth.make_session_cookie(SECRET, "owen"))
+        page = client.get("/cards/").text
+    assert 'data-year="2026"' in page and 'data-year="2024"' not in page
+    assert 'data-key="FF5"' in page            # the shared levels are not drawn
+
+
+def test_one_bad_mtime_does_not_strip_the_rows_after_it(picker, monkeypatch):
+    client, app, roots = picker
+    real = cards_catalog.sizes
+
+    def bad(settings, rows):
+        got = dict(real(settings, rows))
+        first = sorted(r["slug"] for r in rows)[0]
+        got[first] = {"bytes": 1, "newest": 1e18, "at": time.time()}
+        return got
+
+    monkeypatch.setattr(cards_catalog, "sizes", bad)
+    page = client.get("/cards/")
+    assert page.status_code == 200
+    # Every row still carries its year, so none fell out of the tree.
+    assert page.text.count('class="cl-ep"') == 3
+    import re
+    years = re.findall(r'data-year="(\d*)"\s+data-opened=', page.text)
+    assert sorted(years) == ["2025", "2026", "2026"]

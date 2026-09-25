@@ -34,6 +34,7 @@ Starlette matches in order and the mount would otherwise swallow them.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -160,39 +161,57 @@ def _catalogue(request: Request, rows: list[dict], me: str) -> None:
         sizes = cards_catalog.sizes(settings, [r for r in rows if r.get("root")])
         paths = [cards_catalog.folder_parts(vault, r.get("root") or "")
                  for r in rows]
-        cut = cards_catalog.strip_common(paths)
+        # An open entry whose root has left the scan has no parts; it must
+        # not make every other episode keep the shared levels (Fable review,
+        # 2026-09-25).
+        cut = cards_catalog.strip_common([p for p in paths if p])
         now = time.time()
         me_key = (me or "").strip().lower()
-        for row, parts in zip(rows, paths):
-            slug = row.get("slug", "")
-            parts = parts[cut:]
-            size = sizes.get(slug) or {}
-            modified = size.get("newest") or row.get("mtime")
-            last = anyone.get(slug) or {}
-            by = str(last.get("by") or "")
-            row["parts"] = parts
-            row["path_label"] = " / ".join(parts)
-            row["year"] = cards_catalog.year_of(parts, modified)
-            row["opened_mine"] = mine.get(slug)
-            row["opened_any"] = last.get("at")
-            if row["opened_mine"]:
-                row["opened_phrase"] = ("you opened it "
-                                        + cards_catalog.ago_phrase(now - row["opened_mine"]))
-            elif row["opened_any"]:
-                who = "you" if by == me_key else (by or "somebody")
-                row["opened_phrase"] = (f"{who} opened it "
-                                        + cards_catalog.ago_phrase(now - row["opened_any"]))
-            else:
-                row["opened_phrase"] = "never opened"
-            row["bytes"] = size.get("bytes") if "bytes" in size else None
-            row["size_label"] = (cards_catalog.human_bytes(row["bytes"])
-                                 if row["bytes"] is not None else "")
-            row["size_partial"] = bool(size.get("partial"))
-            row["modified"] = modified
-            row["modified_label"] = (time.strftime("%d %b %Y", time.localtime(modified))
-                                     .lstrip("0") if modified else "")
     except Exception:  # noqa: BLE001 - the picker must draw regardless
         log.exception("Timeline Cards picker: could not read its catalogue")
+        return
+    for row, full in zip(rows, paths):
+        # Per row, so one row's bad value (a far-future mtime from a camera
+        # with an unset clock) cannot strip the catalogue from every row
+        # after it (Fable review, 2026-09-25).
+        try:
+            _catalogue_row(row, full, cut, sizes, anyone, mine, now, me_key)
+        except Exception:  # noqa: BLE001
+            log.exception("Timeline Cards picker: could not describe %s",
+                          row.get("slug", "?"))
+
+
+def _catalogue_row(row: dict, full: list[str], cut: int, sizes: dict,
+                   anyone: dict, mine: dict, now: float, me_key: str) -> None:
+    slug = row.get("slug", "")
+    parts = full[cut:]
+    size = sizes.get(slug) or {}
+    modified = size.get("newest") or row.get("mtime")
+    last = anyone.get(slug) or {}
+    by = str(last.get("by") or "")
+    row["parts"] = parts
+    row["path_label"] = " / ".join(parts)
+    # The year from the UNSTRIPPED path: on the live vault every
+    # episode is under one year folder, which is exactly the level
+    # strip_common removes (Fable review, 2026-09-25).
+    row["year"] = cards_catalog.year_of(full, modified)
+    row["opened_mine"] = mine.get(slug)
+    row["opened_any"] = last.get("at")
+    if row["opened_mine"]:
+        row["opened_phrase"] = ("you opened it "
+                                + cards_catalog.ago_phrase(now - row["opened_mine"]))
+    elif row["opened_any"]:
+        who = "you" if by == me_key else (by or "somebody")
+        row["opened_phrase"] = (f"{who} opened it "
+                                + cards_catalog.ago_phrase(now - row["opened_any"]))
+    else:
+        row["opened_phrase"] = "never opened"
+    row["bytes"] = size.get("bytes") if "bytes" in size else None
+    row["size_label"] = (cards_catalog.human_bytes(row["bytes"])
+                         if row["bytes"] is not None else "")
+    row["size_partial"] = bool(size.get("partial"))
+    row["modified"] = modified
+    row["modified_label"] = cards_catalog.date_label(modified)
 
 
 def _close_prompt(name: str, last_in_phrase: str) -> str:
@@ -288,8 +307,11 @@ async def cards_open(request: Request) -> Response:
         return RedirectResponse(f"/cards/?refused={quote(refusal)}",
                                 status_code=303)
     pool.note_visit(entry.slug, auth.get_session_user(request) or "")
-    cards_catalog.note_opened(request.app.state.settings, entry.slug,
-                              auth.get_session_user(request) or "")
+    # Off the event loop: a file write, and a stalled data dataset must not
+    # stall every request (Fable review, 2026-09-25).
+    await asyncio.to_thread(cards_catalog.note_opened,
+                            request.app.state.settings, entry.slug,
+                            auth.get_session_user(request) or "")
     response = RedirectResponse(f"/cards/?want={entry.slug}", status_code=303)
     # security-3 (2026-09-18): ONE helper decides `secure` for every cookie
     # this server sets. `request.url.scheme` is `http` behind a TLS terminator

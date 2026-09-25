@@ -367,6 +367,16 @@ def _count(items: list[dict]) -> int:
     return sum(i["count"] if i.get("kind") == "folder" else 1 for i in items)
 
 
+def date_label(ts: float | None) -> str:
+    """'3 Sep 2026', or '' for a missing or unrepresentable time."""
+    if not ts:
+        return ""
+    try:
+        return time.strftime("%d %b %Y", time.localtime(ts)).lstrip("0")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
 def human_bytes(n: float | None) -> str:
     if n is None:
         return ""

@@ -370,10 +370,14 @@
           delay = 3000;
           var now = {};
           (state.episodes || []).forEach(function (e) { now[e.slug] = e.state || ''; });
+          // A slug that has left state.json altogether (closed while it was
+          // outside the vault scan) has moved too, or this would poll every
+          // 3 s until the tab closed.
           var moved = rows.some(function (r) {
             var slug = r.getAttribute('data-slug');
-            return Object.prototype.hasOwnProperty.call(now, slug) &&
-              now[slug] !== (r.getAttribute('data-state') || '');
+            var was = r.getAttribute('data-state') || '';
+            if (!Object.prototype.hasOwnProperty.call(now, slug)) return was !== '';
+            return now[slug] !== was;
           });
           if (moved) { window.location.reload(); return; }
           setTimeout(tick, delay);

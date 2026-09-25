@@ -57,6 +57,7 @@ the same engine from the same values.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import logging
@@ -525,7 +526,8 @@ class CardsDispatch:
             # The page itself, as a navigation: that is "opened", where a
             # media range request (several a second) is only "still here".
             try:
-                self.on_enter(slug, user)
+                # A file write: off the event loop (Fable review, 2026-09-25).
+                await asyncio.to_thread(self.on_enter, slug, user)
             except Exception:  # noqa: BLE001 - a recency note is never a 500
                 log.exception("Timeline Cards: could not note %s entering %s",
                               user, slug)

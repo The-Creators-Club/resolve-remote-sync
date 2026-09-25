@@ -40,9 +40,9 @@
 
       <h2 class="sec">what the download link does</h2>
       <section class="win">
-        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">/download</span><span>&#9566;</span><span class="rule"></span><span class="meta">the installer entry in the menu</span><span>&#9552;&#9488;</span></div>
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">/download</span><span>&#9566;</span><span class="rule"></span><span class="meta" title="The installer link in the dashboard menu goes to /download, which picks the right file for the browser.">the installer entry in the menu</span><span>&#9552;&#9488;</span></div>
         <div class="body" style="display:grid;gap:12px">
-          <p class="lede">The menu's installer entry goes straight to the package for the browser's own platform, so the click <b>is</b> the download. This page only appears when the browser names neither Windows nor macOS, and for setting up the other platform (a Mac, from a Windows computer). The file keeps its version in its name, so "which installer did you run?" has an answer.</p>
+          <p class="lede">The menu's installer entry goes straight to the package for the browser's own platform, so the click <b>is</b> the download. This page only appears when the browser names neither Windows nor macOS, and for setting up the other platform, such as a Mac from a Windows computer. The file keeps its version in its name, so "which installer did you run?" has an answer.</p>
           <p class="lede">When nothing has been published for that platform, the link answers with plain text instead of a file:</p>
           <pre class="code" id="none-text" style="white-space:pre-wrap"></pre>
         </div>
@@ -76,7 +76,7 @@
       return CC.win(label, here ? '<b title="Your browser says it is running on this kind of computer.">this computer</b>' : '', `<div class="body">${body}</div>`, 'pick-plat' + (here ? ' here' : ''));
     }).join('');
     const miss = 'macos';
-    $('#none-text').textContent = `No ${miss} installer has been published for this fleet yet, so there is nothing to download. Ask whoever set this dashboard up for the installer.\n\nAdmins: publish one with \`tools/publish_latest.py --kind onboard --platform ${miss}\` (or upload it on Settings > Packages).`;
+    $('#none-text').textContent = `No ${miss} installer has been published for this fleet yet, so there is nothing to download. Ask whoever set this dashboard up for the installer.\n\nAdmins: publish one with \`tools/publish_latest.py --kind onboard --platform ${miss}\`, or upload it on Settings, Packages.`;
   }
   CC.page({ page: 'home', onData: render });
 })();

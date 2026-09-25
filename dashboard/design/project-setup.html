@@ -77,12 +77,14 @@
     const canLinkCurrent = !!rel && (!inside || current);
     const entries = kids(rel);
     let h = '';
-    if (err) h += `<div class="note err"><span title="Nothing was created or changed. The reason is beside this.">${tag('err', 'not done', true)}</span><span class="grow">${esc(err.text)}${err.suggest ? `<div style="margin-top:8px">${btn('Use Projects/' + err.suggest, 'sm primary', `data-link="${esc(err.suggest)}"`, USE_TIP)}</div>` : ''}</span></div>`;
+    // Round 2 ("nothing may shift"): the refusal is drawn under the create
+    // form, the last thing on the page, so the picker above never moves.
+    const errNote = err ? `<div class="note err"><span title="Nothing was created or changed. The reason is beside this.">${tag('err', 'not done', true)}</span><span class="grow">${esc(err.text)}${err.suggest ? `<div style="margin-top:8px">${btn('Use Projects/' + err.suggest, 'sm primary', `data-link="${esc(err.suggest)}"`, USE_TIP)}</div>` : ''}</span></div>` : '';
     h += win('pick_the_folder_for_this_project', '', `
-      <div class="lede">Browse the server's Projects tree. If the project's folder is already there, pick it with <b>Use this folder</b>. Nothing inside it is changed. Only create a new folder when there is not one yet; new folders get the standard subfolders (<span class="hi">${TEMPLATE.map(t => `<span class="nowrap">${esc(t)}</span>`).join(', ')}</span>).</div>
+      <div class="lede">Browse the server's Projects tree. If the project's folder is already there, pick it with <b>Use this folder</b>. Nothing inside it is changed. Only create a new folder when there is not one yet; new folders get the standard subfolders: <span class="hi">${TEMPLATE.map(t => `<span class="nowrap">${esc(t)}</span>`).join(', ')}</span>.</div>
       <div class="crumbs"><a href="#" data-rel="" title="Back to the top of the server's Projects folder.">Projects</a>${crumbs.map((c, i) => `<span class="sep">/</span>${i === crumbs.length - 1 ? `<span class="here">${esc(c)}</span>` : `<a href="#" data-rel="${esc(crumbs.slice(0, i + 1).join('/'))}">${esc(c)}</a>`}`).join('')}</div>
-      <div class="inline here-row" style="font-size:13px">${canLinkCurrent ? `You are in <b>Projects/${esc(rel)}</b> ${btn('Use this folder', 'sm primary', `data-link="${esc(rel)}"`, USE_TIP)}<span class="dim">points "${esc(RP)}" at this folder as it is</span>` : `<span class="dim">${rel ? 'You are inside a project: go up a level to pick a folder.' : 'Open a year, then a show, to find the folder.'}</span>`}</div>
-      <div class="win" style="box-shadow:none"><div class="dirlist scroll-y" style="max-height:420px;min-height:260px">${entries.length ? entries.map(n => {
+      <div class="inline here-row" style="font-size:13px">${canLinkCurrent ? `${btn('Use this folder', 'sm primary', `data-link="${esc(rel)}"`, USE_TIP)}<span>You are in <b>Projects/${esc(rel)}</b><span class="dim">: this points "${esc(RP)}" at it as it is</span></span>` : `<span class="dim">${rel ? 'You are inside a project: go up a level to pick a folder.' : 'Open a year, then a show, to find the folder.'}</span>`}</div>
+      <div class="win" style="box-shadow:none"><div class="dirlist scroll-y" style="max-height:420px;min-height:180px">${entries.length ? entries.map(n => {
         const r2 = rel ? rel + '/' + n : n;
         const p = isProj(r2), has = kids(r2).length > 0, same = n.toLowerCase() === RP.toLowerCase();
         const name = p ? `<span class="plain">${esc(n)}</span>` : `<a class="go ${has ? 'parent' : ''}" href="#" data-rel="${esc(r2)}">${esc(n)}</a>`;
@@ -92,11 +94,12 @@
       ${inside ? `<div class="note">${current
         ? `<span class="grow">This folder is already a project. Use <b>Use this folder</b> above to point "${esc(RP)}" at it.</span>`
         : `<span class="grow">You are inside an existing project, and projects cannot nest. Go up to pick or create.</span>`}</div>` : ''}`);
-    if (!inside) {
-      h += win('or_create_a_new_project_folder_here', `in <b>Projects/${esc(rel)}</b>`, `
+    if (inside) h += errNote;
+    else {
+      h += win('or_create_a_folder', `<span title="The new folder is made inside the folder you are browsing above.">in <b>Projects${rel ? '/' + esc(rel) : ''}</b></span>`, `
         <div class="lede">Only for a folder that does not exist yet. A name that is already listed above would nest a second folder inside it, so pick it with <b>Use this folder</b> instead.</div>
-        <form class="inline" id="create"><input class="inp" name="name" placeholder="new folder name" required style="flex:1 1 240px;width:auto"><button class="key primary" type="submit" title="Makes a new folder here with the standard subfolders, turns it into a project and files this Resolve project into it."><span class="t">Create and link</span></button></form>
-        <div class="hint" style="font-size:12px;line-height:1.5">Anyone signed in can create a project, and it appears for everyone: in the tick lists, on SYNC PLANS and in the queue. Who made it is recorded in HISTORY. Only an admin can take one back off those lists, with Archive on SYNC PLANS, and even that keeps the folder and the files.</div>`);
+        <form class="inline" id="create"><input class="inp" name="name" placeholder="new folder name" required style="flex:1 1 240px;width:auto" title="The name of the new project folder. It is made inside the folder shown in this window's title bar."><button class="key primary" type="submit" title="Makes a new folder here with the standard subfolders, turns it into a project and files this Resolve project into it."><span class="t">Create and link</span></button></form>
+        <div class="hint" style="font-size:12px;line-height:1.5">Anyone signed in can create a project, and it appears for everyone: in the tick lists, on SYNC PLANS and in the queue. Who made it is recorded in HISTORY. Only an admin can take one back off those lists, with Archive on SYNC PLANS, and even that keeps the folder and the files.</div>${errNote}`);
     }
     return h;
   }
@@ -106,14 +109,14 @@
     if (state === 'done') {
       P.innerHTML = win('done', '', `
         <div class="inline" style="font-size:14px"><span title="Done: the folder is set up and linked.">${tag('ok', 'ok')}</span><span><b>Projects/${esc(created || '2026/Shorts/Typhoon Prep')}</b> is set up on the server and "${esc(RP)}" now files into it.</span></div>
-        <div class="dim" title="Syncthing is the sync engine that keeps project files the same on every computer.">Sync (its Syncthing folder) is set up automatically within about 5 minutes. You can close this page.</div>`);
+        <div class="dim" title="Syncthing is the sync engine that keeps project files the same on every computer.">Sync, its Syncthing folder, is set up automatically within about 5 minutes. You can close this page.</div>`);
     } else if (state === 'mapped' || state === 'mapped-admin') {
       const admin = state === 'mapped-admin';
       P.innerHTML = win('already_set_up', '', `
-        <dl class="kv"><dt>resolve project</dt><dd>${esc(RP)}</dd><dt title="The server folder this Resolve project's media is filed into.">files into</dt><dd>2026/Shorts/Typhoon Prep <span class="dim">(auto-set by jsmith)</span></dd></dl>
+        <dl class="kv"><dt>resolve project</dt><dd>${esc(RP)}</dd><dt title="The server folder this Resolve project's media is filed into.">files into</dt><dd>2026/Shorts/Typhoon Prep <span class="dim" title="Matched by name the first time jsmith opened this project in Resolve.">set automatically for jsmith</span></dd></dl>
         <div class="dim">Mappings are fixed once set. ${admin ? 'As an admin you can change it in the <a class="hi" href="project.html#roots">project roots box</a> on the fleet page.' : 'Ask your admin if this looks wrong.'}</div>`);
     } else if (state === 'unmounted') {
-      P.innerHTML = win('pick_the_folder_for_this_project', '', `<div class="note warn"><span title="The dashboard cannot see the server's Projects folder, so there is nothing to pick from.">${tag('warn', 'cannot show folders')}</span><span class="grow">The server's Projects tree is not mounted on this dashboard, so it cannot show you the folders. Ask whoever installed this server: it is a container setting, not something this page can change.</span></div>`);
+      P.innerHTML = win('pick_the_folder_for_this_project', '', `<div class="note warn"><span title="The dashboard cannot see the server's Projects folder, so there is nothing to pick from.">${tag('warn', 'not mounted')}</span><span class="grow">The server's Projects tree is not mounted on this dashboard, so it cannot show you the folders. Ask whoever installed this server: it is a container setting, not something this page can change.</span></div>`);
     } else {
       if (state === 'error' && !err) err = { text: `Projects/2026/Shorts/${RP} already exists. Use this folder to point the project at it instead of creating another folder inside it.`, suggest: `2026/Shorts/${RP}` };
       P.innerHTML = picker();
@@ -123,7 +126,8 @@
     const f = P.querySelector('#create');
     if (f) f.addEventListener('submit', e => {
       e.preventDefault();
-      const n = f.elements.name.value.trim();
+      const n = f.elements.namedItem('name').value.trim();
+      if (!n) return;
       if (kids(rel).some(k => k.toLowerCase() === n.toLowerCase())) {
         err = { text: `Projects/${rel ? rel + '/' : ''}${n} already exists. Use this folder to point the project at it instead of creating another folder inside it.`, suggest: (rel ? rel + '/' : '') + n };
         render(); return;

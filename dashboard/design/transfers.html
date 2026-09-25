@@ -39,12 +39,12 @@
       <div id="safe"></div>
 
       <section class="win">
-        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">live</span><span>&#9566;</span><span class="rule"></span><span class="meta" id="live-meta"></span><span>&#9552;&#9488;</span></div>
-        <div class="scroll-y" style="max-height:340px" id="live"></div>
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">live</span><span>&#9566;</span><span class="rule"></span><span class="meta" id="live-meta" title="How many files are moving at this moment."></span><span>&#9552;&#9488;</span></div>
+        <div class="scroll-y" style="height:340px" id="live"></div>
       </section>
 
       <section class="win">
-        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">queued</span><span>&#9566;</span><span class="rule"></span><span class="meta" id="q-meta"></span><span>&#9552;&#9488;</span></div>
+        <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">queued</span><span>&#9566;</span><span class="rule"></span><span class="meta" id="q-meta" title="How many files are still waiting to move, and their total size, from the lists below."></span><span>&#9552;&#9488;</span></div>
         <div class="lede" id="q-lede" style="padding:10px var(--pad) 0"></div>
         <div class="scroll-y" style="max-height:520px" id="queues"></div>
       </section>
@@ -107,7 +107,7 @@
   // Plain-words tooltips (round 2, 2026-09-25).
   const KIND_TIP = {
     upload: 'Upload: new original footage going from the computer to the server.',
-    'proxy download': 'Proxy download: small edit copies (proxies) coming from the server to the computer.',
+    'proxy download': 'Proxy download: small edit copies, called proxies, coming from the server to the computer.',
     'folder sync': 'Folder sync: project files such as Resolve projects, graphics and audio kept the same on every computer.',
   };
   const dirTip = d => d === 'up' ? 'Up: from the computer to the server.' : 'Down: from the server to the computer.';
@@ -130,8 +130,8 @@
     // Round 2 ("nothing may shift"): the admin's page has no such line, but
     // the bench's preview switch must not move the windows below, so the
     // editor's line is kept invisibly in its place on the admin view.
-    if (admin) $('#safe').innerHTML = `<div class="note warn" style="visibility:hidden" aria-hidden="true"><span class="tag solid warn">not yet</span><span class="grow"><b>Not yet: 14 files still uploading from JSMITH-MBP (6.2 GB), about 5 m.</b> Leave that computer running.</span></div>`;
-    else if (busy) $('#safe').innerHTML = `<div class="note warn"><span class="tag solid warn" title="Not yet: closing or unplugging this computer now would stop files half-way. Leave it running until this says safe.">not yet</span><span class="grow"><b>Not yet: 14 files still uploading from JSMITH-MBP (6.2 GB), about 5 m.</b> Leave that computer running.</span></div>`;
+    if (admin) $('#safe').innerHTML = `<div class="note warn" style="visibility:hidden" aria-hidden="true"><span class="tag solid warn">not yet</span><span class="grow"><b>Not yet: 14 files, 6.2 GB, still uploading from JSMITH-MBP, about 5 m.</b> Leave that computer running.</span></div>`;
+    else if (busy) $('#safe').innerHTML = `<div class="note warn"><span class="tag solid warn" title="Not yet: closing or unplugging this computer now would stop files half-way. Leave it running until this says safe.">not yet</span><span class="grow"><b>Not yet: 14 files, 6.2 GB, still uploading from JSMITH-MBP, about 5 m.</b> Leave that computer running.</span></div>`;
     else $('#safe').innerHTML = `<div class="note ok"><span class="tag ok" title="Safe: nothing of yours is moving, so you can shut down or unplug.">safe</span><span class="grow"><b>Safe to close: nothing is transferring.</b></span></div>`;
 
     // LIVE
@@ -161,7 +161,7 @@
       let rest;
       if (q.pending) {
         rest = `<span title="Getting ready: the project was just ticked, and the computer and server are setting it up. Nothing needs doing.">${tag('warn', 'getting ready')}</span><span class="why">${q.upload_only
-          ? 'Just ticked as upload only. Waiting for this computer\'s first file list, then its video originals start uploading (nothing is downloaded).'
+          ? 'Just ticked as upload only. Waiting for this computer\'s first file list, then its video originals start uploading. Nothing is downloaded.'
           : 'Just ticked. Sharing and first file lists are being set up; syncing starts within a minute or two.'}</span>`;
       } else {
         const kind = q.lane === 'c' ? 'folder sync' : q.dir === 'up' ? 'upload' : 'proxy download';
@@ -170,7 +170,7 @@
           <span title="${KIND_TIP[kind]}">${tag('mute', kind)}</span>
           ${q.held ? `<span title="On hold: something on this computer stops the transfer until it is fixed. The reason is on the next line.">${tag('err', 'on hold', true)}</span>` : ''}
           ${q.uncertain && !q.n ? '<span class="why">None counted, but this computer could not list every original: some may still need to upload.</span>' : ''}
-          ${q.held ? `<span class="why" style="color:var(--err)">${esc(q.held.s)} (since ${esc(q.held.since)}).</span>` : ''}`;
+          ${q.held ? `<span class="why" style="color:var(--err)">${esc(q.held.s)}, since ${esc(q.held.since)}.</span>` : ''}`;
       }
       let body = '';
       if (!q.pending) {

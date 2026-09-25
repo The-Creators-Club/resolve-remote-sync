@@ -108,7 +108,7 @@
 .crumbs a:hover { color: var(--hi); border-color: var(--hi); }
 .crumbs .sep { color: var(--red); }
 .crumbs .here { color: var(--hi); }
-.dirlist { display: grid; }
+.dirlist { display: grid; align-content: start; }
 .dirlist .d {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center;
   padding: 7px var(--pad); border-top: 1px dashed var(--line); font-size: 13px;
@@ -140,7 +140,7 @@
   .fold .fold-body { padding-left: var(--pad); }
   .lrow .keys { margin-left: 0; }
   .tbl td.file { max-width: none; white-space: normal; overflow-wrap: anywhere; }
-  .tbl.stack-sm td[data-l]::before { content: attr(data-l); display: inline-block; min-width: 9ch; color: var(--muted); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; }
+  .tbl.stack-sm td[data-l]::before { content: attr(data-l); display: inline-block; min-width: 9ch; margin-right: 1ch; color: var(--muted); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; }
   .tbl.stack-sm tr.drawer { border-top: 0; padding-top: 0; }
   .dirlist .d { grid-template-columns: minmax(0, 1fr); gap: 6px; }
 }
@@ -219,7 +219,7 @@
   /* on a phone the per-computer keys and the "you are in" line wrap to two
      or three lines; reserve them so ticking or walking folders moves nothing */
   #tick-one { min-height: calc(66px * var(--d)); align-items: flex-start; }
-  .here-row { min-height: 134px; align-items: flex-start; }
+  .here-row { min-height: 104px; align-items: flex-start; align-content: flex-start; }
   #pickers { min-height: 4.7em; }
   #sub.xf-sub { min-height: 3.1em; }
 }
@@ -228,4 +228,19 @@
      wraps inside the key instead of running off the window */
   .key.w-tick, .key.w-mode { width: 100%; white-space: normal; text-align: center; line-height: 1.3; padding-top: 6px; padding-bottom: 6px; }
   .key.w-tick { min-height: 50px; }
+}
+
+/* round 2, second pass (2026-09-25). A lane's state is its name, then the
+   state tag (a square plus one word), never "name: state" inside the tag. */
+.tbl .lane-s { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; font-size: 12px; }
+.tbl .lane-s .ln { color: var(--text-2); }
+/* the share form's refusal keeps its line whether or not it is showing, and
+   the move result is a fixed box (it scrolls if a result is long), so a
+   submit never pushes the windows below it down */
+#share-err { min-height: 1.5em; }
+#move-result { height: calc(92px * var(--d)); overflow-y: auto; overscroll-behavior: contain; }
+@media (max-width: 760px) {
+  #share-err { min-height: 3em; }
+  #move-result { height: 270px; }
+  #pickers { min-height: 6.3em; }
 }

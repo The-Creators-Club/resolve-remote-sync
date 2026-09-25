@@ -27,7 +27,7 @@
     <div class="head">
       <div>
         <h1><span><span class="prompt">&gt;</span> 2026/FF5/ELECTIONS</span><span id="h-state"></span></h1>
-        <div class="sub"><span class="num">Projects/2026/FF5/Elections</span> &middot; <span title="The name the sync engine (Syncthing) uses for this project's shared folder. You only need it when reading the sync engine's own screens.">folder id <b>ff5-elections</b></span> &middot; <span id="h-sum"></span></div>
+        <div class="sub"><span class="num">Projects/2026/FF5/Elections</span> &middot; <span title="The name the sync engine, Syncthing, uses for this project's shared folder. You only need it when reading the sync engine's own screens.">folder id <b>ff5-elections</b></span> &middot; <span id="h-sum"></span></div>
       </div>
       <div class="acts">
         <a class="key quiet" href="home.html" title="Back to the sync status page and the full project list."><span class="t">all projects</span></a>
@@ -40,7 +40,7 @@
       <section class="win">
         <div class="bar"><span>&#9484;&#9472;&#9569;</span><span class="t">ticking_for</span><span>&#9566;</span><span class="rule"></span><span>&#9552;&#9488;</span></div>
         <div class="body fieldset">
-          <label class="pick" title="Whose sync plan the ticks and keys on this page change. Pick another editor to tick this project for them."><span>editor</span><select id="tick-for"><option value="owen">owen (me)</option><option value="jsmith" selected>jsmith</option><option value="mrivera">mrivera</option><option value="tchen">tchen</option></select></label>
+          <label class="pick" title="Whose sync plan the ticks and keys on this page change. Pick another editor to tick this project for them."><span>editor</span><select id="tick-for"><option value="owen">owen, me</option><option value="jsmith" selected>jsmith</option><option value="mrivera">mrivera</option><option value="tchen">tchen</option></select></label>
           <div class="hint">The ticks, and the keys on this page, act for this person.</div>
         </div>
       </section>
@@ -78,7 +78,7 @@
             <button class="key" type="submit" title="Adds that folder to this project for everyone who syncs it. The folder stays where it is on the server; nothing is copied."><span class="t">Share into this project</span></button>
           </div>
           <div class="hint">Anyone syncing this project receives that folder at its original path. Nothing is copied on the server.</div>
-          <div class="hint bad" id="share-err" hidden></div>
+          <div class="hint bad" id="share-err" role="status">&nbsp;</div>
         </form>
       </section>
 
@@ -92,13 +92,13 @@
           </div>
           <div class="row">
             <span class="lbl">to</span>
-            <select class="sel" name="to_slug" title="the project to move it into (this one by default)">
+            <select class="sel" name="to_slug" title="The project to move it into. This one is picked to start with.">
               <option>2025/FF4/CIA City</option><option>2025/FF4/Kinmen</option><option>2025/FF4/Taichung Drone Camp</option>
               <option>2026/FF5/Civil Defence</option><option selected>2026/FF5/Elections</option><option>2026/FF5/Repro Rights</option>
               <option>2026/Shorts/Night Market</option><option>2026/Shorts/Typhoon Prep</option>
             </select>
             <span class="sep">/</span>
-            <input class="inp" name="to_path" placeholder="folder in that project, e.g. Interviewees/Candidate_B" title="the folder to put it in (its own name is kept); leave blank for the project root">
+            <input class="inp" name="to_path" placeholder="folder in that project, e.g. Interviewees/Candidate_B" title="The folder to put it in. The file or folder keeps its own name. Leave it blank for the top of the project.">
           </div>
           <div class="row">
             <button class="key primary" type="submit" title="moves the file and its proxies on the server, then every computer that has it moves its own copy and relinks Resolve"><span class="t">Move on the server and on every computer</span></button>
@@ -151,9 +151,9 @@
     pickers: ['jsmith', 'mrivera', 'tchen'],
     modes: { mrivera: 'upload_only', tchen: 'mixed' },
     banners: [
-      ['err', 'syncthing folder error', 'folder path missing on the server. The completion figures below are stale until this is fixed.'],
-      ['err', 'nas inventory not updated', 'the project folder could not be read: permission denied. The NAS figures below are the last good ones, from before this started.', 'checked 6 min ago'],
-      ['warn', 'sharing change held', 'TCHEN-RIG was not given 2026/FF5/Elections: its sync engine did not answer (18 min ago)'],
+      ['err', 'error', 'Syncthing folder error:', 'folder path missing on the server. The completion figures below are stale until this is fixed.'],
+      ['err', 'stale', 'NAS inventory not updated:', 'the project folder could not be read: permission denied. The NAS figures below are the last good ones, from before this started.', 'checked 6 min ago'],
+      ['warn', 'held', 'Sharing change held:', 'TCHEN-RIG was not given 2026/FF5/Elections: its sync engine did not answer, 18 min ago'],
     ],
     nas: { orig: 1284, proxy: 1190 },
     computers: [
@@ -170,24 +170,24 @@
       { st: 'invalid', path: 'Projects/2026/FF5/Elections/B-roll', detail: 'that folder is inside this project already' },
     ],
     borrowers: [['Interviewees/Rally_Crowd', '2026/Shorts/Night Market']],
-    moveDone: { partial: true, from: 'B-roll/Card_03', to: '2026/FF5/Civil Defence/B-roll/Card_03', failed: ['Proxy/Card_03/C0012.mov (in use on the server)'] },
+    moveDone: { partial: true, from: 'B-roll/Card_03', to: '2026/FF5/Civil Defence/B-roll/Card_03', failed: ['Proxy/Card_03/C0012.mov, in use on the server'] },
     awaiting: [
-      { tone: 'err', label: 'not applied: this computer may re-upload the old path', who: 'tchen', m: 'TCHEN-RIG', what: '2026/FF5/Elections/B-roll/Rally_0931.mov, asked 3 days ago', again: true },
-      { tone: 'warn', label: 'waiting 2 days', who: 'mrivera', m: 'RIVERA-LAPTOP', what: '2026/FF5/Elections/Interviewees/Candidate_B, asked 2 days ago, this computer is still trying (4 attempts): the file is open in another program' },
+      { tone: 'err', label: 'not applied', why: 'this computer may upload the old path again', who: 'tchen', m: 'TCHEN-RIG', what: '2026/FF5/Elections/B-roll/Rally_0931.mov, asked 3 days ago', again: true },
+      { tone: 'warn', label: 'waiting', why: 'for 2 days', who: 'mrivera', m: 'RIVERA-LAPTOP', what: '2026/FF5/Elections/Interviewees/Candidate_B, asked 2 days ago, this computer is still trying, 4 attempts so far: the file is open in another program' },
       { tone: 'warn', label: 'waiting', who: 'jsmith', m: 'JSMITH-MBP', what: '2026/FF5/Elections/Audio/Music/Opening_theme.wav, asked 20 min ago' },
     ],
     moves: [
-      { tags: [['warn', 'waiting for 2']], from: '2026/FF5/Elections/Interviewees/Candidate_B', to: '2026/FF5/Civil Defence/Interviewees/Candidate_B', by: 'owen 2 days ago', undo: true,
-        targets: ['jsmith on JSMITH-STUDIO: moved', 'jsmith on JSMITH-MBP: moved, Resolve not repointed yet', 'mrivera on RIVERA-LAPTOP: still trying here (4 attempts) (the file is open in another program)', 'tchen on TCHEN-RIG: waiting for its next report'] },
-      { tags: [['err', '1 not applied']], from: '2026/FF5/Elections/B-roll/Rally_0931.mov', to: '2026/FF5/Elections/B-roll/Rally/Rally_0931.mov', by: 'owen 3 days ago',
-        targets: ['jsmith on JSMITH-STUDIO: moved', 'tchen on TCHEN-RIG: NOT APPLIED, this computer may re-upload the old path'] },
-      { tags: [['err', 'unfinished on the server']], from: '2026/FF5/Elections/Graphics/Old', to: '2026/FF5/Elections/Graphics/Archive/Old', by: 'owen 4 days ago',
+      { tags: [['warn', 'waiting', 'for 2 computers']], from: '2026/FF5/Elections/Interviewees/Candidate_B', to: '2026/FF5/Civil Defence/Interviewees/Candidate_B', by: 'owen 2 days ago', undo: true,
+        targets: ['jsmith on JSMITH-STUDIO: moved', 'jsmith on JSMITH-MBP: moved, Resolve not repointed yet', 'mrivera on RIVERA-LAPTOP: still trying here, 4 attempts so far: the file is open in another program', 'tchen on TCHEN-RIG: waiting for its next report'] },
+      { tags: [['err', 'not applied', 'on 1 computer']], from: '2026/FF5/Elections/B-roll/Rally_0931.mov', to: '2026/FF5/Elections/B-roll/Rally/Rally_0931.mov', by: 'owen 3 days ago',
+        targets: ['jsmith on JSMITH-STUDIO: moved', 'tchen on TCHEN-RIG: not applied, this computer may upload the old path again'] },
+      { tags: [['err', 'unfinished', 'on the server']], from: '2026/FF5/Elections/Graphics/Old', to: '2026/FF5/Elections/Graphics/Archive/Old', by: 'owen 4 days ago',
         pending: 'This move was interrupted part-way through on the server. Nothing has been sent to any computer. Check both paths on the NAS; the dashboard re-checks them every cycle and finishes it by itself once only one of them exists.', targets: [] },
-      { tags: [['err', '1 blocked'], ['warn', 'some proxies stayed']], from: '2026/FF5/Elections/B-roll/Card_03', to: '2026/FF5/Civil Defence/B-roll/Card_03', by: 'owen 5 days ago',
-        detail: 'Proxy/Card_03/C0012.mov stayed at the old path on the server (in use when the move ran).',
-        targets: ['jsmith on JSMITH-STUDIO: BLOCKED here after 5 attempts (Resolve is holding the file)', 'mrivera on RIVERA-TOWER: trashed on this computer: it does not sync the destination project', 'tchen on TCHEN-RIG: moved'] },
-      { tags: [['err', '1 failed']], from: '2026/FF5/Elections/Subs/en_v1.srt', to: '2026/FF5/Elections/Subs/Old/en_v1.srt', by: 'jsmith 6 days ago',
-        targets: ['jsmith on JSMITH-MBP: FAILED (permission denied)', 'mrivera on RIVERA-TOWER: moved'] },
+      { tags: [['err', 'blocked', 'on 1 computer'], ['warn', 'partial', 'some proxies stayed']], from: '2026/FF5/Elections/B-roll/Card_03', to: '2026/FF5/Civil Defence/B-roll/Card_03', by: 'owen 5 days ago',
+        detail: 'Proxy/Card_03/C0012.mov stayed at the old path on the server: it was in use when the move ran.',
+        targets: ['jsmith on JSMITH-STUDIO: blocked here after 5 attempts: Resolve is holding the file', 'mrivera on RIVERA-TOWER: trashed on this computer: it does not sync the destination project', 'tchen on TCHEN-RIG: moved'] },
+      { tags: [['err', 'failed', 'on 1 computer']], from: '2026/FF5/Elections/Subs/en_v1.srt', to: '2026/FF5/Elections/Subs/Old/en_v1.srt', by: 'jsmith 6 days ago',
+        targets: ['jsmith on JSMITH-MBP: failed, permission denied', 'mrivera on RIVERA-TOWER: moved'] },
       { tags: [['mute', 'put back']], from: '2026/FF5/Repro Rights/AE/Titles', to: '2026/FF5/Elections/AE/Titles', by: 'owen 8 days ago', note: 'putting move 14 back', targets: ['jsmith on JSMITH-STUDIO: moved'] },
       { tags: [['ok', 'done']], from: '2026/FF5/Elections/Youtube/Debate_clip.mp4', to: '2026/FF5/Elections/B-roll/Debate_clip.mp4', by: 'mrivera 9 days ago', undo: true,
         targets: ['jsmith on JSMITH-STUDIO: moved', 'mrivera on RIVERA-TOWER: moved'] },
@@ -207,7 +207,7 @@
       ] },
     ],
     roots: {
-      maps: [['Elections Rough Cut', '2026/FF5/Elections', 'auto'], ['Elections SELECTS', '2026/FF5/Elections', 'admin (owen)'], ['Civil Defence v3', '2026/FF5/Civil Defence', 'auto'], ['Night Market', '2026/Shorts/Night Market', 'auto']],
+      maps: [['Elections Rough Cut', '2026/FF5/Elections', 'auto'], ['Elections SELECTS', '2026/FF5/Elections', 'admin, owen'], ['Civil Defence v3', '2026/FF5/Civil Defence', 'auto'], ['Night Market', '2026/Shorts/Night Market', 'auto']],
       unmapped: ['Untitled Project 3', 'Typhoon Prep'],
     },
   };
@@ -220,13 +220,13 @@
   const LED_TIP = { '': 'Online and syncing normally.', err: 'Something on this computer has stopped for this project.', warn: 'Online, but something needs a look.', off: 'Not heard from: the computer is off, asleep or offline.' };
   const LANE_TIP = {
     upload: 'Upload: sends new original footage from this computer to the server.',
-    'proxy download': 'Proxy download: brings the small edit copies (proxies) from the server to this computer.',
+    'proxy download': 'Proxy download: brings the small edit copies, the proxies, from the server to this computer.',
     'folder sync': 'Folder sync: keeps project files such as Resolve projects, graphics and audio the same on every computer.',
   };
   const BANNER_TIP = {
-    'syncthing folder error': 'The sync engine (Syncthing) on the server reports a problem with this project\'s shared folder.',
-    'nas inventory not updated': 'The server could not count the files in this project, so the NAS figures are from its last good count.',
-    'sharing change held': 'The server wanted to share this project with a computer but could not reach it yet. It keeps trying.',
+    'Syncthing folder error:': 'The sync engine on the server, Syncthing, reports a problem with this project\'s shared folder.',
+    'NAS inventory not updated:': 'The server could not count the files in this project, so the NAS figures are from its last good count.',
+    'Sharing change held:': 'The server wanted to share this project with a computer but could not reach it yet. It keeps trying.',
   };
   const LINK_TIP = {
     ok: 'This shared folder exists and reaches everyone who syncs this project.',
@@ -238,7 +238,7 @@
     : /not applied/.test(t) ? 'A computer could not move its copy and may upload the file again at the old path.'
     : /unfinished/.test(t) ? 'The move stopped part-way on the server. The server finishes it by itself once only one of the two paths exists.'
     : /blocked/.test(t) ? 'A computer gave up after several tries, usually because a program such as Resolve holds the file.'
-    : /proxies stayed/.test(t) ? 'Some proxy files could not move on the server because something was using them.'
+    : /partial/.test(t) ? 'Some proxy files could not move on the server because something was using them.'
     : /failed/.test(t) ? 'A computer tried and could not move its copy.'
     : /put back/.test(t) ? 'This move reverses an earlier one.' : '';
 
@@ -259,7 +259,7 @@
           total++; if (t) on++;
           const cur = year === '2026' && show === 'FF5' && p === 'Elections';
           const ticked = cur ? state.pickers.includes(tickFor) : t;
-          rows.push(`<a class="row proj ${ticked ? 'on' : ''}${cur ? ' cur' : ''}" href="project.html" data-name="${esc(p)}" title="Open ${esc(p)}. The square shows whether it is ticked (synced) for the editor chosen above."><span class="br">${pre1}${sLast ? '   ' : '│  '}${pi === projects.length - 1 ? '└─ ' : '├─ '}</span><span class="box">${ticked ? '■' : '□'}</span>${esc(p)}<span class="sz" title="Size of this project on the server.">${sz}</span></a>`);
+          rows.push(`<a class="row proj ${ticked ? 'on' : ''}${cur ? ' cur' : ''}" href="project.html" data-name="${esc(p)}" title="Open ${esc(p)}. The square shows whether it is ticked, that is synced, for the editor chosen above."><span class="br">${pre1}${sLast ? '   ' : '│  '}${pi === projects.length - 1 ? '└─ ' : '├─ '}</span><span class="box">${ticked ? '■' : '□'}</span>${esc(p)}<span class="sz" title="Size of this project on the server.">${sz}</span></a>`);
         });
       });
     });
@@ -277,18 +277,18 @@
     $('#pickers').innerHTML = state.pickers.length ? state.pickers.map(e => {
       const m = state.modes[e];
       const chip = m === 'upload_only' ? ` <a href="help.html#upload-only" title="upload only: this editor's computer sends its video originals to the server and downloads nothing">${tag('warn', 'upload only')}</a>`
-        : m === 'mixed' ? ` <a href="help.html#upload-only" title="upload only on one of this editor's computers, a full sync on another: see Settings, SYNC PLANS">${tag('warn', 'upload only on one computer')}</a>` : '';
+        : m === 'mixed' ? ` <a href="help.html#upload-only" title="upload only on one of this editor's computers, a full sync on another: see Settings, SYNC PLANS">${tag('warn', 'upload only')}</a> <span class="dim">on one computer</span>` : '';
       return `<b>${esc(e)}</b>${chip}`;
-    }).join(', ') : '<span class="dim">nobody (not syncing to any editor)</span>';
+    }).join(', ') : '<span class="dim">nobody: not syncing to any editor</span>';
 
     const names = owned.join(', ');
-    const where = `${T}'s ${owned.length} computer${owned.length === 1 ? '' : 's'} (${names})`;
+    const where = `${T}'s ${owned.length} computer${owned.length === 1 ? '' : 's'}: ${names}`;
     const warn = WARN[T] || '';
     let keys = '';
     if (ticked) {
       keys += key(`Untick for ${whom}`, 'w-tick', `This removes ${LABEL} from ${where}. Their copies stay on disk; nothing new comes down and proxy sync stops for it.`, `unticked ${LABEL} for ${T}`, 'untick', `Stop syncing this project to ${where}. Nothing already on their disks is deleted.`);
     } else if (owned.length > 1) {
-      keys += key(`Tick for all of ${me ? 'my' : T + "'s"} computers (${owned.length})`, 'primary w-tick', warn ? `${warn} Sync it there anyway?` : '', `ticked ${LABEL} for ${T}`, 'tick', `Start syncing this project to ${where}: its proxies and shared project files come down on each.`);
+      keys += key(`Tick for all ${owned.length} of ${me ? 'my' : T + "'s"} computers`, 'primary w-tick', warn ? `${warn} Sync it there anyway?` : '', `ticked ${LABEL} for ${T}`, 'tick', `Start syncing this project to ${where}: its proxies and shared project files come down on each.`);
     } else {
       keys += key(`Tick for ${whom}`, 'primary w-tick', warn ? `${warn} Sync it there anyway?` : '', `ticked ${LABEL} for ${T}`, 'tick', `Start syncing this project to ${where}: its proxies and shared project files come down.`);
     }
@@ -297,7 +297,7 @@
         'download this project\'s proxies and shared files as well: the normal sync');
     } else {
       keys += key(ticked ? 'Switch to upload only' : `Upload only for ${whom}`, 'w-mode', ticked ? `This sets ${LABEL} to upload only on every one of ${where}: nothing more comes down on any of them, and a computer that has a full sync of it now stops downloading. Their copies stay on disk. Switch to upload only?` : '',
-        'set to upload only', 'upload', 'for footage you already have on this computer: send the video originals to the server and download nothing (no proxies, no shared project files)');
+        'set to upload only', 'upload', 'for footage you already have on this computer: send the video originals to the server and download nothing: no proxies, no shared project files');
     }
     $('#tick-keys').innerHTML = keys;
     // Round 2 ("nothing may shift"): the per-computer line is always drawn,
@@ -327,7 +327,7 @@
 
     $('#h-state').innerHTML = '';
     $('#h-sum').innerHTML = d.computers.length ? `<b>${d.computers.length}</b> computers share it` : 'no computer shares it yet';
-    $('#banners').innerHTML = d.banners.map(b => `<div class="note ${b[0]}"><span title="${esc(BANNER_TIP[b[1]] || '')}">${tag(b[0], b[1], b[0] === 'err')}</span><span class="grow">${esc(b[2])}${b[3] ? ` <span class="muted">${esc(b[3])}</span>` : ''}</span></div>`).join('');
+    $('#banners').innerHTML = d.banners.map(b => `<div class="note ${b[0]}"><span title="${esc(BANNER_TIP[b[2]] || '')}">${tag(b[0], b[1], b[0] === 'err')}</span><span class="grow"><b>${esc(b[2])}</b> ${esc(b[3])}${b[4] ? ` <span class="muted">${esc(b[4])}</span>` : ''}</span></div>`).join('');
     $('#banners').style.display = d.banners.length ? '' : 'none';
     renderPlan();
 
@@ -335,18 +335,18 @@
     $('#pc-meta').innerHTML = d.computers.length ? `NAS: <b>${d.nas.orig.toLocaleString()}</b> originals &middot; <b>${d.nas.proxy.toLocaleString()}</b> proxies` : '';
     $('#computers').innerHTML = d.computers.length ? `
       <table class="tbl stack-sm pct">
-        <thead><tr><th></th><th>computer</th><th title="How much of this project the computer has: the small edit copies (proxies) and shared project files, by size. Camera originals live on the server and are not counted.">synced</th><th title="Files this computer holds, out of the files it should hold.">has</th><th title="What this computer still needs from the server. Show the files lists them.">missing</th><th title="Camera originals (orig) and proxies on this computer's disk, out of how many the server has.">media</th><th title="The state of each sync lane on this computer. Upload: sends new footage up. Proxy download: brings edit copies down. Folder sync: keeps project files the same everywhere.">sync</th><th title="When this computer last sent the server its status.">last seen</th></tr></thead>
+        <thead><tr><th></th><th>computer</th><th title="How much of this project the computer has: the small edit copies, called proxies, and shared project files, by size. Camera originals live on the server and are not counted.">synced</th><th title="Files this computer holds, out of the files it should hold.">has</th><th title="What this computer still needs from the server. Show the files lists them.">missing</th><th title="Camera originals (orig) and proxies on this computer's disk, out of how many the server has.">media</th><th title="The state of each sync lane on this computer. Upload: sends new footage up. Proxy download: brings edit copies down. Folder sync: keeps project files the same everywhere.">sync</th><th title="When this computer last sent the server its status.">last seen</th></tr></thead>
         <tbody>${d.computers.map((c, i) => {
           const dash = '<span class="muted" title="no Syncthing device on this computer, so folder sync does not apply">-</span>';
           return `<tr>
             <td class="c-led" title="${LED_TIP[c.st] || ''}">${led(c.st)}</td>
             <td class="who c-who">${esc(c.who)}${c.m ? `<small>${esc(c.m)}</small>` : ''}
               <div class="inline" style="margin-top:4px">${c.wired ? `<span title="Wired: this computer is plugged into the server and works straight off it, so nothing needs to sync to it.">${tag('ok', 'wired')}</span>` : ''}${c.unmapped ? `<span title="Unmapped: the sync engine knows this computer, but it is not linked to any editor yet. Approve it on Settings, then Users.">${tag('warn', 'unmapped')}</span>` : ''}${c.wired ? '' : `<span class="conn ${c.on ? 'on' : 'off'}">${c.on ? 'online' : 'offline'}</span>`}</div></td>
-            <td class="c-pct" data-l="synced" title="everything this computer should hold: proxies + shared project files (originals stay on the server)">${c.wired ? dash : `<span class="mtr" style="color:${c.pct === 100 ? 'var(--ok)' : 'var(--hi)'}">${meter(c.pct, 100, 10)}</span> <b>${c.pct}%</b>`}</td>
+            <td class="c-pct" data-l="synced" title="Everything this computer should hold: proxies and shared project files. Camera originals stay on the server.">${c.wired ? dash : `<span class="mtr" style="color:${c.pct === 100 ? 'var(--ok)' : 'var(--hi)'}">${meter(c.pct, 100, 10)}</span> <b>${c.pct}%</b>`}</td>
             <td class="num" data-l="has">${c.wired ? dash : c.has.replace(/ /g, '')}</td>
             <td data-l="missing" class="nowrap">${c.wired ? dash : c.miss ? `<span style="color:var(--warn)">${c.miss}</span>` : '<span class="muted">-</span>'}${c.missing ? `<br><button class="key quiet sm" type="button" data-missing="${i}" title="Opens the list of files this computer is still waiting for."><span class="t">show the files</span></button>` : ''}</td>
             <td data-l="media" class="nowrap">${c.media ? `<span title="camera originals on this computer's disk / on the NAS">${c.media[0].toLocaleString()}/${d.nas.orig.toLocaleString()} orig</span><br><span title="proxies on this computer's disk / on the NAS">${c.media[1].toLocaleString()}/${d.nas.proxy.toLocaleString()} proxy</span>` : '<span class="muted" title="no media manifest reported yet">-</span>'}</td>
-            <td data-l="sync"><div class="lanes-t">${c.lanes.length ? c.lanes.map(l => `<span class="tag ${l[1] === 'hi' ? 'hi' : l[1]}" title="${esc(LANE_TIP[l[0]] || l[0])}&#10;On ${esc(c.m)}: ${esc(l[2])}${l[3] ? ' (' + esc(l[3]) + ')' : ''}">${esc(l[0])}: ${esc(l[2])}</span>`).join('') : '<span class="muted" title="no companion report received">no reports</span>'}</div></td>
+            <td data-l="sync"><div class="lanes-t">${c.lanes.length ? c.lanes.map(l => `<span class="lane-s" title="${esc(LANE_TIP[l[0]] || l[0])}&#10;On ${esc(c.m)}: ${esc(l[2])}${l[3] ? ', ' + esc(l[3]) : ''}"><span class="ln">${esc(l[0])}</span>${tag(l[1], l[2])}</span>`).join('') : '<span class="muted" title="no companion report received">no reports</span>'}</div></td>
             <td data-l="last seen" class="nowrap dim">${esc(c.seen)}</td>
           </tr>
           <tr class="drawer" id="drawer-${i}" hidden><td colspan="8">${c.missing === 'empty' ? `
@@ -355,7 +355,7 @@
             <div class="drawer-box"><div class="h">missing on ${esc(c.m)}<span class="dim">refreshed 40 s ago</span></div>
             <ul class="files cap">${['Proxy/A004_C014_0918FJ.mov 412 MB', 'Proxy/A004_C015_0918FJ.mov 388 MB', 'Proxy/A004_C016_0918FJ.mov 1.1 GB', 'Proxy/A005_C001_0919TR.mov 640 MB', 'Proxy/A005_C002_0919TR.mov 702 MB', 'Proxy/B001_C020_0919XX.mov 1.4 GB', 'Elections.drp 48 MB', 'Graphics/lower_third_v4.png 2 MB']
               .map(x => { const k = x.lastIndexOf(' ', x.length - 4); return `<li><span class="g muted">&middot;</span><span class="nm">${esc(x.slice(0, k))}</span><span class="sz">${esc(x.slice(k + 1))}</span></li>`; }).join('')}
-              <li class="note-line">... and 720 more (list capped at 8)</li></ul></div>`}</td></tr>`;
+              <li class="note-line">... and 720 more: the list stops at 8</li></ul></div>`}</td></tr>`;
         }).join('')}</tbody></table>`
       : `<div class="empty"><span class="glyph">░░░</span>No editor computer shares this folder yet. Approve the computer on Settings, then USERS: sharing follows by itself on the next cycle.</div>`;
 
@@ -367,7 +367,7 @@
       lh += d.links.map(l => `<div class="lrow"><span title="${esc(LINK_TIP[l.st])}">${l.st === 'ok' ? tag('ok', 'ok') : tag('err', l.st, true)}</span>
         <span class="path">${esc(l.path)}</span>${l.from ? `<span>from <a class="link" href="project.html">${esc(l.from)}</a></span>` : ''}
         ${l.detail ? `<span class="dim">${esc(l.detail)}</span>` : ''}
-        <span class="keys"><button class="key quiet sm" type="button" data-dismiss=".lrow" title="stop sharing this folder into ${LABEL} (nothing on disk is deleted)"><span class="t">unshare</span></button></span></div>`).join('');
+        <span class="keys"><button class="key quiet sm" type="button" data-dismiss=".lrow" title="Stop sharing this folder into ${LABEL}. Nothing on disk is deleted."><span class="t">unshare</span></button></span></div>`).join('');
     }
     if (d.borrowers.length) {
       lh += `<div class="sec-h">shared into<span class="dim">folders of this project other projects receive</span></div>`;
@@ -376,13 +376,13 @@
     $('#links').innerHTML = lh;
 
     // moves
-    $('#move-result').innerHTML = d.moveDone ? moveResult(d.moveDone) : '';
+    $('#move-result').innerHTML = d.moveDone ? moveResult(d.moveDone) : MOVE_IDLE;
     $('#awaiting').innerHTML = d.awaiting.length ? `<div class="sec-h">moves awaiting computers</div>` + d.awaiting.map(a => `
-      <div class="lrow"><span title="${a.tone === 'err' ? 'That computer reported it could not move its copy. Until it does, it may upload the file again at the old path.' : 'That computer has not moved its copy yet. It is told again on each report until it does.'}">${tag(a.tone, a.label, a.tone === 'err')}</span><span><b>${esc(a.who)}</b> on <b>${esc(a.m)}</b></span>
+      <div class="lrow"><span title="${a.tone === 'err' ? 'That computer reported it could not move its copy. Until it does, it may upload the file again at the old path.' : 'That computer has not moved its copy yet. It is told again on each report until it does.'}">${tag(a.tone, a.label, a.tone === 'err')}</span><span><b>${esc(a.who)}</b> on <b>${esc(a.m)}</b>${a.why ? `<span class="dim">: ${esc(a.why)}</span>` : ''}</span>
         ${a.again ? `<span class="keys"><button class="key sm" type="button" data-busy="offered again: TCHEN-RIG gets it on its next report" title="offer this move to that computer again on its next report"><span class="t">Ask that computer again</span><span class="busy-t"><span class="spin"></span> asking</span></button></span>` : ''}
         <div class="sub">${esc(a.what)}</div></div>`).join('') : '';
     $('#moves').innerHTML = d.moves.length ? `<div class="sec-h">moves</div><div class="scroll-y" style="max-height:420px">` + d.moves.map(mv => `
-      <div class="lrow">${mv.tags.map(t => `<span title="${esc(moveTip(t[1]))}">${tag(t[0], t[1], t[0] === 'err')}</span>`).join('')}
+      <div class="lrow">${mv.tags.map(t => `<span title="${esc(moveTip(t[1]))}">${tag(t[0], t[1], t[0] === 'err')}</span>${t[2] ? `<span class="dim">${esc(t[2])}</span>` : ''}`).join('')}
         <span class="path">${esc(mv.from)}</span><span class="red">&#8594;</span><span class="path">${esc(mv.to)}</span>
         <span class="muted">by ${esc(mv.by)}${mv.note ? ', ' + esc(mv.note) : ''}</span>
         ${mv.undo ? `<span class="keys"><button class="key quiet sm" type="button" data-confirm="Move ${esc(mv.to)} back to ${esc(mv.from)} on the server, and tell every computer that holds it to move its copy back and relink Resolve? Proxies go back with it." data-done="move put back: every computer that holds it is told" title="put this move back: the same move in reverse, on the server and on every computer"><span class="t">undo this move</span></button></span>` : ''}
@@ -398,9 +398,9 @@
         <summary><span class="mk">&#9656;</span>${led(e.st)}<b>${esc(e.who)}</b><span class="muted" title="${e.mode === 'base' ? 'Base: a computer wired to the server that works straight off it.' : 'Editor: a computer that syncs its own copy.'}">${esc(e.m)} &middot; ${esc(e.mode)}</span>${e.proxyOnly ? `<span title="This computer edits with proxies only. It is not expected to hold the camera originals.">${tag('ok', 'proxy only')}</span>` : ''}
           <span class="grow"></span><span title="Camera originals and proxies on this computer, out of what the server has.">originals ${e.have[0].toLocaleString()}/${d.nas.orig.toLocaleString()} &middot; proxies ${e.have[1].toLocaleString()}/${d.nas.proxy.toLocaleString()}${e.offline ? ` &middot; <span style="color:var(--warn)" title="Clips Resolve shows as media offline (red) on this computer: it cannot find their files.">${e.offline} offline in Resolve</span>` : ''}</span></summary>
         <div class="fold-body">${e.bins.length ? e.bins.map(b => `
-          <details class="fold"><summary title="${esc(b.p || '(root)')}"><span class="mk">&#9656;</span><span style="color:var(--text)">${esc(b.p || '(root)')}</span><span style="color:${b.present < b.total ? 'var(--warn)' : 'var(--muted)'}" title="Clips in this Resolve bin whose files are on the computer, out of all its clips.">${b.present}/${b.total} present</span></summary>
+          <details class="fold"><summary title="${esc(b.p || 'Clips at the top of the Resolve project, in no bin.')}"><span class="mk">&#9656;</span><span style="color:var(--text)">${esc(b.p || 'top of the project')}</span><span style="color:${b.present < b.total ? 'var(--warn)' : 'var(--muted)'}" title="Clips in this Resolve bin whose files are on the computer, out of all its clips.">${b.present}/${b.total} present</span></summary>
             <div class="fold-body"><ul class="files">${b.clips.map(c => `<li>${c[1] === 'up' ? '<span class="g up" title="uploading">&#8673;</span>' : c[1] ? '<span class="g ok" title="online">&#9632;</span>' : '<span class="g err" title="offline">&#9632;</span>'}<span class="nm" title="${esc(c[0])}">${esc(c[0])}</span><span class="sz">${c[2] ? `<span title="Only the proxy (the small edit copy) of this clip is on the computer.">${tag('mute', 'proxy')}</span>` : ''}</span></li>`).join('')}</ul></div></details>`).join('')
-          + (e.truncated ? '<div class="hint">(clip list truncated)</div>' : '')
+          + (e.truncated ? '<div class="hint">The clip list stops here: the computer sends only the first clips of each bin.</div>' : '')
           : '<div class="dim" style="font-size:12px">No Resolve bin data. Open this project in Resolve on that computer to fill it in.</div>'}</div>
       </details>`).join('')
       : `<div class="allclear"><span class="led off"></span>No presence data reported yet for this project.</div>`;
@@ -408,15 +408,16 @@
     renderRoots(d.roots);
   }
 
+  const MOVE_IDLE = '<div class="dim" style="font-size:12px">The result of a move started here shows in this box.</div>';
   function moveResult(r) {
-    if (r.partial) return `<div class="note warn">${tag('warn', 'moved, some proxies stayed')}<span class="grow">${esc(r.from)} is now ${esc(r.to)} on the server, but these proxy files did not move: ${esc(r.failed.join('; '))}. Move them by hand or run the move again once whatever is holding them has let go.</span></div>`;
-    return `<div class="note ok">${tag('ok', 'moved')}<span class="grow">${esc(r.from)} is now ${esc(r.to)} on the server (${r.proxies} proxy file${r.proxies === 1 ? '' : 's'} with it); ${r.n} computer${r.n === 1 ? '' : 's'} told to follow.</span></div>`;
+    if (r.partial) return `<div class="note warn"><span title="The file moved, but some of its proxy files could not.">${tag('warn', 'partial')}</span><span class="grow"><b>Moved, some proxies stayed.</b> ${esc(r.from)} is now ${esc(r.to)} on the server, but these proxy files did not move: ${esc(r.failed.join('; '))}. Move them by hand or run the move again once whatever is holding them has let go.</span></div>`;
+    return `<div class="note ok">${tag('ok', 'moved')}<span class="grow">${esc(r.from)} is now ${esc(r.to)} on the server, with ${r.proxies} proxy file${r.proxies === 1 ? '' : 's'}; ${r.n} computer${r.n === 1 ? '' : 's'} told to follow.</span></div>`;
   }
 
   // ------------------------------------------------------------ project roots
   const PROJECTS = ['2025/FF4/CIA City', '2025/FF4/Kinmen', '2025/FF4/Taichung Drone Camp', '2026/FF5/Civil Defence', '2026/FF5/Elections', '2026/FF5/Repro Rights', '2026/Shorts/Night Market', '2026/Shorts/Typhoon Prep'];
   function rootSel(cur, blank) {
-    return `<select class="sel" style="width:auto;min-width:220px">${blank ? '<option value="">pick a project</option>' : ''}${PROJECTS.map(p => `<option ${p === cur ? 'selected' : ''}>${p}</option>`).join('')}${blank ? '' : '<option value="">remove (re-detect)</option>'}</select>`;
+    return `<select class="sel" style="width:auto;min-width:220px">${blank ? '<option value="">pick a project</option>' : ''}${PROJECTS.map(p => `<option ${p === cur ? 'selected' : ''}>${p}</option>`).join('')}${blank ? '' : '<option value="">remove and match again</option>'}</select>`;
   }
   function renderRoots(r) {
     const rows = r.maps.map((m, i) => ({ name: m[0], into: m[1], src: m[2], id: 'm' + i }))
@@ -476,35 +477,33 @@
   $('#confirm-no').addEventListener('click', () => { dlg.classList.remove('open'); pending = null; });
   $('#confirm-yes').addEventListener('click', () => {
     dlg.classList.remove('open');
-    if (pending) { if (pending.dataset.act) applyAct(pending.dataset.act); toast(pending.dataset.done || 'done'); }
+    if (pending) { if (pending.dataset.act) applyAct(pending.dataset.act); if (pending.then) pending.then(); toast(pending.dataset.done || 'done'); }
     pending = null;
   });
   $('#tick-for').addEventListener('change', e => { tickFor = e.target.value; renderPlan(); });
 
   $('#share-form').addEventListener('submit', e => {
     e.preventDefault();
-    const v = e.target.elements.path.value.trim();
+    const v = e.target.elements.namedItem('path').value.trim();
     const err = $('#share-err');
-    if (!v) { err.hidden = false; err.textContent = 'empty path'; return; }
-    if (/^2026\/FF5\/Elections(\/|$)/i.test(v)) { err.hidden = false; err.textContent = 'that folder is inside this project already'; return; }
-    err.hidden = true; e.target.elements.path.value = '';
+    if (!v) { err.textContent = 'Paste a folder path first.'; return; }
+    if (/^2026\/FF5\/Elections(\/|$)/i.test(v)) { err.textContent = 'That folder is inside this project already.'; return; }
+    err.textContent = '\u00a0'; e.target.elements.namedItem('path').value = '';
     toast('shared into ' + LABEL + ': ' + v);
   });
   $('#move-form').addEventListener('submit', e => {
     e.preventDefault();
-    const f = e.target, path = f.elements.path.value.trim(), into = f.elements.to_path.value.trim(), dest = f.elements.to_slug.value;
+    const f = e.target, path = f.elements.namedItem('path').value.trim(), into = f.elements.namedItem('to_path').value.trim(), dest = f.elements.namedItem('to_slug').value;
     if (!path) { $('#move-result').innerHTML = `<div class="note err">${tag('err', 'nothing to move', true)}<span class="grow">Type the file or folder to move.</span></div>`; return; }
     const n = 4;
-    pending = { dataset: { done: 'moved on the server; 4 computers told to follow' } };
+    pending = { dataset: { done: 'moved on the server; 4 computers told to follow' },
+      then: () => { $('#move-result').innerHTML = moveResult({ from: path, to: `${dest}/${into ? into + '/' : ''}${path.split('/').pop()}`, proxies: 2, n }); } };
     $('#confirm-text').textContent = `Move '${path}' from ${LABEL} to ${dest}${into ? '/' + into : ''} on the server, and tell ${n} computers to move their copy and relink Resolve? Proxies move with it. You can put it back with UNDO while every computer has either applied it or is still waiting for it.`;
     dlg.classList.add('open');
-    $('#confirm-yes').addEventListener('click', () => {
-      $('#move-result').innerHTML = moveResult({ from: path, to: `${dest}/${into ? into + '/' : ''}${path.split('/').pop()}`, proxies: 2, n });
-    }, { once: true });
   });
   document.addEventListener('keydown', e => {
     if (e.key === '/' && !/input|select|textarea/i.test(e.target.tagName)) { e.preventDefault(); $('#proj-q').focus(); }
-    if (e.key === 'Escape') dlg.classList.remove('open');
+    if (e.key === 'Escape') { dlg.classList.remove('open'); pending = null; }
   });
   $('#proj-q').addEventListener('input', e => {
     const q = e.target.value.trim().toLowerCase();

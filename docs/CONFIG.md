@@ -588,6 +588,102 @@ laptops.
 | `remote` | `ccsync_sftp` | Must match the stanza in `rclone.conf` |
 | `remote_root` | `""` | **R, and must be absolute.** A relative value resolves under the editor's home, which does not contain the tree |
 | `server_p_unc` | *(from manifest)* | The UNC path, taken from `smb_unc` rather than derived |
+| `remote_down` | `""` | Optional download route, set by an admin on one computer. See "Download route" below |
+| `remote_down_root` | `""` | The tree's path on `remote_down`; blank means "same as `remote_root`" |
+
+### Download route (`remote_down`, trial from 2026-09-25)
+
+Why it exists: [`TRANSFER_SPEED.md`](TRANSFER_SPEED.md) section 6b. The
+direct route between the studio's ISP and one remote editor's caps every
+download at about 18 MB/s whatever the protocol; the same bytes through a
+Cloudflare tunnel arrive at about 52 MB/s. The NAS serves the tree
+**read-only** over WebDAV (`rclone serve webdav /data --read-only`, the tree
+mounted at `/data`) behind that tunnel.
+
+What it changes, per call site (each one carries a comment saying why):
+
+| Uses `remote_down` when set (download-only) | Always uses `remote` (writes or deletes on the server) |
+|---|---|
+| Lane B's `rclone sync` | Lane A and express uploads |
+| Lane B's breaker pre-flight listing, the relocation listing and the `remote_root` marker probe: the SAME remote the pass downloads from | Consolidate's upload, and its upload preview |
+| Consolidate's lane B preview (the consent dialog for the proxy pull that follows, which is lane B's own run) | File moves, including their server listing |
+| The structure clone (lists the server, makes folders here) | B-roll and music uploads, and their existence check |
+| The on-demand fetch behind Send to Resolve (b-roll archive, music, YouTube originals) | |
+
+Blank `remote_down` is today's behaviour exactly: every one of those calls
+answers `remote` + `remote_root`. Paths on the route are the same as on SFTP,
+relative to `remote_down_root`.
+
+Safety, all of it measured against rclone 1.74.4 on 2026-09-25:
+
+- **Unreachable, a refused password (401) or a tunnel error page (530)**:
+  the pre-flight listing fails, and lane B **parks** (`paused`, detail
+  `NOT DOWNLOADING (route): ...`), never `error`, never trips the breaker. It
+  tries again every pass. Uploads and lane C are untouched.
+- **An empty listing**: a sign-in or error page served with HTTP 200 lists as
+  EMPTY with exit 0, and `rclone sync` from it deletes local proxies. Lane B
+  therefore also parks when the route lists a scope as empty while this
+  computer holds proxies there. The breaker's own rules (root markers, empty
+  after non-empty, shrink) still apply on top.
+- **No cleartext off the network (LG-4)**: the companion reads the remote's
+  `url` from rclone's config (`rclone config dump`, cached per process) and
+  classifies it with `transport.classify`. Plain `http` to a public host is
+  refused: lane B falls back to `remote` (SSH), logs why, and reports
+  `lane_b_via = "remote"`. `https`, and `http` on the LAN or tailnet, are
+  allowed.
+- Switching a machine onto (or off) the route does not re-download what it
+  already has: WebDAV and SFTP both keep 1-second modtimes, and a lane B pass
+  over SFTP, then WebDAV, then SFTP again moved 2, 0 and 0 files.
+
+Flags a pass through the route adds: `--disable-http2` (rclone otherwise
+negotiates HTTP/2 with Cloudflare and multiplexes every transfer onto one TCP
+connection), and `--multi-thread-streams 4 --multi-thread-cutoff 256Mi`
+(rclone's defaults, pinned: through the tunnel 1 stream measured 50-52 MB/s
+and 4 streams 52.8, so more buys nothing). `--transfers` stays the machine's
+`transfers`; the `--sftp-*` flags stay in the argv and are inert on WebDAV.
+`sync/rclone_lane.py`, `REMOTE_DOWN_FLAGS`, has the reasoning.
+
+The report carries `lane_b_via` (`"remote"` or `"remote_down"`) only on a
+machine that sets `remote_down`, and only after lane B's first pass. The
+dashboard does not declare it yet, so it shows as an undeclared report key
+for that machine (accepted, named, never a rejected report).
+
+**Setting it up on one editor's computer.** Add a stanza to the rclone.conf
+the companion already uses (`%APPDATA%\rclone\rclone.conf` on Windows,
+`~/.config/rclone/rclone.conf` on macOS), next to the existing SFTP one:
+
+```ini
+[ccsync_dl]
+type = webdav
+url = https://<download-host>
+vendor = rclone
+user = <webdav-user>
+pass = <obscured-password>
+```
+
+`<obscured-password>` is the output of rclone's own obscuring, which reads
+the password from stdin so it stays out of shell history:
+`rclone obscure -` (type the password, press Enter, then Ctrl+Z Enter on
+Windows or Ctrl+D on macOS). Obscuring is reversible encoding, not
+encryption: it keeps the password from being read over a shoulder, and the
+file's own permissions are what protect it. `vendor = rclone` because the
+server IS `rclone serve webdav`.
+
+Then in `~/.ccsync/config.toml`, and restart the companion:
+
+```toml
+remote_down = "ccsync_dl"
+# The tunnel serves the tree AS its root, so the tree is at "/" there.
+# Blank would mean "same as remote_root", i.e. the NAS's absolute path,
+# which does not exist on the tunnel: every listing then fails and lane B
+# parks (paused, nothing deleted) until this line is fixed.
+remote_down_root = "/"
+```
+
+Check it took: the companion log says `lane_b_proxy_down: downloading via
+remote_down (ccsync_dl:/)` on the first pass, and Copy diagnostics shows a
+`download route` line. To end the trial, delete the two lines (or set
+`remote_down = ""`) and restart.
 
 ### Lanes
 

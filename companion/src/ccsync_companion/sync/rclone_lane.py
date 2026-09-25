@@ -590,6 +590,263 @@ class RcloneTuning:
         return flags
 
 
+# -- the download route: `remote_down` (2026-09-25) --------------------------
+#
+# The owner's one-month trial (docs/TRANSFER_SPEED.md section 6b): the direct
+# HiNet -> UBBNET route caps one remote editor's downloads at ~18 MB/s whatever
+# the protocol, and the same bytes through a Cloudflare tunnel arrive at ~52.
+# The NAS serves the tree READ-ONLY over WebDAV behind that tunnel, and a
+# machine whose config names `remote_down` pulls through it. Blank (the
+# default) is today's behaviour exactly: every call below answers `remote`.
+#
+# THE RULE, per call site: only a path that COPIES from the tree down to this
+# machine, and never writes or deletes on the server, may use it. Lane B, its
+# pre-flight listings (they must read the SAME remote the pass downloads from,
+# or the breaker judges one server and rclone syncs from another), the
+# structure clone, consolidate's lane-B preview, the b-roll on-demand fetch.
+# Everything that writes keeps `remote`: lane A and express, consolidate's
+# upload, file moves, b-roll/music uploads. The WebDAV side is --read-only
+# anyway; the rule is what keeps a write from ever being attempted there.
+VIA_REMOTE = "remote"
+VIA_REMOTE_DOWN = "remote_down"
+
+# What a lane B pass through `remote_down` adds to its argv. Chosen against
+# the real 1.74.4 and the live tunnel on 2026-09-25:
+#
+#   --disable-http2   rclone negotiates HTTP/2 with Cloudflare's edge (a
+#                     `--dump headers` against the tunnel answers
+#                     "HTTP/2.0 401"), which multiplexes EVERY transfer and
+#                     every multi-thread stream of the pass onto one TCP
+#                     connection: one congestion window, and one lost packet
+#                     stalls all of them (TCP head-of-line blocking). With
+#                     HTTP/1.1 each stream is its own connection, which is
+#                     the shape section 6b measured (4 streams, 52.8 MB/s).
+#   --multi-thread-streams 4 / --multi-thread-cutoff 256Mi
+#                     rclone's own defaults, PINNED: through the tunnel one
+#                     stream measured 50-52 MB/s and four 52.8, so more
+#                     streams buy nothing, and a future rclone default must
+#                     not quietly change the shape the trial is judged on.
+#                     WebDAV serves Range requests, so a proxy over the
+#                     cutoff is read as four ranged GETs into a sparse file.
+#
+# NOT changed: --transfers stays the machine's `transfers` (4 files x 4
+# streams is already 16 connections through the tunnel for a 57 MB/s line),
+# and the --sftp-* window flags stay in the argv. They are backend options,
+# inert on a WebDAV remote (verified: the full lane argv runs clean against
+# `rclone serve webdav`), and dropping them would cost the window tuning if
+# an admin ever points `remote_down` at a second SFTP endpoint instead.
+# NOT added: --fast-list (WebDAV has no ListR), --use-server-modtime (the
+# rclone vendor already reports modtimes; its precision is 1 s, the same as
+# SFTP's, so a tree lane B pulled over SFTP is NOT re-downloaded by the first
+# WebDAV pass -- measured: SFTP pass 2 files, WebDAV pass 0, SFTP again 0).
+REMOTE_DOWN_FLAGS: tuple[str, ...] = (
+    "--disable-http2",
+    "--multi-thread-streams", "4",
+    "--multi-thread-cutoff", "256Mi",
+)
+
+
+def route_flags(via: Optional[str]) -> list[str]:
+    """The extra argv a download through `via` carries (none for `remote`)."""
+    return list(REMOTE_DOWN_FLAGS) if via == VIA_REMOTE_DOWN else []
+
+
+@dataclass(frozen=True)
+class DownRoute:
+    """Where a download-only call reads the tree from.
+
+    `refused` is set when `remote_down` was configured and REFUSED (LG-4:
+    plain http to a public host), in which case remote/remote_root/via are
+    the `remote` ones -- today's route, which is SSH and never cleartext."""
+
+    remote: str
+    remote_root: str
+    via: str
+    refused: str = ""
+
+
+# (rclone_path, remote_down) -> (backend type, url) as read from rclone's
+# own config. Process lifetime: rclone.conf is edited by an admin, and the
+# companion is restarted after that like after every config.toml edit. Only
+# SUCCESSFUL reads are cached, so an unreadable config is re-asked next pass.
+_route_url_cache: dict[tuple[str, str], tuple[str, str]] = {}
+_route_url_lock = threading.Lock()
+# Refusals already written to the log, so a refused route is one WARNING per
+# process rather than one per pass.
+_route_refusal_logged: set[str] = set()
+ROUTE_CONFIG_TIMEOUT_SECONDS = 20.0
+
+_INLINE_PARAM = re.compile(
+    r"""(?:^|,)\s*(url|type)\s*=\s*("(?:[^"]*)"|'(?:[^']*)'|[^,:]*)""", re.IGNORECASE)
+
+
+def _inline_remote_params(spec: str) -> Optional[tuple[str, str]]:
+    """(type, url) out of an rclone connection string, or None when `spec`
+    is a plain remote NAME. `:webdav,url='https://x',vendor=rclone` names its
+    backend after the leading colon; `name,url=...` overrides a stanza."""
+    if "," not in spec and not spec.startswith(":"):
+        return None
+    head, _, params = spec.partition(",")
+    backend = head[1:] if head.startswith(":") else ""
+    url = ""
+    for key, raw in _INLINE_PARAM.findall("," + params):
+        value = raw.strip().strip("'\"")
+        if key.lower() == "url":
+            url = value
+        elif key.lower() == "type" and not backend:
+            backend = value
+    if not backend and not url:
+        # `name,vendor=rclone` -- a stanza with an override that says nothing
+        # about where it points; the stanza itself has to be read.
+        return None
+    return backend, url
+
+
+def _default_config_dump(rclone_path: str, timeout: float) -> Optional[dict]:
+    """`rclone config dump` as a dict, or None when it could not be read.
+
+    --ask-password=false: an encrypted rclone.conf with no RCLONE_CONFIG_PASS
+    would otherwise wait on a stdin nobody will ever type into. The dump
+    carries every remote's obscured secrets; it is parsed here and never
+    logged -- the only thing that leaves this function is the stanza."""
+    code, out, err = _run_bounded(
+        [rclone_path, "config", "dump", "--ask-password=false"], timeout)
+    if code != 0:
+        log.warning("remote_down: could not read rclone's config (exit %s): %s",
+                    code, _stderr_for_log(err))
+        return None
+    try:
+        data = json.loads(out or "{}")
+    except ValueError:
+        log.warning("remote_down: rclone config dump did not return JSON")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def remote_type_and_url(
+    rclone_path: str,
+    spec: str,
+    dump_fn: Optional[Callable[[str, float], Optional[dict]]] = None,
+) -> Optional[tuple[str, str]]:
+    """(backend type, url) for the rclone remote `spec`, or None when rclone's
+    config could not be read. ("", "") when it was read and holds no such
+    remote -- rclone will fail that pass on its own, which parks lane B.
+
+    The environment wins over the file, exactly as it does inside rclone
+    (RCLONE_CONFIG_<NAME>_URL / _TYPE)."""
+    inline = _inline_remote_params(spec)
+    if inline is not None and inline[1]:
+        return inline
+    name = spec.split(",", 1)[0].lstrip(":")
+    key = (str(rclone_path), spec)
+    with _route_url_lock:
+        cached = _route_url_cache.get(key)
+    if cached is None:
+        data = (dump_fn or _default_config_dump)(rclone_path, ROUTE_CONFIG_TIMEOUT_SECONDS)
+        if data is None:
+            return None
+        stanza = data.get(name) if isinstance(data.get(name), dict) else {}
+        cached = (str(stanza.get("type") or ""), str(stanza.get("url") or ""))
+        with _route_url_lock:
+            _route_url_cache[key] = cached
+    backend, url = cached
+    env = "RCLONE_CONFIG_" + re.sub(r"[^A-Za-z0-9]", "_", name).upper()
+    backend = os.environ.get(env + "_TYPE", backend)
+    url = os.environ.get(env + "_URL", url)
+    if inline is not None and inline[0]:
+        backend = inline[0]
+    return backend, url
+
+
+def reset_route_cache() -> None:
+    """Forget every rclone-config read and logged refusal (tests)."""
+    with _route_url_lock:
+        _route_url_cache.clear()
+        _route_refusal_logged.clear()
+
+
+def route_refusal(
+    rclone_path: str,
+    spec: str,
+    dump_fn: Optional[Callable[[str, float], Optional[dict]]] = None,
+) -> str:
+    """Why `remote_down` must not be used, or "" when it may.
+
+    LG-4 (transport.py): nothing this companion runs may send plain http to a
+    host on the public internet, and a WebDAV remote carries its basic-auth
+    password in every request. Uses transport.classify, the one table the
+    settings window, the wizard and the dashboard already agree on -- so
+    http on the studio LAN or the tailnet is allowed exactly as it is for
+    the dashboard, and a name that does not resolve is never refused.
+
+    FAILS OPEN when rclone's config cannot be read: rclone reads the same
+    file for the pass itself, so an unreadable config fails that pass (which
+    parks lane B) rather than sending anything anywhere."""
+    from .. import transport  # leaf module, no package import side effects
+
+    found = remote_type_and_url(rclone_path, spec, dump_fn=dump_fn)
+    if found is None:
+        return ""
+    _backend, url = found
+    if not url:
+        return ""
+    try:
+        verdict = transport.classify(url)
+    except Exception:  # classify never raises; belt and braces
+        log.debug("remote_down: could not classify %s", url, exc_info=True)
+        return ""
+    if verdict == transport.HTTP_PUBLIC:
+        return (f"remote_down {spec!r} points at plain http on a public host; "
+                "its password would cross the internet in cleartext. Using "
+                "`remote` instead until the rclone remote's url is https.")
+    return ""
+
+
+def down_route(
+    cfg: Optional[dict],
+    verify: bool = True,
+    dump_fn: Optional[Callable[[str, float], Optional[dict]]] = None,
+) -> DownRoute:
+    """The remote a download-only call reads the tree from.
+
+    `remote_down` blank -> `remote` + `remote_root`, i.e. today, exactly.
+    Set -> `remote_down` + `remote_down_root`, where a blank
+    `remote_down_root` means `remote_root` (a second route to the same
+    server with the same layout). A WebDAV tunnel that serves the tree AS its
+    root needs "/" there -- blank would carry the NAS's absolute path onto a
+    remote where it does not exist, every listing through it fails, and lane
+    B parks on that (safely: paused, nothing deleted).
+
+    `verify` runs route_refusal (one `rclone config dump`, cached for the
+    process). False is for a caller that only needs to know what is
+    CONFIGURED, never for one about to run rclone."""
+    cfg = cfg or {}
+    remote = str(cfg.get("remote") or "").strip()
+    remote_root = str(cfg.get("remote_root") or "").strip()
+    # A trailing colon is the one typo that can never be right: every caller
+    # appends its own, and "name::path" is not a remote.
+    down = str(cfg.get("remote_down") or "").strip().rstrip(":")
+    if not down:
+        return DownRoute(remote, remote_root, VIA_REMOTE)
+    down_root = str(cfg.get("remote_down_root") or "").strip() or remote_root
+    if verify:
+        rclone_path = str(cfg.get("rclone_path") or "rclone")
+        try:
+            refused = route_refusal(rclone_path, down, dump_fn=dump_fn)
+        except Exception:
+            log.exception("remote_down: the route check failed -- using it anyway, "
+                          "rclone reads the same config for the pass itself")
+            refused = ""
+        if refused:
+            with _route_url_lock:
+                first = down not in _route_refusal_logged
+                _route_refusal_logged.add(down)
+            if first:
+                log.warning("%s", refused)
+            return DownRoute(remote, remote_root, VIA_REMOTE, refused=refused)
+    return DownRoute(down, down_root, VIA_REMOTE_DOWN)
+
+
 def _win_creationflags() -> int:
     """CREATE_NO_WINDOW: rclone is spawned from a windowed (console=False,
     build.spec) build, so without this every lane run and every
@@ -1979,8 +2236,13 @@ def build_down_command(
     max_duration_seconds: float | None = None,
     tuning: Optional[RcloneTuning] = None,
     min_age_seconds: int = LANE_B_MIN_AGE_SECONDS,
+    via: str = VIA_REMOTE,
 ) -> list[str]:
     """Lane B: `rclone sync` NAS -> editor, proxies only.
+
+    `via` is which route `remote` is (see down_route): VIA_REMOTE_DOWN adds
+    REMOTE_DOWN_FLAGS, and nothing else about the argv changes -- the same
+    filter, gates, delete caps and trash, whichever way the bytes come.
 
     `backup_dir` is how a caller makes this lane's deletions recoverable
     (see TRASH_DIR_NAME) -- RcloneLane always supplies one. It is a
@@ -2024,6 +2286,7 @@ def build_down_command(
         "--max-delete-size", LANE_B_MAX_DELETE_SIZE,
         "--transfers", str(transfers),
         *tuning.flags(DIRECTION_DOWN),
+        *route_flags(via),
         *_transport_flags(),
         *_max_duration_flags(max_duration_seconds),
         "--use-json-log",
@@ -2450,6 +2713,7 @@ class RcloneLane(LaneAdapter):
         locator: Optional["server_locate.ServerLocator"] = None,
         project_rel_fn: Optional[Callable[[str], Optional[str]]] = None,
         on_relocated: Optional[Callable[[str, str], None]] = None,
+        route_fn: Optional[Callable[[], "DownRoute"]] = None,
     ) -> None:
         assert direction in (DIRECTION_UP, DIRECTION_DOWN)
         self.direction = direction
@@ -2462,6 +2726,23 @@ class RcloneLane(LaneAdapter):
         self.local_root = local_root
         self.remote = remote
         self.remote_root = remote_root
+        # remote_down (2026-09-25): lane B only. Asked afresh at the top of
+        # every pass and every root probe (_apply_route), so the pre-flight
+        # listing, the pass, the relocation listing and the marker probe all
+        # read ONE remote -- the breaker judging the SFTP server while rclone
+        # syncs from the tunnel would be a breaker guarding nothing. Lane A
+        # never takes one: it WRITES, and remote_down is read-only by rule.
+        # `via` stays None until a route has been applied, which is how the
+        # report says "no pass yet" rather than guessing.
+        if route_fn is not None and direction != DIRECTION_DOWN:
+            log.warning("lane A was handed a download route -- ignored, uploads "
+                        "always go through `remote`")
+            route_fn = None
+        self._route_fn = route_fn
+        self.via: Optional[str] = None if route_fn is not None else VIA_REMOTE
+        # The last route refusal said (LG-4), so a refused remote_down is one
+        # log line per change rather than one per pass.
+        self._route_said = ""
         self.rclone_path = rclone_path
         self.transfers = transfers
         self.scan_interval = scan_interval
@@ -2909,6 +3190,7 @@ class RcloneLane(LaneAdapter):
             filter_file, self.transfers, subpath=subpath, stats_interval=stats_interval,
             backup_dir=backup_dir, max_duration_seconds=max_duration_seconds,
             tuning=self.tuning, min_age_seconds=self.min_age_seconds,
+            via=self.via or VIA_REMOTE,
         )
 
     # -- LaneAdapter ---------------------------------------------------
@@ -3614,6 +3896,10 @@ class RcloneLane(LaneAdapter):
         # against a remote that does not look like the tree (a wrong
         # remote_root, an empty/half-mounted share). COMMERCIAL_READINESS.md
         # item 9, 2026-08-17.
+        if self.direction == DIRECTION_DOWN:
+            # remote_down: which remote THIS pass reads, settled once, before
+            # the listing below -- the probe and the pass must agree.
+            self._apply_route()
         if self.direction == DIRECTION_DOWN and self.breaker is not None:
             scope = str(subpath or "").replace("\\", "/").strip("/")
             entries = list_remote_top(
@@ -3626,6 +3912,10 @@ class RcloneLane(LaneAdapter):
             # fraction rule, and after the pass the files it measures may be
             # the ones that were trashed.
             local_proxies = lane_guard.count_local_proxies(self.local_root, subpath)
+            if self.via == VIA_REMOTE_DOWN:
+                parked = self._route_preflight(scope, entries, local_proxies)
+                if parked is not None:
+                    return parked
         else:
             local_proxies = 0
 
@@ -4439,6 +4729,111 @@ class RcloneLane(LaneAdapter):
                 relocated += 1
         return relocated
 
+    def _apply_route(self) -> None:
+        """Point this lane at the route `route_fn` names right now.
+
+        Never raises, and a route_fn that fails keeps whatever route the lane
+        already had (the constructor's `remote` before the first success):
+        a download route that cannot be worked out is not a reason to point
+        lane B at something new."""
+        if self._route_fn is None:
+            return
+        try:
+            route = self._route_fn()
+        except Exception:
+            log.exception("%s: could not work out the download route -- keeping %s",
+                          self.name, self.via or VIA_REMOTE)
+            if self.via is None:
+                self.via = VIA_REMOTE
+            return
+        said = f"{route.via}:{route.remote}:{route.remote_root}"
+        # Root before remote, remote before via: a reader on another thread
+        # (the sequencer's root probe) can see the old pair for an instant
+        # while this runs. The route changes at most once per process in
+        # practice (a refusal found on the first pass), so that instant is
+        # the whole exposure, and the reader is a listing, never a transfer.
+        self.remote_root = route.remote_root
+        self.remote = route.remote
+        self.via = route.via
+        if said != self._route_said:
+            self._route_said = said
+            log.info("%s: downloading via %s (%s:%s)%s", self.name, route.via,
+                     route.remote, route.remote_root,
+                     f" -- remote_down refused: {route.refused}" if route.refused else "")
+
+    def _route_stand_down(self, detail: str, admin: str = "") -> LaneStatus:
+        """Park lane B for a download route that is not answering properly.
+
+        PAUSED, never ERROR, and NOT the breaker: a tunnel that is down, a
+        password the server refuses, or a page that is not a listing at all
+        is a route problem that clears by itself, and the latch is for a
+        server that no longer looks like the tree. The next pass asks again.
+        Lanes A and C are untouched (they never use this route)."""
+        with self._lock:
+            first = self._status.detail != detail
+            self._status.state = STATE_PAUSED
+            self._status.transferring = 0
+            self._status.queued = 0
+            self._status.speed_bps = None
+            self._status.eta_seconds = None
+            self._status.transfers = []
+            self._status.current_project = None
+            self._status.last_error = None
+            self._status.detail = detail
+        if first:
+            # Once per distinct park, not once per pass: the lane re-parks on
+            # every rotation for as long as the route stays down.
+            log.warning("%s: %s", self.name, admin or detail)
+        return self.status()
+
+    def _route_preflight(
+        self, scope: str, entries: Optional[list[str]], local_proxies: int,
+    ) -> Optional[LaneStatus]:
+        """The two answers from `remote_down` that must not reach `rclone sync`.
+
+        Over SFTP a failed listing is left to fail the pass on its own
+        (LaneBBreaker.check_remote). Through the tunnel that is not good
+        enough, for two reasons measured against the real 1.74.4 on
+        2026-09-25:
+
+        * unreachable, a refused password (401) and a Cloudflare 530 all fail
+          the listing (exit 1), and would paint lane B red for what is a
+          route outage -- so they park it instead;
+        * a 200 that is NOT a WebDAV answer (a sign-in page put in front of
+          the tunnel, a captive portal) lists as EMPTY with exit 0, and
+          `rclone sync` from it deleted both local proxies of a test scope
+          (into --backup-dir, bounded by --max-delete; still wrong). The
+          breaker catches an empty listing only when it has a count to
+          compare against, and a resumed breaker or a first pass has none.
+          So an empty listing through this route, over a scope where this
+          machine holds proxies, parks the lane: a project really emptied on
+          the server is for an admin to confirm, not for a tunnel to decide.
+        """
+        # The detail is the EDITOR's sentence (tray, balloon, fleet chip), so
+        # it names no config key (SYNC-106); the admin's half -- which remote,
+        # which key -- goes to the log beside it.
+        where = scope or "the whole tree"
+        if entries is None:
+            return self._route_stand_down(
+                "NOT DOWNLOADING (route): the server's download link did not "
+                "answer, so proxy download is paused and nothing was changed "
+                "here. It tries again next pass.",
+                admin=(f"remote_down {self.remote}:{self.remote_root} did not list "
+                       f"{where} (unreachable, refused the password, or the tunnel "
+                       "is down; the rclone lsf line above says which) -- lane B "
+                       "parked until it answers"))
+        if not entries and local_proxies > 0:
+            return self._route_stand_down(
+                "NOT DOWNLOADING (route): the server's download link listed "
+                f"{where} as empty while this computer holds {local_proxies} "
+                "proxies there, so proxy download is paused and nothing was "
+                "deleted. It tries again next pass.",
+                admin=(f"remote_down {self.remote}:{self.remote_root} listed {where} "
+                       f"as EMPTY over {local_proxies} local proxies -- not syncing "
+                       "from it (a sign-in or error page in front of the tunnel "
+                       "lists as empty with exit 0)"))
+        return None
+
     def check_remote_root(self) -> bool:
         """Probe `remote_root` ITSELF for the breaker's marker directories.
 
@@ -4459,6 +4854,10 @@ class RcloneLane(LaneAdapter):
             return True
         if self._remote_root_checked or not self.breaker.marker_dirs:
             return True
+        # The marker probe reads the route lane B's passes read (remote_down):
+        # probing the SFTP root while the passes come through the tunnel
+        # would pass a tunnel serving the wrong folder.
+        self._apply_route()
         try:
             entries = list_remote_top(
                 self.rclone_path, self.remote, self.remote_root, None,

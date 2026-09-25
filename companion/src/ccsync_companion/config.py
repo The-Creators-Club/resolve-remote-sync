@@ -153,7 +153,7 @@ log = logging.getLogger("ccsync.config")
 # and this loop claims it BY ID through a closed idle gate, and a whisper pass
 # finally reports progress -- its stdout is read on a drain thread instead of
 # being buffered until exit, so the fleet chip moves while the GPU works.
-VERSION = "0.9.81"
+VERSION = "0.9.82"
 
 # The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
 # resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy
@@ -205,6 +205,16 @@ DEFAULTS: dict[str, Any] = {
     # misses the real project tree. Left blank so a fresh install trips
     # validate_config() instead of quietly syncing into the wrong place.
     "remote_root": "",
+    # OPTIONAL second rclone remote that lane B (and every other path that
+    # only COPIES the tree down to this machine) reads from instead of
+    # `remote` -- the 2026-09-25 trial of a read-only WebDAV tunnel for one
+    # remote editor (docs/TRANSFER_SPEED.md 6b, docs/CONFIG.md). Blank is
+    # today's behaviour exactly. Anything that writes or deletes on the
+    # server keeps `remote`. See sync/rclone_lane.py: down_route.
+    "remote_down": "",
+    # The tree's path ON `remote_down`. Blank means "same as remote_root";
+    # a tunnel that serves the tree as its root needs "/".
+    "remote_down_root": "",
     "projects": [],
     # The project new editor media gets filed into (popup destinations are
     # prefixed with this) — rel path under local_root, e.g. "Projects/2025/FF4/Nuclear".
@@ -941,6 +951,19 @@ remote = ""
 # directory on the NAS, so a relative value resolves under ~/ and will not
 # find the project tree.
 remote_root = ""
+
+# OPTIONAL, admin-set, per computer: a second rclone remote that PROXY
+# DOWNLOADS (lane B, the b-roll fetch, the folder-structure copy) read the
+# tree from instead of `remote`. Everything that writes to the server
+# (uploads, consolidate, file moves, b-roll/music uploads) always uses
+# `remote`. Blank = downloads use `remote`, exactly as before.
+# It must name a stanza in rclone.conf (url must be https off the studio
+# network: plain http to a public host is refused and `remote` is used).
+# remote_down_root is the tree's path ON that remote; blank means "the same
+# as remote_root", and a tunnel that serves the tree as its root needs "/".
+# See docs/CONFIG.md for an example rclone.conf stanza.
+# remote_down = ""
+# remote_down_root = ""
 
 # WHICH PROJECTS SYNC is decided on the dashboard, by your ticks -- not
 # here. The sequencer works through the ticked projects ONE AT A TIME; the
@@ -2080,6 +2103,27 @@ def validate_config(cfg: dict[str, Any], for_save: bool = False) -> tuple[list[s
             f"starts in your home directory on the NAS, so this resolves to "
             f"~/{remote_root} and will miss the project tree"
         )
+
+    # remote_down (2026-09-25): WARNINGS only. A bad download route parks
+    # lane B on its own (paused, nothing deleted) and never touches uploads,
+    # so it is not a reason to stop the whole companion syncing.
+    remote_down = str(cfg.get("remote_down") or "").strip()
+    remote_down_root = str(cfg.get("remote_down_root") or "").strip()
+    if remote_down_root and not remote_down:
+        warnings.append(
+            "remote_down_root is set but remote_down is blank -- it is ignored, "
+            "and downloads use remote/remote_root")
+    if remote_down and remote_down.rstrip(":") == str(cfg.get("remote", "")).strip():
+        warnings.append(
+            "remote_down names the same rclone remote as remote -- downloads "
+            "take the same route either way; leave remote_down blank")
+    if remote_down and not remote_down_root:
+        warnings.append(
+            f"remote_down is set and remote_down_root is blank, so downloads read "
+            f"{remote_root or '(blank remote_root)'} on {remote_down}. That is "
+            f"only right if {remote_down} is a second route to the same server "
+            f"with the same paths; a tunnel serving the tree as its root needs "
+            f'remote_down_root = "/"')
 
     if not str(cfg.get("editor_name", "")).strip():
         warnings.append(

@@ -487,8 +487,16 @@ class DashboardReporter:
         state_dir: Optional[Path] = None,
         get_eula: Optional[Callable[[], Optional[dict[str, Any]]]] = None,
         get_site: Optional[Callable[[], Optional[dict[str, Any]]]] = None,
+        get_lane_b_via: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         self._get_statuses = get_statuses
+        # remote_down (2026-09-25 trial): which route lane B downloads
+        # through, "remote" or "remote_down". OPTIONAL ON THE WIRE BOTH WAYS:
+        # the getter answers None on every machine without a remote_down (so
+        # the fleet's payload is unchanged), and a dashboard that does not
+        # declare the key accepts it as an extra (ReportIn is extra="allow")
+        # and names it rather than rejecting the report.
+        self._get_lane_b_via = get_lane_b_via
         # LG-5 (docs/LEGAL_GAP_FEATURES_PLAN.md section 5, 2026-09-25): which
         # licence this computer accepted. Heavy ticks only: it changes once a
         # year, and absent reads as "not reported" on the dashboard.
@@ -967,6 +975,14 @@ class DashboardReporter:
                 payload["mode"] = self._get_mode()
             except Exception:
                 log.exception("get_mode() failed")
+        if self._get_lane_b_via is not None:
+            try:
+                via = self._get_lane_b_via()
+            except Exception:
+                log.exception("get_lane_b_via() failed")
+                via = None
+            if via in ("remote", "remote_down"):
+                payload["lane_b_via"] = via
         if self._get_transport_health is not None:
             try:
                 payload["transport_health"] = self._get_transport_health()

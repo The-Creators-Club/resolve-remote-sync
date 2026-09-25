@@ -78,7 +78,7 @@ from .reporter import DashboardReporter
 from .selection import SelectionClient
 from .sync import lane_guard, server_locate
 from .sync.base import STATE_ERROR, LaneAdapter, LaneStatus
-from .sync.rclone_lane import DIRECTION_DOWN, DIRECTION_UP, VIDEO_EXTS, RcloneLane
+from .sync.rclone_lane import DIRECTION_DOWN, DIRECTION_UP, VIDEO_EXTS, RcloneLane, down_route
 from .sync.sequencer import PROJECTS_PREFIX, STATE_NO_SELECTION, Sequencer
 from .sync.syncthing_admin import SyncthingAdmin
 from .sync.syncthing_lane import SyncthingLane
@@ -2384,6 +2384,9 @@ class CompanionApp:
             # ones: a tripped breaker and a halted machine are the two states
             # an admin must not learn about a report interval late.
             get_sync_guard=self.sync_guard,
+            # remote_down (2026-09-25 trial): which route lane B is pulling
+            # through. None (key omitted) unless this machine names one.
+            get_lane_b_via=self.lane_b_via,
             # Answers to the dashboard's file-move commands
             # (docs/FILE_MOVES.md): read lazily, the ledger is built below.
             get_file_moves_applied=self._file_move_results,
@@ -2631,6 +2634,9 @@ class CompanionApp:
         lane_a = RcloneLane(
             direction=DIRECTION_UP,
             local_root=cfg["local_root"],
+            # Always `remote`, never remote_down (2026-09-25): lane A and its
+            # express path WRITE to the server, and the download route is a
+            # read-only tunnel by rule. No route_fn, so nothing can repoint it.
             remote=cfg["remote"],
             remote_root=cfg["remote_root"],
             rclone_path=cfg.get("rclone_path", "rclone"),
@@ -2669,6 +2675,14 @@ class CompanionApp:
             scan_interval=config_mod.coerce_numeric(cfg, "scan_interval_down", 120),
             state_dir=state_dir,
             cfg=cfg,
+            # remote_down (2026-09-25 trial): lane B is `rclone sync` FROM the
+            # server and writes nothing there, so it is the one lane that may
+            # read the tree through the download route. Asked at the top of
+            # every pass rather than here, so the LG-4 check (one `rclone
+            # config dump`) never runs on the startup path. Blank remote_down
+            # answers `remote` + `remote_root`, i.e. exactly the two above.
+            # Lane A is given no route: it writes.
+            route_fn=lambda: down_route(cfg),
             # Lane B is `sync` with --backup-dir: a proxy the editor made
             # locally and hasn't uploaded yet is moved out of the project
             # folder into .ccsync-trash. That used to happen in total
@@ -7248,6 +7262,23 @@ class CompanionApp:
             log.debug("could not read the reporting switches", exc_info=True)
             return set()
 
+    def lane_b_via(self) -> Optional[str]:
+        """`lane_b_via` for the report: "remote_down" while lane B pulls
+        through the download route, "remote" when one is configured but the
+        lane is not using it (refused under LG-4, or not yet applied because
+        no pass has run -- None then, the key is omitted). None on every
+        machine without `remote_down`, so their report is unchanged. Never
+        raises."""
+        try:
+            if not str((self.config or {}).get("remote_down") or "").strip():
+                return None
+            lane = getattr(self, "_lane_b", None)
+            via = getattr(lane, "via", None) if lane is not None else None
+            return via if via in ("remote", "remote_down") else None
+        except Exception:
+            log.debug("lane_b_via failed", exc_info=True)
+            return None
+
     def sync_guard(self) -> dict[str, Any]:
         """The `sync_guard` report section: breaker, trash, halt, and lane A's
         "skipped, exists" counter.
@@ -8740,6 +8771,10 @@ class CompanionApp:
                     # `retrying`, never "done", because a done move's
                     # exclusion lapses in a day and lane A then re-uploads
                     # the whole folder to the path the admin cleared.
+                    # `remote`, not remote_down (2026-09-25): this listing is
+                    # half of a file move, and a move's decisions (what to
+                    # bin, when lane A may re-upload) must read the server the
+                    # move itself acted on, never depend on the tunnel trial.
                     server_files=file_moves_mod.rclone_server_files(
                         str(self.config.get("rclone_path", "rclone") or "rclone"),
                         str(self.config.get("remote", "") or ""),
@@ -9469,6 +9504,13 @@ class CompanionApp:
                if self._macos_access_blocked else "")
         ))
         section("remote", lambda: f"{self.config.get('remote')}:{self.config.get('remote_root')}")
+        # remote_down (2026-09-25): what is configured, and what lane B last
+        # actually used -- the two differ exactly when LG-4 refused the route.
+        section("download route", lambda: (
+            "remote (no remote_down)" if not str(self.config.get("remote_down") or "").strip()
+            else f"remote_down={self.config.get('remote_down')}:"
+                 f"{self.config.get('remote_down_root') or self.config.get('remote_root')}"
+                 f" lane B via={getattr(getattr(self, '_lane_b', None), 'via', None)}"))
         section("dashboard_url", lambda: self.config.get("dashboard_url"))
         section("rclone available", lambda: _rclone_lane.rclone_available(
             str(self.config.get("rclone_path", "rclone"))))

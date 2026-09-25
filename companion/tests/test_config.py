@@ -244,6 +244,10 @@ def test_default_toml_text_documents_every_default_key():
         # client one edit away on every machine in the fleet, and exactly one
         # machine should ever have it (CR-68, one client per computer).
         "cards_agent", "cards_vault_root",
+        # The download route (2026-09-25 trial, docs/CONFIG.md). An admin sets
+        # it on ONE computer; a blank written into every first-run file would
+        # read as a setting every editor is meant to fill in.
+        "remote_down", "remote_down_root",
     }
     for key in config_mod.DEFAULTS:
         if key in commented_out:
@@ -342,6 +346,9 @@ EXAMPLE_COMMENTED_OUT = {
     # every editor's file is the switch for a second Resolve client one edit
     # away on all of them.
     "cards_agent", "cards_vault_root",
+    # The download route (2026-09-25 trial): one admin-chosen computer, never
+    # a value to copy about.
+    "remote_down", "remote_down_root",
 }
 
 # Read straight off the loaded config with .get() and DELIBERATELY absent from

@@ -202,14 +202,25 @@ def _dry_run_command(
         stats_interval="1s",
     )
     if direction == rclone_lane.DIRECTION_UP:
+        # The upload preview keeps `remote`: consolidate's upload WRITES to
+        # the server, and remote_down is download-only by rule.
         cmd = rclone_lane.build_up_command(**common)
     else:
+        # remote_down (2026-09-25): this preview is the consent dialog for the
+        # proxy pull that follows, and that pull is lane B's own run_once --
+        # which reads through the download route when one is set. A preview
+        # read from `remote` while the pull reads from the tunnel would count
+        # deletions against a different listing from the one that acts. It is
+        # a --dry-run `sync` FROM the server, so it writes nothing there.
+        route = rclone_lane.down_route(cfg)
+        common.update(remote=route.remote, remote_root=route.remote_root)
         # Same stability gate the real lane B run uses, read from the same
         # cfg key -- a preview that counted proxies the real run will skip
         # (because they are still being written) would promise the editor
         # files that then don't arrive.
         cmd = rclone_lane.build_down_command(
-            **common, min_age_seconds=rclone_lane.lane_b_min_age_seconds(cfg)
+            **common, min_age_seconds=rclone_lane.lane_b_min_age_seconds(cfg),
+            via=route.via,
         )
     # build_up/down_command always add --verbose so the REAL runs get
     # per-file INFO log lines for parse_json_log() -- but a dry run only

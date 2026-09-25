@@ -9913,6 +9913,12 @@ class ReportIn(BaseModel):
     # db.store_machine_settings leaves the cfg_* columns alone, and the page
     # says "not reported" and offers no request (cfg_accepts NULL).
     machine_settings: MachineSettingsIn | None = None
+    # Lane B's download route (companion 0.9.82+, the 2026-09-25 Cloudflare
+    # lane B trial, docs/CONFIG.md "Download route"): "remote" or
+    # "remote_down". Declared so a machine on the trial route does not raise
+    # the SYS-3 undeclared-section banner on every report; a bounded plain
+    # string, never a Literal (res-fleet-3).
+    lane_b_via: str | None = Field(default=None, max_length=32)
     # LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.1, 2026-09-25): the categories
     # this computer withholds by its own switches. Absent = a build without
     # the switches, which is "not reported", never "nothing withheld"; the

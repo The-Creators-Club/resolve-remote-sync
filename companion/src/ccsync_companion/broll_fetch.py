@@ -275,8 +275,16 @@ def build_fetch_command(ccsync_cfg: dict[str, Any], rel_path: str, dest: str,
     plausible-looking truncated clip where is_file() would find it.
     """
     rclone_path = str(ccsync_cfg.get("rclone_path") or "rclone")
-    remote = str(ccsync_cfg.get("remote") or "").strip()
-    remote_root = str(ccsync_cfg.get("remote_root") or "").strip()
+    # remote_down (2026-09-25): a `copyto` from the server to this disk that
+    # writes nothing there, so it reads the tree through the download route
+    # like lane B does -- an editor on the tunnel trial waiting on a clip
+    # for Send to Resolve is the case the route exists for. Blank
+    # remote_down answers remote + remote_root, the argv this always built.
+    # The archive sits under the tree, so its path on the route is the same
+    # relative path under remote_down_root.
+    route = rclone_lane.down_route(ccsync_cfg)
+    remote = route.remote
+    remote_root = route.remote_root
     tuning = rclone_lane.RcloneTuning.from_cfg(ccsync_cfg)
     src = f"{remote}:{remote_root.rstrip('/')}/{remote_rel.strip('/')}/{rel_path}"
     return [
@@ -285,6 +293,7 @@ def build_fetch_command(ccsync_cfg: dict[str, Any], rel_path: str, dest: str,
         src,
         str(dest),
         *tuning.flags(rclone_lane.DIRECTION_DOWN),
+        *rclone_lane.route_flags(route.via),
         *rclone_lane._transport_flags(),
         "--use-json-log",
         "--verbose",

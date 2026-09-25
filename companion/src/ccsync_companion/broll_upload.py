@@ -148,6 +148,9 @@ class UploadJob:
 
 def _remote_spec(ccsync_cfg: dict[str, Any], remote_rel: str,
                  archive_rel: str = ARCHIVE_REMOTE_REL) -> str:
+    # `remote`, never remote_down (2026-09-25): both the upload and its
+    # lsjson existence check belong to a WRITE to the archive, and the
+    # download route is read-only by rule. Music ingest uploads come here too.
     remote = str(ccsync_cfg.get("remote") or "").strip()
     remote_root = str(ccsync_cfg.get("remote_root") or "").strip()
     return f"{remote}:{remote_root.rstrip('/')}/{archive_rel.strip('/')}/{remote_rel.lstrip('/')}"

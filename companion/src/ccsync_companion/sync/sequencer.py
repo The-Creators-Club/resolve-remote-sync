@@ -40,6 +40,7 @@ from .rclone_lane import (
     RUN_OUTCOME_NOTHING,
     RUN_OUTCOME_WORK_REMAINED,
     clone_directory_tree,
+    down_route,
     hard_ceiling_seconds,
 )
 from .borrowed_folders import BorrowedFolderManager
@@ -2914,10 +2915,17 @@ class Sequencer:
             )
             return
         try:
+            # remote_down (2026-09-25): the structure clone only LISTS the
+            # server and makes folders here -- it is lane B's scaffolding, so
+            # it reads the tree the way lane B does. Blank remote_down answers
+            # remote + remote_root, i.e. what this always passed. Through a
+            # tunnel serving a sign-in page the listing comes back empty and
+            # this creates nothing, which is the harmless direction.
+            route = down_route(self.cfg)
             created = self._clone_tree_fn(
                 rclone_path=str(self.cfg.get("rclone_path", "rclone")),
-                remote=str(self.cfg.get("remote", "")),
-                remote_root=str(self.cfg.get("remote_root", "")),
+                remote=route.remote,
+                remote_root=route.remote_root,
                 local_root=self.local_root,
                 subpath=subpath,
             )

@@ -59,6 +59,16 @@ remote = "ccsync_sftp"
 # Synology: /volume1/<share>/<tree>.
 remote_root = "/mnt/<pool>/<share>/Creators_Club"
 
+# OPTIONAL, admin-set, one computer at a time: a second rclone remote that
+# proxy DOWNLOADS read the tree from instead of `remote` (lane B, the b-roll
+# fetch, the folder-structure copy). Uploads, consolidate, file moves and
+# b-roll/music uploads always use `remote`. Blank = today's behaviour.
+# remote_down_root is the tree's path on that remote: blank means "the same
+# as remote_root"; a WebDAV tunnel serving the tree as its root needs "/".
+# Example stanza for rclone.conf: docs/CONFIG.md, "Download route".
+# remote_down = "ccsync_dl"
+# remote_down_root = "/"
+
 # NEITHER OF THESE SCOPES WHAT SYNCS, and neither does the whole tree.
 # With dashboard_url set (the default), the DASHBOARD decides: only the
 # projects you have TICKED there sync to this machine, and the sequencer

@@ -587,3 +587,13 @@ def test_no_em_dash_in_the_account_section():
     for line in text[start:end].splitlines():
         if line.startswith("|") and "`" in line:
             assert "—" not in line, line
+
+
+def test_lane_b_via_is_declared_not_banner(env):
+    # The 2026-09-25 lane B download-route trial: a companion with remote_down
+    # set reports which route lane B used. Undeclared, it would raise the
+    # SYS-3 "report sections this dashboard does not read" banner on every
+    # report from that machine.
+    payload = api.ReportIn.model_validate(body(lane_b_via="remote_down"))
+    assert payload.lane_b_via == "remote_down"
+    assert api.undeclared_report_sections(payload) == []

@@ -9510,7 +9510,7 @@ class CompanionApp:
             "remote (no remote_down)" if not str(self.config.get("remote_down") or "").strip()
             else f"remote_down={self.config.get('remote_down')}:"
                  f"{self.config.get('remote_down_root') or self.config.get('remote_root')}"
-                 f" lane B via={getattr(getattr(self, '_lane_b', None), 'via', None)}"))
+                 f" proxy download via={getattr(getattr(self, '_lane_b', None), 'via', None)}"))
         section("dashboard_url", lambda: self.config.get("dashboard_url"))
         section("rclone available", lambda: _rclone_lane.rclone_available(
             str(self.config.get("rclone_path", "rclone"))))

@@ -4820,8 +4820,8 @@ class RcloneLane(LaneAdapter):
                 "here. It tries again next pass.",
                 admin=(f"remote_down {self.remote}:{self.remote_root} did not list "
                        f"{where} (unreachable, refused the password, or the tunnel "
-                       "is down; the rclone lsf line above says which) -- lane B "
-                       "parked until it answers"))
+                       "is down; the rclone lsf line above says which): proxy download "
+                       "paused until it answers"))
         if not entries and local_proxies > 0:
             return self._route_stand_down(
                 "NOT DOWNLOADING (route): the server's download link listed "

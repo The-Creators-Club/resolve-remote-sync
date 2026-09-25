@@ -47,7 +47,11 @@ Ranked list of what bounds each transfer today, with the evidence:
    with 1 to 16 streams; HTTP from the base rig over the tunnel 17.5 MB/s
    single, 22.5 MB/s with 4; raw HTTP from Singapore outside the tunnel
    57 MB/s with 4 streams; the NAS's own tunnel end does 107 MB/s to a LAN
-   peer. Confidence high that it is the path, not an endpoint.
+   peer. The afternoon's tests (section 6a) ruled out CPU at either end,
+   MTU, DERP, Wi-Fi and any per-flow or per-peer limit, and found Ruskin
+   behind his ISP's carrier-grade NAT: **UDP policing on his side is the
+   leading suspect, the studio router's UDP forwarding the second**, and one
+   hotspot test tells them apart.
 3. **Nothing else is close.** The SFTP window (255 KiB x 64 = 16.3 MiB per
    stream) allows about 800 MB/s at Ruskin's 21 ms round trip. The NAS
    takes a single SFTP stream at 290 to 315 MB/s and four at 645 MB/s
@@ -189,15 +193,17 @@ Expected gain, risk and effort per item. Nothing here has been done; the
 owner decides.
 
 1. **Find and remove the tunnel-path cap to Ruskin (lane B: 18 to ~50 MB/s,
-   about 3x).** Zero code. It is a network problem in one of four places
-   (section 6's plan tells which in an afternoon): the studio router's UDP
-   NAT path (gateway `192.168.0.1`, MAC `3c:52:a1:85:40:ad`, which is also
-   the studio access point), UDP shaping by Ruskin's cable ISP or modem,
-   Ruskin's Wi-Fi + Windows Tailscale packet path, or the HiNet to his-ISP
-   route for UDP. Risk: none from testing. Effort: an hour of the owner's
-   and Ruskin's time each. If it turns out to be the studio router, a router
-   with hardware NAT for UDP (or turning that on) fixes every remote editor
-   at once.
+   about 3x).** Zero code. Section 6a narrowed it to two places: UDP
+   policing on Ruskin's side (he is behind his ISP's carrier-grade NAT; the
+   leading suspect) or the studio router's software UDP forwarding (gateway
+   `192.168.0.1`, MAC `3c:52:a1:85:40:ad`, also the studio AP, PPPoE WAN, no
+   UPnP). Two short tests settle it: Ruskin on a phone hotspot pulling the
+   same 1 GiB from the NAS, and a studio laptop tethered to a phone doing
+   the same. Risk: none from testing. Effort: half an hour each. If it is
+   his ISP, the fixes are on his side (a different ISP or plan, or a static
+   or non-CGNAT address if the ISP sells one) and the same cap will apply
+   to any editor on such a connection; if it is the studio router, a router
+   with hardware NAT for UDP fixes every remote editor at once.
 2. **Ruskin's line: a plan with a faster upload (lane A: 6 to 30 MB/s, 5x).**
    Zero code. His upload tier is the whole of lane A's ceiling. A 40 GB card
    takes 1.8 hours at today's 6.1 MB/s and 22 minutes at 30 MB/s. Risk:
@@ -256,6 +262,43 @@ owner decides.
    cap; disabling Syncthing relays on the NAS remains a safety change, not
    a speed one.
 
+## 6a. The lane B cap: which culprit the evidence points at (afternoon of 2026-09-25)
+
+The owner ruled Wi-Fi capacity out, and the numbers agree: Ruskin pulled
+57 MB/s from Singapore over the same Wi-Fi, on the same 5 GHz 802.11ax link
+(649 to 721 Mbps receive, signal 57 to 75 %), that carries 14 to 19 MB/s
+through the tunnel. A radio that carries 460 Mbit/s of TCP is not the thing
+holding the tunnel to 120 to 150. Time was therefore not spent on band or
+signal beyond recording them beside each test.
+
+The tests run to split the remaining suspects, all read-only, no setting
+changed anywhere:
+
+| Test | Result |
+|---|---|
+| `tailscale status --json` on both ends | Ruskin sees `truenas` at `CurAddr 114.34.8.231:39501`, direct; this rig and the Razer see it at `192.168.0.102:39501`, direct over the LAN. His own endpoints: `122.100.70.91:4751`, `:1794`, `:41641` and `192.168.0.12:41641` |
+| `tailscale netcheck`, both ends | UDP yes on both; `MappingVariesByDestIP: false` on both; `PortMapping` empty on both (no UPnP/NAT-PMP/PCP on either router); no captive portal; nearest DERP Hong Kong for both (27 ms studio, 75 ms Ruskin) |
+| `tracert` first hops, for double NAT | Studio: `192.168.0.1` then `168.95.98.254` (HiNet, public). **No double NAT at the studio.** Ruskin: `192.168.0.1` then `10.104.128.1`, `10.102.254.121`, `10.102.251.130`: **his ISP puts him behind carrier-grade NAT** (his "public" `122.100.70.91` is the ISP's shared address) |
+| MTU probes (`ping -f -l`) | Tunnel: 1252 passes, 1272 fails, from every machine, i.e. the expected 1280 tunnel MTU, no black hole. Internet from Ruskin: 1472 passes (a clean 1500 path). Internet from the studio: 1472 is refused by `192.168.0.1` itself, so the studio WAN is PPPoE-class (1492 or less); a tunnel packet is at most about 1340 bytes and fits with room, so no fragmentation on the path |
+| Per-core CPU on Ruskin's PC during a 1 GiB tunnel download | busiest core 5 to 26 %, average 2 to 8 %; `tailscaled` 26 % of one core. **No pinned core.** Same on the Razer (busiest 6 to 11 %, `tailscaled` 3 to 8 %) |
+| Per-core CPU on the NAS during the same download | busiest core 6 to 29 %, average 1.5 to 8 %; his `sshd` 7 %; `tailscaled` (pid 7943, 6.6 % lifetime average) below the top lines, under 1.4 %. **No pinned core.** |
+| Two tunnel peers at once (NAS SFTP + this rig HTTP, both to Ruskin) | 10.3 + 9.3 = **19.6 MB/s aggregate**, the same as one peer alone. A second WireGuard session, a second sshd, a second source host and a second studio LAN port bought nothing: the cap is shared by everything heading to him |
+| Time of day | 10:40 download 15.5 MB/s; 12:13 download 13.7 MB/s; upload 6.1 then 6.0 MB/s. Flat so far; an evening point is still owed |
+| A Windows Tailscale client on Wi-Fi at the studio (the Razer, both ends on the LAN) | tunnel 18.4 to 29 MB/s versus 24 to 27 MB/s on the raw LAN: the tunnel costs nothing measurable at these rates on a Windows Wi-Fi client |
+
+Verdicts:
+
+| Suspect | Verdict | What says so, or what would settle it |
+|---|---|---|
+| (c) per-flow CPU in the tunnel, Ruskin's end (Windows Tailscale / wintun decrypting) | **Ruled out** | no core above 26 % during the transfer, `tailscaled` at a quarter of one core, and a second peer added nothing |
+| (c) per-flow CPU in the tunnel, the NAS end (tailscaled encrypting) | **Ruled out** | no core above 29 %, `tailscaled` under 1.4 %; the NAS pushes 107 MB/s through the same tunnel process to a LAN peer |
+| Ruskin's Wi-Fi | **Ruled out** (owner's ruling, and the 57 MB/s raw download over it) | |
+| MTU / fragmentation / DERP relay | **Ruled out** | direct path both ways, clean 1280 tunnel MTU, no black hole |
+| A per-peer or per-flow limit anywhere | **Ruled out** | more streams, and a second peer, do not add up past ~20 MB/s |
+| (b) UDP shaping on Ruskin's side: his ISP's carrier-grade NAT, or his own router | **Ruled in as the leading suspect** | He is behind CGNAT (`10.104.128.1`), which is exactly where ISPs police UDP per subscriber; every tunnel flow to him shares one cap regardless of source; his TCP download is 3x faster. Settled by: Ruskin on a phone hotspot (a different carrier) pulling the same 1 GiB; or Ruskin wired to his router (rules his Wi-Fi driver in or out for UDP specifically, which the TCP test does not cover); or a UDP iperf3 from the studio to his PC showing loss at 150 to 180 Mbit/s |
+| (a) the studio router's UDP/NAT handling | **Still possible, second** | It is a consumer router (`3c:52:a1:85:40:ad` at `192.168.0.1`, also the studio AP, PPPoE WAN, no UPnP) forwarding every tunnel byte in software; the two-peer test cannot separate it from (b), because both peers leave through it to the same destination. Settled by: a laptop tethered to a phone (off the studio line) pulling from the NAS over the tunnel at 40+ MB/s rules it in; a second remote site that is not behind CGNAT getting 40+ MB/s rules it out |
+| (b') UDP shaping by HiNet at the studio | **Unlikely, not excluded** | HiNet forwarded a high UDP port at line rate before (`SPEC.md:28`); the same hotspot test settles it with (a) |
+
 ## 6. Measurement plan for the remote-editor side
 
 What to run, and what each result would mean. Every step is short, uses temp
@@ -303,50 +346,102 @@ studio, run the same rclone copy pair and a public upload/download test.
 That gives the second remote editor's two ceilings; the doc's section 8
 table has a row waiting for it.
 
-## 7. The Razer (the owner's laptop, on the studio Wi-Fi): partly measured, and one finding
+## 7. The Razer (the owner's laptop, on the studio Wi-Fi), measured 16:02 to 16:35
 
-Its read-only state at 11:20: Windows Tailscale direct to the NAS over the
-LAN (`192.168.0.102:39501`, 2 ms), Wi-Fi 802.11ac on the studio AP
-(`Cablewrap_5G`, channel 161) at 866.7 Mbps both ways, signal 79 %, MediaTek
-MT7921, rclone v1.74.4, companion running with no rclone in flight, Ryzen 9
-5900HS, CUBIC.
+The third case: a Windows editor machine whose Tailscale path to the NAS is
+direct over the studio LAN (`192.168.0.102:39501`, 1 ms), on Wi-Fi 802.11ac
+at 866.7 Mbps both ways, signal 78 to 79 %, MediaTek MT7921, Ryzen 9 5900HS,
+CUBIC, rclone v1.74.4, companion running with no rclone in flight. Its
+remote `creators_club_sftp` (`100.71.216.3`, user `alex`, key
+`~/.ssh/ccsync_ed25519`) is exactly the companion's own path, and the tests
+below use it with the companion's flags. The laptop was held awake for the
+tests by a `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED |
+ES_AWAYMODE_REQUIRED)` call inside the test process itself (checked with
+`powercfg /requests`, gone when the script ended); no power setting was
+changed. A first attempt at 12:17 lost its output at a session reset and
+left one `rclone` hung at a 0-byte `.partial` on the LAN-IP control
+download; that process and its two parents were the only things killed,
+and every test was rerun with a hard 4-minute bound per transfer.
 
-**Its SFTP matrix could not run: the laptop's rclone remote cannot log in
-to the NAS at all.** `creators_club_sftp` there is `host = 100.71.216.3`,
-`user = alex_laptop`, `key_file = ~/.ssh/ccsync_ed25519`, and every attempt
-(its own remote over Tailscale, and the same user over the LAN IP) failed
-with `ssh: unable to authenticate, attempted methods [none publickey]`. On
-the NAS, `alex_laptop` exists only as a **group** (`alex_laptop:x:3002:`);
-there is no such user, the owner's account is `alex` with its home at
-`/mnt/tank/TheCreatorsPool/homes/alex`. So the laptop's lanes A and B have
-nothing to talk to today. The laptop's key (`~/.ssh/ccsync_ed25519`, made
-2026-07-25) is present, and its `companion.log` holds no
-"unable to authenticate" or "handshake failed" line at all, so whatever the
-tray shows for lanes A and B there, the log does not name the cause. This
-is a setup defect to fix (create the account, or point the laptop's remote
-and key at `alex`), not a speed matter, and it was not touched here.
+| Test (CC Sync path: `creators_club_sftp` over Tailscale, direct on the LAN) | Time | Rate |
+|---|---|---|
+| lane A: UP 1 GiB single, companion flags | 23.5 s | **45.7 MB/s (366 Mbit/s)** |
+| lane A: UP 4 x 256 MiB, --transfers 4 | 18.3 s | **58.6 MB/s (469 Mbit/s)** |
+| lane B: DOWN 1 GiB single, companion flags (rclone default multi-thread 4) | 31.0 s | **34.7 MB/s (278 Mbit/s)** |
+| lane B: DOWN 1 GiB single, 1 stream | 24.3 s | 44.2 MB/s (354 Mbit/s) |
+| lane B: DOWN 4 x 256 MiB, --transfers 4 | 27.0 s | 39.8 MB/s (318 Mbit/s) |
+| control only: UP 1 GiB single via the NAS LAN IP, no tunnel | 19.4 s | 55.3 MB/s (442 Mbit/s) |
+| control only: DOWN 1 GiB single via the NAS LAN IP, no tunnel | **hung at 0 bytes, twice** (12:23 and 16:05), killed by hand at the 4-minute bound; see below |
 
-What did measure, over the studio Wi-Fi, outside the tunnel:
+Lane C on the laptop, read-only: its Syncthing is connected to the NAS
+directly (`tcp-server` from `192.168.0.102:22000`). Of its 4 folders, one
+(`2026-ff5-elections`) reports `needBytes` of 19.97 GB with state `idle` and
+a live rate of 0.00 MB/s over 20 s, so there was no lane C transfer to time.
+That 20 GB sitting still is an observation for the owner, not a speed
+number: a folder that needs 20 GB and is idle is either paused, waiting on
+the sequencer's turn, or short of the remote side, and this doc did not
+touch it.
 
-| Test | Rate |
-|---|---|
-| Raw UPLOAD, 150 MB POST to Cloudflare | 14.9 MB/s (119 Mbit/s); the wired rig got 41 MB/s on the same test |
-| Raw DOWNLOAD, OVH Singapore, 1 stream, 100 MB | 17.3 MB/s |
-| Raw DOWNLOAD, OVH Singapore, 4 streams | 14.8 + 9.0 + 9.6 MB/s (one stream failed to start) = about 33 MB/s |
+Generic-internet baseline on the same Wi-Fi, immediately before and after a
+CC Sync-path UP + DOWN pair (same session, Wi-Fi rx/tx/signal beside each
+run; the OVH host refuses parallel connections from one address, so the
+4-stream rows count only the streams it accepted):
 
-So a Wi-Fi client of the studio router reaches the internet at roughly a
-third of what the wired rig gets on the same line, which is worth keeping
-in mind for section 6 step 2 and 3: on this Wi-Fi the laptop would not be
-able to prove much above 250 Mbit/s either way.
+| Run (Wi-Fi 866.7/866.7 Mbps, signal 80 % on every row) | BEFORE (16:24) | AFTER (16:26) |
+|---|---|---|
+| Singapore, 1 stream, 200 MB, run 1 | 36.3 MB/s | 40.8 MB/s |
+| Singapore, 1 stream, run 2 | 45.1 MB/s | 39.5 MB/s |
+| Singapore, 1 stream, run 3 | 44.0 MB/s | 37.7 MB/s |
+| Singapore, 4 streams, run 1 | 46.3 MB/s (2 accepted) | 51.3 MB/s (2 accepted) |
+| Singapore, 4 streams, run 2 | 6.9 MB/s (1 accepted, slow) | 40.9 MB/s (1 accepted) |
+| Singapore, 4 streams, run 3 | 44.3 MB/s (2 accepted) | 0 (none accepted) |
+| Cloudflare UP 150 MB | 16.6 MB/s | 16.6 MB/s |
+| CC Sync path between the two: lane A UP 1 GiB | 76.4 MB/s (14.1 s) | |
+| CC Sync path between the two: lane B DOWN 1 GiB | 37.4 MB/s (28.7 s) | |
 
-The Wi-Fi-versus-Wi-Fi-plus-tunnel control (pulling a file from this rig
-over `192.168.0.103` and then over `100.74.115.96`, no NAS login needed) was
-prepared, but the laptop dropped off the network twice in fifteen minutes
-(Tailscale "offline", no answer on `192.168.0.112`), so it did not run. Two
-scripts sit ready for the next time it is awake at the studio: `rz_http.ps1`
-(the control above, 2 minutes, nothing on the NAS) and `rz_bench.ps1` (the
-full section 6 matrix, 8 minutes, once its NAS login works).
+Wi-Fi-versus-tunnel control against this rig (not the NAS; no SFTP), so
+the tunnel's own cost on a Windows Wi-Fi client can be read directly:
 
+| HTTP to/from this rig | Raw LAN (`192.168.0.103`) | Tunnel (`100.74.115.96`, direct over the LAN, 2 ms) |
+|---|---|---|
+| DOWN 1 GiB, 1 stream, run 1 | 41.3 MB/s | **58.9 MB/s** |
+| DOWN 1 GiB, 1 stream, run 2 | 34.3 MB/s | **58.6 MB/s** |
+| DOWN 4 x 256 MiB, 4 streams | 14.8 MB/s (two of the four streams stalled at 57 KB/s) | **62.6 MB/s** (all four ran) |
+| UP 512 MiB, 1 stream | 38.8 MB/s | **54.3 MB/s** |
+
+Two things stand out. The tunnel is FASTER than the raw LAN on this laptop
+(59 versus 34 to 41 MB/s), and raw-LAN TCP to it is flaky: two of four
+parallel streams stalled, and the SFTP download from the NAS's LAN address
+hung at 0 bytes both times it was tried, while the same download over the
+tunnel ran at 35 to 44 MB/s. The tunnel's packets are 1280-byte UDP; the
+raw LAN path carries full-size TCP segments through the studio AP, and
+the NAS's LAN interface runs jumbo frames (`eno1np0` MTU 9000). That is a
+LAN/AP/MTU matter on the raw path, not a CC Sync one (the companion uses
+the tunnel), and it is recorded here so nobody reads the LAN control as
+the laptop's ceiling. The hung rclone processes were mine, from these
+tests, and were the only processes killed on the laptop all day.
+
+Reading the three side by side (single-stream, companion flags, same hour
+band; the wired rig's Singapore numbers are from 16:12):
+
+| | Ruskin (remote, internet, direct tunnel, 21 ms) | Razer (studio Wi-Fi, direct tunnel over the LAN, 1 ms) | Wired rig (studio LAN, 2 ms) |
+|---|---|---|---|
+| lane A UP 1 GiB, companion flags | 6.1 MB/s | 45.7 MB/s | 287 to 315 MB/s (2 GiB) |
+| lane B DOWN 1 GiB, companion flags | 15.5 then 13.7 MB/s | 34.7 MB/s | 716 MB/s (2 GiB) |
+| generic Singapore, 1 stream | 18.2 MB/s | 36.3 to 45.1 MB/s (6 runs) | 37.6 to 43.6 MB/s (3 runs) |
+| generic Singapore, 4 streams | ~57 MB/s (3 of 4 accepted) | 41 to 51 MB/s when 2 accepted | 41 to 44 MB/s (1 to 2 accepted) |
+| Cloudflare upload, 150 MB | 6.13 MB/s | 16.6 MB/s (twice; 14.9 at 11:30) | 38.1 MB/s (41 and 64 earlier) |
+| tunnel HTTP from this rig, 1 stream | 17.5 MB/s | 58.9 MB/s | (is this rig) |
+
+What the laptop settles: a Windows client on Wi-Fi, through the very same
+Tailscale process, the same NAS `tailscaled`, the same sshd and the same
+rclone flags, moves 35 to 76 MB/s on the CC Sync path and 59 to 63 MB/s
+through the tunnel to this rig, at the same moment its generic internet
+download is 36 to 45 MB/s. Every component CC Sync owns therefore
+carries more than three times Ruskin's ceiling on a client that shares
+nothing with Ruskin except the software. That leaves the internet path
+between the studio router and his PC as the only place his cap can live,
+which is where section 6a already put it. No verdict in section 1 changes.
 ## 8. What was measured, raw
 
 All on 2026-09-25 between 10:30 and 11:25 local. MB/s is decimal
@@ -458,9 +553,14 @@ under `Creators_Club`, `homes/<editor>/` beyond a temp folder that was
 purged, or any project folder was written. Ruskin's companion was idle the
 whole time (no rclone process before, during or after; `lane_stall.json`
 there records an unrelated lane A kill of 2026-09-11, recovered 2026-09-24).
-Resolve was not touched on any machine. The only process started outside a
-test was a read-only `rclone serve http` on this rig's tailnet address for
-40 seconds, stopped afterwards.
+Resolve was not touched on any machine. The only processes started outside
+a test were a read-only `rclone serve http` / `serve webdav` of a temp file
+on this rig (stopped afterwards), and the laptop's keep-awake, held by the
+test scripts themselves through `SetThreadExecutionState` and confirmed
+released with `powercfg /requests` at the end. The only processes killed
+anywhere were this investigation's own on the laptop: the two `rclone`
+LAN-control downloads that hung at 0 bytes, and the PowerShell sessions
+that had launched them.
 
 ## 9. Related documents
 

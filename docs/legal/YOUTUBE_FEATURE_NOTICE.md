@@ -1,13 +1,9 @@
 # The YouTube downloader: what it is, and whose responsibility it is
 
-> **DRAFT FOR COUNSEL — written by engineers, 2026-08-17.** Everything below
-> describes what the software actually does and where the lines are drawn in
-> code. None of it is legal advice, and none of it is a warranty that any
-> particular download is lawful. A lawyer should review the wording here and in
-> `ytdl/web/ytdlweb/attestation.py` (the notice editors accept) before this
-> feature is offered to a customer.
->
-> Written for `docs/COMMERCIAL_READINESS.md` items 2 and 3.
+**Version 1.0, 2026-09-25.** Issued by Cablewrap Creative Ltd. (the "vendor"
+in this document). It describes what the software does and where the lines
+are drawn in code. It is not a warranty that any particular download is
+lawful.
 
 ## The short version
 
@@ -16,7 +12,7 @@ an editor can cut reference or archive material without leaving the tool.
 
 **The feature is OFF in the software as shipped.** A customer turns it on for
 their own deployment, and that act is the customer deciding that downloading
-third-party YouTube material is something they are entitled to do — in their
+third-party YouTube material is something they are entitled to do, in their
 jurisdiction, for their use, under their own agreement with YouTube. The vendor
 does not make that decision for them, does not turn it on for them, and does
 not ship the components whose only purpose is getting past YouTube's
@@ -26,13 +22,13 @@ anti-automation measures.
 
 | | In the default build | How a customer gets it |
 |---|---|---|
-| The downloader UI, search, review, download | **No** — not mounted, routes 404 | `site.toml` `[features] youtube_download = true` |
-| `yt-dlp` (the downloader library) | Installed as a dependency, **unused** while the feature is off | — |
-| PO-token provider sidecar (`bgutil-ytdlp-pot-provider`) | **No** — the compose service does not exist | `[features] youtube_unblock = true` |
-| deno, the "n-challenge" JavaScript solver | **No** — not provisioned on the NAS, not installed by the companion | `[features] youtube_unblock = true` |
-| Signing in to YouTube with browser cookies | **No** — the tray item is hidden, the endpoint refuses, cookie files on disk are ignored | `[features] youtube_unblock = true` |
-| The Claude Code / Codex CLIs | **No, and not at any setting** — no copy of either one is contained in, or distributed with, any build of this software | `[features] ai_cli_providers = true` permits *using* one on the host: either one the customer installed themselves, or one the customer's admin fetched **from the publisher, at their own click**, through the SET UP wizard (below) |
-| The rights/ToS attestation | Always. It cannot be switched off | — |
+| The downloader UI, search, review, download | **No**: not mounted, routes 404 | `site.toml` `[features] youtube_download = true` |
+| `yt-dlp` (the downloader library) | Installed as a dependency, **unused** while the feature is off | n/a |
+| PO-token provider sidecar (`bgutil-ytdlp-pot-provider`) | **No**: the compose service does not exist | `[features] youtube_unblock = true` |
+| deno, the "n-challenge" JavaScript solver | **No**: not provisioned on the NAS, not installed by the companion | `[features] youtube_unblock = true` |
+| Signing in to YouTube with browser cookies | **No**: the tray item is hidden, the endpoint refuses, cookie files on disk are ignored | `[features] youtube_unblock = true` |
+| The Claude Code / Codex CLIs | **No, and not at any setting**: no copy of either one is contained in, or distributed with, any build of this software | `[features] ai_cli_providers = true` permits *using* one on the host: either one the customer installed themselves, or one the customer's admin fetched **from the publisher, at their own click**, through the SET UP wizard (below) |
+| The rights/ToS attestation | Always. It cannot be switched off | n/a |
 
 The three rows in the middle are what this document calls the **unblock
 components**. They exist because YouTube actively resists automated retrieval:
@@ -84,7 +80,7 @@ Four things, all enforced in code rather than described in a manual:
   the dashboard's own database (username, wording version, digest of the exact
   text, timestamp) and **per machine** in the companion's state (the machine
   that fetches the video from its own address is a party to what happens).
-  Downloads are refused until both are present — in the browser, on the fleet
+  Downloads are refused until both are present: in the browser, on the fleet
   claim route, and in the companion's own capability check. Re-wording the
   notice bumps its version and re-prompts everyone.
 - **A standing notice on the page.** The copyright line and the rate/volume
@@ -121,7 +117,7 @@ serve the downloader, and the deploy says so rather than provisioning them.
 
 The downloader's two AI calls (search-term expansion and relevance filtering)
 need an AI provider, which **the customer supplies**. The supported path is an
-API key — Anthropic, OpenAI or DeepSeek — typed on the dashboard's **Settings →
+API key (Anthropic, OpenAI or DeepSeek) typed on the dashboard's **Settings →
 AI providers** page or set in the container's environment
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`). It is billed to
 their account, it is masked in `--dry-run` output and in every API response,
@@ -132,7 +128,7 @@ credential" and nothing else on the dashboard is affected.
 ### CLI providers: the customer's own subscription, and the customer's own CLI
 
 Since 2026-08-18 the same Settings page can also point the two AI calls at
-**Claude Code** or **Codex** — the command-line tools Anthropic and OpenAI
+**Claude Code** or **Codex**, the command-line tools Anthropic and OpenAI
 publish, driven by a personal Claude or ChatGPT subscription instead of a
 metered API key.
 
@@ -148,8 +144,8 @@ not shipped by us.** Since 2026-08-18 the Settings page can also *fetch* one,
 because requiring a shell on the server put the feature out of reach of the
 customers it was meant for. When an administrator presses SET UP and accepts
 the notice, the customer's own server downloads the tool **directly from the
-publisher** — `downloads.claude.ai` for Claude Code, the `openai/codex` GitHub
-releases for Codex — verifies it against the publisher's own published
+publisher** (`downloads.claude.ai` for Claude Code, the `openai/codex` GitHub
+releases for Codex), verifies it against the publisher's own published
 checksum, and stores it in the customer's own data volume. The vendor is not
 in that path: no copy is hosted, mirrored, cached, modified or redistributed by
 CC Sync, no vendor credential is used to obtain it, and nothing is fetched
@@ -167,11 +163,15 @@ vendor never sees it.
 
 **It is off unless the customer turns it on.** `site.toml` `[features]
 ai_cli_providers` (default `false`) is what makes the two rows appear at all;
-while it is off they are not even probed — no process is executed, and nothing
-can be downloaded. The Settings page carries this sentence above the switch:
+while it is off they are not even probed: no process is executed, and nothing
+can be downloaded. The Settings page carries this note above the switch:
 
-> Using a personal Claude/ChatGPT subscription for a service may breach its
-> terms — that is your decision.
+> Claude Code and Codex are signed in with a personal Claude or ChatGPT
+> subscription. Using a personal subscription to power a service may breach
+> its terms: that is your decision, not ours. Neither CLI is shipped, bundled
+> or updated by CC Sync. SET UP downloads the publisher's own build, from the
+> publisher's own servers, at your click, and checks it against the
+> publisher's own checksum. The API keys above are the supported path.
 
 and the wizard's first step, which an administrator must read and tick before
 anything is fetched, says it at length:
@@ -205,47 +205,51 @@ usage under its own agreement.
 This history matters and is recorded in `docs/COMMERCIAL_READINESS.md` item 1:
 an earlier version of this feature shipped the 304 MB Claude Code binary onto
 customer hardware and ran every deployment under one human's consumer account.
-The redistribution was the vendor's to fix and is fixed — nothing is
+The redistribution was the vendor's to fix and is fixed: nothing is
 distributed. What remains is a switch the customer may set for their own host,
 their own binary and their own account, and a button that fetches that binary
 from its publisher on their instruction.
 
-**A note for counsel on that distinction.** The engineering position is that
-"the vendor distributes a copy" and "the vendor's software fetches the
-publisher's copy when a customer asks it to" are different acts, and that the
-second is what a package manager, an IDE extension installer and the
-publisher's own `install.sh` all do. It is drawn in code: no artefact of ours
-contains either tool, no vendor-controlled host serves it, no vendor
-credential obtains it, the request is unauthenticated and https-only, the
-bytes are checked against the publisher's own checksum, and nothing happens
-without an administrator's click. Whether that distinction holds under each
-publisher's terms is a question for review (open item 5 below).
+**The vendor's position on that distinction.** "The vendor distributes a copy"
+and "the vendor's software fetches the publisher's copy when a customer asks
+it to" are different acts, and the second is what a package manager, an IDE
+extension installer and the publisher's own `install.sh` all do. The line is
+drawn in code: no artefact of ours contains either tool, no vendor-controlled
+host serves it, no vendor credential obtains it, the request is
+unauthenticated and https-only, the bytes are checked against the publisher's
+own checksum (a release with no published checksum is refused, never
+installed unverified), and nothing happens without an administrator's click.
+The notice quoted above is the disclosure of the subscription question, made
+at the moment it is asked.
 
 ## Vendored code
 
-`ytdl/web/ytdlweb/vendor/` carries a vendored copy of the `yt-credit-downloader`
-utility. Its provenance, and the written licence grant that is owed for it, are
-in `ytdl/web/ytdlweb/vendor/PROVENANCE.md`.
+`ytdl/web/ytdlweb/vendor/` carries code adapted from the `yt-credit-downloader`
+utility, written by the vendor's own author. It is part of the Software,
+licensed to the customer under `docs/legal/EULA.md`, and is not third-party
+code. Its provenance is recorded in `ytdl/web/ytdlweb/vendor/PROVENANCE.md`.
 
-## Open items for counsel
+## Settled positions
 
-1. Review the attestation wording (`ytdl/web/ytdlweb/attestation.py`
-   `NOTICE_TEXT`, `COPYRIGHT_NOTICE`, `RATE_DISCLAIMER`) and the companion's
+1. **The attestation wording** is the text in `ytdl/web/ytdlweb/attestation.py`
+   (`NOTICE_TEXT`, `COPYRIGHT_NOTICE`, `RATE_DISCLAIMER`) and the companion's
    copy of it (`companion/src/ccsync_companion/ytdl_attestation.py`). The two
    are pinned to the same version string by test; the companion's is trimmed
    for a plain dialog box.
-2. Decide whether the EULA (`docs/legal/EULA.md`) needs a clause pointing at
-   this document, and whether enabling `youtube_unblock` should require
-   something more explicit than a configuration key.
-3. Decide the retention period for the attestation records and for the
-   download ledger (who downloaded what, when, from which machine). Neither is
-   currently pruned.
-4. Resolve the vendored-code grant in `PROVENANCE.md`.
-5. **The SET UP wizard (2026-08-18).** Confirm that fetching Claude Code from
-   `downloads.claude.ai`, and Codex from the `openai/codex` GitHub releases, at
-   an administrator's click and into their own server, is not "distribution" by
-   the vendor under either publisher's terms, and that the notice quoted above
-   is sufficient disclosure of the subscription question at the moment it is
-   asked. If either answer is no, the fix is small and known: remove the two
-   install routes and go back to the customer typing the publisher's install
-   command themselves. The adapter, the flag and the notice are unaffected.
+2. **The EULA covers this feature through its sections 3(e) and 5**: the
+   customer must not use the Software in breach of the terms of the
+   third-party services it interoperates with, and is responsible for meeting
+   those terms. Enabling `youtube_download` or `youtube_unblock` is a
+   configuration setting in the customer's own `site.toml`, set by the
+   customer's administrator, and setting it is the customer's decision under
+   the responsibilities listed above.
+3. **Retention.** The attestation records and the download ledger (who
+   requested which video, when, and which machine fetched it) are kept for as
+   long as the customer's dashboard database exists. CC Sync does not delete
+   them automatically, because they are the customer's own record of who
+   accepted the notice and who downloaded what. Whether and when to remove
+   them is the customer's decision.
+4. **The SET UP wizard** fetches Claude Code from `downloads.claude.ai` and
+   Codex from the `openai/codex` GitHub releases, at an administrator's click
+   and into the customer's own server. That is not distribution by the vendor,
+   for the reasons given above.

@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Generate docs/legal/THIRD_PARTY_NOTICES.md from the component venvs.
 
-DRAFT FOR COUNSEL — NOT LEGAL ADVICE. Written 2026-08-17 for
-docs/COMMERCIAL_READINESS.md item 3 ("the repo has no LICENSE, NOTICE, EULA,
-privacy policy or telemetry disclosure"). The file this produces is an
-engineer's inventory of what is installed and what its own metadata claims,
-shaped so a lawyer has something concrete to review. It is not a legal
-opinion and the licence identifiers in it are only as good as the packages'
-own metadata.
+First written 2026-08-17 for docs/COMMERCIAL_READINESS.md item 3 ("the repo
+has no LICENSE, NOTICE, EULA, privacy policy or telemetry disclosure"); the
+document it produces was issued as final product text on 2026-09-25, after
+the owner's legal review. The pip tables are an inventory of what is
+installed and what each package's own metadata claims, so the licence
+identifiers in them are only as good as that metadata.
 
     python tools\\gen_notices.py            # rewrite docs/legal/THIRD_PARTY_NOTICES.md
     python tools\\gen_notices.py --check    # exit 1 if that file is out of date
@@ -20,8 +19,8 @@ pip-licenses is installed INTO each component venv on demand instead, because
 a package list is only true for the interpreter that owns it.
 
 WHAT IT CANNOT DO. Everything conveyed to a customer that is not a pip
-package — rclone, Syncthing, ffmpeg, deno, yt-dlp, the models, htmx, Tcl/Tk,
-the vendored yt-credit-downloader — is invisible to pip and is maintained BY
+package (rclone, Syncthing, ffmpeg, deno, yt-dlp, the models, htmx, Tcl/Tk,
+the vendored yt-credit-downloader) is invisible to pip and is maintained BY
 HAND between the sentinels:
 
     <!-- BEGIN HAND-MAINTAINED -->  ...  <!-- END HAND-MAINTAINED -->
@@ -192,7 +191,7 @@ def collect() -> tuple[dict[str, list[dict]], list[str]]:
     for label, venv, _desc in COMPONENTS:
         python = venv_python(venv)
         if not python.exists():
-            warnings.append(f"{label}: no venv at {venv} — SKIPPED, its packages are "
+            warnings.append(f"{label}: no venv at {venv}: SKIPPED, its packages are "
                             f"not in this inventory")
             sys.stderr.write(f"WARNING: {label}: no venv at {venv}\n")
             continue
@@ -204,7 +203,7 @@ def collect() -> tuple[dict[str, list[dict]], list[str]]:
         # a byte the pipe's codec cannot map raises -- which used to escape
         # main() as a traceback and leave the notices file unregenerable.
         except (RuntimeError, ValueError) as exc:
-            warnings.append(f"{label}: pip-licenses failed — {exc}")
+            warnings.append(f"{label}: pip-licenses failed: {exc}")
             sys.stderr.write(f"WARNING: {label}: {exc}\n")
             continue
         packages.sort(key=lambda p: p.get("Name", "").lower())
@@ -255,7 +254,7 @@ def has_license_text(row: dict) -> bool:
 def esc(value: object) -> str:
     """Table-cell text. A pipe in a licence string ("MIT | Apache-2.0") would
     otherwise open a new column."""
-    return str(value if value is not None else "").replace("|", "\\|").strip() or "—"
+    return str(value if value is not None else "").replace("|", "\\|").strip() or "-"
 
 
 def render(per_component: dict[str, list[dict]], warnings: list[str],
@@ -278,49 +277,41 @@ def render(per_component: dict[str, list[dict]], warnings: list[str],
     # what the tables say is true of whatever venvs the last run scanned, and
     # `git log docs/legal/THIRD_PARTY_NOTICES.md` is the honest answer to when
     # (2026-08-18).
-    add("<!-- DRAFT FOR COUNSEL — NOT LEGAL ADVICE. First written 2026-08-17 for")
-    add("     docs/COMMERCIAL_READINESS.md item 3; the tables below are")
-    add("     regenerated, and `git log` on this file is when they last were.")
-    add("     GENERATED FILE — the pip sections below are produced by")
-    add("     `python tools/gen_notices.py`. Edit that script, not these tables.")
+    add("<!-- Maintainers: GENERATED FILE. The pip sections below are produced by")
+    add("     `python tools/gen_notices.py`; edit that script, not these tables,")
+    add("     and `git log` on this file is when they were last regenerated.")
     add("     The block between <!-- BEGIN HAND-MAINTAINED --> and")
     add("     <!-- END HAND-MAINTAINED --> is written by hand and is preserved")
-    add("     verbatim across regeneration — it carries the components pip")
+    add("     verbatim across regeneration: it carries the components pip")
     add("     cannot see, which is where every copyleft obligation actually is.")
-    add("     TODO(legal): replace \"Cablewrap Creative\" with the registered")
-    add("     legal entity name. The placeholder was inferred from the")
-    add("     operator's email domain and is almost")
-    add("     certainly NOT the correct contracting entity — confirm before use.")
-    add("     TODO(legal): confirm which of these components are actually")
-    add("     CONVEYED to a customer versus merely present in a developer venv;")
-    add("     the venv tables below are the venvs. The dashboard-container")
-    add("     table IS the shipped artefact's own lock (server-tools-1,")
-    add("     2026-09-18), with its licences borrowed from a venv. -->")
+    add("     The developer-venv tables list what is installed for development;")
+    add("     the dashboard-container table is the shipped image's own lock")
+    add("     (server-tools-1, 2026-09-18), with its licences read from a venv. -->")
     add("")
-    add("# CC Sync — third-party notices")
+    add("# CC Sync: third-party notices")
     add("")
-    add("**Draft of 2026-08-17. DRAFT FOR COUNSEL — not legal advice.**")
+    add("**Issued 2026-09-25 by Cablewrap Creative Ltd.**")
     add("")
-    add("CC Sync is proprietary software (see `LICENSE`). It incorporates, links")
-    add("against, or arranges the download of the third-party components listed")
-    add("here. Each remains licensed by its own author under its own terms, which")
-    add("prevail over `LICENSE` for that component.")
+    add("CC Sync is proprietary software, licensed under `docs/legal/EULA.md`. It")
+    add("incorporates, links against, or arranges the download of the third-party")
+    add("components listed here. Each remains licensed by its own author under its")
+    add("own terms, which prevail over the EULA for that component.")
     add("")
     add("**How to read the verification column.** `metadata` means the fact came")
     add("out of the installed distribution's own metadata via `pip-licenses`, and")
-    add("`+text` means the distribution also ships the licence text on disk — both")
-    add("are VERIFIED. Anything in the hand-maintained section marked *stated from")
-    add("knowledge — confirm* was not verified against an artefact on this machine")
-    add("and must be checked before this document is relied on.")
+    add("`+text` means the distribution also ships the licence text on disk. In the")
+    add("hand-maintained section, *as published upstream* means the licence is the")
+    add("one the component's publisher states, and was not re-read from a shipped")
+    add("file.")
     add("")
 
     if flagged:
         add("## LICENCES NEEDING ATTENTION")
         add("")
         add("Copyleft or otherwise non-permissive licences found in the venvs. Being")
-        add("listed here is not a finding of non-compliance — it means a human must")
+        add("listed here is not a finding of non-compliance: it means a human must")
         add("decide whether the way we ship this one is compliant. See the")
-        add("\"LGPL components that remain\" subsection for the ones already reasoned")
+        add("\"LGPL and MPL components that remain\" subsection for the ones already reasoned")
         add("through.")
         add("")
         add("| Package | Version | Licence | Present in | Verification |")
@@ -363,7 +354,7 @@ def render(per_component: dict[str, list[dict]], warnings: list[str],
             continue
         add(f"### {label}")
         add("")
-        add(f"{desc}. Venv: `{venv}` — {len(packages)} package(s).")
+        add(f"{desc}. Venv: `{venv}`, {len(packages)} package(s).")
         add("")
         add("| Package | Version | Licence | Home page |")
         add("|---|---|---|---|")
@@ -378,7 +369,7 @@ def render(per_component: dict[str, list[dict]], warnings: list[str],
             continue
         add(f"### {label}")
         add("")
-        add(f"{desc}. Lock: `{path.relative_to(REPO).as_posix()}` — "
+        add(f"{desc}. Lock: `{path.relative_to(REPO).as_posix()}`, "
             f"{len(packages)} package(s). A lock carries no licence metadata, "
             f"so each licence below is the one the same package's metadata "
             f"declares in a developer venv on this machine; the version column "
@@ -413,8 +404,8 @@ def render(per_component: dict[str, list[dict]], warnings: list[str],
 DEFAULT_HAND_BLOCK = """
 ## Non-pip components (hand-maintained)
 
-TODO(legal): this section has never been filled in. Everything conveyed to a
-customer that is not a pip package belongs here — rclone, Syncthing, ffmpeg,
+This section has not been written for this file yet. Everything conveyed to
+a customer that is not a pip package belongs here: rclone, Syncthing, ffmpeg,
 deno, yt-dlp, the models, htmx, Tcl/Tk and the vendored yt-credit-downloader.
 `tools/gen_notices.py` preserves whatever is between the sentinels; it cannot
 write it.
@@ -482,8 +473,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.out == "-":
-        # Through the BUFFER: this document is full of em-dashes, and a
-        # Windows console stdout defaults to cp1252, which turns `--out -`
+        # Through the BUFFER: this document carries non-ASCII (licence names,
+        # package metadata, the hand block's symbols), and a Windows console stdout defaults to cp1252, which turns `--out -`
         # into a UnicodeEncodeError (or, redirected, mojibake that no longer
         # matches --check).
         sys.stdout.buffer.write(rendered.encode("utf-8"))

@@ -1,44 +1,36 @@
-<!-- DRAFT FOR COUNSEL — NOT LEGAL ADVICE. First written 2026-08-17 for
-     docs/COMMERCIAL_READINESS.md item 3; the tables below are
-     regenerated, and `git log` on this file is when they last were.
-     GENERATED FILE — the pip sections below are produced by
-     `python tools/gen_notices.py`. Edit that script, not these tables.
+<!-- Maintainers: GENERATED FILE. The pip sections below are produced by
+     `python tools/gen_notices.py`; edit that script, not these tables,
+     and `git log` on this file is when they were last regenerated.
      The block between <!-- BEGIN HAND-MAINTAINED --> and
      <!-- END HAND-MAINTAINED --> is written by hand and is preserved
-     verbatim across regeneration — it carries the components pip
+     verbatim across regeneration: it carries the components pip
      cannot see, which is where every copyleft obligation actually is.
-     TODO(legal): replace "Cablewrap Creative" with the registered
-     legal entity name. The placeholder was inferred from the
-     operator's email domain and is almost
-     certainly NOT the correct contracting entity — confirm before use.
-     TODO(legal): confirm which of these components are actually
-     CONVEYED to a customer versus merely present in a developer venv;
-     the venv tables below are the venvs. The dashboard-container
-     table IS the shipped artefact's own lock (server-tools-1,
-     2026-09-18), with its licences borrowed from a venv. -->
+     The developer-venv tables list what is installed for development;
+     the dashboard-container table is the shipped image's own lock
+     (server-tools-1, 2026-09-18), with its licences read from a venv. -->
 
-# CC Sync — third-party notices
+# CC Sync: third-party notices
 
-**Draft of 2026-08-17. DRAFT FOR COUNSEL — not legal advice.**
+**Issued 2026-09-25 by Cablewrap Creative Ltd.**
 
-CC Sync is proprietary software (see `LICENSE`). It incorporates, links
-against, or arranges the download of the third-party components listed
-here. Each remains licensed by its own author under its own terms, which
-prevail over `LICENSE` for that component.
+CC Sync is proprietary software, licensed under `docs/legal/EULA.md`. It
+incorporates, links against, or arranges the download of the third-party
+components listed here. Each remains licensed by its own author under its
+own terms, which prevail over the EULA for that component.
 
 **How to read the verification column.** `metadata` means the fact came
 out of the installed distribution's own metadata via `pip-licenses`, and
-`+text` means the distribution also ships the licence text on disk — both
-are VERIFIED. Anything in the hand-maintained section marked *stated from
-knowledge — confirm* was not verified against an artefact on this machine
-and must be checked before this document is relied on.
+`+text` means the distribution also ships the licence text on disk. In the
+hand-maintained section, *as published upstream* means the licence is the
+one the component's publisher states, and was not re-read from a shipped
+file.
 
 ## LICENCES NEEDING ATTENTION
 
 Copyleft or otherwise non-permissive licences found in the venvs. Being
-listed here is not a finding of non-compliance — it means a human must
+listed here is not a finding of non-compliance: it means a human must
 decide whether the way we ship this one is compliant. See the
-"LGPL components that remain" subsection for the ones already reasoned
+"LGPL and MPL components that remain" subsection for the ones already reasoned
 through.
 
 | Package | Version | Licence | Present in | Verification |
@@ -54,7 +46,7 @@ through.
 These components were NOT scanned; their packages are missing from
 every table below.
 
-- ytdl/web: no venv at E:\Projects\Editing\ccsync\ytdl\web\.venv — SKIPPED, its packages are not in this inventory
+- ytdl/web: no venv at E:\Projects\Editing\ccsync\ytdl\web\.venv: SKIPPED, its packages are not in this inventory
 
 ## Python dependencies by component
 
@@ -65,7 +57,7 @@ installs `dashboard/deploy/requirements.txt`.
 
 ### companion
 
-editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv: `E:\Projects\Editing\ccsync\companion\.venv` — 21 package(s).
+editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv: `E:\Projects\Editing\ccsync\companion\.venv`, 21 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -93,7 +85,7 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv:
 
 ### dashboard
 
-FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Venv: `E:\Projects\Editing\ccsync\dashboard\.venv` — 59 package(s).
+FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Venv: `E:\Projects\Editing\ccsync\dashboard\.venv`, 59 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -159,7 +151,7 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 
 ### music/web
 
-music search UI mounted at /music; deliberately no torch. Venv: `E:\Projects\Editing\ccsync\music\web\.venv` — 32 package(s).
+music search UI mounted at /music; deliberately no torch. Venv: `E:\Projects\Editing\ccsync\music\web\.venv`, 32 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -198,7 +190,7 @@ music search UI mounted at /music; deliberately no torch. Venv: `E:\Projects\Edi
 
 ### broll/web
 
-b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\Projects\Editing\ccsync\broll\web\.venv` — 31 package(s).
+b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\Projects\Editing\ccsync\broll\web\.venv`, 31 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -236,7 +228,7 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 
 ### dashboard-container
 
-what the deployed dashboard image installs -- the artefact a customer receives, not a developer venv. Lock: `dashboard/deploy/requirements.lock` — 52 package(s). A lock carries no licence metadata, so each licence below is the one the same package's metadata declares in a developer venv on this machine; the version column is the CONTAINER's.
+what the deployed dashboard image installs -- the artefact a customer receives, not a developer venv. Lock: `dashboard/deploy/requirements.lock`, 52 package(s). A lock carries no licence metadata, so each licence below is the one the same package's metadata declares in a developer venv on this machine; the version column is the CONTAINER's.
 
 | Package | Version (container) | Licence | Licence read from |
 |---|---|---|---|
@@ -387,59 +379,58 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 
 Everything CC Sync ships, embeds, or arranges the download of that pip cannot
 see. This section is written by hand and preserved verbatim by
-`tools/gen_notices.py`; the generator cannot produce it, and every copyleft
-obligation the product actually carries is in here rather than in the tables
+`tools/gen_notices.py`; the generator cannot produce it, and the copyleft
+obligations the product carries are set out here rather than in the tables
 above.
 
-### How a component is conveyed — the distinction the licences turn on
+### How a component is conveyed: the distinction the licences turn on
 
 Three modes, because "we ship it" and "we tell the customer's own machine to
-fetch it" are different acts under GPL §6 / MPL §3:
+fetch it" are different acts under GPL §6 and MPL §3:
 
-- **(A) EMBEDDED** — inside an artefact we build and publish (the frozen
-  companion exe, the dashboard image, a file we SFTP onto a customer's NAS).
-  We are conveying. Copyleft obligations attach to us.
-- **(B) FETCHED BY THE CUSTOMER'S MACHINE** — our installer or companion tells
+- **(A) EMBEDDED**: inside an artefact we build and publish (the frozen
+  companion exe, the dashboard image, a file we copy onto a customer's NAS).
+  We are conveying, and copyleft obligations attach to us.
+- **(B) FETCHED BY THE CUSTOMER'S MACHINE**: our installer or companion tells
   the editor's workstation or the customer's NAS to download it directly from
   upstream, over a pinned URL, and verifies it. Upstream conveys to the
-  customer; we convey nothing. We do choose and pin the build, which is why the
-  written offers below are given anyway where the licence is GPL.
-- **(C) CUSTOMER-SUPPLIED** — the customer already has it, or installs it from
-  their own vendor's catalogue. We only talk to it.
-
-TODO(legal): confirm that mode (B) is accepted as non-conveying in the target
-jurisdictions. The FSF's position on "the user downloads it themselves" is
-well known but this product automates the download, which is the fact pattern
-counsel should look at.
+  customer; the Licensor does not convey it. Because we choose and pin the
+  build, the written offers below are given anyway where the licence is GPL.
+- **(C) CUSTOMER-SUPPLIED**: the customer already has it, or installs it from
+  its own vendor's catalogue. We only talk to it.
 
 ### Inventory
 
+*As published upstream* means the licence is the one the component's
+publisher states, and was not re-read from a file we ship.
+
 | Component | Version / pin | Licence | Verification | Where obtained | Mode |
 |---|---|---|---|---|---|
-| rclone | `rclone-current-*` (unpinned, resolved at install time) | MIT | *stated from knowledge — confirm* | `downloads.rclone.org` (`installer/windows_bootstrap.ps1:771`, `installer/macos_bootstrap.sh:1437-1439`) | B |
-| Syncthing (editor side) | latest release resolved at install time | MPL-2.0 | *stated from knowledge — confirm* | `github.com/syncthing/syncthing` releases (`installer/windows_bootstrap.ps1:935-941`, `installer/macos_bootstrap.sh:1536-1539`) | B |
-| Syncthing (NAS side) | whatever the NAS vendor's catalogue offers | MPL-2.0 | *stated from knowledge — confirm* | the TrueNAS/Synology app catalogue, installed through the NAS's own API (`server/install_syncthing_app.py:93-151`) | C |
-| **ffmpeg (editor side)** | `eugeneware/ffmpeg-static` tag `b6.1.1`; binary reports `6.1.1-essentials_build` | **GPLv3** | version string measured 2026-08-16 (`sidecar_tools.py:41`) — VERIFIED; licence *stated from knowledge — confirm* | GitHub release assets, sha256-pinned per asset (`companion/src/ccsync_companion/sidecar_tools.py:94-133`) | B |
-| **ffmpeg (NAS side)** | `ffmpeg-7.0.2-amd64-static.tar.xz`, sha256 `abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67` | **GPLv3** | pin VERIFIED in `server/install_dashboard_app.py:308-314`; licence *stated from knowledge — confirm* | `johnvansickle.com/ffmpeg/releases/` | B by default since 2026-08-17; **A** under `--push-ffmpeg-from-local` |
-| yt-dlp (NAS side) | `yt-dlp>=2026.6.9` | Unlicense | *stated from knowledge — confirm* | PyPI, installed by the container's own `pip` (`dashboard/deploy/requirements.txt`, the `yt-dlp` pin) | B |
-| yt-dlp (editor side) | latest, refreshed daily | Unlicense | *stated from knowledge — confirm* | GitHub releases (`companion/src/ccsync_companion/ytdlp_manager.py`) | B |
-| deno | `v2.9.5` | MIT | version string measured 2026-08-16 (`sidecar_tools.py:44`) — VERIFIED; licence *stated from knowledge — confirm* | `github.com/denoland/deno` releases, sha256-pinned (`sidecar_tools.py:96-133`) | B |
-| bgutil PO-token provider | `bgutil-ytdlp-pot-provider==1.3.1` + the matching sidecar container image | **GPLv3** — see below | plugin licence VERIFIED 2026-08-17 from installed metadata (`dashboard` venv table above); sidecar image licence *stated from knowledge — confirm* | PyPI (plugin, `dashboard/deploy/requirements-unblock.txt`) + a container image pinned in `server/install_dashboard_app.py` (`POT_PROVIDER_IMAGE`) — BOTH ONLY on a site with `[features] youtube_unblock` on | A (plugin, into our own container venv) / B (sidecar image, pulled by the customer's own docker) |
-| Tailscale | customer's own | client BSD-3-Clause; the coordination service is a paid SaaS | *stated from knowledge — confirm* | the customer installs and pays for it (`docs/SERVER-SYNOLOGY.md`) | C |
-| CLAP text tower (ONNX export) | derived from `laion/larger_clap_music_and_speech`, exported 2026-08-10 | Apache-2.0 | model id, dim 512 and 125,302,016 text params VERIFIED from `music/web/data/text_encoder/manifest.json`; licence *stated from knowledge — confirm* | Hugging Face, exported on the base rig by `music/indexer/export_text_encoder.py` | **A** |
-| MiniLM (b-roll embeddings) | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` via fastembed | Apache-2.0 | model id VERIFIED in `broll/web/app/semantic.py:51-53`; licence *stated from knowledge — confirm* | Hugging Face / the fastembed CDN, on the base rig only | not shipped — see below |
-| Whisper (transcription) | an external `faster-whisper` environment the operator already has | faster-whisper MIT, model weights MIT | path VERIFIED in `broll/indexer/broll_index/config.py:115-116`; licences *stated from knowledge — confirm* | operator-supplied, outside this repo (`%USERPROFILE%\tools\whisper` by default) | C |
-| **llama.cpp** (b-roll local indexing runtime, 2026-08-18) | release `b10470`, `llama-server` — one asset per platform (Windows CUDA 12.4, macOS arm64 Metal, Linux Vulkan) | **MIT** | asset names + sha256 pinned and VERIFIED against `api.github.com/repos/ggml-org/llama.cpp/releases/tags/b10470`'s own digests, `broll/indexer/broll_index/local_models.py:RUNTIMES`; licence *stated from knowledge — confirm* | `github.com/ggml-org/llama.cpp` releases, sha256-pinned per asset (`broll_index/local_runtime.py`) | B |
-| **Qwen3-VL-4B/8B-Instruct-GGUF** (b-roll local indexing model, 2026-08-18) | `Qwen/Qwen3-VL-4B-Instruct-GGUF`@`1cd86af…`, `Qwen/Qwen3-VL-8B-Instruct-GGUF`@`f982a07…`, `Q4_K_M` quant + F16 mmproj each | **Apache-2.0** | repo/revision/filename/sha256 pinned in `broll_index/local_models.py:TIERS`; 4B sha256 VERIFIED by local download+hash 2026-08-18, 8B sha256 is Hugging Face's own API-reported `lfs.oid` (not independently re-downloaded); licence *stated from knowledge — confirm against the model card* | Hugging Face, sha256-pinned per file (`broll_index/local_runtime.py`) | B |
-| htmx | `1.9.12` | 0BSD | version VERIFIED (`version:"1.9.12"` in `dashboard/static/htmx.min.js`); licence *stated from knowledge — confirm* | vendored into `dashboard/static/` | **A** |
-| Tcl/Tk | 8.6 (`tcl86t.dll`, `tk86t.dll`) | BSD-style (Tcl/Tk licence) | presence VERIFIED by byte-scanning `companion/dist/ccsync-companion.exe` (0.7.11, built 2026-08-17); licence *stated from knowledge — confirm* | the CPython 3.12.10 install on the build machine, collected by PyInstaller | **A** |
-| CPython (`python312.dll`) | 3.12.10 | PSF-2.0 | presence VERIFIED by the same byte scan; build-machine interpreter VERIFIED as 3.12.10 | the CPython install on the build machine | **A** |
-| Pillow | 12.3.0 | `MIT-CMU` (the HPND/PIL-style licence) | VERIFIED from installed metadata **and** the licence text on disk; presence in the exe VERIFIED by byte scan | PyPI | **A** |
+| rclone | `rclone-current-*` (resolved at install time) | MIT | *as published upstream* | `downloads.rclone.org` (`installer/windows_bootstrap.ps1`, `installer/macos_bootstrap.sh`) | B |
+| Syncthing (editor side) | latest release resolved at install time | MPL-2.0 | *as published upstream* | `github.com/syncthing/syncthing` releases (`installer/windows_bootstrap.ps1`, `installer/macos_bootstrap.sh`) | B |
+| Syncthing (NAS side) | whatever the NAS vendor's catalogue offers | MPL-2.0 | *as published upstream* | the TrueNAS/Synology app catalogue, installed through the NAS's own API (`server/install_syncthing_app.py`) | C |
+| **ffmpeg (editor side)** | `eugeneware/ffmpeg-static` tag `b6.1.1`; binary reports `6.1.1-essentials_build` | **GPLv3** | pin VERIFIED (`sidecar_tools.py:FFMPEG_RELEASE_TAG`); licence *as published upstream* | GitHub release assets, sha256-pinned per asset (`companion/src/ccsync_companion/sidecar_tools.py`) | B |
+| **ffmpeg (NAS side)** | `ffmpeg-7.0.2-amd64-static.tar.xz`, sha256 `abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67` | **GPLv3** | pin VERIFIED (`server/install_dashboard_app.py:DEFAULT_FFMPEG_URL`, `DEFAULT_FFMPEG_SHA256`); licence *as published upstream* | `johnvansickle.com/ffmpeg/releases/` | B by default; **A** under `--push-ffmpeg-from-local` |
+| yt-dlp (NAS side) | the version pinned in `dashboard/deploy/requirements.lock` | Unlicense | metadata (the dashboard-container table above) | PyPI, installed by the container's own `pip` | B |
+| yt-dlp (editor side) | latest, refreshed daily | Unlicense | *as published upstream* | GitHub releases (`companion/src/ccsync_companion/ytdlp_manager.py`) | B |
+| deno | `v2.9.5` | MIT | pin VERIFIED (`sidecar_tools.py:DENO_RELEASE_TAG`); licence *as published upstream* | `github.com/denoland/deno` releases, sha256-pinned (`sidecar_tools.py`) | B |
+| bgutil PO-token provider | `bgutil-ytdlp-pot-provider==1.3.1` + the matching sidecar container image | **GPLv3** (see below) | plugin licence VERIFIED from installed metadata (`dashboard` venv table above); sidecar image licence *as published upstream* | PyPI (plugin, `dashboard/deploy/requirements-unblock.txt`) + a container image pinned in `server/install_dashboard_app.py` (`POT_PROVIDER_IMAGE`), BOTH ONLY on a site with `[features] youtube_unblock` on | A (plugin, into our own container venv) / B (sidecar image, pulled by the customer's own docker) |
+| Tailscale | the customer's own | client BSD-3-Clause; the coordination service is a paid service | *as published upstream* | the customer installs and pays for it (`docs/SERVER-SYNOLOGY.md`) | C |
+| CLAP text tower (ONNX export) | derived from `laion/larger_clap_music_and_speech`, exported 2026-08-10 | Apache-2.0 | model id, dim 512 and 125,302,016 text params VERIFIED from `music/web/data/text_encoder/manifest.json`; licence *as published upstream* | Hugging Face, exported on the base rig by `music/indexer/export_text_encoder.py` | **A** |
+| MiniLM (b-roll embeddings) | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` via fastembed | Apache-2.0 | model id VERIFIED in `broll/web/app/semantic.py`; licence *as published upstream* | Hugging Face / the fastembed CDN, on the indexing machine only | not shipped (see below) |
+| Whisper (transcription) | an external `faster-whisper` environment the operator already has | faster-whisper MIT, model weights MIT | path VERIFIED in `broll/indexer/broll_index/config.py`; licences *as published upstream* | operator-supplied, outside this repo (`%USERPROFILE%\tools\whisper` by default) | C |
+| **llama.cpp** (b-roll local indexing runtime) | release `b10470`, `llama-server`: one asset per platform (Windows CUDA 12.4, macOS arm64 Metal, Linux Vulkan) | **MIT** | asset names + sha256 pinned and VERIFIED against the release's own digests (`broll/indexer/broll_index/local_models.py:RUNTIMES`); licence *as published upstream* | `github.com/ggml-org/llama.cpp` releases, sha256-pinned per asset (`broll_index/local_runtime.py`) | B |
+| **Qwen3-VL-4B/8B-Instruct-GGUF** (b-roll local indexing model) | `Qwen/Qwen3-VL-4B-Instruct-GGUF`@`1cd86af…`, `Qwen/Qwen3-VL-8B-Instruct-GGUF`@`f982a07…`, `Q4_K_M` quant + F16 mmproj each | **Apache-2.0** | repo/revision/filename/sha256 pinned in `broll_index/local_models.py:TIERS`; licence *as published upstream* on the model card | Hugging Face, sha256-pinned per file (`broll_index/local_runtime.py`) | B |
+| htmx | `1.9.12` | 0BSD | version VERIFIED (`version:"1.9.12"` in `dashboard/static/htmx.min.js`); licence *as published upstream* | vendored into `dashboard/static/` | **A** |
+| Tcl/Tk | 8.6 (`tcl86t.dll`, `tk86t.dll`) | BSD-style (Tcl/Tk licence) | presence VERIFIED by byte-scanning the Windows companion build (re-checked 2026-09-25); licence *as published upstream* | the CPython 3.12 install on the build machine, collected by PyInstaller | **A** |
+| CPython (`python312.dll`) | 3.12 | PSF-2.0 | presence VERIFIED by the same byte scan | the CPython install on the build machine | **A** |
+| Pillow | 12.3.0 | `MIT-CMU` (the HPND/PIL-style licence) | VERIFIED from installed metadata **and** the licence text on disk | PyPI | **A** |
 | Microsoft Visual C++ runtime | `VCRUNTIME140` | Microsoft redistributable terms | presence VERIFIED by byte scan | the build machine's toolchain, collected by PyInstaller | **A** |
-| PyInstaller bootloader | 6.21.0 | **GPL-2.0-or-later WITH Bootloader-exception** | VERIFIED — SPDX id and the exception text both read off `companion/.venv/Lib/site-packages/pyinstaller-6.21.0.dist-info/licenses/COPYING.txt` | PyPI | **A** (bootloader only) |
-| yt-credit-downloader (vendored) | copied 2026-08-11 | **NO LICENCE GRANT** | VERIFIED by inspection 2026-08-17: no LICENSE/COPYING in `ytdl/web/ytdlweb/vendor/`, no header on either module | `E:\Projects\Utilities\yt-credit-downloader` (`vendor/__init__.py:1-2`) | **A** |
+| psycopg2 (in the companion exe) | the `psycopg2-binary` version resolved at build time (`companion/pyproject.toml`: `>=2.9,<3`), with the `libpq` and OpenSSL libraries its wheel carries | **LGPL-3.0-or-later with psycopg2's exceptions**; libpq PostgreSQL Licence; OpenSSL Apache-2.0 | presence VERIFIED by byte-scanning the Windows companion build (2026-09-25) and in `companion/build.spec` (`hiddenimports`); licences *as published upstream* | PyPI, collected by PyInstaller | **A** (see below) |
+| PyInstaller bootloader | 6.21.0 | **GPL-2.0-or-later WITH Bootloader-exception** | VERIFIED: SPDX id and the exception text both read off `pyinstaller-6.21.0.dist-info/licenses/COPYING.txt` | PyPI | **A** (bootloader only) |
+| yt-credit-downloader (vendored) | copied 2026-08-11 | Proprietary: part of the Software, licensed under `docs/legal/EULA.md` | provenance recorded in `ytdl/web/ytdlweb/vendor/PROVENANCE.md` | the Licensor's own utility (`vendor/__init__.py`) | **A** |
 
-### ffmpeg — the GPLv3 component, and both copies of it
+### ffmpeg: the GPLv3 component, and both copies of it
 
 ffmpeg builds that include `libx264`/`libx265` are **GPLv3**, not LGPL. Both
 copies CC Sync arranges are such builds.
@@ -447,61 +438,52 @@ copies CC Sync arranges are such builds.
 **Editor side.** `companion/src/ccsync_companion/sidecar_tools.py` installs
 `ffmpeg`/`ffprobe` into `%LOCALAPPDATA%\ccsync\tools` from the
 `eugeneware/ffmpeg-static` GitHub release `b6.1.1`, which republishes gyan.dev's
-Windows "essentials" build and evermeet's macOS builds one-file-per-platform.
+Windows "essentials" build and evermeet's macOS builds one file per platform.
 Each asset is sha256-pinned in that module. The download is performed by the
 editor's own machine from GitHub, so upstream is the one conveying (mode B);
-we choose the build.
-
-*Scope change 2026-08-18:* `ensure_ffmpeg_pair` is no longer behind the
-`youtube_download` feature gate, because b-roll and music ingest need ffmpeg on
-any machine an editor drops files on. The mode is unchanged (still B, still the
-editor's own machine fetching from GitHub) but the population is: **every**
-editor machine now installs a GPLv3 ffmpeg, where before only a
-youtube-enabled fleet's did. Counsel should read the written offer below
-knowing that, rather than as an edge case.
+we choose the build. Every editor machine installs it, because b-roll and
+music ingest need ffmpeg on any machine an editor drops files on, so the
+written offer below applies to every deployment.
 
 **NAS side.** `server/install_dashboard_app.py` puts johnvansickle's
 `ffmpeg-7.0.2-amd64-static` on the customer's NAS for `/music`'s ingest
-transcode. As of **2026-08-17** (`DEFAULT_FFMPEG_FETCH = "remote"`,
-`install_dashboard_app.py:344-347`) the default has the NAS curl the pinned
-tarball itself — precisely so this stops being a conveyance. The
+transcode. By default (`DEFAULT_FFMPEG_FETCH = "remote"`) the NAS downloads
+the pinned tarball itself, so this is not a conveyance. The
 `--push-ffmpeg-from-local` flag remains for air-gapped sites and **does**
-convey; choosing it prints `FFMPEG_LOCAL_PUSH_GPL_NOTICE`
-(`install_dashboard_app.py:352-366`) at the operator.
+convey; choosing it prints `FFMPEG_LOCAL_PUSH_GPL_NOTICE` at the operator.
 
 **WRITTEN OFFER (GPLv3 §6).** Where CC Sync has conveyed an ffmpeg binary to
-you — that is, where the deployment used `--push-ffmpeg-from-local`, or where
-a build was handed to you on media — Cablewrap Creative offers, for a period
-of three years from that conveyance, to give any third party a complete
-machine-readable copy of the corresponding source code of that ffmpeg build,
-on a physical medium customarily used for software interchange, for no more
-than the cost of physically performing the distribution. Direct such a request
-to the address in `docs/legal/EULA.md`. The same source is available without
-charge from upstream:
+you, that is, where the deployment used `--push-ffmpeg-from-local`, or where
+a build was handed to you on media, Cablewrap Creative Ltd. offers, for a
+period of three years from that conveyance, to give any third party a
+complete machine-readable copy of the corresponding source code of that ffmpeg
+build, on a physical medium customarily used for software interchange, for no
+more than the cost of physically performing the distribution. Send requests
+to Cablewrap Creative Ltd., No. 111, Minquan Road, Zhuwei Village, Tamsui
+District, New Taipei City 251, Taiwan (R.O.C.), or to
+contact@thecreatorsclub.co. The same source is available without charge from
+upstream:
 
-- upstream ffmpeg source and release tarballs — <https://ffmpeg.org/download.html>
-- johnvansickle build scripts and source links — <https://johnvansickle.com/ffmpeg/>
-- gyan.dev Windows build configuration and sources — <https://www.gyan.dev/ffmpeg/builds/>
-- the exact assets the companion fetches — <https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1>
+- upstream ffmpeg source and release tarballs: <https://ffmpeg.org/download.html>
+- johnvansickle build scripts and source links: <https://johnvansickle.com/ffmpeg/>
+- gyan.dev Windows build configuration and sources: <https://www.gyan.dev/ffmpeg/builds/>
+- the exact assets the companion fetches: <https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1>
 
-TODO(legal): the offer above names no address because the contracting entity is
-not yet decided. It is not valid until one is set.
+<!-- Maintainers: the pins named in this section (b6.1.1 / 7.0.2) must be
+     updated here whenever sidecar_tools.py or install_dashboard_app.py bumps
+     one. A written offer that names the wrong build is not an offer. -->
 
-TODO(operator): the pinned versions above (`b6.1.1` / `7.0.2`) must be updated
-in this file whenever `sidecar_tools.py` or `install_dashboard_app.py` bumps a
-pin. A written offer that names the wrong build is not an offer.
+### PyInstaller: why a GPLv2 tool does not make the exe GPL
 
-### PyInstaller — why a GPLv2 tool does not make the exe GPL
+`pyinstaller` is GPL-2.0-or-later. It does not affect the licence of the
+frozen companion, for two independent reasons:
 
-`pyinstaller` is GPL-2.0-or-later, and pip-licenses flags it above. It does not
-infect the frozen companion, for two independent reasons:
-
-1. PyInstaller is a **build tool**. It is not distributed to customers; it is
-   not in the exe. Using a GPL tool to build proprietary software has never
-   created an obligation, exactly as `gcc` does not.
-2. The one PyInstaller-authored artefact that *is* inside the exe — the
-   **bootloader** — carries an explicit exception. VERIFIED, quoted from
-   `pyinstaller-6.21.0.dist-info/licenses/COPYING.txt` on this machine:
+1. PyInstaller is a **build tool**. It is not distributed to customers and is
+   not in the exe. Using a GPL tool to build proprietary software creates no
+   obligation, exactly as `gcc` does not.
+2. The one PyInstaller-authored artefact that *is* inside the exe, the
+   **bootloader**, carries an explicit exception, quoted from
+   `pyinstaller-6.21.0.dist-info/licenses/COPYING.txt`:
 
    > In addition to the permissions in the GNU General Public License, the
    > authors give you unlimited permission to link or embed compiled bootloader
@@ -516,162 +498,164 @@ The exception covers embedding and distributing the **compiled** bootloader. It
 does not cover distributing a **modified** bootloader; CC Sync does not modify
 one (`companion/build.spec` uses the stock one).
 
-### pystray — being removed, and not in the shipped build
+### pystray: removed
 
-`pystray` 0.19.5 is **LGPLv3** (VERIFIED from installed metadata, with
-`COPYING.LGPL` present in its dist-info). It is the finding that opened
-`docs/COMMERCIAL_READINESS.md` item 3, and it is being replaced with an
-in-house ctypes/PyObjC tray backend in that same work item.
+`pystray` (LGPLv3) was the companion's tray library until 2026-08-17. It has
+been replaced by CC Sync's own tray code (`tray_native.py`), is no longer a
+dependency (`companion/pyproject.toml`), is not collected by
+`companion/build.spec`, and `tools/check_licenses.py` fails a build that
+re-adds it. A byte scan of the current Windows companion build (re-checked
+2026-09-25) finds no occurrence of it. Companion builds published before the
+replacement contained it; any customer still running one should update.
 
-It still appears in the companion venv table above, because it is still
-installed there as a **dev-only optional escape hatch** — `companion/build.spec`
-bundles it only `if` it imports at build time.
+### CLAP, MiniLM, Whisper, Qwen3-VL/llama.cpp: what actually ships
 
-TODO(operator): a byte scan of `companion/dist/ccsync-companion.exe` (0.7.11,
-built 2026-08-17T08:23:41Z, `git_commit e270aef`) still finds the string
-`pystray`, i.e. **the currently published build does contain it**. This section
-becomes accurate only once a build made after the tray replacement is published.
-Until then, the LGPLv3 §4/§6 obligations for that build stand: it is a
-single-file binary with an LGPL library statically inside it and no relinking
-mechanism offered.
-
-### CLAP, MiniLM, Whisper, Qwen3-VL/llama.cpp — what actually ships
-
-- **CLAP text tower — SHIPPED (mode A).** `music/web/data/text_encoder/` is an
+- **CLAP text tower: SHIPPED (mode A).** `music/web/data/text_encoder/` is an
   ONNX export of the 125M-parameter text half of
   `laion/larger_clap_music_and_speech`, produced on the base rig and shipped to
-  the customer's NAS beside `music.db`. That is a derivative work of an
-  Apache-2.0 model, so Apache-2.0 §4 applies to us: retain the licence, retain
-  attribution/NOTICE, and state that the file has been modified (it has: it is
-  a partial ONNX export, not the original checkpoint).
-  TODO(legal/operator): ship the Apache-2.0 text and a NOTICE file alongside
-  `music/web/data/text_encoder/`, and record the modification there.
-- **MiniLM — NOT SHIPPED.** `fastembed` is deliberately excluded from the
-  container (VERIFIED — `dashboard/deploy/requirements.txt` says so in the
-  b-roll section's comment, and gives the reason). The model is downloaded only on the base rig during
-  indexing; what reaches the customer is precomputed float32 vectors inside
-  `broll.db`. Apache-2.0 imposes no copyleft on those.
-- **Whisper — NOT SHIPPED, NOT IN THIS REPO.** `broll/indexer` shells out to an
+  the customer's NAS beside `music.db`. It is a derivative work of an
+  Apache-2.0 model. **Attribution and modification notice (Apache-2.0 §4):**
+  the files in `music/web/data/text_encoder/` are derived from
+  `laion/larger_clap_music_and_speech` by LAION, licensed under the Apache
+  License, Version 2.0 (<https://www.apache.org/licenses/LICENSE-2.0>); they
+  have been modified by Cablewrap Creative Ltd. by exporting only the text
+  encoder to ONNX, and are not the original checkpoint.
+- **MiniLM: NOT SHIPPED.** `fastembed` is deliberately excluded from the
+  container (`dashboard/deploy/requirements.txt` says so in the b-roll
+  section's comment, and gives the reason). The model is downloaded only on
+  the indexing machine; what reaches the customer is precomputed float32
+  vectors inside `broll.db`. Apache-2.0 imposes no copyleft on those.
+- **Whisper: NOT SHIPPED, NOT IN THIS REPO.** `broll/indexer` calls an
   operator-supplied `faster-whisper` environment
-  (`broll/indexer/broll_index/transcribe.py:1-17`). Only the resulting
-  transcript text reaches a customer, inside `broll.db`.
-- **Qwen3-VL / llama.cpp (b-roll local indexing, 2026-08-18) — NOT SHIPPED.**
-  Same posture as Whisper: `broll_index/local_runtime.py` has the INDEXING
-  machine's own `llama-server` process download the runtime binary from
-  GitHub and the GGUF weights from Hugging Face, sha256-verified against the
-  pins in `broll_index/local_models.py` before either is trusted. Only the
-  resulting shot descriptions (text) reach a customer, inside `broll.db` —
-  the model weights themselves never leave the indexing machine and are never
-  bundled into `companion` or the `dashboard` container, which is why
-  `tools/check_licenses.py`'s gate (scoped to those two shipped artefacts —
-  see its own docstring) does not see this row; it is inventoried here by
-  hand instead, same as Whisper above.
+  (`broll/indexer/broll_index/transcribe.py`). Only the resulting transcript
+  text reaches a customer, inside `broll.db`.
+- **Qwen3-VL / llama.cpp: NOT SHIPPED.** `broll_index/local_runtime.py` has the
+  indexing machine download the runtime binary from GitHub and the GGUF
+  weights from Hugging Face itself, sha256-verified against the pins in
+  `broll_index/local_models.py` before either is trusted. Only the resulting
+  shot descriptions (text) reach a customer, inside `broll.db`; the weights
+  never leave the indexing machine and are never bundled into the companion
+  or the dashboard container, which is why `tools/check_licenses.py` (scoped
+  to those two shipped artefacts) does not see this row and it is inventoried
+  here by hand.
 
-TODO(legal): model weights are frequently licensed by terms that are *not* the
-repository's stated software licence (RAIL/OpenRAIL riders, "no commercial use"
-model cards). The three above are believed to be Apache-2.0/MIT, but that is
-*stated from knowledge — confirm* against each model card before sale.
+Model weights can carry terms separate from their repository's software
+licence. The licences stated above for the CLAP, MiniLM, Whisper and Qwen3-VL
+weights are those on each model's published model card.
 
-### bgutil PO-token provider — GPLv3, and split out of the base container 2026-08-17
+### bgutil PO-token provider: GPLv3, and outside the base container
 
-Its licence is now **VERIFIED**: installed metadata in the `dashboard` venv
-reads **GNU General Public License v3 (GPLv3)** (the plugin table above). Its
-upstream repository is `Brainicism/bgutil-ytdlp-pot-provider`; the sidecar
-container image's own licence is still *stated from knowledge — confirm from
-the repository's own LICENSE file*.
+Its licence is VERIFIED: installed metadata in the `dashboard` venv reads
+**GNU General Public License v3 (GPLv3)** (the table above). Its upstream
+repository is `Brainicism/bgutil-ytdlp-pot-provider`; the sidecar container
+image's licence is *as published upstream*.
 
-**2026-08-17 (CI run 32041222871's licence gate, `docs/COMMERCIAL_READINESS.md`
-items 2/3): moved OUT of the base `dashboard/deploy/requirements.txt`/`.lock`
-that every deployment installs and the image bakes, into its own
-`dashboard/deploy/requirements-unblock.txt`/`.lock`.** Before this split, the
-base container lock — the one thing every customer's dashboard installs
-regardless of which optional features they turned on — conveyed a GPLv3
-anti-anti-automation package unconditionally; `tools/check_licenses.py`'s
-`dashboard-container` target is now clean of it (see its own `dashboard-
-container-unblock` target and `tools/license_allowlist.toml`'s
-`[allow.bgutil-ytdlp-pot-provider]` entry, `targets = ["dashboard-container-
-unblock"]`). `dashboard/deploy/run.sh` installs the unblock lock into the same
-container venv only when `DASH_SITE_YOUTUBE_UNBLOCK=1` — which is only ever
-"1" on a site whose `site.toml` sets `[features] youtube_unblock` (see
-`server/install_dashboard_app.py compose_config()`). `docs/CI.md` documents
-why the strict CI run (`--only dashboard-container`) does not scan this
-package at all: it is a customer-enabled optional feature, not something the
-vendor build always conveys, so it does not belong in a gate whose whole
-point is "what does the vendor build always convey".
+It is not in the base `dashboard/deploy/requirements.txt`/`.lock` that every
+deployment installs and the image bakes. It lives in its own
+`dashboard/deploy/requirements-unblock.txt`/`.lock`, which
+`dashboard/deploy/run.sh` installs into the container venv only when
+`DASH_SITE_YOUTUBE_UNBLOCK=1`, which is set only on a site whose `site.toml`
+sets `[features] youtube_unblock` (`server/install_dashboard_app.py
+compose_config()`). `tools/check_licenses.py`'s `dashboard-container` target
+is clean of it; its `dashboard-container-unblock` target and
+`tools/license_allowlist.toml`'s `[allow.bgutil-ytdlp-pot-provider]` entry
+cover it. The component exists to get past YouTube's bot check, and is
+governed by `docs/legal/YOUTUBE_FEATURE_NOTICE.md`.
 
-Independently of licensing, this component exists to defeat YouTube's bot
-check, which `docs/COMMERCIAL_READINESS.md` item 2 treats as DMCA §1201 /
-EUCD Art. 6 exposure and gates behind the same customer-enabled
-`youtube_unblock` site flag. Counsel should read items 2 and 3 together for
-it. The written-offer/source-availability obligations GPLv3 §6 imposes on us
-whenever this is actually conveyed (i.e. on a site with the feature on) are
-still open, same as ffmpeg's above — no address exists yet to make the offer
-from.
+**WRITTEN OFFER (GPLv3 §6).** On a site where this plugin has been installed,
+Cablewrap Creative Ltd. makes the same offer as for ffmpeg above, on the same
+terms and at the same address, for the corresponding source of the version
+installed. The same source is available without charge from
+<https://github.com/Brainicism/bgutil-ytdlp-pot-provider> and from PyPI.
 
-### yt-credit-downloader — NO LICENCE GRANT (open item)
+### yt-credit-downloader: the Licensor's own code
 
-`ytdl/web/ytdlweb/vendor/downloader.py` and `ytsearch.py` were copied verbatim
-from a separate personal utility on 2026-08-11 (`vendor/__init__.py:1-2`).
-VERIFIED by inspection on 2026-08-17: **the directory contains no LICENSE or
-COPYING file, and neither module carries a copyright or licence header.**
+`ytdl/web/ytdlweb/vendor/downloader.py` and `ytsearch.py` were adapted on
+2026-08-11 from `yt-credit-downloader`, a utility written by the Licensor's
+own author (`vendor/__init__.py`). They are not third-party code and carry no
+open-source licence: they are part of the Software and are licensed to you
+under `docs/legal/EULA.md`. Their provenance is recorded in
+`ytdl/web/ytdlweb/vendor/PROVENANCE.md`.
 
-**NO LICENCE GRANT — written permission required from the author** before this
-code is distributed to, or run for, a customer. If the author is the operator,
-this is a five-minute assignment/licence to self; it still has to exist in
-writing, because "I wrote it" is not a record that survives a due-diligence
-review or a change of employer.
+### LGPL and MPL components that remain, and why they are compliant
 
-### LGPL components that remain, and why they are compliant
+Three LGPL dependencies are installed as ordinary Python packages:
+**dynamically imported into a normal Python installation**, **not inside any
+single-file binary we distribute**, and replaceable by the customer with a
+modified version by `pip install`-ing over them, which is exactly the "user
+can replace the library" freedom the LGPL exists to protect. A fourth,
+psycopg2, is also frozen into the companion executable; it is described
+separately below.
 
-Two LGPL-2.1 dependencies stay in the product after pystray goes. Both are
-compliant on the same §4/§5 reasoning: they are **dynamically imported into a
-normal Python installation**, they are **not inside any single-file binary we
-distribute**, and the customer can replace them with a modified version by
-`pip install`-ing over them — which is exactly the "user can relink/replace the
-library" freedom §4 exists to protect.
+**`paramiko` 5.0.0 (LGPL-2.1).** VERIFIED from installed metadata, with the
+licence text on disk. Imported by exactly two places:
 
-**`paramiko` 5.0.0 — LGPL-2.1.** VERIFIED from installed metadata, with the
-licence text on disk. Imported by exactly two places (VERIFIED by grep across
-the repo):
-
-- `dashboard/src/ccsync_dashboard/nas/synology.py` — the Synology backend's SSH
+- `dashboard/src/ccsync_dashboard/nas/synology.py`: the Synology backend's SSH
   session, needed because DSM exposes no API for writing an editor's
   `authorized_keys`;
-- `server/common.py` — the NAS-side install scripts, run from the operator's own
+- `server/common.py`: the NAS-side install scripts, run from the operator's own
   Python on the base rig.
 
-Neither is frozen. The dashboard runs from a source tree on `/app` with its
-deps pip-installed into a persistent `/data/venv` inside the customer's own
-container (`dashboard/deploy/requirements.txt` header) — the customer can
-replace `paramiko` in that venv without touching anything of ours. The
+Neither is frozen. The dashboard runs from a source tree with its
+dependencies pip-installed into the customer's own container venv, where the
+customer can replace `paramiko` without touching anything of ours. The
 `server/` scripts are plain `.py` files run under an ordinary interpreter.
 
-**`soundfile` / `librosa` — LGPL-2.1 via bundled `libsndfile`/`libsoxr`.**
-Imported by exactly one module, `music/indexer/music_index/features.py`
-(VERIFIED by grep). That is the **GPU indexer on the base rig** — the operator's
-own machine, never shipped and never installed on a customer's NAS or an
-editor's workstation. `music/web/.venv` deliberately carries no torch and no
-audio stack; only precomputed features reach `music.db`.
+**`psycopg2-binary` in the dashboard container (LGPL with psycopg2's own
+exceptions).** Installed and replaceable exactly as `paramiko` is (the
+dashboard-container table above). It is imported only by the mounted Timeline
+Cards page's project-library route, which reads DaVinci Resolve's PostgreSQL
+database, on a site that enables that page (`tools/license_allowlist.toml`,
+`[allow.psycopg2-binary]`).
 
-**VERIFIED, not asserted:** a byte scan of the published
-`companion/dist/ccsync-companion.exe` (0.7.11) finds **zero** occurrences of
-`paramiko`, `soundfile` or `librosa`, and `companion/build.spec` names none of
-them. `onboarding/build_onboard.spec:69-87` and
-`build_onboard_macos.spec:137-152` explicitly *exclude* `pystray`, `PIL` and
-`watchdog`, and name no LGPL package at all. **No LGPL library other than
-pystray has ever been frozen into a CC Sync binary.**
+<!-- ENG-GAP: companion-frozen-psycopg2 -->
+**`psycopg2` in the companion executable.** The companion's Timeline Cards
+role reads DaVinci Resolve's PostgreSQL project library, and for that
+`companion/build.spec` collects `psycopg2` (from `psycopg2-binary`, a
+dependency in `companion/pyproject.toml`) into the frozen companion, together
+with the `libpq` and OpenSSL libraries its wheel carries. They are packed as
+separate extension-module and shared-library files that the executable
+extracts and loads at run time, unmodified. The source of psycopg2 at the
+version in a given build is available without charge from
+<https://github.com/psycopg/psycopg2> and from PyPI, and Cablewrap Creative
+Ltd. makes the same written offer for it as for ffmpeg above, on the same
+terms and at the same address, for three years from the build's
+publication.
 
-### What is still missing from this file
+**`soundfile` / `librosa` (LGPL-2.1 via bundled `libsndfile`/`libsoxr`).**
+Imported by exactly one module, `music/indexer/music_index/features.py`: the
+**GPU indexer on the base rig**, the operator's own machine, never shipped and
+never installed on a customer's NAS or an editor's workstation.
+`music/web/.venv` deliberately carries no torch and no audio stack; only
+precomputed features reach `music.db`.
 
-- TODO(legal): licence texts. This file names licences; it does not reproduce
-  them. MIT, BSD, Apache-2.0, MPL-2.0, LGPL and GPL all require the licence
-  text to accompany a distribution. A `docs/legal/licenses/` directory
-  assembled from the `LicenseText` field `tools/gen_notices.py` already
-  collects would satisfy this; it has not been built.
-- TODO(legal): htmx has no licence header vendored beside
-  `dashboard/static/htmx.min.js`.
-- TODO(operator): the `ytdl/web` component has no venv on this machine, so its
-  dependencies are absent from every table above. Its runtime deps are in
-  `dashboard/deploy/requirements.txt`; create the venv, or add its `pyproject`
-  deps by hand, before this file is relied on.
+**`certifi` (MPL-2.0).** Used unmodified. Its source is available from
+<https://github.com/certifi/python-certifi> and from PyPI.
+
+**VERIFIED:** a byte scan of the current Windows companion build (re-checked
+2026-09-25) finds no occurrence of `paramiko`, `soundfile` or `librosa`; the
+only LGPL package `companion/build.spec` collects is `psycopg2`, described
+above. `onboarding/build_onboard.spec` and `build_onboard_macos.spec`
+explicitly *exclude* `pystray`, `PIL` and `watchdog`, and name no LGPL
+package.
+
+The source of every LGPL and MPL component listed here, at the version we
+install, is available without charge from PyPI and from the project's home
+page in the tables above; Cablewrap Creative Ltd. will also supply it on
+request at the address given for the ffmpeg offer.
+
+### Licence texts
+
+This document names each licence rather than reproducing it. The full text of
+each licence is available from the component's home page listed in the tables
+above and, for Python packages, inside the installed distribution (the
+"Licence text on disk" column). Cablewrap Creative Ltd. will supply a copy of
+any of them on request at contact@thecreatorsclub.co. htmx is licensed under
+the Zero-Clause BSD licence (0BSD), which requires no notice to accompany it.
+
+### The ytdl/web component
+
+`ytdl/web` has no environment of its own, so the generator reports it as
+skipped. It runs inside the dashboard container, and its runtime dependencies
+are the container's: they appear in the dashboard-container table above.
 <!-- END HAND-MAINTAINED -->

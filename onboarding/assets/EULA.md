@@ -1,26 +1,22 @@
-<!-- DRAFT FOR COUNSEL — NOT LEGAL ADVICE, NOT YET EXECUTABLE.
-     Written 2026-08-17 for docs/COMMERCIAL_READINESS.md item 3. Every clause
-     here is an engineer's description of what the software actually does,
-     shaped into contract form so a lawyer has something concrete to redline.
-     It has NOT been reviewed by a qualified legal professional.
-     TODO(legal): replace "Cablewrap Creative" with the registered legal
-     entity name, its company number and registered address. The placeholder
-     was taken from the operator's email domain and is
-     almost certainly NOT the correct contracting entity — confirm before use.
-     TODO(legal): set the governing-law jurisdiction (marked below).
-     TODO(legal): confirm the EULA-VERSION bump policy in docs/legal/README
-     before changing the version marker — bumping it forces every editor in
-     every customer fleet through the acceptance wizard again. -->
+<!-- Maintainers: this file exists in three byte-identical copies
+     (docs/legal/EULA.md, companion/src/ccsync_companion/assets/EULA.md,
+     onboarding/assets/EULA.md; companion tests/test_eula.py and onboarding
+     tests/test_eula_step.py pin them). Any change to the wording bumps the
+     EULA-VERSION marker below, and a bump sends every editor in every fleet
+     back through acceptance, so batch wording changes into one release.
+     Version 1.1 (2026-09-25) is the final text cleared by the owner's legal
+     adviser; 1.0 was the 2026-08-17 draft. -->
 
-<!-- EULA-VERSION: 1.0 -->
+<!-- EULA-VERSION: 1.1 -->
 
-# CC Sync — End User Licence Agreement
+# CC Sync: End User Licence Agreement
 
-**Version 1.0 — draft of 2026-08-17. DRAFT FOR COUNSEL.**
+**Version 1.1, 2026-09-25.**
 
-This End User Licence Agreement ("Agreement") is between **Cablewrap Creative**
-(the "Licensor") and the individual or organisation installing or using the
-CC Sync software (the "Customer", "you").
+This End User Licence Agreement ("Agreement") is between **Cablewrap Creative
+Ltd.** (捲獻新媒體有限公司), a company registered in Taiwan (R.O.C.) (the
+"Licensor"), and the individual or organisation installing or using the CC Sync
+software (the "Customer", "you"). The Licensor's details are in section 14.
 
 By clicking ACCEPT in the CC Sync setup wizard, or by installing, copying or
 using any part of the Software, you agree to this Agreement. If you do not
@@ -70,7 +66,7 @@ The Software is licensed, not sold. The Licensor and its suppliers retain all
 right, title and interest in and to the Software, including all intellectual
 property rights. No rights are granted other than those expressly stated here.
 
-## 5. Third-party requirements — DaVinci Resolve Studio
+## 5. Third-party requirements: DaVinci Resolve Studio
 
 The Software is designed for use with **DaVinci Resolve®** and **requires
 DaVinci Resolve Studio** (the paid edition) on each editing workstation whose
@@ -87,10 +83,11 @@ The Licensor is not affiliated with, endorsed by or sponsored by Blackmagic
 Design. "DaVinci Resolve" and "Blackmagic Design" are trademarks of Blackmagic
 Design Pty Ltd, used here for identification only.
 
-Other third-party products the Software interoperates with — including
-Tailscale, Syncthing, rclone and, where enabled, network media services — are
-licensed to you by their own suppliers under their own terms, which you are
-responsible for meeting. Some of them require a paid plan at your scale.
+Other third-party products and services the Software interoperates with,
+including Tailscale, Syncthing, rclone and, where you enable them, network
+media services and AI providers, are licensed to you by their own suppliers
+under their own terms, which you are responsible for meeting. Some of them
+require a paid plan at your scale.
 
 ## 6. Customer data and content
 
@@ -107,32 +104,38 @@ Customer Content with the Software, including any music, stock footage or LUT
 packs you distribute to your editors through it, and you will indemnify the
 Licensor against third-party claims arising from Customer Content.
 
-## 7. Operational data and monitoring — READ THIS
+## 7. Operational data and monitoring: READ THIS
 
 The CC Sync companion running on each editing workstation reports operational
-data to the CC Sync dashboard on **your own server**, several times a minute.
-That data identifies the workstation and its user, and includes **the name of
-the DaVinci Resolve project currently open on that workstation**, an inventory
-of the media files present locally, and the project's bin structure.
+data to the CC Sync dashboard on **your own server**, at least once a minute
+and every few seconds while files are syncing. That data identifies the
+workstation and its user, and includes **the name of the DaVinci Resolve
+project currently open on that workstation**, how long it is since the
+workstation last received keyboard or mouse input, an inventory of the media
+files present locally, and the project's bin structure.
 
 **This is capable of being used to monitor individual employees or
 contractors.** It is visible to whoever administers your dashboard. If you
-deploy the Software, **you** are the data controller for that data, and you —
-not the Licensor — are responsible for having a lawful basis for it, for
+deploy the Software, **you** are the data controller for that data, and you,
+not the Licensor, are responsible for having a lawful basis for it, for
 informing the people it describes, and for meeting your obligations under the
 UK GDPR, the EU GDPR and any other applicable data-protection law.
 
 `docs/legal/TELEMETRY.md` states exactly what is reported, how often, who can
 see it, how long it is kept, and what can be switched off. Read it before
-deploying. `docs/legal/PRIVACY.md` states what, if anything, reaches the
-Licensor.
+deploying. `docs/legal/PRIVACY.md` states what reaches the Licensor.
 
 ## 8. Support, updates and the upgrade channel
 
 Support and updates are provided as described in your order or support plan.
-The Software includes an upgrade channel that installs new companion builds
-published to your own dashboard by your own administrator. The Licensor does
-not push software to your workstations directly.
+
+New builds reach your workstations and your dashboard only through your own
+dashboard: either your administrator publishes them there, or, where your site
+is configured to read the Licensor's release feed, your dashboard fetches them
+from that feed and makes them available according to the policy your
+administrator sets. Every build is verified against the Licensor's release
+signing key before it is installed. The Licensor has no access to your
+dashboard or your workstations and does not push software to them directly.
 
 ## 9. Warranty disclaimer
 
@@ -164,8 +167,8 @@ lawfully be excluded.
 
 The Software includes third-party components licensed under their own terms,
 listed in `docs/legal/THIRD_PARTY_NOTICES.md`. Where a component's licence
-grants you rights that conflict with this Agreement — including rights to the
-component's source code, or to reverse engineer it — that licence prevails for
+grants you rights that conflict with this Agreement, including rights to the
+component's source code or to reverse engineer it, that licence prevails for
 that component.
 
 Certain components are licensed under the GNU General Public Licence. Where the
@@ -182,17 +185,23 @@ remove it from your systems. Sections 4, 6, 9, 10 and 13 survive termination.
 
 ## 13. General
 
-This Agreement is governed by the laws of **[TODO(legal): jurisdiction]**, and
-the courts of that jurisdiction have exclusive jurisdiction over disputes
-arising from it. If any provision is held unenforceable, the rest remains in
-effect. This Agreement, together with your order, is the entire agreement
-between the parties in respect of the Software.
+This Agreement is governed by the laws of Taiwan (R.O.C.). The Taiwan New
+Taipei District Court has exclusive jurisdiction, as the court of first
+instance, over disputes arising from it. If any provision is held
+unenforceable, the rest remains in effect. This Agreement, together with your
+order, is the entire agreement between the parties in respect of the
+Software.
 
 Export controls: you must not use or export the Software in breach of any
 applicable export-control or sanctions law.
 
 ## 14. Contact
 
-**Cablewrap Creative** — TODO(legal): registered entity name, company number,
-registered address, contact email, and a security contact address for
-vulnerability reports.
+**Cablewrap Creative Ltd.** (捲獻新媒體有限公司), a company registered in
+Taiwan (R.O.C.), tax ID (統一編號) 00118757.
+
+Registered office: No. 111, Minquan Road, Zhuwei Village, Tamsui District,
+New Taipei City 251, Taiwan (R.O.C.) (251新北市淡水區竹圍里民權路111號).
+
+Email, including privacy and data-protection enquiries and security
+vulnerability reports: contact@thecreatorsclub.co

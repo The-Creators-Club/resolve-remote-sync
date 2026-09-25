@@ -513,11 +513,12 @@ def test_the_machine_panel_shows_what_resolve_last_said(fleet):
     # One state line, whitespace-folded: the template wraps it for reading.
     # Since the fleet-grid declutter (2026-09-11) it is the RESOLVE row inside
     # the row's [ DETAILS ], so the label is the <dt> and the state is the
-    # value: same facts, one fold away from the headline.
+    # value: same facts, one fold away from the headline. (The terminal grid,
+    # 2026-09-25: the label is lower case and the project name is bold.)
     line = " ".join(page.text.split())
-    assert "<dt>RESOLVE</dt>" in line
+    assert "<dt>resolve</dt>" in line
     assert "connected" in line
-    assert 'project open: <span class="who">FF5 EP12</span>' in line
+    assert 'project open: <b>FF5 EP12</b>' in line
     assert "wedged 12 s in GetMediaPool" in line
     assert "proxies attached 3, failed 1 (timecode)" in line
     assert "proxy queue capped at 2" in line
@@ -539,5 +540,5 @@ def test_a_machine_that_has_not_sent_them_renders_nothing(fleet):
     page = as_user(client, "owen").get("/partials/fleet")
     assert page.status_code == 200
     line = " ".join(page.text.split())
-    assert "<dt>RESOLVE</dt>" not in line
+    assert "<dt>resolve</dt>" not in line
     assert "whose original is not on this computer" not in line

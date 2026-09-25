@@ -14,7 +14,7 @@
 .ev-page .vstack { min-width: 0; }
 .ev-lede { padding: 10px var(--pad) 6px; }
 .ev-h { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text); display: flex; align-items: center; gap: 8px; margin: 4px 0 2px; }
-.ev-h::before { content: "\2f\2f"; color: var(--red); letter-spacing: 0; }
+.ev-h::before { content: "\2f\2f"; content: "\2f\2f" / ""; color: var(--red); letter-spacing: 0; }
 .ev-err { color: var(--err); }
 .ev-warn { color: var(--warn); }
 .allclear-in { display: inline-flex; align-items: center; gap: 10px; }
@@ -47,12 +47,20 @@
 .ev-login { display: grid; gap: 14px; }
 .ev-login-form { display: grid; gap: 12px; }
 .ev-login-form .fld { display: grid; gap: 4px; font-size: 12px; color: var(--text-2); }
-.ev-look { text-align: center; margin-top: 14px; font-size: 12px; }
-.ev-look a { color: var(--muted); border-bottom: 1px dotted var(--muted); }
-.ev-look a:hover { color: var(--hi); border-color: var(--hi); }
 
 /* help */
 .ev-help .help-doc { overflow-wrap: anywhere; }
+/* everyday-apps-5 verifier (2026-09-25): the pre fix left two wideners. A
+   contents entry whose heading is one long path (ACCOUNT_PAGE_FEATURES.md
+   5.1, 407 px at 390) and the reader's title bar naming a deep document
+   (bug-hunt-.../comp-broll-tiers-res-companion.md, 533 px) did not wrap.
+   The contents wrap; the title keeps its one-line bar and ends in an
+   ellipsis (the bar is nowrap, and the document list names it in full). */
+.ev-help .help-toc { overflow-wrap: anywhere; }
+.ev-help .win > .bar h2.t { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* and the page head's path line (legal/licenses/.../THIRD_PARTY_LICENSES.txt, 399 px) */
+.ev-help .head > div { min-width: 0; }
+.ev-help .head .sub { overflow-wrap: anywhere; }
 .ev-help .help-files { max-height: 70vh; overflow-y: auto; }
 
 /* account: the result line an answer lands in, reserved so it never pushes */
@@ -80,6 +88,12 @@
 
 /* account section headings between the window rows */
 .ev-acct h2.sec { font-size: 12px; letter-spacing: 2px; text-transform: uppercase; color: var(--text); display: flex; align-items: baseline; gap: 8px; margin-top: 6px; }
-.ev-acct h2.sec::before { content: "\2f\2f"; color: var(--red); letter-spacing: 0; }
+.ev-acct h2.sec::before { content: "\2f\2f"; content: "\2f\2f" / ""; color: var(--red); letter-spacing: 0; }
 .ev-acct h2.sec .muted { font-weight: 400; letter-spacing: 0; text-transform: none; }
 .ev-acct .acct-empty-win { grid-column: 1 / -1; }
+/* The 12 px phone floor for this sheet's own small text (a11y-copy-7,
+   UI port review 2026-09-25): page sheets load after phone.css, so its
+   floor list cannot reach a rule written here. */
+@media (max-width: 760px) {
+  .ev-h, .xft td small, .ev-acct .grp td small { font-size: 12px; }
+}

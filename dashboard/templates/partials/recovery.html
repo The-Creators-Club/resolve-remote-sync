@@ -1,304 +1,267 @@
-{# GETTING SOMETHING BACK (SYS-15, resilience sweep wave 5, 2026-08-29).
+{# GETTING SOMETHING BACK, terminal twin (UI port phase 5, 2026-09-25; bench
+   design/recovery.html). Same context, forms, field names and targets as
+   partials/recovery.html: every form swaps #recovery outerHTML.
 
-   A WIZARD, NOT PROSE. Every documented recovery in this product used to be
-   a root SSH session that asked a non-technical owner for judgements he had
-   no way to make: is that a dataset or a folder, which snapshot, is
-   everything since it expendable. This panel answers the ones this server
-   can verify, does the recovery where it can, and where it cannot it prints
-   the exact commands with this NAS's real names in them.
+   A COMMAND IS NEVER PRINTED ON A GUESS (SYS-15): a step whose facts this
+   server could not confirm is a "not printed" refusal naming what is
+   missing, exactly as recovery.plan() hands it over.
 
-   A COMMAND IS NEVER PRINTED ON A GUESS. A step whose facts this server
-   could not confirm renders as a refusal naming what is missing. That is the
-   finding, not a nicety: a generated `zfs rollback` with the wrong dataset in
-   it is worse than no command at all. #}
-<div id="recovery">
+   The problem picker stays a LINK per problem (?problem=, as classic); the
+   plan pane beside it has a fixed height so picking one never moves the
+   windows below (round 2). The Resolve undo is drawn inside the plan pane,
+   for the Resolve answer only, as classic draws it under the plan. #}
+{%- macro bar(name, label, meta='') -%}
+<div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold {{ label }}"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">{{ name | cc_title }}</h2><span class="bar-rule"></span>{% if meta %}<span class="meta">{{ meta }}</span>{% endif %}</div>
+{%- endmacro -%}
+{%- set kind_tag = {
+  'action': ('ok', 'this server can do this', 'A button in this dashboard does this step. No command line needed.'),
+  'command': ('warn', 'on the NAS, as an administrator', 'Someone with an administrator login on the NAS has to type these commands on the NAS itself.'),
+  'refusal': ('solid err', 'not printed', 'Not printed: this server is not sure of the names these commands need, so it will not guess and risk the wrong folder.')} -%}
+<div id="recovery" class="vstack">
+  {% if recovery_error %}<div class="note err error-banner"><span class="grow">{{ recovery_error }}</span></div>{% endif %}
+  {% if recovery_notice %}<div class="note ok result-banner"><span class="grow">{{ recovery_notice }}</span></div>{% endif %}
 
-  {# ui-dash-admin-5 (2026-09-25): error-banner / result-banner are what
-     static/htmx_errors.js moves next to the button that posted. This panel
-     swaps outerHTML with scroll kept, so a result painted here at the top
-     landed a screen or more above a button far down the panel. #}
-  {% if recovery_error %}<div class="banner error-banner">▲ {{ recovery_error }}</div>{% endif %}
-  {% if recovery_notice %}<div class="muted result-banner" style="margin:0.4rem 0">{{ recovery_notice }}</div>{% endif %}
-
-  {# 1. What stands between this fleet and losing something, RIGHT NOW. The
-     protection panel's own evidence, not a second opinion about it. #}
-  <div class="side-head">[ WHAT IS PROTECTED RIGHT NOW ]
-    <span class="muted">{{ recovery.protection.counts.ok }} confirmed,
-      {{ recovery.protection.counts.broken }} missing,
-      {{ recovery.protection.counts.not_checked + recovery.protection.counts.check_failed }}
-      this server cannot check.
-      <a href="/admin/protection">[ THE FULL LIST ]</a></span></div>
-  {# .stack with EMPTY data-labels on both of these: a row is one line of
-     protection or one fact about the NAS, and its first cell is the chip that
-     names which. Round 2 (2026-08-30) corrected the first pass's judgement
-     that they were fine unstacked -- they were 620 px wide at 390, because
-     .mono-sm is nowrap and the prose beside the chip is a full sentence. #}
-  {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
-     600 px, but between 600 and 900 it is still a grid, and a grid that
-     is wider than the window has to scroll inside itself rather than take
-     the page with it (round 2 of the sweep, 2026-08-30). #}
-  <div class="scroll-x">
-  <table class="editors recovery-lines stack" style="margin-top:0.5rem"><tbody>
-    {% for row in recovery.protection.lines if row.state != 'ok' %}
-      <tr class="editor-row">
-        <td class="mono-sm" data-label="" style="white-space:nowrap">
-          {% if row.state == 'broken' %}<span class="chip red">[ MISSING ]</span>
-          {% elif row.state == 'check_failed' %}<span class="chip red">[ COULD NOT RUN ]</span>
-          {% else %}<span class="chip amber">[ CANNOT VERIFY ]</span>{% endif %}
-        </td>
-        <td data-label=""><div class="mono-sm">{{ row.title }}</div>
-            <div class="muted" style="margin-top:0.2rem">{{ row.detail }}</div></td>
-      </tr>
-    {% else %}
-      <tr class="editor-row"><td colspan="2" class="muted" data-label="">
-        Everything this server checks is in place.</td></tr>
-    {% endfor %}
-  </tbody></table>
-  </div>
-
-  {# 2. What this server knows about this NAS, which is what decides whether a
-     command below can be printed at all. #}
-  <div class="side-head" style="margin-top:1.2rem">[ WHAT THIS SERVER KNOWS ABOUT THIS NAS ]</div>
-  <div class="scroll-x">
-  <table class="editors recovery-lines stack" style="margin-top:0.5rem"><tbody>
-    {% for fact in recovery.facts %}
-      <tr class="editor-row">
-        <td class="mono-sm" data-label="" style="white-space:nowrap">
-          {% if fact.verified %}<span class="chip green">[ CONFIRMED ]</span>
-          {% else %}<span class="chip amber">[ NOT CONFIRMED ]</span>{% endif %}
-        </td>
-        <td data-label="">
-          <div class="mono-sm">{{ fact.label }}{% if fact.value %}: {{ fact.value }}{% endif %}</div>
-          {% if not fact.verified %}
-            <div class="muted" style="margin-top:0.2rem">{{ fact.why_not }}</div>
-            {% if fact.fix %}<div class="mono-sm" style="margin-top:0.2rem">WHAT TO DO: {{ fact.fix }}</div>{% endif %}
-          {% endif %}
-        </td>
-      </tr>
-    {% endfor %}
-  </tbody></table>
-  </div>
-
-  {# 3. The wizard's one question. #}
-  <div class="side-head" style="margin-top:1.2rem">[ WHAT WENT WRONG? ]</div>
-  <div style="margin-top:0.5rem">
-    {% for problem in recovery.problems %}
-      <div style="margin-bottom:0.35rem">
-        <a class="btn tap{{ ' settings-nav-current' if recovery_problem == problem.key }}"
-           href="/admin/recovery?problem={{ problem.key }}">[ {{ problem.question }} ]</a>
-        <div class="muted mono-sm" style="margin-top:0.15rem">{{ problem.detail }}</div>
-      </div>
-    {% endfor %}
-  </div>
-
-  {% if recovery.plan %}
-    <div class="side-head" style="margin-top:1.2rem">[ WHAT TO DO ]
-      <span class="muted">{{ recovery.plan.question }}</span></div>
-    {% for step in recovery.plan.steps %}
-      <div style="margin-top:0.7rem">
-        <div class="mono-sm">
-          {% if step.kind == 'action' %}<span class="chip green">[ THIS SERVER CAN DO THIS ]</span>
-          {% elif step.kind == 'command' %}<span class="chip amber">[ ON THE NAS, AS AN ADMINISTRATOR ]</span>
-          {% elif step.kind == 'refusal' %}<span class="chip red">[ NOT PRINTED ]</span>
-          {% endif %}
-          {{ step.title }}
+  {% set pc = recovery.protection.counts %}
+  <div class="cols-2">
+    {# 1. What stands between this fleet and losing something, RIGHT NOW:
+       the protection panel's own evidence, not a second opinion. #}
+    <section class="win" data-win="protected-now">
+      {{ bar('protected_right_now', 'what is protected right now') }}
+      <div class="body rc-tight"><div class="lede rc-prot-lede">{{ pc.ok }} confirmed, {{ pc.broken }} missing,
+        {{ pc.not_checked + pc.check_failed }} this server cannot check.
+        <a class="key quiet sm" href="/admin/protection" title="Opens the Protection page with every line and how to fix it."><span class="t">the full list</span></a></div></div>
+      <div class="scroll-y rc-list">
+      {% for row in recovery.protection.lines if row.state != 'ok' %}
+        <div class="vd no-when">
+          <span class="st">
+            {% if row.state == 'broken' %}<span class="tag solid err" title="Missing: this protection is not in place.">missing</span>
+            {% elif row.state == 'check_failed' %}<span class="tag solid err" title="The check itself hit an error.">could not run</span>
+            {% else %}<span class="tag warn" title="Cannot verify: this server has no way to see it. Treat it as unprotected.">cannot verify</span>{% endif %}
+          </span>
+          <span class="ti">{{ row.title }}</span>
+          {% if row.detail %}<div class="more"><div class="dt">{{ row.detail }}</div></div>{% endif %}
         </div>
-        {% if step.body %}<div class="muted" style="margin-top:0.25rem;max-width:78ch">{{ step.body }}</div>{% endif %}
-        {% if step.href %}<div style="margin-top:0.3rem"><a class="btn tap" href="{{ step.href }}">[ GO ]</a></div>{% endif %}
-        {% if step.commands %}
-          <pre class="mono-sm" style="margin-top:0.35rem;white-space:pre-wrap">{% for line in step.commands %}{{ line }}
-{% endfor %}</pre>
-        {% endif %}
-      </div>
-    {% endfor %}
-  {% endif %}
-
-  {# 3b. THE RESOLVE UNDO (ui-copy-2, 2026-09-25). Two API routes and no
-     button: "pick the computer and the change" was a sentence about a
-     control that did not exist. Each computer reports the clip-path changes
-     it wrote down (names and counts, never its paths), and the ask rides
-     that computer's next report reply, exactly as the tray's own undo would
-     run. Drawn for the Resolve answer only. #}
-  {% if recovery_problem == 'resolve' %}
-  <div class="side-head" id="resolve-undo" style="margin-top:1.2rem">[ UNDO A CLIP-PATH CHANGE ]</div>
-  <p class="muted" style="max-width:78ch;margin:0.4rem 0">
-    Every time CC Sync changes where Resolve looks for clips, that computer
-    writes the change down and tells this server. Undoing one puts those clip
-    paths back on that computer, the same as [ UNDO LAST FIX ] in its tray's
-    Settings. It happens when the computer next reports, and only while that
-    project is open in its Resolve.
-  </p>
-  {% for m in resolve_undo %}
-    <div class="mono-sm" style="margin-top:0.7rem"><span class="who">{{ m.editor }}</span> <span class="muted">{{ m.machine }}</span></div>
-    {% if m.journals %}
-    <div class="scroll-x">
-    <table class="editors stack" style="margin-top:0.3rem">
-      <thead><tr><th>WHEN</th><th>PROJECT</th><th>CLIPS</th><th></th></tr></thead>
-      <tbody>
-      {% for j in m.journals %}
-        <tr class="editor-row">
-          <td class="mono-sm" data-label="WHEN">{% if j.started %}<span title="{{ j.started }}">{{ j.started | ago }}</span>{% else %}-{% endif %}</td>
-          <td class="mono-sm" data-label="PROJECT">{{ j.project or "-" }}</td>
-          <td class="mono-sm" data-label="CLIPS">{{ j.entries }}</td>
-          <td data-label="">
-            {% if j.asked %}<span class="chip amber" title="waiting for {{ m.machine }} to report in and pick this up">[ UNDO ASKED ]</span>
-            {% else %}
-            <form class="inline-form" hx-post="/partials/admin/recovery/resolve-undo" hx-target="#recovery" hx-swap="outerHTML"
-                  hx-confirm="Put back the {{ j.entries }} clip path(s) CC Sync changed in {{ j.project or 'this project' }} on {{ m.machine }}?">
-              <input type="hidden" name="editor" value="{{ m.editor }}">
-              <input type="hidden" name="machine" value="{{ m.machine }}">
-              <input type="hidden" name="journal" value="{{ j.id }}">
-              <button class="btn tap" type="submit">[ UNDO THIS CHANGE ]</button>
-            </form>
-            {% endif %}
-          </td>
-        </tr>
+      {% else %}
+        <div class="allclear"><span class="led"></span>Everything this server checks is in place.</div>
       {% endfor %}
-      </tbody>
-    </table>
+      </div>
+    </section>
+
+    {# 2. What this server knows about this NAS: what decides whether a
+       command below can be printed at all. #}
+    <section class="win" data-win="nas-facts">
+      {{ bar('what_this_server_knows', 'what this server knows about this NAS') }}
+      <div class="scroll-y rc-facts">
+      {% for fact in recovery.facts %}
+        <div class="vd no-when{{ ' ok' if fact.verified }}">
+          <span class="st">{% if fact.verified %}<span class="tag ok" title="Confirmed: the server checked this itself.">confirmed</span>
+            {% else %}<span class="tag warn" title="Not confirmed: the server could not check this, so it will not print commands that depend on it.">not confirmed</span>{% endif %}</span>
+          <span class="ti">{{ fact.label }}{% if fact.value %}: <span class="rc-value">{{ fact.value }}</span>{% endif %}</span>
+          {% if not fact.verified %}<div class="more">
+            {% if fact.why_not %}<div class="cq">{{ fact.why_not }}</div>{% endif %}
+            {% if fact.fix %}<div class="fix">{{ fact.fix }}</div>{% endif %}
+          </div>{% endif %}
+        </div>
+      {% else %}
+        <div class="allclear"><span class="led off"></span>This server could not gather anything about this NAS just now.</div>
+      {% endfor %}
+      </div>
+    </section>
+  </div>
+
+  {# 3. The wizard's one question, and its answer beside it. #}
+  <section class="win" data-win="wizard" id="wizard">
+    {{ bar('what_went_wrong', 'what went wrong') }}
+    <div class="cols-2 rc-wizard">
+      <nav class="choices" aria-label="what went wrong">
+        {% for problem in recovery.problems %}
+          <a class="choice" href="/admin/recovery?problem={{ problem.key }}#wizard"{% if recovery_problem == problem.key %} aria-current="true"{% endif %}><span class="g" aria-hidden="true"></span><span class="q">{{ problem.question }}</span><span class="d">{{ problem.detail }}</span></a>
+        {% endfor %}
+      </nav>
+      <div class="scroll-y plan-pane rc-plan">
+      {% if recovery.plan %}
+        <div class="body rc-plan-head"><h2 class="sec">what to do</h2><div class="lede">{{ recovery.plan.question }}</div></div>
+        {% for step in recovery.plan.steps %}
+          {% set k = kind_tag.get(step.kind) %}
+          <div class="plan-step">
+            <div class="h">{% if k %}<span class="tag {{ k[0] }}" title="{{ k[2] }}">{{ k[1] }}</span>{% endif %}<span>{{ step.title }}</span></div>
+            {% if step.body %}<div class="b">{{ step.body }}</div>{% endif %}
+            {% if step.href %}<div><a class="key sm" href="{{ step.href }}" title="Opens the page where this step is done."><span class="t">go</span></a></div>{% endif %}
+            {% if step.commands %}<pre class="code">{% for line in step.commands %}{{ line }}
+{% endfor %}</pre>{% endif %}
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty"><span class="glyph">&gt;_</span>Pick what went wrong, and what to do appears here.</div>
+      {% endif %}
+
+      {# 3b. THE RESOLVE UNDO (ui-copy-2): each computer reports the clip-path
+         changes it wrote down; the ask rides that computer's next report
+         reply, as the tray's own undo would run. #}
+      {% if recovery_problem == 'resolve' %}
+        <div class="body rc-undo" id="resolve-undo"><h2 class="sec">undo a clip-path change</h2>
+          <p class="lede">Every time CC Sync changes where Resolve looks for clips, that
+            computer writes the change down and tells this server. Undoing one puts
+            those clip paths back on that computer, the same as "Undo last fix" in its
+            tray's Settings. It happens when the computer next reports, and only while
+            that project is open in its Resolve.</p></div>
+        {% for m in resolve_undo %}
+          {% if not loop.first %}<hr class="rc-sep">{% endif %}
+          <div class="body rc-tight"><b>{{ m.editor }}</b> <span class="muted">{{ m.machine }}</span></div>
+          {% if m.journals %}
+          {# M3 (MOBILE_PLAN.md): every admin table sits in a .scroll-x div, so at
+             tablet width (above the phone stack) a long project name scrolls
+             inside the table rather than the page. #}
+          <div class="scroll-x">
+          <table class="tbl stack-sm">
+            <thead><tr><th>when</th><th>project</th><th class="num" title="How many clips had their file path changed.">clips</th><th></th></tr></thead>
+            <tbody>
+            {% for j in m.journals %}
+              <tr>
+                <td data-label="when">{% if j.started %}<span title="{{ j.started }}">{{ j.started | ago }}</span>{% else %}-{% endif %}</td>
+                <td data-label="project"><b>{{ j.project or "-" }}</b></td>
+                <td data-label="clips" class="num">{{ j.entries }}</td>
+                <td data-label="">
+                  {% if j.asked %}<span class="tag warn" title="Waiting for {{ m.machine }} to report in and pick this up. It needs that project open in its Resolve.">undo asked</span>
+                  {% else %}
+                  <form class="inline" hx-post="/partials/admin/recovery/resolve-undo" hx-target="#recovery" hx-swap="outerHTML"
+                        data-confirm-key="resolve-undo-{{ m.machine }}-{{ j.id }}"
+                        hx-confirm="Put back the {{ j.entries }} clip path(s) CC Sync changed in {{ j.project or 'this project' }} on {{ m.machine }}?">
+                    <input type="hidden" name="editor" value="{{ m.editor }}">
+                    <input type="hidden" name="machine" value="{{ m.machine }}">
+                    <input type="hidden" name="journal" value="{{ j.id }}">
+                    <button class="key sm" type="submit" title="Puts the clip paths back the way they were, on that computer, when it next reports."><span class="t">Undo this change</span></button>
+                  </form>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+          </div>
+          {% endif %}
+          {% if m.requests %}
+          <div class="body lines">
+            {% for r in m.requests %}<div><span class="t" title="{{ r.requested_at }}">{{ r.requested_at | ago }}</span>{{ r.requested_by }} asked to undo {{ r.project_name or r.journal_id }}: {{ r.state_sentence }}</div>{% endfor %}
+          </div>
+          {% endif %}
+        {% else %}
+          <div class="body"><p class="lede">No computer has told this server about a clip-path change it could undo.
+            On the computer itself, "Undo last fix" is in the RESOLVE section of its tray's Settings.</p></div>
+        {% endfor %}
+      {% endif %}
+      </div>
     </div>
-    {% endif %}
-    {% for r in m.requests %}
-      <div class="muted mono-sm" style="margin-top:0.2rem"><span title="{{ r.requested_at }}">{{ r.requested_at | ago }}</span> {{ r.requested_by }} asked to undo {{ r.project_name or r.journal_id }}: {{ r.state_sentence }}</div>
-    {% endfor %}
-  {% else %}
-    <div class="muted" style="margin-top:0.4rem">No computer has told this server about a clip-path change it could undo.
-      On the computer itself, [ UNDO LAST FIX ] is in the RESOLVE section of its tray's Settings.</div>
-  {% endfor %}
-  {% endif %}
+  </section>
 
   {# 4. The restore itself. NOTHING HERE OVERWRITES: this is what makes the
      choice above safe to get wrong. #}
-  <div class="side-head" id="restore" style="margin-top:1.4rem">[ PUT A PROJECT'S FILES BACK ]</div>
-  {% if recovery.snapshots %}
-    <p class="muted" style="max-width:78ch;margin:0.4rem 0">
-      {# bug-dash-diag-3 (2026-09-25): the copy said "a NEW folder inside that
-         project", which is where recovery.py used to write it - inside the
-         project's Syncthing folder, so it was sent to every editor with the
-         project ticked. It now lands at the top of the tree. #}
-      Pick a project and a snapshot. Whatever is missing is copied into a new
-      folder called <span class="mono-sm">.restored-&lt;date&gt;</span> at the
-      top of the Projects folder on the server, under the project's own name.
-      It is not sent to any editor's computer.
-      Nothing that is there now is changed, moved or deleted, so choosing the
-      wrong snapshot costs disk space and nothing else.
-    </p>
-    <form hx-post="/partials/admin/recovery/preview" hx-target="#recovery" hx-swap="outerHTML"
-          style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
-      <input type="hidden" name="problem" value="{{ recovery_problem }}">
-      <select name="slug" class="input">
-        {% for p in recovery.projects %}
-          <option value="{{ p.slug }}"{% if recovery_preview and recovery_preview.slug == p.slug %} selected{% endif %}>{{ p.label }}</option>
-        {% endfor %}
-      </select>
-      <select name="snapshot" class="input">
-        {% for s in recovery.snapshots %}
-          <option value="{{ s.name }}"{% if recovery_preview and recovery_preview.snapshot == s.name %} selected{% endif %}>{{ s.name }}</option>
-        {% endfor %}
-      </select>
-      <button class="btn tap" type="submit">[ SEE WHAT IS MISSING ]</button>
-    </form>
+  <section class="win" data-win="restore" id="restore">
+    {{ bar('put_files_back', "put a project's files back") }}
+    {% if recovery.snapshots %}
+    <div class="body vstack">
+      <p class="lede">Pick a project and a snapshot. Whatever is missing is copied into a new
+        folder called <code class="rc-value">.restored-&lt;date&gt;</code> at the top of the
+        Projects folder on the server, under the project's own name. It is not sent to
+        any editor's computer. Nothing that is there now is changed, moved or deleted,
+        so choosing the wrong snapshot costs disk space and nothing else.</p>
+      <form class="inline rc-pickrow" hx-post="/partials/admin/recovery/preview" hx-target="#recovery" hx-swap="outerHTML">
+        <input type="hidden" name="problem" value="{{ recovery_problem }}">
+        <label class="rc-pick"><span class="lbl">project</span>
+          <select class="sel" name="slug">
+            {% for p in recovery.projects %}
+              <option value="{{ p.slug }}"{% if recovery_preview and recovery_preview.slug == p.slug %} selected{% endif %}>{{ p.label }}</option>
+            {% endfor %}
+          </select></label>
+        <label class="rc-pick" title="A snapshot is a frozen copy of the storage from that moment. The name carries its date and time."><span class="lbl">snapshot</span>
+          <select class="sel" name="snapshot">
+            {% for s in recovery.snapshots %}
+              <option value="{{ s.name }}"{% if recovery_preview and recovery_preview.snapshot == s.name %} selected{% endif %}>{{ s.name }}</option>
+            {% endfor %}
+          </select></label>
+        <button class="key w-14 rc-pick-go" type="submit" title="Compares the snapshot with the server now and lists what is missing. Nothing is copied yet."><span class="t">See what is missing</span><span class="busy-t"><span class="spin"></span> comparing</span></button>
+      </form>
 
-    {% if recovery_preview %}
-      {# COUNTS ONLY WHEN THERE ARE COUNTS (dash-collector-alerts' hand-off,
-         2026-09-11b). A folder this server cannot walk in one go withholds
-         them, and the zeros it returns instead rendered as "0 file(s) missing
-         from the server now, 0 that are there but different, 0 the same" -
-         which reads as "nothing is missing" to the person deciding whether to
-         restore. The refusal's own sentence is in `note`. #}
-      {% if not recovery_preview.counts_unavailable %}
-      <div class="mono-sm" style="margin-top:0.6rem">
-        {{ recovery_preview.label }} in {{ recovery_preview.snapshot }}:
-        {{ recovery_preview.missing_count }} file(s) missing from the server now,
-        {{ recovery_preview.changed_count }} that are there but different,
-        {{ recovery_preview.unchanged_count }} the same.
-        {% if recovery_preview.truncated %}(This project is too large to list in
-        full: the counts above stopped early.){% endif %}
+      {% if recovery_preview %}
+      <div class="rc-preview vstack">
+        {# COUNTS ONLY WHEN THERE ARE COUNTS: a folder this server cannot walk
+           in one go withholds them, and zeros would read as "nothing is
+           missing" to the person deciding whether to restore. #}
+        {% if not recovery_preview.counts_unavailable %}
+        <div class="rc-counts"><b>{{ recovery_preview.label }}</b> in <span class="hi">{{ recovery_preview.snapshot }}</span>:
+          <b class="rc-missing">{{ recovery_preview.missing_count }}</b> file(s) missing from the server now,
+          <b>{{ recovery_preview.changed_count }}</b> that are there but different,
+          <span class="dim">{{ recovery_preview.unchanged_count }} the same.</span>
+          {% if recovery_preview.truncated %}(This project is too large to list in
+          full: the counts above stopped early.){% endif %}</div>
+        {% else %}
+        <div class="rc-counts"><b>{{ recovery_preview.label }}</b> in <span class="hi">{{ recovery_preview.snapshot }}</span>:
+          <span class="tag warn" title="This server could not walk the whole folder in one go, so it will not show counts that could read as nothing missing.">cannot say</span></div>
+        {% endif %}
+        {% if recovery_preview.note %}<div class="lede rc-prot-lede">{{ recovery_preview.note }}</div>{% endif %}
+        {% if recovery_preview.missing %}
+        <pre class="code rc-files">{% for row in recovery_preview.missing %}<span class="rc-plus">+</span> {{ row.rel }}
+{% endfor %}{% if recovery_preview.missing_count > recovery_preview.missing | length %}<span class="rc-more">... and {{ recovery_preview.missing_count - (recovery_preview.missing | length) }} more</span>{% endif %}</pre>
+        {% endif %}
+        {% if recovery_preview.missing_count or recovery_preview.changed_count %}
+          {% set _only_changed = not recovery_preview.missing_count %}
+          <form class="vstack" hx-post="/partials/admin/recovery/restore" hx-target="#recovery" hx-swap="outerHTML"
+                data-confirm-key="recovery-restore"
+                hx-confirm="{% if _only_changed %}Copy the {{ recovery_preview.changed_count }} file(s) that are there but different into a new folder?{% elif recovery_preview.changed_count %}Copy {{ recovery_preview.missing_count }} missing file(s), and the {{ recovery_preview.changed_count }} different one(s) if the box is ticked, into a new folder?{% else %}Copy {{ recovery_preview.missing_count }} missing file(s) into a new folder?{% endif %} Nothing there now changes.">
+            <input type="hidden" name="problem" value="{{ recovery_problem }}">
+            <input type="hidden" name="slug" value="{{ recovery_preview.slug }}">
+            <input type="hidden" name="snapshot" value="{{ recovery_preview.snapshot }}">
+            <label class="check"><input type="checkbox" name="include_changed" value="1"{% if _only_changed %} checked{% endif %}><span class="g" aria-hidden="true"></span><span class="l">also bring back the ones that are there but different</span></label>
+            <div><button class="key primary w-14" type="submit" title="Copies the files into a new .restored folder. You are asked first."><span class="t">Restore into a new folder</span><span class="busy-t"><span class="spin"></span> copying the files back</span></button></div>
+          </form>
+        {% endif %}
       </div>
-      {% else %}
-      <div class="mono-sm" style="margin-top:0.6rem">
-        {{ recovery_preview.label }} in {{ recovery_preview.snapshot }}:
-        <span class="chip amber">[ CANNOT SAY ]</span>
-      </div>
       {% endif %}
-      <div class="muted" style="margin-top:0.25rem;max-width:78ch">{{ recovery_preview.note }}</div>
-      {% for row in recovery_preview.missing %}
-        <div class="mono-sm">+ {{ row.rel }}</div>
-      {% endfor %}
-      {% if recovery_preview.missing_count > recovery_preview.missing | length %}
-        <div class="muted mono-sm">... and {{ recovery_preview.missing_count - (recovery_preview.missing | length) }} more</div>
-      {% endif %}
-      {% if recovery_preview.missing_count or recovery_preview.changed_count %}
-        {# logic-admin-5 / ui-dash-admin-13 (2026-09-25): the confirm quoted
-           missing_count alone, so a changed-only preview asked "Copy 0
-           file(s)?" over an unticked box the server then refused. With
-           nothing missing the box is the only thing the button can do, so it
-           starts ticked, and the confirm names both counts. #}
-        {% set _only_changed = not recovery_preview.missing_count %}
-        <form hx-post="/partials/admin/recovery/restore" hx-target="#recovery" hx-swap="outerHTML"
-              {# Short enough for a phone dialog (MOBILE_PLAN.md §4 M3,
-                 2026-08-30); the paragraph above the form is where the rest
-                 of it has always been said. #}
-              hx-confirm="{% if _only_changed %}Copy the {{ recovery_preview.changed_count }} file(s) that are there but different into a new folder?{% elif recovery_preview.changed_count %}Copy {{ recovery_preview.missing_count }} missing file(s), and the {{ recovery_preview.changed_count }} different one(s) if the box is ticked, into a new folder?{% else %}Copy {{ recovery_preview.missing_count }} missing file(s) into a new folder?{% endif %} Nothing there now changes."
-              style="margin-top:0.5rem">
-          <input type="hidden" name="problem" value="{{ recovery_problem }}">
-          <input type="hidden" name="slug" value="{{ recovery_preview.slug }}">
-          <input type="hidden" name="snapshot" value="{{ recovery_preview.snapshot }}">
-          <label class="mono-sm"><input type="checkbox" name="include_changed" value="1"{% if _only_changed %} checked{% endif %}>
-            also bring back the ones that are there but different</label>
-          {# DUI-4 (2026-09-04): this copies real files out of a snapshot and
-             can run for minutes. Until now the page did nothing visible for
-             the whole of it. #}
-          <button class="btn tap" type="submit"><span class="idle-label">[ RESTORE INTO A NEW FOLDER ]</span><span class="busy-label">[ COPYING THE FILES BACK... ]</span></button>
-        </form>
-      {% endif %}
-    {% endif %}
 
-    {% if recovery_result %}
-      <div class="mono-sm" style="margin-top:0.6rem">
-        {# logic-admin-4 (2026-09-25): say where that is and why it may not
-           show: a dot-name is hidden by default in Explorer and Finder. #}
-        Restored {{ recovery_result.files }} file(s) into {{ recovery_result.where }},
-        at the top of the Projects folder on the server. A name that starts
-        with a dot may be hidden in Explorer or Finder until hidden items are shown.
+      {% if recovery_result %}
+      <div class="note ok"><span class="grow">Restored <b>{{ recovery_result.files }}</b> file(s) into
+        <b>{{ recovery_result.where }}</b>, at the top of the Projects folder on the server. A name
+        that starts with a dot may be hidden in Explorer or Finder until hidden items are shown.
         {% if recovery_result.failed_count %}{{ recovery_result.failed_count }} could not be
-        copied: {{ recovery_result.failed | join(', ') }}{% endif %}
-      </div>
+        copied: {{ recovery_result.failed | join(', ') }}{% endif %}</span></div>
+      {% endif %}
+    </div>
+    {% else %}
+    <div class="body"><div class="note warn"><span class="grow"><b>This server cannot read this
+      NAS's snapshots, so it cannot put anything back by itself.</b>
+      {{ recovery.snapshots_why_not }}</span></div></div>
     {% endif %}
-  {% else %}
-    <div class="banner" style="margin-top:0.4rem">▲ This server cannot read this
-      NAS's snapshots, so it cannot put anything back by itself.
-      {{ recovery.snapshots_why_not }}</div>
-  {% endif %}
+  </section>
 
   {# 5. The rehearsal. A backup nobody has restored from is a hypothesis. #}
-  <div class="side-head" style="margin-top:1.4rem">[ REHEARSE A RESTORE ]</div>
-  <p class="muted" style="max-width:78ch;margin:0.4rem 0">
-    Copies one real file out of the newest snapshot into a scratch folder,
-    checks it came back exactly, deletes it again, and records the date on the
-    protection page. It touches nothing else and takes a moment.
-  </p>
-  <form hx-post="/partials/admin/recovery/drill" hx-target="#recovery" hx-swap="outerHTML">
-    <input type="hidden" name="problem" value="{{ recovery_problem }}">
-    {# DUI-4 (2026-09-04): a rehearsal restores real bytes and takes a moment. #}
-    <button class="btn tap" type="submit"><span class="idle-label">[ REHEARSE A RESTORE NOW ]</span><span class="busy-label">[ REHEARSING... ]</span></button>
-  </form>
-  {% if recovery.drills %}
-    <div style="margin-top:0.5rem">
-      {% for drill in recovery.drills[:5] %}
-        <div class="mono-sm">{{ '[ WORKED ]' if drill.ok else '[ FAILED ]' }}
-          <span title="{{ drill.at }}">{{ drill.at | ago }}</span> from {{ drill.snapshot }}: {{ drill.detail }}</div>
-      {% endfor %}
+  <section class="win" data-win="drill">
+    {{ bar('rehearse_a_restore', 'rehearse a restore') }}
+    <div class="body vstack">
+      <p class="lede">Copies one real file out of the newest snapshot into a scratch folder,
+        checks it came back exactly, deletes it again, and records the date on the
+        protection page. It touches nothing else and takes a moment.</p>
+      <form hx-post="/partials/admin/recovery/drill" hx-target="#recovery" hx-swap="outerHTML">
+        <input type="hidden" name="problem" value="{{ recovery_problem }}">
+        <button class="key w-14" type="submit" title="A practice run: brings one file back from the newest snapshot, checks it, deletes it again and records the date."><span class="t">Rehearse a restore now</span><span class="busy-t"><span class="spin"></span> rehearsing</span></button>
+      </form>
+      {% if recovery.drills %}
+      <div class="lines rc-drills">
+        {% for drill in recovery.drills[:5] %}
+          <div>{% if drill.ok %}<span class="tag ok" title="The file came back exactly as it was in the snapshot.">worked</span>{% else %}<span class="tag solid err" title="The file that came back did not match the snapshot. Backups need checking.">failed</span>{% endif %}<span class="t" title="{{ drill.at }}">{{ drill.at | ago }}</span>from {{ drill.snapshot }}: {{ drill.detail }}</div>
+        {% endfor %}
+      </div>
+      {% endif %}
     </div>
-  {% endif %}
+  </section>
 
   {% if recovery.restores %}
-    <div class="side-head" style="margin-top:1.2rem">[ WHAT HAS BEEN PUT BACK ]</div>
-    {% for row in recovery.restores[:10] %}
-      {# ui-dash-admin-12 (2026-09-25): "3h ago", with the stored UTC stamp in the title, like every other page; a raw +00:00 string is a sum a UTC+8 owner does in their head. #}
-      <div class="mono-sm"><span title="{{ row.at }}">{{ row.at | ago }}</span> {{ row.by }}: {{ row.files }} file{{ "s" if row.files != 1 }} from
-        {{ row.snapshot }} into {{ row.where }}</div>
-    {% endfor %}
+  <section class="win" data-win="restored">
+    {{ bar('what_has_been_put_back', 'what has been put back', recovery.restores | length) }}
+    <div class="body lines">
+      {% for row in recovery.restores[:10] %}
+        <div><span class="t" title="{{ row.at }}">{{ row.at | ago }}</span><b>{{ row.by }}</b>: {{ row.files }} file{{ "s" if row.files != 1 }} from {{ row.snapshot }} into {{ row.where }}</div>
+      {% endfor %}
+    </div>
+  </section>
   {% endif %}
-
 </div>

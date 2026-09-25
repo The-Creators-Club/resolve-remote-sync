@@ -1,28 +1,21 @@
-"""The terminal Health group's server half (UI redesign port, phase 5,
+"""The Health page's server half (UI redesign port, phase 5,
 2026-09-25). docs/UI_REDESIGN_PORT_PLAN.md 1.3, 1.5, 5.3, 7.1 row 5, R15.
 
 Kept out of ui.py on purpose: several builders edit that file at once during
 the port, and Health needs only three small routes of its own.
 
-The terminal Health page carries the three panels the classic look draws on
-the home page (problems the server found, the collector, what the computers
-said) as TABS. Their markup lives under NEW names, so the classic home that
-still fetches `partials/notices.html`, `collector_health.html` and
-`admin_diagnostics.html` can never be handed terminal markup (R15, 7.0):
+The Health page carries the server's problems, the collector and what the
+computers said as TABS, each on its own route:
 
 - ``GET /partials/health-notices`` and ``POST
-  /partials/health-notices/{id}/dismiss``: the notices panel and its dismiss,
-  which answers with ``health_notices`` markup (never ``notices``).
+  /partials/health-notices/{id}/dismiss``: the notices panel and its dismiss.
 - ``GET /partials/health-collector``: the collector's cycles and the pending
-  share diff. Classic builds this context inside the fleet grid; here it is
-  its own route (the plan's "BACKEND, small").
+  share diff.
 - ``GET /partials/health-diagnostics``: with no parameters, the newest bundle
-  per computer (``db.newest_diagnostics_per_machine``, as the classic route);
-  ``editor``/``machine`` narrow it to one computer's last five.
+  per computer (``db.newest_diagnostics_per_machine``); ``editor``/``machine``
+  narrow it to one computer's last five.
 
-Each answers 404 whenever ``settings-health`` is not in the asking page's
-resolved set (the templates exist only under ``templates/cc/``), and all four
-are admin only, as their classic twins are.
+All four are admin only.
 
 ``cc_unbracket`` is a Jinja filter for Python-built button labels that still
 carry the classic ``[ LABEL ]`` shape (``db.notice_href``, the Health rows'
@@ -33,17 +26,13 @@ from __future__ import annotations
 
 import sqlite3
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
-from jinja2 import TemplateNotFound
 
-from . import db, notices, ui, ui_variant
+from . import db, notices, ui
 from .api import get_conn
 
 router = APIRouter(default_response_class=HTMLResponse)
-
-GROUP = "settings-health"
-
 
 def cc_unbracket(value) -> str:
     """"[ TAKE ME THERE ]" -> "take me there"; anything else unchanged."""
@@ -56,23 +45,9 @@ def cc_unbracket(value) -> str:
 
 
 ui.templates.env.filters.setdefault("cc_unbracket", cc_unbracket)
-ui_variant.sync_envs()
 
 
-def _render_health(request: Request, name: str, context: dict):
-    try:
-        return ui._render(request, name, context)
-    except TemplateNotFound:
-        raise HTTPException(status_code=404,
-                            detail="not part of this page's look") from None
-
-
-def _require_group(request: Request) -> None:
-    """For a WRITE: refuse before anything changes when the asking page's
-    look has no Health group, so a dismiss is never committed behind a 404."""
-    res = ui_variant.resolve(request)
-    if GROUP not in res.groups:
-        raise HTTPException(status_code=404, detail="not part of this page's look")
+_render_health = ui._render
 
 
 @router.get("/partials/health-notices")
@@ -86,23 +61,32 @@ def partial_health_notices(request: Request,
 @router.post("/partials/health-notices/{notice_id}/dismiss")
 def partial_health_notice_dismiss(notice_id: int, request: Request,
                                   conn: sqlite3.Connection = Depends(get_conn)):
-    """The classic dismiss (ui.partial_notice_dismiss), answering with the
-    terminal panel. Only hidden: db.notice() reopens it on the next cycle
+    """The notice dismiss, answering with the Health panel. Only hidden: db.notice() reopens it on the next cycle
     that still sees the problem."""
     admin = ui._require_admin_page(request)
-    _require_group(request)
     row = db.dismiss_notice(conn, notice_id, admin)
     conn.commit()
     error = None if row else "that notice is already gone. Reload the page."
-    return _render_health(request, "partials/health_notices.html",
+    resp = _render_health(request, "partials/health_notices.html",
                           ui._notices_context(conn, error))
+    # settings-6 (UI port review 2026-09-25): the open findings tab (its
+    # count, its list, the page head's totals) is drawn once with the page,
+    # so a dismissed notice stayed counted and listed there until a reload.
+    # The page re-reads those parts itself on this event (admin_health.html,
+    # #health-open-list); a refused dismiss changed nothing and says so here.
+    if row and resp.status_code == 200:
+        resp.headers["HX-Trigger"] = HEALTH_CHANGED
+    return resp
+
+
+# The event a Health write answers with, so the open findings tab re-reads.
+HEALTH_CHANGED = "cc-health-changed"
 
 
 @router.get("/partials/health-collector")
 def partial_health_collector(request: Request,
                              conn: sqlite3.Connection = Depends(get_conn)):
-    """The collector panel on its own (classic draws it inside the fleet
-    grid from `fleet.collector`, which is db.collector_health too)."""
+    """The collector panel on its own (db.collector_health)."""
     ui._require_admin_page(request)
     return _render_health(request, "partials/health_collector.html", {
         "collector": db.collector_health(conn),
@@ -113,7 +97,8 @@ def partial_health_collector(request: Request,
 @router.get("/partials/health-diagnostics")
 def partial_health_diagnostics(request: Request, editor: str = "", machine: str = "",
                                conn: sqlite3.Connection = Depends(get_conn)):
-    """ui.partial_admin_diagnostics' data, terminal markup, its own window."""
+    """The stored diagnostics bundles (v33, SYS-7). ADMIN ONLY: a bundle
+    names an editor's paths, their Resolve project and their tree."""
     ui._require_admin_page(request)
     editor = editor.strip().lower()
     machine = machine.strip()

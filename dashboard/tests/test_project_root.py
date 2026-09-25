@@ -194,8 +194,13 @@ def test_unmatched_projects_surface_for_admin(env):
     assert dbmod.fetch_unmapped_resolve_projects(conn) == ["Mystery Doc"]
 
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
-    page = client.get("/")
-    assert "[ PROJECT ROOTS ]" in page.text and "Mystery Doc" in page.text
+    # The project roots window lives on each project page (D7 of the UI
+    # port), not on home: an unmatched Resolve project shows there with a
+    # "no match" tag and, for an admin, the form that maps it.
+    page = client.get("/project/2025-ff4-nuclear")
+    assert page.status_code == 200
+    assert 'id="roots"' in page.text and "Mystery Doc" in page.text
+    assert 'aria-label="where Mystery Doc files into"' in page.text
     resp = client.post("/partials/project-roots",
                        data={"resolve_project": "Mystery Doc", "root": "2025-ff4-nuclear"})
     assert resp.status_code == 200 and "2025/FF4/Nuclear" in resp.text
@@ -216,7 +221,9 @@ def test_queue_shows_fixed_root_read_only(env):
     page = client.get("/")
     assert "open in Resolve:" in page.text
     assert "CCT Creator Profiles" in page.text
-    assert "auto-matched, fixed" in page.text
+    assert "matched by itself, then kept" in page.text
+    # read-only for a non-admin: no form that changes the root on home
+    assert 'hx-post="/partials/project-roots"' not in page.text
 
 
 # -- FILES INTO folder browser (any folder, not only registered projects) ---

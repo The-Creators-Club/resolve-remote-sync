@@ -210,7 +210,9 @@ def test_the_users_view_and_the_fleet_grid_both_say_suspended(smb_env):
     assert view["suspensions"]["jsmith"]["by"] == "owen"
 
     page = client.get("/")
-    assert "[ SUSPENDED ]" in page.text
+    # The terminal grid's tag (2026-09-25): a warn-toned "suspended" word.
+    assert '<span class="tag warn" title="an admin paused this person' in page.text
+    assert '<span class="w">suspended</span>' in page.text
 
 
 # --------------------------------------------------- DCORE-4 / DCORE-5 enforce
@@ -317,7 +319,9 @@ def test_the_create_form_says_who_may_create_a_project():
             / "templates" / "partials" / "project_setup_panel.html"
             ).read_text(encoding="utf-8")
     assert "Anyone signed in can create a project" in text
-    assert "ARCHIVE" in text
+    # ...and who can take one back off the lists, and how (the terminal copy
+    # names the control in sentence case, 2026-09-25).
+    assert "Only an admin can take one back off those lists, with Archive" in text
 
 
 # ----------------------------------------------------------------- DCORE-6
@@ -485,9 +489,11 @@ def test_the_users_page_names_dash_nas_pw_and_where_to_set_it():
 def test_the_key_field_is_optional_and_the_row_offers_one():
     text = (__import__("pathlib").Path(__file__).resolve().parents[1]
             / "templates" / "partials" / "admin_users.html").read_text(encoding="utf-8")
-    assert "[ NO SSH KEY ]" in text
+    # The terminal row (2026-09-25): an err tag, the consequence under it,
+    # and one key that reads "add" or "update" by whether a key is on file.
+    assert '<span class="tag err">no ssh key</span>' in text
     assert "upload and proxy download will not run until a key is added" in text
-    assert "[ UPDATE SSH KEY ]" in text
+    assert "{% if e.has_ssh_key %}update ssh key{% else %}add ssh key{% endif %}" in text
     assert 'name="ssh_pubkey" placeholder="ssh-ed25519 AAAA... user@host" rows="2" required' \
         not in text
 

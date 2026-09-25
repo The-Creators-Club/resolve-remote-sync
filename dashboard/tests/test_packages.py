@@ -417,24 +417,28 @@ def test_c3_confirm_copy_is_pinned_in_confirms_js():
 def test_c4_unsigned_make_current_confirm_copy_is_pinned():
     text = (DASHBOARD_ROOT / "templates" / "partials" / "admin_packages.html").read_text(
         encoding="utf-8")
-    assert ("This build has no release signature. Companions verify signatures, "
+    # logic-admin-6 (2026-09-25): a site on the vendor feed has no ship.cmd;
+    # the next action there is the feed's signed build. The terminal partial
+    # chooses the words once and every unsigned confirm reads them.
+    assert ('{% set via_feed = feed is defined and feed and feed.configured %}') in text
+    assert ('{% set instead_words = "Publish the signed build from the vendor list '
+            'instead." if via_feed else "Republish it through tools\\\\ship.cmd instead." %}'
+            ) in text
+    assert ('hx-confirm="This build has no release signature. Companions verify signatures, '
             # UX-16 (usability sweep 2026-09-03): "computer".
             "so making it current stops EVERY computer in the fleet from updating, "
-            "silently. {% if feed is defined and feed and feed.configured %}"
-            # logic-admin-6 (2026-09-25): a site on the vendor feed has no
-            # ship.cmd; the next action there is the feed's signed build.
-            "Publish the signed build from AVAILABLE FROM THE VENDOR instead."
-            "{% else %}Republish it through tools\\ship.cmd instead.{% endif %} "
-            "Make it current anyway?") in text
+            'silently. {{ instead_words }} Make it current anyway?"') in text
 
 
 def test_c5_delete_confirm_copy_is_pinned():
     text = (DASHBOARD_ROOT / "templates" / "partials" / "admin_packages.html").read_text(
         encoding="utf-8")
-    assert ("Delete {{ p.kind }} {{ p.version }} for {{ p.platform }}? "
-            "These are the bytes a rollback to that version needs. Once it is gone "
-            "you cannot put the fleet back on it without rebuilding and "
-            "republishing.") in text
+    # The delete goes to <data>/packages/.trash/ for 30 days (one helper,
+    # api._trash_package_file), and the confirm says so, then what losing the
+    # bytes costs: a rollback to that version needs a rebuild.
+    assert ('hx-confirm="Delete {{ p.kind }} {{ p.version }} for {{ p.platform }}? '
+            "It goes to the trash on this server for 30 days. After that it is gone, "
+            "and putting the fleet back on it means rebuilding and republishing.\"") in text
 
 
 def test_prune_can_be_opted_out_of(env):
@@ -818,7 +822,8 @@ def test_fleet_view_flags_a_stale_per_machine_version(env):
     as_user(client, "owen")
     page = client.get("/partials/fleet")
     assert page.status_code == 200
-    assert "[ OUT OF DATE: 0.2.0 ]" in page.text
+    assert ('<span class="tag warn" title="windows: running 0.1.0, current is 0.2.0">'
+            '<span class="w">out of date</span></span>') in page.text
     assert "EDIT-PC" in page.text
 
 
@@ -850,7 +855,9 @@ def test_fleet_view_tolerates_a_report_without_a_version(env):
     assert entry["companion_outdated"] is False        # unknown != "differs"
 
     as_user(client, "owen")
-    assert "[ VERSION UNKNOWN ]" in client.get("/partials/fleet").text
+    fleet = client.get("/partials/fleet").text
+    assert '<span class="w">version unknown</span>' in fleet
+    assert '<span class="w">out of date</span>' not in fleet   # unknown != "differs"
 
 
 # -- kind=onboard: the [ INSTALLER ] download --------------------------
@@ -1460,10 +1467,13 @@ def test_the_packages_page_prints_the_adoption_line(env):
     client, conn = _fleet_of_three(env)
     resp = as_user(client, "owen").get("/admin/packages")
     assert resp.status_code == 200
-    assert "[ ROLLOUT ]" in resp.text
-    assert "2 of 3 on 0.2.0" in resp.text
-    assert "ruskin on RUSKIN-PC 0.1.0" in resp.text
-    assert "0 reverts, 0 failed attempts" in resp.text
+    assert 'data-win="rollout"' in resp.text
+    rollout = resp.text[resp.text.index('data-win="rollout"'):
+                        resp.text.index('data-win="from_the_vendor"')]
+    assert '<b class="num">2</b> of 3 on 0.2.0' in rollout
+    assert "ruskin on RUSKIN-PC 0.1.0" in rollout
+    assert '<td data-label="reverts">0</td>' in rollout
+    assert '<td data-label="failed attempts">0</td>' in rollout
 
 
 def test_a_refusing_machine_says_so_instead_of_offering_update_now(env):
@@ -1471,15 +1481,15 @@ def test_a_refusing_machine_says_so_instead_of_offering_update_now(env):
     build queues a request that can never be honoured."""
     client, conn = _fleet_of_three(env)
     resp = as_user(client, "owen").get("/admin/packages")
-    assert "[ UPDATE NOW ]" in resp.text                     # before the refusal
+    assert UPDATE_NOW in resp.text                           # before the refusal
 
     _refuse(conn, "ruskin", "RUSKIN-PC", "0.2.0", "release signature rejected")
     resp = as_user(client, "owen").get("/admin/packages")
-    assert "[ REFUSING 0.2.0 ]" in resp.text
+    assert ">refusing 0.2.0</span>" in resp.text
     assert "release signature rejected" in resp.text
     assert "This computer refuses the current build" in resp.text
     assert "Pushing it again will not change that." in resp.text
-    assert "[ UPDATE NOW ]" not in resp.text
+    assert UPDATE_NOW not in resp.text
 
 
 def test_health_carries_the_rollout_counts_for_the_ship_and_no_names(env):
@@ -1505,13 +1515,17 @@ def test_health_carries_the_rollout_counts_for_the_ship_and_no_names(env):
 # be 'currently served'". The grouping is ui._kind_platform_groups and the
 # three sections are admin_packages.html; this test is the order, which is the
 # whole point of the change and the thing a later edit would quietly lose.
-SECTIONS = ("[ CURRENTLY SERVED ]", "[ AVAILABLE FROM THE VENDOR ]",
-            "[ OTHER VERSIONS HELD ON THIS SERVER ]")
+# The terminal page draws the three sections as windows keyed by data-win.
+SECTIONS = ('data-win="currently_served"', 'data-win="from_the_vendor"',
+            'data-win="other_versions_held"')
+HELD_END = 'data-win="out_of_date_computers"'
+UPDATE_NOW = '<span class="t">update now</span>'
 
 
 def _headings(block: str) -> list[tuple[str, str]]:
     """The kind and platform heading rows of a section, in document order."""
-    return re.findall(r'pkg-(kind|platform)-row"><td colspan="4">([a-z0-9]+)', block)
+    return [("platform" if plat else "kind", name) for plat, name in re.findall(
+        r'grp-row( plat)?"><td colspan="4">([a-z0-9]+)', block)]
 
 
 def _publish_onboard(client, platform, version, body, make_current=0):
@@ -1537,7 +1551,7 @@ def test_the_packages_page_is_grouped_by_kind_then_platform_in_a_fixed_order(env
     assert at == sorted(at), "the sections must read served, vendor, held"
 
     served = text[at[0]:at[1]]
-    held = text[at[2]:]
+    held = text[at[2]:text.index(HELD_END)]
     # companion before onboard, windows before macos, and nothing invents a
     # linux companion heading over an empty space.
     assert _headings(served) == [("kind", "companion"), ("platform", "windows"),
@@ -1549,7 +1563,8 @@ def test_the_packages_page_is_grouped_by_kind_then_platform_in_a_fixed_order(env
     # the version kept behind it is only in the drawer.
     assert "0.2.0" in served and "0.1.0" not in served
     assert "0.1.0" in held and "0.2.0" not in held
-    assert "[ CURRENT ]" in served
+    assert ('<span class="tag ok" title="What this server hands out for this kind and '
+            'platform right now.">current</span>') in served
 
 
 def test_the_rollback_drawer_says_why_those_versions_are_kept(env):
@@ -1561,13 +1576,14 @@ def test_the_rollback_drawer_says_why_those_versions_are_kept(env):
     publish_platform(client, "windows", "0.2.0", body=b"win2", make_current=1)
 
     text = as_user(client, "owen").get("/admin/packages").text
-    assert "<details" in text[:text.index("[ OTHER VERSIONS HELD ON THIS SERVER ]")]
-    drawer = text[text.index("[ OTHER VERSIONS HELD ON THIS SERVER ]"):]
+    drawer = text[text.index('data-win="other_versions_held"'):text.index(HELD_END)]
+    # collapsed: a <details> with no `open`
+    assert re.search(r'<details class="fold pkg-other" data-key="pkg-other">', drawer)
     assert "republishing an older" in drawer
     assert "staged canary" in drawer
     # One delete button, and the warning is in the confirm rather than on the
     # row (owner: "delete takes three lines").
-    assert drawer.count("[ DELETE ]") == 1
+    assert drawer.count('<span class="t">delete</span>') == 1
     assert "hx-confirm=\"Delete companion 0.1.0" in drawer
 
 
@@ -1605,15 +1621,15 @@ def test_the_vendor_section_marks_what_this_server_already_holds(env, tmp_path):
         ]}
         text = client.get("/admin/packages").text
 
-    vendor = text[text.index("[ AVAILABLE FROM THE VENDOR ]"):
-                  text.index("[ OTHER VERSIONS HELD ON THIS SERVER ]")]
+    vendor = text[text.index('data-win="from_the_vendor"'):
+                  text.index('data-win="other_versions_held"')]
     assert _headings(vendor) == [("kind", "companion"),
                                  ("platform", "windows"), ("platform", "macos")]
-    assert "[ CURRENT HERE ]" in vendor                 # 0.2.0
-    assert "[ STAGED, NOT CURRENT ]" in vendor          # 0.3.0
+    assert ">current here</span>" in vendor             # 0.2.0
+    assert ">staged, not current</span>" in vendor      # 0.3.0
     # Only the one this server has never taken is offered for download.
-    assert vendor.count("[ PUBLISH ]") == 1
-    assert vendor.count("[ PUBLISH + MAKE CURRENT ]") == 1
+    assert vendor.count('<span class="t">publish</span>') == 1
+    assert vendor.count('<span class="t">publish and make current</span>') == 1
     # The staged row, and only it: a build already downloaded here needs a
     # decision, not a second download.
-    assert vendor.count("[ MAKE CURRENT ]") == 1
+    assert vendor.count('<span class="t">make current</span>') == 1

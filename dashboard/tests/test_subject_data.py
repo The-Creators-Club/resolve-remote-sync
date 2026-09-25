@@ -379,7 +379,8 @@ def test_erase_from_the_users_panel_answers_in_the_panel(app, browsers):
     # the row carries both buttons, and the export form carries the token
     assert 'action="/api/v1/admin/users/jsmith/export"' in resp.text
     assert f'name="csrf" value="{owen.csrf}"' in resp.text
-    assert "[ ERASE HISTORY ]" in resp.text
+    assert 'hx-post="/partials/admin/users/erase-history"' in resp.text
+    assert '<span class="t">erase history</span><span class="vh"> of jsmith</span>' in resp.text
     resp = owen.client.post("/partials/admin/users/erase-history",
                             data={"username": "nobody"}, headers=owen.h)
     assert resp.status_code == 200

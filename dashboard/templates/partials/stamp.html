@@ -1,17 +1,14 @@
-{# The freshness stamp (DUI-2, usability + resilience sweep 2026-09-04).
+{# The freshness stamp, terminal twin (phase 1; DUI-2 for the why).
 
-   This used to be two literals inside partials/topbar.html, which is included
-   once per full page load and never re-rendered: "updated 4s ago" was frozen
-   at load time, and so was "▲ SYNCTHING UNREACHABLE". A page left open beside
-   a dead dashboard therefore claimed to be four seconds old for as long as
-   the tab stayed open. Both live here now, in a fragment the topbar polls, so
-   the sentence can only be true.
-
-   Empty when nothing rendered it (an anonymous page, or a caller that has no
-   database handle): a blank stamp is honest, a stale one is not. #}
+   Polled into #topbar-stamp by the HUD every 30 s. On a phone (600 px and
+   below, hud-common) the bar keeps only the compact warning: an LED and the
+   word "stale" when Syncthing is unreachable, and nothing when all is well.
+   The full sentence is the warning's own title / data-tip, which the hint
+   sheet reads on a tap, so it is never a second copy that could go stale. #}
 {% if stamp_at %}
   {% if not stamp_syncthing_reachable %}
-    <span class="banner">▲ SYNCTHING UNREACHABLE: data may be stale</span>
+    <span class="hud-stale" data-tip="Syncthing is unreachable: the data on this page may be stale."
+          title="Syncthing is unreachable: the data on this page may be stale."><span class="hud-led hud-warn" aria-hidden="true"></span><span>stale<span class="hud-stale-long hud-hide-sm">: syncthing unreachable, data may be stale</span></span></span>
   {% endif %}
-  <span class="stamp-at" title="when this page last heard back from the server">updated {{ stamp_at | ago }}</span>
+  <span class="hud-stamp-at hud-hide-sm hud-lowpri" title="when this page last heard back from the server">updated {{ stamp_at | ago }}</span>
 {% endif %}

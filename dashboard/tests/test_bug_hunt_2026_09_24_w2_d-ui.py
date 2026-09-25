@@ -104,11 +104,13 @@ window.__done = function (result) {
 
 
 def _inline_base_script() -> str:
-    """base.html's own inline <script> (the details keeper and the fragment
-    scroll), taken from the template so the test runs what ships."""
-    text = (TEMPLATES / "base.html").read_text(encoding="utf-8")
+    """The page shell's own inline <script> (the details keeper and the
+    fragment scroll), taken from the template so the test runs what ships.
+    It was base.html's until the terminal look became the only one
+    (2026-09-25); shell.html carries the same script."""
+    text = (TEMPLATES / "shell.html").read_text(encoding="utf-8")
     blocks = re.findall(r"<script>(.*?)</script>", text, flags=re.S)
-    assert blocks, "base.html has no inline script"
+    assert blocks, "shell.html has no inline script"
     return "\n".join(blocks)
 
 
@@ -205,18 +207,27 @@ setTimeout(function () {
 # ------------------------------------------------ ui-dash-main-1 (markup)
 
 def test_the_sidebar_tick_swaps_the_aside_not_the_nav():
-    """The answer is the whole partial (handle + nav); swapping it over the
-    nav alone added a second [ PROJECTS ] handle on every tick."""
-    text = (TEMPLATES / "partials" / "sidebar.html").read_text(encoding="utf-8")
-    assert 'hx-target="closest .projects" hx-swap="outerHTML"' not in text
-    assert 'hx-target="closest .sidebar" hx-swap="innerHTML"' in text
-    # Every page that includes the partial puts it inside an aside.sidebar,
-    # which is what `closest .sidebar` resolves to.
-    for page in TEMPLATES.glob("*.html"):
+    """The answer is the whole partial; swapping it over part of itself added
+    a second [ PROJECTS ] handle on every tick. The classic sidebar is gone
+    (2026-09-25, the terminal look is the only one); the same rule holds for
+    the terminal tree: the tick's answer (partials/projects_tree.html) is the
+    INSIDE of `.tree-body`, swapped innerHTML into it, and the partial draws
+    neither a `.tree-body` nor the find box, so a tick can never nest a
+    second one."""
+    text = (TEMPLATES / "partials" / "projects_tree.html").read_text(encoding="utf-8")
+    assert 'hx-swap="outerHTML"' not in text
+    assert 'hx-target="closest .tree-body" hx-swap="innerHTML"' in text
+    assert 'class="tree-body"' not in text and "tree-find" not in text
+    # Every template that includes the partial puts it inside a .tree-body,
+    # which is what `closest .tree-body` resolves to.
+    includes = 0
+    for page in TEMPLATES.rglob("*.html"):
         body = page.read_text(encoding="utf-8")
-        if '{% include "partials/sidebar.html" %}' in body:
-            before = body.split('{% include "partials/sidebar.html" %}', 1)[0]
-            assert before.rfind('<aside class="sidebar"') > before.rfind("</"), page.name
+        if 'include "partials/projects_tree.html"' in body:
+            includes += 1
+            before = body.split('include "partials/projects_tree.html"', 1)[0]
+            assert before.rfind('<div class="tree-body"') > before.rfind("</div>"), page.name
+    assert includes
 
 
 # -------------------------------------- ui-dash-main-2 / admin-5 (browser)
@@ -282,8 +293,10 @@ def test_the_three_admin_panels_mark_their_banners_for_the_mover():
                               ("recovery", "recovery_error", "recovery_notice"),
                               ("protection", "protection_error", "protection_notice")):
         text = (TEMPLATES / "partials" / f"{name}.html").read_text(encoding="utf-8")
-        assert f'{{% if {err} %}}<div class="banner error-banner">' in text, name
-        assert re.search(r"\{% if " + notice + r" %\}<div class=\"muted result-banner\"", text), name
+        # The terminal note carries the same two markers the mover reads
+        # (`.error-banner` / `.result-banner`) on its `note err` / `note ok`.
+        assert f'{{% if {err} %}}<div class="note err error-banner">' in text, name
+        assert re.search(r"\{% if " + notice + r" %\}<div class=\"note ok result-banner\"", text), name
 
 
 # ------------------------------- ui-dash-main-3 / admin-3 / main-8 (browser)
@@ -447,7 +460,7 @@ def test_the_undo_notice_and_the_row_name_the_folder_not_the_slug(env):
     tick_id = dbmod.fetch_audit(conn)[0]["id"]
     html = client.post(f"/partials/plan-changes/{tick_id}/undo").text
     assert "removed 2026/FF5/Elections again for leso" in html
-    assert '<td class="mono-sm" title="2026-ff5-elections">2026/FF5/Elections</td>' in html
+    assert '<td data-label="project" title="2026-ff5-elections">2026/FF5/Elections</td>' in html
 
 
 # ------------------------------- ui-dash-admin-2 / logic-admin-2 (server)
@@ -469,7 +482,9 @@ def test_an_active_halt_says_when_it_releases_itself(env):
     client, conn = env
     dbmod.set_fleet_halt(conn, True, "restoring the pool", "owen")
     conn.commit()
-    for path in ("/partials/fleet-halt-banner", "/partials/admin/fleet-halt"):
+    # /partials/halt-line is every page's halt line since the terminal look
+    # became the only one (it was /partials/fleet-halt-banner).
+    for path in ("/partials/halt-line", "/partials/admin/fleet-halt"):
         html = client.get(path).text
         assert "releases itself" in html, (path, html)
         assert "releases itself 0s ago" not in html, path
@@ -622,7 +637,7 @@ setTimeout(function () {
 @pytest.fixture
 def settings_page(env):
     """The REAL /admin/settings render, its own scripts stripped, with a fake
-    fetch and static/site_settings.js: the template and the script together,
+    fetch and static/cc/site_settings.js: the template and the script together,
     the way a browser gets them."""
     client, _conn = env
     html = client.get("/admin/settings").text
@@ -679,7 +694,7 @@ window.addEventListener("error", function (e) {
 def _run_settings(tmp_path: Path, html: str, scenario: str) -> dict:
     page = tmp_path / "settings.html"
     head = (f"<script>{FAKE_FETCH}</script>"
-            f"<script src=\"{(STATIC / 'site_settings.js').as_uri()}\"></script>")
+            f"<script src=\"{(STATIC / 'cc' / 'site_settings.js').as_uri()}\"></script>")
     tail = ("<script>document.addEventListener('DOMContentLoaded', function () {"
             "setTimeout(function () { try {" + scenario + "} catch (e) {"
             "window.__done({error: String(e && e.stack || e)}); } }, 300); });</script>")
@@ -716,7 +731,7 @@ setTimeout(function () {
   setTimeout(function () {
     window.__done({first: first, second: line ? line.textContent : null,
                    besideButton: besideButton, bad: line ? line.className : "",
-                   page: document.querySelector("main").textContent});
+                   page: document.body.textContent});
   }, 400);
 }, 400);
 """
@@ -725,7 +740,8 @@ setTimeout(function () {
     # field), and the second, refused save left "saved" standing.
     assert result["besideButton"] is True
     assert result["first"].startswith("saved at "), result
-    assert result["second"] == "▲ could not save: canonical_prefix must be a drive letter"
+    # The terminal line carries no glyph; `bad` is its refusal tone.
+    assert result["second"] == "could not save: canonical_prefix must be a drive letter"
     assert "bad" in result["bad"]
     assert "saved at" not in result["page"], "an old 'saved' stands beside the refusal"
 
@@ -738,6 +754,13 @@ var form = document.getElementById("settings-form");
 form.dispatchEvent(new Event("submit", {cancelable: true}));
 setTimeout(function () {
   document.getElementById("site-undo-btn").click();
+  // The terminal page asks through its own <dialog id="site-ask">, not
+  // window.confirm: record the question it shows, then press its yes.
+  var dlg = document.getElementById("site-ask");
+  if (dlg && dlg.open) {
+    window.__confirms.push(document.getElementById("site-ask-q").textContent);
+    document.getElementById("site-ask-yes").click();
+  }
   setTimeout(function () {
     window.__done({confirms: window.__confirms, log: window.__log,
                    list: document.getElementById("site-history-list").textContent});
@@ -828,7 +851,10 @@ def test_the_poll_keeps_the_ticks_capacity_confirm(env, monkeypatch):
     monkeypatch.setattr(ui, "tick_capacity_warning",
                         lambda *_a, **_k: "2026/FF5/Elections is 620 GB of proxies.")
     html = client.get("/partials/project/2026-ff5-elections").text
-    tick = re.search(r"<button[^>]*/toggle\?view=project&(?:amp;)?slug_page[^>]*>", html, flags=re.S)
+    # The tick names the state it means (mode=on/off, home-project-2) since
+    # the terminal project page; the capacity confirm must still ride it.
+    tick = re.search(r"<button[^>]*/toggle\?view=project&(?:amp;)?mode=on&(?:amp;)?slug_page[^>]*>",
+                     html, flags=re.S)
     assert tick, html
     # HEAD: the 10 s poll re-rendered [ TICK ] without its UX-1 confirm.
     assert "620 GB" in tick.group(0)
@@ -844,15 +870,16 @@ def test_an_expired_halt_can_be_taken_down_without_a_new_halt(env):
     assert dbmod.get_fleet_halt(conn)["expired"] is True
     panel = client.get("/partials/admin/fleet-halt").text
     # HEAD: the expired branch offered only [ STOP ALL SYNCING ].
-    assert "[ OK, IT CAN STAY OFF ]" in panel
-    assert "Take this notice down" in client.get("/partials/fleet-halt-banner").text
+    assert '<span class="t">ok, it can stay off</span>' in panel
+    assert "Take this notice down" in client.get("/partials/halt-line").text
     resp = client.post("/partials/admin/fleet-halt",
                        data={"active": "0", "ack_expired": "1",
                              "reason": "the expired stop was acknowledged"})
     assert resp.status_code == 200
     halt = dbmod.get_fleet_halt(conn)
     assert halt["expired"] is False and halt["active"] is False
-    assert "HAS EXPIRED" not in client.get("/partials/fleet-halt-banner").text
+    line = client.get("/partials/halt-line").text
+    assert "has expired" not in line and 'id="fleet-halt-line"' not in line
 
 
 def test_the_ok_button_never_releases_a_live_halt(env):
@@ -885,7 +912,7 @@ def test_a_feed_site_is_pointed_at_the_feed_not_ship_cmd(env, monkeypatch):
     html = client.get("/partials/admin/packages").text
     # HEAD: "publish a build below, or from your wired computer with
     # tools\ship.cmd", on an appliance that has neither.
-    assert "Press [ CHECK NOW ] there to fetch them" in html
+    assert 'Press "Check now" there to fetch them' in html
     assert "or from your wired" not in html
     assert "Publish new builds from your wired computer" not in html
 
@@ -940,8 +967,10 @@ def _two_computers(client, editor="leso"):
 
 
 def _fix_root_row(html: str) -> str:
-    start = html.index('<div class="fix-root-box">')
-    end = html.index('<div class="mono-sm root-line">', start)
+    # The terminal home's FIX DESTINATION ROOT (partials/home_fix_root.html):
+    # the computer keys, up to the root line.
+    start = html.index('<div class="inline fix-root-machines">')
+    end = html.index('<div class="root-line">', start)
     return html[start:end]
 
 
@@ -962,9 +991,10 @@ def test_the_fix_root_chips_keep_the_editor_the_admin_is_viewing(env):
     assert f"/?machine={MAC}&as=leso" in hrefs, hrefs
     # Following one is the editor's view of that computer, not the admin's.
     page = client.get("/?machine=EDIT-PC&as=leso").text
-    assert "[ SYNC QUEUE: LESO ]" in page
+    assert "For <b>leso</b> on <b>EDIT-PC</b>" in page
     row = _fix_root_row(page)
-    assert re.search(r'class="chip amber"\s+href="/\?machine=EDIT-PC&amp;as=leso"', row), row
+    assert re.search(r'<a class="key quiet sm" href="/\?machine=EDIT-PC&amp;as=leso" '
+                     r'aria-current="true">', row), row
 
 
 def test_the_fix_root_chips_of_your_own_computers_carry_no_as(env):
@@ -981,18 +1011,20 @@ def test_the_fix_root_chips_of_your_own_computers_carry_no_as(env):
 def test_the_fix_root_chips_wrap_on_a_phone(tmp_path, env):
     client, _conn = env
     _two_computers(client, editor="owen")
-    row = _fix_root_row(client.get("/").text) + "</div>"
-    body = (f'<link rel="stylesheet" href="{(STATIC / "style.css").as_uri()}">'
-            f'<div id="phone" style="width:390px;overflow:hidden">{row}</div>')
+    row = _fix_root_row(client.get("/").text)
+    sheets = "".join(f'<link rel="stylesheet" href="{(STATIC / "cc" / name).as_uri()}">'
+                     for name in ("terminal.css", "components.css", "home.css", "phone.css"))
+    body = (f'{sheets}<div id="phone" class="fix-root" style="width:390px;overflow:hidden">'
+            f'{row}</div>')
     scenario = """
 setTimeout(function () {
   var limit = document.getElementById("phone").getBoundingClientRect().right;
   var worst = 0;
-  document.querySelectorAll("#phone a.chip").forEach(function (a) {
+  document.querySelectorAll("#phone a.key").forEach(function (a) {
     worst = Math.max(worst, a.getBoundingClientRect().right);
   });
   window.__done({limit: limit, worst: worst,
-                 chips: document.querySelectorAll("#phone a.chip").length});
+                 chips: document.querySelectorAll("#phone a.key").length});
 }, 300);
 """
     result = _run_page(tmp_path, body, scenario)
@@ -1054,9 +1086,12 @@ def test_the_queue_untick_keeps_the_computer_and_the_safe_to_close_line(env):
     for slug in ("2026-ff5-elections", "2026-ff5-voters"):
         assert client.put(f"/api/v1/selection/leso/{slug}").status_code == 200
     page = client.get("/?machine=EDIT-PC&as=leso").text
-    assert "/toggle?queue_machine=EDIT-PC" in page, "the untick does not say which computer"
+    # The terminal home queue's untick (partials/home_queue.html) names the
+    # state it means and the computer the panel is about.
+    untick = "/toggle?view=home-queue&mode=off&amp;queue_machine=EDIT-PC"
+    assert untick in page, "the untick does not say which computer"
     html = client.post("/partials/selection/leso/2026-ff5-elections/toggle"
-                       "?queue_machine=EDIT-PC").text
+                       "?view=home-queue&mode=off&queue_machine=EDIT-PC").text
     # The write stays the PERSON's, as the confirm says: off both computers.
     for machine in ("EDIT-PC", MAC):
         assert all(s["slug"] != "2026-ff5-elections"
@@ -1065,7 +1100,7 @@ def test_the_queue_untick_keeps_the_computer_and_the_safe_to_close_line(env):
                for s in dbmod.fetch_selections(conn, "leso", machine=MAC))
     # HEAD: no sentence, and a button that forgot the computer.
     assert "Safe to close" in html or "Not yet" in html, html
-    assert "/partials/selection/leso/2026-ff5-voters/toggle?queue_machine=EDIT-PC" in html
+    assert "/partials/selection/leso/2026-ff5-voters" + untick in html
 
 
 def test_a_queue_machine_that_is_not_theirs_is_the_persons_view(env):
@@ -1106,8 +1141,8 @@ def test_the_rollback_list_and_the_halt_history_are_keyed():
     pk = (TEMPLATES / "partials" / "admin_packages.html").read_text(encoding="utf-8")
     fh = (TEMPLATES / "partials" / "fleet_halt.html").read_text(encoding="utf-8")
     # HEAD: neither had a data-key or an id, so no keeper could remember them.
-    assert '<details class="pkg-other" data-key="pkg-other"' in pk
-    assert '<details class="proj-group" data-key="halt-history"' in fh
+    assert '<details class="fold pkg-other" data-key="pkg-other"' in pk
+    assert '<details class="fold sp-gap" data-key="halt-history"' in fh
 
 
 @needs_chrome
@@ -1148,7 +1183,8 @@ def test_the_env_password_offers_no_set_or_clear(env, monkeypatch):
     monkeypatch.setenv(alerts.SMTP_PASSWORD_ENV, "env-app-password-abcd1234")
     html = client.get("/admin/alerts").text
     # HEAD: both buttons beside "it cannot be changed here".
-    assert "[ SET PASSWORD ]" not in html and "[ CLEAR ]" not in html
+    assert '<span class="t">Set password</span>' not in html
+    assert '<span class="t">Clear</span>' not in html
     assert "comes from the deployment" in html
     assert "env-app-password-abcd1234" not in html
 
@@ -1166,7 +1202,8 @@ def test_a_stale_tab_setting_the_password_is_told_the_env_still_wins(env, monkey
     monkeypatch.delenv(alerts.SMTP_PASSWORD_ENV)
     html = client.post("/partials/admin/alerts/password", data={"clear": "1"}).text
     assert "password cleared." in html and "environment password" not in html
-    assert "[ SET PASSWORD ]" in html, "control: the file-backed form is offered again"
+    assert '<span class="t">Set password</span>' in html, \
+        "control: the file-backed form is offered again"
 
 
 # ---------------------------------------------------------- ui-dash-admin-11
@@ -1174,13 +1211,18 @@ def test_a_stale_tab_setting_the_password_is_told_the_env_still_wins(env, monkey
 @needs_chrome
 def test_a_minted_token_wraps_inside_its_box(tmp_path):
     token = "cce1." + "0123456789abcdef" + "." + "a" * 48
-    body = (f'<link rel="stylesheet" href="{(STATIC / "style.css").as_uri()}">'
-            f'<div id="phone" style="width:390px"><div id="minted-secret"><div class="minted-box">'
-            f'<div class="minted-value mono-sm" id="minted-value">{token}</div></div></div></div>')
+    # The terminal box (partials/minted_secret.html): code + copy key in .secret.
+    sheets = "".join(f'<link rel="stylesheet" href="{(STATIC / "cc" / name).as_uri()}">'
+                     for name in ("terminal.css", "components.css", "phone.css"))
+    body = (f'{sheets}<div id="phone" style="width:390px"><div id="minted-secret">'
+            f'<section class="win sp-minted"><div class="body"><div class="secret">'
+            f'<code class="minted-value" id="minted-value">{token}</code>'
+            f'<button class="key primary sm copy-btn" type="button">copy</button>'
+            f'</div></div></section></div></div>')
     scenario = """
 setTimeout(function () {
   var v = document.getElementById("minted-value");
-  var box = document.querySelector(".minted-box").getBoundingClientRect();
+  var box = document.querySelector(".secret").getBoundingClientRect();
   window.__done({value_scroll: v.scrollWidth, value_client: v.clientWidth,
                  box_right: box.right});
 }, 300);
@@ -1199,7 +1241,7 @@ def test_the_halt_says_ago_not_iso(env):
     conn.commit()
     panel = client.get("/partials/admin/fleet-halt").text
     # HEAD: "set by owen at 2026-09-25T03:16:18.123456+00:00".
-    assert re.search(r'set by owen <span title="[^"]+">\d+[smhd] ago</span>', panel), panel
+    assert re.search(r'set by <b>owen</b> <span title="[^"]+">\d+[smhd] ago</span>', panel), panel
 
 
 def test_report_tokens_say_ago_not_iso(env):
@@ -1209,8 +1251,8 @@ def test_report_tokens_say_ago_not_iso(env):
                        data={"username": "leso", "label": "laptop"})
     assert resp.status_code == 200, resp.text
     html = client.get("/partials/admin/report-tokens").text
-    assert re.search(r'data-label="CREATED" title="[^"]+">\d+[smhd] ago<', html), html
-    assert 'data-label="LAST USED" title="">never<' in html
+    assert re.search(r'data-label="created" title="[^"]+">\d+[smhd] ago<', html), html
+    assert 'data-label="last used" title="">never<' in html
 
 
 def test_the_jobs_head_says_how_long_in_words():
@@ -1226,7 +1268,7 @@ def test_the_alert_log_recovery_and_history_humanise_their_stamps():
     assert "{{ row.at | ago }}" in al and "{{ group.at | ago }}" in al
     assert "{{ triage.last_poll.at | ago }}" in al
     assert "{{ drill.at | ago }}" in rc and "{{ row.at | ago }}" in rc
-    js = (STATIC / "site_settings.js").read_text(encoding="utf-8")
+    js = (STATIC / "cc" / "site_settings.js").read_text(encoding="utf-8")
     assert '" at " + e.at' not in js and '" at " + latest.at' not in js
     # The undo still names the entry it confirmed by its exact stamp.
     assert "agoText(e.at)" in js and "expected_at: latest.at" in js
@@ -1295,16 +1337,20 @@ def test_the_settings_undo_is_named_for_any_change(env):
     client, _conn = env
     html = client.get("/admin/settings").text
     # HEAD: "[ UNDO LAST IMPORT ]" on a button that undoes a save too.
-    assert "[ UNDO LAST CHANGE ]" in html
-    assert "UNDO LAST IMPORT" not in html
+    assert '<span class="t">Undo last change</span>' in html
+    assert "undo last import" not in html.lower()
 
 
 def test_the_older_bundle_buttons_are_marked_as_rollbacks():
     src = (TEMPLATES / "partials" / "admin_dashboard_update.html").read_text(encoding="utf-8")
-    m = re.search(r"<button[^>]*>\[ ROLL BACK TO \{\{ u\.version \}\} \]", src, flags=re.S)
+    # The terminal panel picks the older bundle in a select and applies it
+    # with ONE key (dashupd-older-key), whose label says roll back.
+    m = re.search(r'<button[^>]*id="dashupd-older-key"[^>]*>\s*<span class="t">roll back</span>',
+                  src, flags=re.S)
     assert m, "the rollback-candidate button moved"
     # HEAD: the button carried only data-dashupd-apply, the UPDATE marker.
     assert 'data-dashupd-older="1"' in m.group(0)
+    assert 'data-dashupd-apply=' in m.group(0)
 
 
 DASHUPD_FETCH = r"""
@@ -1352,7 +1398,7 @@ window.fetch = function (path, opts) {
 
 @needs_chrome
 def test_a_refused_update_keeps_its_reason_and_posts_once(tmp_path):
-    head = DASHUPD_FETCH + f'<script src="{(STATIC / "dashboard_update.js").as_uri()}"></script>'
+    head = DASHUPD_FETCH + f'<script src="{(STATIC / "cc" / "dashboard_update.js").as_uri()}"></script>'
     body = ('<div id="host"><div class="admin-packages-box" id="dashboard-update" data-running="0.7.58">'
             '<div id="dashupd-progress" class="muted" data-in-progress="0"></div>'
             '<button type="button" id="up" data-dashupd-apply="0.7.60">[ UPDATE NOW ]</button>'
@@ -1376,7 +1422,7 @@ setTimeout(function () {
 @needs_chrome
 def test_a_refusal_while_another_update_runs_resumes_the_watch(tmp_path):
     head = (DASHUPD_FETCH + "<script>window.__partial_in_progress = true;</script>"
-            + f'<script src="{(STATIC / "dashboard_update.js").as_uri()}"></script>')
+            + f'<script src="{(STATIC / "cc" / "dashboard_update.js").as_uri()}"></script>')
     body = ('<div class="admin-packages-box" id="dashboard-update" data-running="0.7.58">'
             '<div id="dashupd-progress" class="muted" data-in-progress="0"></div>'
             '<button type="button" id="up" data-dashupd-apply="0.7.60">[ UPDATE NOW ]</button>'
@@ -1392,7 +1438,7 @@ setTimeout(function () { window.__done({status: window.__status}); }, 2500);
 
 @needs_chrome
 def test_an_older_bundle_asks_to_roll_back_not_to_update(tmp_path):
-    head = DASHUPD_FETCH + f'<script src="{(STATIC / "dashboard_update.js").as_uri()}"></script>'
+    head = DASHUPD_FETCH + f'<script src="{(STATIC / "cc" / "dashboard_update.js").as_uri()}"></script>'
     body = ('<div class="admin-packages-box" id="dashboard-update" data-running="0.7.58">'
             '<div id="dashupd-progress" class="muted" data-in-progress="0"></div>'
             '<button type="button" id="up" data-dashupd-apply="0.7.60">[ UPDATE NOW ]</button>'
@@ -1431,22 +1477,31 @@ def _css_token(css: str, name: str) -> str:
 
 
 def test_muted_text_meets_aa_on_every_surface():
-    css = (STATIC / "style.css").read_text(encoding="utf-8")
-    muted = _css_token(css, "muted")
-    for surface in ("bg", "panel", "field"):
-        # HEAD: #6f6f7a is 3.98 / 3.82 / 3.63.
-        assert _contrast(muted, _css_token(css, surface)) >= 4.5, (muted, surface)
+    # The terminal palette (static/cc/terminal.css) since the classic look
+    # was retired (2026-09-25): its solid surfaces are the page and a window.
+    css = (STATIC / "cc" / "terminal.css").read_text(encoding="utf-8")
+    for text in ("muted", "text-2", "red"):
+        colour = _css_token(css, text)
+        for surface in ("bg", "win-solid"):
+            # HEAD (classic): #6f6f7a is 3.98 / 3.82 / 3.63.
+            assert _contrast(colour, _css_token(css, surface)) >= 4.5, (text, surface)
 
 
 def test_the_drawer_close_and_help_notes_are_not_border_red():
-    css = (STATIC / "style.css").read_text(encoding="utf-8")
-    for sel in (r"\.drawer-close", r"\.help-file-note"):
-        m = re.search(r"^" + sel + r"\s*\{([^}]*)\}", css, flags=re.M)
-        assert m, sel
-        # HEAD: color: var(--red-dim), 1.8:1 on the page.
-        assert "var(--red-dim)" not in m.group(1), (sel, m.group(1))
-    red = _css_token(css, "red")
-    assert _contrast(red, _css_token(css, "panel")) >= 4.5
+    """The classic drawer's close and the help file note are gone with the
+    classic look; what is left of the finding is that no terminal rule sets
+    TEXT in the border reds (--red-dim / --red-deep, 1.8:1 on the page).
+    The only uses are decorative glyphs drawn by `content:`, which carry an
+    empty alternative (a11y-copy-1)."""
+    for sheet in sorted((STATIC / "cc").glob("*.css")):
+        css = re.sub(r"/\*.*?\*/", "", sheet.read_text(encoding="utf-8"), flags=re.S)
+        for m in re.finditer(r"([^{}]+)\{([^}]*)\}", css):
+            selector, rule = m.group(1).strip(), m.group(2)
+            if re.search(r"(?<![-\w])color:\s*var\(--red-(?:dim|deep)\)", rule):
+                # `.br` is the bench's tree-branch glyph class; no template
+                # draws one (checked 2026-09-25), so it colours no text.
+                assert "content:" in rule or selector in (".iv-tree .br", ".tree .row .br"), \
+                    (sheet.name, selector)
 
 
 # ----------------------------------------------------------- ui-dash-static-6
@@ -1454,7 +1509,7 @@ def test_the_drawer_close_and_help_notes_are_not_border_red():
 def test_the_offline_retry_reloads_the_page_that_failed(env):
     client, _conn = env
     html = client.get("/offline").text
-    m = re.search(r"<a\b([^>]*)>\[ RETRY \]</a>", html, flags=re.S)
+    m = re.search(r'<a\b([^>]*)><span class="t">Try again</span></a>', html, flags=re.S)
     assert m, html
     attrs = m.group(1)
     # HEAD: href="/", which threw the reader's own URL away.
@@ -1467,9 +1522,11 @@ def test_the_offline_retry_reloads_the_page_that_failed(env):
 
 @needs_chrome
 def test_the_stale_banner_leaves_the_toasts_and_the_foot_readable(tmp_path):
-    head = f'<link rel="stylesheet" href="{(STATIC / "style.css").as_uri()}">'
-    body = ('<div id="assign-toast" class="toast-host"><div class="toast err" id="t">'
-            'could not tick leso</div></div>'
+    head = "".join(f'<link rel="stylesheet" href="{(STATIC / "cc" / name).as_uri()}">'
+                   for name in ("terminal.css", "components.css"))
+    # The terminal page's one toast is the shell's #cc-toast (shown here).
+    body = ('<div class="toast show" id="t" role="status"><span class="p">&gt;</span>'
+            '<span class="tt">could not tick leso</span></div>'
             '<div class="spacer" style="height:1500px"></div><p id="last">the last line</p>'
             f'<script src="{(STATIC / "htmx_errors.js").as_uri()}"></script>')
     scenario = """
@@ -1495,7 +1552,7 @@ setTimeout(function () {
 
 
 def test_the_stale_banner_clears_the_home_indicator():
-    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    css = (STATIC / "cc" / "terminal.css").read_text(encoding="utf-8")
     m = re.search(r"^([^{}\n]*\.stale-banner)\s*\{([^}]*)\}", css, flags=re.M)
     assert m
     # HEAD: padding 0.5rem 0.9rem, no --safe-b, under viewport-fit=cover.
@@ -1508,14 +1565,15 @@ def test_the_stale_banner_clears_the_home_indicator():
 # ----------------------------------------------------------- ui-dash-static-8
 
 COPY_BODY = ('<span id="pw">hunter2-one-time</span>'
-             '<button type="button" class="copy-btn" id="c" data-copy-from="pw">[ COPY ]</button>')
+             '<button type="button" class="copy-btn" id="c" data-copy-from="pw"'
+             ' data-copied-label="copied">copy</button>')
 
 
 @needs_chrome
 def test_a_double_click_on_copy_goes_back_to_copy(tmp_path):
     head = ("<script>Object.defineProperty(navigator, 'clipboard', {configurable: true,"
             " value: {writeText: function () { return Promise.resolve(); }}});</script>"
-            f'<script src="{(STATIC / "copy_value.js").as_uri()}"></script>')
+            f'<script src="{(STATIC / "cc" / "copy_value.js").as_uri()}"></script>')
     # The label during the 2 s window, then after it: the second matters.
     page = _run_static(tmp_path, "copy.html", head, COPY_BODY, """
 var b = document.getElementById("c");
@@ -1528,9 +1586,9 @@ setTimeout(function () {
 }, 300);
 """)
     during, after = page["seen"]
-    assert during == "[ COPIED ]"
+    assert during == "copied"
     # HEAD: the second click saved "[ COPIED ]" as the label to go back to.
-    assert after == "[ COPY ]", page
+    assert after == "copy", page
 
 
 @needs_chrome
@@ -1538,7 +1596,7 @@ def test_copy_without_a_clipboard_api_says_what_happened(tmp_path):
     head = ("<script>Object.defineProperty(navigator, 'clipboard', {configurable: true,"
             " value: undefined});"
             "document.execCommand = function () { return false; };</script>"
-            f'<script src="{(STATIC / "copy_value.js").as_uri()}"></script>')
+            f'<script src="{(STATIC / "cc" / "copy_value.js").as_uri()}"></script>')
     result = _run_static(tmp_path, "copy2.html", head, COPY_BODY, """
 var b = document.getElementById("c");
 b.click();
@@ -1547,7 +1605,7 @@ setTimeout(function () {
 }, 100);
 """)
     # HEAD: the value was selected and the button said nothing at all.
-    assert result["label"] == "[ SELECTED - PRESS CTRL+C ]", result
+    assert result["label"] == "Selected: press Ctrl+C", result
     assert result["selected"] == "hunter2-one-time"
 
 
@@ -1593,14 +1651,17 @@ def test_a_refused_ai_pin_or_cli_flag_goes_back_to_what_is_in_force(tmp_path, se
     html = settings_page
     page = tmp_path / "ai.html"
     head = (f"<script>{AI_FETCH}</script>"
-            f"<script src=\"{(STATIC / 'site_settings.js').as_uri()}\"></script>")
+            f"<script src=\"{(STATIC / 'cc' / 'site_settings.js').as_uri()}\"></script>")
     scenario = """
 var pref = document.getElementById("ai-preference");
 var opt = document.createElement("option");
 opt.value = "openai_api"; opt.textContent = "4. OpenAI API";
 pref.appendChild(opt);
 pref.value = "openai_api";
-pref.dispatchEvent(new Event("change"));
+// A person's pick fires a change that BUBBLES; the terminal script listens
+// on the document (its select is redrawn), so a non-bubbling one never
+// reaches it.
+pref.dispatchEvent(new Event("change", {bubbles: true}));
 var flag = document.getElementById("ai-cli-enabled");
 setTimeout(function () {
   var prefAfter = pref.value;
@@ -1674,13 +1735,14 @@ def test_the_busy_login_says_it_without_the_banned_dash():
 def test_the_topbar_says_sign_in_and_sign_out(env):
     client, _conn = env
     body = client.get("/partials/topbar").text
-    assert "[ SIGN OUT ]" in body and "[ SIGN OUT EVERYWHERE ]" in body
+    assert ">sign out</button>" in body and ">sign out everywhere</button>" in body
     # HEAD: [ LOGOUT ] and [ LOGOUT ALL ].
     assert "LOGOUT" not in body.upper().replace("/LOGOUT", "")
     assert "log in again" not in body
     anon = TestClient(client.app)
     page = anon.get("/login").text
-    assert "[ SIGN IN ]" in page and "[ LOGIN ]" not in page
+    assert '<span class="t">Sign in</span>' in page
+    assert not re.search(r'class="t">\s*log ?in\s*<', page, flags=re.I)
 
 
 def test_the_sessions_confirms_say_sign_in_again():
@@ -1860,7 +1922,7 @@ def _preview(missing, changed):
 
 
 def _restore_form(html):
-    m = re.search(r'<form hx-post="/partials/admin/recovery/restore".*?</form>', html, re.S)
+    m = re.search(r'<form\b[^>]*hx-post="/partials/admin/recovery/restore".*?</form>', html, re.S)
     assert m, html
     return m.group(0)
 
@@ -1897,9 +1959,9 @@ def test_a_mixed_restore_confirm_names_both_counts_and_stays_unticked():
 
 
 def test_the_restore_result_says_where_and_that_a_dot_name_may_hide():
-    html = " ".join(_render_recovery(result={
+    html = " ".join(re.sub(r"<[^>]+>", "", _render_recovery(result={
         "files": 2, "where": ".restored-20260925/Elections",
-        "failed_count": 0, "failed": []}).split())
+        "failed_count": 0, "failed": []})).split())
     # HEAD: "Restored 2 file(s) into .restored-20260925/Elections." and no more.
     assert ("into .restored-20260925/Elections, at the top of the Projects "
             "folder on the server.") in html
@@ -1915,16 +1977,23 @@ def test_the_restore_route_docstring_names_the_tree_not_the_project():
 # ------------------------------------------ ui-copy-2 (the collector anchor)
 
 def test_the_collector_panel_is_the_anchor_the_notices_link_to():
-    html = (TEMPLATES / "partials" / "collector_health.html").read_text(encoding="utf-8")
+    # The collector is a window on Settings, Health since the terminal look
+    # became the only one (2026-09-25); /go/collector sends the notices there.
+    html = (TEMPLATES / "admin_health.html").read_text(encoding="utf-8")
     # HEAD: no id, so /#fleet-collector landed at the top of the page.
-    assert re.search(r'<div class="side-head" id="fleet-collector"[^>]*>\[ COLLECTOR \]', html)
+    assert re.search(r'<section class="win" data-win="collector" id="fleet-collector">', html)
+    from ccsync_dashboard import ui_chrome
+    assert ui_chrome.go_href("collector") == "/admin/health#fleet-collector"
 
 
 def test_the_fleet_page_renders_the_collector_anchor_once(env):
     client, _conn = env
     _report(client, "leso", "EDIT-PC")
-    html = client.get("/").text
+    html = client.get("/admin/health").text
     assert html.count('id="fleet-collector"') == 1
+    resp = client.get("/go/collector", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/admin/health#fleet-collector"
 
 
 # ------------------------------------------ ui-copy-2 (the Resolve undo button)
@@ -1943,7 +2012,7 @@ def test_the_resolve_answer_lists_each_computers_changes_with_an_undo(env):
     html = client.get("/admin/recovery?problem=resolve").text
     # HEAD: no page drew the journals; the API routes had no caller.
     assert 'id="resolve-undo"' in html
-    assert "[ UNDO THIS CHANGE ]" in html
+    assert '<span class="t">Undo this change</span>' in html
     assert 'hx-post="/partials/admin/recovery/resolve-undo"' in html
     assert 'value="ff5-elections/2026-09-24T10-00-00.json"' in html
     assert "Put back the 12 clip path(s) CC Sync changed in FF5 Elections on EDIT-PC?" in html
@@ -1965,7 +2034,8 @@ def test_undo_this_change_asks_that_computer_and_shows_it_asked(env):
     # The row now says it was asked instead of offering a second button.
     # The button, not the words: d-diag's recovery step now names the button
     # in its prose, on the same page.
-    assert "[ UNDO ASKED ]" in html and ">[ UNDO THIS CHANGE ]</button>" not in html
+    assert ">undo asked</span>" in html
+    assert '<span class="t">Undo this change</span></button>' not in html
     assert "asked to undo FF5 Elections: waiting for that computer to report" in html
 
 
@@ -1993,7 +2063,7 @@ def test_an_editor_cannot_press_undo_this_change(env):
 def test_with_no_journals_the_resolve_answer_points_at_the_tray():
     html = " ".join(_render_recovery(problem="resolve").split())
     assert "No computer has told this server about a clip-path change it could undo." in html
-    assert "[ UNDO LAST FIX ]" in html
+    assert '"Undo last fix"' in html
 
 
 # ====================================================================
@@ -2046,7 +2116,8 @@ def test_the_editors_queue_panel_does_not_say_safe_to_close_over_a_capped_list(e
     client, conn = env
     _seed_capped_originals(conn)
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "leso"))
-    html = " ".join(client.get("/partials/queue").text.split())
+    # The editor's own queue panel is the home page's sync_queue body.
+    html = " ".join(client.get("/partials/home-queue").text.split())
     assert "Safe to close" not in html
     assert "Cannot tell yet" in html
     page = " ".join(client.get("/partials/transfers").text.split())
@@ -2128,7 +2199,8 @@ def test_an_old_unanswered_undo_stays_asked_under_five_newer_requests(env):
     html = client.get("/admin/recovery?problem=resolve").text
     # The button, not the words: d-diag's recovery step now names the button
     # in its prose, on the same page.
-    assert "[ UNDO ASKED ]" in html and ">[ UNDO THIS CHANGE ]</button>" not in html
+    assert ">undo asked</span>" in html
+    assert '<span class="t">Undo this change</span></button>' not in html
 
 
 # ====================================================================
@@ -2140,21 +2212,21 @@ def test_an_old_unanswered_undo_stays_asked_under_five_newer_requests(env):
 def test_a_zero_file_capped_upload_row_is_a_sentence_not_zero_files():
     html = " ".join(_render_transfers([_up_uncertain()]).split())
     # HEAD: "0 files · 0 B" beside an "upload" chip, which reads as done.
-    assert "0 files · 0 B" not in html and ">0 files" not in html
-    assert '<span class="chip">upload</span>' not in html
-    assert "[ CANNOT TELL ]" in html
-    assert ("this computer's file list was capped: it holds more video originals "
+    assert "0 files &middot; 0 B" not in html and ">0 files" not in html
+    assert ">upload</span>" not in html
+    assert ">cannot tell</span>" in html
+    assert ("This computer's file list was capped: it holds more video originals "
             "than it can list to the dashboard, so the dashboard cannot tell "
             "whether it still owes uploads") in html
     # The header over such a panel does not say "0 files · 0 B waiting" either.
     assert "waiting behind the transfers above" not in html
-    assert "nothing counted yet, but the rows below are not finished" in html
+    assert "Nothing counted yet, but the rows below are not finished" in html
     assert "—" not in html and " -- " not in html
 
 
 def test_a_capped_row_that_counted_files_still_shows_its_count():
     html = " ".join(_render_transfers([_up_uncertain(n_files=3)]).split())
-    assert "3 files" in html and "[ CANNOT TELL ]" not in html
+    assert "3 files" in html and ">cannot tell</span>" not in html
     assert "so the upload count may be low" in html
 
 
@@ -2162,7 +2234,7 @@ def test_a_zero_file_row_that_is_not_capped_keeps_its_old_shape():
     # A GETTING READY row is also zero files; it must stay as it was.
     q = dict(_up_uncertain(), uncertain=False, pending=True)
     html = " ".join(_render_transfers([q]).split())
-    assert "[ GETTING READY ]" in html and "[ CANNOT TELL ]" not in html
+    assert ">getting ready</span>" in html and ">cannot tell</span>" not in html
 
 
 # ---------------- ui-copy-6 (owed to d-ui for this round): the package-wide scan
@@ -2282,8 +2354,8 @@ def test_a_held_zero_file_capped_row_shows_the_hold_not_leave_it_running():
     html = " ".join(_render_transfers([dict(_up_uncertain(), held=held)]).split())
     # HEAD of round 2: the CANNOT TELL branch never rendered `held`, and told
     # the admin to leave a machine running that is not uploading at all.
-    assert "[ CANNOT TELL ]" in html
-    assert "[ ON HOLD ]" in html
+    assert ">cannot tell</span>" in html
+    assert ">on hold</span>" in html
     assert "Its sync drive is unplugged, so nothing can upload." in html
     assert "Leave it running and check its tray." not in html
     assert "—" not in html and " -- " not in html
@@ -2292,4 +2364,4 @@ def test_a_held_zero_file_capped_row_shows_the_hold_not_leave_it_running():
 def test_an_unheld_zero_file_capped_row_still_says_check_its_tray():
     html = " ".join(_render_transfers([dict(_up_uncertain(), held=None)]).split())
     assert "Leave it running and check its tray." in html
-    assert "[ ON HOLD ]" not in html
+    assert ">on hold</span>" not in html

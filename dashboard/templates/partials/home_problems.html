@@ -1,0 +1,42 @@
+{# problems.log, the terminal home window's BODY (UI redesign port phase 2;
+   plan 5.1, R15). A NEW name on /partials/home-problems: the classic
+   notices partial stays classic for classic home. Drawn into the static
+   #server-notices body (cc/fleet.html) by its load + 60 s poll and by a
+   dismiss, which posts ?view=home-problems and gets THIS markup back, never
+   the classic admin-users-box (5.1, wave 4). Same context as the classic
+   panel (ui._notices_context). OK needs evidence: a check nothing ran says
+   "not checked", never a false OK. #}
+{% if notice_error %}<div class="note err error-banner"><span class="grow">{{ notice_error }}</span></div>{% endif %}
+{% if notices %}
+<div class="prob-list">
+  {% for n in notices %}
+  <div class="prob">
+    <span class="sev"><span class="tag {{ 'solid err' if n.severity == 'error' else ('solid warn' if n.severity == 'warn' else 'mute') }}" title="{{ 'Error: something has stopped working and needs fixing.' if n.severity == 'error' else ('Warning: still working, but heading for trouble.' if n.severity == 'warn' else 'For your information.') }}"><span class="w">{{ 'error' if n.severity == 'error' else ('warn' if n.severity == 'warn' else 'info') }}</span></span></span>
+    <span class="title">{{ n.subject }}<span class="who" title="The name of the check that found it.">{{ n.kind }}</span></span>
+    <span class="when" title="first seen {{ n.first_seen | ago }}">{{ n.last_seen | ago }}</span>
+    <div class="what">{{ n.body }}</div>
+    <div class="todo">{% if n.fix %}<span class="cmd">{{ n.fix }}</span>{% endif %}<span class="keys">
+      {% if n.href %}<a class="key sm" href="{{ n.href }}"><span class="t">{{ (n.href_label or 'take me there') | lower }}</span><span class="vh">: {{ n.subject }}</span></a>{% endif %}
+      <form class="inline" hx-post="/partials/notices/{{ n.id }}/dismiss?view=home-problems"
+            hx-target="#server-notices" hx-swap="innerHTML"
+            data-confirm-key="notice-dismiss:{{ n.id }}"
+            hx-confirm="Dismiss this? It is only hidden. If the server finds the same problem again it comes straight back, so dismissing it is not a fix.">
+        <button class="key quiet sm" type="submit" title="Hides this problem. If the server still finds it on its next check, it comes back."><span class="t">dismiss</span><span class="vh">: {{ n.subject }}</span></button>
+      </form>
+    </span></div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="allclear"><span class="led" aria-hidden="true"></span><span>All clear. <b>{{ notice_checks_ran }} of {{ notice_checks_total }}</b> checks ran and found nothing wrong.{% if notice_checks_never_ran %} <span class="tag warn" title="A check registered with nothing behind it yet reports neither OK nor a problem. Open the list below to see which."><span class="w">{{ notice_checks_never_ran }} never ran</span></span>{% endif %}</span></div>
+{% endif %}
+<details class="fold sub-win" data-key="home:notice-checks">
+  <summary title="Open the full list of checks and what each one found."><span class="caret" aria-hidden="true">&#9656;</span> what the server checks <span class="dim">{{ notice_kinds | length }} checks</span></summary>
+  <ul class="checks">
+  {% for k in notice_kinds %}
+    <li>{% if k.kind in open_kinds %}<span class="tag solid {{ 'err' if k.severity == 'error' else 'warn' }}" title="This check found something. It is in the list above."><span class="w">found</span></span>
+      {% elif k.kind in checked_kinds %}<span class="tag ok" title="This check ran and found nothing wrong."><span class="w">ok</span></span>
+      {% else %}<span class="tag mute" title="Registered, but nothing in this build has ever run it, so it is neither OK nor a problem."><span class="w">not checked</span></span>{% endif %} <span>{{ k.what }}</span></li>
+  {% endfor %}
+  </ul>
+</details>

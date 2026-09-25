@@ -223,23 +223,17 @@ COSMETIC_DISABLES = {
         "box exists to show the resulting state (CLAUDE.md: accepting the "
         "wizard's notice is what turns the feature on)"),
     "setup.html#setup-eula-accept": (
-        "[ ACCEPT ] on the EULA, enabled by setup.js once the checkbox is "
-        "ticked. The server does not refuse it - setup_api.setup_admin's own "
-        "'no users yet' gate is the real one - so there is no route predicate "
-        "to name; the disable is 'read it first'"),
-    # The terminal look's twins (UI port, 2026-09-25): same controls, same
-    # reasons, drawn by templates/cc/.
-    "cc/admin_settings.html#manifest.features.ai_cli_providers": (
-        "the terminal twin of admin_settings.html's display-only mirror of "
-        "features.ai_cli_providers (accepting the notice is the real switch)"),
-    "cc/setup.html#setup-eula-accept": (
-        "the terminal twin of setup.html's accept key, enabled by setup.js "
-        "once the box is ticked; setup_api's 'no users yet' gate is the rule"),
-    "cc/admin_settings.html#site-undo-btn": (
+        "the accept key on the EULA, enabled by static/cc/setup.js once the "
+        "checkbox is ticked. The server does not refuse it - setup_api."
+        "setup_admin's own 'no users yet' gate is the real one - so there is "
+        "no route predicate to name; the disable is 'read it first'"),
+    # Drawn by the terminal look's own scripts (UI port 2026-09-25; the
+    # classic look was retired the same day, so these are the only copies).
+    "admin_settings.html#site-undo-btn": (
         "undo last change: enabled by static/cc/site_settings.js once the "
         "history read says there is a change to undo; the route re-checks "
         "the history itself, so the grey is 'nothing to undo yet', not a rule"),
-    "cc/partials/admin_dashboard_update.html#dashupd-older-key": (
+    "partials/admin_dashboard_update.html#dashupd-older-key": (
         "go back to an older bundle: enabled by static/cc/dashboard_update.js "
         "when a bundle is picked in the select beside it; the apply route "
         "validates the bundle itself, so the grey is 'pick one first'"),

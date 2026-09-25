@@ -294,23 +294,12 @@ function trackHeaderHeight() {
  * imitation of one. Standalone the same fetch resolves inside THIS app, 404s,
  * and the fallback stays. Never made root-relative: see
  * tests/test_mounted_prefix.py. */
-/* UI port phase 1 (7.0): after an injection, the markup that ARRIVED is the
-   truth. html.cc-chrome only when a HUD came back, html.cc only when its
-   marker says the apps look is on, and the readable cookie rewritten to
-   match (path=/ always, or a second cookie scoped here would win). */
+/* UI port phase 1: after an injection, html.cc-chrome stays only when a HUD
+   came back. html.cc is the only look and is never switched (2026-09-25). */
 function syncDashboardLook(host) {
-  const root = document.documentElement;
   const hud = !!(host && host.querySelector(".hud"));
-  const marker = host && host.querySelector("[data-dash-topbar]");
-  const apps = !!marker && marker.getAttribute("data-ui-apps") === "cc";
-  root.classList.toggle("cc-chrome", hud);
-  root.classList.toggle("cc", apps);
+  document.documentElement.classList.toggle("cc-chrome", hud);
   relayoutDetail();
-  const v = [hud ? "chrome" : "", apps ? "apps" : ""].filter(Boolean).join(".");
-  try {
-    document.cookie = "ccsync_ui_effective=" + v + "; path=/; samesite=lax" +
-      (location.protocol === "https:" ? "; secure" : "");
-  } catch { /* storage blocked: the next load corrects it */ }
 }
 
 async function loadDashboardTopbar() {

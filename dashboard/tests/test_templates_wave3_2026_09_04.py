@@ -20,10 +20,16 @@ One test per finding, each of which fails on the tree as it was this morning:
   DCORE-16 a HELD sharing change was recorded and rendered nowhere.
   CYT-3   YouTube clips that land on disk and never reach Resolve reached
           nobody at either end.
+
+Converted 2026-09-25 when the CC Terminal look replaced the classic one: the
+same findings, pinned on the terminal markup (tags, not [ BRACKET ] chips;
+shell.html, not base.html; the terminal sheets, not style.css/mobile.css).
 """
 from __future__ import annotations
 
 from pathlib import Path
+
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -113,14 +119,21 @@ def test_a_chip_explains_itself_from_one_dict_and_a_tap_opens_it(env):
     source = (TEMPLATES / "partials" / "fleet_grid.html").read_text(encoding="utf-8")
     assert "limited to relay speed" not in source
     assert "chip_help('relayed'" in source
+    # ...rendered as the tag's title, which is what a tap opens.
+    assert re.search(r'<span class="tag warn" title="2 Syncthing peer\(s\) connected via a RELAY[^"]*">'
+                     r'<span class="w">relayed: 2</span>', body)
     # The sheet is on every page and outside the 15 s swap.
-    assert '{% include "partials/chip_sheet.html" %}' in (
-        TEMPLATES / "base.html").read_text(encoding="utf-8")
+    assert '{% include "partials/hint_sheet.html" %}' in (
+        TEMPLATES / "shell.html").read_text(encoding="utf-8")
     assert 'id="chip-sheet"' in page(client, "/")
     js = (STATIC / "htmx_errors.js").read_text(encoding="utf-8")
-    assert "chip-sheet" in js and "data-chip-detail" in js
-    # A coarse pointer has no hover, which is the whole finding.
-    assert ".chip[title]" in (STATIC / "mobile.css").read_text(encoding="utf-8")
+    assert "chip-sheet" in js and "data-chip-detail" in js and ".tag[title]" in js
+    # A coarse pointer has no hover, which is the whole finding: a tag that
+    # explains itself is a full tap target there.
+    phone = (STATIC / "cc" / "phone.css").read_text(encoding="utf-8")
+    coarse = phone[phone.index("@media (pointer: coarse)"):]
+    coarse = coarse[:coarse.index("}")]
+    assert ".tag:is([title], [data-tip])" in coarse
 
 
 # ------------------------------------------------------------------- DUI-6
@@ -133,14 +146,15 @@ def test_a_refusal_renders_beside_the_button_that_caused_it(env):
               "admin_report_tokens", "fleet_grid"]
     for name in panels:
         source = (TEMPLATES / "partials" / f"{name}.html").read_text(encoding="utf-8")
-        assert 'class="banner error-banner">▲ {{ error }}' in source, name
-    assert 'class="banner error-banner"' in (
+        assert re.search(r'class="note err error-banner"[^>]*>(<span class="grow">)?'
+                         r'\{\{ error \}\}', source), name
+    assert 'class="note err error-banner"' in (
         TEMPLATES / "setup.html").read_text(encoding="utf-8")
     js = (STATIC / "htmx_errors.js").read_text(encoding="utf-8")
     assert ".error-banner" in js and "form-error" in js
     # The setup wizard clears an error on success, which it never did: there
     # was no showError(null) call site anywhere in the file.
-    setup = (STATIC / "setup.js").read_text(encoding="utf-8")
+    setup = (STATIC / "cc" / "setup.js").read_text(encoding="utf-8")
     assert "function clearErrors()" in setup
     assert setup.count("clearErrors();") >= 5
     assert "showError(\"could not accept the EULA: \" + err.message, acceptBtn)" in setup
@@ -175,7 +189,10 @@ def test_the_editor_is_told_whether_the_laptop_can_be_closed(env):
     resp = client.get("/transfers")
     assert resp.status_code == 200, resp.text
     assert "Safe to close: nothing is transferring." in resp.text
-    for name in ("partials/transfers.html", "partials/my_queue.html"):
+    # The terminal's four homes for the sentence: the transfers page, the
+    # home page's live transfers and queue, and a person's own queue.
+    for name in ("partials/transfers.html", "partials/home_transfers.html",
+                 "partials/home_queue.html", "partials/person_queue.html"):
         assert "safe_to_close.sentence" in (TEMPLATES / name).read_text(encoding="utf-8")
 
 
@@ -185,12 +202,15 @@ def test_a_wired_computer_says_where_the_setting_lives(env):
     """CR-88: wired or remote is that COMPUTER's own setting, and the greyed
     grid never said so. CR-95's rule is untouched - only a wired cell that is
     NOT ticked is disabled."""
+    route = "Change it on that computer: tray, Settings, This computer."
     grid = (TEMPLATES / "admin_assignments.html").read_text(encoding="utf-8")
-    assert grid.count("Change it on that computer: tray, Settings, THIS COMPUTER.") == 3
-    assert '<span class="muted mono-sm">set on that computer</span>' in grid
+    # The column head, the disabled cell and the stale-tick cell.
+    assert grid.count(route) == 3
+    assert "<b>wired</b>: set on that computer</span>" in grid
     assert "{% if wired and not ticked %}disabled" in grid
-    rail = (TEMPLATES / "partials" / "sidebar.html").read_text(encoding="utf-8")
-    assert "Change it on that computer: tray, Settings, THIS COMPUTER." in rail
+    # The classic sidebar's rail is the home page's project tree now.
+    tree = (TEMPLATES / "partials" / "projects_tree.html").read_text(encoding="utf-8")
+    assert route in tree
 
 
 # ------------------------------------------------------------------ REL-11
@@ -231,11 +251,15 @@ def test_the_four_long_controls_on_packages_show_that_they_are_working():
             assert 'hx-disabled-elt="this"' in head, route
     # CR-335 (2026-09-25) gave every MAKE CURRENT form (the held row, its
     # MAKE CURRENT ANYWAY, the vendor row and its override) the same busy
-    # state, so the panel now carries eight, not four.
-    assert source.count('hx-indicator="this"') == 8
-    assert "[ ASKING THAT COMPUTER... ]" in source
-    css = (STATIC / "style.css").read_text(encoding="utf-8")
-    assert ".htmx-request .btn" in css and "form.htmx-request" in css
+    # state, so the panel carried eight, not four; the terminal row's "roll
+    # back to" shortcut (5.3, wave 6) is the ninth.
+    assert source.count('hx-indicator="this"') == 9
+    assert '<span class="busy-t">asking that computer</span>' in source
+    # The busy word is shown by the in-flight class htmx puts on the form.
+    css = (STATIC / "cc" / "settings_fleet.css").read_text(encoding="utf-8")
+    assert ".sf-pkg form.htmx-request .key .busy-t { display: inline; }" in css
+    assert ".sf-pkg form.htmx-request .key .t { display: none; }" in css
+    assert '<div class="admin-packages-box sf-pkg' in source
 
 
 # ------------------------------------------------------------------ REL-16
@@ -263,18 +287,19 @@ def test_a_recalled_build_of_any_kind_can_be_rolled_back(env):
                            session_is_admin=True,
                            feed_interval_seconds=86400.0,
                            feed_next_check_seconds=None)
-    assert "[ ROLL THE FLEET BACK ]" in body
+    assert '<span class="t">roll the fleet back</span>' in body
     assert 'value="1.0.39"' in body  # the option list is that kind's, not companion's
 
 
 # ------------------------------------------------------------------- RES-6
 
+# The terminal tag tones: green -> ok, amber -> warn, red -> err.
 @pytest.mark.parametrize("state,colour,label", [
-    ("running", "green", "[ CARDS"),
-    ("refused", "amber", "[ CARDS REFUSED"),
-    ("unreachable", "amber", "[ CARDS OFFLINE"),
-    ("stopped", "red", "[ CARDS STOPPED"),
-    ("credential_refused", "red", "[ CARDS SIGNED OUT"),
+    ("running", "ok", "cards: FF5 CUT"),
+    ("refused", "warn", "cards refused"),
+    ("unreachable", "warn", "cards offline"),
+    ("stopped", "err", "cards stopped"),
+    ("credential_refused", "err", "cards signed out"),
 ])
 def test_the_cards_chip_reads_the_state_not_the_connection(env, state, colour, label):
     """`connected` stayed true through a dead loop and through hours of 401s,
@@ -290,9 +315,10 @@ def test_the_cards_chip_reads_the_state_not_the_connection(env, state, colour, l
         }
 
     body = render_grid(conn, mutate)
-    assert label in body
-    assert f'class="chip {colour}"' in body
-    assert "the dashboard answered HTTP 401" in body
+    tag = re.search(r'<span class="tag ' + colour + r'" title="([^"]*)"><span class="w">'
+                    + re.escape(label), body)
+    assert tag, (state, colour, label)
+    assert "the dashboard answered HTTP 401" in tag.group(1)
 
 
 def test_an_older_companion_still_reads_as_running(env):
@@ -305,8 +331,8 @@ def test_an_older_companion_still_reads_as_running(env):
                                             "timeline": "FF5 CUT", "version": 5}
 
     body = render_grid(conn, mutate)
-    assert "[ CARDS: FF5 CUT v5 ]" in body
-    assert 'class="chip green"' in body
+    assert re.search(r'<span class="tag ok" title="[^"]*"><span class="w">cards: FF5 CUT v5</span>',
+                     body)
 
 
 @pytest.mark.parametrize("block", [
@@ -322,7 +348,7 @@ def test_a_machine_with_no_cards_role_gets_no_chip(env, block):
     same answer as no detail at all."""
     _, conn = env
     body = render_grid(conn, lambda e: e["capabilities"].update({"cards_agent": block}))
-    assert "[ CARDS" not in body
+    assert '<span class="w">cards' not in body
 
 
 # ---------------------------------------------------------------- DCORE-16
@@ -333,11 +359,13 @@ def test_a_held_sharing_change_is_rendered(env):
     _, conn = env
     notes = [{"at": dbmod.utcnow_iso(),
               "note": "applied 9 of 40; syncthing refused the rest"}]
-    grid = ui.templates.env.get_template("partials/collector_health.html").render(
-        fleet={"collector": {"kinds": [], "enforce_plan": None,
-                             "enforce_notes": notes, "collector_stale": False}},
+    # The collector's panel is on Health now (partials/health_collector.html,
+    # the terminal twin of the classic collector_health.html).
+    health = ui.templates.env.get_template("partials/health_collector.html").render(
+        collector={"kinds": [], "enforce_plan": None,
+                   "enforce_notes": notes, "collector_stale": False},
         session_is_admin=True)
-    assert "Sharing change held: applied 9 of 40" in grid
+    assert "Sharing change held: applied 9 of 40" in health
     source = (TEMPLATES / "partials" / "project_detail.html").read_text(encoding="utf-8")
     assert "Sharing change held:" in source
     assert "enforce_notes | default([])" in source
@@ -356,7 +384,7 @@ def test_clips_waiting_for_resolve_are_on_the_grid(env):
                                "pending": 8, "at": dbmod.utcnow_iso()}
 
     body = render_grid(conn, waiting)
-    assert "[ YOUTUBE CLIPS WAITING FOR RESOLVE: 8 ]" in body
+    assert '<span class="w">youtube clips waiting for resolve: 8</span>' in body
     assert "waiting to go into Resolve (Resolve is closed)" in body
 
     def gave_up(e):
@@ -365,8 +393,8 @@ def test_clips_waiting_for_resolve_are_on_the_grid(env):
                                "at": dbmod.utcnow_iso()}
 
     body = render_grid(conn, gave_up)
-    assert "[ YOUTUBE IMPORT GAVE UP ]" in body
+    assert '<span class="w">youtube import gave up</span>' in body
     assert "this project has no server folder yet" in body
 
     # A companion that does not send the section renders nothing at all.
-    assert "YOUTUBE" not in render_grid(conn)
+    assert "youtube" not in render_grid(conn).lower()

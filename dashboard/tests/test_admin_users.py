@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -118,10 +120,13 @@ def test_a_truenas_blip_does_not_hide_the_device_approval_half(env):
 
     panel = client.get("/partials/admin/users")
     assert panel.status_code == 200
-    assert new_id in panel.text and "[ APPROVE ]" in panel.text
+    assert new_id in panel.text
+    # ...with its approve key on that device's row
+    assert re.search(r'name="device_id" value="' + re.escape(new_id) + r'".*?'
+                     r'<span class="t">approve</span>', panel.text, re.S)
     # ...and the missing half says so rather than claiming there are none
-    assert "account list unavailable" in panel.text
-    assert "no editor accounts yet" not in panel.text
+    assert "account list is unavailable" in panel.text
+    assert "no editor accounts yet" not in panel.text.lower()
 
 
 def test_a_syncthing_blip_does_not_hide_the_account_half(env):
@@ -132,9 +137,12 @@ def test_a_syncthing_blip_does_not_hide_the_account_half(env):
     body = client.get("/api/v1/admin/users").json()
     assert body["syncthing_error"] and body["truenas_error"] is None
     panel = client.get("/partials/admin/users")
-    assert "device list unavailable" in panel.text
+    assert "device list is unavailable" in panel.text
     assert "none pending" not in panel.text
-    assert "[ CREATE NEW EDITOR ACCOUNT ]" in panel.text
+    assert "no device is waiting" not in panel.text.lower()
+    # The account half still answers, create form and all.
+    assert 'data-win="create-nas"' in panel.text
+    assert 'hx-post="/partials/admin/users/create"' in panel.text
 
 
 def test_create_editor_account_end_to_end(env):
@@ -369,8 +377,9 @@ def test_admin_users_page_renders_for_admin(env):
     as_user(client, "owen")
     page = client.get("/admin/users")
     assert page.status_code == 200
-    assert "[ USERS ]" in page.text
-    assert "[ DEVICES AWAITING APPROVAL ]" in page.text
+    assert re.search(r"<h1>.*?USERS</span></h1>", page.text, re.S)
+    assert 'data-win="devices"' in page.text
+    assert 'id="win-devices-t">devices<span aria-hidden="true">_</span>' in page.text
 
 
 # -- htmx partials (ui.py) -- these wrap blocking TrueNAS/Syncthing calls in

@@ -1,550 +1,308 @@
-<div class="detail-head">
-  <span class="dot big {{ view.fleet_status }}">●</span>
-  <h1>FLEET OVERVIEW</h1>
-</div>
-<div class="rule"></div>
+{# The computers window's BODY, terminal look (UI redesign port phase 2; plan
+   3.1, 5.1). Served by /partials/fleet (the 15 s poll into .fleet-grid-wrap)
+   and by RESUME, ASK THIS COMPUTER WHY and FORGET, whose answers swap the
+   same wrapper. The frame and its bar live in cc/fleet.html.
 
-{# UX-20 (resilience sweep 2026-08-28): a button on this grid that acted on
-   nothing. [ RESUME ] used to re-render the whole grid looking fine after
-   naming a computer that had been renamed or forgotten, so the proxies it
-   was meant to restart stayed stopped. #}
+   - The fleet banners and LOST COMPUTERS stay HERE, inside the polled body
+     (5.1, wave 5): FORGET targets `closest .fleet-grid-wrap`, and a banner
+     moved out of this body would freeze at first paint.
+   - Each row keeps health.fleet_headline's text, and the row LED and lane
+     tones come from its level, never recomputed from lanes or silence: a
+     computer with nothing ticked stays muted however long it is quiet.
+   - The row's issues are the chips that sat behind the classic DETAILS,
+     worst first (D11: one list, no variant switcher); the whole detail list
+     and the admin keys are in a row expander (<details data-key>), which the
+     shell's keeper holds open across the poll.
+   - The readouts and the bar meta come back out of band, and only on an
+     htmx answer (3.1): on first paint the page draws them itself. #}
+{% import "partials/home_macros.html" as hm with context %}
+{# Only when the answer carries the projects view: RESUME, ASK WHY and
+   FORGET answer with the fleet alone, and readouts drawn from half the
+   data would flash wrong numbers until the next beat. #}
+{% if oob and view is defined and view %}
+{% set ro = home_readouts(request, fleet, view) %}
+<div id="home-readouts" hx-swap-oob="innerHTML">{{ hm.readouts_inner(ro) }}</div>
+<span id="computers-meta" hx-swap-oob="innerHTML">{{ hm.computers_meta(ro) }}</span>
+{% endif %}
+
 {% if error is defined and error %}
-{# DUI-6: `error-banner` is what static/htmx_errors.js moves next to the button
-   that caused it. This panel swaps outerHTML, which preserves scroll, so a
-   refusal used to render a screen or two above the click that earned it. An
-   error with no control behind it stays here, which is where it belongs. #}
-<div class="banner error-banner">▲ {{ error }}</div>
+<div class="note err error-banner" role="alert">{{ error }}</div>
 {% endif %}
 
-<div class="cards">
-  {% for p in view.projects %}
-    <a class="card" href="/project/{{ p.slug }}">
-      <div><span class="dot {{ p.status }}">●</span> <span class="who">{{ p.label }}</span></div>
-      <div class="mono-sm muted">{{ p.editors | length }} editor{{ "s" if p.editors | length != 1 }}
-        {% if p.editors_behind %} · {{ p.editors_behind }} behind · {{ p.need_bytes_total | human_bytes }} queued{% else %} · all synced{% endif %}
-      </div>
-    </a>
-  {% else %}
-    <div class="muted">no projects yet, waiting for first Syncthing poll</div>
-  {% endfor %}
-</div>
-
-{# Safety alarms (COMMERCIAL_READINESS.md item 9, 2026-08-17). ABOVE the
-   companion table, not a chip inside it: a machine that has stopped
-   downloading proxies, or that an editor has halted, looks completely
-   healthy on every other signal this page has -- so the fleet banner is the
-   only thing that makes it visible without reading every row. #}
+{% set banners %}
 {% if fleet.fleet_halt and fleet.fleet_halt.active %}
-<div class="banner alarm">⛔ SYNCING IS STOPPED ON EVERY COMPUTER: an admin stopped the whole fleet.
+<div class="alertline err">{{ hm.tag('err', 'stopped', solid=true) }}<span class="grow">Syncing is stopped on every computer: an admin stopped the whole fleet.
   {% if fleet.fleet_halt.reason %}{{ fleet.fleet_halt.reason }}{% endif %}
-  <span class="mono-sm muted">set by {{ fleet.fleet_halt.set_by }} {{ fleet.fleet_halt.set_at | ago }}</span>
-</div>
+  <span class="dim">set by {{ fleet.fleet_halt.set_by }} {{ fleet.fleet_halt.set_at | ago }}</span></span></div>
 {% endif %}
-{# UX-16 / UX-10 (usability sweep 2026-09-03): the product says "computer"
-   to a person, "machine" only in code, routes and the database. And "(s)" is
-   not a word: the count is known here, so the noun agrees with it. #}
 {% if fleet.breaker_tripped %}
-<div class="banner alarm">⛔ PROXY DOWNLOAD STOPPED on {{ fleet.breaker_tripped | length }} computer{{ "s" if fleet.breaker_tripped | length != 1 }}:
+<div class="alertline err">{{ hm.tag('err', 'stopped', solid=true) }}<span class="grow">Proxy download stopped on {{ fleet.breaker_tripped | length }} computer{{ "s" if fleet.breaker_tripped | length != 1 }}:
   {% for m in fleet.breaker_tripped %}{{ m.editor }}/{{ m.machine }}{{ ", " if not loop.last }}{% endfor %}.
-  Check the server, then use [ RESUME ] below (or have each editor use the tray's
-  "Resume proxy download").
-</div>
+  <span class="dim">Check the server, then press "Resume" on that computer's row (or have each editor use the tray's "Resume proxy download").</span></span></div>
 {% endif %}
 {% if fleet.halted %}
-<div class="banner alarm">⛔ SYNCING IS PAUSED on {{ fleet.halted | length }} computer{{ "s" if fleet.halted | length != 1 }}, by whoever is sitting at {{ "it" if fleet.halted | length == 1 else "them" }}:
-  {% for m in fleet.halted %}{{ m.editor }}/{{ m.machine }}{{ ", " if not loop.last }}{% endfor %}.
-</div>
+<div class="alertline err">{{ hm.tag('err', 'paused', solid=true) }}<span class="grow">Syncing is paused on {{ fleet.halted | length }} computer{{ "s" if fleet.halted | length != 1 }}, by whoever is sitting at {{ "it" if fleet.halted | length == 1 else "them" }}:
+  {% for m in fleet.halted %}{{ m.editor }}/{{ m.machine }}{{ ", " if not loop.last }}{% endfor %}.</span></div>
 {% endif %}
-{# SYS-3 (resilience sweep 2026-08-28). Companion telemetry this dashboard
-   accepts and does not read. Three times now a section has ridden every
-   report for months and reached nobody, and every time it was found by a
-   human reading the source. This banner is what makes the fourth one
-   announce itself. It is not an outage, so it is a notice and not an alarm. #}
 {% if fleet.ignored_report_sections %}
-<div class="banner">ℹ️ [ {{ fleet.ignored_report_sections.sections | length }} REPORT SECTION{{ "S" if fleet.ignored_report_sections.sections | length != 1 }} IGNORED:
-  {% for name, s in fleet.ignored_report_sections.sections | dictsort %}{{ name }}{{ ", " if not loop.last }}{% endfor %} ]
-  <span class="mono-sm muted">Companions are computing and sending this and the dashboard is throwing it away.
+<div class="alertline">{{ hm.tag('warn', 'ignored') }}<span class="grow">{{ fleet.ignored_report_sections.sections | length }} report section{{ "s" if fleet.ignored_report_sections.sections | length != 1 }} ignored:
+  {% for name, s in fleet.ignored_report_sections.sections | dictsort %}{{ name }}{{ ", " if not loop.last }}{% endfor %}.
+  <span class="dim">Companions are computing and sending this and the dashboard is throwing it away.
   Last seen {{ fleet.ignored_report_sections.at | ago }} from
-  {% for name, s in fleet.ignored_report_sections.sections | dictsort %}{% for m in s.machines %}{{ m }}{{ ", " if not loop.last }}{% endfor %}{{ "; " if not loop.last }}{% endfor %}.</span>
-</div>
+  {% for name, s in fleet.ignored_report_sections.sections | dictsort %}{% for m in s.machines %}{{ m }}{{ ", " if not loop.last }}{% endfor %}{{ "; " if not loop.last }}{% endfor %}.</span></span></div>
 {% endif %}
-{# The COLLECTOR's own brakes (DASH-3 / DASH-4, resilience sweep 2026-08-28).
-   Both of these used to go to the container log alone, and both are states in
-   which every poll still reports ok while nothing is being applied: an admin
-   unticks a project to stop an editor filling their drive and the untick sits
-   there. Admin-only, because api.py's _scope_editors_view drops the block for
-   everyone else. #}
 {% if fleet.collector and fleet.collector.enforce_refusal %}
-<div class="banner alarm">⛔ {{ fleet.collector.enforce_refusal.count }} SHARE REMOVAL{{ "S" if fleet.collector.enforce_refusal.count != 1 }} REFUSED:
-  shares are FROZEN. No untick is being applied on
+<div class="alertline err">{{ hm.tag('err', 'refused', solid=true) }}<span class="grow">{{ fleet.collector.enforce_refusal.count }} share removal{{ "s" if fleet.collector.enforce_refusal.count != 1 }} refused:
+  shares are frozen. No untick is being applied on
   {{ fleet.collector.enforce_refusal.folders | length }} folder{{ "s" if fleet.collector.enforce_refusal.folders | length != 1 }},
   {{ fleet.collector.enforce_refusal.devices | length }} computer{{ "s" if fleet.collector.enforce_refusal.devices | length != 1 }}. Approve the pending
-  devices (Settings, then USERS), then this clears itself on the next cycle. To allow a
+  devices (Settings, then Users), then this clears itself on the next cycle. To allow a
   removal this large deliberately, ask whoever installed this server to raise the limit
   ({{ fleet.collector.enforce_refusal.limit }}): it is a container setting, not something
   this page can change.
-  <span class="mono-sm muted">refused {{ fleet.collector.enforce_refusal.at | ago }}</span>
-</div>
+  <span class="dim">refused {{ fleet.collector.enforce_refusal.at | ago }}</span></span></div>
 {% endif %}
 {% if fleet.collector and fleet.collector.deactivation_refusal %}
-<div class="banner alarm">⛔ {{ fleet.collector.deactivation_refusal.message }}.
+<div class="alertline err">{{ hm.tag('err', 'refused', solid=true) }}<span class="grow">{{ fleet.collector.deactivation_refusal.message }}.
   The project list is being kept exactly as it was. Check Syncthing on the server: a
   config it cannot load answers with zero folders.
-  <span class="mono-sm muted">refused {{ fleet.collector.deactivation_refusal.at | ago }}</span>
-</div>
+  <span class="dim">refused {{ fleet.collector.deactivation_refusal.at | ago }}</span></span></div>
 {% endif %}
-
-{# DASH-2 (resilience sweep 2026-08-28): computers that ARE reporting and are
-   being turned away. Rotating DASH_SESSION_SECRET 401s the whole fleet at
-   once, and the grid's only symptom used to be rows going stale -- which is
-   exactly what a switched-off machine looks like. #}
 {% if fleet.report_refused %}
-<div class="banner alarm">⛔ {{ fleet.report_refused | length }} COMPUTER{{ "S" if fleet.report_refused | length != 1 }} {{ "IS" if fleet.report_refused | length == 1 else "ARE" }} BEING REFUSED:
+<div class="alertline err">{{ hm.tag('err', 'refused', solid=true) }}<span class="grow">{{ fleet.report_refused | length }} computer{{ "s" if fleet.report_refused | length != 1 }} {{ "is" if fleet.report_refused | length == 1 else "are" }} being refused:
   {% for m in fleet.report_refused %}{{ m.editor }}/{{ m.machine }}{{ ", " if not loop.last }}{% endfor %}.
   They are reporting and the dashboard is turning them away{% if fleet.report_refused[0].reason %} ({{ fleet.report_refused[0].reason }}){% endif %}.
-  Have each editor click "Sign in..." on that computer's tray.
-</div>
+  Have each editor click "Sign in..." on that computer's tray.</span></div>
 {% endif %}
 {% if fleet.identity_key_drain and fleet.identity_key_drain.count %}
-<div class="banner">ℹ️ [ {{ fleet.identity_key_drain.count }} COMPUTER{{ "S" if fleet.identity_key_drain.count != 1 }} STILL ON A RETIRED SIGNING KEY ]
-  <span class="mono-sm muted">They are accepted because DASH_SESSION_SECRET_PREVIOUS still carries the old key:
+<div class="alertline">{{ hm.tag('hi', 'old key') }}<span class="grow">{{ fleet.identity_key_drain.count }} computer{{ "s" if fleet.identity_key_drain.count != 1 }} still on a retired signing key.
+  <span class="dim">They are accepted because DASH_SESSION_SECRET_PREVIOUS still carries the old key:
   {% for m in fleet.identity_key_drain.machines %}{{ m }}{{ ", " if not loop.last }}{% endfor %}.
-  Each one clears when its editor signs in again at the tray. Remove that variable once this reaches zero.</span>
-</div>
+  Each one clears when its editor signs in again at the tray. Remove that variable once this reaches zero.</span></span></div>
 {% endif %}
-{# REL-11: a site whose update check has been failing for weeks looks exactly
-   like a site where nothing has been published. #}
 {% if fleet.feed_alarm and fleet.feed_alarm.stale %}
-<div class="banner">▲ [ NO SUCCESSFUL UPDATE CHECK FOR {{ fleet.feed_alarm.age_days }} DAYS ]
-  <span class="mono-sm muted">last checked {{ fleet.feed_alarm.last_checked_at | ago }}{% if fleet.feed_alarm.last_error %} - {{ fleet.feed_alarm.last_error }}{% endif %}.
-  This site is not receiving fixes, which looks the same as no fixes having been published.</span>
-</div>
+<div class="alertline">{{ hm.tag('warn', 'no updates') }}<span class="grow">No successful update check for {{ fleet.feed_alarm.age_days }} days.
+  <span class="dim">last checked {{ fleet.feed_alarm.last_checked_at | ago }}{% if fleet.feed_alarm.last_error %} - {{ fleet.feed_alarm.last_error }}{% endif %}.
+  This site is not receiving fixes, which looks the same as no fixes having been published.</span></span></div>
 {% endif %}
 {% if fleet.feed_alarm and fleet.feed_alarm.runtime_mismatch %}
-<div class="banner">▲ [ EVERY DASHBOARD BUILD ON OFFER NEEDS A NEW CONTAINER IMAGE ]
-  <span class="mono-sm muted">{% for v in fleet.feed_alarm.runtime_mismatch.versions %}{{ v }}{{ ", " if not loop.last }}{% endfor %}
+<div class="alertline">{{ hm.tag('warn', 'new image') }}<span class="grow">Every dashboard build on offer needs a new container image.
+  <span class="dim">{% for v in fleet.feed_alarm.runtime_mismatch.versions %}{{ v }}{{ ", " if not loop.last }}{% endfor %}
   {{ "brings" if fleet.feed_alarm.runtime_mismatch.versions | length == 1 else "bring" }} dependencies this container does not have,
   so no update can be applied from this dashboard. Apply it in your NAS's own UI:
-  {{ fleet.feed_alarm.runtime_mismatch.nas_hint }}.</span>
-</div>
+  {{ fleet.feed_alarm.runtime_mismatch.nas_hint }}.</span></span></div>
 {% endif %}
+{% endset %}
+{% if banners | trim %}<div class="grid-banners">{{ banners }}</div>{% endif %}
 
-<div class="side-head" style="margin-top:2rem">[ COMPANIONS ]</div>
-<div class="rule"></div>
-{# An editor sees their own machines; the rest of the fleet is a COUNT, never a
-   roster (COMMERCIAL_READINESS.md §C L1, 2026-08-17 -- api.py's
-   _scope_editors_view). An admin has nothing hidden, so this line does not
-   appear for them. #}
 {% if fleet.machines_hidden %}
-<div class="muted">Showing your computers. {{ fleet.machines_hidden }} other computer{{ "s" if fleet.machines_hidden != 1 }} in
+<div class="hint grid-scope">Showing your computers. {{ fleet.machines_hidden }} other computer{{ "s" if fleet.machines_hidden != 1 }} in
   the fleet: {{ fleet.summary.machines_unhealthy }} unhealthy,
   {{ fleet.summary.machines_outdated }} on an old build.</div>
 {% endif %}
+
 {% if fleet.editors %}
-{# The densest table on the site. On a phone it STACKS (MOBILE_PLAN.md M2,
-   2026-08-30): every row becomes a card and every cell carries its own
-   heading in data-label, because the alternative -- a horizontal scroll --
-   puts the chips that say what is wrong off the right-hand edge, and "is
-   anything red" is the whole reason to open this page on a phone. #}
-{# The .scroll-x wrapper (MOBILE_PLAN.md §3.2, sweep round 2 2026-08-30):
-   the phone layer stops at 600 px, so at 768 this is still a table and it
-   took the whole page sideways with it. In a wrapper the scroll is the
-   element's own, which is what the vocabulary allows. #}
-{# ONE ROW, ONE HEADLINE (fleet-grid declutter 2026-09-11). The owner, of
-   this section: "this whole section is also very visually cluttered, clean
-   it up". A row used to be a red sentence, three lane chips, a Resolve
-   line, a dozen more chips with two buttons in among them, an expander and
-   a version, all at once -- so the one row that needed reading looked like
-   the nine that did not.
-
-   The shape now: a headline (health.fleet_headline ranks it, this template
-   ranks nothing), the three lanes in ONE FIXED ORDER so the eye finds the
-   same lane in the same place on every row, everything else behind
-   [ DETAILS ], and the buttons in a column of their own. Every chip, route,
-   form field and title that was here is still here; what changed is where
-   it is drawn. #}
-<div class="scroll-x"><table class="editors stack">
-  <thead><tr><th></th><th>EDITOR</th><th>COMPUTER</th><th><a href="{{ GLOSSARY_HREF }}" title="what these words mean">SYNC</a></th><th>VERSION</th><th>LAST REPORT</th><th></th></tr></thead>
-  <tbody>
-  {% for e in fleet.editors %}
-    <tr>
-      <td data-label="STATUS"><span class="dot {{ e.status }}"{% if e.status_reason %} title="{{ e.status_reason }}"{% endif %}>●</span></td>
-      {# Account page 2026-09-25: the display name, with the sign-in name
-         muted beneath whenever the two differ (6.2). #}
-      {% set who_name = e.editor_username | shown_as %}
-      <td class="who" data-label="EDITOR" title="signed in as {{ e.editor_username }}">{{ who_name }}
-        {% if who_name != e.editor_username %}<div class="muted mono-sm">{{ e.editor_username }}</div>{% endif %}
-        {% if not e.verified %}<span class="chip amber" title="this companion has not signed in with verified credentials">[ UNVERIFIED ]</span>{% endif %}
-        {# DCORE-4 (2026-09-04): a suspended person's computers are turned
-           away and unshared, which on this page looks exactly like a
-           computer somebody switched off. The chip is what tells them
-           apart, and it names the one thing that undoes it. #}
-        {% if e.account_suspended %}<span class="chip amber" title="an admin paused this person on Settings, Users. Their computers are being turned away and their projects are unshared. Their sync plan is kept: RESUME puts it all back.">[ SUSPENDED ]</span>{% endif %}
-      </td>
-      <td class="mono-sm" data-label="COMPUTER">{{ e.machine }}</td>
-      <td class="lane-cell" data-label="SYNC">
-        {# SYS-7 (resilience sweep 2026-08-28), re-ranked 2026-09-11. THE ONE
-           LINE OF THE ROW: composed by health.fleet_headline from states
-           every one of which was already computed somewhere and never
-           composed into words. Before SYS-7 the owner opened this page, read
-           amber, and messaged the editor whose machine was the broken one.
-
-           `muted` covers both kinds of "nothing to chase": a machine syncing
-           normally and a machine with nothing ticked. Nothing ticked is NOT
-           an error (owner, 2026-09-11: "Alex laptop just happens to have no
-           synced projects, not an error") -- red there is what sends an admin
-           chasing a computer that is doing exactly what was planned for it,
-           and it is the commonest sentence on this page. #}
-        {% set hl = e.headline or {} %}
-        <div class="why-line {{ hl.level or "muted" }}"
-             title="reason code: {{ hl.reason }}">{{ hl.text }}
-          <a class="help-link" href="{{ GLOSSARY_HREF }}" title="what these words mean">[ ? ]</a></div>
-        {# THE THREE LANES, always all three, always in this order (upload,
-           proxy download, folder sync). A healthy lane is drawn `quiet`: a
-           row of green boxes stops the eye exactly as well as a red one
-           does, and only one of them should be able to. SYS-1's chip_reason
-           is still the sentence behind a red one -- a stall ("no progress
-           for 47 min"), 15 minutes of silence, or the lane's own error. #}
-        <div class="lane-strip">
-          {% for lane in e.lane_strip %}
-            <span class="chip lane {% if lane.reported is defined and not lane.reported %}unknown{% elif lane.chip == "green" %}quiet{% else %}{{ lane.chip }}{% endif %}" title="{{ lane.label }}: {{ lane.state }}{% if lane.chip_reason %} - {{ lane.chip_reason }}{% elif lane.last_error %} ({{ lane.last_error }}){% endif %}">{{ lane.label }}: {{ lane.state }}{% if lane.chip_reason and "no progress" in lane.chip_reason %} STALLED{% endif %}</span>
-          {% endfor %}
-          {# Transport health (B17): the companion computes this every heavy
-             tick and the server used to drop it, so a lane C riding the
-             public relay pool at 1-5 MB/s looked identical to a merely slow
-             editor. A RELAYED count is a chip because it is a fault; a
-             direct count is the normal case, so it is a muted detail beside
-             the lanes rather than a fourth green box. #}
-          {% if e.transport.relayed %}<span class="chip amber" title="{{ chip_help('relayed', n=e.transport.relayed, at=e.transport.at | ago) }}">[ RELAYED: {{ e.transport.relayed }} ]</span>
-          {% elif e.transport.direct %}<span class="mono-sm muted lane-detail" title="{{ chip_help('direct', n=e.transport.direct, at=e.transport.at | ago) }}">direct:{{ e.transport.direct }}</span>{% endif %}
-        </div>
-        {# EVERYTHING ELSE, COLLAPSED. `notes` (health.detail_notes, counted
-           in ui._fleet_view) is what stops a fold from hiding a real problem
-           in silence: the count is on the closed summary and its title names
-           each one. data-key so base.html keeps an admin's choice across the
-           15 s poll's swap. #}
-        <details class="proj-group row-details" data-key="fleet:details:{{ e.editor_username }}:{{ e.machine }}">
-          <summary><span class="marker">&#9656;</span> [ DETAILS ]
-            {% if e.notes %}<span class="muted" title="{{ e.notes | join('; ') }}">{{ e.notes | length }} note{{ "s" if e.notes | length != 1 }}</span>{% endif %}
-          </summary>
-          <dl class="row-detail-list">
-            {# WHAT IS WRONG. Chips only here: a fact about the machine is a
-               label and a value below, and a chip on a fact is the wall of
-               colour this section was. #}
-            {% set problems %}
-              {# The safety latches, first: they outrank every diagnostic
-                 beside them (COMMERCIAL_READINESS.md item 9). #}
-              {% if e.guard.breaker_tripped %}<span class="chip red" title="{{ chip_help('breaker', reason=e.guard.breaker_reason, at=e.guard.breaker_at | ago) }}">[ PROXY DOWNLOAD STOPPED ITSELF ]</span>{% endif %}
-              {% if e.guard.halt_active %}<span class="chip red" title="{{ e.guard.halt_reason }}">[ {{ "STOPPED BY YOUR ADMIN" if e.guard.halt_scope == "fleet" else "SYNCING PAUSED ON THIS COMPUTER" }} ]</span>{% endif %}
-              {# SYNC-8 (resilience sweep 2026-08-28). What lane C's own state
-                 cannot say is HOW LONG and HOW MANY TRIES: the difference
-                 between "he rebooted" and "that machine has needed a human
-                 since Tuesday". #}
-              {% if e.guard.supervisor_down_since %}{% set engine_extra = (("; " ~ e.guard.supervisor_attempts ~ (" automatic restart attempt has failed" if e.guard.supervisor_attempts == 1 else " automatic restart attempts have failed")) if e.guard.supervisor_attempts else "") ~ ("; automatic restarts are switched off or suppressed on this machine, so nothing is trying" if (e.guard.supervisor_supervising is not none and not e.guard.supervisor_supervising) else "") ~ ((". Last error: " ~ e.guard.supervisor_last_error) if e.guard.supervisor_last_error else "") %}<span class="chip red" title="{{ chip_help('sync_engine_down', since=e.guard.supervisor_down_since, extra=engine_extra) }}">[ SYNC ENGINE DOWN {{ e.guard.supervisor_down_since | ago }}{% if e.guard.supervisor_attempts %}, {{ e.guard.supervisor_attempts }} RESTART{{ "S" if e.guard.supervisor_attempts != 1 }} FAILED{% endif %} ]</span>{% endif %}
-              {# SYS-4 / APP-13: nothing anywhere measured this. A slow clock
-                 makes lane B exclude every file on the NAS (rclone --min-age
-                 reads their age as negative), transfer nothing, exit 0 and
-                 report green. #}
-              {% if e.guard.clock_skew_dir %}<span class="chip red" title="{{ chip_help('clock', abs=e.guard.clock_skew_abs | eta, direction=("ahead of" if e.guard.clock_skew_dir == "AHEAD" else "behind")) }}">[ CLOCK {{ e.guard.clock_skew_abs | eta }} {{ e.guard.clock_skew_dir }} ]</span>{% endif %}
-              {# SYNC-1 / SYS-17: the stall the COMPANION found and killed,
-                 which is the machine that had the evidence. The server's own
-                 detector is the lane chip above. #}
-              {% if e.guard.stalled_lane and e.guard.stall_current %}<span class="chip red" title="{{ chip_help('stalled', lane=e.guard.stalled_lane | lane_word, seconds=e.guard.stalled_seconds, killed=("and was killed" if e.guard.stalled_killed else "and was reported without being killed"), at=e.guard.stalled_at | ago) }}">[ STALLED: {{ e.guard.stalled_lane | lane_word | upper }}{{ ", KILLED" if e.guard.stalled_killed }} ]</span>{% endif %}
-              {# DASH-2: this computer is talking to us and we are refusing
-                 it. On the row as well as in the banner, because the fix is
-                 on THAT machine. #}
-              {% if e.guard.report_refused_at %}<span class="chip red" title="{{ chip_help('report_refused', at=e.guard.report_refused_at | ago, reason=e.guard.report_refused_reason) }}">[ BEING REFUSED: SIGN IN ON ITS TRAY ]</span>{% endif %}
-              {# REL-8: a machine that cannot take a build used to retry for
-                 ever with nobody told. The count separates "has not seen the
-                 push yet" from "has failed this build eight times". #}
-              {# bug-comp-core-1 (2026-09-25): "crash-looped" is the give-up
-                 record a crash-loop revert writes, not a failed download, and
-                 the download advice would send the admin to install by hand
-                 the very build this machine fled. #}
-              {% if e.guard.upgrade_attempts and upgrade_crash_looped(e.guard.upgrade_last_error) %}<span class="chip red" title="{{ chip_help('update_crash_looped', version=(e.guard.upgrade_version or "an update"), when=((", last " ~ (e.guard.upgrade_last_attempt_at | ago)) if e.guard.upgrade_last_attempt_at else "")) }}">[ UPDATE KEPT CRASHING ]</span>
-              {% elif e.guard.upgrade_attempts %}<span class="chip red" title="{{ chip_help('update_failed', version=(e.guard.upgrade_version or "an update"), n=e.guard.upgrade_attempts, when=((", last " ~ (e.guard.upgrade_last_attempt_at | ago)) if e.guard.upgrade_last_attempt_at else ""), why=((": " ~ e.guard.upgrade_last_error) if e.guard.upgrade_last_error else "")) }}">[ UPDATE FAILED x{{ e.guard.upgrade_attempts }} ]</span>{% endif %}
-              {# APP-5: the crash-loop guard put this machine back on its
-                 previous build. The chip goes when the machine is running
-                 something at or above what it fell back from. #}
-              {% if e.guard.upgrade_reverted_from %}<span class="chip amber" title="this computer installed {{ e.guard.upgrade_reverted_from }}, could not start it, and put itself back on {{ e.companion_version }}. That build should not be made current for the fleet.">[ REVERTED FROM {{ e.guard.upgrade_reverted_from }} ]</span>{% endif %}
-              {% if e.guard.folders_unfiltered %}<span class="chip amber" title="{{ chip_help('unfiltered', n=e.guard.folders_unfiltered, names=((": " ~ e.guard.folders_unfiltered_names) if e.guard.folders_unfiltered_names else "")) }}">[ UNFILTERED FOLDERS: {{ e.guard.folders_unfiltered }} ]</span>{% endif %}
-              {% if e.guard.sync_conflicts %}<span class="chip amber" title="{{ chip_help('conflicts', n=e.guard.sync_conflicts) }}">[ CONFLICTS: {{ e.guard.sync_conflicts }} ]</span>{% endif %}
-              {# v38 (wave 4's ingest contract): footage that is on ONE
-                 computer and nowhere else. Every one of these looks like a
-                 perfectly green machine on every other signal here, because
-                 as far as the lanes are concerned there is nothing to move.
-                 Amber rather than red: nothing is broken, something is
-                 unprotected. #}
-              {% if e.guard.resolve_out_of_tree %}<span class="chip amber" title="{{ chip_help('out_of_tree', n=e.guard.resolve_out_of_tree, bad_prefix=((", " ~ e.guard.resolve_bad_prefix ~ " of them under the wrong drive letter") if e.guard.resolve_bad_prefix else ""), at=e.guard.resolve_last_scan_at | ago) }}">[ {{ e.guard.resolve_out_of_tree }} CLIPS OUTSIDE THE TREE ]</span>{% endif %}
-              {% if e.guard.stray_projects_count %}<span class="chip amber" title="{{ chip_help('stray_dirs', n=e.guard.stray_projects_count, bytes=e.guard.stray_projects_bytes | human_bytes) }}">[ {{ e.guard.stray_projects_count }} STRAY PROJECT DIRS ]</span>{% endif %}
-              {% if e.guard.moved_project_dirs_count %}<span class="chip amber" title="{{ e.guard.moved_project_dirs_count }} project folder{{ "s" if e.guard.moved_project_dirs_count != 1 }} on this computer {{ "are" if e.guard.moved_project_dirs_count != 1 else "is" }} not where the tree expects them. Syncing for those projects looks busy and moves nothing. Move it back, or use MOVE ON THE SERVER AND ON EVERY MACHINE on the project page.">[ PROJECT FOLDER MOVED ]</span>{% endif %}
-              {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ chip_help('skipped_exists', n=e.guard.skipped_exists, scope=skipped_scope(e.guard)) }}">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
-              {% if e.transport.orphan_partials %}<span class="chip amber" title="{{ chip_help('orphans', bytes=e.transport.orphan_partial_bytes | human_bytes) }}">[ ORPHANS: {{ e.transport.orphan_partials }} ]</span>{% endif %}
-              {% if e.transport.express_last_error %}<span class="chip amber" title="last express upload failure: {{ e.transport.express_last_error }}">[ EXPRESS UPLOAD FAILED ]</span>
-              {% elif e.transport.express_dropped %}<span class="chip amber" title="{{ e.transport.express_dropped }} file{{ "s" if e.transport.express_dropped != 1 }} dropped by the express upload's batch cap: they still go up on the next periodic pass.">[ EXPRESS DROPPED: {{ e.transport.express_dropped }} ]</span>{% endif %}
-              {# APP-6: crash_report.py writes these and its own docstring
-                 names "the tray stayed up with a dead lane" as the failure to
-                 fix. CR-88 route sweep (2026-09-03): Copy diagnostics is not
-                 a tray menu item any more, so the path comes from one
-                 constant. #}
-              {% if e.guard.crash_count %}<span class="chip amber" title="{{ chip_help('crashes', n=e.guard.crash_count, newest=((" (newest: " ~ e.guard.crash_newest ~ ")") if e.guard.crash_newest else ""), path=COMPANION_DIAGNOSTICS_PATH) }}">[ CRASHES: {{ e.guard.crash_count }} ]</span>{% endif %}
-              {# CYT-3 (2026-09-03): the clips downloaded, landed on disk, and
-                 never reached Resolve - and the importer's whole status
-                 reached NOBODY at either end. `no-project-match` is a
-                 per-machine misconfiguration an admin can fix and the editor
-                 cannot, which is why it belongs on this grid. #}
-              {% if e.youtube_import is defined and e.youtube_import %}
-                {% set yt = e.youtube_import %}
-                {% if yt.pending %}<span class="chip amber" title="{{ chip_help('youtube_import', n=yt.pending,
-                        reason=((" (" ~ yt.reason ~ ")") if yt.reason else ""),
-                        at=(yt.at | ago) if yt.at else "at an unknown time") }}">[ YOUTUBE CLIPS WAITING FOR RESOLVE: {{ yt.pending }} ]</span>
-                {% elif yt.reason and yt.state and yt.state not in ("ok", "idle") %}<span class="chip amber" title="{{ chip_help('youtube_import_gave_up', n=yt.pending or 0, reason=yt.reason,
-                        at=(yt.at | ago) if yt.at else "at an unknown time") }}">[ YOUTUBE IMPORT GAVE UP ]</span>{% endif %}
-              {% endif %}
-              {% if e.proxy.missing %}<span class="chip amber" title="{{ chip_help('need_proxies', n=e.proxy.missing, state=((" (proxy generator: " ~ e.proxy.state ~ ")") if e.proxy.state else ""), left=(("; " ~ e.proxy.left ~ " queued to encode") if e.proxy.left else "")) }}">[ {{ e.proxy.missing }} NEED PROXIES ]</span>{% endif %}
-            {% endset %}
-            {% if problems | trim %}<dt>PROBLEMS</dt><dd>{{ problems }}</dd>{% endif %}
-
-            {# SYS-5 (resilience sweep 2026-08-28): a full drive used to show
-               as red dots with no cause, and "why?" had no answer on any
-               page. Nothing at all for a machine that has not reported a disk
-               section: "could not check" must never render as a green
-               reassurance. #}
-            {% set storage %}
-              {% if e.guard.disk_percent is not none %}{% if e.guard.disk_status != "green" %}<span class="chip {{ e.guard.disk_status }}" title="{{ chip_help('disk', free=e.guard.disk_root_free_bytes | human_bytes, total=e.guard.disk_root_total_bytes | human_bytes, system=(("; its system drive has " ~ (e.guard.disk_system_free_bytes | human_bytes) ~ " free") if e.guard.disk_system_free_bytes is not none else ""), at=e.guard.disk_at | ago) }}">[ DISK {{ "%.0f" | format(e.guard.disk_percent) }}% ]</span>{% else %}<span class="mono-sm muted">disk {{ "%.0f" | format(e.guard.disk_percent) }}% used, {{ e.guard.disk_root_free_bytes | human_bytes }} free</span>{% endif %}{% endif %}
-              {% if e.guard.trash_bytes and e.guard.trash_bytes > 5000000000 %}<span class="chip amber" title="{{ chip_help('trash', n=e.guard.trash_count) }}">[ TRASH: {{ e.guard.trash_bytes | human_bytes }} ]</span>{% endif %}
-              {% if e.guard.ingest_staging_bytes %}<span class="chip amber" title="{{ e.guard.ingest_staging_bytes | human_bytes }} of footage is in this computer's drop folder and has not been filed into a project yet. It is on one disk.">[ INGEST STAGING {{ e.guard.ingest_staging_bytes | human_bytes }} ]</span>{% endif %}
-            {% endset %}
-            {% if storage | trim %}<dt>STORAGE</dt><dd>{{ storage }}</dd>{% endif %}
-
-            {# comp-app-2 (bug hunt 2026-09-11): the nine wave-3
-               `resolve_health` fields. The companion has sent them since
-               2026-09-04 and the report model threw every one away, so
-               "Resolve has been wedged on this call for 40 seconds" and "the
-               attach pass refused 12 clips" arrived and were dropped. NOTHING
-               AT ALL for a machine that has not sent them (an older
-               companion): silence, never a reassuring "connected". #}
-            {% if e.resolve_detail %}{% set rd = e.resolve_detail %}
-            <dt>RESOLVE</dt>
-            <dd>
-              <span class="mono-sm muted">{% if rd.get('connected') is not none %}{{ "connected" if rd.get('connected') else "not connected" }}{% else %}not checked{% endif %}{% if rd.get('project_open') %} · project open: <span class="who">{{ rd.get('project_open') }}</span>{% endif %}{% if rd.get('wedged_seconds') %} · <span class="red">wedged {{ rd.get('wedged_seconds') | round | int }} s{% if rd.get('wedged_call') %} in {{ rd.get('wedged_call') }}{% endif %}</span>{% endif %}{% set pa = rd.get('proxy_attach') or {} %}{% if pa.get('attached') is not none or pa.get('failed') is not none %} · proxies attached {{ pa.get('attached') or 0 }}, failed {{ pa.get('failed') or 0 }}{% if pa.get('why') %} ({{ pa.get('why') }}){% endif %}{% endif %}{% set pg = rd.get('proxy_gaps') or {} %}{% if pg.get('capped') %} · proxy queue capped at {{ pg.get('capped') }}{% endif %}{% if pg.get('low_space') %} · {{ pg.get('low_space') }}{% endif %}{% set st = rd.get('stills') or {} %}{% if st.get('ok') is not none and not st.get('ok') %} · stills: {{ st.get('status') or "not ok" }}{% if st.get('instruction') %} ({{ st.get('instruction') }}){% endif %}{% endif %}</span>
-              {# Behind a count of their own, because either list can be fifty
-                 clips long and this is still a grid cell. #}
-              {# CR-317 (2026-09-24): the missing-clips words depend on the
-                 reporting build. Up to 0.9.75 the list includes clips playing
-                 their proxy, so "Resolve cannot find" was false for all of
-                 them on a remote rig; health.missing_clips_label says why. #}
-              {% for group in [('missing_clips', missing_clips_label(e.companion_version)), ('non_canonical_refused', 'refused: the path is not the canonical one')] %}
-                {% set clips = rd.get(group[0]) or [] %}
-                {% if clips %}
-                <details class="proj-group" data-key="rh:{{ group[0] }}:{{ e.editor_username }}:{{ e.machine }}">
-                  <summary{% if group[0] == 'missing_clips' %} title="{{ missing_clips_help(e.companion_version) }}"{% endif %}><span class="marker">&#9656;</span> {{ clips | length }} clip{{ "s" if clips | length != 1 }} {{ group[1] }}</summary>
-                  <ul class="mono-sm">
-                    {% for c in clips %}<li>{{ c.get('name') or c.get('path') or "?" }}{% if c.get('name') and c.get('path') %} <span class="muted">{{ c.get('path') }}</span>{% endif %}</li>{% endfor %}
-                  </ul>
-                </details>
-                {% endif %}
-              {% endfor %}
-            </dd>
-            {% endif %}
-
-            {# LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.1, 2026-09-25): what this
-               computer does not send, by its own privacy switch or the site's.
-               GREY, never a fault colour, never counted in `notes`, never an
-               alert: somebody chose it, and sync is not affected. Absent (a
-               view built before the fact was attached) is nothing at all. #}
-            {% if e.report_withheld %}
-            <dt>REPORTING</dt>
-            <dd>{% for w in e.report_withheld %}<span class="chip grey" title="This computer does not send this to the dashboard: its own privacy switch (tray, Settings, THIS COMPUTER, PRIVACY) or the site one (Settings, Site, TELEMETRY) is off. Sync is not affected, and nothing here is a fault.">[ NOT REPORTED BY THIS COMPUTER: {{ w.label }} ]</span> {% endfor %}</dd>
-            {% endif %}
-
-            {# WHAT THIS COMPUTER CAN DO (TIMELINE-CARDS-INTO-CCSYNC.md §4.3,
-               2026-08-29): "which machines could take this work" is a
-               question an admin has to be able to answer while the queue is
-               empty, and until phase 0 the GPU probe's answer never left the
-               machine it ran on. A capability is a FACT, so it is a muted
-               value here rather than a chip. #}
-            {% set hardware %}
-              {% if e.capabilities.gpu_present %}<span class="mono-sm muted" title="{{ chip_help('gpu', name=(e.capabilities.gpu_name or "an NVIDIA GPU"), nvenc=(", with nvenc" if e.capabilities.nvenc else ""), at=((" - reported " ~ (e.capabilities.at | ago)) if e.capabilities.at else "")) }}">GPU{% if e.capabilities.gpu_vram_gb %} {{ e.capabilities.gpu_vram_gb | round | int }}G{% endif %}{% if e.capabilities.nvenc %}, nvenc{% endif %}</span>{% endif %}
-              {% if e.capabilities.whisper %}<span class="mono-sm muted" title="{{ chip_help('whisper') }}">whisper</span>{% endif %}
-              {% if e.ingest.warning %}<span class="chip amber" title="{{ e.ingest.warning }}">[ VRAM ]</span>{% endif %}
-              {% if e.music_ingest.warning %}<span class="chip amber" title="{{ e.music_ingest.warning }}">[ MUSIC MODEL ]</span>{% endif %}
-            {% endset %}
-            {% if hardware | trim %}<dt>THIS COMPUTER</dt><dd>{{ hardware }}</dd>{% endif %}
-
-            {# WHAT IT IS DOING FOR THE FLEET: the b-roll and music batches,
-               the job it is holding, the cards role, and whether somebody at
-               the keyboard said "go ahead". The job chip stays a LINK (phase
-               4, 2026-08-30): the chip is where an admin notices a job and
-               the jobs page is where they can see why it is stuck and stop
-               it. The other chips are facts, not places. #}
-            {% set work %}
-              {% if e.ingest.active %}<span class="chip {{ "amber" if e.ingest.warning else "green" }}" title="b-roll batch {{ e.ingest.batch[:8] if e.ingest.batch else "?" }}{% if e.ingest.clip %} - {{ e.ingest.clip }}{% endif %}{% if e.ingest.state %} ({{ e.ingest.state }}{% if e.ingest.gate %}: {{ e.ingest.gate }}{% endif %}){% endif %}{% if e.ingest.tier %} · {{ e.ingest.tier }} model{% endif %}{% if e.ingest.percent %} · {{ e.ingest.percent }}% of this clip{% endif %}{% if e.ingest.failed %} · {{ e.ingest.failed }} failed{% endif %} · reported {{ e.ingest.at | ago }}">[ INDEXING B-ROLL: {{ e.ingest.done }}/{{ e.ingest.total }} ]</span>{% endif %}
-              {# Music ingest (MUSIC_INGEST_PLAN.md step 3, 2026-08-18). Its
-                 OWN chip beside b-roll's rather than one shared one: music
-                 needs no GPU, so a machine can be embedding an album and
-                 indexing a camera card at the same time, and a single chip
-                 could only ever name one of them. #}
-              {% if e.music_ingest.active %}<span class="chip {{ "amber" if e.music_ingest.warning else "green" }}" title="music batch {{ e.music_ingest.batch[:8] if e.music_ingest.batch else "?" }}{% if e.music_ingest.track %} - {{ e.music_ingest.track }}{% endif %}{% if e.music_ingest.state %} ({{ e.music_ingest.state }}{% if e.music_ingest.gate %}: {{ e.music_ingest.gate }}{% endif %}){% endif %}{% if e.music_ingest.percent %} · {{ e.music_ingest.percent }}% of this track{% endif %}{% if e.music_ingest.failed %} · {{ e.music_ingest.failed }} failed{% endif %} · reported {{ e.music_ingest.at | ago }}">[ INDEXING MUSIC: {{ e.music_ingest.done }}/{{ e.music_ingest.total }} ]</span>{% endif %}
-              {% if e.job.id %}<a class="chip green" href="/admin/jobs" title="job #{{ e.job.id }} ({{ e.job.kind }}, {{ e.job.state }}){% if e.job.rel_path %} - {{ e.job.rel_path }}{% endif %}{% if e.job.at %} · last heartbeat {{ e.job.at | ago }}{% endif %}{% if e.job.lease_expires_at %} · lease until {{ e.job.lease_expires_at }}{% endif %}">[ {{ e.job.label or e.job.kind | upper }}: {% if e.job.percent is not none %}{{ e.job.percent }}%{% else %}JOB {{ e.job.id }}{% endif %} ]</a>{% endif %}
-              {# SOMEBODY AT THIS MACHINE SAID "GO AHEAD" (section 10,
-                 2026-08-30). It is the ONE lever this dashboard has no button
-                 for - the person at the keyboard is the only one who knows
-                 whether they mind - so the grid shows what they chose and
-                 nothing here changes it. #}
-              {% if e.volunteering.active %}<span class="chip green" title="{{ chip_help('volunteering', machine=e.machine, until=e.volunteering.until) }}">[ VOLUNTEERING until {{ e.volunteering.until }} ]</span>{% endif %}
-              {# THE TIMELINE CARDS PAGE, served from this computer's Resolve
-                 (TIMELINE-CARDS-INTO-CCSYNC.md phase 2, 2026-08-30). A
-                 machine that REFUSED the role shows nothing here -- the
-                 refusal is in the diagnostics bundle, because "cards_agent is
-                 not set" is true of every computer and would be a chip on all
-                 of them.
-                 RES-6 (2026-09-03): `connected` alone kept this chip GREEN
-                 while the role's loop was dead or had been 401-ing for hours.
-                 The companion sends a STATE now (builder C5, 2026-09-04);
-                 colour comes from the state, and a build that predates it
-                 still reports `connected` and reads as running. #}
-              {% if e.capabilities.cards_agent %}
-                {% set ca = e.capabilities.cards_agent %}
-                {% set cstate = (ca.state | default("", true)) or ("running" if ca.connected else "") %}
-                {# The FIVE health words only (C5, 2026-09-04). The
-                   companion's default block for a machine with no cards role
-                   at all is `state: "disabled"`, and most machines in a fleet
-                   are that. #}
-                {% if cstate in ("running", "stopped", "refused", "credential_refused", "unreachable") %}
-                  {% set ccolour = {"running": "green", "refused": "amber", "unreachable": "amber",
-                                    "stopped": "red", "credential_refused": "red"}[cstate] %}
-                  {% set clabel = {"running": "CARDS", "stopped": "CARDS STOPPED",
-                                   "refused": "CARDS REFUSED", "credential_refused": "CARDS SIGNED OUT",
-                                   "unreachable": "CARDS OFFLINE"}[cstate] %}
-                  {% set cat = ca.last_poll_at | default(none, true) or e.capabilities.at %}
-                  {# `detail` is the exception's own text; `gate_state` is the
-                     older refusal vocabulary and is what an older companion
-                     has instead. The HTTP status is only ever interesting on
-                     a credential refusal. #}
-                  {% set cdetail = (ca.detail | default("", true)) or (ca.gate_state | default("", true)) %}
-                  {% if ca.last_http_status is defined and ca.last_http_status and cstate == "credential_refused" %}{% set cdetail = cdetail ~ " (HTTP " ~ ca.last_http_status ~ ")" %}{% endif %}
-                  <span class="chip {{ ccolour }}" title="{{ chip_help('cards_' ~ cstate,
-                          timeline=((" - " ~ ca.timeline) if ca.timeline else ""),
-                          detail=((" " ~ cdetail) if cdetail else ""),
-                          at=((" - last talked " ~ (cat | ago)) if cat else "")) }}">[ {{ clabel }}{% if cstate == "running" and ca.timeline %}: {{ ca.timeline }}{% endif %}{% if ca.version %} v{{ ca.version }}{% endif %} ]</span>
-                {% endif %}
-              {% endif %}
-            {% endset %}
-            {% if work | trim %}<dt>WORK</dt><dd>{{ work }}</dd>{% endif %}
-          </dl>
-        </details>
-      </td>
-      {# Per-machine build, compared against the current package for THAT
-         machine's own platform (see X-5) -- never the windows one by default. #}
-      <td class="mono-sm muted" data-label="VERSION">{{ e.companion_version or "?" }}
-        {% if e.companion_version_unknown %}<span class="chip amber" title="this companion has never reported its version: it predates the upgrade channel">[ VERSION UNKNOWN ]</span>
-        {% elif e.companion_outdated %}<span class="chip amber" title="{{ e.platform }}: running {{ e.companion_version }}, current is {{ e.current_companion_version }}">[ OUT OF DATE: {{ e.current_companion_version }} ]</span>{% endif %}
-        {# REL-3 (resilience sweep 2026-08-28): this machine is RUNNING a build
-           the vendor recalled. Un-currenting it says nothing about the
-           machines that already took it, which are the ones a recall is
-           about; Packages has the button that rolls them back. #}
-        {% if e.companion_retracted_reason is not none %}<span class="chip red" title="{{ e.companion_retracted_reason or 'no reason given' }}">[ RECALLED BUILD ]</span>{% endif %}
-        {# LG-5 (docs/LEGAL_GAP_FEATURES_PLAN.md §5, 2026-09-25): the licence
-           this computer's companion says was accepted. The VERSION alone is
-           judged (health.eula_status); the sha is shown, never compared.
-           "Not reported" is grey and is never "not accepted": that stays the
-           companion's own licence_pending reason. #}
-        {% if e.eula %}<div class="mono-sm eula-line" title="{% if e.eula.accepted_at %}accepted {{ e.eula.accepted_at }}{% endif %}{% if e.eula.eula_sha256 %} · sha256 {{ e.eula.eula_sha256[:12] }}{% endif %}">{% if e.eula.colour %}<span class="{{ e.eula.colour }}">{{ e.eula.text }}</span>{% else %}<span class="muted">{{ e.eula.text }}</span>{% endif %}{% if e.eula.accepted_at %} <span class="muted">{{ e.eula.accepted_at | ago }}</span>{% endif %}</div>{% endif %}
-      </td>
-      <td class="muted" data-label="LAST REPORT">{{ e.received_at | ago }}</td>
-      {# THE BUTTONS, in a column of their own (2026-09-11). They used to sit
-         between the chips, which is how [ ASK THIS COMPUTER WHY ] came to be
-         a 12 px word between two of them -- the thing MOBILE_PLAN.md's .tap
-         rule exists for. Admin only: a diagnostics bundle names an editor's
-         paths and their Resolve project. Routes, targets and form fields are
-         untouched; UX-20's rule still holds, a button that acted on nothing
-         re-rendered the whole grid looking fine. #}
-      <td class="row-actions" data-label="">
-        {% if session_is_admin %}
-          {# CR-45: only the editor's own tray could clear the breaker, so a
-             remote machine stayed parked until its owner was next at the
-             keyboard. The companion does exactly what the tray click does. #}
-          {% if e.guard.breaker_tripped %}{% if e.guard.resume_requested %}<span class="chip amber" title="waiting for {{ e.machine }} to report in and pick this up">[ RESUME ASKED ]</span>{% else %}<form class="inline-form" hx-post="/partials/admin/machines/resume-lane-b" hx-target="closest .fleet-grid-wrap" hx-swap="innerHTML">
-            <input type="hidden" name="editor" value="{{ e.editor_username }}">
-            <input type="hidden" name="machine" value="{{ e.machine }}">
-            <button class="btn tap" type="submit" title="let this computer start downloading proxies again on its next report. Only once you have checked the server.">[ RESUME ]</button>
-          </form>{% endif %}{% endif %}
-          {# SYS-7: the bundle that answers the question, without an inbound
-             connection to an editor's PC and without asking a non-technical
-             person to click anything on the machine that is broken. The
-             request rides the next report reply; the answer arrives one
-             report interval later. #}
-          {% if e.guard.diagnostics_requested %}<span class="chip amber" title="waiting for {{ e.machine }} to report in and send its diagnostics">[ ASKED WHY ]</span>
-          {% else %}<form class="inline-form" hx-post="/partials/admin/machines/ask-why" hx-target="closest .fleet-grid-wrap" hx-swap="innerHTML">
-            <input type="hidden" name="editor" value="{{ e.editor_username }}">
-            <input type="hidden" name="machine" value="{{ e.machine }}">
-            {# UX-16 (usability sweep 2026-09-03): the button an admin presses
-               says "computer", the word the rest of the product uses to a
-               person. #}
-            <button class="btn tap" type="submit" title="ask this computer to upload its own diagnostics on its next report. It answers within a report interval; nothing connects to it.">[ ASK THIS COMPUTER WHY ]</button>
-          </form>{% endif %}
-          {% if e.diagnostics.id %}<button class="btn tap" hx-get="/partials/admin/diagnostics?editor={{ e.editor_username }}&machine={{ e.machine }}"
-                  hx-target="#fleet-diagnostics" hx-swap="innerHTML"
-                  title="what this computer said, {{ e.diagnostics.received_at | ago }}">[ READ THE ANSWER ]</button>{% endif %}
-        {% endif %}
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table></div>
+<div class="pc head-row" aria-hidden="true"><span></span><span title="The computer's name, and the editor signed in on it.">computer</span><span title="The three ways a computer syncs. Up: sends new original footage to the server. Down: brings the small edit copies (proxies) down. Share: keeps project files the same on every computer.">sync</span><span title="Anything wrong on this computer, worst first.">issues</span><span title="The CC Sync app version on this computer.">version</span><span title="When this computer last sent the server its status.">last report</span></div>
+{% for e in fleet.editors %}
+{% set hl = e.headline or {} %}
+{% set level = hl.level or "muted" %}
+{% set who_name = e.editor_username | shown_as %}
+{# WHAT IS WRONG, worst first: the chips of the classic DETAILS list, as
+   tags. Errors, then warnings. #}
+{% set errs %}
+  {% if e.guard.breaker_tripped %}{{ hm.tag('err', 'proxy download stopped itself', chip_help('breaker', reason=e.guard.breaker_reason, at=e.guard.breaker_at | ago)) }}{% endif %}
+  {% if e.guard.halt_active %}{{ hm.tag('err', 'stopped by your admin' if e.guard.halt_scope == 'fleet' else 'syncing paused on this computer', e.guard.halt_reason) }}{% endif %}
+  {% if e.guard.supervisor_down_since %}{% set engine_extra = (("; " ~ e.guard.supervisor_attempts ~ (" automatic restart attempt has failed" if e.guard.supervisor_attempts == 1 else " automatic restart attempts have failed")) if e.guard.supervisor_attempts else "") ~ ("; automatic restarts are switched off or suppressed on this computer, so nothing is trying" if (e.guard.supervisor_supervising is not none and not e.guard.supervisor_supervising) else "") ~ ((". Last error: " ~ e.guard.supervisor_last_error) if e.guard.supervisor_last_error else "") %}{{ hm.tag('err', 'sync engine down ' ~ (e.guard.supervisor_down_since | ago) ~ ((', ' ~ e.guard.supervisor_attempts ~ ' restart' ~ ('s' if e.guard.supervisor_attempts != 1 else '') ~ ' failed') if e.guard.supervisor_attempts else ''), chip_help('sync_engine_down', since=e.guard.supervisor_down_since, extra=engine_extra)) }}{% endif %}
+  {% if e.guard.clock_skew_dir %}{{ hm.tag('err', 'clock ' ~ (e.guard.clock_skew_abs | eta) ~ ' ' ~ (e.guard.clock_skew_dir | lower), chip_help('clock', abs=e.guard.clock_skew_abs | eta, direction=("ahead of" if e.guard.clock_skew_dir == "AHEAD" else "behind"))) }}{% endif %}
+  {% if e.guard.stalled_lane and e.guard.stall_current %}{{ hm.tag('err', 'stalled: ' ~ (e.guard.stalled_lane | lane_word) ~ (', killed' if e.guard.stalled_killed else ''), chip_help('stalled', lane=e.guard.stalled_lane | lane_word, seconds=e.guard.stalled_seconds, killed=("and was killed" if e.guard.stalled_killed else "and was reported without being killed"), at=e.guard.stalled_at | ago)) }}{% endif %}
+  {% if e.guard.report_refused_at %}{{ hm.tag('err', 'being refused: sign in on its tray', chip_help('report_refused', at=e.guard.report_refused_at | ago, reason=e.guard.report_refused_reason)) }}{% endif %}
+  {% if e.guard.upgrade_attempts and upgrade_crash_looped(e.guard.upgrade_last_error) %}{{ hm.tag('err', 'update kept crashing', chip_help('update_crash_looped', version=(e.guard.upgrade_version or "an update"), when=((", last " ~ (e.guard.upgrade_last_attempt_at | ago)) if e.guard.upgrade_last_attempt_at else ""))) }}
+  {% elif e.guard.upgrade_attempts %}{{ hm.tag('err', 'update failed x' ~ e.guard.upgrade_attempts, chip_help('update_failed', version=(e.guard.upgrade_version or "an update"), n=e.guard.upgrade_attempts, when=((", last " ~ (e.guard.upgrade_last_attempt_at | ago)) if e.guard.upgrade_last_attempt_at else ""), why=((": " ~ e.guard.upgrade_last_error) if e.guard.upgrade_last_error else ""))) }}{% endif %}
+  {% if e.companion_retracted_reason is not none %}{{ hm.tag('err', 'recalled build', e.companion_retracted_reason or 'no reason given') }}{% endif %}
+{% endset %}
+{% set warns %}
+  {% if not e.verified %}{{ hm.tag('warn', 'unverified', 'this companion has not signed in with verified credentials') }}{% endif %}
+  {% if e.account_suspended %}{{ hm.tag('warn', 'suspended', "an admin paused this person on Settings, Users. Their computers are being turned away and their projects are unshared. Their sync plan is kept: Resume puts it all back.") }}{% endif %}
+  {% if e.guard.upgrade_reverted_from %}{{ hm.tag('warn', 'reverted from ' ~ e.guard.upgrade_reverted_from, 'this computer installed ' ~ e.guard.upgrade_reverted_from ~ ', could not start it, and put itself back on ' ~ e.companion_version ~ '. That build should not be made current for the fleet.') }}{% endif %}
+  {% if e.guard.folders_unfiltered %}{{ hm.tag('warn', 'unfiltered folders: ' ~ e.guard.folders_unfiltered, chip_help('unfiltered', n=e.guard.folders_unfiltered, names=((": " ~ e.guard.folders_unfiltered_names) if e.guard.folders_unfiltered_names else ""))) }}{% endif %}
+  {% if e.guard.sync_conflicts %}{{ hm.tag('warn', 'conflicts: ' ~ e.guard.sync_conflicts, chip_help('conflicts', n=e.guard.sync_conflicts)) }}{% endif %}
+  {% if e.guard.resolve_out_of_tree %}{{ hm.tag('warn', e.guard.resolve_out_of_tree ~ ' clips outside the tree', chip_help('out_of_tree', n=e.guard.resolve_out_of_tree, bad_prefix=((", " ~ e.guard.resolve_bad_prefix ~ " of them under the wrong drive letter") if e.guard.resolve_bad_prefix else ""), at=e.guard.resolve_last_scan_at | ago)) }}{% endif %}
+  {% if e.guard.stray_projects_count %}{{ hm.tag('warn', e.guard.stray_projects_count ~ ' stray project dirs', chip_help('stray_dirs', n=e.guard.stray_projects_count, bytes=e.guard.stray_projects_bytes | human_bytes)) }}{% endif %}
+  {% if e.guard.moved_project_dirs_count %}{{ hm.tag('warn', 'project folder moved', e.guard.moved_project_dirs_count ~ ' project folder' ~ ('s' if e.guard.moved_project_dirs_count != 1 else '') ~ ' on this computer ' ~ ('are' if e.guard.moved_project_dirs_count != 1 else 'is') ~ ' not where the tree expects. Syncing for those projects looks busy and moves nothing. Move it back, or use "Move on the server and on every computer" on the project page.') }}{% endif %}
+  {% if e.guard.skipped_exists %}{{ hm.tag('warn', "won't upload: " ~ e.guard.skipped_exists, chip_help('skipped_exists', n=e.guard.skipped_exists, scope=skipped_scope(e.guard))) }}{% endif %}
+  {% if e.transport.relayed %}{{ hm.tag('warn', 'relayed: ' ~ e.transport.relayed, chip_help('relayed', n=e.transport.relayed, at=e.transport.at | ago)) }}{% endif %}
+  {% if e.transport.orphan_partials %}{{ hm.tag('warn', 'orphans: ' ~ e.transport.orphan_partials, chip_help('orphans', bytes=e.transport.orphan_partial_bytes | human_bytes)) }}{% endif %}
+  {% if e.transport.express_last_error %}{{ hm.tag('warn', 'express upload failed', 'last express upload failure: ' ~ e.transport.express_last_error) }}
+  {% elif e.transport.express_dropped %}{{ hm.tag('warn', 'express dropped: ' ~ e.transport.express_dropped, e.transport.express_dropped ~ ' file' ~ ('s' if e.transport.express_dropped != 1 else '') ~ " dropped by the express upload's batch cap: they still go up on the next periodic pass.") }}{% endif %}
+  {% if e.guard.crash_count %}{{ hm.tag('warn', 'crashes: ' ~ e.guard.crash_count, chip_help('crashes', n=e.guard.crash_count, newest=((" (newest: " ~ e.guard.crash_newest ~ ")") if e.guard.crash_newest else ""), path=COMPANION_DIAGNOSTICS_PATH)) }}{% endif %}
+  {% if e.youtube_import is defined and e.youtube_import %}{% set yt = e.youtube_import %}
+    {% if yt.pending %}{{ hm.tag('warn', 'youtube clips waiting for resolve: ' ~ yt.pending, chip_help('youtube_import', n=yt.pending, reason=((" (" ~ yt.reason ~ ")") if yt.reason else ""), at=(yt.at | ago) if yt.at else "at an unknown time")) }}
+    {% elif yt.reason and yt.state and yt.state not in ("ok", "idle") %}{{ hm.tag('warn', 'youtube import gave up', chip_help('youtube_import_gave_up', n=yt.pending or 0, reason=yt.reason, at=(yt.at | ago) if yt.at else "at an unknown time")) }}{% endif %}
+  {% endif %}
+  {% if e.proxy.missing %}{{ hm.tag('warn', e.proxy.missing ~ ' need proxies', chip_help('need_proxies', n=e.proxy.missing, state=((" (proxy generator: " ~ e.proxy.state ~ ")") if e.proxy.state else ""), left=(("; " ~ e.proxy.left ~ " queued to encode") if e.proxy.left else ""))) }}{% endif %}
+  {% if e.guard.disk_percent is not none and e.guard.disk_status != "green" %}{{ hm.tag(hm.chip_tone(e.guard.disk_status), 'disk ' ~ ("%.0f" | format(e.guard.disk_percent)) ~ '%', chip_help('disk', free=e.guard.disk_root_free_bytes | human_bytes, total=e.guard.disk_root_total_bytes | human_bytes, system=(("; its system drive has " ~ (e.guard.disk_system_free_bytes | human_bytes) ~ " free") if e.guard.disk_system_free_bytes is not none else ""), at=e.guard.disk_at | ago)) }}{% endif %}
+  {% if e.guard.trash_bytes and e.guard.trash_bytes > 5000000000 %}{{ hm.tag('warn', 'trash: ' ~ (e.guard.trash_bytes | human_bytes), chip_help('trash', n=e.guard.trash_count)) }}{% endif %}
+  {% if e.guard.ingest_staging_bytes %}{{ hm.tag('warn', 'ingest staging ' ~ (e.guard.ingest_staging_bytes | human_bytes), (e.guard.ingest_staging_bytes | human_bytes) ~ " of footage is in this computer's drop folder and has not been filed into a project yet. It is on one disk.") }}{% endif %}
+  {% if e.ingest.warning %}{{ hm.tag('warn', 'vram', e.ingest.warning) }}{% endif %}
+  {% if e.music_ingest.warning %}{{ hm.tag('warn', 'music model', e.music_ingest.warning) }}{% endif %}
+  {% if e.companion_version_unknown %}{{ hm.tag('warn', 'version unknown', 'this companion has never reported its version: it predates the upgrade channel') }}
+  {% elif e.companion_outdated %}{{ hm.tag('warn', 'out of date', e.platform ~ ': running ' ~ e.companion_version ~ ', current is ' ~ e.current_companion_version) }}{% endif %}
+{% endset %}
+{% set work %}
+  {# The tooltip is what an admin needs before they go and ask: which batch,
+     which clip, which model tier (classic's chip carried it; the first port
+     dropped it, T2 2026-09-25, pinned by test_broll_ingest_report). #}
+  {% if e.ingest.active %}{% set ingest_tip %}b-roll batch {{ e.ingest.batch[:8] if e.ingest.batch else "?" }}{% if e.ingest.clip %} - {{ e.ingest.clip }}{% endif %}{% if e.ingest.state %} ({{ e.ingest.state }}{% if e.ingest.gate %}: {{ e.ingest.gate }}{% endif %}){% endif %}{% if e.ingest.tier %} · {{ e.ingest.tier }} model{% endif %}{% if e.ingest.percent %} · {{ e.ingest.percent }}% of this clip{% endif %}{% if e.ingest.failed %} · {{ e.ingest.failed }} failed{% endif %} · reported {{ e.ingest.at | ago }}{% endset %}{{ hm.tag('warn' if e.ingest.warning else 'hi', 'indexing b-roll: ' ~ e.ingest.done ~ '/' ~ e.ingest.total, ingest_tip) }}{% endif %}
+  {% if e.music_ingest.active %}{% set music_tip %}music batch {{ e.music_ingest.batch[:8] if e.music_ingest.batch else "?" }}{% if e.music_ingest.track %} - {{ e.music_ingest.track }}{% endif %}{% if e.music_ingest.state %} ({{ e.music_ingest.state }}{% if e.music_ingest.gate %}: {{ e.music_ingest.gate }}{% endif %}){% endif %}{% if e.music_ingest.percent %} · {{ e.music_ingest.percent }}% of this track{% endif %}{% if e.music_ingest.failed %} · {{ e.music_ingest.failed }} failed{% endif %} · reported {{ e.music_ingest.at | ago }}{% endset %}{{ hm.tag('warn' if e.music_ingest.warning else 'hi', 'indexing music: ' ~ e.music_ingest.done ~ '/' ~ e.music_ingest.total, music_tip) }}{% endif %}
+  {% if e.job.id %}<a class="tag hi" href="/admin/jobs" title="job #{{ e.job.id }} ({{ e.job.kind }}, {{ e.job.state }}){% if e.job.rel_path %} - {{ e.job.rel_path }}{% endif %}{% if e.job.at %} · last heartbeat {{ e.job.at | ago }}{% endif %}"><span class="w">{{ (e.job.label or e.job.kind) | lower }}: {% if e.job.percent is not none %}{{ e.job.percent }}%{% else %}job {{ e.job.id }}{% endif %}</span></a>{% endif %}
+  {% if e.volunteering.active %}{{ hm.tag('ok', 'volunteering until ' ~ e.volunteering.until, chip_help('volunteering', machine=e.machine, until=e.volunteering.until)) }}{% endif %}
+  {% if e.capabilities.cards_agent %}
+    {% set ca = e.capabilities.cards_agent %}
+    {% set cstate = (ca.state | default("", true)) or ("running" if ca.connected else "") %}
+    {% if cstate in ("running", "stopped", "refused", "credential_refused", "unreachable") %}
+      {% set ctone = {"running": "ok", "refused": "warn", "unreachable": "warn", "stopped": "err", "credential_refused": "err"}[cstate] %}
+      {% set clabel = {"running": "cards", "stopped": "cards stopped", "refused": "cards refused", "credential_refused": "cards signed out", "unreachable": "cards offline"}[cstate] %}
+      {% set cat = ca.last_poll_at | default(none, true) or e.capabilities.at %}
+      {% set cdetail = (ca.detail | default("", true)) or (ca.gate_state | default("", true)) %}
+      {% if ca.last_http_status is defined and ca.last_http_status and cstate == "credential_refused" %}{% set cdetail = cdetail ~ " (HTTP " ~ ca.last_http_status ~ ")" %}{% endif %}
+      {{ hm.tag(ctone, clabel ~ ((': ' ~ ca.timeline) if cstate == 'running' and ca.timeline else '') ~ ((' v' ~ ca.version) if ca.version else ''), chip_help('cards_' ~ cstate, timeline=((" - " ~ ca.timeline) if ca.timeline else ""), detail=((" " ~ cdetail) if cdetail else ""), at=((" - last talked " ~ (cat | ago)) if cat else ""))) }}
+    {% endif %}
+  {% endif %}
+{% endset %}
+{% set row_tone = cc_tone(level) %}
+<div class="pc home-pc{{ ' ' ~ row_tone if row_tone }}">
+  <span class="led {{ row_tone }}{{ ' off' if hl.reason == 'not_reporting' and not row_tone }}" title="{{ hl.text }}"><span class="vh">{{ hl.text }}</span></span>
+  <div class="name">{{ e.machine }}<small title="signed in as {{ e.editor_username }}">{{ who_name }}{% if who_name != e.editor_username %} ({{ e.editor_username }}){% endif %}</small></div>
+  <div class="lanes-wrap">
+    <div class="hl {{ row_tone or 'muted' }}" title="{{ hl.text }}">{{ hl.text }}</div>
+    <div class="lanes">
+    {% for lane in e.lane_strip %}{% set lt = cc_lane_tone(lane, level) %}
+      <div class="lane {{ lt }}" title="{{ lane.label }}: {{ lane.state }}{% if lane.chip_reason %} - {{ lane.chip_reason }}{% elif lane.last_error %} ({{ lane.last_error }}){% endif %}"><span class="k">{{ lane.label | lower }}</span><span class="m" aria-hidden="true">{{ cc_meter(1 if lt in ('ok', 'busy') else 0, 1, 10) }}</span><span class="s">{{ lane.state }}{% if lane.chip_reason and "no progress" in lane.chip_reason %}, stalled{% endif %}</span></div>
+    {% endfor %}
+    </div>
+  </div>
+  <div class="issues" tabindex="0" aria-label="issues on {{ e.machine }}">
+    {% if errs | trim or warns | trim %}{{ errs }}{{ warns }}{% else %}<span class="none">nothing wrong</span>{% endif %}
+    {% if work | trim %}{{ work }}{% endif %}
+  </div>
+  <div class="ver num">{{ e.companion_version or "?" }}{% if e.companion_outdated %}<br><span class="dim">current {{ e.current_companion_version }}</span>{% endif %}
+    {#- LG-5 (LEGAL_GAP_FEATURES_PLAN.md 5), carried from the classic grid: the
+        licence this computer's companion says was accepted. The version alone
+        is judged (health.eula_status); the sha is shown, never compared.
+        "Not reported" is muted and is never "not accepted". #}
+    {%- if e.eula %}<div class="eula-line" title="{% if e.eula.accepted_at %}accepted {{ e.eula.accepted_at }}{% endif %}{% if e.eula.eula_sha256 %} &middot; sha256 {{ e.eula.eula_sha256[:12] }}{% endif %}"><span class="{{ {'green': 'ok', 'amber': 'warn'}.get(e.eula.colour, 'dim') }}">{{ e.eula.text }}</span>{% if e.eula.accepted_at %} <span class="dim">{{ e.eula.accepted_at | ago }}</span>{% endif %}</div>{% endif %}</div>
+  <div class="seen">{{ e.received_at | ago }}</div>
+  <details class="more" data-key="fleet:details:{{ e.editor_username }}:{{ e.machine }}">
+    <summary><span class="caret" aria-hidden="true">&#9656;</span> details{% if e.notes %} <span class="dim" title="{{ e.notes | join('; ') }}">&middot; {{ e.notes | length }} note{{ "s" if e.notes | length != 1 }}</span>{% endif %}</summary>
+    <dl class="kv">
+      {% if e.guard.disk_percent is not none %}<dt>storage</dt><dd>disk {{ "%.0f" | format(e.guard.disk_percent) }}% used, {{ e.guard.disk_root_free_bytes | human_bytes }} free</dd>{% endif %}
+      {% if e.transport.direct %}<dt>transport</dt><dd title="{{ chip_help('direct', n=e.transport.direct, at=e.transport.at | ago) }}">direct: {{ e.transport.direct }}</dd>{% endif %}
+      {% if e.resolve_detail %}{% set rd = e.resolve_detail %}
+      <dt>resolve</dt>
+      <dd>
+        {% if rd.get('connected') is not none %}{{ "connected" if rd.get('connected') else "not connected" }}{% else %}not checked{% endif %}{% if rd.get('project_open') %} &middot; project open: <b>{{ rd.get('project_open') }}</b>{% endif %}{% if rd.get('wedged_seconds') %} &middot; <span class="red">wedged {{ rd.get('wedged_seconds') | round | int }} s{% if rd.get('wedged_call') %} in {{ rd.get('wedged_call') }}{% endif %}</span>{% endif %}{% set pa = rd.get('proxy_attach') or {} %}{% if pa.get('attached') is not none or pa.get('failed') is not none %} &middot; proxies attached {{ pa.get('attached') or 0 }}, failed {{ pa.get('failed') or 0 }}{% if pa.get('why') %} ({{ pa.get('why') }}){% endif %}{% endif %}{% set pg = rd.get('proxy_gaps') or {} %}{% if pg.get('capped') %} &middot; proxy queue capped at {{ pg.get('capped') }}{% endif %}{% if pg.get('low_space') %} &middot; {{ pg.get('low_space') }}{% endif %}{% set st = rd.get('stills') or {} %}{% if st.get('ok') is not none and not st.get('ok') %} &middot; stills: {{ st.get('status') or "not ok" }}{% if st.get('instruction') %} ({{ st.get('instruction') }}){% endif %}{% endif %}
+        {% for group in [('missing_clips', missing_clips_label(e.companion_version)), ('non_canonical_refused', 'refused: the path is not the canonical one')] %}
+          {% set clips = rd.get(group[0]) or [] %}
+          {% if clips %}
+          <details class="fold" data-key="rh:{{ group[0] }}:{{ e.editor_username }}:{{ e.machine }}">
+            <summary{% if group[0] == 'missing_clips' %} title="{{ missing_clips_help(e.companion_version) }}"{% endif %}><span class="caret" aria-hidden="true">&#9656;</span> {{ clips | length }} clip{{ "s" if clips | length != 1 }} {{ group[1] }}</summary>
+            <ul class="cliplist">
+              {% for c in clips %}<li>{{ c.get('name') or c.get('path') or "?" }}{% if c.get('name') and c.get('path') %} <span class="dim">{{ c.get('path') }}</span>{% endif %}</li>{% endfor %}
+            </ul>
+          </details>
+          {% endif %}
+        {% endfor %}
+      </dd>
+      {% endif %}
+      {# LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.1, 2026-09-25), carried from
+         the classic grid: what this computer does not send, by its own
+         privacy switch or the site's. Muted, never a fault colour, never
+         counted in `notes`, never an alert. Absent is nothing at all. #}
+      {% if e.report_withheld %}
+      <dt>reporting</dt>
+      <dd class="report-withheld">{% for w in e.report_withheld %}{{ hm.tag('mute', 'not reported by this computer: ' ~ w.label, "This computer does not send this to the dashboard: its own privacy switch (tray, Settings, THIS COMPUTER, PRIVACY) or the site one (Settings, Site, TELEMETRY) is off. Sync is not affected, and nothing here is a fault.") }} {% endfor %}</dd>
+      {% endif %}
+      {% if e.capabilities.gpu_present or e.capabilities.whisper %}
+      <dt>this computer</dt>
+      <dd>{% if e.capabilities.gpu_present %}<span title="{{ chip_help('gpu', name=(e.capabilities.gpu_name or "an NVIDIA GPU"), nvenc=(", with nvenc" if e.capabilities.nvenc else ""), at=((" - reported " ~ (e.capabilities.at | ago)) if e.capabilities.at else "")) }}">GPU{% if e.capabilities.gpu_vram_gb %} {{ e.capabilities.gpu_vram_gb | round | int }}G{% endif %}{% if e.capabilities.nvenc %}, nvenc{% endif %}</span>{% endif %}{% if e.capabilities.whisper %} <span title="{{ chip_help('whisper') }}">whisper</span>{% endif %}</dd>
+      {% endif %}
+      <dt>version</dt><dd>{{ e.platform or "?" }}, running {{ e.companion_version or "?" }}{% if e.current_companion_version %}, current is {{ e.current_companion_version }}{% endif %}</dd>
+    </dl>
+    {% if session_is_admin %}
+    <div class="acts row-actions">
+      {% if e.guard.breaker_tripped %}{% if e.guard.resume_requested %}{{ hm.tag('warn', 'resume asked', 'waiting for ' ~ e.machine ~ ' to report in and pick this up') }}{% else %}<form class="inline" hx-post="/partials/admin/machines/resume-lane-b" hx-target="closest .fleet-grid-wrap" hx-swap="innerHTML">
+        <input type="hidden" name="editor" value="{{ e.editor_username }}">
+        <input type="hidden" name="machine" value="{{ e.machine }}">
+        <button class="key sm" type="submit" title="let this computer start downloading proxies again on its next report. Only once you have checked the server."><span class="t">Resume</span></button>
+      </form>{% endif %}{% endif %}
+      {% if e.guard.diagnostics_requested %}{{ hm.tag('warn', 'asked why', 'waiting for ' ~ e.machine ~ ' to report in and send its diagnostics') }}
+      {% else %}<form class="inline" hx-post="/partials/admin/machines/ask-why" hx-target="closest .fleet-grid-wrap" hx-swap="innerHTML">
+        <input type="hidden" name="editor" value="{{ e.editor_username }}">
+        <input type="hidden" name="machine" value="{{ e.machine }}">
+        <button class="key sm" type="submit" title="ask this computer to upload its own diagnostics on its next report. It answers within a report interval; nothing connects to it."><span class="t">Ask this computer why</span></button>
+      </form>{% endif %}
+      {% if e.diagnostics.id %}<button class="key sm" type="button" hx-get="/partials/computer-answer?editor={{ e.editor_username | urlencode }}&machine={{ e.machine | urlencode }}"
+              hx-target="#fleet-diagnostics" hx-swap="innerHTML"
+              title="what this computer said, {{ e.diagnostics.received_at | ago }}"><span class="t">Read the answer</span></button>{% endif %}
+    </div>
+    {% endif %}
+  </details>
+</div>
+{% endfor %}
 {% else %}
-{# ui-copy-5 (2026-09-25): this hand-wrote a third route to the button
-   ("Settings, then Help, then Copy diagnostics"); the one wording lives in
-   health.COMPANION_DIAGNOSTICS_PATH, which the tray copy matches. #}
-<div class="muted">No computer has reported yet. Each companion is given this dashboard's address when it is installed: if one is running and is not here, ask that editor to open {{ COMPANION_DIAGNOSTICS_PATH }} and send you what it copies.</div>
+<div class="allclear">No computer has reported yet. Each companion is given this dashboard's address when it is installed: if one is running and is not here, ask that editor to open {{ COMPANION_DIAGNOSTICS_PATH }} and send you what it copies.</div>
 {% endif %}
 
-{# DASH-16 (resilience sweep 2026-08-28). A computer must never leave this
-   page just because a status table aged out. At 14 days its media presence
-   went; at 30 its machine_state row was deleted and it quietly disappeared,
-   while its registry row, its sync plan and its Syncthing share all stayed --
-   so the fleet looked healthier than it was, and a device still holding
-   project data was shared with nothing watching it. The registry row is the
-   anchor: it survives every prune. #}
 {% if fleet.lost_machines %}
-<div class="side-head" style="margin-top:2rem">[ LOST COMPUTERS ]
-  <span class="muted">no report for over a week. Each one still holds the sync plan below, and is still shared the projects in it.</span></div>
-<div class="rule"></div>
-<div class="scroll-x"><table class="editors stack">
-  <thead><tr><th></th><th>EDITOR</th><th>COMPUTER</th><th>PLATFORM</th><th>STILL PLANNED</th><th>LAST REPORT</th><th></th></tr></thead>
-  <tbody>
-  {% for m in fleet.lost_machines %}
-    <tr>
-      <td data-label="STATUS"><span class="dot red" title="no report since {{ m.last_seen }}">●</span></td>
+<details class="sub-win" data-key="fleet:lost" open>
+  <summary><span class="caret" aria-hidden="true">&#9656;</span> lost computers <span class="dim">no report for over a week. Each one still holds its sync plan, and is still shared the projects in it.</span></summary>
+  <div class="scroll-x"><table class="tbl">
+    <thead><tr><th></th><th>editor</th><th>computer</th><th>platform</th><th>still planned</th><th>last report</th><th></th></tr></thead>
+    <tbody>
+    {% for m in fleet.lost_machines %}
       {% set who_name = m.editor_username | shown_as %}
-      <td class="who" data-label="EDITOR" title="signed in as {{ m.editor_username }}">{{ who_name }}{% if who_name != m.editor_username %}<div class="muted mono-sm">{{ m.editor_username }}</div>{% endif %}</td>
-      <td class="mono-sm" data-label="COMPUTER" title="{{ m.syncthing_device_id or 'no Syncthing device ever reported' }}">{{ m.machine }}</td>
-      <td class="mono-sm muted" data-label="PLATFORM">{{ m.platform or "?" }}</td>
-      <td class="mono-sm" data-label="STILL PLANNED">{% if m.projects %}{{ m.projects | length }} project{{ "" if m.projects | length == 1 else "s" }}: {{ m.projects | join(", ") }}{% else %}nothing{% endif %}</td>
-      <td class="muted" data-label="LAST REPORT">{{ m.last_seen | ago }}</td>
-      <td data-label="">
-        {% if session_is_admin %}
-        <form class="inline-form" hx-post="/partials/admin/machines/forget-lost"
-              hx-target="closest .fleet-grid-wrap" hx-swap="innerHTML"
-              hx-confirm="Forget the computer {{ m.machine }} ({{ m.editor_username }})? Its sync plan, its status rows and its Syncthing device go, so it stops being sent projects. Files already on it stay there. If its companion is still installed and signed in, it will register itself again on its next report.">
-          <input type="hidden" name="editor" value="{{ m.editor_username }}">
-          <input type="hidden" name="machine" value="{{ m.machine }}">
-          <button class="btn tap" type="submit" title="remove this computer from the fleet. Leave it if the computer is only away for a while.">[ FORGET ]</button>
-        </form>
-        {% endif %}
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table></div>
+      <tr>
+        <td data-label="status"><span class="led off" title="no report since {{ m.last_seen }}"><span class="vh">no report since {{ m.last_seen }}</span></span></td>
+        <td data-label="editor" title="signed in as {{ m.editor_username }}">{{ who_name }}{% if who_name != m.editor_username %} <span class="dim">{{ m.editor_username }}</span>{% endif %}</td>
+        <td data-label="computer" title="{{ m.syncthing_device_id or 'no Syncthing device ever reported' }}">{{ m.machine }}</td>
+        <td data-label="platform" class="dim">{{ m.platform or "?" }}</td>
+        <td data-label="still planned">{% if m.projects %}{{ m.projects | length }} project{{ "" if m.projects | length == 1 else "s" }}: {{ m.projects | join(", ") }}{% else %}nothing{% endif %}</td>
+        <td data-label="last report" class="dim">{{ m.last_seen | ago }}</td>
+        <td data-label="">
+          {% if session_is_admin %}
+          <form class="inline" hx-post="/partials/admin/machines/forget-lost"
+                hx-target="closest .fleet-grid-wrap" hx-swap="innerHTML"
+                data-confirm-key="forget:{{ m.editor_username }}:{{ m.machine }}"
+                hx-confirm="Forget the computer {{ m.machine }} ({{ m.editor_username }})? Its sync plan, its status rows and its Syncthing device go, so it stops being sent projects. Files already on it stay there. If its companion is still installed and signed in, it will register itself again on its next report.">
+            <input type="hidden" name="editor" value="{{ m.editor_username }}">
+            <input type="hidden" name="machine" value="{{ m.machine }}">
+            <button class="key sm" type="submit" title="remove this computer from the fleet. Leave it if the computer is only away for a while."><span class="t">Forget</span></button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</details>
 {% endif %}
 
-{% if fleet.collector %}
-{# COLLECTOR HEALTH (DASH-14, resilience sweep 2026-08-28). `ok` alone said
-   "I reconciled everything" for three distinct "I did nothing" outcomes:
-   an empty myID, a refused removal pass, a seed that could not be marked
-   done. The note each runner returns is rendered here, and a kind carrying
-   one is amber rather than green. #}
-{% include "partials/collector_health.html" %}
+{# The project overview (D7's default: keep a compact one on home). It was
+   the classic grid's cards; here it is a folded sub-window of the polled
+   body, so it refreshes with the grid and costs a healthy page one line. #}
+{% if view and view.projects %}
+<details class="fold sub-win" data-key="fleet:projects">
+  <summary><span class="caret" aria-hidden="true">&#9656;</span> projects <span class="dim">{{ view.projects | length }}, {{ view.projects | selectattr('editors_behind') | list | length }} catching up</span></summary>
+  <ul class="proj-overview">
+  {% for p in view.projects %}
+    {% set pt = {'red': 'err', 'amber': 'warn', 'green': ''}.get(p.status, 'off') %}
+    <li><span class="led {{ pt }}"><span class="vh">{{ p.status }}</span></span> <a href="/project/{{ p.slug }}">{{ p.label }}</a>
+      <span class="dim">{{ p.editors | length }} editor{{ "s" if p.editors | length != 1 }}{% if p.editors_behind %}, {{ p.editors_behind }} behind, {{ p.need_bytes_total | human_bytes }} queued{% elif p.editors %}, all synced{% endif %}</span></li>
+  {% endfor %}
+  </ul>
+</details>
 {% endif %}
+
+{# The collector lives on Health (D7, 7.1 row 5). problems.log and the
+   answer window stay on home (D7: the home page's first question; READ THE
+   ANSWER needs its target). #}

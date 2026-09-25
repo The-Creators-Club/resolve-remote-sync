@@ -126,14 +126,6 @@ KEYS: dict[str, str] = {
     "telemetry.local_manifest": "bool",
     "telemetry.media_tree": "bool",
     "telemetry.input_idle": "bool",
-    # The terminal look (docs/UI_REDESIGN_PORT_PLAN.md 7.0, R24, 2026-09-25).
-    # DASHBOARD ONLY: never in `api_site`'s manifest or its `features`, never
-    # exported, refused by import. `ui_terminal_groups` is the list of page
-    # groups drawn in the new look (`none`, or names from
-    # ui_variant.GROUPS, `chrome` required); `ui_preview` is who may preview
-    # it with the per-browser cookie (off / admins / everyone).
-    "ui_terminal_groups": "csv",
-    "ui_preview": "str",
 }
 
 # LG-1: the four telemetry keys, in the order the Settings page, the manifest
@@ -155,9 +147,13 @@ TELEMETRY_SETTINGS_ATTRS = {
     "input_idle": "site_telemetry_input_idle",
 }
 
-# Keys the general Settings save, the history snapshots and site.toml never
-# carry (R24): a look change is recorded under its own meta key.
-UI_KEYS = frozenset({"ui_terminal_groups", "ui_preview"})
+# Keys an earlier build stored and this one reads nowhere. The CC Terminal
+# look's rollout switch (`ui_terminal_groups`, `ui_preview`, UI port R24) was
+# retired on 2026-09-25 when the terminal look became the only look. A row
+# left on a live site is deleted at boot (drop_retired_keys); a Settings save
+# or a site.toml that still names one is not refused for it, the key is
+# simply dropped.
+RETIRED_KEYS = frozenset({"ui_terminal_groups", "ui_preview"})
 
 # What `keytool -list` and Play Console both print: 32 hex byte pairs, colon
 # separated. Pinned as a regex because a fingerprint that is one pair short
@@ -441,12 +437,6 @@ def validate(key: str, raw: str) -> str:
         return _validate_android_package(raw)
     if key == "android.sha256_cert_fingerprints":
         return _validate_android_fingerprints(raw)
-    if key == "ui_terminal_groups":
-        from . import ui_variant
-        return ui_variant.validate_groups_value(raw)
-    if key == "ui_preview":
-        from . import ui_variant
-        return ui_variant.validate_preview_value(raw)
     if kind == "int":
         return _validate_int(key, raw)
     if key in TELEMETRY_KEYS:
@@ -471,6 +461,16 @@ def get_all(conn: sqlite3.Connection) -> dict[str, str]:
     what `resolved_manifest` reads as "fall through to Settings"."""
     rows = conn.execute(f"SELECT key, value FROM {TABLE}").fetchall()
     return {row["key"]: row["value"] for row in rows}
+
+
+def drop_retired_keys(conn: sqlite3.Connection) -> int:
+    """Delete every RETIRED_KEYS row; returns how many went. Idempotent, and
+    commits its own change (it runs once at boot, on its own connection)."""
+    marks = ",".join("?" for _ in RETIRED_KEYS)
+    cur = conn.execute(f"DELETE FROM {TABLE} WHERE key IN ({marks})",
+                       tuple(sorted(RETIRED_KEYS)))
+    conn.commit()
+    return int(cur.rowcount or 0)
 
 
 def table_is_empty(conn: sqlite3.Connection) -> bool:
@@ -823,9 +823,6 @@ def _shape(db_values: Mapping[str, str], settings: Any) -> dict[str, Any]:
         "telemetry": {
             key.split(".", 1)[1]: pick(key).strip() != "0" for key in TELEMETRY_KEYS
         },
-        # The terminal look (UI port 7.0): read by ui_variant only.
-        "ui_terminal_groups": pick("ui_terminal_groups") or "none",
-        "ui_preview": pick("ui_preview") or "off",
         # For the Settings page: which fields the DB actually overrides,
         # vs. which are still falling through to Settings/defaults.
         "_from_db": sorted(k for k in KEYS if k in db_values),
@@ -1053,8 +1050,6 @@ def _settings_fallback(key: str, settings: Any) -> str:
         # records says "from 1" for a site that never set one, and an undo
         # writes "1" back rather than a blank that would read as off.
         **{k: _telemetry_fallback(k, settings) for k in TELEMETRY_KEYS},
-        "ui_terminal_groups": str(getattr(settings, "site_ui_terminal_groups", "") or "none"),
-        "ui_preview": str(getattr(settings, "site_ui_preview", "") or "off"),
     }
     return str(mapping.get(key, ""))
 
@@ -1211,15 +1206,6 @@ def import_toml(text: str) -> dict[str, str]:
                 "or rename the folder on the server "
                 "(docs/TREE_LAYOUT_AGNOSTICISM.md section 3.2)",
             )
-    # UI port R24: the look is never set by a pasted file. A `[site]
-    # ui_terminal_groups = ...` would re-enable a group just rolled back and be
-    # recorded as an ordinary import.
-    for table in data.values():
-        if isinstance(table, dict) and UI_KEYS & set(table):
-            raise SiteValidationError(
-                "ui_terminal_groups",
-                "the look is not imported: use the look groups form on Settings, "
-                "or tools/ui_variant.py")
     reverse_toml_key = {v: k for k, v in _TOML_KEY_NAMES.items()}
     out: dict[str, str] = {}
     for section, keys in _SECTIONS:

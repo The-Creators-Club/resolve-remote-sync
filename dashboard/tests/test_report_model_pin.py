@@ -23,7 +23,7 @@ FIX = ("update TELEMETRY.md's payload table, the FIELDS table, then this list "
 
 REPORT_FIELDS = [
     "arch", "broll_ingest", "capabilities", "companion_version", "completed",
-    "current_project", "editor_name", "eula", "file_moves_applied", "lanes",
+    "current_project", "editor_name", "eula", "file_moves_applied", "lane_b_via", "lanes",
     "local_manifest", "machine", "machine_id", "machine_settings", "media_tree",
     "mode", "music_ingest", "platform", "proxy_coverage", "queue",
     "report_optouts", "reported_at", "resolve_journals", "resolve_project",
@@ -63,6 +63,7 @@ NOT_PERSONAL = {
     "editor_name": "identity: the report is authenticated as this person",
     "eula": "licence version and time accepted (LG-5)",
     "file_moves_applied": "answers to moves the dashboard ordered: STILL SENT",
+    "lane_b_via": "which route proxy downloads used (remote / remote_down), no personal data",
     "lanes": "lane states and transfer names: STILL SENT, sync needs them",
     "machine": "identity: the computer's name",
     "machine_id": "identity: the computer's minted id",

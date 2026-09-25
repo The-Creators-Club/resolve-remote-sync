@@ -119,8 +119,10 @@ def test_a_machine_indexing_music_is_stored_and_chipped(env):
 
     page = as_admin(client).get("/partials/fleet")
     assert page.status_code == 200
-    assert "INDEXING MUSIC: 4/12" in page.text
-    assert "03 Slow Burn.wav" in page.text
+    # Terminal look (2026-09-25): a lower-case tag, not "[ INDEXING MUSIC ]";
+    # the track it is on rides in the tag's tip.
+    assert ">indexing music: 4/12</span>" in page.text
+    assert "music batch 01234567 - 03 Slow Burn.wav" in page.text
 
 
 def test_both_kinds_ride_one_report_into_two_sets_of_columns(env):
@@ -140,8 +142,8 @@ def test_both_kinds_ride_one_report_into_two_sets_of_columns(env):
     assert broll["clip"] == "A001_C003.MP4" and music["track"] == "03 Slow Burn.wav"
 
     page = as_admin(client).get("/partials/fleet").text
-    assert "INDEXING B-ROLL: 12/40" in page
-    assert "INDEXING MUSIC: 4/12" in page
+    assert ">indexing b-roll: 12/40</span>" in page
+    assert ">indexing music: 4/12</span>" in page
 
 
 def test_a_finished_music_batch_leaves_the_grid(env):
@@ -151,7 +153,7 @@ def test_a_finished_music_batch_leaves_the_grid(env):
     client.post("/api/v1/report", json=payload(music_ingest=music_section()),
                 headers=report_headers())
     client.post("/api/v1/report", json=payload(), headers=report_headers())
-    assert "INDEXING MUSIC" not in as_admin(client).get("/partials/fleet").text
+    assert "indexing music" not in as_admin(client).get("/partials/fleet").text
 
 
 def test_a_b_roll_only_report_does_not_clear_the_music_columns(env):
@@ -179,9 +181,9 @@ def test_the_model_refusal_is_visible_with_nothing_running(env):
                 "indexing model cannot be downloaded",
     )), headers=report_headers())
     page = as_admin(client).get("/partials/fleet").text
-    assert "[ MUSIC MODEL ]" in page
+    assert '<span class="w">music model</span>' in page
     assert "no release feed configured" in page
-    assert "INDEXING MUSIC" not in page
+    assert "indexing music" not in page
 
 
 def test_the_view_carries_the_music_section_per_machine(env):

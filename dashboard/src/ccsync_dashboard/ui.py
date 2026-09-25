@@ -62,10 +62,26 @@ STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
 
 router = APIRouter(default_response_class=HTMLResponse)
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-# The terminal look's overlay (UI_REDESIGN_PORT_PLAN.md 7.0): the classic
-# environment refuses cc/*, and every render goes through ui_variant.render.
-from . import ui_variant  # noqa: E402
-ui_variant.install(templates)
+# The CC Terminal look is the ONLY look (owner, 2026-09-25): one environment,
+# no overlay. Every static URL a template writes goes through asset_url(), a
+# content hash the service worker and static_files key on (UI port R8).
+from . import ui_assets  # noqa: E402
+templates.env.globals["asset_url"] = ui_assets.asset_url
+
+# What every page puts in its body hx-headers after the CSRF token, and what
+# app.stale_page_gate asks of every htmx request. A page drawn before the
+# look switch was retired (the classic look, or a 0.7.62 page that sent its
+# signed group set) does not send it, and is told to reload rather than
+# handed markup its own shell cannot draw (UI port review mechanism-1/-2).
+LOOK_HEADER = "X-CC-UI"
+LOOK_VALUE = "terminal"
+templates.env.globals["look_header"] = LOOK_HEADER
+templates.env.globals["look_value"] = LOOK_VALUE
+
+
+def is_partial(name: str) -> bool:
+    """A fragment is any template whose LAST directory is `partials`."""
+    return str(name).replace("\\", "/").split("/")[-2:-1] == ["partials"]
 
 log = logging.getLogger("ccsync.dashboard.ui")
 
@@ -656,7 +672,7 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
         context.setdefault("display_names", {})
         context.setdefault("session_shown_as", "")
     # Every template gets it, because every partial can contain a form and a
-    # partial re-rendered into the page must carry a live token (base.html puts
+    # partial re-rendered into the page must carry a live token (shell.html puts
     # it on <body> as hx-headers, so htmx sends it on every request from the
     # page; partials/topbar.html republishes it for the mounted SPAs). "" for
     # an anonymous render -- there is no session to protect yet.
@@ -721,7 +737,7 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     # itself is behind the login gate. Its own connection for the same reason
     # the two counts below take one: _render has no request-scoped handle, and
     # a stamp is not worth threading one through every call site for.
-    if not ui_variant.is_partial(name) and context.get("session_user"):
+    if not is_partial(name) and context.get("session_user"):
         try:
             conn = db.connect(settings.db_path)
             try:
@@ -731,7 +747,7 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
                 conn.close()
         except Exception:  # noqa: BLE001
             log.exception("could not stamp this page render")
-    if not ui_variant.is_partial(name) and context.get("session_is_admin"):
+    if not is_partial(name) and context.get("session_is_admin"):
         context.setdefault("notice_counts", _notice_counts_safe(settings))
         # SYS-8: the same idea for the alert scan, read from the LAST SCAN'S
         # stored counts rather than by scanning here. A scan walks the whole
@@ -739,7 +755,9 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
         # the cost of the diagnosis on every click, and the number a topbar
         # shows does not need to be fresher than the collector's cadence.
         context.setdefault("alert_counts", _alert_counts_safe(settings))
-    return ui_variant.render(request, name, context)
+    # An htmx swap draws its own out-of-band parts; a full page does not.
+    context.setdefault("oob", request.headers.get("hx-request", "").lower() == "true")
+    return templates.TemplateResponse(request=request, name=name, context=context)
 
 
 def _alert_counts_safe(settings) -> dict[str, int]:
@@ -1100,17 +1118,12 @@ def partial_topbar(request: Request, current: str = "",
     left out here because no `view` was passed, so an SPA's header said
     nothing about whether the server was still answering. It is its own read
     now (_stamp_context), not the fleet view, so this stays one cheap query."""
-    # UI port phase 1 (3.4, 7.0): the HUD shows the problem and alert counts
-    # in the SPAs too (under hud_* names, so the classic bar is unchanged),
-    # and this fragment is the one that writes the SPAs' first-paint cookie.
+    # UI port phase 1 (3.4): the HUD shows the problem and alert counts in
+    # the SPAs too; _render computes them only for full pages.
     from . import ui_chrome
-    response = _render(request, "partials/topbar.html",
-                       {"nav_current": current.strip().lower(),
-                        **_stamp_context(conn), **ui_chrome.topbar_extras(request)})
-    groups = getattr(response, "context", {}).get("ui_groups")
-    if groups is not None and response.status_code == 200:
-        ui_variant.set_effective_cookie(request, response, frozenset(groups))
-    return response
+    return _render(request, "partials/topbar.html",
+                   {"nav_current": current.strip().lower(),
+                    **_stamp_context(conn), **ui_chrome.topbar_extras(request)})
 
 
 # ----------------------------------------------------------- freshness stamp
@@ -1152,31 +1165,6 @@ def partial_stamp(request: Request, conn: sqlite3.Connection = Depends(get_conn)
     """The polled half of DUI-2. Every open tab asks for this on its own
     cadence, so it is kept to one collector read and no view build."""
     return _render(request, "partials/stamp.html", _stamp_context(conn))
-
-
-@router.get("/partials/queue")
-def partial_queue(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
-    """The queue panel AND the destination-root panel below it.
-
-    One fragment for two panels since 2026-08-18, when [ FIX DESTINATION ROOT ]
-    moved out of the queue box: both read one build_queue_view, so a route of
-    its own for the root line would rebuild the whole queue every 10s to
-    re-render one sentence.
-    """
-    editor = _queue_editor(request)
-    if editor is None:
-        raise HTTPException(status_code=401, detail="not logged in")
-    # DUI-19: the same sentence the transfers panel carries, on the panel an
-    # editor actually reads. It is built from the transfers view because that
-    # is where "what is still going up" lives; the 10s poll pays for one
-    # editor-scoped build, not a fleet one.
-    transfers = build_transfers_view(conn, editor=editor)
-    machine = _queue_machine(request, conn, editor)
-    return _render(request, "partials/queue_section.html", {
-        "queue": build_queue_view(conn, editor, machine=machine or None),
-        "queue_machine": machine,
-        "safe_to_close": safe_to_close(transfers, editor),
-    })
 
 
 def _roots_context(conn: sqlite3.Connection, is_admin: bool) -> dict:
@@ -1562,14 +1550,30 @@ def partial_toggle(
     if target is not None and target not in db.machines_of(conn, editor):
         raise HTTPException(status_code=404,
                             detail=f"{editor} has no computer named {target!r}")
-    wanted = _sync_mode_arg(mode) if (mode or "").strip() else None
+    # everyday-apps-1 (UI port review 2026-09-25): `?mode=off` is an
+    # explicit REMOVE. An Untick key rendered from a stale body (the account
+    # page's computer window, 30 s behind the queue window's untick) sent the
+    # plain toggle, and a project no longer ticked got ticked again. With
+    # `off` an already-unticked project is a no-op, never a tick.
+    remove_only = (mode or "").strip().lower() == "off"
+    # home-project-2 (same review): `?mode=on` is the explicit ADD twin. The
+    # terminal tree's checkbox drew from a body up to 30 s behind the home
+    # queue's untick, so its "This removes X" confirm sent a toggle that
+    # ticked X again. `on` ticks (full) only what is not ticked, and never
+    # changes the mode of a tick that is already there.
+    add_only = (mode or "").strip().lower() == "on"
+    wanted = (_sync_mode_arg(mode) if (mode or "").strip() and not remove_only
+              and not add_only else None)
     ticked = {s["slug"] for s in db.fetch_selections(conn, editor, machine=target)}
     # SYS-11 / DASH-8 (resilience sweep 2026-08-28). Snapshot, act, record:
     # the same three lines as the JSON route, because a ledger the checkbox
     # can walk past reads as "nobody did that".
     before = db.selection_placements(conn, editor, slug, machine=target)
     action = db.AUDIT_UNTICK if (slug in ticked and wanted is None) else db.AUDIT_TICK
-    if slug in ticked and wanted is None:
+    noop = (remove_only and slug not in ticked) or (add_only and slug in ticked)
+    if noop:
+        pass
+    elif slug in ticked and wanted is None:
         db.remove_selection(conn, editor, slug, machine=target)
     else:
         project = conn.execute(
@@ -1610,8 +1614,9 @@ def partial_toggle(
             db.add_selection(conn, editor, slug, created_by=user,
                              now=db.utcnow_iso(), machine=target,
                              sync_mode=sync_mode)
-    audit_plan_change(conn, user, action, editor, slug, target, before,
-                      db.selection_placements(conn, editor, slug, machine=target))
+    if not noop:
+        audit_plan_change(conn, user, action, editor, slug, target, before,
+                          db.selection_placements(conn, editor, slug, machine=target))
     conn.commit()
     # Reconcile Syncthing sharing promptly -- ticking used to wait out
     # interval_enforce (up to 60s) before anything started (2026-07-26).
@@ -1620,8 +1625,7 @@ def partial_toggle(
     _nudge_collector(request)
     # Return the partial the control lives in.
     view_kind = request.query_params.get("view")
-    # UI port phase 2: the terminal tree and home queue get their own markup
-    # back (ui_home.py; 404 when the asking page has no `home` group).
+    # The tree and the home queue get their own window back (ui_home.py).
     from . import ui_home
     if view_kind in ui_home.TOGGLE_VIEWS:
         return ui_home.toggle_answer(request, conn, editor, target, view_kind)
@@ -1630,19 +1634,12 @@ def partial_toggle(
     from . import ui_everyday
     if view_kind in ui_everyday.TOGGLE_VIEWS:
         return ui_everyday.toggle_answer(request, conn, editor, view_kind)
-    # Re-render for `editor` (the POST path), not for whoever _queue_editor
-    # would infer: an admin ticking for someone else must get that editor's
-    # checkboxes back, not their own.
-    if view_kind == "sidebar" or "sidebar" in (request.headers.get("hx-target") or ""):
-        current = request.query_params.get("slug_page")
-        return _render(request, "partials/sidebar.html",
-                       _sidebar_context(request, conn, current, editor=editor))
     if view_kind == "project":
         page_slug = request.query_params.get("slug_page", slug)
         view = build_project_view(conn, page_slug)
         if view is None:
             raise HTTPException(status_code=404)
-        return _render(request, "partials/project_detail.html",
+        answer = _render(request, "partials/project_detail.html",
                        {"project": view,
                         "selected_by": db.fetch_all_selections(conn),
                         "selected_modes": db.fetch_all_selection_modes(conn),
@@ -1654,24 +1651,14 @@ def partial_toggle(
                         # UX-1 capacity sentence (logic-plans-2).
                         **_tick_confirms(conn, editor, page_slug),
                         "as_qs": _as_qs(request, editor)})
-    # ui-dash-main-9 (2026-09-25): the queue panel's own untick. It answered
-    # with the PERSON's queue and no "safe to close" sentence, so on
-    # /?machine=MacBook the panel became about the other computer and the
-    # "Not yet: 3 files still uploading" line vanished - which reads as safe
-    # to close - until the next 10 s poll put both back. `queue_machine` is a
-    # view key only (the write above stays the person's, as the confirm
-    # says), checked like _queue_machine: a computer this person does not
-    # own is the person's view. partial_queue builds the same two values.
-    view_machine = (request.query_params.get("queue_machine") or "").strip()
-    if view_machine and view_machine not in db.machines_of(conn, editor):
-        view_machine = ""
-    if target is not None:
-        view_machine = target
-    return _render(request, "partials/my_queue.html", {
-        "queue": build_queue_view(conn, editor, machine=view_machine or None),
-        "queue_machine": view_machine,
-        "safe_to_close": safe_to_close(build_transfers_view(conn, editor=editor), editor),
-    })
+        # home-project-2 (UI port review 2026-09-25): the page's
+        # tree beside this window re-reads at once instead of 30 s later.
+        ui_home.plan_changed(answer)
+        return answer
+    # No `view` (or one no page sends any more, such as the retired classic
+    # sidebar's): the write is done and the answer is empty, like
+    # `view=none`. Every plan window on the page re-reads on the event.
+    return ui_home.plan_changed(HTMLResponse(""))
 
 
 @router.get("/project/{slug}")
@@ -1787,11 +1774,6 @@ def _switcher_context(request: Request, conn, current: str | None,
     }
 
 
-@router.get("/partials/sidebar")
-def partial_sidebar(request: Request, current: str = "", conn: sqlite3.Connection = Depends(get_conn)):
-    return _render(request, "partials/sidebar.html", _sidebar_context(request, conn, current))
-
-
 @router.get("/transfers")
 def page_transfers(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     scope = auth.scope_for(request)
@@ -1871,12 +1853,6 @@ def _notices_context(conn, error: str | None = None) -> dict:
     }
 
 
-@router.get("/partials/notices")
-def partial_notices(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
-    _require_admin_page(request)
-    return _render(request, "partials/notices.html", _notices_context(conn))
-
-
 @router.post("/partials/notices/{notice_id}/dismiss")
 def partial_notice_dismiss(
     notice_id: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)
@@ -1890,12 +1866,10 @@ def partial_notice_dismiss(
     row = db.dismiss_notice(conn, notice_id, admin)
     conn.commit()
     error = None if row else "that notice is already gone. Reload the page."
-    # UI port phase 2: a dismiss from a terminal window answers with that
-    # window's markup (?view=), never the classic admin-users-box.
+    # The home page's problems window is the one caller (the Health page
+    # dismisses on its own route, ui_health.py).
     from . import ui_home
-    if request.query_params.get("view") in ui_home.DISMISS_VIEWS:
-        return ui_home.dismiss_answer(request, conn, request.query_params["view"], error)
-    return _render(request, "partials/notices.html", _notices_context(conn, error))
+    return ui_home.dismiss_answer(request, conn, "home-problems", error)
 
 
 def _project_label(conn, slug: str) -> str:
@@ -2555,13 +2529,23 @@ def page_admin_alerts_preview(request: Request,
     return PlainTextResponse(f"Subject: {subject}\n\n{text}")
 
 
+def alerts_form_max_fields() -> int:
+    """The field ceiling for the Alerts save: every key it keeps, plus room
+    for what htmx or a browser adds (a csrf field, a named submit)."""
+    from . import alerts
+    return len(alerts.SETTING_KEYS) + 4
+
+
 @router.post("/partials/admin/alerts/save")
 async def partial_admin_alerts_save(request: Request,
                                     conn: sqlite3.Connection = Depends(get_conn)):
     user = _require_admin_page(request)
     from . import alerts
 
-    form = await _form(request)
+    # settings-1 (UI port review 2026-09-25): the form carries one field per
+    # SETTING_KEYS entry, which passed MAX_FORM_FIELDS when the server-check
+    # keys arrived. Sized from the key list, so the next key cannot do it again.
+    form = await _form(request, max_fields=alerts_form_max_fields())
     values = {k: v for k, v in form.items() if k in alerts.SETTING_KEYS}
     error = ""
     notice = ""
@@ -2939,14 +2923,19 @@ def _require_admin_page(request: Request) -> str:
     return user
 
 
-async def _form(request: Request) -> dict[str, str]:
+async def _form(request: Request, max_fields: int = MAX_FORM_FIELDS) -> dict[str, str]:
     """Parse an htmx form body. The BYTE ceiling is app.py's body_size_gate
     (every write path, not just the two it used to cover -- DASH-3); the field
     ceiling is here, because 1 MB of `a=1&a=1&...` is a cheap way to spend the
     single worker's CPU inside parse_qs. page_login_submit has capped its
-    fields since it was written; these routes never did (2026-08-11)."""
+    fields since it was written; these routes never did (2026-08-11).
+
+    `max_fields` is for a route whose form is LEGITIMATELY wider than the
+    default: size it from the keys the route keeps, never raise the default.
+    The Alerts save grew to 17 fields on 2026-09-24 (the server-check keys)
+    and every Save 400'd "malformed form body" (UI port review settings-1)."""
     try:
-        parsed = parse_qs((await request.body()).decode(), max_num_fields=MAX_FORM_FIELDS)
+        parsed = parse_qs((await request.body()).decode(), max_num_fields=max_fields)
     except ValueError:
         raise HTTPException(status_code=400, detail="malformed form body")
     return {k: v[0] for k, v in parsed.items()}
@@ -3666,18 +3655,6 @@ def _halt_banner_context(conn) -> dict:
             "halt_machines": int(row["n"] if row else 0)}
 
 
-@router.get("/partials/fleet-halt-banner")
-def partial_fleet_halt_banner(
-    request: Request, conn: sqlite3.Connection = Depends(get_conn)
-):
-    """The every-page banner (UX-8, 2026-08-28). Any signed-in user: an
-    editor whose sync has stopped is exactly who needs to read it."""
-    if auth.get_session_user(request) is None:
-        raise HTTPException(status_code=401, detail="log in first")
-    return _render(request, "partials/fleet_halt_banner.html",
-                   _halt_banner_context(conn))
-
-
 def _fleet_halt_render(request, conn, *, error: str | None = None):
     context = _halt_banner_context(conn)
     context["error"] = error
@@ -4200,6 +4177,13 @@ def _packages_and_feed(conn, request: Request, error: str | None = None,
                    float(getattr(settings, "release_feed_interval", 0) or 86400.0))
     packages = build_packages_view(conn, settings)
     rows = packages["packages"]
+    # settings-2 (UI port review 2026-09-25): a refusal keyed to a row that is
+    # not on the page (deleted by another admin between poll and click) was
+    # drawn nowhere, because the top banner stands down whenever error_for is
+    # set. Unmatched, it goes back to the banner.
+    if error_for and not any(f"{p['kind']}/{p['platform']}/{p['version']}" == error_for
+                             for p in rows):
+        error_for = ""
     return {
         "packages": packages,
         # The three lists the panel renders, grouped once here rather than
@@ -4320,9 +4304,15 @@ async def partial_admin_package_current(
     # CR-335 (2026-09-25): the refusal is ALSO drawn on the row that was
     # clicked. At the top of a long panel it was out of view, so the button
     # read as dead and the owner clicked it again and again.
+    # settings-2: the "roll back to" select on a SERVED row posts the OLDER
+    # version it chose, whose row sits folded in "other versions held"; the
+    # form names the row it lives on (`row_version`), and that is the row
+    # that was clicked. _packages_and_feed falls back to the banner when the
+    # key matches no row.
+    row_version = form.get("row_version", "").strip() or version
     return _render(request, "partials/admin_packages.html",
                    _packages_and_feed(conn, request, error,
-                                      error_for=f"{kind}/{platform}/{version}" if error else ""))
+                                      error_for=f"{kind}/{platform}/{row_version}" if error else ""))
 
 
 @router.post("/partials/admin/packages/push-one")
@@ -4510,39 +4500,6 @@ async def partial_admin_ask_why(
     return _render(request, "partials/fleet_grid.html", {
         "view": api_scope_projects_view(build_projects_view(conn), scope),
         "fleet": _fleet_view(conn, scope),
-    })
-
-
-@router.get("/partials/admin/diagnostics")
-def partial_admin_diagnostics(
-    request: Request, editor: str = "", machine: str = "",
-    conn: sqlite3.Connection = Depends(get_conn)
-):
-    """The stored diagnostics bundles (v33, SYS-7).
-
-    ADMIN ONLY, and not merely by convention: a bundle names an editor's
-    paths, their Resolve project and their tree, which is exactly what
-    COMMERCIAL_READINESS.md §C L1 says one editor may not read about another.
-
-    Lives OUTSIDE the fleet-grid wrapper on the page, so the grid's own 15 s
-    poll cannot swap an open bundle out from under whoever is reading it.
-    """
-    _require_admin_page(request)
-    editor = editor.strip().lower()
-    machine = machine.strip()
-    if editor or machine:
-        bundles = db.fetch_diagnostics(conn, editor=editor or None,
-                                       machine=machine or None, limit=5)
-    else:
-        bundles = db.newest_diagnostics_per_machine(conn)
-    return _render(request, "partials/admin_diagnostics.html", {
-        "diagnostics": {"bundles": bundles, "editor": editor, "machine": machine},
-        "crash_reports": len(notices.crash_files(request.app.state.settings)),
-        # DCORE-16: the same list as the project page's. A machine that is
-        # not getting its shares because an enforce cycle has been half
-        # failing for a week is a fleet-level answer, and this panel is where
-        # an admin looks for one.
-        "enforce_notes": db.enforce_notes(conn),
     })
 
 
@@ -4927,7 +4884,7 @@ def service_worker() -> Response:
     if not path.is_file():
         return PlainTextResponse("no service worker on this server", status_code=404)
     body = path.read_text(encoding="utf-8").replace("__VERSION__", VERSION)
-    body = body.replace("/*__CC_PRECACHE__*/[]", json.dumps(ui_variant.precache_urls()))
+    body = body.replace("/*__CC_PRECACHE__*/[]", json.dumps(ui_assets.precache_urls()))
     return Response(
         content=body,
         media_type="application/javascript",

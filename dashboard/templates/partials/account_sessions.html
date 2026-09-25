@@ -1,35 +1,34 @@
-{# SIGNED-IN BROWSERS (F3, F3a, F3b; account page 2026-09-25,
-   ACCOUNT_PAGE_FEATURES.md 3.4). Polled every 30 s by its wrapper in
-   account.html, like the admin panel. The person's OWN browsers only; a row
-   is named by the same 12-character handle the admin panel shows, never the
-   whole session id. THIS browser has no SIGN OUT (D-13: that is the Sign out
-   button's job), and SIGN OUT EVERYWHERE is the existing plain form with its
-   existing confirm, unchanged. #}
+{# SIGNED-IN BROWSERS, terminal look (UI redesign port phase 3, group
+   `everyday`; bench design/account.html renderSessions). The body of the
+   window cc/account.html draws: its wrapper (#account-sessions-wrap) polls
+   every 30 s and is the target of every sign-out here, innerHTML, as
+   classic. The person's OWN browsers only, named by the 12-character handle.
+   THIS browser has no sign out (D-13), and Sign out everywhere is the
+   existing plain form with its existing confirm, unchanged. #}
+{% from "partials/ev_macros.html" import result_line, tag with context %}
 <div id="account-sessions">
-  <div class="side-head">[ SIGNED-IN BROWSERS ]
-    <span class="muted"><b>{{ sessions | length }}</b> browser{{ "s" if sessions | length != 1 }}</span></div>
-  <div class="muted account-lede">Every browser signed in as {{ user }}. Signing one out takes effect within a second. Your computers' own sign-in is separate and is not affected.</div>
-  {% if result %}<div class="account-result {{ result.tone }}" role="status">{{ result.text }}</div>{% endif %}
+  <div class="lede-in">Every browser signed in as {{ user }} (<b>{{ sessions | length }}</b> now). Signing one out takes effect within a second. Your computers' own sign-in is separate and is not affected.</div>
+  <div class="ev-result">{{ result_line(result) }}</div>
   {% if unavailable %}
-    <div class="account-result amber">{{ unavailable }}</div>
+    <div class="note warn"><span class="grow">{{ unavailable }}</span></div>
   {% elif sessions %}
-    <div class="scroll-x"><table class="editors stack">
-      <thead><tr><th title="The network address the browser signs in from. Addresses starting 100. are computers and phones on your private network.">FROM</th><th>BROWSER</th><th>SIGNED IN</th><th title="When this browser last loaded a page.">LAST SEEN</th><th></th></tr></thead>
+    <div class="scroll-y" style="max-height:260px"><table class="tbl stack-sm">
+      <thead><tr><th title="The network address the browser signs in from. Addresses starting 100. are computers and phones on your private network.">from</th><th>browser</th><th>signed in</th><th title="When this browser last loaded a page.">last seen</th><th><span class="vh">sign out</span></th></tr></thead>
       <tbody>
       {% for s in sessions %}
-        <tr class="editor-row">
-          <td class="mono-sm" data-label="FROM">{{ s.ip or "?" }}</td>
-          <td data-label="BROWSER"><b>{{ s.browser or "a browser" }}</b>
-            {% if s.current %}<span class="chip green" title="The browser you are reading this in.">[ THIS BROWSER ]</span>{% endif %}</td>
-          <td class="mono-sm muted" data-label="SIGNED IN">{{ s.created_at | ago }}</td>
-          <td class="mono-sm muted" data-label="LAST SEEN">{{ s.last_seen | ago }}</td>
-          <td>
+        <tr class="sess">
+          <td data-label="from"><span class="num">{{ s.ip or "?" }}</span></td>
+          <td data-label="browser"><b>{{ s.browser or "a browser" }}</b>
+            {% if s.current %}{{ tag("hi", "this browser", "The browser you are reading this in.") }}{% endif %}</td>
+          <td class="muted" data-label="signed in">{{ s.created_at | ago }}</td>
+          <td class="muted" data-label="last seen">{{ s.last_seen | ago }}</td>
+          <td data-label="">
             {% if not s.current %}
-              <form class="inline-form" hx-post="/partials/account/sessions/revoke"
+              <form class="inline" hx-post="/partials/account/sessions/revoke"
                     hx-target="#account-sessions-wrap" hx-swap="innerHTML"
                     hx-confirm="Sign out {{ s.browser or 'that browser' }}? Whoever is using it has to sign in again.">
                 <input type="hidden" name="handle" value="{{ s.handle }}">
-                <button class="btn tap" type="submit" title="Sign this one browser out. Whoever is using it has to sign in again.">[ SIGN OUT ]</button>
+                <button class="key sm" type="submit" title="Sign this one browser out. Whoever is using it has to sign in again."><span class="t">Sign out</span></button>
               </form>
             {% endif %}
           </td>
@@ -38,23 +37,23 @@
       </tbody>
     </table></div>
   {% endif %}
-  <div class="account-sess-acts">
+  <div class="sessions-acts">
     {% if others %}
-      <form class="inline-form" hx-post="/partials/account/sessions/revoke-others"
+      <form class="inline" hx-post="/partials/account/sessions/revoke-others"
             hx-target="#account-sessions-wrap" hx-swap="innerHTML"
             hx-confirm="Sign {{ user }} out of the other {{ others }} browser{{ 's' if others != 1 }}? This one stays signed in.">
-        <button class="btn tap" type="submit" title="Sign out every browser except this one. Asks first.">[ SIGN OUT THE OTHERS ]</button>
+        <button class="key" type="submit" title="Sign out every browser except this one. Asks first."><span class="t">Sign out the others</span></button>
       </form>
     {% elif not unavailable %}
-      <span class="muted">Only this browser is signed in.</span>
+      <span class="dim">Only this browser is signed in.</span>
     {% endif %}
-    {# The existing control, exactly as the drawer has it (C-9's confirm). A
+    {# The existing control, exactly as the menu has it (C-9's confirm). A
        PLAIN form, so the token travels as a field. #}
-    <form method="post" action="/logout-everywhere" class="inline-form"
+    <form method="post" action="/logout-everywhere" class="inline"
           title="Sign out every browser, this one too. Your computers keep syncing: their sign-in is separate."
           onsubmit="return window.confirm('Sign yourself out of every browser, including this one? You will need to sign in again to finish what you are doing.');">
       <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
-      <button class="btn tap" type="submit">[ SIGN OUT EVERYWHERE ]</button></form>
-    <div class="muted">Use these if a computer or a phone was lost.</div>
+      <button class="key" type="submit"><span class="t">Sign out everywhere</span></button></form>
+    <span class="muted">Use these if a computer or a phone was lost.</span>
   </div>
 </div>

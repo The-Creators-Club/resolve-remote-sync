@@ -133,7 +133,7 @@
   .lrow .keys { margin-left: 0; }
   .tbl td.file { max-width: none; white-space: normal; overflow-wrap: anywhere; }
   .tbl.stack-sm td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 9ch; color: var(--muted); font-size: 12px; letter-spacing: 1px; text-transform: uppercase; }
-  .tbl.stack-sm tr.drawer { border-top: 0; padding-top: 0; }
+  .tbl.stack-sm tr.row-drawer { border-top: 0; padding-top: 0; }
   .dirlist .d { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .tbl.fixed { table-layout: auto; }
   .tbl.fixed colgroup { display: none; }
@@ -154,7 +154,7 @@
   .tbl.pct tr { grid-template-columns: 3ch minmax(0, 1fr); }
   .tbl.pct td { grid-column: 2; padding: 1px 0; }
   .tbl.pct td.c-led { grid-column: 1; grid-row: 1; padding-left: var(--pad); padding-top: 4px; }
-  .tbl.pct tr.drawer td { grid-column: 1 / -1; padding: 4px var(--pad); }
+  .tbl.pct tr.row-drawer td { grid-column: 1 / -1; padding: 4px var(--pad); }
   .note { flex-wrap: wrap; }
   .note .grow { flex-basis: 100%; }
   .bar .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -272,8 +272,16 @@
   .mng .fixed,
   .pick .nm small { font-size: 12px; }
 }
+/* everyday-apps-6 (review 2026-09-25): a tip tag is keyed on title OR
+   data-tip, because cc.js adoptTips moves title to data-tip on every swap.
+   Keyed on title alone, a polled row grew 24 px for the moment between the
+   swap and adoptTips, then fell back, and adopted tags were under 44 px. */
 @media (pointer: coarse) {
-  .key, .tabs button, .fold, .tip-btn, .check, .radio, .switch, .tree .row, .tag[title], .led[title], [data-chip-detail], .pick select, .inp, .sel { min-height: var(--tap); }
+  .key, .tabs button, .fold, .tip-btn, .check, .radio, .switch, .tree .row, .tag:is([title], [data-tip]), .led:is([title], [data-tip]), [data-chip-detail], .pick select, .inp, .sel { min-height: var(--tap); }
+  /* M3 (MOBILE_PLAN.md): the matrix's upload-only box is a control (it
+     writes upload-only for one project on one computer); the LABEL is what
+     a thumb lands on. The legend's copy is a span, so it does not grow. */
+  label.upm { min-height: var(--tap); align-items: center; }
 }
 /* Fields at 16px on phones, written to win over every smaller field rule
    above (iOS zooms the page on a focused field under 16px). Keep LAST. */

@@ -1,6 +1,7 @@
 """CSS and markup facts for the terminal look's sheets (docs/UI_REDESIGN_PORT_PLAN.md
-2.1-2.4, R8, R10, R20; phase 0). The classic sheets keep their own tests;
-these are the terminal twins and the rules only the new sheets have."""
+2.1-2.4, R8, R10, R20; phase 0). Since 2026-09-25 the terminal look is the
+only look: the classic sheets are deleted and every dashboard template is a
+terminal template, so the template scans below read all of templates/."""
 from __future__ import annotations
 
 import hashlib
@@ -13,7 +14,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
 CC = STATIC / "cc"
-TEMPLATES_CC = ROOT / "templates" / "cc"
+# Every template is a terminal one now (the classic look was deleted
+# 2026-09-25 and templates/cc/ moved up over its twins).
+TEMPLATES_CC = ROOT / "templates"
 REPO = ROOT.parent
 NOTICES = REPO / "docs" / "legal" / "THIRD_PARTY_NOTICES.md"
 
@@ -56,11 +59,20 @@ def test_the_four_sheets_exist():
         assert (CC / name).is_file(), name
 
 
-def test_theme_common_is_byte_identical_to_the_classic_sheet():
-    classic = (STATIC / "style.css").read_text(encoding="utf-8").replace("\r\n", "\n")
+# The dashboard's classic style.css was the fourth copy of theme-common until
+# 2026-09-25; terminal.css is the dashboard's copy now, and it may not drift
+# from the three SPA sheets that still carry the block.
+SPA_SHEETS = [REPO / "broll" / "web" / "static" / "style.css",
+              REPO / "music" / "web" / "static" / "style.css",
+              REPO / "ytdl" / "web" / "static" / "style.css"]
+
+
+@pytest.mark.parametrize("sheet", SPA_SHEETS, ids=lambda p: p.parts[-4])
+def test_theme_common_is_byte_identical_to_the_spa_sheets(sheet):
+    other = sheet.read_text(encoding="utf-8").replace("\r\n", "\n")
     assert css("terminal.css").count(THEME_BEGIN) == 1
     assert _between(css("terminal.css"), THEME_BEGIN, THEME_END) == \
-        _between(classic, THEME_BEGIN, THEME_END)
+        _between(other, THEME_BEGIN, THEME_END)
 
 
 def test_every_token_theme_common_reads_is_declared_in_the_cc_root():
@@ -85,7 +97,7 @@ def test_no_hud_dock_or_snav_rule_outside_hud_common():
 
 
 def test_no_customer_domain_in_the_terminal_files():
-    files = list(CC.rglob("*")) + (list(TEMPLATES_CC.rglob("*")) if TEMPLATES_CC.is_dir() else [])
+    files = list(CC.rglob("*")) + list(TEMPLATES_CC.rglob("*"))
     for p in files:
         if p.is_file() and p.suffix in (".css", ".js", ".html"):
             assert "thecreatorsclub" not in p.read_text(encoding="utf-8").lower(), p
@@ -187,16 +199,12 @@ def test_the_page_and_toast_leave_room_for_the_dock():
 
 
 def test_no_box_drawing_in_terminal_templates():
-    if not TEMPLATES_CC.is_dir():
-        return
     for p in TEMPLATES_CC.rglob("*.html"):
         text = p.read_text(encoding="utf-8")
         assert not re.search("[─-╿]", text), p
 
 
 def test_no_bare_classic_vocabulary_in_terminal_templates():
-    if not TEMPLATES_CC.is_dir():
-        return
     for p in TEMPLATES_CC.rglob("*.html"):
         for classes in re.findall(r'class="([^"]*)"', p.read_text(encoding="utf-8")):
             words = set(classes.split())
@@ -243,8 +251,7 @@ def test_every_non_cjk_glyph_the_terminal_uses_is_in_a_shipped_range():
     for lo, hi in re.findall(r"U\+([0-9A-F]+)-([0-9A-F]+)", css("terminal.css")):
         ranges.append((int(lo, 16), int(hi, 16)))
     files = [p for p in CC.glob("*") if p.suffix in (".css", ".js")]
-    if TEMPLATES_CC.is_dir():
-        files += list(TEMPLATES_CC.rglob("*.html"))
+    files += list(TEMPLATES_CC.rglob("*.html"))
     for p in files:
         text = p.read_text(encoding="utf-8")
         cps = {ord(ch) for ch in text if ord(ch) > 0x7F}

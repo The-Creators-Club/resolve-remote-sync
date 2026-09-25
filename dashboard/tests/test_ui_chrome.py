@@ -1,10 +1,11 @@
 """The terminal chrome (UI redesign port, phase 1 "chrome", 2026-09-25).
 
 docs/UI_REDESIGN_PORT_PLAN.md 2.2, 2.5, 3.4, 4.1, 7.0, R6, R9, R15, R16.
-Classic pins (test_topbar_partial.py, the drawer and theme-common sections of
-every test_theme_css.py, test_mobile_css.py) are untouched: this file only
-ADDS the terminal assertions, with the `chrome` group switched on through
-the one seam every reader of the setting uses (ui_variant.site_groups).
+Since the owner retired the look switch the same day, the terminal chrome is
+the ONLY chrome: these tests used to switch the `chrome` group on through
+ui_variant and pin the classic bar beside it. The classic half is gone with
+the classic look; what is left pins the one chrome every page and every SPA
+gets.
 """
 from __future__ import annotations
 
@@ -16,9 +17,9 @@ from urllib.parse import urljoin
 
 import pytest
 from fastapi.testclient import TestClient
-from jinja2 import DictLoader
+from jinja2 import ChoiceLoader, DictLoader
 
-from ccsync_dashboard import auth, ui, ui_variant
+from ccsync_dashboard import auth, ui
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
@@ -63,13 +64,6 @@ def test_hud_common_is_byte_identical_in_all_four_sheets():
     assert ref.strip()
     drifted = [name for name, (path, _url) in SPA_SHEETS.items() if _block(path) != ref]
     assert not drifted, "hud-common drifted from static/cc/hud.css in: " + ", ".join(drifted)
-
-
-def test_the_classic_drawer_block_is_still_in_every_sheet():
-    # hud-common is ADDED beside the drawer, never in its place (4.1): with
-    # chrome off, /partials/topbar still serves the classic drawer.
-    for path in [DASH / "static" / "style.css"] + [p for p, _ in SPA_SHEETS.values()]:
-        assert "BEGIN nav drawer, menu button, settings gear" in path.read_text(encoding="utf-8")
 
 
 def test_hud_common_selectors_are_hud_owned():
@@ -170,17 +164,6 @@ def test_the_spa_font_urls_resolve_to_the_dashboards_fonts(tmp_path):
 
 # ------------------------------------------------------------ rendering
 
-@pytest.fixture
-def chrome(monkeypatch):
-    """`chrome` on for this studio, through the setting's one seam."""
-    monkeypatch.setattr(ui_variant, "site_groups",
-                        lambda conn, settings, app=None: frozenset({"chrome"}))
-    ui_variant.refresh()
-    token = ui_variant.RECORDING.set(True)
-    yield
-    ui_variant.RECORDING.reset(token)
-
-
 def _client(tmp_path, admins=frozenset({"owen"})) -> TestClient:
     return TestClient(create_app(Settings(db_path=str(tmp_path / "d.db"),
                                           session_secret=SECRET, admin_users=admins)))
@@ -225,14 +208,15 @@ def _parse(html: str) -> _Tree:
     return t
 
 
-def test_topbar_is_the_hud_with_chrome_on(tmp_path, chrome):
+def test_topbar_is_the_hud(tmp_path):
     with _client(tmp_path) as c:
         r = _as(c, "jsmith").get("/partials/topbar?current=transfers")
         assert r.status_code == 200
         html = r.text
         mounted = c.app.state
     assert 'class="hud"' in html and "data-dash-topbar" in html
-    assert 'data-ui-apps="classic"' in html
+    # the SPAs' classic-bar marker went with the switch (2026-09-25)
+    assert "data-ui-apps" not in html
     assert "<script" not in html and "[ " not in html
     assert "nav-drawer" not in html and "menu-btn" not in html
     # only mounted modules (music may mount from the dev tree in this venv)
@@ -253,33 +237,21 @@ def test_topbar_is_the_hud_with_chrome_on(tmp_path, chrome):
             assert attrs.get("type") == "button", attrs
         if "hud-dock" in (attrs.get("class") or "").split():
             assert "hud" not in chain, "the dock must be a sibling of .hud (R7)"
-    # the SPAs' first-paint cookie, raw: unquoted, Path=/, readable
-    raw = [v for k, v in r.headers.multi_items() if k.lower() == "set-cookie"
-           and v.startswith(ui_variant.EFFECTIVE_COOKIE + "=")]
-    assert raw and raw[0].startswith("ccsync_ui_effective=chrome;"), raw
-    assert "Path=/" in raw[0] and "HttpOnly" not in raw[0] and "\\" not in raw[0]
+    # the SPAs' first-paint look cookie is retired: the SPAs are terminal
+    # in markup now, so the bar never sets it again
+    assert not any(k.lower() == "set-cookie" and "ccsync_ui_effective" in v
+                   for k, v in r.headers.multi_items())
 
 
-def test_topbar_counts_show_in_the_spas_when_nonzero(tmp_path, chrome, monkeypatch):
+def test_topbar_counts_show_in_the_spas_when_nonzero(tmp_path, monkeypatch):
     monkeypatch.setattr(ui, "_notice_counts_safe", lambda s: {"error": 3})
     monkeypatch.setattr(ui, "_alert_counts_safe", lambda s: {"warn": 1})
     with _client(tmp_path) as c:
         html = _as(c, "owen").get("/partials/topbar?current=broll").text
     assert "<b>3</b> problems" in html and "<b>1</b> alert<" in html
     assert 'href="/go/notices"' in html
-    assert "ui/preview?variant=classic&amp;next=/broll/" in html
-
-
-def test_classic_topbar_is_unchanged_with_chrome_off(tmp_path, monkeypatch):
-    monkeypatch.setattr(ui, "_notice_counts_safe", lambda s: {"error": 3})
-    with _client(tmp_path) as c:
-        r = _as(c, "owen").get("/partials/topbar")
-    assert 'class="hud"' not in r.text and "nav-drawer" in r.text
-    assert 'data-ui-apps="classic"' in r.text
-    # the classic SPA bar never showed counts, and still does not
-    assert "PROBLEM" not in r.text
-    assert not any(k.lower() == "set-cookie" and ui_variant.EFFECTIVE_COOKIE in v
-                   for k, v in r.headers.multi_items())
+    # no "look" menu section: there is one look (2026-09-25)
+    assert "ui/preview" not in html and "classic" not in html
 
 
 _ALLOWED_UNPREFIXED = {"scroll-x"}
@@ -292,7 +264,7 @@ def _classes(html: str) -> set[str]:
     return out
 
 
-def test_every_class_in_the_rendered_chrome_is_hud_owned(tmp_path, chrome, monkeypatch):
+def test_every_class_in_the_rendered_chrome_is_hud_owned(tmp_path, monkeypatch):
     monkeypatch.setattr(ui, "_notice_counts_safe", lambda s: {"error": 2})
     monkeypatch.setattr(ui, "_alert_counts_safe", lambda s: {"error": 1, "warn": 2})
     monkeypatch.setattr(ui, "_stamp_context",
@@ -326,36 +298,28 @@ def _page_headers(page: str) -> dict:
     return hdrs
 
 
-def test_a_classic_page_under_chrome_gets_the_bare_host_and_hud_sheet(tmp_path, chrome):
+def test_a_page_gets_the_bare_host_and_hud_sheet(tmp_path):
     with _client(tmp_path) as c:
         page = _as(c, "owen").get("/admin/users").text
     assert '<header class="hud-host">' in page and '<header class="topbar">' not in page
     assert re.search(r'href="/static/cc/hud\.css\?h=[0-9a-f]{10}"', page)
-    assert 'href="/static/style.css"' in page     # the body stays classic
-    assert 'class="rule"' not in page.split('<div class="layout">', 1)[0]
+    assert "/static/style.css" not in page and "/static/mobile.css" not in page
     assert '<nav class="snav scroll-x"' in page and "settings-nav-item" not in page
-    # the classic halt banner stays on classic pages (R15)
-    assert "/partials/fleet-halt-banner" in page and "/partials/halt-line" not in page
+    # the halt line on its own route, never the classic banner (R15)
+    assert 'hx-get="/partials/halt-line"' in page and "fleet-halt-banner" not in page
 
 
-def test_a_classic_page_with_chrome_off_is_unchanged(tmp_path):
-    with _client(tmp_path) as c:
-        page = _as(c, "owen").get("/admin/users").text
-    assert '<header class="topbar">' in page and "hud-host" not in page
-    assert "cc/hud.css" not in page
-
-
-def test_the_stamp_poll_from_a_classic_page_gets_the_cc_stamp(tmp_path, chrome):
+def test_the_stamp_poll_from_a_page_gets_the_hud_stamp(tmp_path):
     with _client(tmp_path) as c:
         _as(c, "owen")
         page = c.get("/admin/users").text
         headers = _page_headers(page)
-        assert headers.get("X-CC-UI") == "chrome"
+        assert headers.get(ui.LOOK_HEADER) == ui.LOOK_VALUE == "terminal"
         r = c.get("/partials/stamp", headers=headers)
     assert r.status_code == 200 and "hud-stamp-at" in r.text and "stamp-at" not in r.text.replace("hud-stamp-at", "")
 
 
-def test_the_halt_line_route_follows_the_page(tmp_path, chrome, monkeypatch):
+def test_the_halt_line_route_follows_the_page(tmp_path, monkeypatch):
     halted = {"halt": {"active": True, "reason": "NAS swap", "set_by": "owen",
                        "set_at": "2026-09-25T00:00:00Z", "expires_at": None},
               "halt_hours": 2, "halt_machines": 4}
@@ -370,49 +334,52 @@ def test_the_halt_line_route_follows_the_page(tmp_path, chrome, monkeypatch):
         assert "Syncing is stopped on every computer" in r.text and "NAS swap" in r.text
         assert "[ " not in r.text and 'class="v">NAS swap' in r.text
         assert 'href="/admin/users#admin-fleet-halt"' in r.text
-        # a classic (headerless htmx) asker never gets it
-        classic = c.get("/partials/halt-line", headers={"HX-Request": "true"})
-        assert classic.status_code in (200, 404) and "Syncing is stopped" not in classic.text
+        # a page drawn by an older build (htmx without X-CC-UI: terminal)
+        # never gets it: the stale-page gate tells it to reload instead
+        stale = c.get("/partials/halt-line", headers={"HX-Request": "true"})
+        assert stale.status_code == 200 and stale.text == ""
+        assert stale.headers.get("HX-Refresh") == "true"
     (tmp_path / "x").mkdir()
     with _client(tmp_path / "x") as c2:
         anon = c2.get("/partials/halt-line", follow_redirects=False)
         assert anon.status_code in (401, 302, 303, 307)
 
 
-def test_the_offline_page_under_chrome_names_nobody(tmp_path, chrome, monkeypatch):
+def test_the_offline_page_names_nobody(tmp_path, monkeypatch):
     monkeypatch.setattr(ui, "_notice_counts_safe", lambda s: {"error": 3})
     with _client(tmp_path) as c:
         _as(c, "owen")
         html = c.get("/offline").text
-    assert "hud-host" in html
+    # a bare gate page since it moved onto shell.html: no HUD at all, so
+    # nothing on it can go stale in the service worker's cache
+    assert "hud-host" not in html and 'class="hud"' not in html
+    assert "cc/hud.css" in html and "Try again" in html
     assert "hud-count" not in html and 'href="/account"' not in html
     assert "owen" not in html
 
 
 # ------------------------------------------------ the shell (test-only child)
 
-_PROBE = ('{% extends "cc/shell.html" %}{% block layout %}'
+_PROBE = ('{% extends "shell.html" %}{% block layout %}'
           '<main class="page"><p>probe</p></main>{% endblock %}')
 
 
-def test_the_terminal_shell(tmp_path, chrome):
-    loader = DictLoader({"cc_probe.html": _PROBE})
-    ui_variant.add_test_loader(loader)
+def test_the_terminal_shell(tmp_path):
+    env = ui.templates.env
+    orig = env.loader
+    env.loader = ChoiceLoader([DictLoader({"cc_probe.html": _PROBE}), orig])
     try:
-        env = ui_variant.templates_for(frozenset({"chrome"})).env
         html = env.get_template("cc_probe.html").render(
             csrf_token="tok123", brand_org="Studio", session_user="jsmith",
-            session_is_admin=False, ui_groups=frozenset({"chrome"}),
-            ui_groups_attr="chrome",
-            ui_hx_headers=[("X-CC-UI", "chrome"), ("X-CC-UI-Gen", "g1"),
-                           ("X-CC-UI-Sig", "s1")],
-            nav_current="", request=None)
+            session_is_admin=False, nav_current="", request=None)
     finally:
-        ui_variant.remove_test_loader(loader)
-    assert '<html lang="en" data-ui="cc" data-ui-groups="chrome" data-ui-gen="g1" data-ui-sig="s1">' in html
+        env.loader = orig
+    # one look: no group set, no generation, no signature on the root
+    assert '<html lang="en" data-ui="cc">' in html
+    assert "data-ui-groups" not in html and "data-ui-sig" not in html
     hdrs = json.loads(re.search(r"<body hx-headers='([^']*)'", html).group(1))
-    assert list(hdrs) == ["X-CSRF-Token", "X-CC-UI", "X-CC-UI-Gen", "X-CC-UI-Sig"]
-    assert hdrs["X-CSRF-Token"] == "tok123"
+    # the look header every page sends, which app.stale_page_gate checks
+    assert hdrs == {"X-CSRF-Token": "tok123", "X-CC-UI": "terminal"}
     srcs = re.findall(r'<script src="([^"]+)"', html)
     names = [s.split("?")[0] for s in srcs]
     assert names == ["/static/pwa.js", "/static/htmx.min.js", "/static/htmx_errors.js",
@@ -442,8 +409,10 @@ def test_block_two_has_one_explicit_selector_with_summary_exempt():
     assert 'chip.getAttribute("data-tip") || chip.getAttribute("data-chip-detail")' in js
 
 
-def test_pwa_install_button_has_a_hud_branch_and_keeps_the_classic_one():
+def test_pwa_install_button_is_the_hud_key():
+    # the slot only exists in the HUD's "more" sheet since the classic
+    # drawer went (2026-09-25), so the bracketed classic chip went with it
     js = (DASH / "static" / "pwa.js").read_text(encoding="utf-8")
-    assert "slot.closest('.hud-more')" in js
     assert "btn.className = 'hud-key install-btn';" in js
-    assert "btn.className = 'btn chip tap install-btn';" in js and "'[ INSTALL ]'" in js
+    assert "'install this app'" in js
+    assert "btn chip tap install-btn" not in js and "[ INSTALL ]" not in js

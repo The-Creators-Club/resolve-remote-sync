@@ -16,6 +16,12 @@ tests at the foot of the file.
 
 What is pinned here is what an admin can actually reach, because the failure
 mode of a nav redesign is a page that still exists and nothing links to.
+
+Terminal look (C-collapse, 2026-09-25): the classic look is gone. The strip
+is `<nav class="snav scroll-x">` (partials/settings_nav.html), its entries are
+lower-case words and the current one carries aria-current="page"; the drawer
+is the HUD (partials/topbar.html), which marks Settings the same way. Every
+pin below is the same statement about the same behaviour, in that markup.
 """
 from __future__ import annotations
 
@@ -44,14 +50,14 @@ NAV_OPEN = re.compile(r'<nav[^>]*\sclass="([^"]*)"[^>]*>')
 
 
 def _strip_match(body: str):
-    """The first <nav> whose class list carries settings-nav as a WHOLE token.
+    """The first <nav> whose class list carries snav as a WHOLE token.
 
-    Whole token, not a substring: `settings-nav-item` is the class on every
-    link inside the strip, so a substring test would still find the strip in
-    a page that had lost it and kept one link.
+    Whole token, not a substring: `snav-g` / `snav-h` are the classes inside
+    the strip, so a substring test would still find the strip in a page that
+    had lost it and kept one group.
     """
     for match in NAV_OPEN.finditer(body):
-        if "settings-nav" in match.group(1).split():
+        if "snav" in match.group(1).split():
             return match
     return None
 
@@ -64,23 +70,56 @@ def strip_at(body: str) -> int:
     """Where the strip's opening tag starts. Raises like str.index did."""
     match = _strip_match(body)
     if match is None:
-        raise ValueError("no settings-nav in this page")
+        raise ValueError("no settings strip (nav.snav) in this page")
     return match.start()
+
+
+def strip_of(body: str) -> str:
+    """The strip's own markup, from its <nav> to the first </nav> after it."""
+    start = strip_at(body)
+    return body[start:body.index("</nav>", start)]
+
+
+def hud_nav_of(body: str) -> str:
+    """The HUD's desktop row: the drawer's successor."""
+    start = body.index('<nav class="hud-nav"')
+    return body[start:body.index("</nav>", start)]
+
+
+def hud_more_of(body: str) -> str:
+    """The HUD's "more" sheet: the phone half of the drawer."""
+    start = body.index('id="hud-more"')
+    return body[start:body.index("</div>", start)]
+
+
+def plain_entry(url: str, label: str) -> str:
+    return f'<a href="{url}">{label}</a>'
+
+
+def current_entry(url: str, label: str) -> str:
+    return f'<a href="{url}" aria-current="page">{label}</a>'
+
+
+# How the HUD row draws one of its links, lit or not.
+def hud_link(url: str, word: str, lit: bool) -> str:
+    cur = ' aria-current="page"' if lit else ""
+    return (f'<a href="{url}"{cur}><span class="hud-slash" aria-hidden="true">'
+            f'&gt;</span>{word}</a>')
 
 
 # key -> (url, label). The order is the strip's own.
 HUB = {
-    "site": ("/admin/settings", "[ SITE ]"),
-    "users": ("/admin/users", "[ USERS ]"),
+    "site": ("/admin/settings", "site"),
+    "users": ("/admin/users", "users"),
     # DUI-12 / the sweep's vocabulary table (2026-09-04): the page is
     # SYNC PLANS. The route is unchanged.
-    "assignments": ("/admin/assignments", "[ SYNC PLANS ]"),
-    "transfers": ("/transfers", "[ TRANSFERS ]"),
-    "setup": ("/setup", "[ SETUP ]"),
-    "packages": ("/admin/packages", "[ PACKAGES ]"),
+    "assignments": ("/admin/assignments", "sync plans"),
+    "transfers": ("/transfers", "transfers"),
+    "setup": ("/setup", "setup"),
+    "packages": ("/admin/packages", "packages"),
     # SYS-6 (wave 4): the composed page, and the Settings landing.
-    "health": ("/admin/health", "[ HEALTH ]"),
-    "help": ("/help", "[ HELP ]"),
+    "health": ("/admin/health", "health"),
+    "help": ("/help", "help"),
 }
 # The two an editor may open. The rest 403 or redirect for them, so the strip
 # must not offer them (see test_the_strip_offers_an_editor_only_their_pages).
@@ -130,12 +169,16 @@ def test_every_hub_page_renders_the_strip_with_itself_marked(client, key):
     page = as_user(client, "owen").get(url)
     assert page.status_code == 200, page.text
     assert has_strip(page.text)
+    strip = strip_of(page.text)
     # Its own entry is the current one...
-    assert f'settings-nav-current" href="{url}"' in page.text
-    assert page.text.count("settings-nav-current") == 1
+    assert current_entry(url, label) in strip
+    assert strip.count('aria-current="page"') == 1
     # ...and every other entry is offered as a plain link.
     for other, (other_url, other_label) in HUB.items():
-        assert other_label in page.text, f"{key} page does not offer {other_label}"
+        if other == key:
+            continue
+        assert plain_entry(other_url, other_label) in strip, \
+            f"{key} page does not offer {other_label}"
 
 
 def test_the_strip_is_found_whatever_else_is_in_its_class_list():
@@ -144,12 +187,12 @@ def test_the_strip_is_found_whatever_else_is_in_its_class_list():
     sideways inside itself, and the sweep only exempts an element from
     "content scrolls sideways" if it CARRIES `.scroll-x`. This file pinned
     the exact attribute and was the reason the class could not be added."""
-    assert has_strip('<nav class="settings-nav" aria-label="settings">')
-    assert has_strip('<nav class="settings-nav scroll-x" aria-label="settings">')
-    assert has_strip('<nav aria-label="settings" class="scroll-x settings-nav">')
+    assert has_strip('<nav class="snav" aria-label="settings">')
+    assert has_strip('<nav class="snav scroll-x" aria-label="settings">')
+    assert has_strip('<nav aria-label="settings" class="scroll-x snav">')
     # ...and it is still a statement about THIS strip, not any nav.
-    assert not has_strip('<nav class="drawer-nav">')
-    assert not has_strip('<nav class="settings-nav-item">')
+    assert not has_strip('<nav class="hud-nav" aria-label="main">')
+    assert not has_strip('<nav class="snav-g">')
 
 
 @pytest.mark.parametrize("key", sorted(HUB))
@@ -160,15 +203,26 @@ def test_the_drawer_keeps_settings_lit_on_every_hub_page(client, key):
     url, _label = HUB[key]
     body = as_user(client, "owen").get(url).text
     # SYS-6: the drawer's [ SETTINGS ] lands on HEALTH now, not the site form.
-    assert f'drawer-current" href="{ui.SETTINGS_LANDING}"' in body
+    # Transfers is its own HUD entry (hud_in_settings excludes it), so there
+    # it is Transfers that is lit, not Settings.
+    nav = hud_nav_of(body)
+    more = hud_more_of(body)
+    if key == "transfers":
+        assert hud_link("/transfers", "transfers", True) in nav
+        assert hud_link(ui.SETTINGS_LANDING, "settings", False) in nav
+    else:
+        assert hud_link(ui.SETTINGS_LANDING, "settings", True) in nav
+        assert (f'<a class="hud-mi" href="{ui.SETTINGS_LANDING}" '
+                f'aria-current="page">settings</a>') in more
 
 
 def test_an_editor_on_transfers_sees_it_lit_in_the_drawer(client):
     """An editor has no Settings hub to enter, so their drawer names Transfers
     itself -- and marks it."""
     body = as_user(client, "jsmith").get("/transfers").text
-    assert 'drawer-current" href="/transfers"' in body
-    assert "[ SETTINGS ]" not in body
+    assert hud_link("/transfers", "transfers", True) in hud_nav_of(body)
+    assert ">settings</a>" not in body
+    assert f'href="{ui.SETTINGS_LANDING}"' not in hud_nav_of(body)
 
 
 def test_the_strip_offers_an_editor_only_their_pages(client):
@@ -177,11 +231,12 @@ def test_the_strip_offers_an_editor_only_their_pages(client):
     five refusals."""
     page = as_user(client, "jsmith").get("/transfers")
     assert page.status_code == 200
-    for key, (_url, label) in HUB.items():
+    strip = strip_of(page.text)
+    for key, (url, label) in HUB.items():
         if key in EDITOR_PAGES:
-            assert label in page.text
+            assert f'<a href="{url}"' in strip and f">{label}</a>" in strip
         else:
-            assert label not in page.text
+            assert f'href="{url}"' not in strip, f"an editor is offered {label}"
 
 
 def test_the_transfers_poll_cannot_eat_the_strip(client):
@@ -202,16 +257,17 @@ def test_packages_has_its_own_page_and_the_users_page_no_longer_carries_it(clien
     packages = as_user(client, "owen").get("/admin/packages")
     assert packages.status_code == 200
     # [ PUBLISHED PACKAGES ] was one flat table; since 2026-09-11 the panel
-    # leads with what the fleet is actually handed.
-    assert "[ CURRENTLY SERVED ]" in packages.text
-    assert "[ AVAILABLE FROM THE VENDOR ]" in packages.text
-    assert "[ OTHER VERSIONS HELD ON THIS SERVER ]" in packages.text
+    # leads with what the fleet is actually handed. Terminal look: each panel
+    # is a window, found by its id.
+    assert 'id="win-currently_served"' in packages.text
+    assert 'id="win-from_the_vendor"' in packages.text
+    assert 'id="win-other_versions_held"' in packages.text
     # The dashboard's own update panel loads itself on this page.
     assert 'hx-get="/partials/admin/dashboard-update"' in packages.text
 
     users = client.get("/admin/users")
     assert users.status_code == 200
-    assert "[ CURRENTLY SERVED ]" not in users.text
+    assert 'id="win-currently_served"' not in users.text
     assert "/partials/admin/packages" not in users.text
     assert "/partials/admin/dashboard-update" not in users.text
     # Nothing may point at the old anchor either.
@@ -266,7 +322,9 @@ def test_the_strip_does_not_offer_the_installer(client):
     behind where it belongs."""
     for url, _label in HUB.values():
         body = as_user(client, "owen").get(url).text
-        assert "[ INSTALLER ]" not in body[strip_at(body):body.index("</nav>")]
+        strip = strip_of(body)
+        assert "/download" not in strip and "/installer" not in strip
+        assert "installer" not in strip.lower()
 
 
 def test_download_303s_to_the_browsers_own_package(client):
@@ -288,10 +346,12 @@ def test_an_unknown_user_agent_gets_the_chooser_not_a_guess(client):
     resp = client.get("/download", follow_redirects=False,
                       headers={"User-Agent": UNKNOWN_UA})
     assert resp.status_code == 200
-    assert "[ INSTALLER ]" in resp.text
-    assert "[ WINDOWS ]" in resp.text and "[ MACOS ]" in resp.text
+    assert '<span class="prompt" aria-hidden="true">&gt;</span> INSTALLER</span></h1>' in resp.text
+    assert 'id="win-installer-windows"' in resp.text
+    assert 'id="win-installer-macos"' in resp.text
     # Neither card claims to be this computer, because nothing said so.
-    assert "installer-pick-detected" not in resp.text
+    assert "pick-plat here" not in resp.text
+    assert "this computer</b>" not in resp.text
 
 
 def test_the_installer_page_offers_both_platforms(client, tmp_path):
@@ -304,7 +364,9 @@ def test_the_installer_page_offers_both_platforms(client, tmp_path):
     # banner -- a fleet with no Mac package is a normal state.
     page = client.get("/installer")
     assert page.status_code == 200
-    assert page.text.count("nothing published for this platform yet") == 2
+    assert page.text.count("Nothing published for this platform yet") == 2
+    # ...and "no package" is the quiet empty state, not an error note.
+    assert "note err" not in page.text
     assert "/download/" not in page.text
     # No Settings strip: it is not a hub page any more.
     assert not has_strip(page.text)
@@ -322,7 +384,8 @@ def test_the_installer_page_offers_both_platforms(client, tmp_path):
     assert 'href="/download/windows"' in page.text
     assert "1.0.30" in page.text
     # The Mac half is still honestly empty.
-    assert page.text.count("nothing published for this platform yet") == 1
+    assert page.text.count("Nothing published for this platform yet") == 1
     # ...and a Windows browser is told which card is its own.
     page = client.get("/installer", headers={"User-Agent": WINDOWS_UA})
-    assert "installer-pick-detected" in page.text
+    assert 'class="win pick-plat here" data-win="installer-windows"' in page.text
+    assert 'class="win pick-plat" data-win="installer-macos"' in page.text

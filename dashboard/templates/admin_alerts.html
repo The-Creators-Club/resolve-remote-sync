@@ -1,21 +1,39 @@
-{% extends "base.html" %}
+{# ALERTS, terminal twin (UI port phase 5; bench design/alerts.html).
+   Same context as admin_alerts.html. NOT polled: a swap under the reader
+   would throw away whatever they had typed.
+
+   FOUR SIBLING FORMS, never one (1.3, wave 6): save, the password (its own
+   store), run the server check, send a test. The head's "Send a test" is its
+   own form here; the others are in partials/admin_alerts.html, where a window
+   may show another form's control through the form= attribute, never a
+   nested <form>. #}
+{% extends "shell.html" %}
 {% block title %}{{ brand_org | upper }}: ALERTS{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset_url('cc/health.css') }}">{% endblock %}
 {% block layout %}
-  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
-    {% include "partials/sidebar.html" %}
-  </aside>
-  <main class="main">
-    {% include "partials/settings_nav.html" %}
-    <div class="detail-head"><h1>[ ALERTS ]</h1></div>
-    <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 62ch;">
-      What this server checks about itself and the fleet, what it found, and
-      where it sends it. Every alarm this product raises used to be
+<div class="page one">
+  {% include "partials/settings_nav.html" %}
+
+  <div class="head">
+    <div>
+      <h1><span><span class="prompt" aria-hidden="true">&gt;</span> ALERTS</span></h1>
+      <div class="sub">checked against <b>{{ alerts_kinds | length }}</b> things every <b>{{ alerts_interval_minutes }}</b> minutes</div>
+    </div>
+    <div class="acts">
+      <a class="key" href="/admin/alerts/preview" target="_blank" rel="noopener" title="Opens this week's Monday report in a new tab, built from what is open now. Nothing is sent."><span class="t">Preview this week's report</span></a>
+      <form id="alerts-test-form" class="inline" hx-post="/partials/admin/alerts/test" hx-target="#admin-alerts" hx-swap="outerHTML">
+        <button class="key primary w-14" type="submit" data-busy title="Sends one test message through the saved channel. Save first if you changed anything below."><span class="t">Send a test</span><span class="busy-t"><span class="spin"></span> sending</span></button>
+      </form>
+    </div>
+  </div>
+
+  <div class="vstack">
+    <p class="lede">What this server checks about itself and the fleet, what it
+      found, and where it sends it. Every alarm this product raises used to be
       pull-only: it was on a page, and somebody had to have the page open.
-      This is the same information, pushed, plus a report every Monday
-      morning.
-    </p>
-    {# NOT polled: this page is read, and a swap under the reader would throw
-       away whatever they had typed in the settings form. #}
+      This is the same information, <b>pushed</b>, plus a report every Monday
+      morning.</p>
     {% include "partials/admin_alerts.html" %}
-  </main>
+  </div>
+</div>
 {% endblock %}

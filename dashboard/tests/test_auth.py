@@ -125,7 +125,7 @@ def test_expired_session_answers_htmx_pollers_with_hx_redirect(client):
 
 def test_htmx_redirect_keeps_the_pages_query_and_survives_a_missing_current_url(client):
     resp = client.get(
-        "/partials/sidebar?current=x",
+        "/partials/projects-tree?current=x",
         headers={"HX-Request": "true",
                  "HX-Current-URL": "http://dash/project/2026-cct?as=editor2"},
         follow_redirects=False,
@@ -133,9 +133,9 @@ def test_htmx_redirect_keeps_the_pages_query_and_survives_a_missing_current_url(
     assert resp.headers["HX-Redirect"] == "/login?next=%2Fproject%2F2026-cct%3Fas%3Deditor2"
     # no HX-Current-URL (htmx always sends it, but a hand-rolled caller may
     # not): fall back to the request's own path rather than dropping the header
-    resp = client.get("/partials/sidebar", headers={"HX-Request": "true"},
+    resp = client.get("/partials/projects-tree", headers={"HX-Request": "true"},
                       follow_redirects=False)
-    assert resp.headers["HX-Redirect"] == "/login?next=%2Fpartials%2Fsidebar"
+    assert resp.headers["HX-Redirect"] == "/login?next=%2Fpartials%2Fprojects-tree"
 
 
 def test_plain_document_gets_still_get_the_303(client):
@@ -518,7 +518,10 @@ def test_scope_helper():
 
 def test_login_page_renders(client):
     page = client.get("/login")
-    assert page.status_code == 200 and "[ SIGN IN ]" in page.text
+    # Terminal look (2026-09-25): the "[ SIGN IN ]" control is a key.
+    assert page.status_code == 200
+    assert 'action="/login"' in page.text
+    assert '<span class="t">Sign in</span></button>' in page.text
     resp = client.post("/login", data={"username": "jsmith", "password": "pw1"},
                        follow_redirects=False)
     assert resp.status_code == 303 and auth.COOKIE_NAME in resp.cookies

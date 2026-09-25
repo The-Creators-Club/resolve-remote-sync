@@ -1,12 +1,11 @@
 """The terminal Users, Sync plans, Jobs, History and Setup pages (UI redesign
 port phase 4, second half, group `settings-fleet`, builder P4b, 2026-09-25).
 
-Run through the `ui_variant` fixture: classic keeps every classic pin (these
-tests only assert the classic page still draws classic), and the terminal
-look keeps every hook, URL and confirm the classic pages carry, puts every
-swap target on a body and never on a `.win` (plan 3.1), keeps the one-time
-secret out of every foldable window (3.1, wave 5), keeps ARCHIVE's native
-confirm (3.2, wave 5), and draws no [ bracket ] label.
+Since the collapse (2026-09-25) the terminal look is the only look: these
+pages keep every hook, URL and confirm the old pages carried, put every swap
+target on a body and never on a `.win` (plan 3.1), keep the one-time secret
+out of every foldable window (3.1, wave 5), keep ARCHIVE's native confirm
+(3.2, wave 5), and draw no [ bracket ] label.
 """
 from __future__ import annotations
 
@@ -22,10 +21,11 @@ from ccsync_dashboard import auth
 from ccsync_dashboard import db as dbmod
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
+from conftest import HX
 
 SECRET = "p4b-test-secret-not-a-real-one-xx"
 ROOT = Path(__file__).resolve().parents[1]
-CC = ROOT / "templates" / "cc"
+CC = ROOT / "templates"
 
 MY_TEMPLATES = (
     "admin_users.html", "partials/admin_users.html", "partials/admin_sessions.html",
@@ -50,7 +50,7 @@ PAGES = {
 
 
 @pytest.fixture
-def env(ui_variant, tmp_path):
+def env(tmp_path):
     projects = tmp_path / "tree" / "Projects"
     projects.mkdir(parents=True)
     settings = Settings(db_path=str(tmp_path / "d.db"), session_secret=SECRET,
@@ -71,8 +71,9 @@ def env(ui_variant, tmp_path):
         conn.close()
 
 
-def _terminal(ui_variant) -> bool:
-    return "settings-fleet" in ui_variant.groups
+def _hx(page_url: str) -> dict:
+    """The headers a page sends on an htmx request (shell.html)."""
+    return {**HX, "HX-Current-URL": page_url}
 
 
 class _Tree(HTMLParser):
@@ -146,28 +147,22 @@ def _check_terminal_markup(html: str) -> None:
 
 
 @pytest.mark.parametrize("path", list(PAGES))
-def test_each_page_draws_in_the_look_it_was_asked_for(ui_variant, env, path):
+def test_each_page_draws_in_the_terminal_look(env, path):
     client, _ = env
     page = client.get(path).text
-    ui_variant.check_page(page)
-    if not _terminal(ui_variant):
-        assert 'data-ui="cc"' not in page
-        assert "[ " in page      # the classic brackets, untouched
-        return
     assert 'data-ui="cc"' in page
+    assert "data-ui-groups" not in page
     assert "/static/cc/settings_people.css?h=" in page
     assert f"&gt;</span> {PAGES[path]}" in page
     _check_terminal_markup(page)
 
 
-def test_users_page_keeps_every_panel_poll_and_the_secret_slot(ui_variant, env):
+def test_users_page_keeps_every_panel_poll_and_the_secret_slot(env):
     client, _ = env
     page = client.get("/admin/users").text
     for url in ("/partials/admin/users", "/partials/admin/sessions",
                 "/partials/admin/report-tokens", "/partials/admin/fleet-halt"):
         assert f'hx-get="{url}"' in page, url
-    if not _terminal(ui_variant):
-        return
     tree = _parse(page)
     slot = [n for n in tree.nodes if n["attrs"].get("id") == "minted-secret"]
     assert len(slot) == 1
@@ -189,29 +184,27 @@ def test_users_page_keeps_every_panel_poll_and_the_secret_slot(ui_variant, env):
     ("/partials/admin/jobs", "admin-jobs"),
     ("/partials/admin/audit", None),
 ])
-def test_each_partial_keeps_its_hook_in_both_looks(ui_variant, env, url, hook):
+def test_each_partial_keeps_its_hook(env, url, hook):
     client, _ = env
     page_url = "http://testserver/admin/audit" if "audit" in url else (
         "http://testserver/admin/jobs" if "jobs" in url else "http://testserver/admin/users")
-    r = client.get(url, headers=ui_variant.htmx_headers(client, page_url))
+    r = client.get(url, headers=_hx(page_url))
     assert r.status_code == 200, r.text[:300]
+    assert r.text.strip(), "an empty answer is the stale-page gate, not the partial"
     if hook:
         assert hook in r.text
-    if _terminal(ui_variant):
-        assert "[ " not in re.sub(r"<!--.*?-->", "", r.text) or "hx-confirm" in r.text
-        _check_terminal_markup(r.text)
+    assert "[ " not in re.sub(r"<!--.*?-->", "", r.text) or "hx-confirm" in r.text
+    _check_terminal_markup(r.text)
 
 
-def test_a_minted_token_is_never_inside_a_foldable_window(ui_variant, env):
+def test_a_minted_token_is_never_inside_a_foldable_window(env):
     client, _ = env
     r = client.post("/partials/admin/report-tokens/create",
                     data={"username": "jsmith", "label": "laptop"},
-                    headers=ui_variant.htmx_headers(client, "http://testserver/admin/users"))
+                    headers=_hx("http://testserver/admin/users"))
     assert r.status_code == 200, r.text[:300]
     assert 'id="minted-secret"' in r.text and 'hx-swap-oob="true"' in r.text
     assert 'id="minted-value"' in r.text
-    if not _terminal(ui_variant):
-        return
     tree = _parse(r.text)
     value = next(n for n in tree.nodes if n["attrs"].get("id") == "minted-value")
     for anc in value["anc"]:
@@ -223,14 +216,11 @@ def test_a_minted_token_is_never_inside_a_foldable_window(ui_variant, env):
     assert 'data-copy-from="minted-value"' in r.text
 
 
-def test_sync_plans_keeps_archive_native_and_emits_the_machine_map(ui_variant, env):
+def test_sync_plans_keeps_archive_native_and_emits_the_machine_map(env):
     client, _ = env
     page = client.get("/admin/assignments?editor=jsmith&machine=*").text
     assert 'action="/partials/admin/projects/archive"' in page
     assert "onsubmit=\"return window.confirm('Archive '" in page
-    if not _terminal(ui_variant):
-        assert "/static/assignments.js" in page
-        return
     assert "/static/cc/assignments.js?h=" in page
     assert "/static/assignments.js" not in page
     m = re.search(r'<script type="application/json" id="assign-machine-map">(.*?)</script>',
@@ -243,7 +233,7 @@ def test_sync_plans_keeps_archive_native_and_emits_the_machine_map(ui_variant, e
         assert hook in page, hook
 
 
-def test_setup_loads_the_forked_client_and_keeps_every_id(ui_variant, env):
+def test_setup_loads_the_forked_client_and_keeps_every_id(env):
     client, _ = env
     page = client.get("/setup").text
     for hook in ("setup-eula-text", "setup-eula-checkbox", "setup-eula-accept",
@@ -254,28 +244,32 @@ def test_setup_loads_the_forked_client_and_keeps_every_id(ui_variant, env):
     for name in ("org_name", "org_short", "tree_name", "canonical_prefix",
                  "template_folders", "email", "webhook"):
         assert f'name="{name}"' in page, name
-    if not _terminal(ui_variant):
-        assert 'src="/static/setup.js"' in page
-        return
     assert "/static/cc/setup.js?h=" in page
     assert 'src="/static/setup.js"' not in page
 
 
-def test_the_first_run_setup_page_draws_without_a_session(ui_variant, env):
+def test_the_first_run_setup_page_draws_without_a_session(env):
     client, _ = env
     client.cookies.clear()
     r = client.get("/setup", follow_redirects=False)
     # Either the first-run window is open (a page with no strip) or it is
-    # closed (a redirect to sign in); both looks answer the same way.
-    if r.status_code == 200 and _terminal(ui_variant):
+    # closed (a redirect to sign in).
+    assert r.status_code in (200, 302, 303, 307), r.status_code
+    if r.status_code == 200:
         assert "settings-nav" not in r.text and "snav" not in r.text
 
 
-def test_every_cc_template_of_mine_is_registered_and_owned():
-    from ccsync_dashboard import ui_variant as uv
-    for name in MY_TEMPLATES:
-        assert uv.TEMPLATE_GROUPS.get(f"cc/{name}") == "settings-fleet", name
-        assert (CC / name).is_file(), name
+# The old look's scripts (static/setup.js, static/assignments.js) were deleted
+# in the collapse (2026-09-25). These are the calls and confirms they made
+# (read from them at 77916b8), which the terminal scripts must keep.
+CLASSIC_CALLS = {
+    "cc/setup.js": ('"/api/v1/admin/site', '"/api/v1/setup/admin', '"/api/v1/setup/alerts',
+                    '"/api/v1/setup/alerts/test', '"/api/v1/setup/eula',
+                    '"/api/v1/setup/status', '"/api/v1/setup/tasks',
+                    '"/api/v1/setup/tasks/'),
+    "cc/assignments.js": ('"/api/v1/admin/machines/', '"/api/v1/selection/'),
+}
+CLASSIC_CONFIRMS = {"cc/setup.js": 0, "cc/assignments.js": 3}
 
 
 def test_forked_scripts_build_no_bracket_labels_and_keep_their_calls():
@@ -284,15 +278,9 @@ def test_forked_scripts_build_no_bracket_labels_and_keep_their_calls():
         code = "\n".join(line for line in src.splitlines()
                          if not line.lstrip().startswith("//"))
         assert not re.search(r"""["']\[ |\s\]["']""", code), rel
-    classic = (ROOT / "static" / "setup.js").read_text(encoding="utf-8")
-    fork = (ROOT / "static" / "cc" / "setup.js").read_text(encoding="utf-8")
-    for call in set(re.findall(r'"/api/v1/[a-z/]+', classic)):
-        assert call in fork, call
-    classic = (ROOT / "static" / "assignments.js").read_text(encoding="utf-8")
-    fork = (ROOT / "static" / "cc" / "assignments.js").read_text(encoding="utf-8")
-    assert fork.count("window.confirm") == classic.count("window.confirm")
-    for call in set(re.findall(r'"/api/v1/[a-z/-]+', classic)):
-        assert call in fork, call
+        for call in CLASSIC_CALLS[rel]:
+            assert call in src, (rel, call)
+        assert src.count("window.confirm") == CLASSIC_CONFIRMS[rel], rel
 
 
 def test_no_em_dash_in_my_visible_text():
@@ -306,13 +294,13 @@ def test_no_em_dash_in_my_visible_text():
         assert "—" not in code, rel
 
 
-def test_the_data_subject_buttons_reach_the_users_panel(ui_variant, env):
+def test_the_data_subject_buttons_reach_the_users_panel(env):
     """LG-2 / LG-3 carried from the classic partial (2026-09-25): every row
     that names a person carries EXPORT DATA (a plain POST form with the CSRF
     field, since the answer is a download) and ERASE HISTORY (htmx, with the
-    classic confirm), and an erase answers in the asking look."""
+    classic confirm), and an erase answers with the users panel."""
     client, _conn = env
-    headers = ui_variant.htmx_headers(client, "http://testserver/admin/users")
+    headers = _hx("http://testserver/admin/users")
     r = client.get("/partials/admin/users", headers=headers)
     assert r.status_code == 200
     assert 'action="/api/v1/admin/users/jsmith/export"' in r.text
@@ -320,22 +308,19 @@ def test_the_data_subject_buttons_reach_the_users_panel(ui_variant, env):
     assert 'hx-post="/partials/admin/users/erase-history"' in r.text
     assert ('hx-confirm="Erase the history of jsmith? Their account and what their '
             'computers report now stay."') in r.text
-    if _terminal(ui_variant):
-        assert '<span class="t">export data</span>' in r.text
-        assert '<span class="t">erase history</span>' in r.text
-        _check_terminal_markup(r.text)
-    else:
-        assert "[ EXPORT DATA ]" in r.text and "[ ERASE HISTORY ]" in r.text
+    assert '<span class="t">export data</span>' in r.text
+    assert '<span class="t">erase history</span>' in r.text
+    _check_terminal_markup(r.text)
     erased = client.post("/partials/admin/users/erase-history", data={"username": "jsmith"},
                          headers=headers)
     assert erased.status_code == 200, erased.text[:300]
     assert "admin-users-box" in erased.text
-    if _terminal(ui_variant):
-        assert "[ ERASE HISTORY ]" not in erased.text
-        _check_terminal_markup(erased.text)
+    assert "[ ERASE HISTORY ]" not in erased.text
+    assert '<span class="t">erase history</span>' in erased.text
+    _check_terminal_markup(erased.text)
 
 
-def test_suspend_and_resume_answer_in_the_asking_look(ui_variant, env):
+def test_suspend_and_resume_answer_with_the_row(env):
     """The suspend key is only ever included from the users partial, and only
     on a local account's row, so the page tests above (no local accounts)
     never drew it. Integrator, 2026-09-25: the coverage hook caught it."""
@@ -343,16 +328,13 @@ def test_suspend_and_resume_answer_in_the_asking_look(ui_variant, env):
     client, conn = env
     local_users.create_user(conn, "jsmith", "seed-pass-123456", "editor", created_by="owen")
     conn.commit()
-    headers = ui_variant.htmx_headers(client, "http://testserver/admin/users")
+    headers = _hx("http://testserver/admin/users")
     r = client.post("/partials/admin/users/suspend",
                     data={"username": "jsmith", "suspended": "1"}, headers=headers)
     assert r.status_code == 200, r.text[:300]
     assert 'name="suspended" value="0"' in r.text   # jsmith now offers resume
-    if _terminal(ui_variant):
-        assert re.search(r'<span class="t">resume</span>', r.text)
-        _check_terminal_markup(r.text)
-    else:
-        assert "[ RESUME ]" in r.text
+    assert re.search(r'<span class="t">resume</span>', r.text)
+    _check_terminal_markup(r.text)
     r = client.post("/partials/admin/users/suspend",
                     data={"username": "jsmith", "suspended": "0"}, headers=headers)
     assert r.status_code == 200 and 'name="suspended" value="1"' in r.text

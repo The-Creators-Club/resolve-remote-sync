@@ -82,7 +82,9 @@ def test_a_generated_password_is_not_returned_through_the_error_key(env):
     assert "generated password" not in body
     assert "▲" not in body.split("minted-secret")[0] or "banner" not in body
     assert 'id="minted-secret"' in body
-    assert "NEW PASSWORD FOR JSMITH" in body
+    # The terminal look (the only one since 2026-09-25) titles its windows in
+    # lower case; the words are the same.
+    assert "new password for jsmith" in body
 
 
 def test_a_minted_credential_is_swapped_out_of_band_above_the_polled_panels(env):
@@ -95,7 +97,7 @@ def test_a_minted_credential_is_swapped_out_of_band_above_the_polled_panels(env)
     body = resp.text
     assert 'hx-swap-oob="true"' in body
     # ...before the panel it must survive, i.e. a top-level sibling.
-    assert body.index('id="minted-secret"') < body.index('class="admin-users-box"')
+    assert body.index('id="minted-secret"') < body.index('class="admin-users-box')
     # And the host element on the page is not inside either polling wrapper.
     page = as_user(env).get("/admin/users").text
     host = page.index('id="minted-secret"')
@@ -111,7 +113,7 @@ def test_a_minted_report_token_leaves_the_panel_that_polls_every_60s(env):
     body = resp.text
     assert 'hx-swap-oob="true"' in body
     assert body.index('id="minted-secret"') < body.index('id="admin-report-tokens"')
-    assert "NEW TOKEN FOR JSMITH" in body
+    assert "new token for jsmith" in body
     # The token itself, once, in the out-of-band box.
     assert "cce1." in body
 
@@ -123,10 +125,13 @@ def test_every_one_time_credential_offers_a_copy_control(env):
                        ("/partials/admin/report-tokens/create",
                         {"username": "jsmith", "label": ""})):
         body = env.post(path, data=data).text
-        assert 'class="btn tap copy-btn"' in body, path
-        assert 'data-copy-from="minted-value"' in body, path
-    assert (STATIC / "copy_value.js").exists()
-    assert '<script src="/static/copy_value.js"' in (TEMPLATES / "base.html").read_text(
+        assert re.search(r'<button class="key[^"]*\bcopy-btn\b[^"]*" type="button" '
+                         r'data-copy-from="minted-value"', body), path
+        assert 'id="minted-value"' in body, path
+    # shell.html (every page) loads the handler; base.html and the classic
+    # copy_value.js went with the classic look on 2026-09-25.
+    assert 'data-copy-from' in (STATIC / "cc" / "copy_value.js").read_text(encoding="utf-8")
+    assert "asset_url('cc/copy_value.js')" in (TEMPLATES / "shell.html").read_text(
         encoding="utf-8")
 
 
@@ -138,7 +143,10 @@ def test_a_failed_creation_mints_nothing(env):
              data={"username": "jsmith", "role": "editor", "password": ""})
     again = env.post("/partials/admin/users/create",
                      data={"username": "jsmith", "role": "editor", "password": ""})
-    assert "NEW PASSWORD FOR" not in again.text
+    # The minted window's own title and value, not the words: every account
+    # row's set-password control says "new password for <name>" too.
+    assert 'id="minted-secret-t"' not in again.text
+    assert 'id="minted-value"' not in again.text
     assert 'hx-swap-oob' not in again.text
 
 
@@ -164,9 +172,14 @@ def test_the_stamp_route_says_when_the_server_answered_not_when_a_view_was_built
 
 def test_the_syncthing_banner_moved_out_of_the_frozen_include():
     topbar = (TEMPLATES / "partials" / "topbar.html").read_text(encoding="utf-8")
-    assert "SYNCTHING UNREACHABLE" not in topbar
+    assert "syncthing unreachable" not in topbar.lower()
     stamp = (TEMPLATES / "partials" / "stamp.html").read_text(encoding="utf-8")
-    assert "SYNCTHING UNREACHABLE" in stamp
+    assert "syncthing unreachable" in stamp.lower()
+    # ...and the topbar draws it only through the element that polls it.
+    polled = topbar[topbar.index('id="topbar-stamp"'):]
+    polled = polled[:polled.index("</span>")]
+    assert 'hx-get="/partials/stamp"' in polled
+    assert '{% include "partials/stamp.html" %}' in polled
 
 
 def test_an_unreachable_syncthing_is_said_in_the_polled_fragment(env, tmp_path):
@@ -181,7 +194,7 @@ def test_an_unreachable_syncthing_is_said_in_the_polled_fragment(env, tmp_path):
         conn.commit()
     finally:
         conn.close()
-    assert "SYNCTHING UNREACHABLE" in env.get("/partials/stamp").text
+    assert "syncthing unreachable" in env.get("/partials/stamp").text.lower()
 
 
 def test_an_anonymous_page_does_not_poll_a_fragment_behind_the_login_gate(env):
@@ -198,10 +211,16 @@ def test_there_is_a_global_htmx_error_handler():
     # It must clear itself again, or the first blip is permanent.
     assert "htmx:afterRequest" in js
     assert "STOPPED UPDATING" in js
-    base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
-    assert '<script src="/static/htmx_errors.js"' in base
-    # The banner needs a rule, or it is invisible.
-    assert ".stale-banner" in (STATIC / "style.css").read_text(encoding="utf-8")
+    shell = (TEMPLATES / "shell.html").read_text(encoding="utf-8")
+    assert "asset_url('htmx_errors.js')" in shell
+    # The banner needs a rule that pins it where it is seen, or it lands after
+    # the last element of the page. style.css held it and went with the
+    # classic look; terminal.css, which every page loads, holds it now.
+    css = (STATIC / "cc" / "terminal.css").read_text(encoding="utf-8")
+    assert "asset_url('cc/terminal.css')" in shell
+    rule = css[css.index(".banner.alarm.stale-banner {"):]
+    rule = rule[:rule.index("}")]
+    assert "position: fixed" in rule and "bottom: 0" in rule
 
 
 def test_the_error_banner_never_builds_html_from_a_server_string():
@@ -214,22 +233,46 @@ def test_the_error_banner_never_builds_html_from_a_server_string():
 
 # ------------------------------------------------------------------ DUI-4
 
+# The terminal look has no page-wide .htmx-request rule: each slow form's own
+# sheet swaps a key's `.t` for its `.busy-t` and takes its clicks away while
+# the request is out. template: (sheet, the rule that shows the busy words,
+# the rule that stops a second submit).
+SLOW_FORM_RULES = {
+    "partials/admin_users.html": (
+        "settings_people.css", "form.htmx-request .key.sp-busy > .busy-t { visibility: visible; }",
+        "form.htmx-request .sp-busy { pointer-events: none;"),
+    "partials/admin_packages.html": (
+        "settings_fleet.css", ".sf-pkg form.htmx-request .key .busy-t { display: inline; }",
+        ".sf-pkg form.htmx-request .key { pointer-events: none;"),
+    "partials/recovery.html": (
+        "health.css", "#recovery form.htmx-request .key .busy-t,",
+        "#recovery form.htmx-request .key,"),
+}
+
+
 def test_there_is_a_loading_rule_for_htmx_requests():
-    css = (STATIC / "style.css").read_text(encoding="utf-8")
-    assert ".htmx-request .btn" in css
-    assert "pointer-events: none" in css
-    assert ".busy-label" in css
+    terminal = (STATIC / "cc" / "terminal.css").read_text(encoding="utf-8")
+    assert ".key .busy-t { display: none; }" in terminal
+    assert ".key[disabled], .key.busy { pointer-events: none;" in terminal
+    for template, (sheet, shows, blocks) in SLOW_FORM_RULES.items():
+        css = (STATIC / "cc" / sheet).read_text(encoding="utf-8")
+        assert shows in css, (template, sheet)
+        assert blocks in css, (template, sheet)
+    recovery = (STATIC / "cc" / "health.css").read_text(encoding="utf-8")
+    block = recovery[recovery.index("#recovery form.htmx-request .key,"):]
+    assert "pointer-events: none" in block[:block.index("}")]
 
 
 @pytest.mark.parametrize("template,label", [
-    ("partials/admin_users.html", "CREATING THE ACCOUNT"),
-    ("partials/admin_packages.html", "DOWNLOADING THE BUILD"),
-    ("partials/recovery.html", "COPYING THE FILES BACK"),
+    ("partials/admin_users.html", "creating the account"),
+    ("partials/admin_packages.html", "downloading the build"),
+    ("partials/recovery.html", "copying the files back"),
 ])
 def test_the_slow_actions_say_what_they_are_doing(template, label):
     body = (TEMPLATES / template).read_text(encoding="utf-8")
-    assert "busy-label" in body, template
-    assert label in body, template
+    # The busy words sit in a .busy-t inside the key they belong to.
+    assert re.search(r'<span class="busy-t">(<span class="spin"></span>)?\s*'
+                     + re.escape(label), body), template
 
 
 def test_the_two_minute_create_says_so_up_front():
@@ -239,37 +282,46 @@ def test_the_two_minute_create_says_so_up_front():
 
 # ------------------------------------------------- DUI-5 and DCORE-2 (JS)
 
+# static/cc/assignments.js since the terminal look became the only one
+# (2026-09-25); the classic assignments.js was deleted with it.
+ASSIGNMENTS_JS = STATIC / "cc" / "assignments.js"
+
+
 def test_untick_the_whole_column_asks_first():
-    js = (STATIC / "assignments.js").read_text(encoding="utf-8")
+    js = ASSIGNMENTS_JS.read_text(encoding="utf-8")
     none_confirm = "Untick all "
     assert none_confirm in js
     assert "Their copies stay on disk" in js
 
 
 def test_copy_from_asks_naming_both_sides_and_what_is_lost():
-    js = (STATIC / "assignments.js").read_text(encoding="utf-8")
+    js = ASSIGNMENTS_JS.read_text(encoding="utf-8")
     assert "Replace " in js and "stops syncing " in js
     # A source with an empty plan silently emptied the target.
     assert "has no projects ticked" in js
 
 
 def test_a_running_column_shows_progress_and_can_be_stopped():
-    js = (STATIC / "assignments.js").read_text(encoding="utf-8")
+    js = ASSIGNMENTS_JS.read_text(encoding="utf-8")
     assert "runProgress" in js
     assert "dataset.running" in js
 
 
 def test_an_error_toast_is_not_thrown_away_after_four_seconds():
-    js = (STATIC / "assignments.js").read_text(encoding="utf-8")
+    js = ASSIGNMENTS_JS.read_text(encoding="utf-8")
     body = js[js.index("function toast("):js.index("function cellLabel(")]
     # The err branch returns BEFORE the auto-dismiss timer.
     assert body.index('kind === "err"') < body.index("4000")
     assert "click to dismiss" in body
-    assert ".toast.err" in (STATIC / "style.css").read_text(encoding="utf-8")
+    # The terminal page's notes are .assign-note in #assign-toast.sp-notes;
+    # an error one has to LOOK clickable, or nobody knows to click it.
+    assert "assign-note" in body
+    css = (STATIC / "cc" / "settings_people.css").read_text(encoding="utf-8")
+    assert re.search(r"\.assign-note\.err \{[^}]*cursor: pointer", css)
 
 
 def test_a_failed_cell_names_the_project_not_the_editor():
-    js = (STATIC / "assignments.js").read_text(encoding="utf-8")
+    js = ASSIGNMENTS_JS.read_text(encoding="utf-8")
     assert 'toast("could not update' not in js
     assert "cellLabel(box)" in js
     # The bulk summary lists which ones failed.
@@ -355,7 +407,8 @@ def test_a_refused_feed_record_is_shown_not_only_logged(feed_env, monkeypatch):
     resp = feed_env.post("/partials/admin/feed/check")
     assert resp.status_code == 200, resp.text
     assert "companion/windows 0.9.64" in resp.text
-    assert "[ REFUSED ]" in resp.text
+    note = resp.text[resp.text.index('<span class="tag err solid">refused</span>'):]
+    assert "companion/windows 0.9.64" in note[:400]
 
 
 def test_a_feed_check_without_the_new_key_still_renders(feed_env, monkeypatch):

@@ -1,252 +1,124 @@
-{# THE topbar. base.html includes it, and /partials/topbar (ui.py) serves it
-   to the mounted SPAs (/broll, /music, /ytdl), whose app.js swaps it in over
-   their static fallback header -- one template, so the headers cannot drift
-   apart. `nav_current` marks the entry for the page the viewer is standing
-   on: 'broll' / 'music' / 'ytdl' from the SPAs' ?current=, and the dashboard's
-   own pages set it too ('fleet', 'users', 'packages', ...).
-   data-dash-topbar is the marker the SPAs check before injecting: a fetch
-   that came back as something else (the login page, an error body) must
-   leave their fallback header alone. #}
-{# The bar holds NO module links since 2026-08-18 (owner's redesign): the
-   modules live in the left drawer below, and everything administrative lives
-   under Settings. The bar is a menu button, the brand, and who you are --
-   the three things that are true on every page of every module. #}
+{# THE HUD (UI redesign port, phase 1 "chrome", 2026-09-25; the plan is
+   docs/UI_REDESIGN_PORT_PLAN.md 3.4 and 4.1). The dashboard's only header
+   since the terminal look replaced the classic one (2026-09-25): on every
+   page (shell.html) and to the three SPAs through /partials/topbar.
 
-{# The drawer is opened by the HTML popover API, with NO JavaScript at all.
-   That is not a style preference, it is the constraint: this partial is
-   injected into the three SPAs with innerHTML, which never executes a
-   <script> it brings with it, so any drawer that needed a listener would be
-   dead on /broll, /music and /ytdl -- the three pages that need it most.
-   The popover attribute is honoured on the parsed fragment itself, and it
-   carries Esc-to-close, click-outside-to-close and ::backdrop for free.
-   A checkbox hack would also survive innerHTML, but not the SPAs' stacking:
-   their #app-header is `position: sticky; z-index: 10`, so a drawer rendered
-   inside it lives in that stacking context and their overlays paint over it.
-   A popover renders in the TOP LAYER, above every z-index on the page, which
-   is the actual reason this mechanism was chosen. #}
-<button class="btn menu-btn" type="button" popovertarget="nav-drawer" aria-label="menu">
-  <span class="menu-bars" aria-hidden="true"></span>
-</button>
-{# The brand half is SITE DATA, not a literal (2026-08-17,
-   docs/COMMERCIAL_READINESS.md item 10): ui._render supplies brand_org as
-   org_short -> org_name -> product_name, so an install that has said nothing
-   about itself shows the product's name rather than the first customer's. #}
-{# data-csrf republishes the session's CSRF token to the mounted SPAs, which
-   inject this partial into their own pages and therefore have no <meta name=
-   "csrf"> of their own. They do not send it yet -- app.py's _CSRF_EXEMPT_
-   PREFIXES lists /broll/, /music/ and /ytdl/, and dashboard/README.md records
-   what each owner has to do to come off that list. Publishing it here first
-   means the change on their side is one header, not a new endpoint. #}
-{# data-ui-apps (UI port 7.0): whether the `apps` group is in THIS request's
-   set, never which bar was served. Classic here unless apps is on. #}
-<a class="brand" data-dash-topbar data-csrf="{{ csrf_token or '' }}" data-ui-apps="{{ 'cc' if 'apps' in ui_groups else 'classic' }}" href="/">{{ brand_org | upper }} <span class="dim">//</span> SYNC STATUS</a>
-{# UX-10 (2026-08-28): the count of problems the server has found, on every
-   page, linked to the panel that names them. Admin-only and full-page only
-   (see ui._render), and absent rather than zero when there is nothing wrong:
-   a bar that permanently reads [ 0 PROBLEMS ] stops being read. #}
-{% if notice_counts is defined and notice_counts and notice_counts.get("error") %}
-<a class="chip red phone-hide" href="/#server-notices"
-   title="the server has found problems it cannot fix by itself">[ {{ notice_counts.error }} PROBLEM{{ "S" if notice_counts.error != 1 }} ]</a>
-{% endif %}
-{# SYS-8 (finding 3, resilience sweep 2026-08-28 fix pass): the fleet's
-   self-diagnosis scan (alerts.py), which is a wider net than the notices
-   chip above -- a computer's own guard state, not only what this server
-   refused. Read from db.META_ALERTS_OPEN (ui._alert_counts_safe), the LAST
-   scan's counts, so a topbar render never re-runs forty checks. Same
-   absent-at-zero rule: a permanently-present [ 0 ALERTS ] stops being read. #}
-{% set alert_total = (alert_counts.get("error", 0) + alert_counts.get("warn", 0)) if alert_counts is defined and alert_counts else 0 %}
-{% if alert_total %}
-<a class="chip phone-hide {{ 'red' if alert_counts.get('error') else 'amber' }}" href="/admin/health"
-   title="what the fleet's self-diagnosis currently has open">[ {{ alert_total }} ALERT{{ "S" if alert_total != 1 }} ]</a>
-{% endif %}
-
-{# Every page under Settings, so the drawer can light [ SETTINGS ] up for all
-   of them rather than only the site form. SETTINGS_PAGES is a Jinja global
-   DERIVED from ui.SETTINGS_NAV, which partials/settings_nav.html renders:
-   one list, so a thirteenth page cannot be marked in the strip and unmarked
-   in the drawer. It was a literal here until UX-8 (usability sweep
-   2026-09-03), and it had been wrong since the six 08-28 pages landed, with
-   a comment claiming the two lists matched. "installer" is still absent, and
-   deliberately: the installer is a download with its own drawer entry, not a
-   hub page (see below). #}
-<div class="nav-drawer" id="nav-drawer" popover>
-  <div class="drawer-head">
-    <span class="drawer-brand">{{ brand_org | upper }} <span class="dim">//</span> MENU</span>
-    {# Light dismiss (click the backdrop) and Esc both close it; this button is
-       for touch, where neither is obvious. popovertargetaction is
-       declarative -- still no script. #}
-    <button class="btn drawer-close phone-hide" type="button" popovertarget="nav-drawer"
-            popovertargetaction="hide" aria-label="close menu">[ X ]</button>
-    {# The phone's copy of the bar chips (2026-08-30, MOBILE_PLAN.md M1). At
-       390px the bar is one 44px row -- the brand and the menu button -- so the
-       [ N PROBLEMS ] / [ N ALERTS ] chips and the account name would have
-       wrapped it to three. They are DUPLICATED here rather than moved because
-       this partial is injected into the three SPAs with innerHTML and must
-       stay script-free: only CSS can decide which copy a screen sees, and it
-       decides with .phone-hide on the bar pair and .phone-only on this one. #}
-    <div class="drawer-chips phone-only">
-      {% if notice_counts is defined and notice_counts and notice_counts.get("error") %}
-        <a class="chip red" href="/#server-notices"
-           title="the server has found problems it cannot fix by itself">[ {{ notice_counts.error }} PROBLEM{{ "S" if notice_counts.error != 1 }} ]</a>
-      {% endif %}
-      {% if alert_total %}
-        <a class="chip {{ 'red' if alert_counts.get('error') else 'amber' }}" href="/admin/health"
-           title="what the fleet's self-diagnosis currently has open">[ {{ alert_total }} ALERT{{ "S" if alert_total != 1 }} ]</a>
-      {% endif %}
-      {% if session_user %}<a class="muted account-link" href="/account" title="signed in as {{ session_user }}">{{ session_shown_as or session_user }}{{ " (admin)" if session_is_admin }}</a>{% endif %}
-    </div>
-  </div>
-  <nav class="drawer-nav">
-    <a class="drawer-item{{ ' drawer-current' if nav_current == 'fleet' }}" href="/">[ SYNC STATUS ]</a>
-    {% if broll_mounted %}
-      {# Trailing slash matters: the b-roll SPA uses document-relative URLs, so at
-         /broll (no slash) they would resolve against the dashboard root. #}
-      <a class="drawer-item{{ ' drawer-current' if nav_current == 'broll' }}" href="/broll/">[ B-ROLL ]</a>
-    {% endif %}
-    {% if music_mounted %}
-      {# Trailing slash for the same reason as /broll/: the music SPA resolves
-         its URLs against the document. Shown only when the mount fully took --
-         an absent or degraded music tree gets no link, same rule as b-roll. #}
-      <a class="drawer-item{{ ' drawer-current' if nav_current == 'music' }}" href="/music/">[ MUSIC ]</a>
-    {% endif %}
-    {% if ytdl_mounted %}
-      {# Trailing slash for the same reason as /broll/ and /music/: the downloader
-         SPA resolves every URL against the document, so at /ytdl (no slash) its
-         api/ calls would hit the dashboard root. Shown only when the mount fully
-         took -- an absent or degraded ytdl tree gets no link. #}
-      <a class="drawer-item{{ ' drawer-current' if nav_current == 'ytdl' }}" href="/ytdl/">[ YOUTUBE ]</a>
-    {% endif %}
-    {% if cards_mounted %}
-      {# THE TRAILING SLASH IS LOAD BEARING here more than anywhere: every fetch
-         in the Timeline Cards page is document-relative (`api/state?v=-1`), so
-         at /cards (no slash) they would resolve against the dashboard root and
-         the page would poll /api/state forever. Starlette's redirect_slashes
-         sends /cards -> /cards/ as well; this link simply never asks it to. #}
-      <a class="drawer-item{{ ' drawer-current' if nav_current == 'cards' }}" href="/cards/">[ CARDS ]</a>
-    {% endif %}
-    {% if session_is_admin %}
-      <a class="drawer-item{{ ' drawer-current' if nav_current in SETTINGS_PAGES }}" href="{{ SETTINGS_LANDING }}">[ SETTINGS ]</a>
-    {% else %}
-      {# An editor has no Settings hub to enter, so the one hub page they ARE
-         allowed to see is named here directly. Without this the redesign would
-         have taken Transfers away from everyone who is not an admin. #}
-      <a class="drawer-item{{ ' drawer-current' if nav_current == 'transfers' }}" href="/transfers">[ TRANSFERS ]</a>
-    {% endif %}
-    {# /download, not /installer (2026-08-18, owner's redesign): the click IS
-       the download. /download has always 303'd to the current package for this
-       browser's User-Agent, so an editor told "click [ INSTALLER ]" gets a
-       file, not a page about a file. It is outside the admin branch because
-       admins install editor machines too, and the entry left the Settings
-       strip the same day. Unknown UA is the one case that still paints a page:
-       /download renders /installer's two-platform chooser then. #}
-    <a class="drawer-item{{ ' drawer-current' if nav_current == 'installer' }}" href="/download">[ INSTALLER ]</a>
-    <a class="drawer-item{{ ' drawer-current' if nav_current == 'help' }}" href="/help">[ HELP ]</a>
+   Constraints it inherits from the classic bar, all load-bearing:
+   - NO <script>. The SPAs inject this with innerHTML, which runs nothing,
+     so every interaction is a link, a plain form or the popover API.
+   - data-dash-topbar (and data-csrf) on the brand link: the SPAs refuse to
+     inject a body without the marker.
+   - Every class is HUD-owned (hud-*), painted by the hud-common block that
+     is byte-identical in static/cc/hud.css and the three SPA sheets. The
+     SPA sheets know nothing else.
+   - The problem and alert counts are ABSENT at zero (UX-10, SYS-8).
+   - Sign out, sign out everywhere, the installer, help and settings all
+     survive: in the user menu (#hud-user) on a desktop, in the "more"
+     sheet (#hud-more) on a phone.
+   - The dock is a SIBLING of .hud, never a child: a fixed element inside a
+     sticky, filtered bar is trapped by it. #}
+{%- set hud_signed_in = session_user is defined and session_user -%}
+{%- set hud_counts = notice_counts if (notice_counts is defined and notice_counts) else (hud_notice_counts if hud_notice_counts is defined and hud_notice_counts else {}) -%}
+{%- set hud_alerts = alert_counts if (alert_counts is defined and alert_counts) else (hud_alert_counts if hud_alert_counts is defined and hud_alert_counts else {}) -%}
+{%- set hud_problems = hud_counts.get("error", 0) if hud_counts else 0 -%}
+{%- set hud_alert_total = (hud_alerts.get("error", 0) + hud_alerts.get("warn", 0)) if hud_alerts else 0 -%}
+{%- set hud_in_settings = nav_current in SETTINGS_PAGES and nav_current != "transfers" -%}
+<div class="hud">
+  <a class="hud-brand" data-dash-topbar data-csrf="{{ csrf_token or '' }}"
+     href="/" title="{{ brand_org }}: sync status">
+    <svg class="hud-mark" viewBox="0 0 654.89 305.2" aria-hidden="true" focusable="false"><path d="M363.02,134.4h109.96l-23.42,41.25c-7.12,12.22-16.72,21.9-28.77,29.02c-12.04,7.12-25.2,10.69-39.46,10.69H0L100.81,39.71c6.79-12.22,16.29-21.9,28.5-29.02C141.53,3.56,154.6,0,168.52,0h231.67L214.85,61.08c-13.57,4.42-23.93,12.91-31.06,25.46l-59.56,103.88h174.63c9.84,0,19.09-2.46,27.75-7.38c8.65-4.93,15.53-11.81,20.62-20.65L363.02,134.4z"></path><path d="M291.86,170.81H181.91l23.42-41.25c7.12-12.22,16.72-21.9,28.77-29.02c12.04-7.12,25.2-10.69,39.46-10.69h381.33L554.07,265.5c-6.79,12.22-16.29,21.9-28.5,29.02c-12.22,7.12-25.29,10.69-39.21,10.69H254.7l185.33-61.08c13.57-4.42,23.93-12.91,31.06-25.46l59.56-103.88H356.03c-9.84,0-19.09,2.46-27.75,7.38c-8.65,4.93-15.53,11.81-20.62,20.65L291.86,170.81z"></path></svg>
+    <span class="hud-name">{{ brand_org }}</span>
+  </a>
+  {% if hud_signed_in %}
+  <nav class="hud-nav" aria-label="main">
+    <a href="/"{{ ' aria-current="page"' | safe if nav_current == 'fleet' }}><span class="hud-slash" aria-hidden="true">&gt;</span>sync</a>
+    {# Trailing slashes are load-bearing on every module link: the SPAs and
+       the Cards page resolve their own URLs against the document. #}
+    {% if broll_mounted %}<a href="/broll/"{{ ' aria-current="page"' | safe if nav_current == 'broll' }}><span class="hud-slash" aria-hidden="true">&gt;</span>b-roll</a>{% endif %}
+    {% if music_mounted %}<a class="hud-lowpri" href="/music/"{{ ' aria-current="page"' | safe if nav_current == 'music' }}><span class="hud-slash" aria-hidden="true">&gt;</span>music</a>{% endif %}
+    {% if ytdl_mounted %}<a class="hud-lowpri" href="/ytdl/"{{ ' aria-current="page"' | safe if nav_current == 'ytdl' }}><span class="hud-slash" aria-hidden="true">&gt;</span>youtube</a>{% endif %}
+    {% if cards_mounted %}<a href="/cards/"{{ ' aria-current="page"' | safe if nav_current == 'cards' }}><span class="hud-slash" aria-hidden="true">&gt;</span>cards</a>{% endif %}
+    <a href="/transfers"{{ ' aria-current="page"' | safe if nav_current == 'transfers' }}><span class="hud-slash" aria-hidden="true">&gt;</span>transfers</a>
+    {% if session_is_admin %}<a href="{{ SETTINGS_LANDING }}"{{ ' aria-current="page"' | safe if hud_in_settings }}><span class="hud-slash" aria-hidden="true">&gt;</span>settings</a>{% endif %}
+    {# 601 to 900 px only (hud-common): music and youtube fold into the
+       "more" sheet there, and the dock that opens it only exists below. #}
+    <button type="button" class="hud-key hud-more-btn" popovertarget="hud-more">more</button>
   </nav>
-  <div class="drawer-foot">
-    {% if session_user %}
-      {# Account page 2026-09-25: the name is the display name (a LABEL),
-         and the sign-in name is one hover away so nobody can pass as
-         somebody else by picking a name. The link is the way to /account
-         from every page, the SPAs included (a plain link survives their
-         innerHTML injection). #}
-      <div class="muted"><a class="account-link" href="/account" title="signed in as {{ session_user }}">{{ session_shown_as or session_user }}</a>{{ " (admin)" if session_is_admin }}</div>
-      <a class="btn" href="/account">[ YOUR ACCOUNT ]</a>
-      {# PLAIN forms, not htmx, so they do not inherit base.html's hx-headers --
-         the token has to travel as a field. app.py's csrf_gate reads either. #}
-      <form method="post" action="/logout" class="inline-form">
-        <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
-        <button class="btn" type="submit">[ SIGN OUT ]</button></form>
-      {# ui-copy-7 (2026-09-25): SIGN IN / SIGN OUT / SIGN OUT EVERYWHERE, the
-         words the login page, the tray, the SPAs and this form's own confirm
-         already use; the buttons were the one place that said LOGIN/LOGOUT.
-         SIGN OUT EVERYWHERE lives here rather than in the bar (2026-08-18): it is the
-         rare action -- "a machine was lost" -- and the bar is deliberately
-         three items wide now. It stays one click from every page for every
-         account, admin or not.
-         C-9 (UX.md, resilience sweep 2026-08-28): a PLAIN form, not htmx, so
-         hx-confirm cannot reach it -- onsubmit + window.confirm is the
-         matching mechanism for a form that submits itself. #}
-      <form method="post" action="/logout-everywhere" class="inline-form"
-            title="revoke this account's sessions on every device. Use it if a computer was lost"
-            onsubmit="return window.confirm('Sign yourself out of every browser, including this one? You will need to sign in again to finish what you are doing.');">
-        <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
-        <button class="btn" type="submit">[ SIGN OUT EVERYWHERE ]</button></form>
-    {% else %}
-      <a class="btn" href="/login">[ SIGN IN ]</a>
+  {% endif %}
+  <span class="hud-spacer"></span>
+  <div class="hud-meta">
+    {% if hud_problems %}
+    <a class="hud-count" href="/go/notices" title="the server has found problems it cannot fix by itself"><span class="hud-led hud-err" aria-hidden="true"></span><b>{{ hud_problems }}</b> problem{{ "s" if hud_problems != 1 }}</a>
     {% endif %}
-    {# The phone's copy of the [ X ] (2026-08-30): the head is at the top of a
-       844px panel and the thumb holding the phone is at the bottom. A second
-       button rather than one that moves, for the same reason the chips above
-       are copied: this partial has to stay script-free, so only CSS can
-       choose, and CSS cannot reorder a child of another element. The head's
-       copy is .phone-hide, this one is .phone-only, and Esc and a tap on the
-       backdrop close the drawer on both. #}
-    <button class="btn drawer-close drawer-close-foot phone-only" type="button"
-            popovertarget="nav-drawer" popovertargetaction="hide"
-            aria-label="close menu">[ X ]</button>
-    {# Left empty ON PURPOSE (2026-08-30, MOBILE_PLAN.md 3.3): pwa.js fills it
-       with an [ INSTALL ] chip when Chrome fires beforeinstallprompt, and
-       leaves it empty everywhere else -- an install button on a desktop, or
-       inside the installed app itself, is a control that can only disappoint.
-       The slot lives in the markup so the PWA package adds no template. #}
-    <span id="install-slot" class="phone-only"></span>
+    {% if hud_alert_total %}
+    <a class="hud-count hud-hide-sm hud-lowpri" href="/admin/health" title="what the fleet's self-diagnosis currently has open"><span class="hud-led {{ 'hud-err' if hud_alerts.get('error') else 'hud-warn' }}" aria-hidden="true"></span><b>{{ hud_alert_total }}</b> alert{{ "s" if hud_alert_total != 1 }}</a>
+    {% endif %}
+    {% if hud_signed_in %}
+    {# DUI-2: polled, so "updated 4 s ago" can only be said while the server
+       answers. #}
+    <span class="hud-stamp" id="topbar-stamp"
+          hx-get="/partials/stamp"
+          hx-trigger="every 30s [document.visibilityState === 'visible']"
+          hx-swap="innerHTML">{% include "partials/stamp.html" %}</span>
+    <a class="hud-user hud-hide-sm hud-lowpri" href="/account" title="signed in as {{ session_user }}">{{ session_shown_as or session_user }}{% if session_is_admin %}<b>@admin</b>{% endif %}</a>
+    <button type="button" class="hud-key hud-hide-sm" popovertarget="hud-user" aria-label="account menu">menu</button>
+    {% else %}
+    <a class="hud-key" href="/login">sign in</a>
+    {% endif %}
   </div>
 </div>
-
-{# DUI-2 (2026-09-04): the Syncthing banner used to sit here as a literal, and
-   this include is rendered once per page load -- so a warning about stale data
-   was itself frozen for the life of the tab. It moved into partials/stamp.html
-   with the "updated Ns ago" line below, which is polled. #}
-{# The staleness stamp and the session chip are ONE flex item (2026-08-18):
-   as two siblings a wrap could put "updated 4s ago" on one row and the user
-   plus their logout button on the next. .topbar-right carries the
-   margin-left:auto that used to sit on .stamp, so the pair still parks at
-   the right edge of whichever row it lands on. #}
-<span class="topbar-right">
-{# DUI-2 (2026-09-04): POLLED, so it can only say "4s ago" while the server is
-   still answering. Server-rendered on first paint (the include) so a browser
-   that never loads htmx still gets a true stamp for that one render, and
-   static/htmx_errors.js is what says so out loud when the polls stop. No
-   `load` trigger beside the interval: that would be a second request on every
-   page load for a fragment the include has already filled in. #}
-{% if session_user %}
-<span class="stamp" id="topbar-stamp"
-      hx-get="/partials/stamp"
-      hx-trigger="every 30s [document.visibilityState === 'visible']"
-      hx-swap="innerHTML">{% include "partials/stamp.html" %}</span>
-{% else %}
-{# No session, no poll: /partials/stamp is behind the login gate, and a
-   fragment that answers with the login page would be swapped into the topbar
-   as a login form (2026-09-04). #}
-<span class="stamp"></span>
+{% if hud_signed_in %}
+{# The user menu (desktop and tablet). A popover renders in the top layer,
+   above the SPAs' sticky headers, with Esc and click-outside for free. #}
+<div class="hud-menu" id="hud-user" popover aria-label="account menu">
+  <span class="hud-mi hud-mi-who">signed in as {{ session_user }}{{ " (admin)" if session_is_admin }}</span>
+  <a class="hud-mi" href="/account"{{ ' aria-current="page"' | safe if nav_current == 'account' }}>your account</a>
+  <a class="hud-mi" href="/help"{{ ' aria-current="page"' | safe if nav_current == 'help' }}>help</a>
+  {# /download, not /installer: the click IS the download (2026-08-18). #}
+  <a class="hud-mi" href="/download">installer</a>
+  <span class="hud-mi-h">session</span>
+  {# PLAIN forms, not htmx: the token travels as a field (csrf_gate reads
+     either). Sign out everywhere keeps its C-9 confirm. #}
+  <form method="post" action="/logout" class="hud-mi-form">
+    <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+    <button class="hud-mi" type="submit">sign out</button></form>
+  <form method="post" action="/logout-everywhere" class="hud-mi-form"
+        title="revoke this account's sessions on every device. Use it if a computer was lost"
+        onsubmit="return window.confirm('Sign yourself out of every browser, including this one? You will need to sign in again to finish what you are doing.');">
+    <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+    <button class="hud-mi" type="submit">sign out everywhere</button></form>
+</div>
+{# The phone dock: five cells, the last opens "more". A sibling of .hud. #}
+<nav class="hud-dock" aria-label="main, phone">
+  <a href="/"{{ ' aria-current="page"' | safe if nav_current == 'fleet' }}><span class="hud-g" aria-hidden="true">&#8645;</span>sync</a>
+  {% if broll_mounted %}<a href="/broll/"{{ ' aria-current="page"' | safe if nav_current == 'broll' }}><span class="hud-g" aria-hidden="true">&#9635;</span>b-roll</a>{% endif %}
+  {% if cards_mounted %}<a href="/cards/"{{ ' aria-current="page"' | safe if nav_current == 'cards' }}><span class="hud-g" aria-hidden="true">&#8801;</span>cards</a>{% endif %}
+  <a href="/transfers"{{ ' aria-current="page"' | safe if nav_current == 'transfers' }}><span class="hud-g" aria-hidden="true">&#8597;</span>transfers</a>
+  <button type="button" popovertarget="hud-more"><span class="hud-g" aria-hidden="true">&#8230;</span>more</button>
+</nav>
+{# The "more" sheet: everything the phone bar and dock have no room for,
+   and the tablet's music and youtube. #install-slot is filled by pwa.js
+   (a hud-key INSTALL button) and left empty everywhere else. The stamp's
+   sentence is NOT repeated here: only #topbar-stamp is polled, and a copy
+   would itself go stale (DUI-2). #}
+<div class="hud-more" id="hud-more" popover aria-label="more">
+  {% if hud_problems %}<a class="hud-mi" href="/go/notices"><span class="hud-led hud-err" aria-hidden="true"></span><b>{{ hud_problems }}</b> problem{{ "s" if hud_problems != 1 }}</a>{% endif %}
+  {% if hud_alert_total %}<a class="hud-mi" href="/admin/health"><span class="hud-led {{ 'hud-err' if hud_alerts.get('error') else 'hud-warn' }}" aria-hidden="true"></span><b>{{ hud_alert_total }}</b> alert{{ "s" if hud_alert_total != 1 }}</a>{% endif %}
+  {% if music_mounted %}<a class="hud-mi" href="/music/"{{ ' aria-current="page"' | safe if nav_current == 'music' }}>music</a>{% endif %}
+  {% if ytdl_mounted %}<a class="hud-mi" href="/ytdl/"{{ ' aria-current="page"' | safe if nav_current == 'ytdl' }}>youtube</a>{% endif %}
+  {% if session_is_admin %}<a class="hud-mi" href="{{ SETTINGS_LANDING }}"{{ ' aria-current="page"' | safe if hud_in_settings }}>settings</a>{% endif %}
+  <a class="hud-mi" href="/download">installer</a>
+  <a class="hud-mi" href="/help"{{ ' aria-current="page"' | safe if nav_current == 'help' }}>help</a>
+  <a class="hud-mi" href="/account"{{ ' aria-current="page"' | safe if nav_current == 'account' }}>{{ session_shown_as or session_user }}{{ " (admin)" if session_is_admin }}: your account</a>
+  <span class="hud-mi-h">session</span>
+  <form method="post" action="/logout" class="hud-mi-form">
+    <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+    <button class="hud-mi" type="submit">sign out</button></form>
+  <form method="post" action="/logout-everywhere" class="hud-mi-form"
+        onsubmit="return window.confirm('Sign yourself out of every browser, including this one? You will need to sign in again to finish what you are doing.');">
+    <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+    <button class="hud-mi" type="submit">sign out everywhere</button></form>
+  <span id="install-slot"></span>
+  <button class="hud-mi" type="button" popovertarget="hud-more" popovertargetaction="hide">close</button>
+</div>
 {% endif %}
-<span class="session">
-  {% if session_user %}
-    <a class="help-link" href="/help" title="how this works, and what the words mean">[ ? ]</a>
-    <a class="muted account-link" href="/account" title="signed in as {{ session_user }}">{{ session_shown_as or session_user }}{{ " (admin)" if session_is_admin }}</a>
-    {# The gear: the owner's own request (2026-08-18) for a way into Settings
-       that is visible from every page without reading a word. Hand-drawn
-       inline (ring + eight teeth) rather than an icon-set path, so it costs
-       no asset, no request and no third-party licence; currentColor makes it
-       red from .gear-link. Admins only -- /admin/settings 403s for an
-       editor, and a control that always refuses is worse than no control. #}
-    {% if session_is_admin %}
-      <a class="gear-link" href="{{ SETTINGS_LANDING }}" aria-label="settings" title="settings">
-        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false"
-             fill="none" stroke="currentColor" stroke-width="2.2">
-          <circle cx="12" cy="12" r="5.2"></circle>
-          <path d="M12 1.4v3.2M12 19.4v3.2M1.4 12h3.2M19.4 12h3.2"></path>
-          <path d="M4.5 4.5l2.3 2.3M17.2 17.2l2.3 2.3M19.5 4.5l-2.3 2.3M6.8 17.2l-2.3 2.3"></path>
-        </svg>
-      </a>
-    {% endif %}
-    {# A PLAIN form, not htmx, so it does not inherit base.html's hx-headers --
-       the token has to travel as a field. app.py's csrf_gate reads either. #}
-    <form method="post" action="/logout" class="inline-form">
-      <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
-      <button class="btn" type="submit">[ SIGN OUT ]</button></form>
-  {% else %}
-    <a class="btn" href="/login">[ SIGN IN ]</a>
-  {% endif %}
-</span>
-</span>

@@ -1,12 +1,12 @@
 """The terminal HUD in this app (UI redesign port, phase 1, 2026-09-25).
 
 docs/UI_REDESIGN_PORT_PLAN.md 4.1, 7.0, R6, R16, R22. The dashboard's
-/partials/topbar serves the HUD when its `chrome` group is on, this app
-injects it with innerHTML, and THIS stylesheet paints it: so the hud-common
-block here must be the same bytes as the dashboard's static/cc/hud.css (fix a
-drift by copying the block), and the first-paint hold and the loader must
-agree with the dashboard's cookie. The classic drawer block is untouched (its
-pins live in test_theme_css.py).
+/partials/topbar serves the HUD (its only header since the look switch was
+retired, 2026-09-25), this app injects it with innerHTML, and THIS
+stylesheet paints it: so the hud-common block here must be the same bytes as
+the dashboard's static/cc/hud.css (fix a drift by copying the block). The
+first-paint hold no longer reads a look cookie: it always holds, and the
+loader ends the hold on whatever arrived.
 """
 from __future__ import annotations
 
@@ -98,18 +98,19 @@ def test_the_first_paint_script_holds_the_hud_height():
     head = html.split("</head>", 1)[0]
     script = head.split("<script>", 1)[1].split("</script>", 1)[0]
     assert head.index("<script>") < head.index('rel="stylesheet"')
-    assert "document.cookie.split('; ')" in script
-    assert "ccsync_ui_effective=" in script and "slice(20)" in script
-    assert len("ccsync_ui_effective=") == 20
+    # the hold is unconditional now: no look cookie is read to decide it
+    assert "document.cookie.split" not in script and "slice(20)" not in script
+    assert "cl.add('cc-chrome');" in script and "cl.add('cc-chrome-pending');" in script
     assert "cc-chrome-pending" in script and "setTimeout" in script
     assert "match(/" not in script and "\u2014" not in script
 
 
-def test_the_loader_trusts_what_arrived_and_writes_the_cookie_at_the_root():
+def test_the_loader_trusts_what_arrived():
     js = _text(STATIC / "app.js")
     fn = js.split("function syncDashboardLook(host)", 1)[1].split("\n}\n", 1)[0]
-    assert "path=/; samesite=lax" in fn and "secure" in fn
-    assert "data-ui-apps" in fn and "cc-chrome" in fn
+    # the look cookie is retired: the loader writes none, reads no marker
+    assert "document.cookie" not in fn and "data-ui-apps" not in fn
+    assert "cc-chrome" in fn and '.querySelector(".hud")' in fn
     loader = js.split("async function loadDashboardTopbar()", 1)[1].split("\n}\n", 1)[0]
     assert "finally {" in loader
     assert "cc-chrome-pending" in loader.split("finally {", 1)[1]

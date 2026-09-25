@@ -1465,7 +1465,7 @@ def _check_software(ctx: SetupContext) -> TaskState:
         return TaskState(
             status="todo",
             detail="no companion build is current for any platform: open Settings, then "
-                   "Packages, and publish one under \"Available from the vendor\"",
+                   "Packages, and publish one from the \"From the vendor\" window",
         )
     parts = [f"{p} {v} current" if v else f"{p}: none published" for p, v in current.items()]
     # warn, not ok: half a fleet cannot upgrade itself. Still optional, so it

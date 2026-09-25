@@ -619,8 +619,12 @@ def test_project_detail_renders_a_syncthing_folder_error(tmp_path):
         client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
         page = client.get("/project/p")
         assert page.status_code == 200
-        assert "[ SYNCTHING FOLDER STOPPED ]" in page.text
-        assert "folder marker missing" in page.text
+        # Terminal look (2026-09-25): an error note with a solid tag.
+        assert '<span class="w">sync folder stopped</span>' in page.text
+        note = page.text[page.text.index('<div class="note err">'):]
+        note = note[:note.index("</div>")]
+        assert "folder marker missing" in note
+        assert "stale" in note
         health = client.get("/api/v1/health").json()
         assert health["folder_errors"][0]["slug"] == "p"
 

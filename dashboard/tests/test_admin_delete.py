@@ -14,6 +14,8 @@ ever shared, forever, silently.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -372,10 +374,13 @@ def test_users_page_lists_computers_with_a_remove_button(env):
     resp = client.get("/admin/users")
     assert resp.status_code == 200
     html = resp.text
-    assert "[ COMPUTERS ]" in html
+    # The COMPUTERS window (terminal look: a titled, foldable window).
+    assert 'data-win="computers"' in html
+    assert 'id="win-computers-t">computers</h2>' in html
     assert "DESKTOP-1" in html and "LAPTOP" in html
-    assert "/partials/admin/machines/forget" in html
-    assert "[ REMOVE ]" in html
+    # Each row's forget form carries its visible "remove" key.
+    assert re.search(r'hx-post="/partials/admin/machines/forget".*?'
+                     r'<span class="t">remove</span>', html, re.S)
     # The NAS account row carries the delete now too.
     assert html.count("/partials/admin/users/delete") >= 1
 

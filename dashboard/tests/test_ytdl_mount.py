@@ -26,6 +26,7 @@ header to a fetch().
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import sys
 import types
@@ -323,10 +324,13 @@ def test_a_signed_in_editor_renders_a_page_through_the_mount(tmp_path, ytdl_env)
         # resolves every URL against the document.
         assert 'href="/ytdl/"' in c.get("/").text
         # The topbar partial the SPA injects marks the page it was fetched
-        # for -- and only that page (see test_topbar_partial.py).
+        # for -- and only that page (see test_topbar_partial.py). The HUD
+        # marks it with aria-current in the bar and again in the phone's
+        # "more" sheet (the classic drawer-current class went with the
+        # classic look, 2026-09-25).
         marked = c.get("/partials/topbar?current=ytdl").text
-        assert 'drawer-current" href="/ytdl/"' in marked
-        assert marked.count("drawer-current") == 1
+        current = re.findall(r'href="([^"]*)"[^>]*aria-current="page"', marked)
+        assert current and set(current) == {"/ytdl/"}, current
 
 
 def test_the_storage_probe_creates_the_database_and_starts_the_worker(tmp_path,

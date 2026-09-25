@@ -256,12 +256,29 @@ def test_the_topbar_wears_the_sites_brand_and_falls_back_to_the_product(tmp_path
     settings = replace(Settings.from_env({**SITE_ENV, "DASH_SITE_ORG_SHORT": "CC"}),
                        db_path=str(tmp_path / "s.db"), session_secret="secret",
                        dev_insecure=True)
-    with TestClient(create_app(settings)) as client:
-        assert "CC <span" in client.get("/partials/topbar").text
+    from ccsync_dashboard import auth
 
-    plain = replace(Settings(db_path=str(tmp_path / "b.db")), dev_insecure=True)
+    def signed_in(client, secret):
+        client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(secret, "owen"))
+        return client
+
+    with TestClient(create_app(settings)) as client:
+        # Signed out, the gate answers with the sign-in page, which wears the
+        # same brand (upper-cased, as its <title> is).
+        assert '<h1 class="brand">CC</h1>' in client.get("/partials/topbar").text
+        # Terminal look (C-collapse 2026-09-25): the HUD's brand link names
+        # the site in .hud-name, as written.
+        body = signed_in(client, "secret").get("/partials/topbar").text
+        assert '<span class="hud-name">CC</span>' in body
+        assert 'title="CC: sync status"' in body
+
+    plain = replace(Settings(db_path=str(tmp_path / "b.db")), session_secret="secret",
+                    dev_insecure=True)
     with TestClient(create_app(plain)) as client:
-        assert "CC SYNC <span" in client.get("/partials/topbar").text
+        assert '<h1 class="brand">CC SYNC</h1>' in client.get("/partials/topbar").text
+        body = signed_in(client, "secret").get("/partials/topbar").text
+        assert '<span class="hud-name">CC Sync</span>' in body
+        assert "Creators Club" not in body
     assert ui is not None
 
 

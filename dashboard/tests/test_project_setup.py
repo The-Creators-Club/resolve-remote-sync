@@ -511,6 +511,9 @@ def test_create_degrades_without_projects_dir(tmp_path):
 
 # -- /project-setup page -------------------------------------------------
 
+# The "you are in" line of the browse (the pick-this-folder bar).
+HERE = "You are in <b>Projects/"
+
 
 def test_page_redirects_anon_with_next(env):
     client, _conn, _pd = env
@@ -530,8 +533,8 @@ def test_page_shows_folder_browser(env):
     as_user(client, "jsmith")
     page = client.get("/project-setup?resolve_project=Mystery Doc")
     assert page.status_code == 200
-    assert "[ PICK THE FOLDER FOR THIS PROJECT ]" in page.text
-    assert "[ OR CREATE A NEW PROJECT FOLDER HERE ]" in page.text
+    assert '<h3 class="ev-h">pick the folder for this project</h3>' in page.text
+    assert '<h3 class="ev-h">or create a new project folder here' in page.text
     assert "2025" in page.text  # top-level dir listed
 
 
@@ -544,7 +547,8 @@ def test_browse_drills_down_and_flags_projects(env):
     as_user(client, "jsmith")
     page = client.get("/partials/project-setup/browse?rel=2025/FF4&resolve_project=Doc")
     assert page.status_code == 200
-    assert "[ PROJECT ]" in page.text     # Nuclear flagged as a project
+    # Nuclear flagged as a project
+    assert '>project</span><span class="plain">Nuclear</span>' in page.text
     assert "Nuclear" in page.text
 
 
@@ -575,7 +579,7 @@ def test_browse_survives_one_unreadable_sibling(env, monkeypatch):
     for name in ("Aurora", "Bulkhead", "CCT"):
         assert name in page.text
     assert "could not list the folder" not in page.text
-    assert "You are in Projects/2026" in page.text      # [ USE THIS FOLDER ]
+    assert HERE + "2026</b>" in page.text      # Use this folder
 
 
 def test_browse_still_reports_a_folder_it_cannot_list_at_all(env, monkeypatch):
@@ -615,8 +619,14 @@ def test_page_shows_mapping_when_already_set(env):
     conn.commit()
     as_user(client, "jsmith")
     page = client.get("/project-setup?resolve_project=Mystery Doc")
-    assert "[ ALREADY SET UP ]" in page.text
+    assert '<h3 class="ev-h">already set up</h3>' in page.text
     assert "2025/FF4/Nuclear" in page.text
+    assert "Ask your admin if this looks wrong" in page.text
+    # An admin is sent to where the mapping is changed: the project roots
+    # window moved from home to each project page (D7 of the UI port).
+    as_user(client, "owen")
+    admin_page = client.get("/project-setup?resolve_project=Mystery Doc")
+    assert 'href="/project/2025-ff4-nuclear"' in admin_page.text
 
 
 def test_partial_link_marked_folder_first_set(env):
@@ -679,7 +689,7 @@ def test_partial_create_flow(env):
         "name": "Season 2",
     })
     assert resp.status_code == 200
-    assert "[ DONE ]" in resp.text
+    assert '<h3 class="ev-h">done</h3>' in resp.text
     assert (projects_dir / "2026" / "CCT" / "Season 2" / "B-roll").is_dir()
 
 
@@ -695,7 +705,7 @@ def test_partial_create_of_existing_folder_offers_use_this_folder(env):
     })
     assert resp.status_code == 200
     assert "already exists" in resp.text
-    assert "[ USE Projects/2026/CCT/Website Highlights ]" in resp.text
+    assert '<span class="t">Use Projects/2026/CCT/Website Highlights</span>' in resp.text
     assert 'name="rel" value="2026/CCT/Website Highlights"' in resp.text
     assert not (projects_dir / "2026" / "CCT" / "Website Highlights"
                 / "Website Highlights").exists()
@@ -710,7 +720,7 @@ def test_browse_offers_the_current_folder(env):
     page = client.get("/partials/project-setup/browse"
                       "?rel=2026/CCT/Website Highlights&resolve_project=Website Highlights")
     assert page.status_code == 200
-    assert "You are in Projects/2026/CCT/Website Highlights" in page.text
+    assert HERE + "2026/CCT/Website Highlights</b>" in page.text
     assert 'name="rel" value="2026/CCT/Website Highlights"' in page.text
 
 
@@ -722,7 +732,7 @@ def test_browse_of_a_marked_project_offers_it(env):
     provision.write_marker(show, "2026-show")
     as_user(client, "jsmith")
     page = client.get("/partials/project-setup/browse?rel=2026/Show&resolve_project=Doc")
-    assert "You are in Projects/2026/Show" in page.text
+    assert HERE + "2026/Show</b>" in page.text
     assert "This folder is already a project" in page.text
 
 
@@ -734,7 +744,7 @@ def test_browse_flags_the_same_named_folder(env):
     page = client.get("/partials/project-setup/browse"
                       "?rel=2026/CCT&resolve_project=website highlights")
     assert page.status_code == 200
-    assert page.text.count("[ SAME NAME ]") == 1   # only the matching row
+    assert page.text.count(">same name</span>") == 1   # only the matching row
     # ...and both rows can be picked as they are
     assert 'name="rel" value="2026/CCT/Website Highlights"' in page.text
     assert 'name="rel" value="2026/CCT/Other Thing"' in page.text
@@ -746,7 +756,7 @@ def test_browse_root_has_no_current_folder_button(env):
     (projects_dir / "2026").mkdir()
     as_user(client, "jsmith")
     page = client.get("/partials/project-setup/browse?rel=&resolve_project=Doc")
-    assert "You are in Projects/" not in page.text
+    assert HERE not in page.text
 
 
 def test_browse_inside_other_project_hides_current_folder_button(env):
@@ -758,8 +768,8 @@ def test_browse_inside_other_project_hides_current_folder_button(env):
     provision.write_marker(show, "2026-show")
     as_user(client, "jsmith")
     page = client.get("/partials/project-setup/browse?rel=2026/Show/B-roll&resolve_project=Doc")
-    assert "You are in Projects/" not in page.text   # no pick-this-folder bar
-    assert "projects can't nest" in page.text
+    assert HERE not in page.text   # no pick-this-folder bar
+    assert "projects cannot nest" in page.text
 
 
 def test_link_current_existing_folder_leaves_contents_alone(env):
@@ -776,7 +786,7 @@ def test_link_current_existing_folder_leaves_contents_alone(env):
         "resolve_project": "Website Highlights", "rel": "2026/CCT/Website Highlights",
     })
     assert resp.status_code == 200
-    assert "[ DONE ]" in resp.text
+    assert '<h3 class="ev-h">done</h3>' in resp.text
     assert provision.read_marker(existing) == "2026-cct-website-highlights"
     assert not (existing / "Website Highlights").exists()
     assert not (existing / "B-roll").exists()          # link never templates

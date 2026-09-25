@@ -8,6 +8,8 @@ from ccsync_dashboard import db as dbmod
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
+from conftest import HX
+
 SECRET = "test-secret"
 TOKEN = "companion-token"
 
@@ -86,23 +88,31 @@ def test_queue_ui_and_toggle(env):
     client, conn = env
     as_user(client, "jsmith")
     page = client.get("/")
-    # The queue panel reads and unticks; the ticking control is the sidebar
+    # The queue window reads and unticks; the ticking control is the projects
     # tree's checkbox, since the [ ADD TO QUEUE ] row of [ TICK ] buttons left
-    # the panel on 2026-08-18 (test_home_layout.py holds that line).
-    assert "[ SYNC QUEUE: JSMITH ]" in page.text
-    assert 'class="proj-check"' in page.text and "[ TICK ]" not in page.text
+    # the panel on 2026-08-18 (test_home_layout.py holds that line). Terminal
+    # look (C-collapse 2026-09-25): the window is #win-queue, "sync queue",
+    # and its body names whose queue it is.
+    assert 'id="win-queue"' in page.text
+    assert 'id="win-queue-t">sync<span aria-hidden="true">_</span><span class="vh"> </span>queue<' in page.text
+    assert "For <b>jsmith</b>" in page.text
+    assert 'class="proj-check' in page.text and "[ TICK ]" not in page.text
 
-    resp = client.post("/partials/selection/jsmith/2025-ff4-nuclear/toggle")
-    assert resp.status_code == 200 and "[ UNTICK ]" in resp.text
+    # The tick answers the queue window with the project in it and its
+    # Untick key (the classic answer was the same queue with [ UNTICK ]).
+    resp = client.post("/partials/selection/jsmith/2025-ff4-nuclear/toggle?view=home-queue",
+                       headers=HX)
+    assert resp.status_code == 200
+    assert "2025/FF4/Nuclear" in resp.text and ">Untick<" in resp.text
     assert [s["slug"] for s in dbmod.fetch_selections(conn, "jsmith")] == ["2025-ff4-nuclear"]
     # toggle again removes
-    client.post("/partials/selection/jsmith/2025-ff4-nuclear/toggle")
+    client.post("/partials/selection/jsmith/2025-ff4-nuclear/toggle", headers=HX)
     assert dbmod.fetch_selections(conn, "jsmith") == []
 
     # project page shows SELECTED BY + tick-for-me
-    client.post("/partials/selection/jsmith/2025-ff4-nuclear/toggle")
+    client.post("/partials/selection/jsmith/2025-ff4-nuclear/toggle", headers=HX)
     page = client.get("/project/2025-ff4-nuclear")
-    assert "SELECTED BY:" in page.text and "jsmith" in page.text
+    assert "selected by" in page.text and "jsmith" in page.text
 
 
 # -- companion untick (the tray's "Remove this project from this machine") --

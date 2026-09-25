@@ -102,11 +102,21 @@
   });
 
   // ---------------------------------------------------------------- tips
-  var TIP_SELECTOR = "[data-tip], .tag[title], .led[title], .hud-led[title], [data-chip-detail]";
+  // Controls too (a11y-copy-4, UI port review 2026-09-25): a key, a tab, a
+  // dock link or a field that explains itself shows the floating tip on
+  // keyboard focus, and on a touch screen gets a "?" beside it (tipButton).
+  var TIP_SELECTOR = "[data-tip], .tag[title], .led[title], .hud-led[title], [data-chip-detail], " +
+    "a[title], button[title], [role=tab][title], label[title], select[title], input[title], textarea[title]";
   var CONTROL = "a, button, input, select, textarea, label, summary";
+  // Never a "?" in the dock, a dialog or a window's own fold, and never one
+  // for the "?" itself.
+  var NO_TIP_BTN = ".hud, .snav, dialog, .tip-btn, button.fold, [hidden], input[type=hidden]";
+  var tipSeq = 0;
+  var WS = new RegExp("\\s+");
   var tipEl = null;
   var tipAnchor = null;
   var tipTimer = null;
+  var focusTip = null;     // the tip anchor keyboard focus is on, if any
 
   function finePointer() {
     return !(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
@@ -126,8 +136,46 @@
         el.removeAttribute("title");
       }
       if (!el.matches(CONTROL) && !el.hasAttribute("tabindex")) el.setAttribute("tabindex", "0");
+      tipButton(el);
     });
   }
+
+  // A touch screen shows no title and a tap on a control acts, so a control
+  // that explains itself gets a "?" beside it that opens the hint sheet
+  // (plan 3.2, finding 126; a11y-copy-4). Only on a coarse pointer, so a
+  // desktop page's DOM is unchanged; .tip-btn is display:none elsewhere.
+  function tipButton(el) {
+    if (finePointer() || !el.matches(CONTROL) || !tipText(el)) return;
+    if (el.closest(NO_TIP_BTN)) return;
+    // an input inside its label is explained by the label's "?"
+    var anchor = el.matches("input, select, textarea") && el.closest("label") ? el.closest("label") : el;
+    if (anchor !== el && tipText(anchor)) return;
+    var next = anchor.nextElementSibling;
+    if (!el.id) el.id = "cc-tipped-" + (++tipSeq);
+    if (next && next.classList.contains("tip-btn") && next.getAttribute("data-tip-for") === el.id) return;
+    var name = (el.getAttribute("aria-label") || el.textContent || "").split(WS).join(" ").trim();
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tip-btn";
+    btn.setAttribute("data-tip-for", el.id);
+    btn.setAttribute("aria-label", name ? "What " + name + " does" : "What this does");
+    btn.textContent = "?";
+    anchor.insertAdjacentElement("afterend", btn);
+  }
+
+  // The hint sheet (cc/partials/hint_sheet.html) opened for a "?": the same
+  // three hooks htmx_errors.js fills for a tapped tag. Its click handler
+  // closes the sheet on the next tap anywhere.
+  window.ccsyncOpenHint = function (label, text) {
+    var sheet = document.getElementById("chip-sheet");
+    if (!sheet || !text) return false;
+    var l = sheet.querySelector(".chip-sheet-label");
+    var t = sheet.querySelector(".chip-sheet-text");
+    if (l) l.textContent = label || "";
+    if (t) t.textContent = text;
+    sheet.hidden = false;
+    return true;
+  };
 
   function tipText(el) {
     return el.getAttribute("data-tip") || el.getAttribute("data-chip-detail") ||
@@ -181,18 +229,29 @@
   });
   document.addEventListener("focusin", function (evt) {
     var el = evt.target.closest && evt.target.closest(TIP_SELECTOR);
+    focusTip = el;
     if (!el) { hideTip(); return; }
     // A control's tip waits, so tabbing along a row of keys does not drop a
     // box over the next one.
     if (tipTimer) clearTimeout(tipTimer);
     tipTimer = setTimeout(function () { showTip(el); }, el.matches(CONTROL) ? 900 : 0);
   });
-  document.addEventListener("focusout", function () { hideTip(); });
+  document.addEventListener("focusout", function () { focusTip = null; hideTip(); });
   document.addEventListener("keydown", function (evt) {
     if (evt.key === "Escape" && tipAnchor) hideTip();
   });
   window.addEventListener("hashchange", hideTip);
-  window.addEventListener("scroll", hideTip, { passive: true });
+  // Tabbing onto something below the fold scrolls the page AFTER focusin, so
+  // a plain hide-on-scroll cancelled every keyboard tip that needed a scroll
+  // (verifier, 2026-09-25). A focus tip follows its control instead.
+  window.addEventListener("scroll", function () {
+    var a = document.activeElement;
+    if (focusTip && a && focusTip.contains(a)) {
+      if (tipAnchor === focusTip) showTip(focusTip);
+      return;
+    }
+    hideTip();
+  }, { passive: true });
 
   // "?" beside a control, for a touch device that cannot hover (3.2).
   document.addEventListener("click", function (evt) {
@@ -304,7 +363,16 @@
     if (cancel) cancel.addEventListener("click", function (evt) { evt.preventDefault(); closeDialog(); });
     dialog.addEventListener("close", function () {
       // Every close without OK: nothing is sent and nothing is left behind.
+      // A checkbox source (the projects tree) has already flipped by the time
+      // htmx asks, so a Cancel puts it back (home-project-3, UI port review
+      // 2026-09-25): the row showed unticked for 30 s with the server
+      // unchanged. onOk clears `pending` before it closes, so this is only
+      // ever a Cancel or Escape.
+      var p = pending;
       pending = null;
+      if (p && p.elt && p.elt.isConnected && p.elt.type === "checkbox") {
+        p.elt.checked = !p.elt.checked;
+      }
       var okBtn = dialog.querySelector("[data-cc-confirm-ok]");
       if (okBtn) okBtn.hidden = false;
     });
@@ -424,6 +492,20 @@
     try { target.scrollIntoView(); } catch (err) { /* nothing */ }
   }
   window.addEventListener("hashchange", openHash);
+  // settings-5 (UI port review 2026-09-25): an in-page link to the hash the
+  // address already carries fires no hashchange, and a tab click does not
+  // clear the hash, so "AI providers" on Site's features tab (and Health's
+  // "notices") worked once and then did nothing. The same hash is opened
+  // here; a different one is left to hashchange.
+  document.addEventListener("click", function (evt) {
+    if (evt.defaultPrevented || evt.button !== 0 || evt.metaKey || evt.ctrlKey || evt.shiftKey || evt.altKey) return;
+    var a = evt.target.closest && evt.target.closest("a[href^='#']");
+    if (!a) return;
+    var href = a.getAttribute("href") || "";
+    if (href.length < 2 || href !== location.hash) return;
+    evt.preventDefault();
+    openHash();
+  });
 
   // A save refusal naming a field on a hidden tab opens that tab first
   // (site_settings' refusals scroll only).
@@ -438,14 +520,26 @@
   };
 
   // ---------------------------------------------------------------- htmx
+  // A re-read another window's plan answer asked for (cc-plan-changed,
+  // home-project-2) is a poll too: it must never unfold what the reader folded.
+  var POLL_EVENTS = { "cc-plan-changed": 1 };
+
   function isPoll(evt) {
     var trig = evt.detail && evt.detail.requestConfig && evt.detail.requestConfig.triggeringEvent;
+    if (trig && POLL_EVENTS[trig.type]) return true;
     if (!trig) {
       var elt = evt.detail && evt.detail.elt;
       var spec = elt && elt.getAttribute && (elt.getAttribute("hx-trigger") || "");
       return /\bevery\b/.test(spec || "") || /\bload\b/.test(spec || "");
     }
     return false;
+  }
+
+  function reveal(target) {
+    var win = target.closest ? (target.closest(".win") || target) : target;
+    try { win.scrollIntoView({ block: "start" }); } catch (err) { /* nothing */ }
+    if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+    try { target.focus({ preventScroll: true }); } catch (err) { /* nothing */ }
   }
 
   document.addEventListener("htmx:beforeSwap", function (evt) {
@@ -458,6 +552,11 @@
     if (!target) return;
     // (a) an answer to something the user did
     if (!isPoll(evt)) unfoldHolding(target);
+    // (b) an answer that lands in a window of its own, far from the key that
+    // asked (data-reveal, e.g. "Read the answer" into what_computers_said):
+    // bring it on screen and move focus there, or on a phone nothing visible
+    // changes (home-project-11, UI port review 2026-09-25).
+    if (!isPoll(evt) && target.hasAttribute && target.hasAttribute("data-reveal")) reveal(target);
     // (c) a banner or refusal landing in a folded body
     if (target.querySelector && target.querySelector(".error-banner, .result-banner, .htmx-refusal")) {
       unfoldHolding(target);
@@ -470,18 +569,31 @@
     }
   });
 
-  // R23: the page's look changed on the server; say so, never reload mid-edit.
-  function showReloadLine() {
-    if (document.querySelector(".cc-reload")) return;
-    var line = document.createElement("div");
-    line.className = "cc-reload";
-    line.setAttribute("role", "status");
-    line.innerHTML = 'The dashboard look changed. <a href="">Reload</a> when you are ready.';
-    document.body.appendChild(line);
-  }
-  document.addEventListener("htmx:afterRequest", function (evt) {
-    var xhr = evt.detail && evt.detail.xhr;
-    if (xhr && xhr.getResponseHeader && xhr.getResponseHeader("X-CC-UI-Want")) showReloadLine();
+  // settings-2 (UI port review 2026-09-25): a refusal drawn on a ROW can sit
+  // in a folded window AND a closed <details> (Packages' "other versions
+  // held"). The (c) rule above searches detail.target, which after an
+  // outerHTML swap is the DETACHED old box (htmx 1.9.12 leaves it there;
+  // evt.target is the new element), and it unfolds only the target's own
+  // ancestors, never what holds the refusal inside it. This runs on
+  // afterSettle, after onLoad's applyFolds (settle) and the details keeper
+  // (afterSwap) have put back what the reader had, so neither can shut it
+  // again. Every refusal found is opened up to, polls included: a refusal is
+  // only ever the answer to a click.
+  var REFUSALS = ".row-refusal, .error-banner, .htmx-refusal";
+  document.addEventListener("htmx:afterSettle", function (evt) {
+    var root = evt.detail && evt.detail.target;
+    if (root && root.isConnected === false && evt.target && evt.target.nodeType === 1) root = evt.target;
+    if (!root || !root.querySelectorAll) return;
+    var found = Array.prototype.slice.call(root.querySelectorAll(REFUSALS));
+    if (root.matches && root.matches(REFUSALS)) found.push(root);
+    found.forEach(function (el) {
+      var d = el.parentElement ? el.parentElement.closest("details") : null;
+      while (d) {
+        d.setAttribute("open", "");
+        d = d.parentElement ? d.parentElement.closest("details") : null;
+      }
+      unfoldHolding(el);
+    });
   });
 
   function onLoad(elt) {

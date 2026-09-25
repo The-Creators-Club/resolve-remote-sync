@@ -230,7 +230,18 @@ def test_minting_is_admins_only(env):
 def test_the_users_page_panel_renders_and_mints(env):
     client, conn = env
     admin_client(client)
-    assert "REPORT TOKENS" in client.get("/partials/admin/report-tokens").text
+    # The window's body (its "report tokens" bar is the Users page's frame
+    # since the terminal look became the only one): the swap target and the
+    # mint form are what the panel is for.
+    panel = client.get("/partials/admin/report-tokens")
+    assert panel.status_code == 200
+    assert 'id="admin-report-tokens"' in panel.text
+    assert 'hx-post="/partials/admin/report-tokens/create"' in panel.text
+    assert "no per-editor tokens yet" in panel.text
+    users = client.get("/admin/users")
+    assert users.status_code == 200
+    assert 'id="win-tokens-t">report' in users.text
+    assert 'hx-get="/partials/admin/report-tokens"' in users.text
 
     r = client.post("/partials/admin/report-tokens/create",
                     data={"username": "jsmith", "label": "laptop"})

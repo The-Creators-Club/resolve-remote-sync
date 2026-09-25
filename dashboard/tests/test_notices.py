@@ -9,8 +9,11 @@ which had no writer at all before this fix pass (finding 1).
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
+from markupsafe import escape
 
 from ccsync_dashboard import auth
 from ccsync_dashboard import db as dbmod
@@ -188,12 +191,22 @@ def test_the_rendered_panel_shows_not_checked_ok_and_found(tmp_path):
                         body="low", fix="clear space")
             conn.commit()
             client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
-            resp = client.get("/partials/notices")
+            # Terminal look (2026-09-25): the checks list is Health's panel,
+            # and each state is a lower-case tag, no brackets.
+            resp = client.get("/partials/health-notices")
             assert resp.status_code == 200
             html = resp.text
-            assert "[ FOUND ]" in html          # machine_disk_low (open)
-            assert "[ OK ]" in html              # dashboard_disk_low (checked, clean)
-            assert "[ NOT CHECKED ]" in html     # plan_without_share and others: no writer ran
+            checks = html[html.index('<ul class="checks">'):html.index("</ul>")]
+            items = re.findall(r"<li>(.*?)</li>", checks, flags=re.S)
+
+            def state_of(what):
+                (item,) = [i for i in items if f"<span>{escape(what)}</span>" in i]
+                return re.search(r'<span class="tag[^"]*"[^>]*>([^<]*)</span>', item).group(1)
+
+            kinds = {k["kind"]: k["what"] for k in ui._notices_context(conn)["notice_kinds"]}
+            assert state_of(kinds["machine_disk_low"]) == "found"         # open
+            assert state_of(kinds["dashboard_disk_low"]) == "ok"          # checked, clean
+            assert state_of(kinds["plan_without_share"]) == "not checked"  # no writer ran
         finally:
             conn.close()
 

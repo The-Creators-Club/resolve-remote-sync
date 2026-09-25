@@ -1,8 +1,7 @@
-// The this_dashboard window of the terminal Packages page (UI redesign port,
-// phase 4, builder P4a, 2026-09-25; plan 3.3, 5.3). The cc copy of
-// static/dashboard_update.js, which stays frozen for the classic page.
+// The this_dashboard window of the Packages page (UI redesign port, phase 4,
+// builder P4a, 2026-09-25; plan 3.3, 5.3).
 //
-// Same routes, same bodies, same two-phase wait (poll our own status while
+// The two-phase wait (poll our own status while
 // the update runs, then /api/v1/health until a different version answers).
 // What differs, and why:
 //   - Clicks are matched with closest(): a keycap holds a <span class="t">,
@@ -15,12 +14,11 @@
 //     flow) and the tree or image rollback (data-dashupd-rollback, the
 //     rollback flow). A select's change copies its value onto its key
 //     (data-dashupd-for names the key), never one merged list.
-//   - reloadPanel() sends the page's own hx-headers (X-CSRF-Token and the
-//     X-CC-UI group set, R23): a partial follows the page that asked for it.
-//     It obeys HX-Refresh (the "cannot serve" answer, an empty body) by
-//     reloading instead of swapping the empty body over #dashboard-update,
-//     and on a 409 carrying X-CC-UI-Want it shows the reload line and keeps
-//     the panel.
+//   - reloadPanel() sends the page's own hx-headers (X-CSRF-Token and
+//     X-CC-UI: terminal, which app.stale_page_gate asks of every htmx
+//     request). It obeys HX-Refresh (a page an older build drew, answered
+//     with an empty body) by reloading instead of swapping the empty body
+//     over #dashboard-update.
 (function () {
   "use strict";
 
@@ -60,15 +58,6 @@
     el.classList.toggle("muted", !isError);
   }
 
-  function showReloadLine() {
-    if (document.querySelector(".cc-reload")) return;
-    var line = document.createElement("div");
-    line.className = "cc-reload";
-    line.setAttribute("role", "status");
-    line.innerHTML = 'The dashboard look changed. <a href="">Reload</a> when you are ready.';
-    document.body.appendChild(line);
-  }
-
   function postJson(url, body) {
     return fetch(url, {
       method: "POST",
@@ -88,15 +77,11 @@
     headers["HX-Request"] = "true";
     return fetch(PARTIAL_URL, {headers: headers})
       .then(function (resp) {
-        // R23: this page's look cannot be served any more. Reload rather than
-        // swap the empty body over the panel (which would erase the progress
-        // and refusal lines with it).
+        // A page an older build drew. Reload rather than swap the empty
+        // body over the panel (which would erase the progress and refusal
+        // lines with it).
         if (resp.headers.get("HX-Refresh") === "true") {
           window.location.reload();
-          return null;
-        }
-        if (resp.status === 409 && resp.headers.get("X-CC-UI-Want")) {
-          showReloadLine();
           return null;
         }
         // An expired session answers 200 + HX-Redirect to an HX-Request:

@@ -1,23 +1,23 @@
-"""The phone contract, pinned (2026-08-30, docs/MOBILE_PLAN.md M1).
+"""The phone contract, pinned (2026-08-30, docs/MOBILE_PLAN.md M1; moved onto
+the terminal look 2026-09-25 when the classic look was deleted).
 
-Six packages build the mobile port in parallel against ONE set of names: the
-tokens in `:root`, three media queries and a class vocabulary (`.scroll-x`,
-`.stack`, `.tap`, `.sheet`, `.phone-hide`, `.phone-only`, `.rule`). This
-package defines all of them, so a rename here is a rename in five other
-branches at once, and nothing else in the suite would notice: no page 500s
-when `.stack` quietly becomes `.stacked`, it just stops working on a phone.
+Every page's phone behaviour hangs off ONE set of names: the tokens in the
+terminal `:root`, a small set of media queries and a class vocabulary
+(`.scroll-x`, `.tbl.stack-sm` with `data-label`, `.phone-only`, the 44px
+`--tap` target). A rename here is a rename in every page template at once,
+and nothing else in the suite would notice: no page 500s when `stack-sm`
+quietly becomes `stacked`, it just stops working on a phone.
 
-The same goes for the lines `base.html` carries on behalf of the PWA package
-(the manifest, the theme colour, the two Apple metas, the touch icon,
-`pwa.js` BEFORE htmx, `mobile.css` after `style.css`, `viewport-fit=cover`)
-and for the install slot in the drawer foot: they are a contract between two
-branches that never touch the same file, and the only place the contract can
-be enforced is here.
+The same goes for the lines `shell.html` carries on behalf of the PWA (the
+manifest, the theme colour, the two Apple metas, the touch icon, `pwa.js`
+BEFORE htmx, `viewport-fit=cover`) and for the install slot in the HUD's
+"more" sheet: pwa.js and the shell never touch the same file, and the only
+place the contract can be enforced is here.
 
 What this file does NOT pin is how anything looks. It is deliberately a set
 of "the name still exists and it is still declared in the right query" tests,
-because the whole point of the layer is that a later restyle changes the
-numbers and keeps the vocabulary.
+because the whole point of the layer is that a restyle changes the numbers
+and keeps the vocabulary.
 """
 from __future__ import annotations
 
@@ -27,59 +27,70 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-BASE = (ROOT / "templates" / "base.html").read_text(encoding="utf-8")
+CC = ROOT / "static" / "cc"
+TERMINAL = (CC / "terminal.css").read_text(encoding="utf-8")
+COMPONENTS = (CC / "components.css").read_text(encoding="utf-8")
+PHONE = (CC / "phone.css").read_text(encoding="utf-8")
+HUD = (CC / "hud.css").read_text(encoding="utf-8")
+SHEETS = {p.name: p.read_text(encoding="utf-8") for p in sorted(CC.glob("*.css"))}
+ALL_CSS = "\n".join(SHEETS.values())
+SHELL = (ROOT / "templates" / "shell.html").read_text(encoding="utf-8")
 TOPBAR = (ROOT / "templates" / "partials" / "topbar.html").read_text(encoding="utf-8")
-SIDEBAR = (ROOT / "templates" / "partials" / "sidebar.html").read_text(encoding="utf-8")
 SETTINGS_NAV = (ROOT / "templates" / "partials" / "settings_nav.html").read_text(
     encoding="utf-8")
 LOGIN = (ROOT / "templates" / "login.html").read_text(encoding="utf-8")
 
-# The three queries, exactly as MOBILE_PLAN.md 3.1 spells them. The phone one
-# is a literal because @media cannot read a custom property; --bp-phone exists
-# for the rules, and the two must not drift apart (pinned below).
-PHONE_QUERY = "@media (max-width: 600px)"
+# The terminal's two widths: the page body stacks at 760 (the bench's number),
+# the HUD dock appears at 600 (hud-common's, shared byte for byte with the
+# three SPAs). The 1100 query is the desktop-narrow one and is not a phone.
+PAGE_QUERY = "@media (max-width: 760px)"
+DOCK_QUERY = "@media (max-width: 600px)"
 TOUCH_QUERY = "@media (pointer: coarse)"
 APP_QUERY = "@media (display-mode: standalone)"
-
-PHONE_LAYER_BEGIN = "/* ==== the phone layer"
-THEME_COMMON_BEGIN = "/* ==== theme-common BEGIN"
 
 
 def _strip_comments(css: str) -> str:
     return re.sub(r"/\*.*?\*/", "", css, flags=re.S)
 
 
-def _block(css: str, opening: str) -> str:
-    """The text of the {...} that follows `opening`, brace-balanced.
+def _blocks(css: str, opening: str) -> list[str]:
+    """The text of every {...} that follows `opening`, brace-balanced.
 
     Written for media queries, whose bodies hold nested rules that a
     non-greedy regex cannot survive.
     """
     css = _strip_comments(css)
-    start = css.index(opening) + len(opening)
-    start = css.index("{", start)
-    depth = 0
-    for i in range(start, len(css)):
-        if css[i] == "{":
-            depth += 1
-        elif css[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return css[start + 1:i]
-    raise AssertionError(f"unterminated block after {opening!r}")
+    out: list[str] = []
+    pos = 0
+    while True:
+        at = css.find(opening, pos)
+        if at < 0:
+            return out
+        start = css.index("{", at + len(opening))
+        depth = 0
+        for i in range(start, len(css)):
+            if css[i] == "{":
+                depth += 1
+            elif css[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    out.append(css[start + 1:i])
+                    pos = i
+                    break
+        else:
+            raise AssertionError(f"unterminated block after {opening!r}")
 
 
-PHONE_BLOCK = _block(CSS, PHONE_QUERY)
-TOUCH_BLOCK = _block(CSS, TOUCH_QUERY)
-APP_BLOCK = _block(CSS, APP_QUERY)
+PHONE_BLOCK = "\n".join(_blocks(PHONE, PAGE_QUERY))
+TOUCH_BLOCK = "\n".join(_blocks(PHONE, TOUCH_QUERY))
+HUD_DOCK_BLOCK = "\n".join(_blocks(HUD, DOCK_QUERY))
+HUD_TOUCH_BLOCK = "\n".join(_blocks(HUD, TOUCH_QUERY))
+APP_BLOCK = "\n".join(_blocks(HUD, APP_QUERY))
 
 
 # ------------------------------------------------------------- 1. the tokens
 
 TOKENS = {
-    "--bp-phone": "600px",
-    "--bp-tablet": "900px",
     "--tap": "44px",
     "--safe-t": "env(safe-area-inset-top, 0px)",
     "--safe-b": "env(safe-area-inset-bottom, 0px)",
@@ -90,263 +101,186 @@ TOKENS = {
 
 @pytest.mark.parametrize("name,value", sorted(TOKENS.items()))
 def test_the_mobile_tokens_are_declared_with_their_contract_values(name, value):
-    """MOBILE_PLAN.md 3.1. Five other packages write var(--tap) into their own
-    rules; if the token is not declared the rule is simply ignored and the
-    control is 12px tall with nothing to show for it."""
-    assert f"{name}: {value};" in CSS
-
-
-def test_the_breakpoint_token_and_the_query_agree():
-    """A media query cannot read a custom property, so the number is written
-    out in the query AND declared as a token for the rules. They are two
-    copies of one decision: this is the test that they are the same copy."""
-    assert "--bp-phone: 600px" in CSS
-    assert PHONE_QUERY in CSS
+    """MOBILE_PLAN.md 3.1. Page rules write var(--tap) into their own
+    declarations; if the token is not declared the rule is simply ignored and
+    the control is 12px tall with nothing to show for it."""
+    root = TERMINAL[TERMINAL.index(":root"):]
+    root = root[:root.index("}")]
+    assert f"{name}: {value};" in root
 
 
 # ------------------------------------------------------------ 2. the queries
 
 
-@pytest.mark.parametrize("query", [PHONE_QUERY, TOUCH_QUERY, APP_QUERY])
-def test_each_of_the_three_queries_exists_exactly_once(query):
-    """One block per query, so there is one place to read what a phone, a
-    touch screen or the installed app does differently. The 900px query the
-    stylesheet always had is not one of them and is untouched."""
-    assert _strip_comments(CSS).count(query) == 1, query
+def test_every_phone_rule_for_the_pages_lives_in_phone_css():
+    """One sheet to read for what a phone does differently to the page body:
+    phone.css. It carries the page query (the second copy is the 16px field
+    rule, which must be LAST and is pinned in test_cc_css_facts) and the one
+    coarse-pointer block for the page controls."""
+    assert _strip_comments(PHONE).count(PAGE_QUERY) == 2
+    assert _strip_comments(PHONE).count(TOUCH_QUERY) == 1
 
 
-def test_the_old_narrow_window_query_survives():
-    assert "@media (max-width: 900px)" in CSS
+def test_the_dock_query_is_hud_commons_600():
+    """The dock appears at 600px and below, and everything that makes room
+    for it (the --cc-dock-h lift) uses the same number."""
+    assert ".hud-dock" in HUD_DOCK_BLOCK
+    assert "--cc-dock-h" in "\n".join(
+        b for b in _blocks(HUD, DOCK_QUERY) if "html:has(.hud-dock)" in b)
 
 
 def test_no_hover_query_decides_behaviour():
-    """MOBILE_PLAN.md 3.1: (hover: none) may hide a hover-only affordance and
-    nothing else. A touch laptop reports both, so anything gated on it is
+    """MOBILE_PLAN.md 3.1: (hover: none) may REVEAL a hover-only affordance
+    and nothing else. A touch laptop reports both, so anything gated on it is
     wrong on the machine an editor actually uses."""
-    assert "(hover: none)" not in _strip_comments(CSS)
-
-
-def test_the_phone_layer_sits_before_the_theme_common_block():
-    """theme-common is compared byte for byte against the b-roll, music and
-    ytdl stylesheets (test_theme_css.py). A phone rule inside it would have to
-    be copied into all three, and fails four suites until it is."""
-    assert CSS.index(PHONE_LAYER_BEGIN) < CSS.index(THEME_COMMON_BEGIN)
-    assert THEME_COMMON_BEGIN not in CSS[:CSS.index(PHONE_LAYER_BEGIN)]
-
-
-def test_the_theme_common_block_carries_no_phone_rules():
-    common = CSS[CSS.index(THEME_COMMON_BEGIN):]
-    for query in (PHONE_QUERY, TOUCH_QUERY, APP_QUERY):
-        assert query not in common
+    for name, css in SHEETS.items():
+        for block in _blocks(css, "@media (hover: none)"):
+            for decl in re.findall(r"\{([^}]*)\}", block):
+                props = {d.split(":")[0].strip() for d in decl.split(";") if ":" in d}
+                assert props <= {"display"}, (name, decl)
 
 
 # --------------------------------------------------------- 3. the vocabulary
 
 
-def test_scroll_x_scrolls_inside_itself_and_hints_that_it_does():
-    """Never the page: a phone that scrolls sideways has lost the layout, and
-    the hint edge is there because a phone paints no scrollbar until you drag
-    one."""
-    body = _strip_comments(CSS)
+def test_scroll_x_scrolls_inside_itself():
+    """Never the page: a phone that scrolls sideways has lost the layout."""
+    body = _strip_comments(COMPONENTS)
     rule = body[body.index(".scroll-x {"):]
     rule = rule[:rule.index("}")]
     assert "overflow-x: auto" in rule
-    assert "-webkit-overflow-scrolling: touch" in rule
-    assert "border-right: 1px solid var(--red-dim)" in rule
 
 
 def test_stack_turns_a_table_into_labelled_rows_below_the_phone_breakpoint():
-    """MOBILE_PLAN.md 3.2, and the shape M2 and M3 write their data-labels
-    for: every tr a block, every td a labelled line, the header gone. A cell
-    with no data-label renders bare, which is how a row of actions stays
-    readable."""
-    assert "table.stack thead { display: none; }" in PHONE_BLOCK
-    assert "table.stack td { display: block" in PHONE_BLOCK
-    assert "table.stack td[data-label]" in PHONE_BLOCK
+    """MOBILE_PLAN.md 3.2, and the shape every page writes its data-labels
+    for: the header gone, every cell a labelled line. A cell with no
+    data-label renders bare, which is how a row of actions stays readable."""
+    assert ".tbl.stack-sm thead { display: none; }" in PHONE_BLOCK
+    assert ".tbl.stack-sm td[data-label]::before" in PHONE_BLOCK
     assert "content: attr(data-label)" in PHONE_BLOCK
-    # 12px, not 11: the floor in goal 1 beats the sketch in 3.2, because a
-    # heading that has become the only name a value carries cannot be the
-    # smallest text on the page.
-    assert "font-size: 12px" in PHONE_BLOCK
+    # 12px, not 11: a heading that has become the only name a value carries
+    # cannot be the smallest text on the page.
+    labels = re.findall(r"\.tbl\.stack-sm td\[data-label\]::before\s*\{([^}]*)\}",
+                        PHONE_BLOCK)
+    assert labels
+    for decl in labels:
+        if "font-size" in decl:
+            assert "font-size: 12px" in decl, decl
 
 
 def test_an_empty_data_label_asks_for_no_heading_at_all():
     """The action cell (M2, 2026-08-30): a td that carries data-label="" opts
-    out of the heading, instead of getting an empty 11px line above its
-    button. A cell with no attribute renders bare too; the empty value is for
-    a table whose cells are generated and cannot simply omit it."""
-    assert 'table.stack td[data-label]:not([data-label=""])::before' in PHONE_BLOCK
+    out of the heading instead of getting an empty line above its button."""
+    assert '.tbl.stack-sm td[data-label=""]::before { display: none; }' in PHONE_BLOCK
 
 
-def test_a_control_in_a_stacked_cell_is_a_full_width_row():
-    """The other half of a real target inside a stacked table: min-height
-    comes from the coarse-pointer block, the width from here."""
-    assert "table.stack td > .tap" in PHONE_BLOCK
-    assert "table.stack td > .btn" in PHONE_BLOCK
+def test_a_stacked_cell_wraps_and_its_actions_sit_left():
+    """The other half of a readable stacked row: nothing nowrap survives the
+    stack, and the action cell's buttons do not float at the far edge."""
+    assert ".tbl.stack-sm td { white-space: normal; }" in PHONE_BLOCK
+    assert ".tbl.stack-sm td.acts-cell" in PHONE_BLOCK
 
 
-def test_phone_only_and_phone_hide_are_a_pair():
-    assert ".phone-only { display: none; }" in CSS
-    assert ".phone-hide { display: none !important; }" in PHONE_BLOCK
-    assert ".phone-only { display: revert; }" in PHONE_BLOCK
+def test_phone_only_is_hidden_on_a_desktop_and_shown_on_a_phone():
+    assert ".phone-only { display: none; }" in _strip_comments(COMPONENTS)
+    assert ".phone-only { display: flex; }" in PHONE_BLOCK
 
 
-def test_the_tap_class_and_the_two_controls_grow_on_a_coarse_pointer_only():
+def test_the_page_controls_grow_on_a_coarse_pointer_only():
     """The 44px hit box is decided by POINTER, not by width: that is what
     leaves a 1280px mouse window pixel-identical, and what gives a touch
     laptop the big targets a narrow desktop window must not get."""
     assert "min-height: var(--tap)" in TOUCH_BLOCK
-    assert "min-width: var(--tap)" in TOUCH_BLOCK
-    for selector in (".btn", "a.chip", ".tap"):
+    for selector in (".key", ".check", ".radio", ".switch", ".inp", ".sel",
+                     ".tree .row", ".fold"):
         assert selector in TOUCH_BLOCK, selector
     # ...and nowhere in the phone query, which would make the size a function
     # of the window instead of the pointer.
-    assert "min-width: var(--tap)" not in PHONE_BLOCK
+    assert "var(--tap)" not in PHONE_BLOCK
 
 
-def test_every_tick_and_radio_is_a_44px_target_on_a_coarse_pointer():
-    """The sweep's worst targets: the project tick at 13.3 x 13.3px (which
-    starts a real sync on someone's computer) and the assignments matrix at
-    44 x 20. The INPUT is 44px, because a 16px box inside a 44px label still
-    measures 16px and still is what a finger gets; the painted box stays 1em,
-    drawn by a ::before centred in the hit box, so nothing looks like a slab
-    and nothing moves on a desktop."""
-    for selector in ('input[type="checkbox"]', 'input[type="radio"]'):
-        assert selector in TOUCH_BLOCK, selector
-    assert "width: var(--tap)" in TOUCH_BLOCK
-    assert 'input[type="checkbox"]::before' in TOUCH_BLOCK
-    # The mark, the dot and the dash are all inset into the ELEMENT by the
-    # base rules, so each has to be re-centred on the painted box.
-    for state in (":checked::after", ":indeterminate::after"):
-        assert f'input[type="checkbox"]{state}' in TOUCH_BLOCK, state
-    # The row has to grow with it or two 44px boxes 30px apart overlap and the
-    # tap lands on the wrong project.
-    assert ".project-link { min-height: var(--tap)" in TOUCH_BLOCK
-
-
-def test_selects_and_text_fields_get_the_hit_box_too():
-    """A <select> was 27.8px on the home page and 32.6px on the admin forms.
-    range is left out on purpose: its thumb is centred on a 14px rail and a
-    min-height would take the thumb off the track."""
-    assert "select," in TOUCH_BLOCK
-    assert 'input:not([type="checkbox"]):not([type="radio"]):not([type="range"])'         in TOUCH_BLOCK
-    assert "min-height: var(--tap)" in TOUCH_BLOCK
+def test_every_hud_control_is_a_44px_target_on_a_coarse_pointer():
+    for selector in (".hud-nav a", ".hud-key", ".hud-mi", ".hud-dock a",
+                     ".hud-dock button", ".snav a"):
+        assert selector in HUD_TOUCH_BLOCK, selector
+    assert "min-height: var(--cc-tap)" in HUD_TOUCH_BLOCK
 
 
 def test_no_text_under_12px_on_a_phone():
-    """MOBILE_PLAN.md goal 1. The chips went up in the first pass; the sweep
-    of the merged branch found .stamp at 11px on all 32 renders and three
-    more behind it. The desktop keeps 11px."""
-    assert ".chip { font-size: 12px; }" in PHONE_BLOCK
-    assert ".chip { font-size: 12px; }" not in _strip_comments(
-        CSS[:CSS.index(PHONE_LAYER_BEGIN)])
-    for selector in (".stamp", ".drawer-close", ".login-box label",
-                     "table.editors th"):
+    """MOBILE_PLAN.md goal 1. The desktop keeps its 10-11px labels; the phone
+    layer lifts the ones the sweep found (the key hints, table heads, stamps)
+    and never states anything smaller again."""
+    for selector in (".tbl th", ".key.sm", ".hint", ".kv dt", ".sec-h"):
         assert selector in PHONE_BLOCK, selector
-    # Nothing in the phone layer may state 11px or less again.
-    for small in ("font-size: 11px", "font-size: 10px", "font-size: 0."):
-        assert small not in PHONE_BLOCK, small
+    for small in re.findall(r"font-size:\s*([0-9.]+)px", PHONE_BLOCK):
+        assert float(small) >= 12, small
 
 
-def test_the_sheet_is_the_popover_api_and_no_script():
-    """The projects rail on a phone. Script-free is not a preference: the
-    partial is the innerHTML of an <aside> htmx replaces every 30s."""
-    assert 'id="projects-sheet" popover' in SIDEBAR
-    assert 'popovertarget="projects-sheet"' in SIDEBAR
-    assert "<script" not in SIDEBAR
-    assert ".projects.sheet:popover-open" in PHONE_BLOCK
-    assert "max-height: 60vh" in PHONE_BLOCK
-    # The desktop escape hatch: an author display beats the UA's
-    # [popover]:not(:popover-open) rule, so the rail stays a block above the
-    # breakpoint -- and it has to be declared BEFORE the phone query, because
-    # the query hands the state back with `display: revert` at the same
-    # specificity and the later declaration would win.
-    body = _strip_comments(CSS)
-    hatch = body[body.index(".projects.sheet {"):]
-    hatch = hatch[:hatch.index("}")]
-    assert "display: block" in hatch
-    # The UA also makes a popover a fixed, bordered, canvas-coloured card;
-    # every part of that is undone here or the rail paints as a white box over
-    # the corner of the desktop.
-    for undone in ("position: static", "border: none", "background: none"):
-        assert undone in hatch, undone
-    assert body.index(".projects.sheet {") < body.index(PHONE_QUERY)
-
-
-def test_the_sheet_handle_is_a_tap_target_above_the_gesture_bar():
-    assert "sheet-handle" in SIDEBAR
-    assert "height: calc(var(--tap) + var(--safe-b))" in PHONE_BLOCK
-
-
-def test_the_rule_is_a_border_with_no_text_in_it():
-    """It used to be 120 box-drawing characters: a thousand pixels of text
-    laid out on every page of the product to paint one line."""
-    assert '<div class="rule"></div>' in BASE
-    assert '"─"' not in BASE
-    body = _strip_comments(CSS)
-    rule = body[body.index(".rule {"):]
-    rule = rule[:rule.index("}")]
-    assert "height: 0" in rule
-    assert "border-top: 1px solid var(--red-dim)" in rule
-
-
-# --------------------------------------- 4. the lines base.html owes the PWA
+# --------------------------------------- 4. the lines shell.html owes the PWA
 
 CONTRACT_LINES = (
     '<link rel="manifest" href="/manifest.webmanifest">',
-    '<meta name="theme-color" content="#0a0a0d">',
+    '<meta name="theme-color" content="#070403">',
     '<meta name="apple-mobile-web-app-capable" content="yes">',
     '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">',
-    '<link rel="apple-touch-icon" href="/static/icons/icon-180.png">',
-    '<script src="/static/pwa.js" defer></script>',
-    '<link rel="stylesheet" href="/static/mobile.css">',
+    "<link rel=\"apple-touch-icon\" href=\"{{ asset_url('icons/icon-180.png') }}\">",
+    "<script src=\"{{ asset_url('pwa.js') }}\" defer></script>",
+    "<link rel=\"stylesheet\" href=\"{{ asset_url('cc/phone.css') }}\">",
 )
 
 
 @pytest.mark.parametrize("line", CONTRACT_LINES)
-def test_base_html_carries_the_pwa_contract_line(line):
-    """MOBILE_PLAN.md 3.3, exact text. The PWA package makes the targets
-    exist; these lines are how a browser finds them, and neither branch can
-    test the pair on its own."""
-    assert line in BASE
+def test_shell_html_carries_the_pwa_contract_line(line):
+    """MOBILE_PLAN.md 3.3, exact text. pwa.js makes the targets exist; these
+    lines are how a browser finds them."""
+    assert line in SHELL
+
+
+def test_the_theme_colour_is_the_terminal_background():
+    """The phone's status bar is painted with it; a different value draws a
+    band of another colour above every page."""
+    assert "--bg: #070403" in TERMINAL
 
 
 def test_the_viewport_covers_the_display_cutout():
     assert ('<meta name="viewport" content="width=device-width, initial-scale=1, '
-            'viewport-fit=cover">') in BASE
+            'viewport-fit=cover">') in SHELL
 
 
 def test_pwa_js_is_ordered_before_htmx():
     """Both are deferred, and deferred scripts run in document order: pwa.js
     has to rewrite the poll intervals on a coarse pointer while htmx has not
     yet processed the nodes."""
-    assert BASE.index("/static/pwa.js") < BASE.index("/static/htmx.min.js")
+    assert SHELL.index("asset_url('pwa.js')") < SHELL.index("asset_url('htmx.min.js')")
 
 
-def test_mobile_css_is_linked_after_style_css():
-    assert BASE.index("/static/style.css") < BASE.index("/static/mobile.css")
+def test_phone_css_is_linked_after_the_sheets_it_overrides():
+    """phone.css wins by order at equal specificity; linked first it loses
+    every rule it states."""
+    at = SHELL.index("asset_url('cc/phone.css')")
+    for sheet in ("cc/hud.css", "cc/terminal.css", "cc/components.css"):
+        assert SHELL.index(f"asset_url('{sheet}')") < at, sheet
 
 
-def test_the_install_slot_is_empty_and_in_the_drawer_foot():
-    """pwa.js fills it with an [ INSTALL ] chip when Chrome offers one. Empty
-    here, and phone-only, so a desktop never shows a control that cannot do
+def test_the_install_slot_is_empty_and_in_the_more_sheet():
+    """pwa.js fills it with an INSTALL key when Chrome offers one. Empty
+    here, and inside the "more" sheet that only the phone dock and the
+    tablet bar open, so a desktop never shows a control that cannot do
     anything."""
-    assert '<span id="install-slot" class="phone-only"></span>' in TOPBAR
-    foot = TOPBAR[TOPBAR.index('class="drawer-foot"'):]
-    assert 'id="install-slot"' in foot
+    assert '<span id="install-slot"></span>' in TOPBAR
+    sheet = TOPBAR[TOPBAR.index('id="hud-more"'):]
+    assert 'id="install-slot"' in sheet
 
 
 # ------------------------------------------------------- 5. polling on a phone
 
 
-def test_every_poll_in_this_packages_templates_is_filtered_by_visibility():
+def test_every_poll_in_the_chrome_is_filtered_by_visibility():
     """MOBILE_PLAN.md 3.4: a phone in a pocket must not hold a connection
-    against --workers 1. Only base.html polls among the files this package
-    owns; the sidebar's 30s poll lives on the <aside> in fourteen PAGE
-    templates, which belong to M2 and M3 (recorded in the handover)."""
-    for path in (ROOT / "templates" / "base.html",
+    against --workers 1. The page templates are pinned by
+    test_mobile_fleet.py; these are the files on every page."""
+    for path in (ROOT / "templates" / "shell.html",
                  ROOT / "templates" / "partials" / "topbar.html",
-                 ROOT / "templates" / "partials" / "sidebar.html",
                  ROOT / "templates" / "partials" / "settings_nav.html",
                  ROOT / "templates" / "login.html"):
         text = re.sub(r"\{#.*?#\}", "", path.read_text(encoding="utf-8"), flags=re.S)
@@ -357,11 +291,12 @@ def test_every_poll_in_this_packages_templates_is_filtered_by_visibility():
                 f"{path.name}: unfiltered poll {trigger!r}")
 
 
-def test_the_fleet_halt_banner_still_loads_immediately():
-    """The filter must not cost the load trigger: the banner says the whole
+def test_the_fleet_halt_line_still_loads_immediately():
+    """The filter must not cost the load trigger: the line says the whole
     company has stopped syncing, and waiting 60s for it is not an option."""
     assert ("hx-trigger=\"load, every 60s [document.visibilityState === 'visible']\""
-            in BASE)
+            in SHELL)
+    assert 'hx-get="/partials/halt-line"' in SHELL
 
 
 # ------------------------------------------------ 6. the rest of the chrome
@@ -370,28 +305,23 @@ def test_the_fleet_halt_banner_still_loads_immediately():
 def test_the_settings_strip_is_a_scroll_x_row_that_snaps_to_the_current_page():
     """Twelve entries wrapped onto four rows is half a phone screen of
     navigation. One row, and the entry you are standing on is the ONLY snap
-    target in the container, which is what scrolls it into view with no JS."""
-    # The class is in the attribute since round 2: the sweep exempts an
-    # element from its sideways-scroll check only when it carries it.
-    assert 'class="settings-nav scroll-x"' in SETTINGS_NAV
-    assert "scroll-snap-type: x mandatory" in PHONE_BLOCK
-    # The overflow itself comes from .scroll-x, which the nav now carries.
-    assert "overflow-x: auto" in _strip_comments(CSS)
-    assert (".settings-nav-item.settings-nav-current { scroll-snap-align: center; }"
-            in PHONE_BLOCK)
-    # Exactly one snap target, or the container has a choice and makes the
-    # wrong one.
-    assert PHONE_BLOCK.count("scroll-snap-align") == 1
+    target in the strip, which is what scrolls it into view with no JS."""
+    assert 'class="snav scroll-x"' in SETTINGS_NAV
+    assert ".snav.scroll-x { flex-wrap: nowrap; overflow-x: auto;" in HUD_DOCK_BLOCK
+    assert "scroll-snap-type: x" in HUD_DOCK_BLOCK
+    assert ('.snav.scroll-x a[aria-current="page"] { scroll-snap-align: center; }'
+            in HUD_DOCK_BLOCK)
+    assert HUD_DOCK_BLOCK.count("scroll-snap-align") == 1
 
 
-def test_the_topbar_chips_have_a_phone_copy_in_the_drawer():
-    """At 390px the bar is one 44px row. The chips are duplicated rather than
-    moved because the partial is injected into three SPAs with innerHTML and
-    must stay script-free: only CSS can choose which copy a screen sees."""
-    assert 'class="chip red phone-hide"' in TOPBAR
-    assert 'class="drawer-chips phone-only"' in TOPBAR
-    drawer = TOPBAR[TOPBAR.index('id="nav-drawer"'):]
-    assert "drawer-chips" in drawer
+def test_the_phone_bar_hides_the_desktop_nav_and_shows_the_dock():
+    """At 390px the bar is one row: the nav and the desktop-only keys go, the
+    dock carries the destinations, and the "more" sheet the rest."""
+    assert ".hud-nav, .hud .hud-hide-sm { display: none; }" in HUD_DOCK_BLOCK
+    assert '<nav class="hud-dock"' in TOPBAR
+    dock = TOPBAR[TOPBAR.index('<nav class="hud-dock"'):]
+    dock = dock[:dock.index("</nav>")]
+    assert 'popovertarget="hud-more"' in dock
 
 
 def test_the_login_fields_do_not_zoom_or_capitalise_on_a_phone():
@@ -399,9 +329,12 @@ def test_the_login_fields_do_not_zoom_or_capitalise_on_a_phone():
     focused field and do not come back out; autocapitalize is why "jsmith"
     used to arrive as "Jsmith"."""
     assert 'autocapitalize="none"' in LOGIN
-    assert ".login-box input { font-size: 16px; }" in PHONE_BLOCK
-    assert "width: min(380px, 100% - 2rem)" in PHONE_BLOCK
+    last = _blocks(PHONE, PAGE_QUERY)[-1]
+    assert "input:not([type=checkbox], [type=radio], [type=range])" in last
+    assert "font-size: 16px" in last
+    # ...and the selector's root hook is on the shell, or it matches nothing.
+    assert '<html lang="en" data-ui="cc">' in SHELL
 
 
 def test_the_installed_app_pays_the_status_bar_inset():
-    assert "var(--safe-t)" in APP_BLOCK
+    assert "env(safe-area-inset-top, 0px)" in APP_BLOCK

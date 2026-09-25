@@ -153,7 +153,9 @@ def test_the_mounted_apps_keep_their_own_401_wording(env):
 
 
 def test_assignments_js_navigates_on_401_rather_than_toasting():
-    js = (Path(__file__).resolve().parents[1] / "static" / "assignments.js").read_text(
+    # static/cc/assignments.js: the classic file went with the classic look
+    # (2026-09-25); the terminal grid's script carries the same guard.
+    js = (Path(__file__).resolve().parents[1] / "static" / "cc" / "assignments.js").read_text(
         encoding="utf-8")
     assert "function signedOut(err)" in js
     assert "err.status !== 401" in js
@@ -315,10 +317,14 @@ def test_a_held_cycle_is_readable_off_a_page(env):
     assert [n["note"] for n in notes] == [
         "applied 9 of 40 folder(s); syncthing refused the rest"]
     assert notes[0]["at"] == NOW
-    # ...and it is in the two contexts D4 renders.
+    # ...and it is on the page that shows the enforce cycle: the Health
+    # tab's collector window (the classic /partials/admin/diagnostics panel
+    # went with the classic look on 2026-09-25).
     as_admin(client)
-    page = client.get("/partials/admin/diagnostics")
+    page = client.get("/partials/health-collector")
     assert page.status_code == 200
+    assert ("Sharing change held: applied 9 of 40 folder(s); syncthing refused "
+            "the rest") in page.text
 
 
 # ------------------------------------------------------------------- REL-16

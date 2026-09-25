@@ -232,7 +232,8 @@ def test_a_data_root_it_cannot_prepare_is_mounted_but_never_advertised(tmp_path,
         assert c.get("/api/v1/health").status_code == 200
         page = as_user(c).get("/")
         assert page.status_code == 200
-        assert "[ B-ROLL ]" not in page.text
+        # The HUD's b-roll link (top nav and phone dock) is the advert.
+        assert '<a href="/broll/"' not in page.text
 
 
 # --- the mount itself ---------------------------------------------------------
@@ -262,7 +263,9 @@ def test_a_signed_in_editor_renders_a_page_through_the_mount(tmp_path, broll_env
         assert c.get("/broll/api/search").json() == {"results": []}
         # ...and the nav offers the link, which it must only ever do when the
         # mount is fully working.
-        assert "[ B-ROLL ]" in c.get("/").text
+        home = c.get("/").text
+        assert '<a href="/broll/"' in home
+        assert ">b-roll</a>" in home
 
 
 def test_the_lifespan_shim_creates_the_database(tmp_path, broll_env):

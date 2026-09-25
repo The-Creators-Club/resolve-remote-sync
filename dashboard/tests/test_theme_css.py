@@ -4,22 +4,31 @@ Neither is the kind of thing a functional test would ever notice, and both
 were reported from a screenshot rather than a traceback, so they are pinned
 here as CSS facts:
 
-  1. The topbar wraps by WHOLE ITEMS. It used to be a nowrap flex row whose
+  1. The header wraps by WHOLE ITEMS. It used to be a nowrap flex row whose
      items could shrink, so an admin nav wider than the window broke inside
      the labels: "[ TRANSFERS" on one line and "]" on the next, with the "//"
-     separators floating loose. The fix is flex-wrap + `flex: 0 0 auto` +
-     `white-space: nowrap` on every child, the separators moved out of the
-     markup into `.nav-sep::before`, and the staleness stamp and session chip
-     joined into one `.topbar-right` item.
+     separators floating loose. The classic fix was flex-wrap + `flex: 0 0
+     auto` + `white-space: nowrap` on every child, and the staleness stamp
+     and session chip joined into one `.topbar-right` item.
 
-  2. Text fields, textareas and selects are painted by the theme. Until now
+  2. Text fields, textareas and selects are painted by the theme. Until then
      only three places asked, so most of /admin/settings rendered as UA
      chrome: a white box with black text in the middle of a black terminal.
 
+Converted 2026-09-25, when the CC Terminal look replaced the classic one and
+style.css went with it. The same two facts are pinned on the sheets every page
+now loads: the HUD (static/cc/hud.css, whose hud-common block the three SPA
+sheets carry byte for byte) for the header, and static/cc/terminal.css +
+components.css for the fields. The HUD does not wrap at all: it keeps every
+label whole with nowrap, lets only the brand name and the stamp give way, and
+narrows by MOVING entries into the "more" sheet and the phone dock. Deleted
+with the classic sheet (nothing in the terminal carries them): the `.nav-sep`
+"//" pseudo-element, the "no module links in the bar" rule (the HUD's bar has
+a nav again, on purpose), and `.side-head` (the classic section header; a
+terminal window's bar is its header).
+
 A restyle is allowed to change these numbers; what it must not do is drop the
-properties, which is what these tests check. The topbar half is duplicated in
-the b-roll, music and ytdl suites, because the header those pages inject from
-/partials/topbar is painted by THEIR stylesheet, not this one.
+properties, which is what these tests check.
 """
 from __future__ import annotations
 
@@ -29,12 +38,20 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+CC = ROOT / "static" / "cc"
+# terminal.css holds the tokens, the base and theme-common; components.css
+# the field paint. Read together, as a page loads them.
+TERMINAL_CSS = (CC / "terminal.css").read_text(encoding="utf-8")
+CSS = TERMINAL_CSS + "\n" + (CC / "components.css").read_text(encoding="utf-8")
+HUD_CSS = (CC / "hud.css").read_text(encoding="utf-8")
 TOPBAR = (ROOT / "templates" / "partials" / "topbar.html").read_text(encoding="utf-8")
 
 # The families the base form-control rules must cover. Anything a settings
 # page or a wizard step is likely to use.
 TEXTUAL_INPUTS = ("text", "password", "url", "email", "search", "number")
+
+# The terminal's one base field rule: every input that is not a drawn control.
+FIELD = 'input:not([type="checkbox"]):not([type="radio"]):not([type="range"])'
 
 
 def _strip_comments(css: str) -> str:
@@ -44,11 +61,12 @@ def _strip_comments(css: str) -> str:
 def rule(css: str, selector: str) -> str:
     """Every declaration this stylesheet makes for `selector`, concatenated.
 
-    Selector lists are split, so `input[type="text"]:focus` is found inside
-    the thirteen-selector focus rule as readily as in a rule of its own; and
-    all matching rules are joined because a control is often given its paint
-    in one rule and its geometry in another. These are regression pins, not a
-    cascade model: the question is whether the property is still declared.
+    Selector lists are split, so `.inp:focus` is found inside a three-selector
+    focus rule as readily as in a rule of its own; and all matching rules are
+    joined because a control is often given its paint in one rule and its
+    geometry in another. These are regression pins, not a cascade model: the
+    question is whether the property is still declared. Only top-level rules
+    (and rules one @media deep) are seen, which is all these tests ask about.
     """
     found = []
     for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", _strip_comments(css)):
@@ -56,149 +74,144 @@ def rule(css: str, selector: str) -> str:
         if selector in parts:
             found.append(m.group(2))
     if not found:
-        raise AssertionError(f"no rule for selector {selector!r} in style.css")
+        raise AssertionError(f"no rule for selector {selector!r}")
     return " ".join(found)
 
 
-# ------------------------------------------------------------ 1. the topbar
+def _media_block(css: str, query: str) -> str:
+    """The body of the first `@media <query>` block, braces balanced."""
+    css = _strip_comments(css)
+    start = css.index("{", css.index(f"@media {query}")) + 1
+    depth, i = 1, start
+    while depth:
+        depth += {"{": 1, "}": -1}.get(css[i], 0)
+        i += 1
+    return css[start:i - 1]
+
+
+# ------------------------------------------------------------ 1. the header
 
 
 def test_topbar_row_wraps_by_whole_items():
-    body = rule(CSS, ".topbar")
-    assert "flex-wrap: wrap" in body
+    """The HUD is one flex row that never breaks a label: the nav and the meta
+    row are nowrap, and the nav never shrinks."""
+    body = rule(HUD_CSS, ".hud")
     assert "display: flex" in body
+    assert "flex: none" in rule(HUD_CSS, ".hud-nav")
+    assert "white-space: nowrap" in rule(HUD_CSS, ".hud-meta")
 
 
 def test_every_topbar_child_is_an_unbreakable_unit():
-    """The actual fix for "[ TRANSFERS" / "]". nowrap stops the label
-    breaking; `flex: 0 0 auto` stops the item being squeezed narrower than
-    its label in the first place."""
-    body = rule(CSS, ".topbar > *")
-    assert "white-space: nowrap" in body
-    assert "flex: 0 0 auto" in body
-
-
-def test_nav_separators_are_pseudo_elements_not_text_nodes():
-    """A `<span class="dim">//</span>` between two links is a flex item of its
-    own and a wrap can strand it at the end or the start of a row. As a
-    ::before of the item it precedes it travels with that item.
-
-    The bar itself has carried no separated nav entries since the 2026-08-18
-    redesign moved the modules into the drawer, so the markup half of this
-    test is now "the bar has no bracketed links to separate" (below). The
-    rule stays: it is the vocabulary an inline nav entry gets if one ever
-    comes back, and the three SPA stylesheets pin it too.
-    """
-    # The escape, not the two characters: a quote followed by a slash is what
-    # a root-relative URL looks like, and every shipped asset is scanned for
-    # one (YTDL-42).
-    assert 'content: "\\2f\\2f"' in rule(CSS, ".nav-link.nav-sep::before")
-
-
-def test_the_bar_itself_carries_no_module_links():
-    """The redesign in one assertion: between the brand and the right-hand
-    chip the bar holds nothing that could wrap at all. Everything that used to
-    live there -- Transfers, Users, Assignments, Setup, Settings, the three
-    modules, the installer -- is in the drawer or under Settings."""
-    # Comments first: this template explains the redesign in prose and names
-    # the very labels the assertions below say are gone from the bar.
-    markup = re.sub(r"\{#.*?#\}", "", TOPBAR, flags=re.S)
-    # Then the drawer element itself, whole: what is left is the bar.
-    bar = re.sub(r'<div class="nav-drawer".*?\n</div>\n', "", markup, flags=re.S)
-    bar = bar[bar.index('class="brand"'):bar.index('class="topbar-right"')]
-    assert "nav-drawer" not in bar, "the drawer element was not stripped"
-    assert "nav-link" not in bar
-    for gone in ("[ TRANSFERS ]", "[ USERS ]", "[ SETTINGS ]", "[ B-ROLL ]",
-                 "[ MUSIC ]", "[ YOUTUBE ]", "[ INSTALLER ]"):
-        assert gone not in bar
+    """The actual fix for "[ TRANSFERS" / "]", in HUD terms: a nav entry is
+    nowrap, and every item of the meta row is `flex: none` (the stamp alone
+    may shrink, with an ellipsis, never break)."""
+    assert "white-space: nowrap" in rule(HUD_CSS, ".hud-nav a")
+    assert "flex: none" in rule(HUD_CSS, ".hud-meta > *")
+    stamp = rule(HUD_CSS, ".hud-meta > .hud-stamp")
+    assert "overflow: hidden" in stamp
 
 
 def test_the_stamp_and_the_session_chip_are_one_item():
-    """"updated 4s ago" and the user + logout buttons must not be split
-    across a wrap, so they are one flex child carrying the margin-left:auto
-    that used to sit on .stamp."""
-    assert 'class="topbar-right"' in TOPBAR
-    body = rule(CSS, ".topbar-right")
-    assert "margin-left: auto" in body
-    assert "margin-left: auto" not in rule(CSS, ".stamp")
+    """"updated 4s ago" and the user + menu keys must not be split across a
+    wrap, so they are one flex child (.hud-meta), pushed right as a unit by
+    the spacer (the classic .topbar-right's margin-left: auto)."""
+    meta = TOPBAR[TOPBAR.index('<div class="hud-meta">'):TOPBAR.index('<div class="hud-menu"')]
+    assert 'id="topbar-stamp"' in meta and 'class="hud-user' in meta
+    assert "flex: 1 1 0" in rule(HUD_CSS, ".hud-spacer")
+    assert "justify-content: flex-end" in rule(HUD_CSS, ".hud-meta")
 
 
 def test_the_phone_layer_does_not_undo_the_wrap_safe_topbar():
-    """Extended 2026-08-30 with the phone layer (MOBILE_PLAN.md M1). The two
-    tests above read every rule for a selector wherever it is, so a
-    `flex-wrap: nowrap` added inside the phone query would leave them passing
-    and put "[ TRANSFERS" back on one line and "]" on the next at 390px -- the
-    exact bug they exist for, on the screen it is most likely to happen on.
-    The phone layout narrows the bar by MOVING items into the drawer, never by
-    letting a label break."""
-    phone = _strip_comments(CSS)
-    phone = phone[phone.index("@media (max-width: 600px)"):]
-    phone = phone[:phone.index("@media (pointer: coarse)")]
-    bar = phone[phone.index(".topbar {"):]
-    bar = bar[:bar.index("}")]
-    assert "flex-wrap" not in bar
-    assert "white-space" not in bar
-    # ...and nothing anywhere in the phone layer lets a topbar child shrink.
-    assert ".topbar > *" not in phone
+    """Extended 2026-08-30 with the phone layer (MOBILE_PLAN.md M1). The tests
+    above read every rule for a selector wherever it is, so a `white-space:
+    normal` added inside the phone query would leave them passing and put a
+    broken label back at 390px -- the exact bug they exist for, on the screen
+    it is most likely to happen on. The phone layout narrows the bar by
+    MOVING items into the dock and the "more" sheet, never by letting a label
+    break."""
+    for query in ("(max-width: 600px)", "(min-width: 601px) and (max-width: 900px)"):
+        layer = _media_block(HUD_CSS, query)
+        for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", layer):
+            if re.search(r"\.hud(-nav|-meta|-brand)?\b(?![-\w])", m.group(1)):
+                assert "flex-wrap: wrap" not in m.group(2), (query, m.group(1))
+                assert "white-space: normal" not in m.group(2), (query, m.group(1))
+                assert "flex-shrink" not in m.group(2), (query, m.group(1))
+    phone = _media_block(HUD_CSS, "(max-width: 600px)")
+    assert ".hud-nav" in phone and "display: none" in phone
+    assert ".hud-dock" in phone
 
 
 def test_the_brand_stays_on_one_line():
-    """.brand is a direct child of .topbar, so the nowrap above binds it."""
-    assert 'class="brand"' in TOPBAR
-    assert "white-space: nowrap" in rule(CSS, ".topbar > *")
+    """The brand is site data of any length: it stays one line and gives way
+    by ellipsis, never by wrapping."""
+    assert 'class="hud-brand"' in TOPBAR
+    assert "white-space: nowrap" in rule(HUD_CSS, ".hud-brand")
+    assert "text-overflow: ellipsis" in rule(HUD_CSS, ".hud-name")
 
 
 # ----------------------------------------------------- 2. the form controls
 
 
-@pytest.mark.parametrize("kind", TEXTUAL_INPUTS)
-def test_every_text_field_family_is_themed(kind):
-    body = rule(CSS, f'input[type="{kind}"]')
-    assert "background: var(--field)" in body
-    assert "border: 1px solid var(--red-dim)" in body
+def test_every_text_field_family_is_themed():
+    """The terminal paints EVERY input that is not a drawn control in one
+    rule, so no textual type can be missed (the classic sheet listed six).
+    The native spinner / picker / drop-down list is the half a page cannot
+    paint; without color-scheme it renders white against our text colour."""
+    body = rule(CSS, FIELD)
+    assert "background-color: var(--win-solid)" in body
     assert "color: var(--text)" in body
-    # The native spinner / picker / drop-down list is the half a page cannot
-    # paint; without this it renders white against our text colour.
     assert "color-scheme: dark" in body
+    # ...and the one rule excludes exactly the three drawn controls, so every
+    # textual family in TEXTUAL_INPUTS falls under it.
+    for kind in TEXTUAL_INPUTS:
+        assert f'[type="{kind}"]' not in FIELD
+    # The field class adds the border every textual field carries.
+    assert "border: 1px solid var(--line)" in rule(CSS, ".inp")
 
 
 def test_textareas_and_selects_share_the_same_paint():
     for selector in ("textarea", "select"):
         body = rule(CSS, selector)
-        assert "background: var(--field)" in body
-        assert "border: 1px solid var(--red-dim)" in body
+        assert "background-color: var(--win-solid)" in body
         assert "color-scheme: dark" in body
+    for selector in (".area", ".sel"):
+        assert "border: 1px solid var(--line)" in rule(CSS, selector)
 
 
-def test_focus_is_a_slim_red_ring_that_moves_nothing():
-    body = rule(CSS, 'input[type="text"]:focus')
+def test_focus_is_a_slim_ring_that_moves_nothing():
+    """Border colour and a glow only: no outline and no border width change,
+    so focusing a field moves nothing (the terminal's ring is the cyan hi)."""
+    body = rule(CSS, ".inp:focus")
     assert "outline: none" in body
-    assert "border-color: var(--red)" in body
-    assert "box-shadow: 0 0 0 1px var(--red)" in body
+    assert "border-color: var(--hi)" in body
+    assert "box-shadow:" in body
+    assert "border-width" not in body and "padding" not in body
 
 
 def test_placeholder_disabled_and_option_states_exist():
-    assert "var(--red)" in rule(CSS, "::placeholder")
-    assert "opacity" in rule(CSS, "input:disabled")
-    assert "background: var(--panel)" in rule(CSS, "select option")
+    assert "var(--muted)" in rule(CSS, ".inp::placeholder")
+    assert "opacity" in rule(CSS, ".inp:disabled")
+    assert "background: var(--win-solid)" in rule(CSS, "select option")
 
 
 def test_checkboxes_and_radios_keep_their_own_treatment():
-    """The base block must never swallow the appearance:none controls: they
-    are drawn, not merely coloured (2026-08-17)."""
-    for selector in ('input[type="checkbox"]', 'input[type="radio"]'):
-        assert "appearance: none" in rule(CSS, selector)
+    """The base block must never swallow the drawn controls: they are drawn,
+    not merely coloured (2026-08-17). The field rule excludes them, and the
+    terminal draws its own glyph over a hidden native input."""
+    assert ':not([type="checkbox"])' in FIELD and ':not([type="radio"])' in FIELD
+    assert "opacity: 0" in rule(CSS, ".check input")
+    assert "opacity: 0" in rule(CSS, ".radio input")
 
 
 # Adapters, so the fleet-wide section below reads the same in all four suites
 # (this one's rule() takes the stylesheet as its first argument; the three SPA
 # copies close over theirs).
-_CSS_TEXT = CSS
+_CSS_TEXT = TERMINAL_CSS
 _REPO_ROOT = ROOT.parent
 
 
 def _rule(selector: str) -> str:
-    return rule(CSS, selector)
+    return rule(TERMINAL_CSS, selector)
 
 
 # ---------------------------------------------- 3. scrollbars and sliders
@@ -318,7 +331,9 @@ THEME_COMMON_BEGIN = "/* ==== theme-common BEGIN"
 THEME_COMMON_END = "theme-common END"
 
 FLEET_STYLESHEETS = {
-    "dashboard": _REPO_ROOT / "dashboard" / "static" / "style.css",
+    # The dashboard's copy lives in the terminal sheet since style.css was
+    # retired with the classic look (2026-09-25).
+    "dashboard": _REPO_ROOT / "dashboard" / "static" / "cc" / "terminal.css",
     "broll": _REPO_ROOT / "broll" / "web" / "static" / "style.css",
     "music": _REPO_ROOT / "music" / "web" / "static" / "style.css",
     "ytdl": _REPO_ROOT / "ytdl" / "web" / "static" / "style.css",
@@ -359,24 +374,5 @@ def test_the_theme_common_block_is_identical_in_all_four_stylesheets():
     reference = blocks["dashboard"]
     drifted = [name for name, body in blocks.items() if body != reference]
     assert not drifted, (
-        "theme-common has drifted from dashboard/static/style.css in: "
+        "theme-common has drifted from dashboard/static/cc/terminal.css in: "
         + ", ".join(sorted(drifted)))
-
-
-# --------------------------------------------- 5. this app's nav surfaces
-
-
-def test_the_section_header_carries_the_hairline_rule():
-    """`.side-head` is THE section header of the fleet UI: 41 uses, from the
-    sidebar's [ PROJECTS ] to every block of /admin/settings and every step of
-    the setup wizard. It had the red and the [ ... ] brackets but no rule under
-    it, so the same heading read as a heading in b-roll and as a loose red line
-    here (owner, 2026-08-18)."""
-    body = _rule(".side-head")
-    assert "color: var(--red)" in body
-    assert "border-bottom: 1px dotted var(--red-dim)" in body
-
-
-def test_a_section_header_that_is_a_link_still_reads_as_one():
-    assert "color: var(--red)" in _rule(".side-head a")
-    assert "color: var(--red-hot)" in _rule(".side-head a:hover")

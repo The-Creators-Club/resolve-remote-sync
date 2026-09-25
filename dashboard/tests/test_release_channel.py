@@ -468,7 +468,9 @@ def test_a_retracted_build_is_uncurrented_never_offered_and_chipped(env):
     # ...and the fleet grid says so on the machine that is running it.
     page = client.get("/partials/fleet")
     assert page.status_code == 200
-    assert "RECALLED BUILD" in page.text
+    # The row's error tag, with the vendor's reason as its tooltip.
+    assert ('<span class="tag err" title="it corrupts proxies">'
+            '<span class="w">recalled build</span></span>') in page.text
 
 
 def test_retracting_twice_keeps_the_first_stamp(env):
@@ -699,7 +701,7 @@ def test_the_packages_page_names_an_arch_with_no_build(env):
     view = build_packages_view(conn, settings)
     assert {"platform": "macos", "arch": "x86_64", "machines": 1} in view["arch_gaps"]
     page = client.get("/partials/admin/packages")
-    assert "no macos/x86_64 build published" in page.text
+    assert "No macos/x86_64 build published:" in page.text
 
 
 # --------------------------------------------- the soak gate at the PUBLISH door

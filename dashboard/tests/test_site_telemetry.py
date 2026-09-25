@@ -241,13 +241,17 @@ def test_the_settings_page_draws_the_four_switches(env):
     page = client.get("/admin/settings")
     assert page.status_code == 200
     html = page.text
-    assert "[ TELEMETRY ]" in html
+    # The terminal look (the only one since 2026-09-25): a folding window
+    # titled "telemetry", inside #settings-form so Save carries it.
+    assert '<section class="win" data-win="telemetry" id="telemetry">' in html
+    form = html.split('id="settings-form"', 1)[1].split("</form>", 1)[0]
+    window = form.split('data-win="telemetry"', 1)[1].split("</section>", 1)[0]
     for name in ("resolve_project", "local_manifest", "media_tree", "input_idle"):
-        assert f'name="telemetry.{name}"' in html
-    assert 'data-telemetry="input_idle"\n                    data-initial="0"' in html
-    assert 'data-telemetry="local_manifest"\n                    data-initial="1"' in html
+        assert f'name="telemetry.{name}"' in window
+    assert re.search(r'data-telemetry="input_idle"[^>]*data-initial="0"(?![^>]*checked)', window)
+    assert re.search(r'data-telemetry="local_manifest"[^>]*data-initial="1"[^>]*checked', window)
     assert 'id="site-transport-line"' in html
-    assert "—" not in html.split("[ TELEMETRY ]", 1)[1].split("[ B-ROLL", 1)[0]
+    assert "—" not in window
 
 
 # ------------------------------------------------------ the row facts
@@ -325,10 +329,14 @@ def test_the_fleet_grid_draws_grey_chips_and_the_licence_line(env, monkeypatch):
 
     monkeypatch.setattr(ui, "build_editors_view", annotated)
     html = client.get("/").text
-    assert "[ NOT REPORTED BY THIS COMPUTER: FILE LIST ]" in html
-    assert 'class="chip grey"' in html
-    assert f'title="{health.WITHHELD_HELP}"' in html
-    assert '<span class="green">Licence 1.1 accepted</span>' in html
+    # The terminal grid: a muted (grey) tag in the row's details, never a
+    # warn or err tone.
+    withheld = html.split('class="report-withheld"', 1)[1].split("</dd>", 1)[0]
+    assert "not reported by this computer: FILE LIST" in withheld
+    assert '<span class="tag mute"' in withheld
+    assert "warn" not in withheld and "err" not in withheld
+    assert f'title="{health.WITHHELD_HELP}"' in withheld
+    assert '<span class="ok">Licence 1.1 accepted</span>' in html
     # Never an open issue: the collapsed row's note count does not see it.
     assert health.detail_notes({"report_withheld": health.withheld_sections(
         ["local_manifest"])}) == []
@@ -338,11 +346,12 @@ def test_the_fleet_grid_says_nothing_without_the_facts(env):
     client, conn = env
     _machine(conn, "tchen", "RIG", companion_version="0.9.80")
     html = client.get("/").text
-    assert "NOT REPORTED BY THIS COMPUTER" not in html
+    assert "not reported by this computer" not in html
+    assert 'class="report-withheld"' not in html
     # api.build_editors_view annotates every row (final review 2026-09-25),
     # so the licence line is drawn, and says only "Not reported" in grey:
     # never a colour, never "not accepted".
-    assert '<span class="muted">Not reported</span>' in html
+    assert '<span class="dim">Not reported</span>' in html
     assert "Licence " not in html and "Older licence accepted" not in html
 
 
@@ -360,8 +369,9 @@ def test_the_account_computer_draws_the_same_licence_line():
     html = _render("partials/account_computer.html", pc=pc,
                    acct={"user": "tchen", "is_admin": False}, site={})
     assert '<dt>licence</dt>' in html
-    assert '<span class="amber">Older licence accepted</span>' in html
-    assert "[ IDLE TIME ]" in html
+    assert '<span class="tag warn">Older licence accepted</span>' in html
+    withheld = html.split('class="report-withheld"', 1)[1].split("</dd>", 1)[0]
+    assert "IDLE TIME" in withheld and '<span class="tag mute"' in withheld
     bare = _render("partials/account_computer.html", pc={**pc, "eula": None,
                                                          "report_withheld": []},
                    acct={"user": "tchen", "is_admin": False}, site={})
@@ -375,11 +385,13 @@ def test_the_collector_panel_says_when_retention_last_ran():
         {"kind": "alerts", "ok": True, "finished_at": NOW, "note": None,
          "overdue": False, "status": "green"}],
         "collector_stale": False, "retention_last_ran": NOW, "enforce_plan": None}
-    html = _render("partials/collector_health.html", fleet={"collector": collector})
+    # The Health tab's collector window (partials/health_collector.html)
+    # replaced the classic collector_health partial on 2026-09-25.
+    html = _render("partials/health_collector.html", collector=collector)
     assert "Retention last ran" in html
-    assert "[ OVERDUE ]" in html and "[ INCOMPLETE ]" not in html
-    never = _render("partials/collector_health.html",
-                    fleet={"collector": {**collector, "retention_last_ran": None}})
+    assert ">overdue</span>" in html and ">incomplete</span>" not in html
+    never = _render("partials/health_collector.html",
+                    collector={**collector, "retention_last_ran": None})
     assert "Retention last ran" in never and "never on this database" in never
 
 
@@ -419,7 +431,7 @@ def test_the_settings_script_parses():
     # form post and import, undo and the AI-provider controls go dead.
     out = subprocess.run(
         [NODE, "-e", "new (require('vm').Script)(require('fs').readFileSync("
-                     "process.argv[1], 'utf8'))", str(STATIC / "site_settings.js")],
+                     "process.argv[1], 'utf8'))", str(STATIC / "cc" / "site_settings.js")],
         capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
 
@@ -457,8 +469,10 @@ def test_the_history_names_what_an_undo_would_switch_off(env):
 
 
 SETTINGS_FETCH = r"""
+// The terminal page asks through its own <dialog id="site-ask">, not
+// window.confirm; a confirm that fires anyway is recorded so it fails.
 window.__confirms = [];
-window.confirm = function (m) { window.__confirms.push(m); return false; };
+window.confirm = function (m) { window.__confirms.push("window.confirm: " + m); return false; };
 window.alert = function () {};
 function answer(status, body) {
   return Promise.resolve({ok: status < 400, status: status, statusText: "x",
@@ -495,17 +509,27 @@ def test_import_and_undo_confirms_say_what_is_deleted(env, tmp_path):
     html = client.get("/admin/settings").text
     html = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.S)
     html = re.sub(r"<link\b[^>]*>", "", html)
+    # Each ask opens #site-ask with the question in #site-ask-q; read it, then
+    # answer Cancel so nothing is applied.
     scenario = """
+function takeAsk() {
+  var dlg = document.getElementById("site-ask");
+  if (dlg && dlg.open) {
+    window.__confirms.push(document.getElementById("site-ask-q").textContent);
+    document.getElementById("site-ask-no").click();
+  }
+}
 var imp = document.getElementById("settings-import-form");
 imp.text.value = "[telemetry]";
 imp.dispatchEvent(new Event("submit", {cancelable: true}));
 setTimeout(function () {
+  takeAsk();
   document.getElementById("site-undo-btn").click();
-  setTimeout(function () { window.__done({confirms: window.__confirms}); }, 300);
+  setTimeout(function () { takeAsk(); window.__done({confirms: window.__confirms}); }, 300);
 }, 300);
 """
     head = (f"<script>{SETTINGS_FETCH}</script>"
-            f"<script src=\"{(STATIC / 'site_settings.js').as_uri()}\"></script>")
+            f"<script src=\"{(STATIC / 'cc' / 'site_settings.js').as_uri()}\"></script>")
     tail = ("<script>document.addEventListener('DOMContentLoaded', function () {"
             "setTimeout(function () { try {" + scenario + "} catch (e) {"
             "window.__done({error: String(e && e.stack || e)}); } }, 300); });</script>")
@@ -527,9 +551,11 @@ setTimeout(function () {
     confirms = result["confirms"]
     assert len(confirms) == 2, confirms
     for text in confirms:
+        assert not text.startswith("window.confirm"), text
         assert "deleted for every computer" in text, text
-        assert "cannot be brought back" in text, text
+        assert "for good" in text, text
         # The page's own tick label, not the internal key.
-        assert "local_manifest" not in text.split("\n\n", 1)[-1], text
+        assert "Files on each computer's disk" in text, text
+        assert "local_manifest" not in text, text
     assert "and 2 more" in confirms[0]
     assert confirms[1].startswith("Put back the 1 setting")

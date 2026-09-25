@@ -216,7 +216,9 @@ def test_the_chip_renders_and_the_refusing_machine_gets_none(env):
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     page = client.get("/partials/fleet")
     assert page.status_code == 200
-    assert "[ CARDS: E1 v5 ]" in page.text
+    # The terminal fleet row draws the chip as a tag (was "[ CARDS: E1 v5 ]"
+    # in the classic grid, collapsed 2026-09-25).
+    assert '<span class="w">cards: E1 v5</span>' in page.text
     report(client, {"cards_agent": {"connected": False, "state": "disabled"}})
     page = client.get("/partials/fleet")
-    assert "[ CARDS" not in page.text
+    assert '<span class="w">cards' not in page.text

@@ -978,6 +978,29 @@ def _age_words(stamp: Any, now: str) -> str:
     return f"{int(seconds // 86400)} days ago"
 
 
+def _for_words(stamp: Any, now: str) -> str | None:
+    """How long something has been so, for a sentence that says "has been X
+    for ...". None when there is no stamp to measure from, so the caller says
+    so in its own words: "since never" and "since 8 minutes ago" were what
+    `since {_age_words(...)}` printed (a11y-copy-10, UI port review
+    2026-09-25)."""
+    if not stamp:
+        return None
+    seconds = _age(stamp, now)
+    if seconds is None:
+        return f"since {stamp}"
+    if seconds < 0:
+        return "since a time in the future (check that computer's clock)"
+
+    def n(count: int, unit: str) -> str:
+        return f"{count} {unit}{'' if count == 1 else 's'}"
+    if seconds < 3600:
+        return "for " + n(max(1, int(seconds // 60)), "minute")
+    if seconds < 48 * 3600:
+        return "for " + n(int(seconds // 3600), "hour")
+    return "for " + n(int(seconds // 86400), "day")
+
+
 def _duration_words(seconds: Any) -> str:
     try:
         total = int(abs(float(seconds)))
@@ -2089,11 +2112,14 @@ def _check_feed_stale(ctx: Ctx) -> list[Finding]:
     if last and (age is None or age < FEED_STALE_DAYS * 86400):
         if not feed.get("last_error"):
             return []
+    span = _for_words(last, ctx.now)
     return [_f(
         "the update feed",
-        f"This dashboard has not been able to check for new CC Sync builds "
-        f"since {_age_words(last, ctx.now)}. Nobody in the fleet will be "
-        f"offered a fix that has been released since then.",
+        (f"This dashboard has not been able to check for new CC Sync builds "
+         f"{span}. Nobody in the fleet will be offered a fix that has been "
+         f"released since then.") if span else
+        ("This dashboard has never been able to check for new CC Sync builds. "
+         "Nobody in the fleet will be offered a fix until it can."),
         "Check the NAS can reach the internet, then press \"Check now\" on "
         "Settings, Packages.",
         str(feed.get("last_error") or ""))]
@@ -3513,8 +3539,8 @@ def _check_loopback_down(ctx: Ctx) -> list[Finding]:
         out.append(_f(
             who,
             f"The b-roll and music pages cannot send anything to Resolve on "
-            f"{who}: the port they talk to it on is held by something else, "
-            f"since {_age_words(g.get('loopback_since'), ctx.now)}. The page "
+            f"{who}: the port they talk to it on is held by something else"
+            f"{(', ' + _for_words(g.get('loopback_since'), ctx.now)) if g.get('loopback_since') else ''}. The page "
             f"tells that editor CC Sync is not running, which is not what is "
             f"wrong.",
             "Quit whatever holds port 8899 on that computer (an old BRoll "
@@ -3643,7 +3669,7 @@ def _check_ytdl_stale(ctx: Ctx) -> list[Finding]:
         f"deliberately, so downloads here will start failing, and the newer "
         f"one arrives with a dashboard update.",
         "Settings, Packages, then press \"Check now\" and install the build "
-        "the Dashboard panel offers.",
+        "the This dashboard panel offers.",
         f"version={snap.get('yt_dlp_version')} "
         f"age_days={snap.get('yt_dlp_age_days')}")]
 
@@ -4432,10 +4458,11 @@ def compose_weekly(
     for entry in editors:
         if not entry.get("companion_outdated") and not entry.get("companion_version_unknown"):
             continue
+        span = _for_words(entry.get("companion_version_since"), now)
+        build = entry.get("companion_version") or "an unreported build"
         lines.append(
-            f"  {_who(entry)} has been on "
-            f"{entry.get('companion_version') or 'an unreported build'} since "
-            f"{_age_words(entry.get('companion_version_since'), now)}; current "
+            f"  {_who(entry)} "
+            f"{('has been on ' + build + ' ' + span) if span else ('is on ' + build + ' (since when is not known)')}; current "
             f"for {entry.get('platform') or '?'} is "
             f"{entry.get('current_companion_version') or 'nothing published'}")
     lines.append("")

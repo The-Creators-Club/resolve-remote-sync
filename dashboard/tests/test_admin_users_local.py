@@ -149,7 +149,10 @@ def test_users_partial_page_renders_without_500(env):
     as_user(env, "owen")
     resp = env.get("/admin/users")
     assert resp.status_code == 200
-    assert b"LOCAL ACCOUNTS" in resp.content
+    # The LOCAL ACCOUNTS window is drawn (its title reads "local accounts").
+    assert b'data-win="local-accounts"' in resp.content
+    assert (b'id="win-local-accounts-t">local<span aria-hidden="true">_</span>'
+            b'<span class="vh"> </span>accounts</h2>') in resp.content
 
 
 def test_partial_create_local_user_via_htmx(env):

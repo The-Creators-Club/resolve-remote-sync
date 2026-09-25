@@ -1,252 +1,229 @@
-{# The Alerts panel (SYS-8, resilience sweep 2026-08-28).
+{# The Alerts panel, terminal twin (UI port phase 5). Same context as
+   partials/admin_alerts.html; every form swaps this whole #admin-alerts.
 
-   CURRENTLY OPEN comes first and is computed LIVE from alerts.scan, not from
-   what was delivered: the page has to be useful on a site whose sink is
-   "none", which is the vendor build's shape and the state most fleets will
-   sit in until somebody configures a mailbox. A dashboard that only showed
-   the send log would show an empty page on exactly the site that most needs
-   the diagnosis.
+   FOUR SIBLING FORMS (1.3, wave 6). #alerts-form (save) holds only
+   alerts.SETTING_KEYS names; ui.partial_admin_alerts_save keeps nothing else,
+   so a password folded into it would be dropped while the page said
+   "saved.". The password fields and the RUN NOW key sit inside the save
+   form's windows for the eye but belong to #alerts-pw-form and
+   #alerts-run-form through the form= attribute; those two forms are empty
+   siblings AFTER the save form. The fourth, the test, is in the page head.
 
-   THE PASSWORD IS NEVER RENDERED. `alerts.settings_view` returns a mask and
-   where the value came from; there is no field on this page that echoes it
-   back, not even as a value= on a blanked input. #}
-<div id="admin-alerts">
+   ONE FIELD PER SETTING KEY, AND NO MORE (settings-1, 2026-09-25): the save
+   route's field cap is ui.alerts_form_max_fields(), sized from
+   alerts.SETTING_KEYS. At 17 keys against the default cap of 16 every Save
+   was a 400 "malformed form body". A named submit button or any extra field
+   here counts against that cap; test_cc_settings_review_fixes posts this
+   form as rendered.
 
-  {# ui-dash-admin-5 (2026-09-25): error-banner / result-banner are what
-     static/htmx_errors.js moves next to the button that posted. This panel
-     swaps outerHTML with scroll kept, so a result painted here at the top
-     landed a screen or more above a button far down the panel. #}
-  {% if error %}<div class="banner error-banner">▲ {{ error }}</div>{% endif %}
-  {% if notice %}<div class="muted result-banner" style="margin:0.4rem 0">{{ notice }}</div>{% endif %}
+   THE PASSWORD IS NEVER RENDERED: alerts.settings_view returns a mask and
+   where the value came from, and no field echoes it back. #}
+{% set s = alerts_settings %}
+{% set sink_word = {'none': 'none', 'smtp': 'mail (smtp)', 'webhook': 'webhook'} %}
+{% set sink_tip = {'none': 'Nothing leaves this NAS. Problems still show on the Health page.', 'smtp': 'Sends email through your own mail server, set up under mail.', 'webhook': 'Posts each finding to a web address as JSON, for a chat tool or a monitoring service.'} %}
+{% set open_kinds = alerts_open | map(attribute='kind') | list %}
+<div id="admin-alerts" class="vstack">
+  {% if error %}<div class="note err error-banner"><span class="grow">{{ error }}</span></div>{% endif %}
+  {% if notice %}<div class="note ok result-banner"><span class="grow">{{ notice }}</span></div>{% endif %}
 
-  <div class="side-head">[ CURRENTLY OPEN ]
-    <span class="muted">What this server believes is wrong right now.
-      {{ alerts_counts.error or 0 }} problem(s), {{ alerts_counts.warn or 0 }} to look at,
-      checked against {{ alerts_kinds | length }} things every
-      {{ alerts_interval_minutes }} minutes.</span></div>
-
-  {% if not alerts_open %}
-    <p class="muted" style="margin:0.6rem 0">
-      Nothing is wrong that this server can see. All
-      {{ alerts_kinds | length }} checks ran and found nothing.
-    </p>
-  {% else %}
-    {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row is one open finding,
-       and WHAT TO DO is a sentence, not a column. #}
-    {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
-       600 px, but between 600 and 900 it is still a grid, and a grid that
-       is wider than the window has to scroll inside itself rather than take
-       the page with it (round 2 of the sweep, 2026-08-30). #}
-    <div class="scroll-x">
-    <table class="editors stack" style="margin-top:0.6rem">
-      <thead><tr><th>SEVERITY</th><th>WHAT</th><th>WHERE</th><th>WHAT TO DO</th></tr></thead>
-      <tbody>
+  <h2 class="sec">currently open</h2>
+  <section class="win" data-win="open">
+    <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold currently open"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">{{ "currently_open" | cc_title }}</h2><span class="bar-rule"></span>
+      <span class="meta">{% if alerts_open %}<b>{{ alerts_counts.error or 0 }}</b> problem(s), <b>{{ alerts_counts.warn or 0 }}</b> to look at{% else %}nothing open{% endif %}</span></div>
+    <div class="body lede">What this server believes is wrong right now, checked against {{ alerts_kinds | length }} things every {{ alerts_interval_minutes }} minutes.</div>
+    {% if alerts_open %}
+    <div class="scroll-y hl-list">
       {% for f in alerts_open %}
-        <tr class="editor-row">
-          <td data-label="SEVERITY"><span class="chip {{ 'red' if f.severity == 'error' else 'amber' }}">[ {{ f.severity | upper }} ]</span></td>
-          <td data-label="WHAT">{{ f.title }}<div class="muted">{{ f.diagnosis }}</div></td>
-          <td class="mono-sm" data-label="WHERE">{{ f.subject }}{% if f.detail %}<div class="muted mono-sm">{{ f.detail }}</div>{% endif %}</td>
-          <td class="muted" data-label="WHAT TO DO">{{ f.fix }}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-    </div>
-  {% endif %}
-
-  <div class="side-head" style="margin-top:1.2rem">[ WHERE ALERTS GO ]
-    <span class="muted">Off by default. Nothing here ever leaves this NAS
-      unless you set a sink.</span></div>
-
-  <form class="inline-form" style="display:block; margin-top:0.6rem"
-        hx-post="/partials/admin/alerts/save" hx-target="#admin-alerts" hx-swap="outerHTML">
-    <label>SEND ALERTS BY<br>
-      <select name="alerts_sink">
-        {% for sink in alerts_settings.sinks %}
-          <option value="{{ sink }}" {% if alerts_settings.alerts_sink == sink %}selected{% endif %}>{{ sink }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label title="An IANA name such as Europe/London. The weekly report goes out at 08:00 on Monday in this zone.">TIME ZONE<br>
-      <input type="text" name="alerts_timezone" value="{{ alerts_settings.alerts_timezone }}" placeholder="UTC"></label>
-    <label>WEEKLY REPORT<br>
-      <select name="alerts_weekly">
-        <option value="1" {% if alerts_settings.alerts_weekly == "1" %}selected{% endif %}>on (Monday 08:00)</option>
-        <option value="0" {% if alerts_settings.alerts_weekly != "1" %}selected{% endif %}>off</option>
-      </select>
-    </label>
-    {# DDIAG-17 (2026-09-04): the dead-man's beat. Every other message here is
-       composed and sent BY the thing being watched, so a container that is off
-       and a fleet with nothing wrong look identical from the mailbox. This is
-       the one message whose ABSENCE is the information, which is why the note
-       beside it says so on the page and not only in the body. #}
-    <label title="One short message a day while a channel is set up. It is not the weekly report: a proof of life a week wide leaves six days in which no mail means nothing.">DAILY "STILL HERE" MESSAGE<br>
-      <select name="alerts_heartbeat">
-        <option value="1" {% if alerts_settings.alerts_heartbeat == "1" %}selected{% endif %}>on (one a day)</option>
-        <option value="0" {% if alerts_settings.alerts_heartbeat != "1" %}selected{% endif %}>off</option>
-      </select>
-      <span class="muted">If these stop arriving, the server itself is down.</span></label>
-
-    {# CR-190 (2026-09-04): eleven emails inside one minute, one per open
-       finding, on the owner's first hour with a sink configured. One message
-       per check is the default for a mailbox; a webhook consumer wants one
-       event per finding, so the default follows the sink and this overrides
-       it either way. #}
-    <label title="A mailbox gets one message per check with every finding in it. A webhook gets one POST per finding, because its consumer wants events.">HOW MANY MESSAGES<br>
-      <select name="alerts_digest">
-        <option value="" {% if alerts_settings.alerts_digest not in ("0", "1") %}selected{% endif %}>whatever suits the channel</option>
-        <option value="1" {% if alerts_settings.alerts_digest == "1" %}selected{% endif %}>one message per check</option>
-        <option value="0" {% if alerts_settings.alerts_digest == "0" %}selected{% endif %}>one message per problem</option>
-      </select>
-      <span class="muted">One message per check keeps a mailbox readable: everything found in that check is in it, worst first.</span></label>
-
-    <div class="side-head" style="margin-top:0.8rem">[ MAIL ]</div>
-    <label>SMTP HOST<br><input type="text" name="alerts_smtp_host" value="{{ alerts_settings.alerts_smtp_host }}"></label>
-    <label>SMTP PORT<br><input type="text" name="alerts_smtp_port" value="{{ alerts_settings.alerts_smtp_port }}"></label>
-    <label>SMTP USER<br><input type="text" name="alerts_smtp_user" value="{{ alerts_settings.alerts_smtp_user }}"></label>
-    <label>FROM<br><input type="text" name="alerts_smtp_from" value="{{ alerts_settings.alerts_smtp_from }}"></label>
-    <label title="One or more addresses, separated by commas.">TO<br><input type="text" name="alerts_smtp_to" value="{{ alerts_settings.alerts_smtp_to }}"></label>
-    <label>STARTTLS<br>
-      <select name="alerts_smtp_tls">
-        <option value="1" {% if alerts_settings.alerts_smtp_tls == "1" %}selected{% endif %}>on</option>
-        <option value="0" {% if alerts_settings.alerts_smtp_tls != "1" %}selected{% endif %}>off</option>
-      </select>
-    </label>
-    {# bug-hunt-2026-09-03 dash-collector-3: STARTTLS used to run with no certificate check,
-       so anyone answering on the relay's port got the stored password. Verification is on by
-       default; this is the one click-path opt-out for a relay with its own certificate. #}
-    <label title="Off only for a mail server with its own certificate. When on, a certificate that does not match the host is a refusal, never a silent fallback.">VERIFY THE MAIL SERVER'S CERTIFICATE<br>
-      <select name="alerts_smtp_verify_tls">
-        <option value="1" {% if alerts_settings.alerts_smtp_verify_tls != "0" %}selected{% endif %}>on</option>
-        <option value="0" {% if alerts_settings.alerts_smtp_verify_tls == "0" %}selected{% endif %}>off (a server with its own certificate)</option>
-      </select>
-    </label>
-
-    <div class="side-head" style="margin-top:0.8rem">[ WEBHOOK ]</div>
-    <label title="https only. The body is {subject, text} as JSON.">WEBHOOK URL<br>
-      <input type="text" name="alerts_webhook_url" value="{{ alerts_settings.alerts_webhook_url }}" placeholder="https://"></label>
-
-    {# The server triage agent (2026-09-24, docs/SERVER_TRIAGE_AGENT.md). In the
-       same form as the rest so one [ SAVE ] validates everything together:
-       alerts.set_settings refuses the whole form on one bad field. #}
-    <div class="side-head" style="margin-top:0.8rem">[ SERVER CHECK ]
-      <span class="muted">Claude Code reads everything this server knows is open, stuck
-        or failing and mails you what needs a person, at these hours in the time zone
-        above. It only reads; a reply to its email can carry out the actions it offers.</span></div>
-    <label title="Off by default. It runs Claude Code on this server, so it needs Claude Code set up on Settings, AI providers.">SERVER CHECK<br>
-      <select name="alerts_triage">
-        <option value="1" {% if alerts_settings.alerts_triage == "1" %}selected{% endif %}>on</option>
-        <option value="0" {% if alerts_settings.alerts_triage != "1" %}selected{% endif %}>off</option>
-      </select>
-    </label>
-    <label title="Hours of the day, 0 to 23, separated by commas. At most four.">AT THESE HOURS<br>
-      <input type="text" name="alerts_triage_hours" value="{{ alerts_settings.alerts_triage_hours }}" placeholder="6,18"></label>
-    <label title="Replies to the check's email go here, and this is the only mail the server ever reads. Blank means the email cannot be replied to.">REPLY ADDRESS<br>
-      <input type="text" name="alerts_triage_reply_to" value="{{ alerts_settings.alerts_triage_reply_to }}" placeholder="you+ccsync@example.com"></label>
-    <label title="Where replies are read from, with the SMTP user and password above. Blank works it out from the SMTP host.">IMAP HOST<br>
-      <input type="text" name="alerts_imap_host" value="{{ alerts_settings.alerts_imap_host }}" placeholder="{{ triage.imap_host or 'imap.example.com' }}"></label>
-
-    <div style="margin-top:0.6rem"><button class="btn tap" type="submit">[ SAVE ]</button></div>
-  </form>
-
-  <div style="margin-top:0.8rem">
-    {% if triage.error %}
-      <div class="muted">The server check's state could not be read: {{ triage.error }}</div>
-    {% else %}
-      <div class="muted">
-        SERVER CHECK is {{ "on" if triage.enabled else "off" }}.
-        {% if not triage.cli_ok %}It cannot run its analysis: {{ triage.cli_why }}. Each check will mail a plain summary instead.{% endif %}
-        {% if triage.enabled and not triage.replies_enabled %}Replies are not being read (they need a reply address and mail as the channel).{% endif %}
+      <div class="prob">
+        <span class="sev"><span class="tag solid {{ 'err' if f.severity == 'error' else 'warn' }}" title="{{ 'Something is wrong and needs a person.' if f.severity == 'error' else 'Worth checking before it gets worse.' }}">{{ f.severity }}</span></span>
+        <span class="title">{{ f.title }}<span class="who">{{ f.subject }}</span></span>
+        <span class="when"></span>
+        <div class="what">{{ f.diagnosis }}</div>
+        {% if f.detail %}<div class="subj">{{ f.detail }}</div>{% endif %}
+        {% if f.fix %}<div class="todo"><span class="cmd">{{ f.fix }}</span></div>{% endif %}
       </div>
-      {% if triage.running_since %}<div class="muted">A check has been running since {{ triage.running_since }}.</div>{% endif %}
-      {% if triage.last_run %}
-        <div class="muted">Last check: {{ triage.last_run.started_at }},
-          {{ triage.last_run.status }}{% if not triage.last_run.email_ok %}, the email did not go out{% endif %}.
-          <a href="/admin/alerts/triage/{{ triage.last_run.id }}" target="_blank" rel="noopener">[ READ ITS REPORT ]</a></div>
-      {% else %}
-        <div class="muted">No check has run yet.</div>
-      {% endif %}
-      {% if triage.last_poll %}
-        {# ui-dash-admin-12 (2026-09-25): "3h ago", with the stored UTC stamp in the title, like every other page; a raw +00:00 string is a sum a UTC+8 owner does in their head. #}
-        <div class="muted">Replies last read <span title="{{ triage.last_poll.at }}">{{ triage.last_poll.at | ago }}</span>: {{ triage.last_poll.detail }}</div>
-      {% endif %}
-      <form class="inline-form" style="margin-top:0.4rem" hx-post="/partials/admin/alerts/triage/run"
-            hx-target="#admin-alerts" hx-swap="outerHTML">
-        <button class="btn tap" type="submit">[ RUN NOW ]</button>
-      </form>
-    {% endif %}
-  </div>
-
-  {# The password has its own form because it has its own store: a file under
-     <data>/secrets/, 0600, never in the database and never in a response. #}
-  <form class="inline-form" style="display:block; margin-top:0.8rem"
-        hx-post="/partials/admin/alerts/password" hx-target="#admin-alerts" hx-swap="outerHTML">
-    {# ui-dash-admin-9 (2026-09-25): the environment password WINS
-       (alerts.read_password), so [ SET PASSWORD ] and [ CLEAR ] beside the
-       sentence saying so answered "password stored." / "password cleared."
-       while mail kept going out with the environment's value: an admin
-       rotating a Google app password here believed it was done. With the
-       environment in charge the controls are not offered. #}
-    {% if alerts_settings.password_source == "env" %}
-      <div>SMTP PASSWORD <span class="muted">in use: {{ alerts_settings.password_mask }}</span></div>
-      <div class="muted">This password comes from the deployment's own environment, so
-        it cannot be changed here: change it where this server is deployed.</div>
-    {% else %}
-    <label>SMTP PASSWORD<br>
-      <input type="password" name="password" value="" autocomplete="new-password"
-             placeholder="{{ 'stored: ' ~ alerts_settings.password_mask if alerts_settings.password_set else 'not set' }}"></label>
-    <button class="btn tap" type="submit">[ SET PASSWORD ]</button>
-    <button class="btn tap" type="submit" name="clear" value="1">[ CLEAR ]</button>
-    {% endif %}
-  </form>
-
-  <div style="margin-top:1rem">
-    <form class="inline-form" hx-post="/partials/admin/alerts/test"
-          hx-target="#admin-alerts" hx-swap="outerHTML">
-      <button class="btn tap" type="submit">[ SEND A TEST ]</button>
-    </form>
-    <a class="btn tap" href="/admin/alerts/preview" target="_blank" rel="noopener">[ PREVIEW THIS WEEK'S REPORT ]</a>
-  </div>
-
-  <div class="side-head" style="margin-top:1.2rem">[ WHAT WAS SENT ]
-    <span class="muted">Newest first, grouped by the message each one went out
-      in. A failed send is kept: a channel that has been refusing since Tuesday
-      is worse than no channel, because you believe you have one.</span></div>
-  {# CR-190 (2026-09-04): the ledger keeps one row per finding (the dedup and
-     the recovery comparison read it that way), so the page has to put a
-     digest back together to show what the mailbox actually received. Rows
-     with no batch id are their own message and are shown exactly as before. #}
-  {# .stack: a row is one finding (MOBILE_PLAN.md §3.2, 2026-08-30). #}
-  <div class="scroll-x">
-  <table class="editors stack" style="margin-top:0.6rem">
-    <thead><tr><th>WHEN</th><th>KIND</th><th>SUBJECT</th><th>TO</th><th>RESULT</th></tr></thead>
-    <tbody>
-    {% for group in alerts_log_groups %}
-      {% if group.count > 1 %}
-        <tr><td colspan="5" class="muted mono-sm" style="padding-top:0.5rem">
-          <span title="{{ group.at }}">{{ group.at | ago }}</span> - one message, {{ group.count }} finding{{ "s" if group.count != 1 }}</td></tr>
-      {% endif %}
-      {% for row in group.rows %}
-      <tr class="editor-row">
-        <td class="mono-sm muted" data-label="WHEN" title="{{ row.at }}">{{ row.at | ago }}</td>
-        <td class="mono-sm" data-label="KIND">{{ row.kind }}</td>
-        <td data-label="SUBJECT">{{ row.subject }}</td>
-        <td class="mono-sm muted" data-label="TO">{{ row.sent_to or "-" }}</td>
-        <td data-label="RESULT">{% if row.ok %}<span class="chip lane green">sent</span>{% else %}<span class="chip red">[ {{ row.detail or "failed" }} ]</span>{% endif %}</td>
-      </tr>
       {% endfor %}
+    </div>
     {% else %}
-      <tr><td colspan="5" class="muted">Nothing has been sent yet.</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
+    <div class="allclear"><span class="led"></span>Nothing is wrong that this server can see. All {{ alerts_kinds | length }} checks ran and found nothing.</div>
+    {% endif %}
+  </section>
 
-  <div class="side-head" style="margin-top:1.2rem">[ WHAT THIS SERVER CHECKS ]
-    <span class="muted">So that silence is provably checked, not unchecked.</span></div>
-  {# Two columns of 11px text is one column of five characters on a phone:
-     the count is in mobile.css's admin section (MOBILE_PLAN.md, 2026-08-30). #}
-  <ul class="muted alerts-checks" style="margin-top:0.4rem; columns:2">
-    {% for k in alerts_kinds %}<li>{{ k.what }}</li>{% endfor %}
-  </ul>
+  <h2 class="sec">where alerts go</h2>
+  <p class="lede">Off by default. <b>Nothing here ever leaves this NAS unless you set a channel.</b> One save checks every field below together, and refuses the whole form on one bad field.</p>
+  <form id="alerts-form" class="vstack" autocomplete="off"
+        hx-post="/partials/admin/alerts/save" hx-target="#admin-alerts" hx-swap="outerHTML">
+    <div class="cols-2">
+      <section class="win" data-win="channel">
+        <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold channel"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">channel</h2><span class="bar-rule"></span><span class="meta">{{ sink_word.get(s.alerts_sink, s.alerts_sink) }}</span></div>
+        <div class="body form">
+          <div class="form-row"><span class="lbl">Send alerts by</span>
+            <div class="inline">
+              {% for sink in s.sinks %}
+              <label class="radio" title="{{ sink_tip.get(sink, '') }}"><input type="radio" name="alerts_sink" value="{{ sink }}"{% if s.alerts_sink == sink %} checked{% endif %}><span class="g"></span><span class="l">{{ sink_word.get(sink, sink) }}</span></label>
+              {% endfor %}
+            </div></div>
+          <div class="form-row"><label class="lbl" for="al-tz">Time zone<small>An <span title="The official name of a time zone: a region, a slash, then a city, such as Asia/Taipei.">IANA</span> name such as Europe/London.</small></label>
+            <div><input class="inp" id="al-tz" type="text" name="alerts_timezone" value="{{ s.alerts_timezone }}" placeholder="UTC"><div class="hint">The weekly report goes out at 08:00 on Monday in this zone.</div></div></div>
+          <div class="form-row"><label class="lbl" for="al-weekly" title="A summary every Monday morning: what is open, what changed and which computers are behind.">Weekly report</label>
+            <select class="sel" id="al-weekly" name="alerts_weekly">
+              <option value="1"{% if s.alerts_weekly == "1" %} selected{% endif %}>on (Monday 08:00)</option>
+              <option value="0"{% if s.alerts_weekly != "1" %} selected{% endif %}>off</option>
+            </select></div>
+          <div class="form-row"><label class="lbl" for="al-hb">Daily "still here" message<small>One short message a day while a channel is set up.</small></label>
+            <div><select class="sel" id="al-hb" name="alerts_heartbeat">
+              <option value="1"{% if s.alerts_heartbeat == "1" %} selected{% endif %}>on (one a day)</option>
+              <option value="0"{% if s.alerts_heartbeat != "1" %} selected{% endif %}>off</option>
+            </select>
+            <div class="hint">If these stop arriving, the server itself is down. It is not the weekly report: a proof of life a week wide leaves six days in which no mail means nothing.</div></div></div>
+          <div class="form-row"><label class="lbl" for="al-digest" title="Whether one check that finds three problems sends one message or three.">How many messages</label>
+            <div><select class="sel" id="al-digest" name="alerts_digest">
+              <option value=""{% if s.alerts_digest not in ("0", "1") %} selected{% endif %}>whatever suits the channel</option>
+              <option value="1"{% if s.alerts_digest == "1" %} selected{% endif %}>one message per check</option>
+              <option value="0"{% if s.alerts_digest == "0" %} selected{% endif %}>one message per problem</option>
+            </select>
+            <div class="hint">One message per check keeps a mailbox readable: everything found in that check is in it, worst first. A webhook gets one POST per finding, because its consumer wants events.</div></div></div>
+        </div>
+      </section>
+
+      <section class="win" data-win="server-check">
+        <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold server check"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">{{ "server_check" | cc_title }}</h2><span class="bar-rule"></span><span class="meta">{% if not triage.error %}{{ "on" if triage.enabled else "off" }}{% endif %}</span></div>
+        <div class="body form">
+          <div class="lede">Claude Code reads everything this server knows is open, stuck or failing and mails you what needs a person, at these hours in the time zone set under channel. It only reads; a reply to its email can carry out the actions it offers.</div>
+          <div class="form-row"><label class="lbl" for="al-triage">Server check<small>It runs Claude Code on this server, so it needs Claude Code set up on <a class="hi" href="/go/ai-providers">Site, AI providers</a>.</small></label>
+            <select class="sel" id="al-triage" name="alerts_triage" title="Turns the scheduled server check on or off.">
+              <option value="1"{% if s.alerts_triage == "1" %} selected{% endif %}>on</option>
+              <option value="0"{% if s.alerts_triage != "1" %} selected{% endif %}>off</option>
+            </select></div>
+          <div class="form-row"><label class="lbl" for="al-hours">At these hours<small>0 to 23, separated by commas. At most four.</small></label>
+            <input class="inp" id="al-hours" type="text" name="alerts_triage_hours" value="{{ s.alerts_triage_hours }}" placeholder="6,18"></div>
+          <div class="form-row"><label class="lbl" for="al-reply">Reply address<small>The only mail the server ever reads.</small></label>
+            <div><input class="inp" id="al-reply" type="text" name="alerts_triage_reply_to" value="{{ s.alerts_triage_reply_to }}" placeholder="you+ccsync@example.com"><div class="hint">Replies to the check's email go here. Blank means the email cannot be replied to.</div></div></div>
+          <div class="form-row"><label class="lbl" for="al-imap" title="IMAP is how mail is read from a mailbox. Your mail provider publishes the host name.">IMAP host<small>Read with the SMTP user and password.</small></label>
+            <div><input class="inp" id="al-imap" type="text" name="alerts_imap_host" value="{{ s.alerts_imap_host }}" placeholder="{{ triage.imap_host or 'imap.example.com' }}"><div class="hint">Where replies are read from. Blank works it out from the SMTP host.</div></div></div>
+        </div>
+        <div class="body split lines">
+          {% if triage.error %}
+            <div>The server check's state could not be read: {{ triage.error }}</div>
+          {% else %}
+            <div>Server check is <b>{{ "on" if triage.enabled else "off" }}</b>.
+              {% if not triage.cli_ok %}It cannot run its analysis: {{ triage.cli_why }}. Each check will mail a plain summary instead.{% endif %}
+              {% if triage.enabled and not triage.replies_enabled %}Replies are not being read (they need a reply address and mail as the channel).{% endif %}</div>
+            {% if triage.running_since %}<div>A check has been running since {{ triage.running_since }}.</div>{% endif %}
+            {% if triage.last_run %}
+              <div><span class="t">last check</span>{{ triage.last_run.started_at }}, {{ triage.last_run.status }}{% if not triage.last_run.email_ok %}, the email did not go out{% endif %}.
+                <a class="key quiet sm" href="/admin/alerts/triage/{{ triage.last_run.id }}" target="_blank" rel="noopener"><span class="t">read its report</span></a></div>
+            {% else %}
+              <div>No check has run yet.</div>
+            {% endif %}
+            {% if triage.last_poll %}
+              <div><span class="t">replies last read</span><span title="{{ triage.last_poll.at }}">{{ triage.last_poll.at | ago }}</span>: {{ triage.last_poll.detail }}</div>
+            {% endif %}
+            <div><button class="key sm w-14" type="submit" form="alerts-run-form" data-busy title="Starts a server check now, whatever the schedule. The report arrives by mail in a few minutes."><span class="t">Run now</span><span class="busy-t"><span class="spin"></span> starting</span></button></div>
+          {% endif %}
+        </div>
+      </section>
+    </div>
+
+    <div class="cols-2">
+      <section class="win" data-win="mail">
+        <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold mail"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">mail</h2><span class="bar-rule"></span></div>
+        <div class="body form">
+          <div class="form-row"><label class="lbl" for="al-host" title="SMTP is how mail is sent. Your mail provider gives you the host, port, user and password.">SMTP host</label><input class="inp" id="al-host" type="text" name="alerts_smtp_host" value="{{ s.alerts_smtp_host }}"></div>
+          <div class="form-row"><label class="lbl" for="al-port" title="Usually 587 with STARTTLS on, or 465 for mail servers that want it.">SMTP port</label><input class="inp hl-port" id="al-port" type="text" name="alerts_smtp_port" value="{{ s.alerts_smtp_port }}"></div>
+          <div class="form-row"><label class="lbl" for="al-user">SMTP user</label><input class="inp" id="al-user" type="text" name="alerts_smtp_user" value="{{ s.alerts_smtp_user }}"></div>
+          <div class="form-row"><label class="lbl" for="al-from">From</label><input class="inp" id="al-from" type="text" name="alerts_smtp_from" value="{{ s.alerts_smtp_from }}"></div>
+          <div class="form-row"><label class="lbl" for="al-to">To<small>One or more addresses, separated by commas.</small></label><input class="inp" id="al-to" type="text" name="alerts_smtp_to" value="{{ s.alerts_smtp_to }}"></div>
+          <div class="form-row"><label class="lbl" for="al-tls" title="Encrypts the connection to the mail server. Leave it on unless your provider says otherwise.">STARTTLS</label>
+            <select class="sel" id="al-tls" name="alerts_smtp_tls">
+              <option value="1"{% if s.alerts_smtp_tls == "1" %} selected{% endif %}>on</option>
+              <option value="0"{% if s.alerts_smtp_tls != "1" %} selected{% endif %}>off</option>
+            </select></div>
+          <div class="form-row"><label class="lbl" for="al-verify">Verify the mail server's certificate</label>
+            <div><select class="sel" id="al-verify" name="alerts_smtp_verify_tls">
+              <option value="1"{% if s.alerts_smtp_verify_tls != "0" %} selected{% endif %}>on</option>
+              <option value="0"{% if s.alerts_smtp_verify_tls == "0" %} selected{% endif %}>off (a server with its own certificate)</option>
+            </select>
+            <div class="hint">Off only for a mail server with its own certificate. When on, a certificate that does not match the host is a refusal, never a silent fallback.</div></div></div>
+        </div>
+        {# The password has its own store (a file under <data>/secrets/, 0600),
+           so its controls belong to #alerts-pw-form, not to this save form. #}
+        <div class="body split form" id="alerts-pw">
+          {% if s.password_source == "env" %}
+            <div class="form-row"><span class="lbl">SMTP password</span>
+              <div><span class="muted">in use: {{ s.password_mask }}</span>
+              <div class="hint">This password comes from the deployment's own environment, so it cannot be changed here: change it where this server is deployed.</div></div></div>
+          {% else %}
+            <div class="form-row"><label class="lbl" for="al-pw">SMTP password<small>Kept in its own file on the server, never shown again.</small></label>
+              <div><input class="inp" id="al-pw" type="password" name="password" value="" form="alerts-pw-form" autocomplete="new-password"
+                          placeholder="{{ 'stored: ' ~ s.password_mask if s.password_set else 'not set' }}">
+              <div class="foot-keys">
+                <button class="key sm" type="submit" form="alerts-pw-form" title="Stores the password typed above. It is used for every message from now on."><span class="t">Set password</span></button>
+                <button class="key quiet sm" type="submit" form="alerts-pw-form" name="clear" value="1" title="Removes the stored password. Mail stops working until a new one is set."><span class="t">Clear</span></button>
+              </div></div></div>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="win" data-win="webhook">
+        <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold webhook"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">webhook</h2><span class="bar-rule"></span></div>
+        <div class="body form">
+          <div class="form-row"><label class="lbl" for="al-hook" title="The web address that receives each finding. Chat tools and monitoring services give you one.">Webhook URL<small>https only.</small></label>
+            <div><input class="inp" id="al-hook" type="text" name="alerts_webhook_url" value="{{ s.alerts_webhook_url }}" placeholder="https://"><div class="hint">The body is {subject, text} as JSON. A stored URL is shown masked; type a new one to replace it.</div></div></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="foot-keys">
+      <button class="key primary w-10" type="submit" data-busy title="Checks every field together and saves them all, or nothing if one is wrong."><span class="t">Save</span><span class="busy-t"><span class="spin"></span> saving</span></button>
+    </div>
+  </form>
+  <form id="alerts-pw-form" hx-post="/partials/admin/alerts/password" hx-target="#admin-alerts" hx-swap="outerHTML"></form>
+  <form id="alerts-run-form" hx-post="/partials/admin/alerts/triage/run" hx-target="#admin-alerts" hx-swap="outerHTML"></form>
+
+  <h2 class="sec">what was sent</h2>
+  <section class="win" data-win="sent">
+    <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold what was sent"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">sent.log</h2><span class="bar-rule"></span></div>
+    <div class="body lede">Newest first, grouped by the message each one went out in. A failed send is kept: a channel that has been refusing since Tuesday is worse than no channel, because you believe you have one.</div>
+    {# settings-4: the table sits in a .scroll-x inside the .scroll-y. On its
+       own, overflow-y auto forces overflow-x auto, so at tablet width (not
+       stacked yet) the whole list scrolled sideways outside any .scroll-x. #}
+    <div class="scroll-y hl-list"><div class="scroll-x">
+      <table class="tbl stack-sm">
+        <thead><tr><th>when</th><th title="Which check the message was about. heartbeat, weekly and test are the channel's own messages.">kind</th><th>subject</th><th>to</th><th title="sent, or the reason the channel refused it.">result</th></tr></thead>
+        <tbody>
+        {% for group in alerts_log_groups %}
+          {% if group.count > 1 %}
+            <tr class="grp"><td colspan="5" data-label=""><span title="{{ group.at }}">{{ group.at | ago }}</span>: one message, <b>{{ group.count }}</b> finding{{ "s" if group.count != 1 }}</td></tr>
+          {% endif %}
+          {% for row in group.rows %}
+          <tr>
+            <td data-label="when"><span title="{{ row.at }}">{{ row.at | ago }}</span></td>
+            <td data-label="kind">{{ row.kind }}</td>
+            <td data-label="subject">{{ row.subject }}</td>
+            <td data-label="to">{{ row.sent_to or "-" }}</td>
+            <td data-label="result">{% if row.ok %}<span class="tag ok">sent</span>{% else %}<span class="tag solid err">{{ row.detail or "failed" }}</span>{% endif %}</td>
+          </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="5" data-label="" class="muted">Nothing has been sent yet.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div></div>
+  </section>
+
+  <h2 class="sec">what this server checks</h2>
+  <section class="win" data-win="checks">
+    <div class="bar"><button type="button" class="fold" aria-expanded="true" aria-label="Fold what this server checks"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t">checks</h2><span class="bar-rule"></span><span class="meta"><b>{{ alerts_kinds | length }}</b> checks, <b>{{ open_kinds | unique | list | length }}</b> found</span></div>
+    <div class="body lede">So that silence is provably checked, not unchecked.</div>
+    <div class="scroll-y hl-checks">
+      <ul class="checks alerts-checks">
+      {% for k in alerts_kinds %}
+        <li>{% if k.kind in open_kinds %}<span class="tag solid {{ 'err' if k.severity == 'error' else 'warn' }}" title="This check found something. It is under currently open.">found</span>
+          {% else %}<span class="tag mute" title="How serious it is when this check finds something.">{{ 'problem' if k.severity == 'error' else 'to look at' }}</span>{% endif %}<span>{{ k.what }}</span></li>
+      {% endfor %}
+      </ul>
+    </div>
+  </section>
 </div>

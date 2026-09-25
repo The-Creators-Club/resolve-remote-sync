@@ -2,7 +2,7 @@
 
 Plain StaticFiles sends validators and no Cache-Control, so browsers cache
 heuristically for hours, and the service worker's revalidation goes through
-that same HTTP cache: a deploy that changes a shared classic script
+that same HTTP cache: a deploy that changes a shared script
 (htmx_errors.js, pwa.js) was not seen until the heuristic ran out.
 
   * a `?h=` URL whose hash is the CURRENT content hash of that file:
@@ -20,7 +20,7 @@ from urllib.parse import parse_qs
 
 from fastapi.staticfiles import StaticFiles
 
-from . import ui_variant
+from . import ui_assets
 
 IMMUTABLE = "public, max-age=31536000, immutable"
 
@@ -36,7 +36,7 @@ class CachedStaticFiles(StaticFiles):
         if rel.startswith("fonts/"):
             value = IMMUTABLE
         elif sent:
-            value = IMMUTABLE if sent == ui_variant.asset_hash(rel) else "no-store"
+            value = IMMUTABLE if sent == ui_assets.asset_hash(rel) else "no-store"
         else:
             value = "no-cache"
         response.headers["Cache-Control"] = value

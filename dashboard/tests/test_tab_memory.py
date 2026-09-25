@@ -7,7 +7,7 @@ gone on every hop; `static/tab_memory.js` remembers them per page.
 
 Two halves, the same shape test_static_js_syntax.py uses:
 
-  * the SERVER half -- the file is served, base.html includes it after htmx,
+  * the SERVER half -- the file is served, shell.html includes it after htmx,
     and the pages the owner switches between actually carry it. Always runs.
   * the BEHAVIOUR half -- the real, unmodified file executed in a `vm` context
     with a ~120 line DOM/storage/clock stub, so "the polled panels had not
@@ -22,6 +22,7 @@ scenario fires, which is what makes the 3 s give-up deterministic.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -35,9 +36,12 @@ from ccsync_dashboard.settings import Settings
 
 DASHBOARD_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = DASHBOARD_ROOT / "static" / "tab_memory.js"
-BASE = DASHBOARD_ROOT / "templates" / "base.html"
+# shell.html is every page's base since the terminal look replaced the classic
+# one (2026-09-25); base.html and mobile.css went with it, and the CSS half of
+# CR-188 moved into the terminal sheet.
+BASE = DASHBOARD_ROOT / "templates" / "shell.html"
 FLEET = DASHBOARD_ROOT / "templates" / "fleet.html"
-MOBILE_CSS = DASHBOARD_ROOT / "static" / "mobile.css"
+TERMINAL_CSS = DASHBOARD_ROOT / "static" / "cc" / "terminal.css"
 NODE = shutil.which("node")
 
 SECRET = "s" * 32
@@ -75,10 +79,12 @@ def test_the_script_is_served(client):
 
 def test_base_html_includes_it_after_htmx(client):
     """Deferred scripts run in document order: its htmx:afterSettle listener
-    must be registered on a page htmx already owns."""
+    must be registered on a page htmx already owns. (shell.html now; every
+    static URL goes through asset_url for its content hash.)"""
     src = BASE.read_text(encoding="utf-8")
-    assert '<script src="/static/tab_memory.js" defer></script>' in src
-    assert src.index("/static/htmx.min.js") < src.index("/static/tab_memory.js")
+    tag = "<script src=\"{{ asset_url('tab_memory.js') }}\" defer></script>"
+    assert tag in src
+    assert src.index("asset_url('htmx.min.js')") < src.index("asset_url('tab_memory.js')")
 
 
 @pytest.mark.parametrize("url", PAGES)
@@ -89,7 +95,7 @@ def test_every_switchable_page_carries_it(client, url):
 
 
 def test_the_login_page_carries_it_harmlessly(client):
-    """base.html is base.html: an anonymous render must not 500 because a
+    """shell.html is shell.html: an anonymous render must not 500 because a
     script that reads storage is on it."""
     fresh = client
     fresh.cookies.clear()
@@ -111,16 +117,24 @@ def test_the_polled_containers_still_swap_innerhtml(client):
 
 
 def test_the_css_pins_the_two_properties_the_script_depends_on():
-    css = MOBILE_CSS.read_text(encoding="utf-8")
+    """The two properties the restore depends on, in the sheet every page
+    loads. They were lost when mobile.css was deleted (2026-09-25) and put
+    back in terminal.css; nothing in the terminal sheets may turn either
+    off."""
+    css = TERMINAL_CSS.read_text(encoding="utf-8")
     section = css[css.index("== tab memory =="):]
     assert "scroll-behavior: auto" in section
     assert "overflow-anchor: auto" in section
     assert ".fleet-grid-wrap" in section
+    for sheet in (DASHBOARD_ROOT / "static" / "cc").glob("*.css"):
+        text = re.sub(r"/\*.*?\*/", "", sheet.read_text(encoding="utf-8"), flags=re.S)
+        assert "overflow-anchor: none" not in text, sheet.name
+        assert "scroll-behavior: smooth" not in text, sheet.name
 
 
 def test_no_em_dash_in_what_cr188_wrote():
     """CLAUDE.md's rule, on this feature's own files."""
-    for path in (SCRIPT, BASE, MOBILE_CSS, Path(__file__)):
+    for path in (SCRIPT, BASE, TERMINAL_CSS, Path(__file__)):
         assert chr(0x2014) not in path.read_text(encoding="utf-8"), path.name
 
 

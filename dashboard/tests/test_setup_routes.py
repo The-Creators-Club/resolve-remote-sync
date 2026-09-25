@@ -249,14 +249,19 @@ def test_settings_page_renders_both_indexer_model_tier_options(env):
     body = resp.text
     assert 'name="indexer_model_tier" value="good"' in body
     assert 'name="indexer_model_tier" value="best"' in body
-    assert "aria-describedby=\"indexer-model-tier-good-help\"" in body
-    assert "aria-describedby=\"indexer-model-tier-best-help\"" in body
-    assert ">\n          Good\n" in body
-    assert ">\n          Best\n" in body
-    assert ("Qwen3-VL 4B" in body and "8 GB VRAM" in body and "16 GB" in body
-            and "~20 s per clip on an RTX 3080" in body)
-    assert ("Qwen3-VL 8B" in body and "12 GB VRAM" in body and "24 GB" in body
-            and "sharper on on-screen text and vocabulary" in body)
+    # Terminal look (C-collapse 2026-09-25): each option's help sits inside
+    # the <label> that wraps its radio (so it is read with the choice) where
+    # the classic look pointed at it with aria-describedby.
+    def option_label(tier):
+        at = body.index(f'name="indexer_model_tier" value="{tier}"')
+        start = body.rindex('<label class="radio"', 0, at)
+        return body[start:body.index("</label>", at)]
+    good, best = option_label("good"), option_label("best")
+    assert "<b>Good</b>" in good and "<b>Best</b>" in best
+    assert ("Qwen3-VL 4B" in good and "8 GB" in good and "VRAM" in good
+            and "16 GB" in good and "20 s per clip on an RTX 3080" in good)
+    assert ("Qwen3-VL 8B" in best and "12 GB VRAM" in best and "24 GB" in best
+            and "sharper on on-screen text and vocabulary" in best)
     assert "reads this choice from the dashboard" in body
     # The default option ("good") is pre-checked for a fresh manifest, the
     # unselected one is not.
@@ -321,8 +326,13 @@ def test_admin_settings_page_offers_the_tray_logo_field(env):
     resp = client.get("/admin/settings")
     assert resp.status_code == 200
     assert 'name="brand_logo"' in resp.text
-    assert "TRAY LOGO" in resp.text
-    assert "cc_mark_white.png" in resp.text
+    # Terminal look: the label is sentence case, tied to its box by `for`.
+    assert '<label class="lbl" for="f-brand_logo">Tray logo' in resp.text
+    # The hover help rides on the box itself and is spelled out under it.
+    at = resp.text.index('name="brand_logo"')
+    box = resp.text[at:resp.text.index(">", at)]
+    assert "cc_mark_white.png" in box and 'aria-describedby="h-brand_logo"' in box
+    assert 'id="h-brand_logo"' in resp.text
 
 
 # ------------------------------------------ first-run window in local mode

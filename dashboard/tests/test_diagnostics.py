@@ -316,7 +316,7 @@ def test_the_sentence_is_on_the_fleet_grid(env):
     page = client.get("/")
     assert page.status_code == 200
     assert "Not syncing: the sync drive is not there on this computer" in page.text
-    assert "[ ASK THIS COMPUTER WHY ]" in page.text  # UX-16 (2026-09-03)
+    assert '<span class="t">Ask this computer why</span>' in page.text  # UX-16 (2026-09-03)
 
 
 def test_the_admin_partial_shows_the_newest_bundle_per_machine(env):
@@ -327,14 +327,17 @@ def test_the_admin_partial_shows_the_newest_bundle_per_machine(env):
     client.post("/api/v1/diagnostics", json=bundle(text="BUNDLE-NEWEST"),
                 headers=headers())
     admin_session(client)
-    resp = client.get("/partials/admin/diagnostics")
-    assert resp.status_code == 200
-    assert "BUNDLE-NEWEST" in resp.text
-    assert "BUNDLE-OLDER" not in resp.text
-    assert "<pre" in resp.text
-    # ...and the per-machine view keeps the history for that one computer.
-    one = client.get("/partials/admin/diagnostics?editor=leso&machine=LESO-MBP")
-    assert "BUNDLE-OLDER" in one.text and "BUNDLE-NEWEST" in one.text
+    # The Health page's WHAT THESE COMPUTERS SAID window, and the home page's
+    # READ THE ANSWER window: both draw the same bundles the same way.
+    for route in ("/partials/health-diagnostics", "/partials/computer-answer"):
+        resp = client.get(route)
+        assert resp.status_code == 200, route
+        assert "BUNDLE-NEWEST" in resp.text, route
+        assert "BUNDLE-OLDER" not in resp.text, route
+        assert "<pre" in resp.text, route
+        # ...and the per-machine view keeps the history for that one computer.
+        one = client.get(route + "?editor=leso&machine=LESO-MBP")
+        assert "BUNDLE-OLDER" in one.text and "BUNDLE-NEWEST" in one.text, route
 
 
 def test_the_ask_button_becomes_asked(env):
@@ -344,8 +347,8 @@ def test_the_ask_button_becomes_asked(env):
     resp = client.post("/partials/admin/machines/ask-why",
                        data={"editor": "leso", "machine": "LESO-MBP"})
     assert resp.status_code == 200
-    assert "[ ASKED WHY ]" in resp.text
-    assert "[ ASK THIS COMPUTER WHY ]" not in resp.text  # UX-16 (2026-09-03)
+    assert '<span class="w">asked why</span>' in resp.text
+    assert "Ask this computer why</span>" not in resp.text  # UX-16 (2026-09-03)
 
 
 def test_the_contracts_editor_key_is_accepted_too(env):

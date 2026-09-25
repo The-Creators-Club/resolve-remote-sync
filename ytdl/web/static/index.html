@@ -1,32 +1,21 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="cc">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script>
-/* UI port phase 1 (7.0): the dashboard's terminal HUD arrives by fetch, so
-   its height is held before first paint when the dashboard's readable
-   cookie says it is coming. The cookie is dot-separated, read with split,
-   never a regex literal. The loader in app.js clears the hold when the
-   fetch settles; this timer is the safety net. */
+/* The CC Terminal look is the dashboard's only look (2026-09-25), so html.cc
+   (the terminal body, which cc_spa.js keys on) is in the markup above and
+   never switched. The dashboard's HUD arrives by fetch, so its height is
+   held before first paint; the loader in app.js ends the hold when the fetch
+   settles and drops cc-chrome when no HUD came (the standalone dev loop).
+   This timer is the safety net. The retired look cookie is cleared. */
 (function () {
-  try {
-    var v = '';
-    var parts = document.cookie.split('; ');
-    for (var i = 0; i < parts.length; i++) {
-      if (parts[i].indexOf('ccsync_ui_effective=') === 0) { v = parts[i].slice(20); break; }
-    }
-    var groups = v.split('.');
-    var cl = document.documentElement.classList;
-    if (groups.indexOf('chrome') !== -1) {
-      cl.add('cc-chrome');
-      cl.add('cc-chrome-pending');
-      setTimeout(function () { cl.remove('cc-chrome-pending'); }, 3000);
-    }
-    /* UI port phase 6: the terminal body look, before first paint. The
-       injected topbar's data-ui-apps marker is authoritative afterwards. */
-    if (groups.indexOf('apps') !== -1) cl.add('cc');
-  } catch (e) { /* no cookie access: no hold */ }
+  var cl = document.documentElement.classList;
+  cl.add('cc-chrome');
+  cl.add('cc-chrome-pending');
+  setTimeout(function () { cl.remove('cc-chrome-pending'); }, 3000);
+  try { document.cookie = 'ccsync_ui_effective=; path=/; max-age=0'; } catch (e) { /* blocked */ }
 })();
 </script>
 <title>CC SYNC // YOUTUBE</title>

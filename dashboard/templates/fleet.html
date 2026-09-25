@@ -1,80 +1,126 @@
-{% extends "base.html" %}
+{# SYNC STATUS, terminal look (UI redesign port phase 2, group `home`,
+   2026-09-25; plan 1.2, 3.1, 5.1, design/home.html).
+
+   The frame is static and the bodies poll (3.1): every .win and its bar are
+   drawn here, and each poll or form swaps a .body or a child of it, so a
+   15 s beat never touches a fold. Swap hooks (.fleet-grid-wrap,
+   #server-notices, #plan-changes, #fleet-diagnostics, .queue-box) sit on a
+   body or inside one, never on a .win.
+
+   What the bench dropped from home and where it went (5.1, "none may be
+   lost"): the fleet banners and LOST COMPUTERS stay inside the grid's polled
+   body; every row keeps its DETAILS, RESUME, ASK THIS COMPUTER WHY and READ
+   THE ANSWER in a row expander; READ THE ANSWER fills the empty
+   #fleet-diagnostics window; plan-change UNDO stays in its window; the
+   queued and history halves of transfers are one link away on /transfers;
+   the sync queue and FIX DESTINATION ROOT keep their window; PROJECT ROOTS
+   moved to each project page. Check now is not built (a BACKEND ticket), and
+   Stop the fleet is a link to Users until its own ticket lands. #}
+{% extends "shell.html" %}
+{% import "partials/home_macros.html" as hm with context %}
 {% block title %}{{ brand_org | upper }}: SYNC STATUS{% endblock %}
+{% block head %}
+  <link rel="stylesheet" href="{{ asset_url('cc/home.css') }}">
+  <script src="{{ asset_url('cc/home.js') }}" defer></script>
+{% endblock %}
 {% block layout %}
-  {# as_qs keeps an admin's ?as=<editor> focus across the 30s refresh; without
-     it the checkboxes silently revert to the admin's own ticks. #}
-  <aside class="sidebar" hx-get="/partials/sidebar?current={{ as_qs }}"
-         hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
-    {% include "partials/sidebar.html" %}
-  </aside>
-  {# Order is the owner's, 2026-08-18: the fleet grid answers "is everyone's
-     footage where it should be", which is what this page is for, so it comes
-     first. The sync area below it reads top to bottom as what is moving right
-     now (the live window), what is queued behind it, and where the fixer
-     writes. #}
-  <main class="main">
-    {# PROBLEMS THE SERVER FOUND (UX-10, 2026-08-28), above the grid: it
-       answers "why is this project not on the dashboard at all", which the
-       grid below cannot, because the projects are missing from it. Its own
-       load trigger and admin-only, like the plan-changes panel; empty when
-       the server has found nothing, so it costs a healthy fleet no space. #}
-    {% if scope_admin %}
-    <div hx-get="/partials/notices" hx-trigger="load, every 60s [document.visibilityState === 'visible']" hx-swap="innerHTML"></div>
-    {% endif %}
-    {# Named so the [ RESUME ] button inside the grid can swap this same
-       container (CR-45): the partial itself has no single root element. #}
-    <div class="fleet-grid-wrap" hx-get="/partials/fleet" hx-trigger="every 15s [document.visibilityState === 'visible']" hx-swap="innerHTML">
-      {% include "partials/fleet_grid.html" %}
+{% set ro = home_readouts(request, fleet, view, notice_counts if notice_counts is defined else none) %}
+{% set tree = home_tree(request, None) %}
+{# home-project-8 (UI port review 2026-09-25): the grid and transfers polls
+   carry the page's own ?as= (auth.scope_for reads exactly this key), or the
+   first 15 s beat swapped an admin's "as jsmith" page to the whole fleet
+   while the head still counted jsmith's computers. #}
+{% set as_raw = request.query_params.get('as', '') %}
+{% set as_q = ('?as=' ~ (as_raw | urlencode)) if as_raw else '' %}
+<div class="page home-page">
+  <div class="head">
+    <div>
+      <h1><span><span class="prompt" aria-hidden="true">&gt;</span> SYNC STATUS</span></h1>
+      <div class="sub"><b>{{ ro.computers }}</b> computer{{ 's' if ro.computers != 1 }} &middot; <b>{{ (view.projects or []) | length }}</b> project{{ 's' if (view.projects or []) | length != 1 }}</div>
     </div>
+    <div class="acts">
+      {% if scope_admin %}
+      {# Stop the fleet (5.1): the halt route answers with the Users panel, so
+         until its compact-answer ticket lands the key is a link there. #}
+      <a class="key" href="/go/admin-fleet-halt" data-tip="Opens the fleet stop on Users: it pauses syncing on every computer at once until you start it again. Nothing is deleted, and the pause ends by itself after 24 hours." title="Opens the fleet stop on Users: it pauses syncing on every computer at once until you start it again. Nothing is deleted, and the pause ends by itself after 24 hours."><span class="t">Stop the fleet</span></a>
+      {% endif %}
+    </div>
+  </div>
 
-    {# Recent plan changes with their undo (DASH-8, 2026-08-28), between the
-       grid and the live window: it is read at exactly the moment the grid
-       says a project stopped syncing. Its own load trigger, so a slow
-       ledger read can never hold up the grid, and it renders as nothing at
-       all when the last hour holds no plan change. #}
+  {% if stamp_syncthing_reachable is defined and not stamp_syncthing_reachable %}
+  <div class="alertline" role="status">
+    {{ hm.tag('warn', 'stale', 'Stale: the figures on this page are older than they should be, because the server could not refresh them.', solid=true) }}
+    <span class="grow">The server cannot reach Syncthing. <span class="dim">The numbers below may be old. Nothing is lost: every computer keeps syncing.</span></span>
+    <a class="key quiet sm" href="/admin/recovery" title="Opens the step-by-step fix on the Recovery page."><span class="t">What to do</span></a>
+  </div>
+  {% endif %}
+
+  <aside class="side">
+    {{ hm.ticking_for(tree) }}
+    {{ hm.projects_win(tree, '') }}
+  </aside>
+
+  <main class="main">
+    <div class="readouts" id="home-readouts">{{ hm.readouts_inner(ro) }}</div>
+
     {% if scope_admin %}
-    <div hx-get="/partials/plan-changes" hx-trigger="load, every 60s [document.visibilityState === 'visible']" hx-swap="innerHTML"></div>
-    {# SYS-7 (2026-08-28): where a diagnostics bundle lands when an admin
-       clicks [ READ THE ANSWER ] on a row above. OUTSIDE the fleet-grid
-       wrapper on purpose -- the grid re-renders every 15 s, and swapping an
-       open bundle out from under whoever is reading it would make the panel
-       unusable. Empty until asked for: it is a page of text, not a chip. #}
-    <div id="fleet-diagnostics"></div>
+    {% call hm.win('problems', 'problems.log', act_href='/admin/health', act_label='health', act_tip='Every check the server runs, and what it last found.') %}
+      <div class="body flush" id="server-notices" hx-get="/partials/home-problems"
+           hx-trigger="load, every 60s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+        <div class="allclear"><span class="spin" aria-hidden="true"></span>reading what the server found</div>
+      </div>
+    {% endcall %}
     {% endif %}
 
-    {# The /transfers page, windowed (2026-08-18). The panel is the scroll
-       container and the poll lives on the wrapper INSIDE it: the swap is
-       innerHTML, so replacing the wrapper leaves the panel -- and therefore
-       the reader's scroll position -- alone, twice a second. Swapping the
-       panel itself would yank them back to the top of the list every 2s.
-       Its height is pinned in style.css, not here, so the number lives in
-       one place.
-
-       The trigger filter (MOBILE_PLAN.md §3.4, 2026-08-30) is on this and on
-       every other poll in this file: a phone in a pocket holding a 2 s poll
-       is a connection the fleet's editors share, against --workers 1. It
-       stays 2 s in the markup because that is the desktop's rate; pwa.js
-       rewrites it to 10 s on a coarse pointer. #}
-    <section class="live-transfers-window" aria-label="live transfers">
-      <div hx-get="/partials/transfers" hx-trigger="every 2s [document.visibilityState === 'visible']" hx-swap="innerHTML">
-        {% include "partials/transfers.html" %}
+    {% call hm.win('computers', 'computers', meta=hm.computers_meta(ro), meta_id='computers-meta', act_href=GLOSSARY_HREF, act_label='what the words mean', act_tip='Opens the Help glossary: every word this window uses, in plain terms.') %}
+      <div class="body flush fleet-grid-wrap" hx-get="/partials/fleet{{ as_q }}"
+           hx-trigger="every 15s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+        {% include "partials/fleet_grid.html" %}
       </div>
-    </section>
+    {% endcall %}
+
+    {% if scope_admin %}
+    {# READ THE ANSWER lands here (5.1): outside the grid body, so the 15 s
+       poll never swaps an open bundle out from under whoever is reading. #}
+    {% call hm.win('diagnostics', 'what_computers_said') %}
+      <div class="body" id="fleet-diagnostics" data-reveal>
+        <div class="allclear">Press "Read the answer" on a computer's row to read what it sent.</div>
+      </div>
+    {% endcall %}
+    {% endif %}
+
+    {% call hm.win('transfers', 'transfers', act_href='/transfers', act_label='all transfers', act_tip='Every file moving right now, the queue behind it, and what finished recently.') %}
+      {# The owner's 35vh window (2026-08-18, MOBILE_PLAN.md: "keeps its
+         height"), restored after the terminal port drew an unbounded list
+         that pushed the queue down every 2 s. The .body is the fixed-height
+         scroller and the poll sits on a wrapper INSIDE it, so a reader
+         mid-list keeps their place (test_home_layout.py). #}
+      <div class="body flush live-transfers-window">
+        <div class="live-transfers-poll" hx-get="/partials/home-transfers{{ as_q }}"
+             hx-trigger="every 2s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+          {% include "partials/home_transfers.html" %}
+        </div>
+      </div>
+    {% endcall %}
+
+    {% if scope_admin %}
+    {% call hm.win('plan-changes', 'plan_changes', act_href='/admin/audit', act_label='history', act_tip='The full record of who changed what, and when.') %}
+      <div class="body flush" hx-get="/partials/plan-changes"
+           hx-trigger="load, every 60s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+        <div id="plan-changes"><div class="allclear">reading the last hour of plan changes</div></div>
+      </div>
+    {% endcall %}
+    {% endif %}
 
     {% if queue %}
-      {# The poll carries the COMPUTER the panel is about as well as the ?as=
-         (dash-api-4's hand-off, 2026-09-11b). Without it the ten-second
-         refresh re-asks for the person's view and the panel silently becomes
-         about the other machine ten seconds after it was opened. #}
-      <div hx-get="/partials/queue?as={{ queue.editor if session_user and queue.editor != session_user else '' }}&machine={{ queue_machine | default('', true) | urlencode }}"
-           hx-trigger="every 10s [document.visibilityState === 'visible']" hx-swap="innerHTML">
-        {% include "partials/queue_section.html" %}
+    {% call hm.win('queue', 'sync_queue') %}
+      <div class="body queue-box"
+           hx-get="/partials/home-queue?as={{ queue.editor if session_user and queue.editor != session_user else '' }}&machine={{ queue_machine | default('', true) | urlencode }}"
+           hx-trigger="every 10s [document.visibilityState === 'visible'], cc-plan-changed from:body" hx-swap="innerHTML">
+        {% include "partials/home_queue.html" %}
       </div>
-    {% endif %}
-    {% if session_user %}
-    <div style="margin-top:1.4rem" hx-get="/partials/project-roots" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
-      {% include "partials/project_roots.html" %}
-    </div>
+    {% endcall %}
     {% endif %}
   </main>
+</div>
 {% endblock %}

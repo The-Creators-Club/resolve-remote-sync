@@ -395,7 +395,7 @@ def test_apply_stages_verifies_backs_up_swaps_and_asks_to_restart(real_bundle_wo
     # The tree is in place, with the SIGNED record beside it: without that
     # file select_code_root.py refuses to boot the tree at all.
     assert (code / NEW_VERSION / "src" / "ccsync_dashboard" / "app.py").is_file()
-    assert (code / NEW_VERSION / "templates" / "base.html").is_file()
+    assert (code / NEW_VERSION / "templates" / "shell.html").is_file()
     saved = json.loads((code / NEW_VERSION / "record.json").read_text())
     ok, _detail = release_trust.verify_record(saved, saved["signature"], (TEST_PUBKEY,))
     assert ok
@@ -668,24 +668,29 @@ def test_an_unauthenticated_health_is_unchanged(world):
 def test_the_packages_page_carries_the_dashboard_section(world, monkeypatch):
     check(world, [make_dashboard_record(b"x")], monkeypatch)
     html = world["client"].get("/partials/admin/dashboard-update").text
-    assert "[ DASHBOARD ]" in html
-    assert "UPDATE NOW" in html
+    assert 'id="dashboard-update"' in html
+    assert f'data-dashupd-apply="{NEW_VERSION}"' in html
+    assert '<span class="t">update now</span>' in html
     assert NEW_VERSION in html
+    # The window the partial is the body of, on the Packages page.
+    page = world["client"].get("/admin/packages").text
+    assert 'data-win="this_dashboard"' in page
+    assert 'hx-get="/partials/admin/dashboard-update"' in page
 
 
 def test_the_section_says_so_in_bind_mount_mode(world):
     world["runtime_id_file"].unlink()
     html = world["client"].get("/partials/admin/dashboard-update").text
     assert "updates from your wired computer" in html
-    assert "UPDATE NOW" not in html
+    assert "data-dashupd-apply" not in html
 
 
 def test_a_runtime_update_shows_the_nas_click_not_a_button(world, monkeypatch):
     check(world, [make_dashboard_record(b"x", runtime_id="b" * 64)], monkeypatch)
     html = world["client"].get("/partials/admin/dashboard-update").text
-    assert "RUNTIME UPDATE" in html
+    assert '<span class="tag warn solid">runtime update</span>' in html
     assert "Apps &gt; ccsync &gt; Update" in html or "Apps > ccsync > Update" in html
-    assert "UPDATE NOW" not in html
+    assert "data-dashupd-apply" not in html
 
 
 # ------------------------------------------------------------- odds and ends
@@ -1086,12 +1091,15 @@ def test_reload_panel_never_swaps_an_unchecked_response(world):
     unchecked `outerHTML =` wrote the LOGIN DOCUMENT into the packages panel.
     Asserted on the source, because the failure is somebody deleting the
     guard: the browser half has no harness here."""
-    src = (REPO / "dashboard" / "static" / "dashboard_update.js").read_text(encoding="utf-8")
+    src = (REPO / "dashboard" / "static" / "cc" / "dashboard_update.js").read_text(encoding="utf-8")
     body = src.split("function reloadPanel()", 1)[1].split("\n  }", 1)[0]
     assert "resp.ok" in body, "reloadPanel no longer checks the status"
     assert "HX-Redirect" in body, "reloadPanel no longer checks for HX-Redirect"
     guard = min(body.index("resp.ok"), body.index("HX-Redirect"))
     assert guard < body.index("outerHTML"), "the guard must precede the swap"
+    # The stale-page answer (app.stale_page_gate: an empty 200 + HX-Refresh)
+    # must not be swapped over the panel either.
+    assert "HX-Refresh" in body and body.index("HX-Refresh") < body.index("outerHTML")
 
 
 def test_the_login_gate_answers_an_hx_request_with_hx_redirect(world):

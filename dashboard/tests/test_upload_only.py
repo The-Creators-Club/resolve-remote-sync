@@ -21,6 +21,7 @@ from ccsync_dashboard.collector import Collector
 from ccsync_dashboard.settings import Settings
 from ccsync_dashboard.syncthing_client import SyncthingClient
 
+from conftest import HX
 from fake_syncthing import EDITOR_ID, SERVER_ID, FakeSyncthing
 
 SECRET = "s"
@@ -349,35 +350,50 @@ def test_the_project_page_offers_upload_only_and_the_way_back(env):
     report(client, "ruskin", "DESKTOP-1")
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "ruskin"))
     page = client.get("/project/p1").text
-    assert "[ UPLOAD ONLY FOR ME ]" in page and "[ TICK FOR ME ]" in page
+    assert _key("Upload only for me") in page and _key("Tick for me") in page
 
-    r = client.post("/partials/selection/ruskin/p1/toggle?view=project&mode=upload_only")
+    r = client.post("/partials/selection/ruskin/p1/toggle?view=project&mode=upload_only",
+                    headers=HX)
     assert r.status_code == 200, r.text
-    assert "[ SWITCH TO FULL SYNC ]" in r.text and "[ UNTICK FOR ME ]" in r.text
+    assert _key("Switch to full sync") in r.text and _key("Untick for me") in r.text
     # UX-17 (usability sweep 2026-09-03): the chip spells the mode out.
-    assert "[ UPLOAD ONLY ]" in r.text              # the SELECTED BY marker
+    assert re.search(r'<b>ruskin</b> <a class="tag warn"[^>]*><span class="w">upload only</span>',
+                     r.text), r.text              # the SELECTED BY marker
     assert modes_for(client, "ruskin", "DESKTOP-1") == {"p1": UP}
 
     # A SET, never an untick: pressing it again changes nothing.
-    r = client.post("/partials/selection/ruskin/p1/toggle?view=project&mode=upload_only")
+    r = client.post("/partials/selection/ruskin/p1/toggle?view=project&mode=upload_only",
+                    headers=HX)
     assert modes_for(client, "ruskin", "DESKTOP-1") == {"p1": UP}
 
-    r = client.post("/partials/selection/ruskin/p1/toggle?view=project&mode=full")
-    assert "[ SWITCH TO UPLOAD ONLY ]" in r.text
+    r = client.post("/partials/selection/ruskin/p1/toggle?view=project&mode=full", headers=HX)
+    assert _key("Switch to upload only") in r.text
     assert modes_for(client, "ruskin", "DESKTOP-1") == {"p1": FULL}
 
     # The plain toggle is still the plain toggle.
-    client.post("/partials/selection/ruskin/p1/toggle?view=project")
+    client.post("/partials/selection/ruskin/p1/toggle?view=project", headers=HX)
     assert modes_for(client, "ruskin", "DESKTOP-1") == {}
 
 
-def test_the_sidebar_marks_an_upload_only_project(env):
+def _key(label: str) -> str:
+    """A terminal key's visible label (no brackets since the port)."""
+    return f'<span class="t">{label}</span>'
+
+
+def test_the_projects_tree_marks_an_upload_only_project(env):
+    # The classic sidebar's chip is the terminal projects tree's tag now.
     client, conn, _now = env
     report(client, "ruskin", "DESKTOP-1")
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "ruskin"))
     client.put("/api/v1/selection/ruskin/p1?machine=DESKTOP-1&mode=upload_only")
+    client.put("/api/v1/selection/ruskin/p2?machine=DESKTOP-1")
     page = client.get("/project/p1").text
-    assert "[ UPLOAD ONLY ]" in page  # UX-17: the sidebar chip, spelt out
+    tree = page.split('class="tree-body"', 1)[1].split("</section>", 1)[0]
+    rows = {m.group(1): m.group(2) for m in re.finditer(
+        r'<a class="nm" href="/project/([^"?]+)[^>]*>.*?</a>(.*?)</div>', tree, re.S)}
+    # UX-17: the tree's tag, spelt out, on the upload-only project only
+    assert '<span class="w">upload only</span>' in rows["p1"]
+    assert "upload only" not in rows["p2"]
 
 
 def test_the_grid_draws_the_upload_only_half_of_a_cell(env):

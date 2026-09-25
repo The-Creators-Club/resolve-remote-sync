@@ -235,7 +235,8 @@ def test_local_password_login_is_break_glass_for_admins_only(tmp_path, idp):
     password login for the whole fleet either."""
     with TestClient(_app(_settings(tmp_path, idp, "bg.db"))) as c:
         page = c.get("/login")
-        assert "[ SIGN IN WITH SSO ]" in page.text
+        assert "Sign in with SSO" in page.text
+        assert f'href="{oidc.LOGIN_PATH}?next=' in page.text
         assert "name=\"password\"" not in page.text          # hidden by default
         assert "?local=1" in page.text
 

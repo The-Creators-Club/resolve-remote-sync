@@ -33,6 +33,7 @@ from ccsync_dashboard import auth, db as dbmod
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
+from conftest import HX
 from test_broll_fleet_stamp import _build_fake_broll
 from test_music_fleet_stamp import _build_fake_musicweb
 from test_ytdl_mount import _build_fake_ytdlweb
@@ -282,13 +283,17 @@ def _two_computers(client):
 def test_the_queue_panel_can_be_asked_about_one_computer(dash_env):
     """dash-api-4 made build_queue_view per-machine; the two templates that
     render it both called it with no machine, so the fix was unreachable and
-    an editor with two computers still read whichever reported last."""
+    an editor with two computers still read whichever reported last.
+
+    Terminal look (2026-09-25): the queue panel's poll is
+    /partials/home-queue (the classic /partials/queue is gone)."""
     client, conn, _settings = dash_env
     _two_computers(client)
 
     for machine, mine, theirs in (("IMAC", DESKTOP, LAPTOP),
                                   ("MACBOOK", LAPTOP, DESKTOP)):
-        page = _as_editor(client).get(f"/partials/queue?machine={machine}")
+        page = _as_editor(client).get(f"/partials/home-queue?machine={machine}",
+                                      headers=HX)
         assert page.status_code == 200, page.text
         assert mine in page.text, machine
         assert theirs not in page.text, machine
@@ -302,15 +307,15 @@ def test_the_home_page_queue_can_be_asked_about_one_computer(dash_env):
                                   ("MACBOOK", LAPTOP, DESKTOP)):
         page = _as_editor(client).get(f"/?machine={machine}")
         assert page.status_code == 200, page.text
-        # The [ FIX DESTINATION ROOT ] line only: the same page also carries
-        # [ PROJECT ROOTS ], which lists every unmapped Resolve project in the
-        # fleet on purpose, so a whole-page "not in" would be about that.
-        line = page.text.split('class="mono-sm root-line"', 1)[1].split("</div>", 1)[0]
+        # The fix destination root line only: a whole-page "not in" would
+        # also be about any other window that names Resolve projects.
+        line = page.text.split('<div class="root-line">', 1)[1].split("</div>", 1)[0]
         assert mine in line, machine
         assert theirs not in line, machine
         # ...and the 10s poll has to keep asking about the same computer, or
         # the panel becomes about the other one ten seconds after it is read.
-        assert f"machine={machine}" in page.text
+        queue_win = page.text[page.text.index('class="body queue-box"'):]
+        assert f"machine={machine}" in queue_win[:queue_win.index(">")]
 
 
 def test_an_unknown_computer_is_not_taken_as_a_machine(dash_env):
@@ -320,7 +325,8 @@ def test_an_unknown_computer_is_not_taken_as_a_machine(dash_env):
     client, conn, _settings = dash_env
     _two_computers(client)
     person = api_mod.build_queue_view(conn, "jsmith")["resolve_project"]
-    page = _as_editor(client).get("/partials/queue?machine=NOT-A-COMPUTER")
+    page = _as_editor(client).get("/partials/home-queue?machine=NOT-A-COMPUTER",
+                                  headers=HX)
     assert page.status_code == 200, page.text
     assert person in page.text
 
@@ -461,7 +467,12 @@ def test_the_jobs_page_names_the_ffmpeg_sidecar_cause(dash_env):
     # scannable: "this tool's installer failed" and "this computer was never
     # set up" are the same empty answer without one of them.
     assert "could not verify its certificate" in page.text
-    assert "[ SIDECAR FAILED ]" in page.text
+    # The chip is on the computer's own line of the why, carrying the cause.
+    row = page.text[page.text.index('<span class="who">jsmith/EDIT-PC</span>'):]
+    row = row[:row.index("</div>")]
+    assert '<span class="tag warn" title="' in row
+    assert "could not verify its certificate" in row
+    assert ">sidecar failed</span>" in row
 
 
 # ------------------------------------------------- CR-259c's second half (b-1)

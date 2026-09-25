@@ -241,8 +241,10 @@ def test_the_root_declares_the_uas_dark_mode():
 THEME_COMMON_BEGIN = "/* ==== theme-common BEGIN"
 THEME_COMMON_END = "theme-common END"
 
+# The dashboard's copy was its classic static/style.css until 2026-09-25, when
+# the classic look was deleted; cc/terminal.css is the dashboard's copy now.
 FLEET_STYLESHEETS = {
-    "dashboard": _REPO_ROOT / "dashboard" / "static" / "style.css",
+    "dashboard": _REPO_ROOT / "dashboard" / "static" / "cc" / "terminal.css",
     "broll": _REPO_ROOT / "broll" / "web" / "static" / "style.css",
     "music": _REPO_ROOT / "music" / "web" / "static" / "style.css",
     "ytdl": _REPO_ROOT / "ytdl" / "web" / "static" / "style.css",
@@ -283,7 +285,7 @@ def test_the_theme_common_block_is_identical_in_all_four_stylesheets():
     reference = blocks["dashboard"]
     drifted = [name for name, body in blocks.items() if body != reference]
     assert not drifted, (
-        "theme-common has drifted from dashboard/static/style.css in: "
+        "theme-common has drifted from dashboard/static/cc/terminal.css in: "
         + ", ".join(sorted(drifted)))
 
 

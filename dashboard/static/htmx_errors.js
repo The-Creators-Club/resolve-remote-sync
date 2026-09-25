@@ -189,7 +189,7 @@
 // tooltip carries (the prose itself lives in ui.CHIP_HELP, so the two cannot
 // drift), and tab + Enter reaches it for keyboard users.
 //
-// In this file rather than a new one because base.html already loads it on
+// In this file rather than a new one because shell.html already loads it on
 // every page: a second <script> for fifty lines is a request every editor's
 // browser pays for.
 (function () {

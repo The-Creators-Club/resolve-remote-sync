@@ -1,12 +1,11 @@
 """The terminal Health group (UI redesign port, phase 5 "settings-health",
 2026-09-25): Health, Invariants, Protection, Alerts, Recovery.
 
-docs/UI_REDESIGN_PORT_PLAN.md 1.3, 1.5, 5.3, 7.1 row 5, R13, R15. Classic
-pins (test_health_page.py, test_invariants.py, test_protection.py,
-test_alerts.py, the recovery tests) are untouched: this file only ADDS the
-terminal assertions, with the group switched on through the one seam every
-reader of the setting uses (ui_variant.site_groups), and checks classic is
-unchanged beside it.
+docs/UI_REDESIGN_PORT_PLAN.md 1.3, 1.5, 5.3, 7.1 row 5, R13, R15. Written
+while the group was switchable; since the owner retired the look switch
+(2026-09-25) the terminal pages are the only pages, so the classic half of
+each pair is gone and "the group is off" became "the asking page was drawn
+by an older build" (app.stale_page_gate).
 """
 from __future__ import annotations
 
@@ -16,14 +15,13 @@ from html.parser import HTMLParser
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import HX
+
 from ccsync_dashboard import alerts, auth, db as dbmod, protection
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
 SECRET = "test-secret-value-uihealth-1234567890"
-HEALTH = "chrome,settings-health"
-BOTH = pytest.mark.parametrize("ui_variant", ["classic", HEALTH], indirect=True)
-TERMINAL = pytest.mark.parametrize("ui_variant", [HEALTH, "all"], indirect=True)
 PAGES = ("/admin/health", "/admin/invariants", "/admin/protection",
          "/admin/alerts", "/admin/recovery")
 
@@ -44,8 +42,8 @@ def env(tmp_path):
             conn.close()
 
 
-def _hx(ui_variant, client, page="/admin/health"):
-    headers = ui_variant.htmx_headers(client, "http://testserver" + page)
+def _hx(client, page="/admin/health"):
+    headers = dict(HX, **{"HX-Current-URL": "http://testserver" + page})
     headers["Origin"] = "http://testserver"
     headers["X-CSRF-Token"] = _csrf(client, page)
     return headers
@@ -94,25 +92,18 @@ def _forms(html):
 
 # ------------------------------------------------------------- every page
 
-@BOTH
 @pytest.mark.parametrize("path", PAGES)
-def test_each_page_renders_in_its_look(env, ui_variant, path):
+def test_each_page_renders_terminal(env, path):
     client, _conn = env
     r = client.get(path)
     assert r.status_code == 200, r.text[:400]
-    ui_variant.check_page(r.text)
-    if ui_variant.is_classic:
-        assert 'data-ui="cc"' not in r.text
-        assert "[ " in r.text  # classic keeps its bracket keys (D8, classic unchanged)
-    else:
-        assert 'data-ui="cc"' in r.text
-        assert "cc/health.css" in r.text
-        assert 'class="sidebar"' not in r.text  # D17: no sidebar on Settings pages
+    assert '<html lang="en" data-ui="cc">' in r.text
+    assert "cc/health.css" in r.text
+    assert 'class="sidebar"' not in r.text  # D17: no sidebar on Settings pages
 
 
-@TERMINAL
 @pytest.mark.parametrize("path", PAGES)
-def test_terminal_pages_draw_no_bracket_control_and_no_em_dash(env, ui_variant, path):
+def test_terminal_pages_draw_no_bracket_control_and_no_em_dash(env, path):
     client, _conn = env
     html = client.get(path + ("?problem=resolve" if path.endswith("recovery") else "")).text
     body = html.split("<body", 1)[1]
@@ -122,9 +113,8 @@ def test_terminal_pages_draw_no_bracket_control_and_no_em_dash(env, ui_variant, 
         assert not re.search(r"\[\s*[A-Z]", text), f"bracketed control on {path}: {text!r}"
 
 
-@TERMINAL
 @pytest.mark.parametrize("path", PAGES)
-def test_every_window_folds_and_has_a_named_heading(env, ui_variant, path):
+def test_every_window_folds_and_has_a_named_heading(env, path):
     client, _conn = env
     html = client.get(path).text
     wins = re.findall(r'<section class="win"[^>]*>\s*<div class="bar"><button type="button" class="fold"[^>]*aria-label="Fold [^"]+"', html)
@@ -134,8 +124,7 @@ def test_every_window_folds_and_has_a_named_heading(env, ui_variant, path):
 
 # ------------------------------------------------------------- health
 
-@TERMINAL
-def test_health_panels_are_tabs_whose_frames_carry_the_go_anchors(env, ui_variant):
+def test_health_panels_are_tabs_whose_frames_carry_the_go_anchors(env):
     client, _conn = env
     html = client.get("/admin/health").text
     for panel_id, anchor, route in (("hpanel-notices", "server-notices", "/partials/health-notices"),
@@ -149,15 +138,14 @@ def test_health_panels_are_tabs_whose_frames_carry_the_go_anchors(env, ui_varian
         assert f'id="{anchor}" hx-get' not in chunk
 
 
-@TERMINAL
 @pytest.mark.parametrize("route,marker", [
     ("/partials/health-notices", "what the server checks"),
     ("/partials/health-collector", "cycle"),
     ("/partials/health-diagnostics", "diagnostics"),
 ])
-def test_health_partials_serve_terminal_markup(env, ui_variant, route, marker):
+def test_health_partials_serve_terminal_markup(env, route, marker):
     client, _conn = env
-    r = client.get(route, headers=_hx(ui_variant, client))
+    r = client.get(route, headers=_hx(client))
     assert r.status_code == 200, r.text[:300]
     assert marker in r.text
     assert "[ " not in re.sub(r"<[^>]+>", "", r.text).replace("[ TAKE", "")  # no bracket label
@@ -168,65 +156,63 @@ def test_health_partials_serve_terminal_markup(env, ui_variant, route, marker):
         assert "retention-line" in r.text and "Retention last ran" in r.text
 
 
-@pytest.mark.parametrize("ui_variant", ["classic"], indirect=True)
 @pytest.mark.parametrize("route", ["/partials/health-notices", "/partials/health-collector",
                                    "/partials/health-diagnostics"])
-def test_health_partials_are_404_when_the_group_is_off(env, ui_variant, route):
+def test_health_partials_tell_a_stale_page_to_reload(env, route):
+    # was "404 when the group is off": a page without the look header (drawn
+    # by an older build) gets HX-Refresh and no markup
     client, _conn = env
-    r = client.get(route, headers=_hx(ui_variant, client, "/admin/health"))
-    assert r.status_code in (404, 409) or r.headers.get("HX-Refresh") == "true"
-    assert "health-notices-body" not in r.text
+    r = client.get(route, headers={"HX-Request": "true",
+                                   "HX-Current-URL": "http://testserver/admin/health"})
+    assert r.status_code == 200 and r.headers.get("HX-Refresh") == "true"
+    assert r.text == "" and "health-notices-body" not in r.text
 
 
-@TERMINAL
-def test_a_dismiss_from_health_returns_health_markup(env, ui_variant):
+def test_a_dismiss_from_health_returns_health_markup(env):
     client, conn = env
     dbmod.notice(conn, kind="project_nested_marker", subject="nas", severity="error",
                  body="something broke", fix="do the thing")
     conn.commit()
-    listed = client.get("/partials/health-notices", headers=_hx(ui_variant, client)).text
+    listed = client.get("/partials/health-notices", headers=_hx(client)).text
     m = re.search(r'hx-post="/partials/health-notices/(\d+)/dismiss"', listed)
     assert m, listed[:600]
     assert 'hx-target="#health-notices-body"' in listed
-    r = client.post(f"/partials/health-notices/{m.group(1)}/dismiss", headers=_hx(ui_variant, client))
+    r = client.post(f"/partials/health-notices/{m.group(1)}/dismiss", headers=_hx(client))
     assert r.status_code == 200, r.text[:300]
     assert "what the server checks" in r.text          # the health panel,
     assert "admin-users-box" not in r.text and 'id="server-notices"' not in r.text
 
 
-@pytest.mark.parametrize("ui_variant", ["classic"], indirect=True)
-def test_a_health_dismiss_changes_nothing_when_the_group_is_off(env, ui_variant):
+def test_a_health_dismiss_from_a_stale_page_changes_nothing(env):
+    # was "... when the group is off" (mechanism-1): the refusal comes BEFORE
+    # the write, so nothing is committed behind it
     client, conn = env
     dbmod.notice(conn, kind="project_nested_marker", subject="nas", severity="error",
                  body="b", fix="f")
     conn.commit()
     nid = conn.execute("SELECT id FROM notices").fetchone()[0]
-    r = client.post(f"/partials/health-notices/{nid}/dismiss", headers=_hx(ui_variant, client))
-    assert r.status_code != 200 or r.headers.get("HX-Refresh")
+    headers = _hx(client)
+    del headers["X-CC-UI"]
+    r = client.post(f"/partials/health-notices/{nid}/dismiss", headers=headers)
+    assert r.headers.get("HX-Refresh") == "true" and r.text == ""
     row = conn.execute("SELECT cleared_at FROM notices WHERE id=?", (nid,)).fetchone()
     assert row[0] in (None, "")
 
 
-@pytest.mark.parametrize("ui_variant,where", [
-    (HEALTH, {"notices": "/admin/health#server-notices", "collector": "/admin/health#fleet-collector",
-              "diagnostics": "/admin/health#fleet-diagnostics", "restore": "/admin/recovery#restore"}),
-    ("classic", {"notices": "/#server-notices", "collector": "/#fleet-collector",
-                 "diagnostics": "/#fleet-diagnostics", "restore": "/admin/recovery#restore"}),
-], indirect=["ui_variant"])
-def test_go_resolves_per_variant_and_lands_on_a_rendered_anchor(env, ui_variant, where):
+def test_go_resolves_and_lands_on_a_rendered_anchor(env):
     client, _conn = env
+    where = {"notices": "/admin/health#server-notices", "collector": "/admin/health#fleet-collector",
+             "diagnostics": "/admin/health#fleet-diagnostics", "restore": "/admin/recovery#restore"}
     for panel, href in where.items():
         r = client.get(f"/go/{panel}", follow_redirects=False)
         assert r.status_code == 303 and r.headers["location"] == href, (panel, r.headers.get("location"))
-        if not ui_variant.is_classic:
-            page, anchor = href.split("#")
-            assert f'id="{anchor}"' in client.get(page).text, href
+        page, anchor = href.split("#")
+        assert f'id="{anchor}"' in client.get(page).text, href
 
 
 # ------------------------------------------------------------- invariants / protection
 
-@TERMINAL
-def test_invariants_keep_three_states_and_protection_acks_swap_terminal(env, ui_variant):
+def test_invariants_keep_three_states_and_protection_acks_swap_terminal(env):
     client, _conn = env
     inv = client.get("/admin/invariants").text
     assert 'id="invariant-table"' in inv and "not checked" in inv
@@ -235,7 +221,7 @@ def test_invariants_keep_three_states_and_protection_acks_swap_terminal(env, ui_
     assert 'hx-target="#protection"' in prot
     r = client.post("/partials/admin/protection/ack",
                     data={"key": "restore_drill", "date": "2026-09-01"},
-                    headers=_hx(ui_variant, client, "/admin/protection"))
+                    headers=_hx(client, "/admin/protection"))
     assert r.status_code == 200, r.text[:300]
     assert '<div id="protection" class="vstack">' in r.text
     assert "2026-09-01" in r.text
@@ -243,8 +229,7 @@ def test_invariants_keep_three_states_and_protection_acks_swap_terminal(env, ui_
 
 # ------------------------------------------------------------- alerts
 
-@TERMINAL
-def test_alerts_keeps_four_sibling_forms_and_the_save_carries_only_setting_keys(env, ui_variant):
+def test_alerts_keeps_four_sibling_forms_and_the_save_carries_only_setting_keys(env):
     client, _conn = env
     html = client.get("/admin/alerts").text
     p = _forms(html)
@@ -263,19 +248,17 @@ def test_alerts_keeps_four_sibling_forms_and_the_save_carries_only_setting_keys(
         or 'form="%s"' % run_id in html
 
 
-@TERMINAL
-def test_alerts_save_answers_with_the_terminal_panel(env, ui_variant):
+def test_alerts_save_answers_with_the_terminal_panel(env):
     client, _conn = env
     r = client.post("/partials/admin/alerts/save", data={"alerts_sink": "none"},
-                    headers=_hx(ui_variant, client, "/admin/alerts"))
+                    headers=_hx(client, "/admin/alerts"))
     assert r.status_code == 200, r.text[:300]
     assert 'id="alerts-pw-form"' in r.text and '<div id="admin-alerts"' in r.text
 
 
 # ------------------------------------------------------------- recovery
 
-@TERMINAL
-def test_recovery_keeps_its_forms_ids_and_targets(env, ui_variant):
+def test_recovery_keeps_its_forms_ids_and_targets(env):
     client, _conn = env
     html = client.get("/admin/recovery?problem=resolve").text
     for anchor in ('id="recovery"', 'id="restore"', 'id="resolve-undo"', 'id="wizard"'):
@@ -288,14 +271,13 @@ def test_recovery_keeps_its_forms_ids_and_targets(env, ui_variant):
     assert "what to do" in html
 
 
-@TERMINAL
-def test_recovery_posts_answer_with_the_terminal_panel(env, ui_variant):
+def test_recovery_posts_answer_with_the_terminal_panel(env):
     client, _conn = env
     r = client.post("/partials/admin/recovery/drill", data={"problem": ""},
-                    headers=_hx(ui_variant, client, "/admin/recovery"))
+                    headers=_hx(client, "/admin/recovery"))
     assert r.status_code == 200, r.text[:300]
     assert '<div id="recovery" class="vstack">' in r.text
     r = client.post("/partials/admin/recovery/preview",
                     data={"problem": "", "slug": "nope", "snapshot": "nope"},
-                    headers=_hx(ui_variant, client, "/admin/recovery"))
+                    headers=_hx(client, "/admin/recovery"))
     assert r.status_code == 200 and '<div id="recovery" class="vstack">' in r.text

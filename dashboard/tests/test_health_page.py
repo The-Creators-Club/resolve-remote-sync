@@ -55,6 +55,20 @@ def as_user(client, user="owen"):
     return client
 
 
+# A row's band tag in the not-checked band (admin_health.html's band_tip):
+# the page-level "not checked is not OK" note carries a different title, so
+# this marks a ROW, never the legend.
+NOT_CHECKED_ROW_TAG = ('<span class="tag mute" title="This server could not find out. '
+                       'That is not the same as fine.">not checked</span>')
+
+
+def _open_rows(text: str) -> list[str]:
+    """The open list's rows, one string each (terminal look, 2026-09-25)."""
+    body = text[text.index('id="health-open-list"'):]
+    body = body[:body.index("</section>")]
+    return body.split('<div class="prob wide">')[1:]
+
+
 def test_the_page_is_admin_only(env):
     client, _conn = env
     assert as_user(client, "jsmith").get("/admin/health").status_code == 403
@@ -67,8 +81,8 @@ def test_a_fresh_server_reports_what_it_has_not_checked(env):
     client, _conn = env
     page = as_user(client).get("/admin/health")
     assert page.status_code == 200
-    assert "[ HEALTH ]" in page.text
-    assert "NOT CHECKED ]" in page.text
+    assert "&gt;</span> HEALTH</span></h1>" in page.text
+    assert NOT_CHECKED_ROW_TAG in page.text
     assert "Nothing is open" not in page.text
 
 
@@ -92,9 +106,12 @@ def test_an_open_notice_appears_with_its_own_diagnosis_and_fix(env):
     # VERBATIM: both sentences, exactly as the notice wrote them.
     assert "so all of them are hidden." in page.text
     assert "Delete the marker in that folder." in page.text
-    assert "PROBLEM THE SERVER FOUND" in page.text
-    # ...and a way back to the panel that owns it.
-    assert "/#server-notices" in page.text
+    row = next(r for r in _open_rows(page.text) if "so all of them are hidden." in r)
+    assert "problem the server found" in row
+    # ...and a way back to the panel that owns it: the notices tab on this
+    # page, since the terminal look moved that panel off home (D7).
+    assert 'href="#server-notices"' in row
+    assert 'id="server-notices"' in page.text
 
 
 def test_a_notice_carries_its_take_me_there_link(env):
@@ -109,9 +126,12 @@ def test_a_notice_carries_its_take_me_there_link(env):
                  "something happened", "do the thing")
     conn.commit()
     page = as_user(client).get("/admin/health")
-    # UI port phase 7 (D8): the registry holds the plain label; the classic
-    # page wraps it as the key it has always drawn.
-    assert href in page.text and f"[ {label.upper()} ]" in page.text
+    # UI port phase 7 (D8): the registry holds the plain label, and the page
+    # draws it as a key with no brackets.
+    row = next(r for r in _open_rows(page.text) if "something happened" in r)
+    assert f'href="{href}"' in row.replace("&amp;", "&")
+    assert f'<span class="t">{label}</span>' in row
+    assert "[ " not in row
 
 
 def test_a_broken_protection_line_reaches_the_page(env):
@@ -145,7 +165,7 @@ def test_not_checked_is_its_own_band_and_never_ok(env):
     assert all(r["band"] == "unknown"
                for r in rows if r["source"] in ("protection", "invariant"))
     page = as_user(client).get("/admin/health")
-    assert "[ NOT CHECKED ] is not [ OK ]" in page.text
+    assert "<b>Not checked is not OK.</b>" in page.text
 
 
 def test_the_worst_comes_first(env):
@@ -220,8 +240,10 @@ def test_the_health_page_says_what_is_running_and_who_is_on_it(env):
 
     page = as_user(client).get("/admin/health")
     assert page.status_code == 200
-    assert "[ WHAT IS RUNNING ]" in page.text
-    assert "0.9.60" in page.text
+    box = page.text[page.text.index('data-win="running"'):]
+    box = box[:box.index("</section>")]
+    assert "what" in box and "running" in box
+    assert "0.9.60" in box
 
 
 def test_the_box_says_not_checked_rather_than_up_to_date(env):
@@ -229,8 +251,11 @@ def test_the_box_says_not_checked_rather_than_up_to_date(env):
     must never do is render silence as agreement."""
     client, _conn = env
     page = as_user(client).get("/admin/health")
-    assert "[ VENDOR: NOT CHECKED ]" in page.text
-    assert "the vendor channel has never been checked here" in page.text
+    box = page.text[page.text.index('data-win="running"'):]
+    box = box[:box.index("</section>")]
+    assert ">vendor: not checked</span>" in box
+    assert "the vendor channel has never been checked here" in box
+    assert "up to date" not in box
 
 
 def test_the_box_carries_the_reason_this_dashboard_has_not_updated_itself(env):

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import zipfile
 
 from fastapi.testclient import TestClient
@@ -77,12 +78,24 @@ def test_the_panel_renders_take_me_there_and_keeps_the_prose(tmp_path):
                          body="waiting", fix="Approve it on Settings, Users.", now=NOW)
             conn.commit()
             client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
-            html = client.get("/partials/notices").text
-            assert "[ TAKE ME THERE ]" in html
-            assert 'href="/admin/users"' in html
-            # The sentence STAYS: the sink mails the same text and a mail body
-            # has no link to offer.
-            assert "Approve it on Settings, Users." in html
+            # Terminal look (2026-09-25): the notices are drawn in two
+            # places, the home problems window and Health's checks panel, and
+            # both carry the key (a lower-case word, no brackets) and the
+            # sentence.
+            for url in ("/partials/home-problems", "/partials/health-notices"):
+                resp = client.get(url)
+                assert resp.status_code == 200, (url, resp.status_code)
+                html = resp.text
+                key = re.search(r'<a class="key sm" href="/admin/users"><span class="t">'
+                                r'([^<]*)</span>', html)
+                assert key, url
+                # The words, not their case: a key's `.t` is cased by CSS
+                # (.key is text-transform: uppercase), and no brackets.
+                assert key.group(1).lower() == "take me there", (url, key.group(1))
+                assert "[" not in key.group(1)
+                # The sentence STAYS: the sink mails the same text and a mail
+                # body has no link to offer.
+                assert "Approve it on Settings, Users." in html, url
         finally:
             conn.close()
 

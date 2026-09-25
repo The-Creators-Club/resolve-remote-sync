@@ -239,7 +239,8 @@ def test_check_reads_back_what_is_served(env):
     configure(client)
     resp = client.post("/api/v1/setup/android/check")
     assert resp.status_code == 200
-    assert "[ SERVING ]" in resp.text
+    # Terminal look (2026-09-25): the verdict is a tag, not "[ SERVING ]".
+    assert '<span class="tag solid ok">serving</span>' in resp.text
     assert PACKAGE in resp.text and FP1 in resp.text
 
 
@@ -247,7 +248,9 @@ def test_check_says_empty_when_nothing_is_configured(env):
     client, conn, settings = env
     as_user(client, "owen")
     resp = client.post("/api/v1/setup/android/check")
-    assert "[ EMPTY ]" in resp.text
+    # Terminal look (2026-09-25): the verdict is a tag, not "[ EMPTY ]".
+    assert '<span class="tag solid warn">empty</span>' in resp.text
+    assert "serving</span>" not in resp.text
 
 
 def test_check_requires_admin(env):
@@ -284,7 +287,10 @@ def test_the_settings_page_includes_the_panel_once(env):
     page = client.get("/admin/settings")
     assert page.status_code == 200
     assert page.text.count('id="android-settings"') == 1
-    assert "[ ANDROID ]" in page.text
+    # Terminal look (2026-09-25): the "[ ANDROID ]" heading is the android
+    # tab and its window.
+    assert 'id="tab-android"' in page.text
+    assert page.text.count('data-win="android"') == 1
 
 
 # --------------------------------------------------- tools/android/twa_manifest

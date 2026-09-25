@@ -20,7 +20,13 @@ import pytest
 
 from ccsync_dashboard import db as dbmod
 
-CSS = Path(__file__).resolve().parents[1] / "static" / "style.css"
+# The terminal look is the only look (2026-09-25): an error notice is a
+# `.prob` row in problems.log (home) and on Health, and its dismiss is a
+# `.key.quiet`. The rule the classic `.banner.alarm .btn` pin guarded is the
+# same: the one control that closes an error card must never be painted in
+# the colour it sits on.
+CSS = Path(__file__).resolve().parents[1] / "static" / "cc" / "terminal.css"
+NOTICE_PARTIALS = ("partials/home_problems.html", "partials/health_notices.html")
 
 
 def _rule(css: str, selector: str) -> str:
@@ -38,17 +44,40 @@ def _rule(css: str, selector: str) -> str:
     return "\n".join(blocks)
 
 
-def test_a_dismiss_button_on_an_error_notice_is_not_red_on_red():
+def _error_notice_html(template: str) -> str:
+    from ccsync_dashboard import ui
+    notice = {"id": 7, "severity": "error", "subject": "the disk is full",
+              "kind": "disk_full", "body": "writes are refused", "fix": "free space",
+              "href": "", "href_label": "", "first_seen": dbmod.utcnow_iso(),
+              "last_seen": dbmod.utcnow_iso()}
+    return ui.templates.env.get_template(template).render(
+        notices=[notice], notice_kinds=[], open_kinds=set(), checked_kinds=set(),
+        notice_checks_ran=0, notice_checks_total=0, notice_checks_never_ran=0)
+
+
+@pytest.mark.parametrize("template", NOTICE_PARTIALS)
+def test_a_dismiss_button_on_an_error_notice_is_not_red_on_red(template):
+    html = _error_notice_html(template)
+    # The red paint is the severity TAG, never the row the dismiss sits in.
+    assert '<span class="tag solid err"' in html
+    assert '<div class="prob">' in html
+    assert re.search(r'<button class="key quiet sm" type="submit"[^>]*>'
+                     r'<span class="t">dismiss</span>', html)
     css = CSS.read_text(encoding="utf-8")
-    assert "var(--red)" in _rule(css, ".banner.alarm")   # the background
-    block = _rule(css, ".banner.alarm .btn")
-    assert "color: var(--bg)" in block
-    assert "var(--red)" not in block
+    assert "background" not in _rule(css, ".prob")
+    assert "var(--k-bg)" in _rule(css, ".key")          # the key's own paint
+    assert "--k-bg: transparent" in _rule(css, ".key")
+    quiet = _rule(css, ".key.quiet")
+    assert "color: var(--text-2)" in quiet
+    assert "var(--red)" not in quiet and "background" not in quiet
 
 
 def test_the_banner_action_still_reads_as_something_to_click():
-    block = _rule(CSS.read_text(encoding="utf-8"), ".banner.alarm .btn")
-    assert "underline" in block
+    """The quiet key drops its border; the pointer glyph in front of it is
+    what still says "press me"."""
+    css = CSS.read_text(encoding="utf-8")
+    assert "content:" in _rule(css, ".key.quiet::before")
+    assert "color: var(--hi)" in _rule(css, ".key.quiet:hover")
 
 
 @pytest.fixture

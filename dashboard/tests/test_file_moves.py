@@ -224,8 +224,8 @@ def test_an_undelivered_move_never_expires_but_a_delivered_one_does(env):
     # The project page says so, and offers the re-issue.
     as_user(client, "owen")
     page = client.get(f"/project/{D_SLUG}").text
-    assert "[ NOT APPLIED - THIS COMPUTER MAY RE-UPLOAD THE OLD PATH ]" in page
-    assert "[ ASK THAT COMPUTER AGAIN ]" in page
+    assert '<span class="w">not applied: this computer may upload the old path again</span>' in page
+    assert '<span class="t">Ask that computer again</span>' in page
     r = client.post(f"/partials/project/{D_SLUG}/moves/{move['id']}/reissue",
                     data={"editor": "leso", "machine": "LESO-PC"})
     assert r.status_code == 200, r.text
@@ -283,7 +283,7 @@ def test_a_proxy_that_could_not_follow_is_named_and_never_read_as_nothing_happen
     (rec,) = dbmod.file_moves_for_project(conn, D_SLUG)
     assert rec["state"] == "partial" and rec["state_detail"]
     page = client.get(f"/project/{D_SLUG}").text
-    assert "[ SOME PROXIES STAYED ]" in page
+    assert '<span class="w">some proxies stayed</span>' in page
 
 
 def test_an_interrupted_move_is_completed_or_quarantined_on_the_next_pass(env):
@@ -329,7 +329,7 @@ def test_an_interrupted_move_is_completed_or_quarantined_on_the_next_pass(env):
     ids = [m["id"] for m in report(client, "leso", "LESO-PC")["commands"].get("file_moves", [])]
     assert both not in ids
     as_user(client, "owen")
-    assert "[ UNFINISHED ON THE SERVER ]" in client.get(f"/project/{D_SLUG}").text
+    assert '<span class="w">unfinished on the server</span>' in client.get(f"/project/{D_SLUG}").text
 
 
 def test_a_move_can_be_put_back(env):
@@ -342,7 +342,7 @@ def test_a_move_can_be_put_back(env):
         "path": "B-roll/A001_0512.braw", "to_slug": A_SLUG,
         "to_path": "Interviewees/Pangolin"})
     move_id = r.json()["move_id"]
-    assert "[ UNDO THIS MOVE ]" in client.get(f"/project/{D_SLUG}").text
+    assert '<span class="t">Undo this move</span>' in client.get(f"/project/{D_SLUG}").text
 
     undo = client.post(f"/api/v1/projects/{D_SLUG}/moves/{move_id}/undo")
     assert undo.status_code == 200, undo.text
@@ -378,7 +378,7 @@ def test_undo_is_refused_while_a_computer_could_not_follow(env):
     as_user(client, "owen")
     r = client.post(f"/api/v1/projects/{D_SLUG}/moves/{move_id}/undo")
     assert r.status_code == 409 and "still at the old path" in r.json()["detail"]
-    assert "[ 1 BLOCKED ]" in client.get(f"/project/{D_SLUG}").text
+    assert '<span class="w">1 blocked</span>' in client.get(f"/project/{D_SLUG}").text
 
 
 def test_a_retrying_machine_keeps_the_command_and_shows_its_attempts(env):
@@ -412,17 +412,18 @@ def test_the_project_page_has_the_form_and_the_log_for_admins_only(env):
     client, conn, projects = env
     as_user(client, "owen")
     page = client.get(f"/project/{D_SLUG}").text
-    assert "[ MOVE ON THE SERVER AND ON EVERY MACHINE ]" in page
+    assert '<span class="t">Move on the server and on every computer</span>' in page
     r = client.post(f"/partials/project/{D_SLUG}/move",
                     data={"path": "B-roll/A001_0512.braw", "to_slug": A_SLUG,
                           "to_path": "Interviewees/Pangolin"})
     assert r.status_code == 200, r.text
-    assert "[ MOVED ]" in r.text and "[ DONE ]" in r.text
+    assert '<span class="w">moved</span>' in r.text and '<span class="w">done</span>' in r.text
     r = client.post(f"/partials/project/{D_SLUG}/move", data={"path": "", "to_slug": A_SLUG})
     assert "type the file or folder to move" in r.text
     as_user(client, "leso")
     page = client.get(f"/project/{D_SLUG}").text
-    assert "[ MOVE ON THE SERVER AND ON EVERY MACHINE ]" not in page
+    assert 'hx-post="/partials/project/' + D_SLUG + '/move"' not in page
+    assert "Move on the server and on every computer" not in page
 
 
 def test_an_undo_restores_the_original_name_when_the_move_renamed_it(env):

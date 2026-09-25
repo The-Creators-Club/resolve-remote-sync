@@ -565,11 +565,13 @@ def test_want_names_the_episode_that_is_not_open_and_offers_its_button(landing2)
     slug = cards_pool.slug_for(str(roots[1]))
     page = client.get(f"/cards/?want={slug}").text
     assert f'data-want="{slug}"' in page
-    banner = page.split('class="cl-want"', 1)[1].split("cl-lede", 1)[0]
-    assert "FRAMING FORMOSA IS NOT OPEN" in " ".join(banner.split())
+    # The terminal landing (2026-09-25): the banner is `note cl-want` and the
+    # name is in sentence case.
+    banner = page.split('cl-want"', 1)[1].split("cl-lede", 1)[0]
+    assert "<b>Framing Formosa is not open.</b>" in " ".join(banner.split())
     assert f'name="slug" value="{slug}"' in banner
     # No `want`, no banner.
-    assert 'class="cl-want"' not in client.get("/cards/").text
+    assert 'cl-want"' not in client.get("/cards/").text
 
 
 def test_entering_an_episode_page_sets_the_carry_on_cookie(landing2):
@@ -584,7 +586,8 @@ def test_entering_an_episode_page_sets_the_carry_on_cookie(landing2):
                      headers={"Accept": "application/json"})
     assert cards_landing.LAST_COOKIE not in api.headers.get("set-cookie", "")
     page = client.get("/cards/").text
-    assert "CARRY ON WITH FRAMING FORMOSA" in page
+    assert "Carry on with Framing Formosa" in page
+    assert f'href="/cards/p/{entry.slug}/"' in page
 
 
 def test_the_picker_script_goes_into_the_wanted_episode_when_it_is_ready():

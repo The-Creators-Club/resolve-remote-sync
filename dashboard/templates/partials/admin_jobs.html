@@ -1,190 +1,128 @@
-{# THE OPERATOR'S VIEW OF THE FLEET QUEUE (TIMELINE-CARDS-INTO-CCSYNC.md
-   phase 4, 2026-08-30).
+{# The operator's view of the fleet queue, terminal look (phase 4; classic twin
+   partials/admin_jobs.html, TIMELINE-CARDS-INTO-CCSYNC.md phase 4, DDIAG-11).
 
-   Phase 4's stated risk is that the failure mode of a scheduler is INVISIBLE:
-   "a scheduler that quietly assigns nothing looks exactly like a fleet with
-   nothing to do". `GET /api/v1/jobs/<id>/why` has answered that since phase 0
-   for anyone with a terminal; this is the same answer on a page, inline, next
-   to the row it is about -- because the person who notices a lane spinning is
-   not holding a terminal.
-
-   Open jobs first, newest first. A queued job nobody can run is the whole
-   reason this page exists and never ages out at all.
-
-   [ SHOW FINISHED ] (DDIAG-11, 2026-09-04) is the other half: `failed` and
-   `abandoned` are terminal, so a fleet that had just spent its retry budget
-   on twelve whisper jobs showed an operator "Nothing is queued or running."
-   The poll lives on THIS element and carries the toggle in its own URL - the
-   page refreshes every 15 s, and a list the next refresh closes is a list
-   nobody can read. #}
-<div id="admin-jobs"
+   Same poll, same URLs, same confirms. #admin-jobs is the swap target of the
+   poll, the finished toggle, cancel and try again; it is a plain div holding
+   three windows, so each window's fold is re-applied by cc.js after a swap
+   (plan 3.1's keeper fallback). The per-machine "why" stays inline under its
+   row: a scheduler that quietly assigns nothing looks exactly like a fleet
+   with nothing to do. #}
+{% macro bar(hid, title, meta='', label='') -%}
+<div class="bar"><button class="fold" type="button" aria-expanded="true" aria-labelledby="{{ hid }}"><span class="fold-g" aria-hidden="true">&#9662;</span></button><span aria-hidden="true">&#9484;&#9472;&#9569;</span><h2 class="t" id="{{ hid }}">{{ title.split('_') | join('<span aria-hidden="true">_</span><span class="vh"> </span>' | safe) }}</h2><span aria-hidden="true">&#9566;</span><span class="bar-rule"></span>{% if meta %}<span class="meta">{{ meta }}</span>{% endif %}<span aria-hidden="true">&#9552;&#9488;</span></div>
+{%- endmacro %}
+{% macro finished_toggle() -%}
+  <button class="key sm w-12" type="button"
+          hx-get="/partials/admin/jobs{% if not show_finished %}?finished=1{% endif %}"
+          hx-target="#admin-jobs" hx-swap="outerHTML"
+          title="Jobs that ended in the last {{ window_hours }} hours: what was done, what failed, and what the fleet gave up on."><span class="t">{% if show_finished %}hide finished{% else %}show finished{% endif %}</span></button>
+{%- endmacro %}
+{% set state_tips = {
+  "running": "A computer has claimed it and is working on it now.",
+  "queued": "Waiting for a computer that can take it: the lines under it say who could, and why not.",
+  "pinned": "The fleet gave up on it, so the worker on this server is running it.",
+  "claimed": "A computer has taken it and is about to start.",
+  "done": "Finished.",
+  "failed": "Ended without finishing: cancelled, or it could not be done.",
+  "abandoned": "Every try failed and the retry budget ran out."} %}
+<div id="admin-jobs" class="sp-stack"
      hx-get="/partials/admin/jobs{% if show_finished %}?finished=1{% endif %}"
      hx-trigger="every 15s [document.visibilityState === 'visible']"
      hx-swap="outerHTML">
-  {# DUI-6: `error-banner` is what static/htmx_errors.js moves next to the button
-     that caused it. This panel swaps outerHTML, which preserves scroll, so a
-     refusal used to render a screen or two above the click that earned it. An
-     error with no control behind it stays here, which is where it belongs. #}
-  {% if error %}<div class="banner error-banner">▲ {{ error }}</div>{% endif %}
-  {% if notice %}<div class="banner">{{ notice }}</div>{% endif %}
+  {% if error %}<div class="note err error-banner"><span class="grow">{{ error }}</span></div>{% endif %}
+  {% if notice %}<div class="note ok"><span class="grow">{{ notice }}</span></div>{% endif %}
 
-  <div class="admin-users-box">
-    <div class="side-head">[ THE QUEUE ]
-      <span class="muted">{{ depth.queued }} queued, {{ depth.running }} running{% if depth.pinned %}, {{ depth.pinned }} pinned here{% endif %}{% if abandoned %}, {{ abandoned }} abandoned in the last {{ window_hours }} h{% endif %}{% if depth.oldest_age_s is not none %} · the oldest has waited {{ depth.oldest_age_s | eta }}{% endif %}</span></div>
-    {# The capacity chips. .mono-sm is `white-space: nowrap` (style.css), and
-       six chips on one unbreakable line was 633 px at 390: the class is what
-       mobile.css's admin section lets wrap (round 2, 2026-08-30). #}
-    <div class="mono-sm jobs-kinds" style="margin-top:0.4rem">
-      {% for row in kinds %}
-        <span class="chip{{ ' amber' if row.running >= row.cap }}" title="{{ row.running }} of at most {{ row.cap }} {{ row.kind }} jobs are running across the whole fleet{% if row.running >= row.cap %} - the next one waits for a free slot{% endif %}">[ {{ row.label }}: {{ row.running }}/{{ row.cap }} ]</span>
-      {% endfor %}
-      {# "Is there anywhere for a job the fleet gives up on to go" -- the
-         question phase 1 could only ever answer "no" to. #}
-      {% if pinning.available %}
-        <span class="chip green" title="a media job the fleet cannot finish is handed to this dashboard's own Timeline Cards worker instead of being abandoned">[ PIN: THIS SERVER ]</span>
-      {% else %}
-        <span class="chip" title="{{ pinning.why_not }}. A job whose retry budget runs out is abandoned, which is visible and honest, rather than pinned into a queue nothing drains.">[ NO PINNING HERE ]</span>
-      {% endif %}
+  <section class="win" data-win="queue" aria-labelledby="win-queue-t">
+    {{ bar("win-queue-t", "the_queue", depth.queued ~ " queued, " ~ depth.running ~ " running" ~ ((", " ~ depth.pinned ~ " pinned here") if depth.pinned else "") ~ ((", " ~ abandoned ~ " abandoned in the last " ~ window_hours ~ " h") if abandoned else ""), "the queue") }}
+    <div class="body">
+      <div class="caps jobs-kinds">
+        {% for row in kinds %}
+          <span class="cap{{ ' full' if row.running >= row.cap }}" title="{{ row.running }} of at most {{ row.cap }} {{ row.kind }} jobs are running across the whole fleet{% if row.running >= row.cap %}: the next one waits for a free slot{% endif %}"><span class="k">{{ row.label }}</span><span class="v">{{ row.running }}/{{ row.cap }}</span></span>
+        {% endfor %}
+        {% if pinning.available %}
+          <span class="tag ok" title="A media job the fleet cannot finish is handed to this dashboard's own Timeline Cards worker instead of being abandoned.">pin: this server</span>
+        {% else %}
+          <span class="tag mute" title="{{ pinning.why_not }}. A job whose retry budget runs out is abandoned, which is visible and honest, rather than pinned into a queue nothing drains.">no pinning here</span>
+        {% endif %}
+      </div>
+      <div class="hint">{% if depth.oldest_age_s is not none %}The oldest has waited {{ depth.oldest_age_s | eta }}. {% endif %}Each kind shows how many are running out of the most the whole fleet may run at once.</div>
     </div>
-  </div>
+  </section>
 
-  {# The toggle, defined once and used in both places it belongs: under an
-     empty queue, where it is the only thing worth clicking, and above the
-     finished list itself. #}
-  {% macro finished_toggle() %}
-    <button class="btn tap" type="button"
-            hx-get="/partials/admin/jobs{% if not show_finished %}?finished=1{% endif %}"
-            hx-target="#admin-jobs" hx-swap="outerHTML"
-            title="jobs that ended in the last {{ window_hours }} hours: what was done, what failed, and what the fleet gave up on">[ {{ "HIDE" if show_finished else "SHOW" }} FINISHED ]</button>
-  {% endmacro %}
-
-  {% if not jobs %}
-    <p class="muted" style="margin-top:0.8rem">Nothing is queued or running.</p>
-    {# DDIAG-11: "nothing is running" and "the fleet gave up on twelve things
-       overnight" are not the same sentence, and the second one used to be
-       invisible on this page. #}
-    {% if abandoned %}
-      <p class="muted" style="margin-top:0.4rem">{{ abandoned }} job{{ "s" if abandoned != 1 }} {{ "were" if abandoned != 1 else "was" }} abandoned in the last {{ window_hours }} h. {{ finished_toggle() }}</p>
+  <section class="win" data-win="jobs" aria-labelledby="win-jobs-t">
+    {{ bar("win-jobs-t", "jobs", "open jobs" if jobs else "nothing open", "jobs") }}
+    {% if not jobs %}
+      <div class="empty"><span class="glyph" aria-hidden="true">&middot; &middot; &middot;</span>Nothing is queued or running.
+        {% if abandoned %}<br>{{ abandoned }} job{{ "s" if abandoned != 1 }} {{ "were" if abandoned != 1 else "was" }} abandoned in the last {{ window_hours }} h.{% endif %}</div>
     {% else %}
-      <p style="margin-top:0.4rem">{{ finished_toggle() }}</p>
-    {% endif %}
-  {% else %}
-  {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row here is one job, so on a
-     phone each becomes a block of labelled lines rather than eight columns
-     of two characters each. #}
-  {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
-     600 px, but between 600 and 900 it is still a grid, and a grid that
-     is wider than the window has to scroll inside itself rather than take
-     the page with it (round 2 of the sweep, 2026-08-30). #}
-  <div class="scroll-x">
-  <table class="editors stack" style="margin-top:0.8rem">
-    <thead><tr>
-      <th>JOB</th><th>KIND</th><th>STATE</th><th>WHERE</th>
-      <th>PROGRESS</th><th>AGE</th><th>WHY</th><th></th>
-    </tr></thead>
-    <tbody>
-    {% for job in jobs %}
-      <tr class="editor-row">
-        <td class="mono-sm" data-label="JOB">#{{ job.id }}</td>
-        {# SECTION 10's two levers, as chips beside the kind. An admin
-           looking at a queue has to be able to see WHY one job is being
-           offered to a machine with somebody sitting at it, and why another
-           is waiting for one computer while four idle ones look on. #}
-        <td class="mono-sm" data-label="KIND">{{ job.label }}{% if job.forced %} <span class="chip amber" title="forced: every capable computer is asked at once, without waiting for anybody to leave their desk. A stop, an update, a proxy download that stopped itself and the capability filter still refuse it.">[ NOW ]</span>{% endif %}{% if job.target_machine %} <span class="chip" title="this job is for {{ job.target_machine }} only - no other computer is offered it, however idle it is">[ -&gt; {{ job.target_machine }} ]</span>{% endif %}</td>
-        <td class="mono-sm" data-label="STATE">{{ job.state | upper }}{% if job.cancel_requested_at %} <span class="muted">(cancelling)</span>{% endif %}</td>
-        <td class="who" data-label="WHERE">{% if job.claimed_machine %}{{ job.claimed_by }}/{{ job.claimed_machine }}{% else %}<span class="muted">nobody</span>{% endif %}</td>
-        {# A percentage where the runner measured one, the job id where it
-           could not: null is not zero, and a peaks pass that reads its input
-           in one gulp must not look wedged at 0%. #}
-        <td class="mono-sm" data-label="PROGRESS">{% if job.percent is not none %}{{ job.percent }}%{% else %}<span class="muted">-</span>{% endif %}</td>
-        <td class="muted mono-sm" data-label="AGE">{{ job.created_at | ago }}</td>
-        <td class="mono-sm" data-label="WHY">{{ job.why }}{% if job.attempts %} <span class="muted">({{ job.attempts }} attempt{{ "s" if job.attempts != 1 }}{% if job.last_error %}: {{ job.last_error[:120] }}{% endif %})</span>{% endif %}</td>
-        <td>
-          <form class="inline-form" hx-post="/partials/admin/jobs/{{ job.id }}/cancel{% if show_finished %}?finished=1{% endif %}"
-                hx-target="#admin-jobs" hx-swap="outerHTML"
-                hx-confirm="Stop job #{{ job.id }}? It is killed where it runs and not retried.">
-            {# .tap and a short confirm (MOBILE_PLAN.md §4 M3, 2026-08-30):
-               this is the control an admin most wants on a phone, and a
-               confirm longer than the dialog is a confirm nobody reads.
-               The full sentence stays on the button as its title. #}
-            <button class="btn tap" type="submit"
-                    title="a job a computer is running is killed there and not retried anywhere">[ CANCEL ]</button>
-          </form>
-        </td>
-      </tr>
-      <tr class="editor-row">
-        {# THE PER-MACHINE ANSWER, INLINE. "Nothing can run this" and "three
-           machines could but all three have somebody sitting at them" are
-           different problems with the same symptom (an empty grid). #}
-        <td data-label=""></td>
-        {# 798 px at 390 before round 2: one line per machine, each a whole
-           sentence, in a class that is nowrap. #}
-        <td colspan="7" class="mono-sm muted job-why" data-label="">
+    <div class="scroll-y sp-jobs-h"><div class="scroll-x"><table class="tbl jobs stack-sm">
+      <thead><tr><th title="The job's number: tools/jobs.py and the Timeline Cards page use it too.">job</th><th title="What kind of work it is.">kind</th><th>state</th><th title="The person and computer holding it.">where</th><th title="How far the computer says it has got.">progress</th><th title="When the job was put on the queue.">age</th><th></th></tr></thead>
+      <tbody>
+      {% for job in jobs %}
+        <tr class="editor-row">
+          <td data-label="job"><b class="num">#{{ job.id }}</b></td>
+          <td data-label="kind"><b>{{ job.label }}</b>{% if job.forced %} <span class="tag warn" title="Forced: every capable computer is asked at once, without waiting for anybody to leave their desk. A stop, an update, a proxy download that stopped itself and the capability filter still refuse it.">now</span>{% endif %}{% if job.target_machine %} <span class="tag hi" title="This job is for {{ job.target_machine }} only: no other computer is offered it, however idle it is.">for {{ job.target_machine }}</span>{% endif %}</td>
+          <td data-label="state"><span class="tag {{ {'running': 'hi', 'claimed': 'hi', 'pinned': 'warn'}.get(job.state, 'mute') }}" title="{{ state_tips.get(job.state, '') }}">{{ job.state | lower }}</span>{% if job.cancel_requested_at %} <span class="muted">(cancelling)</span>{% endif %}</td>
+          <td data-label="where">{% if job.claimed_machine %}{{ job.claimed_by }}/<b>{{ job.claimed_machine }}</b>{% else %}<span class="muted" title="No computer holds it yet.">nobody</span>{% endif %}</td>
+          {# null is not zero (a peaks pass may not measure one). #}
+          <td data-label="progress">{% if job.percent is not none %}<span class="pct"><span class="n">{{ job.percent }}%</span></span>{% else %}<span class="muted">-</span>{% endif %}</td>
+          <td data-label="age">{{ job.created_at | ago }}</td>
+          <td class="acts-cell" data-label="actions">
+            <form class="inline-form" hx-post="/partials/admin/jobs/{{ job.id }}/cancel{% if show_finished %}?finished=1{% endif %}"
+                  hx-target="#admin-jobs" hx-swap="outerHTML"
+                  hx-confirm="Stop job #{{ job.id }}? It is killed where it runs and not retried.">
+              <button class="key sm w-9" type="submit"
+                      title="Stop this job. A queued job is taken off; one a computer is running is killed there and not retried anywhere."><span class="t">cancel</span></button>
+            </form>
+          </td>
+        </tr>
+        <tr class="why-row"><td colspan="7" data-label=""><div class="job-why">
+          <div class="sum">{{ job.why }}{% if job.attempts %} <span class="muted">({{ job.attempts }} attempt{{ "s" if job.attempts != 1 }}{% if job.last_error %}: {{ job.last_error[:120] }}{% endif %})</span>{% endif %}</div>
           {% for m in job.machines %}
-            {{ "yes" if m.ok else "no " }} {{ m.editor }}/{{ m.machine }}: {{ m.why }}{% if m.sidecar_cause %}
-            {# regression-11 (2026-09-11b): the tool is missing BECAUSE its
-               installer failed, and the difference between that and "this
-               computer was never set up" is the difference between fixing it
-               and re-imaging it. The cause is already in the sentence; the
-               chip is what makes the line scannable in a list of eight. #}
-            <span class="chip amber" title="{{ m.sidecar_cause }}">[ SIDECAR FAILED ]</span>{% endif %}<br>
+            <div class="m {{ 'yes' if m.ok else 'no' }}"><span class="yn">{{ "yes" if m.ok else "no" }}</span><span><span class="who">{{ m.editor }}/{{ m.machine }}</span>: {{ m.why }}{% if m.sidecar_cause %} <span class="tag warn" title="{{ m.sidecar_cause }}">sidecar failed</span>{% endif %}</span></div>
           {% endfor %}
-        </td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
-  <p style="margin-top:0.6rem">{{ finished_toggle() }}</p>
-  {% endif %}
+        </div></td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div></div>
+    {% endif %}
+    <div class="foot-in slot-line">{{ finished_toggle() }}</div>
+  </section>
 
-  {# WHAT ENDED (DDIAG-11). The full `last_error` and not a 120-character
-     slice of it: this list is opened by somebody who has to decide whether
-     the clip is bad or the computer is, and the sentence ffmpeg wrote is the
-     evidence. [ TRY AGAIN ] queues the SAME inputs under a NEW id and leaves
-     this row alone - an attempt history that can be rewritten is not a
-     history. #}
   {% if show_finished %}
-  <div class="admin-users-box" style="margin-top:1rem">
-    <div class="side-head">[ FINISHED IN THE LAST {{ window_hours }} HOURS ]</div>
+  {# DDIAG-11: the full last_error. Try again queues the SAME inputs under a
+     NEW id and leaves this row alone. #}
+  <section class="win" data-win="finished" aria-labelledby="win-finished-t">
+    {{ bar("win-finished-t", "finished_in_the_last_" ~ window_hours ~ "_hours", (finished | length) ~ "", "finished jobs") }}
     {% if not finished %}
-      <p class="muted" style="margin-top:0.6rem">Nothing has finished in the last {{ window_hours }} hours.</p>
+      <div class="empty">Nothing has finished in the last {{ window_hours }} hours.</div>
     {% else %}
-    <div class="scroll-x">
-    <table class="editors stack" style="margin-top:0.6rem">
-      <thead><tr>
-        <th>JOB</th><th>KIND</th><th>STATE</th><th>WHAT</th>
-        <th>LAST HELD BY</th><th>WHEN</th><th>WHY IT ENDED</th><th></th>
-      </tr></thead>
+    <div class="scroll-y box-h"><div class="scroll-x"><table class="tbl stack-sm">
+      <thead><tr><th>job</th><th>kind</th><th>state</th><th title="The file it worked on, as a root name and a path inside it.">what</th><th title="The last computer that held it.">last held by</th><th>when</th><th>why it ended</th><th></th></tr></thead>
       <tbody>
       {% for job in finished %}
         <tr class="editor-row">
-          <td class="mono-sm" data-label="JOB">#{{ job.id }}</td>
-          <td class="mono-sm" data-label="KIND">{{ job.label }}</td>
-          <td class="mono-sm" data-label="STATE">{{ job.state | upper }}{% if job.state == "abandoned" %} <span class="chip amber" title="every attempt failed and the retry budget for this kind ran out. Nothing will pick it up again on its own.">[ GAVE UP ]</span>{% endif %}</td>
-          {# The (root, relative path) pair, which is the only spelling of a
-             job's paths anywhere: the vault is a drive letter here and a
-             container mount there. #}
-          <td class="mono-sm" data-label="WHAT">{{ job.inputs.get("root", "") }}:{{ job.inputs.get("rel_path", "") }}{% if job.inputs.get("retry_of") %} <span class="muted" title="this job was itself a new attempt at job #{{ job.inputs.get('retry_of') }}">(retry of #{{ job.inputs.get("retry_of") }})</span>{% endif %}</td>
-          <td class="who" data-label="LAST HELD BY">{% if job.claimed_machine %}{{ job.claimed_by }}/{{ job.claimed_machine }}{% else %}<span class="muted">nobody</span>{% endif %}</td>
-          <td class="muted mono-sm" data-label="WHEN">{{ job.updated_at | ago }}</td>
-          <td class="mono-sm" data-label="WHY IT ENDED">{% if job.last_error %}{{ job.last_error }}{% else %}<span class="muted">-</span>{% endif %}{% if job.attempts %} <span class="muted">({{ job.attempts }} attempt{{ "s" if job.attempts != 1 }})</span>{% endif %}</td>
-          <td>
+          <td data-label="job"><b class="num">#{{ job.id }}</b></td>
+          <td data-label="kind">{{ job.label }}</td>
+          <td data-label="state"><span class="tag {{ 'ok' if job.state == 'done' else 'err' }}" title="{{ state_tips.get(job.state, '') }}">{{ job.state | lower }}</span>{% if job.state == "abandoned" %} <span class="tag warn" title="Every attempt failed and the retry budget for this kind ran out. Nothing will pick it up again on its own.">gave up</span>{% endif %}</td>
+          <td class="wrap sp-path" data-label="what">{{ job.inputs.get("root", "") }}:{{ job.inputs.get("rel_path", "") }}{% if job.inputs.get("retry_of") %} <span class="muted" title="This job was itself a new attempt at job #{{ job.inputs.get('retry_of') }}.">(retry of #{{ job.inputs.get("retry_of") }})</span>{% endif %}</td>
+          <td data-label="last held by">{% if job.claimed_machine %}{{ job.claimed_by }}/<b>{{ job.claimed_machine }}</b>{% else %}<span class="muted">nobody</span>{% endif %}</td>
+          <td data-label="when">{{ job.updated_at | ago }}</td>
+          <td class="wrap sp-why" data-label="why it ended">{% if job.last_error %}{{ job.last_error }}{% else %}<span class="muted">-</span>{% endif %}{% if job.attempts %} <span class="muted">({{ job.attempts }} attempt{{ "s" if job.attempts != 1 }})</span>{% endif %}</td>
+          <td class="acts-cell" data-label="actions">
             {% if job.retryable %}
             <form class="inline-form" hx-post="/partials/admin/jobs/{{ job.id }}/retry?finished=1"
                   hx-target="#admin-jobs" hx-swap="outerHTML"
                   hx-confirm="Queue job #{{ job.id }} again? It goes back on as a new job.">
-              <button class="btn tap" type="submit"
-                      title="the same work, on the queue again under a new number. This row stays as it is, so the attempt history is still true.">[ TRY AGAIN ]</button>
+              <button class="key sm" type="submit"
+                      title="The same work, on the queue again under a new number. This row stays as it is, so the attempt history is still true."><span class="t">try again</span></button>
             </form>
             {% endif %}
           </td>
         </tr>
       {% endfor %}
       </tbody>
-    </table>
-    </div>
+    </table></div></div>
     {% endif %}
-  </div>
+  </section>
   {% endif %}
 </div>

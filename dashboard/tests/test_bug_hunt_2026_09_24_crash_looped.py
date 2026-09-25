@@ -141,7 +141,7 @@ def test_the_grid_chip_reads_a_crash_loop_as_a_crash_loop(tmp_path):
     client = TestClient(app)
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     html = client.get("/partials/fleet").text
-    assert "[ UPDATE KEPT CRASHING ]" in html
+    assert '<span class="w">update kept crashing</span>' in html
     assert "kept crashing on it and was rolled back" in html
     assert "Antivirus quarantine" not in html
 
@@ -209,4 +209,5 @@ def test_the_packages_row_offers_no_update_now_for_the_fled_build(tmp_path):
     html = client.get("/partials/admin/packages").text
     row = html[html.index("it kept crashing on"):]
     row = row[:row.index("</tr>")]
-    assert "[ UPDATE NOW ]" not in row
+    assert ">update now<" not in row
+    assert "/partials/admin/machines/update\"" not in row

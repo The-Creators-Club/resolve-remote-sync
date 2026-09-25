@@ -1,18 +1,13 @@
-"""The terminal home and project pages' server half (UI redesign port, phase
+"""The home and project pages' server half (UI redesign port, phase
 2, group `home`, 2026-09-25).
 
 docs/UI_REDESIGN_PORT_PLAN.md 5.1, 7.0, 7.1 row 2 and R15. Kept out of ui.py
 on purpose: several builders edit that file at once during the port, and the
 home group needs a handful of things of its own.
 
-- NEW-named partials on NEW routes. Their classic namesakes (`transfers`,
-  `notices`, `queue_section`, `admin_diagnostics`, `sidebar`) are fetched by
-  pages of other groups, so an overlay under the classic name would reach a
-  page of a group that is off. Each route answers 404 when `home` is not in
-  the asking page's resolved set: the new-named template exists only under
-  templates/cc/partials/, so the classic environment raises TemplateNotFound
-  and nothing classic is ever served in its place.
-- The two answers ui.py's shared POST routes hand back for a terminal page:
+- Routes for the home page's own windows (the projects tree, problems.log,
+  what is moving, the sync queue, a computer's answer).
+- The answers ui.py's shared POST routes hand back for these windows:
   a tick from the tree (`view=tree`) and an untick from the home queue
   (`view=home-queue`) in `partial_toggle`, and a dismiss from the home
   problems window (`view=home-problems`) in `partial_notice_dismiss`.
@@ -31,30 +26,21 @@ from typing import Any, Mapping
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from jinja2 import TemplateNotFound
 from markupsafe import Markup, escape
 
-from . import auth, db, notices, ui, ui_variant
+from . import auth, db, health, notices, ui
 from .api import build_projects_view, build_transfers_view, get_conn
 
 log = logging.getLogger("ccsync.dashboard.ui_home")
 
 router = APIRouter(default_response_class=HTMLResponse)
 
-NOT_THIS_LOOK = "not part of this page's look"
-
 # The views partial_toggle and partial_notice_dismiss route here.
 TOGGLE_VIEWS = ("tree", "home-queue")
 DISMISS_VIEWS = {"home-problems": "partials/home_problems.html"}
 
 
-def _render_new(request: Request, name: str, context: dict):
-    """Render a new-named terminal partial, or 404 when the asking page's
-    look has no `home` (the classic environment cannot load it)."""
-    try:
-        return ui._render(request, name, context)
-    except TemplateNotFound:
-        raise HTTPException(status_code=404, detail=NOT_THIS_LOOK) from None
+_render_new = ui._render
 
 
 def _signed_in(request: Request) -> str:
@@ -106,22 +92,113 @@ def _split_bytes(n: Any) -> tuple[str, str]:
     return number, unit or ""
 
 
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _owes(e: Mapping[str, Any]) -> bool:
+    """Does this computer have anything ticked (so its silence matters)?
+
+    home-project-4 (UI port review 2026-09-25): the readout asked
+    `why.reason != 'no_selection'`, but why_not_syncing returns only its
+    FIRST reason and a halt, a breaker, a full disk or "not signed in" rank
+    above no_selection, so a computer with nothing ticked was counted whenever
+    it had any other why. The row's own plan says it directly; a wired
+    computer (mode base) holds no tick by design (CR-28). A row with no
+    `plan` (an older caller) falls back to the why."""
+    plan = e.get("plan")
+    if isinstance(plan, Mapping):
+        if str(e.get("mode") or "").strip().lower() == "base":
+            return False
+        return bool(plan.get("count"))
+    return str(_mapping(e.get("why")).get("reason") or "") != "no_selection"
+
+
+def _is_silent(e: Mapping[str, Any]) -> bool:
+    """Has this computer stopped reporting? health._silence is the row's own
+    freshness test, the one fleet_headline uses. home-project-4: reading
+    `headline.reason == 'not_reporting'` missed every silent computer whose
+    headline led with a fault (breaker, disk full), because fleet_headline
+    returns a named fault before its silence check: an 8 h silent computer
+    counted as online."""
+    try:
+        if health._silence(e) is not None:
+            return True
+    except Exception:  # noqa: BLE001 - a malformed row is judged by its headline
+        pass
+    return str(_mapping(e.get("headline")).get("reason") or "") == "not_reporting"
+
+
+def plan_facts(conn: sqlite3.Connection, editor: str | None) -> dict[str, Any]:
+    """What the "moving" and "in sync" readouts count, from the same sources
+    the transfers window and sync_queue draw (home-project-5, UI port review
+    2026-09-25): the transfers view (lanes A, B and C, live and queued) and
+    the selections table (every tick, upload-only included). They used to
+    read Syncthing folder completion alone, so the page said "moving 0 B,
+    nothing waiting" and "no project is ticked anywhere" beside a transfers
+    window full of moving files. `editor` is the viewer's scope (None: the
+    whole fleet, an admin's view)."""
+    transfers = build_transfers_view(conn, editor=editor)
+    owed = 0
+    moving_files = 0
+    behind: set[str] = set()
+    getting_ready: set[str] = set()
+    for t in transfers.get("transfers") or []:
+        if t.get("granularity") != "file":
+            continue  # lane C's project rows are counted from the queue below
+        moving_files += 1
+        total, done = t.get("bytes_total"), t.get("bytes_done")
+        if total is not None and done is not None:
+            owed += max(0, int(total) - int(done))
+    for q in transfers.get("queues") or []:
+        slug = str(q.get("slug") or "")
+        if q.get("pending"):
+            if slug:
+                getting_ready.add(slug)
+            continue
+        owed += int(q.get("bytes") or 0)
+        if slug and (int(q.get("n_files") or 0) or int(q.get("bytes") or 0)):
+            behind.add(slug)
+    if editor:
+        ticked = {r["slug"] for r in db.fetch_selections(conn, editor)}
+    else:
+        ticked = set(db.fetch_all_selections(conn))
+    return {"owed_bytes": owed, "moving_files": moving_files, "behind": behind,
+            "getting_ready": getting_ready, "ticked": ticked}
+
+
+def _plan_facts_for(request: Request | None) -> dict[str, Any] | None:
+    if request is None:
+        return None
+    try:
+        conn = db.connect(request.app.state.settings.db_path)
+        try:
+            return plan_facts(conn, auth.scope_for(request).editor)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - the readouts fall back to the project view
+        log.exception("could not read the transfers and ticks for the home readouts")
+        return None
+
+
 def home_readouts(request: Request | None, fleet: Mapping[str, Any] | None,
                   view: Mapping[str, Any] | None,
-                  counts: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                  counts: Mapping[str, Any] | None = None,
+                  facts: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """The four readouts and the computers bar's meta, from what the grid
     already loads (5.1). Problems is the HUD's own count (errors, with the
     warnings as the foot), so the two can never disagree. A full page passes
     the SAME `notice_counts` its HUD draws (integrator, 2026-09-25): a second
-    read could land after a collector write and show 5 beside the HUD's 6."""
+    read could land after a collector write and show 5 beside the HUD's 6.
+    `facts` (plan_facts) feeds "moving" and "in sync"; without it, and with no
+    request to read it through, those two fall back to the project view."""
     fleet = fleet or {}
     view = view or {}
+    if facts is None:
+        facts = _plan_facts_for(request)
     editors = [e for e in (fleet.get("editors") or []) if isinstance(e, Mapping)]
-    counted = [e for e in editors
-               if str(((e.get("why") or {}) if isinstance(e.get("why"), Mapping) else {})
-                      .get("reason") or "") != "no_selection"]
-    silent = [e for e in counted
-              if str((e.get("headline") or {}).get("reason") or "") == "not_reporting"]
+    counted = [e for e in editors if _owes(e)]
+    silent = [e for e in counted if _is_silent(e)]
     online = len(counted) - len(silent)
     readouts: list[dict[str, Any]] = []
     if silent:
@@ -141,15 +218,30 @@ def home_readouts(request: Request | None, fleet: Mapping[str, Any] | None,
                             "minutes, out of every computer with a project ticked. A "
                             "computer with nothing ticked is left out: it owes nothing."})
     projects = [p for p in (view.get("projects") or []) if isinstance(p, Mapping)]
-    need = sum(int(p.get("need_bytes_total") or 0) for p in projects)
-    catching = [p for p in projects if p.get("editors_behind")]
+    if facts is not None:
+        need = int(facts.get("owed_bytes") or 0)
+        behind = set(facts.get("behind") or ())
+        n_files = int(facts.get("moving_files") or 0)
+        if behind:
+            mfoot = (f"{len(behind)} project{'s' if len(behind) != 1 else ''} "
+                     "catching up")
+        elif n_files:
+            mfoot = f"{n_files} file{'s' if n_files != 1 else ''} moving now"
+        else:
+            mfoot = "nothing waiting"
+    else:
+        need = sum(int(p.get("need_bytes_total") or 0) for p in projects)
+        catching = [p for p in projects if p.get("editors_behind")]
+        behind = {str(p.get("slug") or "") for p in catching}
+        mfoot = (f"{len(catching)} project{'s' if len(catching) != 1 else ''} "
+                 "catching up") if catching else "nothing waiting"
     number, unit = _split_bytes(need)
     readouts.append({"k": "moving", "big": number, "of": unit, "n": 1 if need else 0,
                      "total": 1, "tone": "",
-                     "foot": (f"{len(catching)} project{'s' if len(catching) != 1 else ''} "
-                              "catching up") if catching else "nothing waiting",
+                     "foot": mfoot,
                      "tip": "How much footage is still waiting to move between the server "
-                            "and the computers."})
+                            "and the computers: files moving now and files queued behind "
+                            "them, uploads and downloads."})
     is_admin = False
     if request is not None:
         try:
@@ -173,14 +265,22 @@ def home_readouts(request: Request | None, fleet: Mapping[str, Any] | None,
                          "foot": pfoot,
                          "tip": "Things the server found wrong that someone should look "
                                 "at. Each one is listed below with what to do."})
-    ticked = [p for p in projects if p.get("editors")]
-    in_sync = sum(1 for p in ticked if not p.get("editors_behind"))
-    readouts.append({"k": "in sync", "big": str(in_sync), "of": f"/ {len(ticked)}",
-                     "n": in_sync, "total": len(ticked),
-                     "tone": "ok" if ticked and in_sync == len(ticked) else "",
-                     "foot": ("all caught up" if in_sync == len(ticked)
-                              else f"{len(ticked) - in_sync} still catching up")
-                     if ticked else "no project is ticked anywhere",
+    if facts is not None:
+        ticked = set(facts.get("ticked") or ())
+        view_behind = {str(p.get("slug") or "") for p in projects if p.get("editors_behind")}
+        not_yet = (behind | view_behind | set(facts.get("getting_ready") or ())) & ticked
+        n_ticked = len(ticked)
+        in_sync = n_ticked - len(not_yet)
+    else:
+        ticked_rows = [p for p in projects if p.get("editors")]
+        n_ticked = len(ticked_rows)
+        in_sync = sum(1 for p in ticked_rows if not p.get("editors_behind"))
+    readouts.append({"k": "in sync", "big": str(in_sync), "of": f"/ {n_ticked}",
+                     "n": in_sync, "total": n_ticked,
+                     "tone": "ok" if n_ticked and in_sync == n_ticked else "",
+                     "foot": ("all caught up" if in_sync == n_ticked
+                              else f"{n_ticked - in_sync} still catching up")
+                     if n_ticked else "no project is ticked anywhere",
                      "tip": "Projects where every computer that ticked them has "
                             "everything, out of every ticked project."})
     collector_at = None
@@ -299,7 +399,6 @@ ui.templates.env.globals["cc_meter"] = cc_meter
 ui.templates.env.globals["cc_lane_tone"] = lane_tone
 ui.templates.env.globals["cc_tone"] = tone_of
 ui.templates.env.filters["cc_title"] = tree_label
-ui_variant.sync_envs()
 
 
 # ------------------------------------------------------------ routes
@@ -346,7 +445,8 @@ def _queue_render(request: Request, conn: sqlite3.Connection, editor: str,
 
 @router.get("/partials/home-queue")
 def partial_home_queue(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
-    """The sync queue and its FIX DESTINATION ROOT line, as partial_queue."""
+    """The sync queue and its FIX DESTINATION ROOT line: one build_queue_view
+    for both, so the root line costs no second queue build."""
     editor = ui._queue_editor(request)
     if editor is None:
         raise HTTPException(status_code=401, detail="not logged in")
@@ -356,9 +456,8 @@ def partial_home_queue(request: Request, conn: sqlite3.Connection = Depends(get_
 @router.get("/partials/computer-answer")
 def partial_computer_answer(request: Request, editor: str = "", machine: str = "",
                             conn: sqlite3.Connection = Depends(get_conn)):
-    """READ THE ANSWER on the terminal home: the same bundles
-    /partials/admin/diagnostics lists, drawn for the home window. Its
-    "every computer" link targets this route, never the classic one (1.5)."""
+    """READ THE ANSWER on the home page: a computer's stored diagnostics
+    bundles (v33, SYS-7), drawn for the home window. Admin only."""
     ui._require_admin_page(request)
     editor = editor.strip().lower()
     machine = machine.strip()
@@ -376,6 +475,26 @@ def partial_computer_answer(request: Request, editor: str = "", machine: str = "
 
 # ------------------------------------------------------------ shared-route answers
 
+# home-project-2 (UI port review 2026-09-25): the home page draws one plan
+# twice (the projects tree and sync_queue; the project page: the tree and
+# sync_plan), and each answer re-drew only its own window. The other one kept
+# the old state for up to 30 s, and its confirm described the opposite of
+# what the server held. Every plan answer fires this event; each of those
+# bodies re-reads on it (`cc-plan-changed from:body` in its hx-trigger). The
+# controls also send the state they mean (`mode=on` / `mode=off`), so a
+# stale one that slips through is a no-op, never the opposite write.
+PLAN_CHANGED = "cc-plan-changed"
+
+
+def plan_changed(response):
+    """Mark a tick/untick answer so the page's sibling plan windows re-read."""
+    try:
+        response.headers["HX-Trigger"] = PLAN_CHANGED
+    except Exception:  # noqa: BLE001 - a response without headers is not ours to fix
+        pass
+    return response
+
+
 def toggle_answer(request: Request, conn: sqlite3.Connection, editor: str,
                   target: str | None, view_kind: str):
     """What partial_toggle returns for a tick from the terminal tree or an
@@ -384,20 +503,21 @@ def toggle_answer(request: Request, conn: sqlite3.Connection, editor: str,
     tree or panel was about."""
     if view_kind == "tree":
         current = request.query_params.get("slug_page") or None
-        return _render_new(request, "partials/projects_tree.html",
-                           {"t": tree_context(request, conn, current, editor=editor,
-                                              machine=target or "")})
+        return plan_changed(_render_new(request, "partials/projects_tree.html",
+                                        {"t": tree_context(request, conn, current,
+                                                           editor=editor,
+                                                           machine=target or "")}))
     view_machine = (request.query_params.get("queue_machine") or "").strip()
     if view_machine and view_machine not in db.machines_of(conn, editor):
         view_machine = ""
     if target is not None:
         view_machine = target
-    return _queue_render(request, conn, editor, view_machine)
+    return plan_changed(_queue_render(request, conn, editor, view_machine))
 
 
 def dismiss_answer(request: Request, conn: sqlite3.Connection, view_kind: str,
                    error: str | None):
     """What partial_notice_dismiss returns for a dismiss from a terminal
-    window: that window's markup, never the classic `admin-users-box`."""
+    window: that window's markup."""
     return _render_new(request, DISMISS_VIEWS[view_kind],
                        ui._notices_context(conn, error))

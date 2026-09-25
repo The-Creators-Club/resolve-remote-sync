@@ -3,7 +3,11 @@
    else is components.css; only what these five pages add lives here, every
    class `sp-` prefixed or a live hook the pages already carry. */
 
-.sp-stack { display: grid; gap: calc(22px * var(--d)); }
+/* settings-3 (UI port review 2026-09-25): an implicit auto track sizes to
+   its widest child, and a .win cannot shrink below its nowrap bar, so one
+   long bar meta widened the whole page on a phone (Sync plans by 240 px).
+   minmax(0, 1fr) holds the track to the page; the bar meta ellipsises. */
+.sp-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: calc(22px * var(--d)); }
 .sp-stack > div:empty { display: none; }
 .sp-stack > .lede, .sp-page > .lede { margin: 0; }
 .sp-gap { margin-top: 12px; }
@@ -28,13 +32,24 @@
 .sp-jobs-h { max-height: 60vh; }
 .sp-audit-h { max-height: 70vh; }
 .sp-check-h { max-height: 70vh; }
-.sp-eula { max-height: 14rem; white-space: pre-wrap; margin: 0; }
+/* overflow-wrap (verifier, settings-3/-4 class, 2026-09-25): a long path in
+   the EULA text made this .scroll-y scroll sideways at 390. */
+.sp-eula { max-height: 14rem; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
 
 .sp-filter { margin-bottom: 8px; }
 .sp-filter input { width: 100%; }
 
 /* A key whose label swaps for a busy word keeps its box (nothing shifts). */
 form.htmx-request .sp-busy { pointer-events: none; opacity: 0.7; }
+/* DUI-4: the busy words ("creating the account...") are what a two-minute
+   create shows while it waits. terminal.css hides .busy-t unless the key is
+   .busy, which nothing sets on these, so the words never appeared (T14,
+   2026-09-25). Both labels share one grid cell, as #pw-go's do, so the key
+   keeps the width of the longer one and nothing shifts. */
+.key.sp-busy { display: inline-grid; place-items: center; }
+.key.sp-busy > .t, .key.sp-busy > .busy-t { grid-area: 1 / 1; display: inline; }
+.key.sp-busy > .busy-t, form.htmx-request .key.sp-busy > .t { visibility: hidden; }
+form.htmx-request .key.sp-busy > .busy-t { visibility: visible; }
 
 /* The one-time secret: never foldable, always seen (plan 3.1, wave 5). */
 .sp-minted { border-color: var(--hi); }
@@ -78,4 +93,10 @@ form.htmx-request .sp-busy { pointer-events: none; opacity: 0.7; }
   .sp-w-key, .sp-w-pw, .sp-w-name, .sp-w-label, .sp-w-md { width: 100%; }
   .sp-w-step { width: auto; }
   #setup-tasks-body .task-actions, #setup-tasks-body .task-actions .inline { text-align: left; justify-content: flex-start; }
+}
+/* The 12 px phone floor for this sheet's own small text (a11y-copy-7,
+   UI port review 2026-09-25): page sheets load after phone.css, so its
+   floor list cannot reach a rule written here. */
+@media (max-width: 760px) {
+  .sp-caps, .sp-fp { font-size: 12px; }
 }

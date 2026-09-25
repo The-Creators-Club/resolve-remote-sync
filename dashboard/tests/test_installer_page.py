@@ -68,7 +68,9 @@ def test_the_windows_pick_prepares_the_editor_for_smartscreen(env):
     sha = _publish(client)
 
     page = _page(client)
-    windows = page.split("[ WINDOWS ]", 1)[1].split("[ MACOS ]", 1)[0]
+    # The terminal page draws one window per platform (`win-installer-<plat>`).
+    windows = page.split('id="win-installer-windows"', 1)[1].split(
+        'id="win-installer-macos"', 1)[0]
     assert "Windows protected your PC" in windows
     assert "More info" in windows and "Run anyway" in windows
     # The fingerprint is already on the page; the paragraph points at it
@@ -83,5 +85,9 @@ def test_the_mac_pick_does_not_carry_the_windows_warning(env):
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     _publish(client, platform="macos", body=b"mac-installer")
 
-    macos = _page(client).split("[ MACOS ]", 1)[1]
+    page = _page(client)
+    macos = page.split('id="win-installer-macos"', 1)[1]
+    # The Mac package really is drawn in that window (not the empty state),
+    # so the absence below is about the warning, not about an empty window.
+    assert "Download for macOS" in macos
     assert "Windows protected your PC" not in macos

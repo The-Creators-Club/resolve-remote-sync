@@ -572,9 +572,18 @@ def test_the_vendor_site_still_gets_the_mac_commands(conn):
 def _labels(text: str) -> set[str]:
     """The controls a sentence names. D8 (UI port phase 7, 2026-09-25): a
     control is its sentence-case label in double quotes (`press "Resume"`);
-    returned as the classic key's text, `[ RESUME ]`, which is what the
-    classic panels below still draw (the terminal key uppercases by CSS)."""
-    return {f"[ {q.upper()} ]" for q in re.findall(r'"([A-Z][a-z][^"]*)"', text)}
+    returned lower-cased, to compare with `_keys` (the terminal key's case
+    is the template's, and CSS decides how it is drawn)."""
+    return {q.lower() for q in re.findall(r'"([A-Z][a-z][^"]*)"', text)}
+
+
+def _keys(template: str) -> set[str]:
+    """The label of every terminal key in a template (`<span class="t">`),
+    lower-cased and unescaped. The classic look drew `[ LABEL ]`; it was
+    retired 2026-09-25, and the terminal key is the only control left."""
+    import html
+    return {html.unescape(re.sub(r"\s+", " ", t)).strip().lower()
+            for t in re.findall(r'<span class="t">(.*?)</span>', template, flags=re.S)}
 
 
 def test_every_button_the_halt_alerts_name_is_on_the_halt_panel(conn):
@@ -592,7 +601,7 @@ def test_every_button_the_halt_alerts_name_is_on_the_halt_panel(conn):
         named |= _labels(finding["fix"])
     assert named, "the halt alerts name no button at all"
     for label in named:
-        assert label in panel, f"{label} is not on the fleet halt panel"
+        assert label in _keys(panel), f"{label} is not on the fleet halt panel"
 
 
 def test_the_recovery_step_sends_the_admin_to_the_halt_panel():
@@ -600,8 +609,9 @@ def test_the_recovery_step_sends_the_admin_to_the_halt_panel():
     assert step.href == "/admin/users#admin-fleet-halt"
     panel = (TEMPLATES / "partials" / "fleet_halt.html").read_text(encoding="utf-8")
     assert 'id="admin-fleet-halt"' in panel
+    assert _labels(step.body)
     for label in _labels(step.body):
-        assert label in panel
+        assert label in _keys(panel)
 
 
 
@@ -642,20 +652,19 @@ def test_no_server_notice_sends_the_owner_to_a_page_that_does_not_exist(conn):
 
 
 def test_the_named_collector_panel_is_where_the_copy_says():
-    """The replacement copy names the [ COLLECTOR ] panel on SYNC STATUS. It is
-    included at the end of the fleet grid partial, i.e. under the computers
-    table; it is NOT at the bottom of the page (fleet.html renders plan
-    changes, the diagnostics div, transfers, the queue and project roots
-    after the grid). Review round 2026-09-25: the first copy said "at the
-    bottom of SYNC STATUS", which sent the owner to project roots."""
-    grid = (TEMPLATES / "partials" / "fleet_grid.html").read_text(encoding="utf-8")
-    panel = (TEMPLATES / "partials" / "collector_health.html").read_text(encoding="utf-8")
-    page = (TEMPLATES / "fleet.html").read_text(encoding="utf-8")
-    include = grid.index('include "partials/collector_health.html"')
-    first_table_end = grid.index("</table>")
-    assert first_table_end < include            # under the computers table
-    assert "[ COLLECTOR ]" in panel
-    assert 'include "partials/fleet_grid.html"' in page
+    """The replacement copy names the Collector panel. Review round
+    2026-09-25: the first copy said "at the bottom of SYNC STATUS", which
+    sent the owner to project roots. Since the terminal look became the only
+    one (2026-09-25) the panel is a window on Settings, Health
+    (#fleet-collector, filled from /partials/health-collector), no longer a
+    block under the fleet grid; the copy names the panel, never a region,
+    and /go/collector resolves it."""
+    page = (TEMPLATES / "admin_health.html").read_text(encoding="utf-8")
+    assert re.search(r'<section class="win" data-win="collector" id="fleet-collector">',
+                     page)
+    assert '<h2 class="t">collector</h2>' in page
+    assert 'hx-get="/partials/health-collector"' in page
+    assert (TEMPLATES / "partials" / "health_collector.html").exists()
     here = Path(notices.__file__)
     src = here.read_text(encoding="utf-8") + here.with_name("collector.py").read_text(
         encoding="utf-8")
@@ -667,8 +676,8 @@ def test_the_named_collector_panel_is_where_the_copy_says():
     assert flat.count("the Collector panel") >= 4
     fix = notices._JOB_MEANING["config"][1]
     assert "Collector panel" in fix
-    from ccsync_dashboard import ui_variant
-    assert ui_variant.go_href("collector", frozenset()) == "/#fleet-collector"
+    from ccsync_dashboard import ui_chrome
+    assert ui_chrome.go_href("collector") == "/admin/health#fleet-collector"
 
 
 def test_the_resolve_undo_step_claims_no_dashboard_button_that_does_not_exist():
@@ -693,7 +702,7 @@ def test_the_resolve_undo_step_claims_no_dashboard_button_that_does_not_exist():
     gate = panel.index("{% if recovery_problem == 'resolve' %}")
     anchor = panel.index('id="resolve-undo"')
     assert gate < anchor < panel.index("{% endif %}", anchor)
-    assert "[ UNDO THIS CHANGE ]" in panel
+    assert "undo this change" in _keys(panel)
     # The plan list renders [ GO ] above the panel, in the same partial, so
     # the fragment resolves without a page load.
     assert panel.index("step.href") < anchor
@@ -726,7 +735,7 @@ def test_the_rollback_plans_create_step_names_a_page_the_dashboard_serves():
     assert '"Create & link"' in step.body  # D8, UI port phase 7
     assert "Projects page" not in step.body
     setup = (TEMPLATES / "partials" / "project_setup_panel.html").read_text(encoding="utf-8")
-    assert "[ CREATE &amp; LINK ]" in setup
+    assert "create & link" in _keys(setup)
 
 
 def test_every_recovery_step_href_is_a_page_or_an_anchor_on_this_one():
@@ -1317,13 +1326,21 @@ def test_the_named_controls_exist_under_the_names_the_copy_uses():
     owner to a Settings page called Projects."""
     from ccsync_dashboard import collector, invariants
     corpus = "".join(p.read_text(encoding="utf-8") for p in TEMPLATES.rglob("*.html"))
-    assert "[ ASK THIS COMPUTER WHY ]" in corpus
+    assert "ask this computer why" in _keys(corpus)
     assert '\\"Ask this computer why\\", then' in _code(alerts)  # D8
     assert "[ ASK WHY ]" not in _code(alerts)
     assert "[ UPDATE THE DASHBOARD ]" not in _code(notices)
-    assert 'press \\"Update now\\" in the Dashboard panel' in _code(notices)
+    # The window on Packages is titled "this dashboard" in the terminal look
+    # (it was [ DASHBOARD ] in the retired classic one), so the copy names it
+    # by that title.
+    assert 'press \\"Update now\\" in the This dashboard panel' in _code(notices)
+    assert "Dashboard panel" not in _code(notices).replace("This dashboard panel", "")
     upd = (TEMPLATES / "partials" / "admin_dashboard_update.html").read_text(encoding="utf-8")
-    assert "[ DASHBOARD ]" in upd and "[ UPDATE NOW ]" in upd
+    pkgs = (TEMPLATES / "admin_packages.html").read_text(encoding="utf-8")
+    assert 'data-win="this_dashboard"' in pkgs
+    assert '"this_dashboard" | cc_title' in pkgs
+    assert 'hx-get="/partials/admin/dashboard-update"' in pkgs
+    assert "update now" in _keys(upd)
     for module in (collector, invariants):
         assert "Settings, Projects" not in _code(module)
     # Review round: the tray's "Set up ... on the server" item shows only for

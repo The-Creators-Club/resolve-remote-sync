@@ -167,9 +167,6 @@ _OPEN_GET_ONLY = frozenset({
     "/favicon.ico", "/manifest.webmanifest", "/sw.js", "/offline",
     "/cards/manifest.webmanifest", "/cards/icon.svg", "/cards/sw.js",
     "/.well-known/assetlinks.json",
-    # UI port 3.4 (wave 6): the signed-out "use the classic look" escape.
-    # The route refuses variant=cc without a session itself.
-    "/ui/preview",
 })
 
 _READ_METHODS = frozenset({"GET", "HEAD"})
@@ -770,6 +767,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             site_store.seed_from_env_once(conn, settings)
         except Exception:  # noqa: BLE001 - never block boot over the manifest
             log.exception("site_settings seed-from-env failed")
+        # The look switch was retired on 2026-09-25 (the CC Terminal look is
+        # the only look): a `ui_terminal_groups` / `ui_preview` row an earlier
+        # build stored is read by nothing now, and is removed so an export or
+        # a history diff never carries it.
+        try:
+            site_store.drop_retired_keys(conn)
+        except Exception:  # noqa: BLE001 - never block boot over a stale row
+            log.exception("could not remove retired site settings")
         # UX-10 (2026-08-28): configuration this server was STARTED with. A
         # quoted or space-padded secret is the failure that looks like a wrong
         # password on every machine at once, and nothing anywhere said so.
@@ -1103,6 +1108,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 {"detail": "missing or bad CSRF token: reload the page and try again"},
                 status_code=403,
             )
+        return await call_next(request)
+
+    # A page drawn before the look switch was retired (2026-09-25: the classic
+    # look, or a 0.7.62 terminal page carrying its signed group set) keeps
+    # polling after a deploy. Its htmx requests do not carry the one header
+    # every page's body sends now (ui.LOOK_HEADER), so they are answered with
+    # HX-Refresh and NOTHING ELSE, BEFORE the route runs: the page reloads
+    # into the current look, and a tick or a dismiss from the old page is
+    # never committed behind an answer the page then undoes on screen (UI
+    # port review mechanism-1, whose 409 came after the write). The mounted
+    # apps and the JSON API are not dashboard pages and are left alone.
+    _stale_exempt = ("/api/", "/cards/", "/broll/", "/music/", "/ytdl/", "/static/")
+
+    @app.middleware("http")
+    async def stale_page_gate(request, call_next):
+        if (request.headers.get("hx-request", "").lower() == "true"
+                and not request.url.path.startswith(_stale_exempt)
+                and request.headers.get(ui.LOOK_HEADER, "") != ui.LOOK_VALUE):
+            return Response(b"", status_code=200, headers={"HX-Refresh": "true"})
         return await call_next(request)
 
     @app.middleware("http")
@@ -1564,11 +1588,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(subject_data_api.router)
     app.include_router(ui.router)
-    # The terminal look's per-browser cookie and /go/<panel> (UI port 7.0).
-    from . import ui_variant
-    app.include_router(ui_variant.router)
-    # The terminal chrome's own route (/partials/halt-line) and the HUD's
-    # Jinja globals (UI port phase 1).
+    # The chrome's own routes (/partials/halt-line, /go/<panel>).
     from . import ui_chrome
     app.include_router(ui_chrome.router)
     # The terminal home and project pages' new-named routes (UI port phase 2).
@@ -1690,7 +1710,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Browsers request /favicon.ico unprompted (the path is already in
     # _OPEN_EXACT); serve the product mark instead of a 404. The
-    # <link rel="icon"> in base.html covers everything else.
+    # <link rel="icon"> in shell.html covers everything else.
     favicon_file = STATIC_DIR / "favicon.ico"
     if favicon_file.is_file():
         @app.get("/favicon.ico", include_in_schema=False)

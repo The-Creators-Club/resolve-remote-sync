@@ -150,13 +150,17 @@ def test_every_glossary_row_is_its_own_anchor():
 
 def test_the_four_surfaces_deep_link_into_the_glossary():
     """UX-3 named four places the vocabulary appears. Each has to point at a
-    target that exists, which is the half a rename breaks silently."""
+    target that exists, which is the half a rename breaks silently.
+
+    Terminal look (2026-09-25): the fleet grid's glossary link is on its
+    window bar, which the page draws (fleet.html), and the sidebar's upload
+    only chip is the projects tree's tag (partials/projects_tree.html)."""
     from ccsync_dashboard import ui
 
     templates = Path(__file__).resolve().parents[1] / "templates"
     body, _ = help_page.render_markdown(REPO_DOC.read_text(encoding="utf-8"))
-    for name in ("partials/fleet_grid.html", "partials/project_detail.html",
-                 "partials/sidebar.html", "partials/topbar.html",
+    for name in ("fleet.html", "partials/project_detail.html",
+                 "partials/projects_tree.html", "partials/topbar.html",
                  "admin_assignments.html"):
         text = (templates / name).read_text(encoding="utf-8")
         assert ("GLOSSARY_HREF" in text or "term_href" in text
@@ -177,17 +181,18 @@ def test_the_page_needs_a_session(client):
 def test_an_editor_can_read_it(client):
     page = as_user(client).get("/help")
     assert page.status_code == 200
-    assert "[ HELP ]" in page.text
+    assert "&gt;</span> HELP</span></h1>" in page.text
     assert "How CC Sync works" in page.text
     assert 'id="glossary"' in page.text
     # The strip is admin furniture; an editor gets the document.
-    assert "settings-nav" not in page.text
+    assert 'class="snav' not in page.text
 
 
 def test_an_admin_gets_the_strip_with_help_marked(client):
     page = as_user(client, "owen").get("/help")
     assert page.status_code == 200
-    assert 'settings-nav-current" href="/help"' in page.text
+    assert 'class="snav' in page.text
+    assert '<a href="/help" aria-current="page">' in page.text
 
 
 def test_a_missing_document_renders_a_sentence_not_a_stack_trace(client, monkeypatch):
@@ -390,9 +395,12 @@ def test_the_page_lists_the_documents_and_lights_the_current_one(client, docs):
     # document, and an editor asking for it gets the index and a 404.
     page = as_user(client, "owen").get("/help/GOTCHAS.md")
     assert page.status_code == 200
-    assert "[ DOCUMENTS ]" in page.text
+    assert 'id="win-documents"' in page.text
     assert 'href="/help/legal/EULA.md"' in page.text
-    assert 'class="help-file help-file-current"' in page.text
+    nav = page.text[page.text.index('class="body filenav help-files"'):]
+    nav = nav[:nav.index("</nav>")]
+    assert 'href="/help/GOTCHAS.md" aria-current="page"' in nav
+    assert nav.count('aria-current="page"') == 1
     assert "Gotchas" in page.text
 
 

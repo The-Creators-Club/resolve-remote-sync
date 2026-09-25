@@ -4,10 +4,9 @@
    the dashboard's own cc.js is not loaded here and the injected HUD carries
    no script.
 
-   Everything it does is gated on html.cc, which the head script sets from the
-   dashboard's readable cookie and the injected topbar's marker then confirms
-   or clears. With html.cc absent it changes nothing, so the classic page is
-   exactly what it was:
+   Everything it does is gated on html.cc, which each app's index.html
+   carries in its markup: the terminal look is the only look (2026-09-25).
+   With html.cc absent (a test harness) it changes nothing:
 
    windows  an element with data-cc-win="title" gets a bar (a real fold button
             and the title) and the window look. The fold state is kept per
@@ -187,6 +186,10 @@
   function showTip(el) {
     if (el.hasAttribute('title')) {
       el.setAttribute('data-cc-tip', el.getAttribute('title'));
+      // Kept as the accessible description: a title moved out of sight must
+      // not take a screen reader's only explanation with it (a11y-copy-3,
+      // UI port review 2026-09-25).
+      if (!el.hasAttribute('aria-description')) el.setAttribute('aria-description', el.getAttribute('title'));
       el.removeAttribute('title');
     }
     var text = el.getAttribute('data-cc-tip');
@@ -225,12 +228,22 @@
     }
     if (tipFor && el !== tipFor) hideTip();
   });
+  // Keyboard focus shows the tip as hover does, and so does the focus a tap
+  // gives a control on a touch screen, which the click path above leaves
+  // alone so the control still acts (a11y-copy-3).
+  document.addEventListener('focusin', function (e) {
+    if (!active()) return;
+    var el = tipTarget(e.target);
+    if (el && el !== tipFor) showTip(el); else if (!el) hideTip();
+  });
+  document.addEventListener('focusout', function () { if (active()) hideTip(); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') hideTip(); });
   window.addEventListener('scroll', hideTip, { passive: true });
 
   function restoreTitles() {
     Array.prototype.forEach.call(document.querySelectorAll('[data-cc-tip]'), function (el) {
       if (!el.hasAttribute('title')) el.setAttribute('title', el.getAttribute('data-cc-tip'));
+      if (el.getAttribute('aria-description') === el.getAttribute('data-cc-tip')) el.removeAttribute('aria-description');
       el.removeAttribute('data-cc-tip');
     });
     hideTip();
@@ -245,10 +258,15 @@
     if (!dialog) {
       dialog = document.createElement('dialog');
       dialog.className = 'cc-spa-dialog';
+      // Named, and described by the question, so a screen reader says what
+      // is being asked when focus lands on Cancel (a11y-copy-2).
+      dialog.setAttribute('aria-label', 'Are you sure?');
+      dialog.setAttribute('aria-describedby', 'cc-spa-confirm-q');
       var form = document.createElement('form');
       form.method = 'dialog';
       var q = document.createElement('p');
       q.className = 'cc-spa-q';
+      q.id = 'cc-spa-confirm-q';
       var row = document.createElement('div');
       row.className = 'cc-spa-acts';
       var cancel = document.createElement('button');

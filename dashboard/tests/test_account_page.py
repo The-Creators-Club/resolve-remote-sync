@@ -20,9 +20,13 @@ from ccsync_dashboard import account_api, account_ui, auth, cards_landing, db, l
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
+from conftest import HX
+
 PASSWORD = "correct-horse-battery"
 STRONG = "kX9-quiet-harbour-42-zephyr"   # passes the boot secret floor
 EM_DASH = chr(0x2014)
+# The page's own heading: "> YOUR ACCOUNT" (terminal look, no brackets).
+YOUR_ACCOUNT_H1 = '<span class="prompt" aria-hidden="true">&gt;</span> YOUR ACCOUNT</span>'
 
 
 def _settings(tmp_path, **kwargs) -> Settings:
@@ -65,7 +69,9 @@ class Signed:
 
     @property
     def h(self) -> dict[str, str]:
-        return {"X-CSRF-Token": self.csrf, "HX-Request": "true"}
+        # X-CC-UI rides every htmx call a page makes (shell.html's
+        # hx-headers); without it app.stale_page_gate answers HX-Refresh.
+        return {"X-CSRF-Token": self.csrf, **HX}
 
     def close(self):
         self.client.__exit__(None, None, None)
@@ -182,15 +188,19 @@ def test_page_renders_for_an_editor_with_every_panel(app, browsers):
     resp = ed.client.get("/account")
     assert resp.status_code == 200, resp.text
     html = resp.text
-    for marker in ("[ YOUR ACCOUNT ]", 'id="account-you"', 'id="account-password"',
-                   "[ YOUR COMPUTERS ]", "[ YOUR WIRED COMPUTERS ]", 'id="account-settings"',
+    for marker in (YOUR_ACCOUNT_H1, 'id="account-you"', 'id="account-password"',
+                   '<h2 class="sec">your computers', '<h2 class="sec">your wired computers',
+                   'id="account-settings"',
                    'id="account-sessions-wrap"', "JS-RIG", "fleet jobs",
                    'hx-get="/partials/account/sync-keys"', 'autocomplete="current-password"',
                    'autocomplete="new-password"'):
         assert marker in html, marker
     assert "This page is about <b>you</b> only" not in html
-    assert "/admin/users" not in html.split('id="account-you"')[0].split("[ YOUR ACCOUNT ]")[1]
-    assert "[ UPDATE NOW ]" not in html and "[ ASK THIS COMPUTER WHY ]" not in html
+    assert "/admin/users" not in html.split('id="account-you"')[0].split(YOUR_ACCOUNT_H1)[1]
+    assert "/partials/admin/machines/update" not in html
+    assert "/partials/admin/machines/ask-why" not in html
+    assert '<span class="t">Update now</span>' not in html
+    assert '<span class="t">Ask this computer why</span>' not in html
     # the computer's F5 controls are there (owner, accepts reported)
     assert 'name="jobs_enabled"' in html and 'name="jobs_kinds"' in html
     assert 'name="mode"' not in html                       # CR-88: never requestable
@@ -201,8 +211,9 @@ def test_page_renders_for_an_admin_with_the_note_and_admin_buttons(app, browsers
     admin = browsers("owen")
     html = admin.client.get("/account").text
     assert "This page is about <b>you</b> only" in html
-    assert 'href="/admin/users">[ SETTINGS, USERS ]' in html
-    assert "[ ASK THIS COMPUTER WHY ]" in html
+    assert 'href="/admin/users"><span class="t">Settings, Users</span>' in html
+    assert '<span class="t">Ask this computer why</span>' in html
+    assert 'hx-post="/partials/admin/machines/ask-why?view=none"' in html
     assert "OWEN-RIG" in html and "wired to the server" in html
 
 
@@ -224,7 +235,13 @@ def test_the_password_and_you_panels_are_never_polled(app, browsers):
         assert ids[key] is False, f"{key} sits inside a polling element"
     # ...while the computers and the browsers list DO refresh themselves
     html = ed.client.get("/account").text
-    assert re.search(r'id="pc-[0-9a-f]{12}"\s+hx-get="/partials/account/computer\?machine=JS-RIG"', html)
+    # Each computer window's frame stays put; a hidden poll inside it asks
+    # its own route and takes only that window's body (hx-select-oob).
+    m = re.search(r'id="(pc-[0-9a-f]{12})".*?<div class="ev-poll"[^>]*?'
+                  r'hx-get="/partials/account/computer\?machine=JS-RIG"[^>]*?'
+                  r'hx-trigger="every 30s[^"]*"[^>]*?hx-select-oob="#(pc-[0-9a-f]{12})-body',
+                  html, re.S)
+    assert m and m.group(1) == m.group(2)
     assert 'hx-get="/partials/account/sessions"' in html
 
 
@@ -433,7 +450,7 @@ def test_topbar_shows_the_name_and_links_to_account(app, browsers):
     ed = browsers("jsmith")
     html = ed.client.get("/account").text
     assert 'href="/account" title="signed in as jsmith">J. Smith' in html
-    assert "[ YOUR ACCOUNT ]" in html
+    assert YOUR_ACCOUNT_H1 in html
     # the topbar the SPAs fetch renders through the same context
     top = ed.client.get("/partials/topbar").text
     assert 'title="signed in as jsmith">J. Smith' in top
@@ -451,7 +468,8 @@ def test_fleet_grid_shows_name_with_sign_in_name_muted(app, browsers):
     admin = browsers("owen")
     html = admin.client.get("/partials/fleet").text
     assert 'title="signed in as jsmith">J. Smith' in html
-    assert '<div class="muted mono-sm">jsmith</div>' in html
+    # the sign-in name rides muted (the <small>) beside the shown name
+    assert '<small title="signed in as jsmith">J. Smith (jsmith)</small>' in html
 
 
 def test_audit_and_plan_changes_show_the_name(app, browsers):
@@ -469,11 +487,12 @@ def test_audit_and_plan_changes_show_the_name(app, browsers):
         conn.close()
     admin = browsers("owen")
     audit = admin.client.get("/partials/admin/audit").text
-    assert 'title="jsmith">J. Smith</td>' in audit
+    assert 'data-label="who" title="jsmith"><b>J. Smith</b></td>' in audit
     plan = admin.client.get("/partials/plan-changes").text
-    assert "RECENT PLAN CHANGES" in plan
-    assert 'title="jsmith">J. Smith</td>' in plan          # WHO
-    assert 'title="jsmith">J. Smith</td>' in plan.split("[ TICKED ]")[1]   # EDITOR
+    assert 'id="plan-changes"' in plan
+    assert 'data-label="who" title="jsmith"><b>J. Smith</b></td>' in plan          # WHO
+    assert ('data-label="editor" title="jsmith">J. Smith</td>'
+            in plan.split('<span class="w">ticked</span>')[1])                      # EDITOR
 
 
 def test_users_page_has_the_shown_as_column(tmp_path, strict, browsers):
@@ -488,7 +507,7 @@ def test_users_page_has_the_shown_as_column(tmp_path, strict, browsers):
     _set_name(application, "jsmith", "J. Smith")
     admin = browsers("owen", application, "owen-password-long")
     html = admin.client.get("/admin/users").text
-    assert "SHOWN AS" in html
+    assert ">shown as</th>" in html
     assert 'hx-post="/partials/admin/users/display-name"' in html
     assert 'value="J. Smith"' in html
 
@@ -563,9 +582,10 @@ def test_sessions_panel_and_sign_out_others(app, browsers):
     browsers("jsmith")
     browsers("owen")
     html = here.client.get("/partials/account/sessions").text
-    assert html.count("[ THIS BROWSER ]") == 1
-    assert html.count("[ SIGN OUT ]") == 1                 # the other one, never this one
-    assert "[ SIGN OUT THE OTHERS ]" in html and "[ SIGN OUT EVERYWHERE ]" in html
+    assert html.count(">this browser</span>") == 1
+    assert html.count('<span class="t">Sign out</span>') == 1   # the other one, never this one
+    assert '<span class="t">Sign out the others</span>' in html
+    assert '<span class="t">Sign out everywhere</span>' in html
     assert 'action="/logout-everywhere"' in html
     # no full session id anywhere
     handles = re.findall(r'name="handle" value="([^"]+)"', html)
@@ -708,7 +728,8 @@ def test_ask_from_the_page_stores_a_pending_request(app, browsers):
                           data={"editor": "jsmith", "machine": "JS-RIG", "jobs_enabled": "0"})
     assert resp.status_code == 200, resp.text
     assert "JS-RIG gets it the next time it reports in." in resp.text
-    assert "[ WITHDRAW ]" in resp.text
+    assert '<span class="t">Withdraw</span>' in resp.text
+    assert 'hx-post="/partials/account/machines/settings/withdraw"' in resp.text
     conn = _conn(app)
     try:
         req = db.machine_settings_request(conn, "jsmith", "JS-RIG")
@@ -720,7 +741,8 @@ def test_ask_from_the_page_stores_a_pending_request(app, browsers):
     resp = ed.client.post("/partials/account/machines/settings/withdraw", headers=ed.h,
                           data={"editor": "jsmith", "machine": "JS-RIG"})
     assert resp.status_code == 200 and "Withdrawn." in resp.text
-    assert "[ WITHDRAW ]" not in resp.text
+    assert '<span class="t">Withdraw</span>' not in resp.text
+    assert 'hx-post="/partials/account/machines/settings/withdraw"' not in resp.text
 
 
 def test_ask_kinds_every_kind_is_stored_as_empty_and_last_kind_refused(app, browsers):
@@ -937,9 +959,17 @@ def test_plan_rows_drive_the_existing_toggle_route(app, browsers):
         conn.close()
     ed = browsers("jsmith")
     html = ed.client.get("/account").text
-    base = "/partials/selection/jsmith/p1/toggle?machine=JS%20RIG"
-    assert re.search(re.escape(f'hx-post="{base}&') + r"(amp;)?mode=full", html)   # [ SYNC FULLY ]
-    assert f'hx-post="{base}"' in html                          # [ UNTICK ]
+    # view=none: the account page takes an empty 200 back (R15). The
+    # attribute's ampersands may be autoescaped (&amp;); htmx decodes them.
+    base = "/partials/selection/jsmith/p1/toggle?view=none&machine=JS%20RIG"
+
+    def posts(body: str, mode: str) -> bool:
+        pat = "&(amp;)?".join(re.escape(part) for part in f"{base}&mode={mode}".split("&"))
+        return re.search(f'hx-post="{pat}"', body) is not None
+
+    assert posts(html, "full")                                  # Sync fully
+    # Untick names the state it means (everyday-apps-1): an explicit off.
+    assert posts(html, "off")                                   # Untick
     assert "This removes 2026/FF5/Elections from JS RIG." in html
     assert '<option value="p2"' in html and '<option value="p1"' not in html
     # the route the button posts to is the existing one, and it flips the mode
@@ -952,8 +982,8 @@ def test_plan_rows_drive_the_existing_toggle_route(app, browsers):
         conn.close()
     assert modes == {"p1": db.SYNC_MODE_FULL}
     frag = ed.client.get("/partials/account/computer?machine=JS%20RIG").text
-    assert "[ FULL ]" in frag
-    assert re.search(re.escape(f'hx-post="{base}&') + r"(amp;)?mode=upload_only", frag)
+    assert re.search(r'<span class="tag ok"[^>]*>full</span>', frag)
+    assert posts(frag, "upload_only")
 
 
 def test_wired_computer_has_no_plan_controls(app, browsers):

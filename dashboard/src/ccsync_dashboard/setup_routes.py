@@ -345,22 +345,11 @@ def api_admin_site_put(
 ) -> dict:
     admin = _require_admin(request)
     settings = request.app.state.settings
-    # UI port R24 (2026-09-25): the look's two keys take their own path. They
-    # are recorded under `ui_groups_history`, never in site_history (whose
-    # undo an older build could not validate), and `site` deletes the row.
-    ui_values = {k: payload.values[k] for k in list(payload.values)
-                 if k in site_store.UI_KEYS}
-    if ui_values:
-        from . import ui_variant_settings
-        ui_variant_settings.apply(conn, admin, ui_values)
-        payload.values = {k: v for k, v in payload.values.items()
-                          if k not in site_store.UI_KEYS}
-        if not payload.values:
-            conn.commit()
-            site_store.invalidate(request.app)
-            manifest = site_store.resolved_manifest(conn, settings)
-            manifest["auto_derived"] = sorted(site_store.AUTO_DERIVED_KEYS)
-            return manifest
+    # The retired look switch's two keys (site_store.RETIRED_KEYS): a page
+    # loaded before 2026-09-25 may still send one. Dropped, never refused,
+    # so the rest of that save still goes through.
+    payload.values = {k: v for k, v in payload.values.items()
+                      if k not in site_store.RETIRED_KEYS}
     # UX-21 (resilience sweep 2026-08-28): "The same snapshot belongs on
     # [ SAVE ] for the three tree keys" -- canonical_prefix, tree_name and
     # remote_root are read by both installers and every companion, so a save
@@ -544,7 +533,13 @@ def api_admin_site_undo_last_change(
             detail="the newest change is no longer the one you confirmed "
                    "(someone saved since): reload the page",
         )
-    restore = {str(k): str(v) for k, v in (latest.get("before") or {}).items()}
+    # The retired look switch (site_store.RETIRED_KEYS, 2026-09-25): the
+    # newest entry on a site that ran 0.7.62 may be the switch itself, and
+    # validate_many would refuse its key. Dropped here exactly as the PUT
+    # above drops it, so an undo of a mixed change restores the other keys
+    # and an undo of the switch alone gets the "nothing to restore" answer.
+    restore = {str(k): str(v) for k, v in (latest.get("before") or {}).items()
+               if str(k) not in site_store.RETIRED_KEYS}
     if not restore:
         raise HTTPException(status_code=409, detail="that change recorded no values to restore")
     try:

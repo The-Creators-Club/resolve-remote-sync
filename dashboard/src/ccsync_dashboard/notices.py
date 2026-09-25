@@ -397,12 +397,14 @@ def _check_collector_alarms(conn, settings, now: str) -> None:
                   f"to store, so it is being thrown away: {names}. The companions are "
                   "ahead of the dashboard."),
             # ui-copy-3 (2026-09-25): there is no [ UPDATE THE DASHBOARD ]
-            # button (that is a chip); the panel on Packages is [ DASHBOARD ]
-            # and its button [ UPDATE NOW ] (admin_dashboard_update.html), and
-            # it offers only a bundle matching the running image.
+            # button (that is a chip); the window on Packages is titled "this
+            # dashboard" (admin_packages.html, since the terminal look became
+            # the only one; it was [ DASHBOARD ] in the classic look) and its
+            # button "Update now" (admin_dashboard_update.html), and it offers
+            # only a bundle matching the running image.
             fix=("Update the dashboard: Settings, Packages, then press \"Update "
-                 "now\" in the Dashboard panel. If that panel offers no update, this "
-                 "server needs a newer container image."),
+                 "now\" in the This dashboard panel. If that panel offers no update, "
+                 "this server needs a newer container image."),
             now=now)
     else:
         db.clear_notice(conn, "ignored_report_sections", "report fields", now=now)

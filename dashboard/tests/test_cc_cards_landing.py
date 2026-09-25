@@ -1,9 +1,10 @@
 """The terminal /cards landing (UI redesign port, phase 6, group `apps`).
 
-Terminal twins of test_cards_picker.py's page tests, run through the
-`ui_variant` fixture: classic keeps every classic pin, and the terminal look
-keeps every hook static/cards_landing.js reads, draws no [ bracket ] label,
-folds every window and loads its own sheet on the cc tokens.
+Terminal twins of test_cards_picker.py's page tests. Since 2026-09-25 the
+terminal look is the only look (the switch and the classic landing are gone):
+the page keeps every hook static/cards_landing.js reads, draws no
+[ bracket ] label, folds every window and loads its own sheet on the cc
+tokens.
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ SCRIPT_HOOKS = ('class="cl-tree', 'id="cl-tree"', 'id="cl-list"', 'id="cl-q"',
 
 
 @pytest.fixture
-def picker(ui_variant, tmp_path, fake_src, monkeypatch):
+def picker(tmp_path, fake_src, monkeypatch):
     monkeypatch.delenv("CARDS_SRC", raising=False)
     vault = tmp_path / "vault"
     roots = []
@@ -49,26 +50,18 @@ def picker(ui_variant, tmp_path, fake_src, monkeypatch):
         yield client, app, roots
 
 
-def _terminal(ui_variant) -> bool:
-    return "apps" in ui_variant.groups
-
-
-def test_the_landing_draws_in_the_look_it_was_asked_for(ui_variant, picker):
+def test_the_landing_draws_the_terminal_page(picker):
     client, _, _ = picker
     page = client.get("/cards/").text
-    ui_variant.check_page(page)
-    # Both looks: the same finder, folders, years and facts.
+    # The same finder, folders, years and facts the classic page had.
     assert 'id="cl-q"' in page and "/static/cards_landing.js" in page
     assert 'data-key="2026/FF5"' in page and 'data-key="2025/FF4"' in page
     assert 'data-key="Vault"' not in page
     assert 'data-year="2026"' in page and 'data-year="2025"' in page
     assert "never opened" in page and "sizing" in page
-    if not _terminal(ui_variant):
-        assert "[ TIMELINE CARDS ]" in page
-        assert "/static/cards_landing.css" in page
-        assert "cc/cards_landing.css" not in page
-        return
+    # cards_landing.js picks its "nothing shifts" branch on this attribute.
     assert 'data-ui="cc"' in page
+    assert "[ TIMELINE CARDS ]" not in page
     assert "cc/cards_landing.css" in page
     assert "/static/cards_landing.css" not in page
     for hook in SCRIPT_HOOKS:
@@ -76,9 +69,7 @@ def test_the_landing_draws_in_the_look_it_was_asked_for(ui_variant, picker):
 
 
 def test_the_terminal_landing_has_no_bracket_labels_and_every_window_folds(
-        ui_variant, picker):
-    if not _terminal(ui_variant):
-        pytest.skip("terminal look only")
+        picker):
     client, app, roots = picker
     entry = open_episode(app, roots[1])
     client.get(f"/cards/p/{entry.slug}/", headers={"Accept": "text/html"})
@@ -95,9 +86,7 @@ def test_the_terminal_landing_has_no_bracket_labels_and_every_window_folds(
     assert 'cl-btn-go' in main
 
 
-def test_the_terminal_refusal_and_want_banner(ui_variant, picker):
-    if not _terminal(ui_variant):
-        pytest.skip("terminal look only")
+def test_the_terminal_refusal_and_want_banner(picker):
     client, _, roots = picker
     slug = cards_pool.slug_for(str(roots[2]))
     page = client.get(f"/cards/?refused=two+are+open&want={slug}").text
@@ -111,7 +100,7 @@ def test_the_terminal_refusal_and_want_banner(ui_variant, picker):
 def test_the_close_confirm_stays_the_native_one():
     """Plan 1.4, wave 5: the landing is plain forms, so close keeps its
     onsubmit confirm in the terminal look too."""
-    text = (ROOT / "templates/cc/cards_landing.html").read_text(encoding="utf-8")
+    text = (ROOT / "templates/cards_landing.html").read_text(encoding="utf-8")
     assert "onsubmit='return confirm({{ ep.close_prompt | tojson }});'" in text
 
 
@@ -121,13 +110,15 @@ def test_the_terminal_sheet_reads_only_cc_tokens_and_says_no_long_dash():
     root = (ROOT / "static/cc/terminal.css").read_text(encoding="utf-8")
     for token in tokens:
         assert re.search(re.escape(token) + r"\s*:", root), token
-    for rel in ("templates/cc/cards_landing.html", "static/cc/cards_landing.css",
+    for rel in ("templates/cards_landing.html", "static/cc/cards_landing.css",
                 "static/cards_landing.js"):
         assert "—" not in (ROOT / rel).read_text(encoding="utf-8"), rel
     assert "infinite" not in css
 
 
-def test_the_shared_script_keeps_classic_recent_behaviour():
+def test_the_shared_script_dims_recent_while_searching():
+    """Nothing shifts: the recent window stays while a search runs and only
+    dims (the classic hide-on-search branch is dead with the classic page)."""
     js = (ROOT / "static/cards_landing.js").read_text(encoding="utf-8")
-    assert "recent.hidden = searching || any === 0;" in js      # classic
-    assert "recent.classList.toggle('cl-dim', searching);" in js  # terminal
+    assert "recent.hidden = any === 0;" in js
+    assert "recent.classList.toggle('cl-dim', searching);" in js

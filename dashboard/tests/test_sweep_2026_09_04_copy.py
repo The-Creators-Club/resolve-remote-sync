@@ -208,7 +208,7 @@ def test_no_typewriter_em_dash_in_rendered_copy(path: Path) -> None:
     )
 
 
-def test_the_scan_would_catch_a_regression() -> None:
+def test_the_scan_would_catch_a_regression(tmp_path) -> None:
     """The detectors themselves, so a silent glob can never pass this file."""
     assert len(_rendered_files()) > 10
     assert len(_py_files()) > 10
@@ -216,8 +216,13 @@ def test_the_scan_would_catch_a_regression() -> None:
     assert not _find("no known editors yet: one appears", " -- ", "x")
     assert _find("{% block title %}CC SYNC: FLEET", "{% block title %}CC SYNC", "x")
     # A comment carrying a retired phrase is NOT a failure: the fix pass's own
-    # comments quote what they retired.
-    assert _visible(TEMPLATES / "partials" / "sidebar.html").count("[ UP ]") == 0
+    # comments quote what they retired. (This read the classic sidebar, whose
+    # comment quoted "[ UP ]", until that partial was deleted on 2026-09-25;
+    # a file of our own keeps the check from depending on any template.)
+    probe = tmp_path / "probe.html"
+    probe.write_text('{# retired "[ UP ]" #}<!-- [ UP ] -->\n<b>[ UP ]</b>\n',
+                     encoding="utf-8")
+    assert _visible(probe).count("[ UP ]") == 1
 
 
 # ------------------------------------------------------- UX-8, one list only
@@ -278,22 +283,42 @@ def test_the_setup_tasks_name_pages_that_exist() -> None:
 
 
 def test_the_clean_notices_headline_counts_the_checks() -> None:
-    html = (TEMPLATES / "partials" / "notices.html").read_text(encoding="utf-8")
-    assert "notice_checks_ran" in html and "notice_checks_total" in html
-    assert "notice_checks_never_ran" in html, (
-        "UX-6: an unchecked kind has to be said out loud, not averaged away")
+    # The classic notices partial is gone (2026-09-25); both terminal
+    # surfaces that say "nothing wrong" carry the counts: the home page's
+    # problems window and the Health tab's notices window.
+    for name in ("partials/home_problems.html", "partials/health_notices.html"):
+        html = _visible(TEMPLATES / name)
+        assert "notice_checks_ran" in html and "notice_checks_total" in html, name
+        assert "notice_checks_never_ran" in html, (
+            f"UX-6 ({name}): an unchecked kind has to be said out loud, not "
+            "averaged away")
 
 
 # ---------------------------------------------------------------- DUI-7 hash
 
 
 def test_the_page_scrolls_to_a_fragment_that_arrives_late() -> None:
-    """Both of the product's deep links target load-triggered panels."""
-    base = (TEMPLATES / "base.html").read_text(encoding="utf-8")
-    assert "htmx:afterSwap" in base and "scrollIntoView" in base
-    assert "location.hash" in base
-    topbar = (TEMPLATES / "partials" / "topbar.html").read_text(encoding="utf-8")
-    assert "/#server-notices" in topbar
+    """The product's deep links target load-triggered panels.
+
+    shell.html (every page since 2026-09-25; base.html is gone) carries the
+    scroller, and the named panels the /go table links to exist on the page
+    it names.
+    """
+    from ccsync_dashboard import ui_chrome
+
+    shell = (TEMPLATES / "shell.html").read_text(encoding="utf-8")
+    assert "htmx:afterSwap" in shell and "scrollIntoView" in shell
+    assert "location.hash" in shell
+    health_page = (TEMPLATES / "admin_health.html").read_text(encoding="utf-8")
+    for panel in ("notices", "collector", "diagnostics"):
+        href = ui_chrome.go_href(panel)
+        assert href and href.startswith("/admin/health#"), (panel, href)
+        assert f'id="{href.split("#", 1)[1]}"' in health_page, href
+    # The home page's problems window is the other deep link (/#server-notices,
+    # the health rows' detail page) and it arrives by a load trigger.
+    home = (TEMPLATES / "fleet.html").read_text(encoding="utf-8")
+    assert re.search(r'id="server-notices"[^>]*hx-trigger="load', home) or (
+        'id="server-notices"' in home and 'hx-get="/partials/home-problems"' in home)
 
 
 # ------------------------------------------------------------ CR-88 constant
@@ -310,7 +335,10 @@ def test_the_diagnostics_path_is_one_constant() -> None:
         "CR-88: the tray's right-click menu is ten items and this is not one "
         "of them")
     assert ui.templates.env.globals["COMPANION_DIAGNOSTICS_PATH"] == path
-    for name in ("partials/admin_diagnostics.html", "partials/fleet_grid.html"):
+    # partials/admin_diagnostics.html went with the classic look (2026-09-25);
+    # the Health tab's diagnostics window and the computer's answer carry it.
+    for name in ("partials/health_diagnostics.html", "partials/computer_answer.html",
+                 "partials/fleet_grid.html"):
         html = (TEMPLATES / name).read_text(encoding="utf-8")
         assert "COMPANION_DIAGNOSTICS_PATH" in html, name
     alerts_src = (SRC / "alerts.py").read_text(encoding="utf-8")

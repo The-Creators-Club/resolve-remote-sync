@@ -491,16 +491,20 @@ def test_the_page_renders_the_three_states_and_is_admin_only(tmp_path):
             conn.close()
 
         anon = client.get("/admin/protection")
-        assert "[ PROTECTION ]" not in anon.text
+        assert 'id="protection-table"' not in anon.text
 
         client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(secret, "owen"))
         resp = client.get("/admin/protection")
         assert resp.status_code == 200
         html = resp.text
-        assert "[ PROTECTION ]" in html
-        assert "[ PROTECTED ]" in html        # the release key, and the drill
-        assert "[ MISSING ]" in html          # the backup nobody has confirmed
-        assert "[ CANNOT VERIFY ]" in html    # every snapshot line: no NAS here
+        assert "</span> PROTECTION</span></h1>" in html
+        assert 'id="protection-table"' in html
+        # One tag per line, each state told apart by its own title (the
+        # page's "cannot verify is not protected" note carries a tag too, so
+        # the per-line titles are what count here).
+        assert 'title="Protected: this server has seen the evidence for itself.">protected<' in html  # the release key, and the drill
+        assert 'title="Missing: this protection is not in place.">missing<' in html  # the backup nobody has confirmed
+        assert 'title="This server has no way to get evidence for this one; the reason is beside it.">cannot verify<' in html  # every snapshot line: no NAS here
         assert protection.BY_KEY["snapshot_apps"].fix.split(".")[0] in html
 
 

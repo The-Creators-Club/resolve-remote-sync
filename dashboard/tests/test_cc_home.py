@@ -1,12 +1,11 @@
 """The terminal home and project pages (UI redesign port phase 2, group
 `home`, 2026-09-25).
 
-docs/UI_REDESIGN_PORT_PLAN.md 1.2, 3.1, 5.1, 7.1 row 2, R15. Classic pins
-are untouched: every page test here runs under a variant parameter and
-asserts the classic shape when `home` is off and the terminal shape when it
-is on. The parameters are the shared fixture's plus phase 2's cumulative set
-`chrome,home` (7.0's cross-group rule), through a file-local fixture so the
-other phases' files keep their own parameter list.
+docs/UI_REDESIGN_PORT_PLAN.md 1.2, 3.1, 5.1, 7.1 row 2, R15. Since
+2026-09-25 the terminal look is the only look (the switch, the classic pages
+and the variant fixtures are gone): every test asserts the terminal shape,
+with every former group on, and htmx requests carry conftest.HX the way a
+real page does.
 """
 from __future__ import annotations
 
@@ -18,21 +17,20 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ccsync_dashboard import auth, db, ui_home
-from ccsync_dashboard import ui_variant as uv
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
-import ui_variant_support as uvs
+from conftest import HX
 
 SECRET = "h" * 32
 DASH = Path(__file__).resolve().parents[1]
-CC = DASH / "templates" / "cc"
+CC = DASH / "templates"
 DEV_OWEN = "OWENAAA-OWENAAA-OWENAAA-OWENAAA-OWENAAA-OWENAAA-OWENAAA-OWENAAA"
 SLUG = "2026-ff5-elections"
 HOME_FILES = [
     "fleet.html", "project.html", "partials/home_macros.html", "partials/fleet_grid.html",
     "partials/plan_changes.html", "partials/home_transfers.html",
-    "partials/home_problems.html", "partials/home_collector.html",
+    "partials/home_problems.html",
     "partials/home_queue.html", "partials/home_fix_root.html",
     "partials/computer_answer.html", "partials/projects_tree.html",
     "partials/project_detail.html", "partials/bins.html", "partials/missing_files.html",
@@ -45,24 +43,13 @@ HOOK_IDS = ("server-notices", "plan-changes", "fleet-diagnostics", "project-deta
             "media-presence", "roots")
 
 
-@pytest.fixture(params=("classic", "chrome", "chrome,home", "all"))
-def variant(request, monkeypatch):
-    v = uvs.UIVariant(request.param)
-    monkeypatch.setattr(uv, "site_groups", lambda conn, settings, app=None: v.setting)
-    token = uv.RECORDING.set(True)
-    try:
-        yield v
-    finally:
-        uv.RECORDING.reset(token)
-
-
 def _cookie(client, user):
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, user))
     return client
 
 
 @pytest.fixture
-def env(tmp_path, variant):
+def env(tmp_path):
     projects = tmp_path / "Projects"
     (projects / "2026" / "FF5" / "Elections" / "Interviews").mkdir(parents=True)
     settings = Settings(db_path=str(tmp_path / "home.db"), session_secret=SECRET,
@@ -90,16 +77,12 @@ def env(tmp_path, variant):
         db.notice(conn, kind, "error", subject="probe", body="the probe notice",
                   fix="do the thing", now=now)
         conn.commit()
-        yield client, conn, variant
+        yield client, conn
         conn.close()
 
 
-def _on(v) -> bool:
-    return "home" in v.groups
-
-
-def _hx(client, v, url="http://testserver/"):
-    return v.htmx_headers(client, url)
+def _hx(url="http://testserver/"):
+    return {**HX, "HX-Current-URL": url}
 
 
 class _Ids(HTMLParser):
@@ -124,10 +107,11 @@ def _parse(html: str) -> _Ids:
 
 # ------------------------------------------------------------ static facts
 
-def test_every_home_template_exists_and_is_in_the_group_table():
+def test_every_home_template_exists():
     for name in HOME_FILES:
         assert (CC / name).is_file(), name
-        assert uv.TEMPLATE_GROUPS["cc/" + name] == "home", name
+    # the home grid's own collector went with the switch: it lives on Health (D7)
+    assert not (CC / "partials" / "home_collector.html").exists()
 
 
 @pytest.mark.parametrize("name", HOME_FILES)
@@ -165,14 +149,10 @@ def test_no_version_behind_and_no_on_since():
 
 # ------------------------------------------------------------ home
 
-def test_home_draws_in_the_look_it_is_asked_for(env):
-    client, _conn, v = env
+def test_home_draws_the_terminal_look(env):
+    client, _conn = env
     page = _cookie(client, "owen").get("/")
     assert page.status_code == 200, page.text[:400]
-    v.check_page(page.text)
-    if not _on(v):
-        assert "cc/home.css" not in page.text
-        return
     html = page.text
     assert 'data-ui="cc"' in html and "cc/home.css" in html
     p = _parse(html)
@@ -193,9 +173,7 @@ def test_home_draws_in_the_look_it_is_asked_for(env):
 
 
 def test_the_problems_readout_agrees_with_the_hud_count(env):
-    client, _conn, v = env
-    if not _on(v):
-        pytest.skip("home off")
+    client, _conn = env
     html = _cookie(client, "owen").get("/").text
     m = re.search(r'id="win-ro-problems".*?<div class="big">(\d+)<small>open', html, re.S)
     hud = re.search(r'class="hud-count" href="/go/notices"[^>]*>.*?<b>(\d+)</b>', html, re.S)
@@ -221,81 +199,66 @@ def test_a_muted_headline_never_draws_a_warn_lane():
     assert ui_home.lane_tone(lane, "red") == "err"
 
 
-def test_the_grid_poll_answers_in_the_asking_look(env):
-    client, _conn, v = env
+def test_the_grid_poll_answers_in_the_terminal_look(env):
+    client, _conn = env
     _cookie(client, "owen")
-    r = client.get("/partials/fleet", headers=_hx(client, v))
+    r = client.get("/partials/fleet", headers=_hx())
     assert r.status_code == 200
-    if _on(v):
-        assert 'class="pc home-pc' in r.text
-        assert 'id="home-readouts" hx-swap-oob="innerHTML"' in r.text
-        # the collector moves to Health with settings-health (D7)
-        assert ('id="fleet-collector"' in r.text) == ("settings-health" not in v.groups)
-        assert "[ DETAILS ]" not in r.text
-    else:
-        assert "home-pc" not in r.text
+    assert 'class="pc home-pc' in r.text
+    assert 'id="home-readouts" hx-swap-oob="innerHTML"' in r.text
+    # the collector lives on Health (D7), never on the home grid
+    assert 'id="fleet-collector"' not in r.text
+    assert "[ DETAILS ]" not in r.text
 
 
 def test_the_legal_gap_lines_reach_the_terminal_grid(env):
-    """LG-1 / LG-5 / LG-17 carried from the classic grid (2026-09-25): a
-    withheld section is a muted tag in the details, the licence line sits
-    under the version, and the collector says when retention last ran."""
-    client, conn, v = env
+    """LG-1 / LG-5 carried from the classic grid (2026-09-25): a withheld
+    section is a muted tag in the details, and the licence line sits under
+    the version. (LG-17, the collector's "retention last ran" line, is on
+    Health: test_ui_health_group.py.)"""
+    client, conn = env
     conn.execute("UPDATE machine_state SET report_optouts=?, eula_json=? "
                  "WHERE editor_username='tchen' AND machine='TCHEN-PC'",
                  ('["local_manifest"]', '{"version": "1.0", "accepted_at": "2026-09-25T09:00:00+00:00"}'))
     conn.commit()
     _cookie(client, "owen")
-    r = client.get("/partials/fleet", headers=_hx(client, v))
+    r = client.get("/partials/fleet", headers=_hx())
     assert r.status_code == 200
     assert "eula-line" in r.text
-    if not _on(v):
-        assert "[ NOT REPORTED BY THIS COMPUTER: FILE LIST ]" in r.text
-        return
     assert "<dt>reporting</dt>" in r.text
     assert re.search(r'class="tag mute"[^>]*><span class="w">not reported by this computer: FILE LIST</span>', r.text)
     assert "NOT REPORTED BY THIS COMPUTER" not in r.text
     assert not BRACKET.search(re.sub(r"<[^>]+>", "", r.text))
-    if "settings-health" not in v.groups:
-        assert "retention-line" in r.text and "Retention last ran" in r.text
 
 
 @pytest.mark.parametrize("path", ["/partials/home-problems", "/partials/home-transfers",
                                   "/partials/home-queue", "/partials/computer-answer",
                                   "/partials/projects-tree"])
-def test_each_new_named_route_is_404_without_home_and_terminal_with_it(env, path):
-    client, _conn, v = env
+def test_each_new_named_route_answers_in_the_terminal_look(env, path):
+    client, _conn = env
     _cookie(client, "owen")
-    r = client.get(path, headers=_hx(client, v))
-    if not _on(v):
-        assert r.status_code in (404, 409) or r.headers.get("HX-Refresh"), (r.status_code, r.text[:200])
-        assert "admin-users-box" not in r.text
-        return
+    r = client.get(path, headers=_hx())
     assert r.status_code == 200, r.text[:300]
     assert "admin-users-box" not in r.text and "[ " not in r.text
 
 
 def test_computer_answer_every_computer_link_targets_its_own_route(env):
-    client, _conn, v = env
-    if not _on(v):
-        pytest.skip("home off")
+    client, _conn = env
     _cookie(client, "owen")
     r = client.get("/partials/computer-answer?editor=owen&machine=OWEN-LAPTOP",
-                   headers=_hx(client, v))
+                   headers=_hx())
     assert r.status_code == 200
     assert "/partials/admin/diagnostics" not in r.text
 
 
 def test_a_dismiss_from_problems_answers_with_the_problems_window(env):
-    client, conn, v = env
-    if not _on(v):
-        pytest.skip("home off")
+    client, conn = env
     _cookie(client, "owen")
     nid = conn.execute("SELECT id FROM notices WHERE subject = 'probe'").fetchone()["id"]
-    body = client.get("/partials/home-problems", headers=_hx(client, v)).text
+    body = client.get("/partials/home-problems", headers=_hx()).text
     assert f"/partials/notices/{nid}/dismiss?view=home-problems" in body
     r = client.post(f"/partials/notices/{nid}/dismiss?view=home-problems",
-                    headers={**_hx(client, v), "X-CSRF-Token": _csrf(client)})
+                    headers={**_hx(), "X-CSRF-Token": _csrf(client)})
     assert r.status_code == 200, r.text[:300]
     assert "admin-users-box" not in r.text and "what the server checks" in r.text
 
@@ -308,13 +271,11 @@ def _csrf(client) -> str:
 
 
 def test_a_tick_from_the_tree_answers_with_the_tree_for_that_computer(env):
-    client, _conn, v = env
-    if not _on(v):
-        pytest.skip("home off")
+    client, _conn = env
     _cookie(client, "owen")
     url = ("/partials/selection/tchen/2026-ff5-civil/toggle?view=tree&machine=TCHEN-PC"
            "&as=tchen")
-    r = client.post(url, headers={**_hx(client, v), "X-CSRF-Token": _csrf(client)})
+    r = client.post(url, headers={**_hx(), "X-CSRF-Token": _csrf(client)})
     assert r.status_code == 200, r.text[:300]
     assert 'class="tree-count"' in r.text and "proj-check" in r.text
     assert "machine=TCHEN-PC" in r.text
@@ -322,43 +283,38 @@ def test_a_tick_from_the_tree_answers_with_the_tree_for_that_computer(env):
         "checked" in r.text
     # the poll as that person and computer keeps showing their tick
     poll = client.get("/partials/projects-tree?current=&machine=TCHEN-PC&as=tchen",
-                      headers=_hx(client, v))
+                      headers=_hx())
     assert poll.status_code == 200, poll.text[:300]
     assert re.search(r'toggle\?view=tree&amp;machine=TCHEN-PC[^"]*as=tchen', poll.text), \
         re.findall(r'hx-post="[^"]*"', poll.text)[:2]
 
 
 def test_an_untick_from_the_home_queue_answers_with_the_home_queue(env):
-    client, _conn, v = env
-    if not _on(v):
-        pytest.skip("home off")
+    client, _conn = env
     _cookie(client, "owen")
     r = client.post(f"/partials/selection/owen/{SLUG}/toggle?view=home-queue",
-                    headers={**_hx(client, v), "X-CSRF-Token": _csrf(client)})
+                    headers={**_hx(), "X-CSRF-Token": _csrf(client)})
     assert r.status_code == 200, r.text[:300]
     assert "fix destination root" in r.text and "queue-box" not in r.text
 
 
 def test_plan_changes_always_answers_with_its_target(env):
-    client, _conn, v = env
+    client, _conn = env
     _cookie(client, "owen")
-    r = client.get("/partials/plan-changes", headers=_hx(client, v))
+    r = client.get("/partials/plan-changes", headers=_hx())
     assert r.status_code == 200
-    if _on(v):
-        assert r.text.count('id="plan-changes"') == 1
-        assert "[ UNDO ]" not in r.text
+    assert r.text.count('id="plan-changes"') == 1
+    assert "[ UNDO ]" not in r.text
 
 
 # ------------------------------------------------------------ project
 
-def test_the_project_page_draws_in_the_look_it_is_asked_for(env):
-    client, _conn, v = env
+def test_the_project_page_draws_the_terminal_look(env):
+    client, _conn = env
     page = _cookie(client, "owen").get(f"/project/{SLUG}")
     assert page.status_code == 200, page.text[:400]
-    v.check_page(page.text)
-    if not _on(v):
-        return
     html = page.text
+    assert 'data-ui="cc"' in html
     p = _parse(html)
     dupes = {i for i in p.ids if p.ids.count(i) > 1}
     assert not dupes, dupes
@@ -375,11 +331,10 @@ def test_the_project_page_draws_in_the_look_it_is_asked_for(env):
                                   f"/partials/project/{SLUG}/missing/{DEV_OWEN}",
                                   "/partials/project-roots",
                                   "/partials/project-roots/browse?resolve_project=Elections%20cut&rel=2026"])
-def test_the_project_partials_answer_in_the_asking_look(env, path):
-    client, _conn, v = env
+def test_the_project_partials_answer_in_the_terminal_look(env, path):
+    client, _conn = env
     _cookie(client, "owen")
-    r = client.get(path, headers=_hx(client, v, f"http://testserver/project/{SLUG}"))
+    r = client.get(path, headers=_hx(f"http://testserver/project/{SLUG}"))
     assert r.status_code == 200, r.text[:300]
-    if _on(v):
-        markup = re.sub(r"<!--.*?-->", "", r.text, flags=re.S)
-        assert not BRACKET.search(markup), BRACKET.search(markup).group(0)
+    markup = re.sub(r"<!--.*?-->", "", r.text, flags=re.S)
+    assert not BRACKET.search(markup), BRACKET.search(markup).group(0)

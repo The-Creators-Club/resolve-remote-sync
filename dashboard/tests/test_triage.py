@@ -572,7 +572,12 @@ def client(tmp_path, monkeypatch):
 def test_the_alerts_page_has_the_server_check_block(client):
     page = client.get("/admin/alerts")
     assert page.status_code == 200
-    assert "[ SERVER CHECK ]" in page.text and "[ RUN NOW ]" in page.text
+    # The terminal look (2026-09-25): a foldable "server check" window whose
+    # Run now key submits the triage run form.
+    assert 'aria-label="Fold server check"' in page.text
+    assert '<span class="t">Run now</span>' in page.text
+    assert 'form="alerts-run-form"' in page.text
+    assert 'hx-post="/partials/admin/alerts/triage/run"' in page.text
     assert 'name="alerts_triage_reply_to"' in page.text
     assert EM not in page.text
 

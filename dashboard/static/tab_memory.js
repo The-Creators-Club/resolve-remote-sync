@@ -29,7 +29,7 @@
 //     often 600 px of skeleton and scrolling to y=1800 would silently clamp
 //     to the bottom of nothing. We wait for the height, up to RESTORE_MS.
 //   * A deep link WINS. /#server-notices and /admin/users#admin-fleet-halt
-//     are the product's own links (DUI-7, base.html) and the reader asked for
+//     are the product's own links (DUI-7, shell.html) and the reader asked for
 //     that anchor, not for where they were last time.
 //   * The reader wins too: the first wheel, touch or key abandons a restore
 //     that has not landed. A page that yanks itself out from under a thumb is
@@ -40,7 +40,7 @@
 (function () {
   "use strict";
 
-  // The mounted SPAs render their own documents and never include base.html,
+  // The mounted SPAs render their own documents and never include shell.html,
   // so this file is not loaded there. The check is belt and braces for the
   // day one of them starts borrowing the dashboard's static assets: they are
   // single-page, they keep their own state, and a scroll restore aimed at a
@@ -190,7 +190,7 @@
     }
   }
 
-  // An id, or the data-key base.html's own open/closed keeper uses: the bins
+  // An id, or the data-key shell.html's own open/closed keeper uses: the bins
   // and sidebar panels are keyed rather than identified, and they are exactly
   // the sections a reader leaves open.
   function detailsId(d) {

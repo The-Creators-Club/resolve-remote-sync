@@ -186,8 +186,13 @@ def test_the_worker_takes_over_and_claims_its_clients():
 def test_offline_renders_without_a_session(client):
     res = client.get("/offline")
     assert res.status_code == 200
-    assert "[ OFFLINE ]" in res.text
-    assert "[ RETRY ]" in res.text
+    # The terminal gate page (2026-09-25, the classic look retired): its
+    # window is titled "offline" and its one key retries.
+    assert 'id="offline-t">offline</h2>' in res.text
+    assert '<span class="t">Try again</span>' in res.text
+    # ui-dash-static-6: the retry is the URL that failed (an empty href),
+    # a plain link that works from the cache with no script loaded.
+    assert re.search(r'<a class="key[^"]*" href=""', res.text)
 
 
 def test_offline_says_nothing_about_this_fleet(client):
@@ -207,7 +212,7 @@ def test_offline_carries_no_identity_even_when_signed_in(client):
                        auth.make_session_cookie("test-secret", "owen"))
     res = client.get("/offline")
     assert res.status_code == 200
-    assert "[ OFFLINE ]" in res.text
+    assert 'id="offline-t">offline</h2>' in res.text
     assert "owen" not in res.text.lower()
     assert "(admin)" not in res.text
     for meta in re.findall(r'<meta[^>]*name="csrf"[^>]*>', res.text):
@@ -261,7 +266,8 @@ def test_pwa_js_offers_the_install_chip_in_m1_s_slot():
     src = (STATIC / "pwa.js").read_text(encoding="utf-8")
     assert "beforeinstallprompt" in src
     assert "install-slot" in src
-    assert "[ INSTALL ]" in src
+    # the HUD key since the classic drawer went (2026-09-25): no brackets
+    assert "'install this app'" in src and "[ INSTALL ]" not in src
     assert "(display-mode: standalone)" in src
 
 

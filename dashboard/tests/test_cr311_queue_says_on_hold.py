@@ -71,10 +71,15 @@ def test_a_stall_is_not_a_hold():
 
 
 def test_the_page_renders_the_hold(conn):
+    # ui_home registers `cc_title`, which every window's title goes through
+    from ccsync_dashboard import ui_home  # noqa: F401
     from ccsync_dashboard.ui import templates
     _setup(conn, "root_absent")
     html = templates.get_template("partials/transfers.html").render(
         transfers=build_transfers_view(conn, NOW), scope_admin=True)
-    assert "[ ON HOLD ]" in html
-    assert "sync drive is not there on this computer" in html
-    assert "—" not in html.split("[ QUEUED ]", 1)[1].split("[ HISTORY ]", 1)[0]
+    queued = html.split('id="xf-queued"', 1)[1].split('id="xf-history"', 1)[0]
+    assert ">on hold</span>" in queued
+    assert "sync drive is not there on this computer" in queued
+    # the "since" clause is drawn, and the queued window carries no em dash
+    assert "(since " in queued
+    assert "—" not in queued

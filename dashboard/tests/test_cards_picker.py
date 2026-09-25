@@ -185,7 +185,7 @@ def test_entering_an_episode_page_makes_it_recent(picker):
     client.get(f"/cards/p/{entry.slug}/", headers={"Accept": "text/html"})
     assert entry.slug in cards_catalog.opened(settings, "owen")[1]
     page = client.get("/cards/").text
-    assert "[ YOUR RECENT ]" in page
+    assert 'data-win="recent"' in page and "cl-recent" in page
     assert "you opened it just now" in page
 
 
@@ -213,7 +213,7 @@ def test_no_em_dash_in_what_the_picker_says():
 
     root = Path(__file__).resolve().parents[1]
     for rel in ("templates/cards_landing.html", "static/cards_landing.js",
-                "static/cards_landing.css"):
+                "static/cc/cards_landing.css"):
         assert "—" not in (root / rel).read_text(encoding="utf-8"), rel
 
 
@@ -255,7 +255,7 @@ def test_one_bad_mtime_does_not_strip_the_rows_after_it(picker, monkeypatch):
     page = client.get("/cards/")
     assert page.status_code == 200
     # Every row still carries its year, so none fell out of the tree.
-    assert page.text.count('class="cl-ep"') == 3
     import re
+    assert len(re.findall(r'class="(?:[^"]* )?cl-ep[" ]', page.text)) == 3
     years = re.findall(r'data-year="(\d*)"\s+data-opened=', page.text)
     assert sorted(years) == ["2025", "2026", "2026"]

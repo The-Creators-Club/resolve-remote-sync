@@ -106,7 +106,8 @@ def test_an_indexing_machine_is_stored_and_chipped(env):
 
     page = as_admin(client).get("/partials/fleet")
     assert page.status_code == 200
-    assert "INDEXING B-ROLL: 12/40" in page.text
+    # Terminal look (2026-09-25): a lower-case tag, not "[ INDEXING B-ROLL ]".
+    assert ">indexing b-roll: 12/40</span>" in page.text
     # The tooltip carries what an admin needs before they go and ask: which
     # batch, which clip, which model tier.
     assert "0123456" in page.text and "A001_C003_0817XY.MP4" in page.text
@@ -120,7 +121,9 @@ def test_a_finished_batch_leaves_the_grid(env):
     client.post("/api/v1/report", json=payload(broll_ingest=ingest_section()),
                 headers=report_headers())
     client.post("/api/v1/report", json=payload(), headers=report_headers())
-    assert "INDEXING B-ROLL" not in as_admin(client).get("/partials/fleet").text
+    page = as_admin(client).get("/partials/fleet").text
+    assert 'class="pc head-row"' in page      # the grid did draw
+    assert "indexing b-roll" not in page
 
 
 def test_the_vram_refusal_is_visible_even_though_nothing_is_running(env):
@@ -132,9 +135,11 @@ def test_the_vram_refusal_is_visible_even_though_nothing_is_running(env):
         warning="Best needs 12 GB VRAM, this GPU has 8 GB — choose Good",
     )), headers=report_headers())
     page = as_admin(client).get("/partials/fleet").text
-    assert "[ VRAM ]" in page
+    # Terminal look (2026-09-25): a warn tag carrying the reason as its tip.
+    assert '<span class="tag warn" title="Best needs 12 GB VRAM, this GPU has 8 GB' in page
+    assert '<span class="w">vram</span>' in page
     assert "this GPU has 8 GB" in page
-    assert "INDEXING B-ROLL" not in page
+    assert "indexing b-roll" not in page
 
 
 def test_the_view_carries_ingest_and_proxy_per_machine(env):
@@ -167,7 +172,8 @@ def test_proxy_coverage_is_persisted_and_chipped(env):
     }), headers=report_headers())
     stored = dbmod.fetch_proxy_coverage_map(conn)[("jsmith", "EDIT-PC")]
     assert stored["missing"] == 132 and stored["state"] == "idle" and stored["left"] == 12
-    assert "132 NEED PROXIES" in as_admin(client).get("/partials/fleet").text
+    # Terminal look (2026-09-25): a lower-case warn tag.
+    assert '<span class="w">132 need proxies</span>' in as_admin(client).get("/partials/fleet").text
 
 
 def test_youtube_import_parses_instead_of_being_dropped(env):

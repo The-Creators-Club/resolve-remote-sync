@@ -1,22 +1,33 @@
-{% extends "base.html" %}
+{# HISTORY, terminal look (UI redesign port phase 4, group settings-fleet,
+   2026-09-25; classic twin admin_audit.html, design/history.html).
+
+   NOT polled, as classic: this page is read, not watched, and a swap would
+   throw away the filter being typed. The frame is here; the filter form and
+   the rows are the body, swapped by the FILTER form into #admin-audit
+   (plan 3.1: the frame is static). No pager (5.3: not needed). No sidebar
+   (D17). #}
+{% extends "shell.html" %}
 {% block title %}{{ brand_org | upper }}: HISTORY{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ asset_url('cc/settings_people.css') }}">{% endblock %}
 {% block layout %}
-  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
-    {% include "partials/sidebar.html" %}
-  </aside>
-  <main class="main">
-    {% include "partials/settings_nav.html" %}
-    <div class="detail-head"><h1>[ HISTORY ]</h1></div>
-    <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 62ch;">
-      What changed in this fleet, and who changed it. Every state-changing
-      action writes one line here: a project ticked or unticked, syncing
-      stopped fleet-wide or started again, proxy download resumed for a computer, a user deleted, a
-      computer forgotten, a build published or made current, an update pushed,
-      a file moved on the server, site settings saved, a Syncthing device
-      approved. Nothing edits or removes a line except the retention pass.
-    </p>
-    {# NOT polled: this page is read, not watched, and a 30s innerHTML swap
-       would throw away whatever the reader had typed in the filter. #}
-    {% include "partials/admin_audit.html" %}
-  </main>
+<div class="page one fl-page sp-page">
+  {% include "partials/settings_nav.html" %}
+  <div class="head">
+    <div>
+      <h1><span><span class="prompt" aria-hidden="true">&gt;</span> HISTORY</span></h1>
+      <div class="sub">What changed in this fleet, and who changed it.</div>
+    </div>
+  </div>
+  <p class="lede">Every state-changing action writes one line here: a project ticked or unticked, syncing
+    stopped fleet-wide or started again, proxy download resumed for a computer, a user deleted, a
+    computer forgotten, a build published or made current, an update pushed, a file moved on the
+    server, site settings saved, a Syncthing device approved. Nothing edits or removes a line except
+    the retention pass.</p>
+  <section class="win" data-win="what-changed" id="win-what-changed" aria-labelledby="win-what-changed-t">
+    <div class="bar"><button class="fold" type="button" aria-expanded="true" aria-label="fold what changed"><span class="fold-g" aria-hidden="true">&#9662;</span></button><span aria-hidden="true">&#9484;&#9472;&#9569;</span><h2 class="t" id="win-what-changed-t">what<span aria-hidden="true">_</span><span class="vh"> </span>changed</h2><span aria-hidden="true">&#9566;</span><span class="bar-rule"></span><span class="meta">kept for {{ audit_max_age_days }} days</span><span aria-hidden="true">&#9552;&#9488;</span></div>
+    <div class="body flush">
+      {% include "partials/admin_audit.html" %}
+    </div>
+  </section>
+</div>
 {% endblock %}

@@ -325,16 +325,20 @@ run alongside the tray app — it would hold port 8899.
   note, not a refusal. The dashboard records `machine_state.report_via` on
   change and alerts only on `http_public`. Site-wide "require https" is
   deferred (plan §6): it could strand the live http fleet.
-- **The CC Terminal look is an OVERLAY** (2026-09-25, dashboard 0.7.62,
-  `docs/UI_REDESIGN_PORT_PLAN.md`, ledgers `docs/UI_PORT_LEDGER/`): every page
-  has a `templates/cc/` twin drawn only for the page groups in the site
-  setting `ui_terminal_groups` (empty in the vendor build, so every site is
-  classic) or for a browser holding the preview cookie (`/ui/preview`,
-  `ui_preview` decides who may). `ui_variant.render` picks the set; the
-  classic set can never load `cc/*`. A change to a classic template that
-  adds a control must add it to the cc twin too (the port was built without
-  the legal-gap controls and had to be caught up). Phase 8 (default on,
-  delete classic) is NOT built: it waits for a two-week soak.
+- **The CC Terminal look is the ONLY look** (2026-09-25, phase 8 built
+  early by the owner's decision, no soak: "this is completely replacing the
+  old one"; `docs/UI_REDESIGN_PORT_PLAN.md`, ledgers `docs/UI_PORT_LEDGER/`).
+  There is one template tree (`dashboard/templates/`, every page extends
+  `shell.html`), no classic twin, no `ui_terminal_groups` / `ui_preview`
+  setting (a stored row is dropped at boot, `site_store.RETIRED_KEYS`), no
+  preview cookie and no `/ui/preview`. Every page's body sends `X-CC-UI:
+  terminal` on its htmx requests, and `app.stale_page_gate` answers an htmx
+  request without it with HX-Refresh BEFORE the route runs, so a tab an
+  older build drew reloads and its write is never committed. The SPAs carry
+  `html.cc` in their markup. Static URLs go through `asset_url()`
+  (`ui_assets.py`, a content hash); a change to what `sw.js` precaches that
+  is not a VERSION change bumps its `LOOK`. The public client share page
+  (`/broll/share/`) keeps its own look (D10).
 - **The server triage agent** (2026-09-24, `docs/SERVER_TRIAGE_AGENT.md`,
   schema v57): `triage.py` runs Claude Code at `alerts_triage_hours` in the
   site zone, READ-ONLY (Read/Grep/Glob over a scrubbed `evidence.json` and

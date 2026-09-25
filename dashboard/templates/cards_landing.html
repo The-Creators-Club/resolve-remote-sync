@@ -1,40 +1,56 @@
-{% extends "base.html" %}
+{% extends "shell.html" %}
 {% block title %}{{ brand_org | upper }}: TIMELINE CARDS{% endblock %}
 {% block head %}
-  <link rel="stylesheet" href="/static/cards_landing.css">
-  <script src="/static/cards_landing.js" defer></script>
+  <link rel="stylesheet" href="{{ asset_url('cc/cards_landing.css') }}">
+  <script src="{{ asset_url('cards_landing.js') }}" defer></script>
 {% endblock %}
-{# The landing page (docs/CARDS_TWO_PROJECTS.md phase 1, 2026-09-14): which
-   episode, then the cut list inside it. It is drawn with NO ENGINE on
-   purpose -- the episodes come from a scandir of the vault and the states
-   from the pool -- because the moment a person most needs this page is the
-   moment every engine is busy, loading or broken.
+{# The terminal /cards landing (UI redesign port, phase 6, group `apps`;
+   bench: dashboard/design/cards.html). The same page as the classic
+   cards_landing.html, drawn with the cc components, and the SAME script:
+   static/cards_landing.js finds everything by its cl-* hooks, so every
+   element it reads keeps its cl-* class beside the terminal one, and the
+   page still works with no script at all (folders are <details>, every
+   button is a real form, the server's order is alphabetical).
 
-   THE PICKER (2026-09-24, Alex: "make it look cooler, like a folder structure
-   concertina, like the vault viewer ... ordered by most recently opened ...
-   filterable by year, by last opened, by largest, by date, alphabetically,
-   and also searchable"). The vault's own folders, folded, with the reader's
-   recent episodes above them. EVERYTHING HERE WORKS WITH NO SCRIPT: the
-   folders are <details>, the buttons are the same forms as before, and the
-   server's order is alphabetical. cards_landing.js only reorders, filters,
-   remembers which folders you left open, and polls while something opens
-   (the <noscript> refresh is the no-script half of that: a page that reloads
-   under somebody typing in the search box would lose their place). #}
+   What differs from classic, on purpose:
+   - no [ bracket ] labels; the controls are keys and toggle chips;
+   - every window folds (cc.js: .win[data-win] with a button.fold);
+   - "nothing shifts": the clear button keeps its box while hidden (the
+     sheet turns [hidden] into visibility), and the recent window dims
+     while a search runs instead of leaving (cards_landing.js, cc branch);
+   - close still asks through the native confirm on the form's onsubmit
+     (plan 1.4, wave 5): this page is plain forms, not htmx, so cc.js's
+     dialog never sees it. #}
+
+{% macro bar(title, key) %}
+  <div class="bar">
+    <button class="fold" type="button" aria-expanded="true" title="Folds or unfolds this window."><span class="fold-g" aria-hidden="true">&#9662;</span><span class="vh">fold {{ title | replace("_", " ") }}</span></button>
+    <h2 class="t">{{ title | cc_title }}</h2>
+    <span class="bar-rule"></span>
+    {{ caller() }}
+  </div>
+{% endmacro %}
+
+{% macro badge(ep) %}
+  {% if ep.state == 'ready' %}<span class="tag ok cl-badge cl-badge-ready" title="Open on the server, so going in is instant.">ready</span>
+  {% elif ep.state == 'loading' %}<span class="tag hi cl-badge cl-badge-loading" title="The server is reading it off the vault.">opening</span>
+  {% elif ep.state == 'failed' %}<span class="tag solid err cl-badge cl-badge-failed" title="The episode did not open. The reason is below it.">failed</span>{% endif %}
+{% endmacro %}
 
 {% macro ep_actions(ep) %}
-  {# dash-cards-2 / security-2 (2026-09-18): [ CLOSE ] is drawn from
-     `ep.may_close`, not from `session_is_admin` and not only for `ready`.
-     A FAILED episode offers BOTH: [ OPEN ] retries the build, [ CLOSE ]
-     forgets the entry. #}
+  {# dash-cards-2 / security-2 (2026-09-18): close is drawn from
+     `ep.may_close`. A FAILED episode offers both: open retries the build,
+     close forgets the entry. #}
   {% if ep.state == 'ready' %}
-    <a class="cl-btn cl-btn-go tap" href="{{ ep.href }}">[ OPEN ]</a>
+    <a class="key primary sm cl-btn cl-btn-go" href="{{ ep.href }}" title="Go into this episode. It is already open, so this is instant."><span class="t">Open</span></a>
   {% elif ep.state == 'loading' %}
-    <span class="cl-btn cl-btn-wait" aria-live="polite">opening</span>
+    <span class="wait cl-btn cl-btn-wait" aria-live="polite" title="The server is reading this episode off the vault. This page takes you in when it is ready."><span class="spin" aria-hidden="true"></span> opening</span>
   {% else %}
     <form method="post" action="/cards/open">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="slug" value="{{ ep.slug }}">
-      <button class="cl-btn tap" type="submit">[ OPEN ]</button>
+      <button class="key sm cl-btn" type="submit"
+              title="{{ 'Opening this episode failed last time. Try opening it again.' if ep.state == 'failed' else 'Opens this episode on the server. Up to ' ~ cap ~ ' can be open at once.' }}"><span class="t">{{ 'Try again' if ep.state == 'failed' else 'Open' }}</span></button>
     </form>
   {% endif %}
   {% if ep.may_close %}
@@ -44,74 +60,62 @@
           onsubmit='return confirm({{ ep.close_prompt | tojson }});'>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="slug" value="{{ ep.slug }}">
-      <button class="cl-btn cl-btn-close tap" type="submit">[ CLOSE ]</button>
+      <button class="key quiet sm cl-btn cl-btn-close" type="submit" title="Closes this episode on the server so another one can open. You are asked first."><span class="t">close</span></button>
     </form>
   {% endif %}
 {% endmacro %}
 
 {% macro ep_row(ep) %}
-  <div class="cl-ep" data-state="{{ ep.state or '' }}" data-slug="{{ ep.slug }}"
+  <div class="ep cl-ep" data-state="{{ ep.state or '' }}" data-slug="{{ ep.slug }}"
        data-name="{{ (ep.name or '') | lower }}"
        data-search="{{ ((ep.name or '') ~ ' ' ~ (ep.show or '') ~ ' ' ~ (ep.path_label or '') ~ ' ' ~ (ep.year or '')) | lower }}"
        data-year="{{ ep.year or '' }}"
        data-opened="{{ ep.opened_mine or 0 }}" data-opened-any="{{ ep.opened_any or 0 }}"
        data-bytes="{{ ep.bytes if ep.bytes is not none else -1 }}"
        data-modified="{{ ep.modified or 0 }}">
-    <span class="cl-ico" aria-hidden="true">{% if ep.state == 'ready' %}&#9679;{% elif ep.state == 'loading' %}&#9684;{% elif ep.state == 'failed' %}&#215;{% else %}&#9642;{% endif %}</span>
+    <span class="ico cl-ico" aria-hidden="true">{% if ep.state == 'ready' %}&#9679;{% elif ep.state == 'loading' %}&#9684;{% elif ep.state == 'failed' %}&#215;{% else %}&#9642;{% endif %}</span>
     <div class="cl-info">
-      <div class="cl-name">
-        {% if ep.state == 'ready' %}<a href="{{ ep.href }}" class="cl-name-text">{{ ep.name }}</a>
-        {% else %}<span class="cl-name-text">{{ ep.name }}</span>{% endif %}
-        {% if ep.state == 'ready' %}<span class="cl-badge cl-badge-ready">READY</span>
-        {% elif ep.state == 'loading' %}<span class="cl-badge cl-badge-loading">OPENING</span>
-        {% elif ep.state == 'failed' %}<span class="cl-badge cl-badge-failed">FAILED</span>{% endif %}
+      <div class="nmline cl-name">
+        {% if ep.state == 'ready' %}<a href="{{ ep.href }}" class="nm cl-name-text">{{ ep.name }}</a>
+        {% else %}<span class="nm cl-name-text">{{ ep.name }}</span>{% endif %}
+        {{ badge(ep) }}
       </div>
-      <div class="cl-meta">
-        <span class="cl-when"{% if ep.opened_by %} title="signed in as {{ ep.opened_by }}"{% endif %}>{{ ep.opened_phrase or 'never opened' }}</span>
-        <span class="cl-size">{% if ep.size_label %}{{ ep.size_label }}{% if ep.size_partial %}+{% endif %}{% else %}sizing{% endif %}</span>
-        {% if ep.modified_label %}<span class="cl-mod">changed {{ ep.modified_label }}</span>{% endif %}
-        {# Last, so the tree can drop it (its folders already say it) without
-           leaving a separator dot at the front of the line. #}
+      <div class="meta cl-meta">
+        <span class="cl-when{% if ep.opened_mine %} mine{% endif %}"{% if ep.opened_by %} title="signed in as {{ ep.opened_by }}"{% endif %}>{{ ep.opened_phrase or 'never opened' }}</span>
+        <span class="cl-size" title="{% if not ep.size_label %}The server is still adding up this episode's files.{% elif ep.size_partial %}At least this big: some files could not be measured.{% else %}Size of the episode on the server.{% endif %}">{% if ep.size_label %}{{ ep.size_label }}{% if ep.size_partial %}+{% endif %}{% else %}sizing{% endif %}</span>
+        {% if ep.modified_label %}<span class="cl-mod" title="When a file in this episode last changed.">changed {{ ep.modified_label }}</span>{% endif %}
         {% if ep.path_label %}<span class="cl-path">in {{ ep.path_label }}</span>{% endif %}
       </div>
       {% if ep.state == 'failed' and ep.detail %}
-        <div class="cl-note cl-note-bad">{{ ep.detail }}</div>
+        <div class="enote bad cl-note cl-note-bad">{{ ep.detail }}</div>
       {% endif %}
       {% if ep.opening_phrase %}
-        {# logic-cards-7 (2026-09-25): a stalled open is told apart from a
-           slow one, and the pool gives up rather than hold a seat for ever. #}
-        <div class="cl-note">{{ ep.opening_phrase }}</div>
+        <div class="enote cl-note">{{ ep.opening_phrase }}</div>
       {% endif %}
-      {# Information, nothing to press (Alex, 2026-09-14): an editor drives
-         their OWN account's companions, so another person being live here is
-         something to know, never something to take. #}
+      {# Information, nothing to press (Alex, 2026-09-14). #}
       {% if ep.occupants %}
-        {# account page 2026-09-25: display names, sign-in names in the title. #}
-        <div class="cl-note" title="signed in as {{ ep.occupants | join(', ') }}">in it now: {{ (ep.occupants_shown or ep.occupants) | join(', ') }}</div>
+        <div class="enote who cl-note" title="signed in as {{ ep.occupants | join(', ') }}">in it now: {{ (ep.occupants_shown or ep.occupants) | join(', ') }}</div>
       {% elif ep.last_in_phrase %}
-        {# security-1 (2026-09-18b mediums): the seat is stamped by requests
-           SERVED here, so an editor working offline shows as nobody after
-           fifteen minutes; the row says who was last in and when. #}
-        <div class="cl-note"{% if ep.last_in %} title="signed in as {{ ep.last_in }}"{% endif %}>{{ ep.last_in_phrase }}</div>
+        <div class="enote was cl-note"{% if ep.last_in %} title="signed in as {{ ep.last_in }}"{% endif %}>{{ ep.last_in_phrase }}</div>
       {% endif %}
     </div>
-    <div class="cl-act">{{ ep_actions(ep) }}</div>
+    <div class="act cl-act">{{ ep_actions(ep) }}</div>
   </div>
 {% endmacro %}
 
 {% macro tree_items(items, depth) %}
   {% for item in items %}
     {% if item.kind == 'folder' %}
-      <details class="cl-folder cl-depth-{{ depth if depth < 3 else 3 }}" data-key="{{ item.key }}"
+      <details class="dirfold d{{ 0 if depth == 0 else 1 }} cl-folder cl-depth-{{ depth if depth < 3 else 3 }}" data-key="{{ item.key }}"
                data-default-open="{{ 1 if (depth == 0 or item.hot) else 0 }}"
                {% if depth == 0 or item.hot %}open{% endif %}>
-        <summary class="cl-sum tap">
-          <span class="cl-chev" aria-hidden="true">&#9656;</span>
-          <span class="cl-fname">{{ item.name }}</span>
-          <span class="cl-fcount" data-total="{{ item.count }}">{{ item.count }}</span>
-          <span class="cl-fsize"></span>
+        <summary class="cl-sum">
+          <span class="chev cl-chev" aria-hidden="true">&#9656;</span>
+          <span class="fnm cl-fname">{{ item.name }}</span>
+          <span class="fct cl-fcount" data-total="{{ item.count }}" title="Episodes in this folder.">{{ item.count }}</span>
+          <span class="fsz cl-fsize" title="Total size of these episodes on the server."></span>
         </summary>
-        <div class="cl-kids">{{ tree_items(item.children, depth + 1) }}</div>
+        <div class="kids cl-kids">{{ tree_items(item.children, depth + 1) }}</div>
       </details>
     {% else %}
       {{ ep_row(item) }}
@@ -120,146 +124,159 @@
 {% endmacro %}
 
 {% block layout %}
-  <main class="main cl"{% if want %} data-want="{{ want.slug }}"{% endif %}>
-    <div class="detail-head"><h1>[ TIMELINE CARDS ]</h1></div>
+  <main class="page one cc-cards cl"{% if want %} data-want="{{ want.slug }}"{% endif %}>
 
-    {% if refusal %}
-      <p class="cl-refusal"><strong>[ NOT OPENED ]</strong> {{ refusal }}</p>
-    {% endif %}
-
-    {# logic-cards-4 (2026-09-25): `?want=<slug>` is where the dispatcher
-       sends a navigation into an episode that is not open (after a restart or
-       a close, an installed episode app lands here). It used to be computed
-       and never drawn, so the phone got a bare list with no mention of the
-       episode it asked for. The banner names it and offers its own button,
-       and cards_landing.js goes straight into it when it turns READY. #}
-    {% if want %}
-      <div class="cl-want" aria-live="polite">
-        {% if want.state == 'ready' %}
-          <p><strong>[ {{ want.name | upper }} IS OPEN ]</strong></p>
-        {% elif want.state == 'loading' %}
-          <p><strong>[ OPENING {{ want.name | upper }} ]</strong> This page
-            takes you into it as soon as it is ready.</p>
-        {% else %}
-          <p><strong>[ {{ want.name | upper }} IS NOT OPEN ]</strong> An
-            episode closes when the dashboard restarts or somebody closes it.
-            Open it again here.</p>
-        {% endif %}
-        <div class="cl-act">{{ ep_actions(want) }}</div>
+    <div class="head">
+      <div>
+        <h1><span><span class="prompt" aria-hidden="true">&gt;</span> TIMELINE CARDS</span></h1>
+        <div class="sub">
+          <span title="The server keeps at most {{ cap }} episodes open at the same time, to save memory. Another one waits until one is closed.">up to <b>{{ cap }}</b> episodes at once on this server</span>
+          &middot; <b>{{ open_count }}</b> open now
+          {% if episodes %}&middot; <b>{{ episodes | length }}</b> in the vault{% endif %}
+        </div>
       </div>
-    {% endif %}
+      <div class="acts">
+        {% if carry_on and carry_on.state == 'ready' %}
+          <a class="key primary cl-carry" href="{{ carry_on.href }}" title="Back into the last episode you were in. It is still open, so this is instant."><span class="t">Carry on with {{ carry_on.name }}</span></a>
+        {% endif %}
+      </div>
+    </div>
 
-    {# logic-cards-3 (2026-09-25): "One episode at a time per person" was
-       neither enforced nor true (a laptop and a phone on one account in two
-       episodes is the everyday pair), and the page never said the one rule
-       that IS true: the Resolve agent follows the episode you last entered. #}
-    <p class="muted cl-lede">
-      Up to {{ cap }} episodes at once on this server ({{ open_count }} open
-      now). Your Resolve follows the last episode you went into. Two people in
-      the SAME episode is fine - the cut list takes one edit at a time and both
-      browsers see the same cards.
-    </p>
+    {# logic-cards-3 (2026-09-25): the one rule that IS true. #}
+    <p class="lede cl-lede">Your Resolve follows the last episode you went into.
+      Two people in the <b>same</b> episode is fine: the cut list takes one
+      edit at a time and both browsers see the same cards.</p>
 
     {% set opening = episodes | selectattr('state', 'equalto', 'loading') | list %}
-    {% if opening %}
-      <noscript><meta http-equiv="refresh" content="3"></noscript>
-      <p class="cl-opening" aria-live="polite">[ OPENING {{ opening | map(attribute='name') | join(', ') | upper }} ]
-        This reads the episode off the vault: it takes a moment, and this page
-        updates itself when it is ready.</p>
-    {% endif %}
+    {% if refusal or want or opening %}
+    <div class="vstack cl-notes">
+      {% if refusal %}
+        <div class="note warn cl-refusal" role="status">
+          <span class="tag solid warn" title="The episode was not opened.">not opened</span>
+          <span class="grow">{{ refusal }}</span>
+        </div>
+      {% endif %}
 
-    {% if carry_on and carry_on.state == 'ready' %}
-      <p><a class="cl-carry tap" href="{{ carry_on.href }}">[ CARRY ON WITH {{ carry_on.name | upper }} ]</a></p>
+      {# logic-cards-4 (2026-09-25): `?want=<slug>` names the episode the
+         dispatcher sent this browser for; cards_landing.js goes straight in
+         when it turns READY. #}
+      {% if want %}
+        <div class="note cl-want" aria-live="polite">
+          <span class="grow">
+            {% if want.state == 'ready' %}<b>{{ want.name }} is open.</b>
+            {% elif want.state == 'loading' %}<b>Opening {{ want.name }}.</b> This page takes you into it as soon as it is ready.
+            {% else %}<b>{{ want.name }} is not open.</b> An episode closes when the dashboard restarts or somebody closes it. Open it again here.{% endif %}
+          </span>
+          <span class="act cl-act">{{ ep_actions(want) }}</span>
+        </div>
+      {% endif %}
+
+      {% if opening %}
+        <noscript><meta http-equiv="refresh" content="3"></noscript>
+        <div class="note cl-opening" aria-live="polite">
+          <span class="spin" aria-hidden="true"></span>
+          <span class="grow"><b>Opening {{ opening | map(attribute='name') | join(', ') }}.</b>
+            This reads the episode off the vault: it takes a moment, and this
+            page updates itself when it is ready.</span>
+        </div>
+      {% endif %}
+    </div>
     {% endif %}
 
     {% if not episodes %}
-      <div class="side-head">[ EPISODES ]</div>
-      <p class="muted cl-lede">No episodes under the vault. An episode is a
-        folder with an <code>Interviewees</code> or <code>Clips</code> folder
-        in it.</p>
+      <section class="win" data-win="episodes">
+        {% call bar('episodes') %}{% endcall %}
+        <div class="empty"><span class="glyph" aria-hidden="true">&#9642;&#9642;&#9642;</span>No episodes under the vault yet.
+          An episode is a folder with an <code>Interviewees</code> or <code>Clips</code> folder in it.</div>
+      </section>
     {% else %}
 
-    <section class="cl-panel" aria-label="Find an episode">
-      <div class="cl-search">
-        <span class="cl-prompt" aria-hidden="true">&gt;</span>
-        <input id="cl-q" class="cl-q" type="search" autocomplete="off" spellcheck="false"
-               placeholder="search episodes, shows, years"
-               aria-label="Search episodes">
-        <kbd class="cl-kbd" aria-hidden="true">/</kbd>
-        <button type="button" class="cl-clear" hidden aria-label="Clear the search">&#215;</button>
-      </div>
-      <div class="cl-controls">
-        <div class="cl-group" role="group" aria-label="Order">
-          <span class="cl-glabel">ORDER</span>
-          <button type="button" class="cl-chip" data-sort="opened" aria-pressed="true">LAST OPENED</button>
-          <button type="button" class="cl-chip" data-sort="modified" aria-pressed="false">DATE</button>
-          <button type="button" class="cl-chip" data-sort="bytes" aria-pressed="false">LARGEST</button>
-          <button type="button" class="cl-chip" data-sort="name" aria-pressed="false">A - Z</button>
+    <section class="win cl-panel" data-win="find" aria-label="Find an episode">
+      {% call bar('find_an_episode') %}{% endcall %}
+      <div class="body cl-find">
+        <div class="prompt-in cl-search">
+          <span class="p" aria-hidden="true">&gt;</span>
+          <input id="cl-q" class="cl-q" type="search" autocomplete="off" spellcheck="false"
+                 placeholder="search episodes, shows, years"
+                 aria-label="Search episodes">
+          <kbd aria-hidden="true">/</kbd>
+          <button type="button" class="key quiet sm cl-clear" hidden aria-label="Clear the search" title="Empties the search box and shows every episode again."><span class="t">clear</span></button>
         </div>
-        {% if years %}
-        <div class="cl-group" role="group" aria-label="Year">
-          <span class="cl-glabel">YEAR</span>
-          <button type="button" class="cl-chip" data-year="" aria-pressed="true">ALL</button>
-          {% for y in years %}
-            <button type="button" class="cl-chip" data-year="{{ y }}" aria-pressed="false">{{ y }}</button>
-          {% endfor %}
-        </div>
-        {% endif %}
-        <div class="cl-group" role="group" aria-label="View">
-          <span class="cl-glabel">VIEW</span>
-          <button type="button" class="cl-chip" data-view="tree" aria-pressed="true">FOLDERS</button>
-          <button type="button" class="cl-chip" data-view="list" aria-pressed="false">LIST</button>
+        <div class="toggle-rows cl-controls">
+          <div class="chips" role="group" aria-label="Order"><span class="lbl">order</span>
+            <button type="button" class="toggle cl-chip" data-sort="opened" aria-pressed="true" title="The episodes you went into most recently first, then the ones anybody opened.">last opened</button>
+            <button type="button" class="toggle cl-chip" data-sort="modified" aria-pressed="false" title="The episodes whose files changed most recently first.">date</button>
+            <button type="button" class="toggle cl-chip" data-sort="bytes" aria-pressed="false" title="The biggest episodes on the server first.">largest</button>
+            <button type="button" class="toggle cl-chip" data-sort="name" aria-pressed="false" title="Alphabetical by episode name.">A - Z</button>
+          </div>
+          {% if years %}
+          <div class="chips" role="group" aria-label="Year"><span class="lbl">year</span>
+            <button type="button" class="toggle cl-chip" data-year="" aria-pressed="true" title="Episodes from every year.">all</button>
+            {% for y in years %}
+              <button type="button" class="toggle cl-chip" data-year="{{ y }}" aria-pressed="false" title="Only episodes from {{ y }}.">{{ y }}</button>
+            {% endfor %}
+          </div>
+          {% endif %}
+          <div class="chips" role="group" aria-label="View"><span class="lbl">view</span>
+            <button type="button" class="toggle cl-chip" data-view="tree" aria-pressed="true" title="Episodes grouped by year and show, as they sit in the vault.">folders</button>
+            <button type="button" class="toggle cl-chip" data-view="list" aria-pressed="false" title="Every episode in one flat list.">list</button>
+          </div>
         </div>
       </div>
     </section>
 
     {% if recent %}
-    <section class="cl-recent" aria-label="Your recent episodes">
-      <div class="side-head">[ YOUR RECENT ]</div>
-      <div class="cl-tiles">
-        {% for ep in recent %}
-          {% if ep.state == 'ready' %}
-            <a class="cl-tile tap" href="{{ ep.href }}" data-search="{{ ((ep.name or '') ~ ' ' ~ (ep.show or '') ~ ' ' ~ (ep.path_label or '') ~ ' ' ~ (ep.year or '')) | lower }}" data-year="{{ ep.year or '' }}">
-              <span class="cl-tile-name">{{ ep.name }}</span>
-              <span class="cl-tile-path">{{ ep.path_label or ep.show }}</span>
-              <span class="cl-tile-when"><span class="cl-badge cl-badge-ready">READY</span> {{ ep.opened_phrase }}</span>
-            </a>
-          {% else %}
-            <form class="cl-tile-form" method="post" action="/cards/open"
-                  data-search="{{ ((ep.name or '') ~ ' ' ~ (ep.show or '') ~ ' ' ~ (ep.path_label or '') ~ ' ' ~ (ep.year or '')) | lower }}" data-year="{{ ep.year or '' }}">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <input type="hidden" name="slug" value="{{ ep.slug }}">
-              <button class="cl-tile tap" type="submit"{% if ep.state == 'loading' %} disabled{% endif %}>
-                <span class="cl-tile-name">{{ ep.name }}</span>
-                <span class="cl-tile-path">{{ ep.path_label or ep.show }}</span>
-                <span class="cl-tile-when">{% if ep.state == 'loading' %}<span class="cl-badge cl-badge-loading">OPENING</span>{% elif ep.state == 'failed' %}<span class="cl-badge cl-badge-failed">FAILED</span>{% endif %} {{ ep.opened_phrase }}</span>
-              </button>
-            </form>
-          {% endif %}
-        {% endfor %}
+    <section class="win cl-recent" data-win="recent" aria-label="Your recent episodes">
+      {% call bar('your_recent') %}<span class="meta hide-sm" title="Only episodes you opened yourself. Somebody else's visits do not count here.">the last {{ recent | length }} you went into</span>{% endcall %}
+      <div class="body">
+        <div class="tiles cl-tiles">
+          {% for ep in recent %}
+            {% set search = ((ep.name or '') ~ ' ' ~ (ep.show or '') ~ ' ' ~ (ep.path_label or '') ~ ' ' ~ (ep.year or '')) | lower %}
+            {% if ep.state == 'ready' %}
+              <a class="tile cl-tile" data-state="ready" href="{{ ep.href }}" data-search="{{ search }}" data-year="{{ ep.year or '' }}" title="Go into {{ ep.name }}.">
+                <span class="tn cl-tile-name">{{ ep.name }}</span>
+                <span class="tp cl-tile-path">{{ ep.path_label or ep.show }}</span>
+                <span class="tw cl-tile-when">{{ badge(ep) }} {{ ep.opened_phrase }}</span>
+              </a>
+            {% else %}
+              <form class="cl-tile-form" method="post" action="/cards/open"
+                    data-search="{{ search }}" data-year="{{ ep.year or '' }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="slug" value="{{ ep.slug }}">
+                <button class="tile cl-tile" data-state="{{ ep.state or '' }}" type="submit"{% if ep.state == 'loading' %} disabled{% endif %}
+                        title="{{ ep.name ~ ' is opening.' if ep.state == 'loading' else 'Open ' ~ ep.name ~ ' on the server.' }}">
+                  <span class="tn cl-tile-name">{{ ep.name }}</span>
+                  <span class="tp cl-tile-path">{{ ep.path_label or ep.show }}</span>
+                  <span class="tw cl-tile-when">{{ badge(ep) }} {{ ep.opened_phrase }}</span>
+                </button>
+              </form>
+            {% endif %}
+          {% endfor %}
+        </div>
       </div>
     </section>
     {% endif %}
 
-    <section class="cl-browse" aria-label="Every episode">
-      <div class="side-head cl-head">
-        <span>[ EPISODES ]</span>
-        <span class="cl-count muted">{{ episodes | length }} episode{{ '' if episodes | length == 1 else 's' }}</span>
+    <section class="win cl-browse" data-win="episodes" aria-label="Every episode">
+      {% call bar('episodes') %}
+        <span class="meta hide-sm cl-count">{{ episodes | length }} episode{{ '' if episodes | length == 1 else 's' }}</span>
         <span class="cl-fold">
-          <button type="button" class="btn cl-unfold">[ UNFOLD ALL ]</button>
-          <button type="button" class="btn cl-refold">[ FOLD ALL ]</button>
+          <button type="button" class="act cl-unfold" title="Opens every year and show folder below.">unfold all</button>
+          &middot;
+          <button type="button" class="act cl-refold" title="Closes every year and show folder below.">fold all</button>
         </span>
+      {% endcall %}
+      <div class="cl-tree tree-view tree-top" id="cl-tree">{{ tree_items(tree, 0) }}</div>
+      <div class="cl-list list-flat" id="cl-list" hidden></div>
+      <div class="empty cl-none" hidden><span class="glyph" aria-hidden="true">&#9642;&#9642;&#9642;</span>Nothing matches.
+        <div class="cl-reset-row"><button type="button" class="key sm cl-reset" title="Clears the search and the year and shows every episode."><span class="t">Show everything</span></button></div>
       </div>
-      <div class="cl-tree" id="cl-tree">{{ tree_items(tree, 0) }}</div>
-      <div class="cl-list" id="cl-list" hidden></div>
-      <p class="cl-none" hidden>Nothing matches. <button type="button" class="btn cl-reset">[ SHOW EVERYTHING ]</button></p>
     </section>
     {% endif %}
 
-    <p class="muted cl-lede cl-foot">
-      An episode stays open behind you once it is open, so switching back is
-      instant. You can close your own episode, or one nobody has been in for
-      a while; closing one somebody else is in is for an admin.
-    </p>
+    <p class="lede cl-lede cl-foot">An episode stays open behind you once it
+      is open, so switching back is instant. You can close your own episode,
+      or one nobody has been in for a while; closing one somebody else is in
+      is for an admin.</p>
   </main>
 {% endblock %}

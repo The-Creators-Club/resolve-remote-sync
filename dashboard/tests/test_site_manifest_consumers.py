@@ -104,7 +104,13 @@ def test_the_settings_page_offers_nas_kind_as_a_choice(env):
     client, conn, settings, app = env
     as_user(client, "owen")
     page = client.get("/admin/settings")
-    assert '<select name="nas_kind">' in page.text
+    # Terminal look (C-collapse 2026-09-25): the same <select>, now with its
+    # own class and id; what it offers is every kind a factory can build.
+    at = page.text.index('name="nas_kind">')
+    assert page.text[page.text.rindex("<", 0, at):at].startswith("<select ")
+    choices = page.text[at:page.text.index("</select>", at)]
+    assert '<option value="truenas"' in choices
+    assert '<option value="qnap"' not in choices
     # dash-admin-7: case is normalised to what nas.factory builds ...
     r = client.put("/api/v1/admin/site", json={"values": {"nas_kind": "TrueNAS"}})
     assert r.status_code == 200

@@ -1798,7 +1798,8 @@ key is hidden, or the older control stays, until the ticket lands.
   serve reload themselves through `HX-Refresh` (R23, wave 5), on any build
   at or above `ui_variant.HEADER_FLOOR`, which the image floor of R23
   guarantees (wave 6).
-- The overlay is temporary. Phase 8 deletes classic, moves `cc/` up, and
+- (2026-09-25: phase 8 is built, see its row in 7.1; the next paragraph is
+  the plan as written.) The overlay is temporary. Phase 8 deletes classic, moves `cc/` up, and
   removes the loader, the setting and the cookie route. It keeps PARSING
   the group-set header (wave 5), only to answer `HX-Refresh` to a page
   whose look it can no longer serve (R23). The generation token and its reload line stay for good (R23).
@@ -1886,7 +1887,7 @@ installed app has its own cookie jar); then the group is added to `ui_terminal_g
 | 5 Healthy / breaks | 3-4 | Panel moves between pages. |
 | 6 Apps | 5-8 | Three SPAs + Cards landing; ytdl app.js is 3,000+ lines; the shared SPA fold/tip/confirm helper and the SPA census (wave 6). |
 | 7 Copy sweep | 2-3 | Alerts copy is emailed: review sentence by sentence. |
-| 8 Default and delete | 1-2 | Plus the soak. |
+| 8 Default and delete | 1-2 | **BUILT 2026-09-25, early, by the owner's decision, with no soak** ("this is completely replacing the old one"; ledger `UI_PORT_LEDGER/C-collapse.md`). `cc/` moved up over the classic templates, classic templates and sheets deleted, `ui_variant.py` and the `ui_terminal_groups` / `ui_preview` settings, the preview cookie, `/ui/preview` and `tools/ui_variant.py` removed. Differs from the plan above in two places: the group-set header is NOT parsed any more (every page sends `X-CC-UI: terminal` and `app.stale_page_gate` answers anything else with HX-Refresh before the route runs), and the generation token and its reload line are gone with it. |
 | **Total** | **28-41** | The BACKEND tickets (section 5) are not in these numbers: user page 3-5, UPDATE ALL 4-6 (with its own design review), check now 1, dismiss all 1, the small view fields 1-2 together, collector route 0.5, who_answers 0.5. |
 
 ### 8.2 Decisions for the owner (each with a recommended default)

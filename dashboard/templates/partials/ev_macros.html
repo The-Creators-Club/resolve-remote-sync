@@ -1,0 +1,36 @@
+{# The everyday group's window and meter (UI redesign port phase 3, plan 3.1
+   and 3.2 "foldable()"). A NEW name with no classic twin: only the phase 3
+   pages import it, so it is reachable only when `everyday` is on.
+
+   win(key, title, cls, meta, meta_id, body_cls): a .win whose bar holds a
+   real fold button (type="button", named by the title through
+   aria-labelledby), the title as a heading with no underscores, the dashed
+   rule and an optional meta span. The caller's block is the window's
+   content, normally one .body. cc.js folds it by data-win, per page. #}
+{% macro win(key, title, cls='', meta='', meta_id='') -%}
+<section class="win {{ cls }}" data-win="{{ key }}" id="win-{{ key }}" aria-labelledby="win-{{ key }}-t">
+  <div class="bar"><button class="fold" type="button" aria-expanded="true" aria-labelledby="win-{{ key }}-t"><span class="fold-g" aria-hidden="true">&#9662;</span></button><h2 class="t" id="win-{{ key }}-t">{{ title | cc_title }}</h2><span class="bar-rule"></span>{% if meta or meta_id %}<span class="meta"{% if meta_id %} id="{{ meta_id }}"{% endif %}>{{ meta }}</span>{% endif %}</div>
+  {{ caller() }}
+</section>
+{%- endmacro %}
+
+{# A text meter, as the bench draws one: `cells` blocks, the rest dimmed. #}
+{% macro meter(pct, cells=14) -%}
+{%- set n = (((pct or 0) | float) / 100 * cells) | round | int -%}
+{%- set n = [[n, cells] | min, 0] | max -%}
+<span class="mtr hi" aria-hidden="true">{{ ('&#9608;' * n) | safe }}<span class="rest">{{ ('&#9617;' * (cells - n)) | safe }}</span></span>
+{%- endmacro %}
+
+{# An account answer ({tone, text}, tone red/green/amber/muted) as a note
+   line. The tone words are the classic partials'; only the paint changes. #}
+{% macro result_line(result, extra='') -%}
+{%- if result -%}
+{%- set cls = {"red": "err", "green": "ok", "amber": "warn"}.get(result.tone, "") -%}
+<div class="note {{ cls }} {{ extra }}" role="status"><span class="grow">{{ result.text }}</span></div>
+{%- endif -%}
+{%- endmacro %}
+
+{# A state word as a tag, with its explanation (round 2 tooltip rule). #}
+{% macro tag(tone, text, tip='', solid=false) -%}
+<span class="tag{{ ' solid' if solid }} {{ tone }}"{% if tip %} title="{{ tip }}"{% endif %}>{{ text }}</span>
+{%- endmacro %}

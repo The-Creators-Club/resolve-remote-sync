@@ -3,9 +3,10 @@
 docs/UI_REDESIGN_PORT_PLAN.md 1.4, 4.1, 7.0, 7.1 row 6. The music and
 youtube suites carry their own test_cc_body.py; this is b-roll's.
 
-What it pins: the head script turns on html.cc before first paint when the
-dashboard's readable cookie lists `apps`, and the injected topbar's marker
-is authoritative afterwards; the helper cc_spa.js loads before app.js, is
+What it pins: html.cc is in the markup (the terminal look is the only look
+since 2026-09-25, so nothing switches it and the retired look cookie is
+cleared, never read), and the loader only toggles cc-chrome on whether a HUD
+arrived; the helper cc_spa.js loads before app.js, is
 served under the mount and is byte-identical with the other apps' copies;
 the cc-spa-common block is byte-identical with music's; every phase 6 rule
 is scoped to html.cc, so the classic app and the client share page (R22)
@@ -81,45 +82,51 @@ def _selectors(css: str):
 
 # ------------------------------------------------------------- first paint
 
-def test_the_head_script_sets_html_cc_from_the_cookie():
-    head = _text(INDEX).split("</head>", 1)[0]
+def test_html_cc_is_in_the_markup_and_the_head_script_reads_no_cookie():
+    html = _text(INDEX)
+    assert '<html lang="en" class="cc">' in html
+    head = html.split("</head>", 1)[0]
     script = head.split("<script>", 1)[1].split("</script>", 1)[0]
-    assert "document.cookie.split('; ')" in script
-    assert "indexOf('apps')" in script and "cl.add('cc')" in script
+    # the retired look cookie is cleared, never read or switched on
+    assert "document.cookie.split" not in script and "indexOf('apps')" not in script
+    assert "cl.add('cc')" not in script
+    assert "document.cookie = 'ccsync_ui_effective=; path=/; max-age=0'" in script
     assert "document.body" not in script
     assert not _ABSOLUTE.findall(script)
 
 
 @pytest.mark.skipif(not NODE, reason="node is not on PATH")
-@pytest.mark.parametrize("cookie,expect", [
-    ("ccsync_ui_effective=chrome.apps", ["cc", "cc-chrome", "cc-chrome-pending"]),
-    ("x=1; ccsync_ui_effective=apps", ["cc"]),
-    ("ccsync_ui_effective=chrome", ["cc-chrome", "cc-chrome-pending"]),
-    ("", []),
+@pytest.mark.parametrize("cookie", [
+    "ccsync_ui_effective=chrome.apps", "x=1; ccsync_ui_effective=apps", "",
 ])
-def test_the_head_script_runs(cookie, expect, tmp_path):
+def test_the_head_script_runs(cookie, tmp_path):
+    # Whatever an old cookie said, the hold starts and the cookie is cleared.
     head = _text(INDEX).split("</head>", 1)[0]
     script = head.split("<script>", 1)[1].split("</script>", 1)[0]
     harness = (
         "const cls = new Set();\n"
         "global.document = {cookie: %s, documentElement: {classList: {add: c => cls.add(c), remove: c => cls.delete(c)}}};\n"
         "global.setTimeout = () => 0;\n%s\n"
-        "process.stdout.write(JSON.stringify([...cls].sort()));\n"
+        "process.stdout.write(JSON.stringify([[...cls].sort(), document.cookie]));\n"
     ) % (json.dumps(cookie), script)
     f = tmp_path / "head.js"
     f.write_text(harness, encoding="utf-8")
     out = subprocess.run([NODE, str(f)], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
-    assert json.loads(out.stdout) == sorted(expect)
+    classes, written = json.loads(out.stdout)
+    assert classes == ["cc-chrome", "cc-chrome-pending"]
+    assert written == "ccsync_ui_effective=; path=/; max-age=0"
 
 
-def test_the_topbar_marker_is_authoritative_for_html_cc():
+def test_the_loader_toggles_only_cc_chrome_on_the_hud():
     js = _text(STATIC / "app.js")
     body = js[js.index("function syncDashboardLook("):]
     body = body[:body.index("\n}\n")]
-    assert 'root.classList.toggle("cc", apps)' in body
-    assert "data-ui-apps" in body
-    # the look can change under an open clip: the detail follows it
+    assert 'host.querySelector(".hud")' in body
+    assert 'classList.toggle("cc-chrome", hud)' in body
+    # html.cc is markup: nothing switches it, and the marker is gone
+    assert 'toggle("cc",' not in body and "data-ui-apps" not in body
+    # the chrome can arrive under an open clip: the detail follows it
     assert "relayoutDetail();" in body
 
 

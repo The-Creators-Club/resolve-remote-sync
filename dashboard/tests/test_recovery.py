@@ -19,6 +19,7 @@ Pins the four properties the finding is about, not the wording:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -502,7 +503,13 @@ def test_the_recovery_page_renders_for_an_admin_and_not_for_an_editor(env):
     page = client.get("/admin/recovery?problem=project")
     assert page.status_code == 200
     assert "GET SOMETHING BACK" in page.text
-    assert "WHAT WENT WRONG" in page.text
+    # The wizard window, with the asked-for problem picked and its plan
+    # drawn beside it (terminal markup since the classic look retired).
+    assert 'data-win="wizard"' in page.text
+    assert 'aria-label="what went wrong"' in page.text
+    assert re.search(r'href="/admin/recovery\?problem=project#wizard"\s+aria-current="true"',
+                     page.text)
+    assert '<h2 class="sec">what to do</h2>' in page.text
 
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "ruskin"))
     assert client.get("/admin/recovery").status_code in (302, 303, 403)

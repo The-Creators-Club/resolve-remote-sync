@@ -10,10 +10,14 @@ times), a line of lane chips, a "direct:1" chip, a Resolve line, a second line
 of a dozen chips with two buttons in among them, an expander, a version.
 
 What a row is: ONE headline, the three lanes in one fixed order, everything
-else behind [ DETAILS ] with a count of the things in there that are actually
-wrong, and the buttons in a column of their own.
+else behind one collapsed details expander with a count of the things in
+there that are actually wrong, and the buttons in a column of their own. The
+terminal look (the only look since 2026-09-25) lists the problems themselves
+inline, worst first (UI port D11), and keeps the rest behind that expander.
 """
 from __future__ import annotations
+
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -191,30 +195,49 @@ def render_grid(conn, mutate=None) -> str:
 
 
 def companions(body: str) -> str:
-    """Just the COMPANIONS table. The banners above it and the collector panel
-    below it carry chips of their own, and neither is this row."""
-    assert "[ COMPANIONS ]" in body
-    return body.split("[ COMPANIONS ]", 1)[1].split("</table></div>", 1)[0]
+    """Just the computers' rows. The banners above them and the lost
+    computers and projects sub-windows below carry tags of their own, and
+    none of them is this row."""
+    assert 'class="pc head-row"' in body
+    rows = body.split('class="pc head-row"', 1)[1]
+    for tail in ('data-key="fleet:lost"', 'data-key="fleet:projects"'):
+        rows = rows.split(tail, 1)[0]
+    return rows
+
+
+def issues(body: str) -> str:
+    """The row's issues column (the chips that sat behind classic DETAILS,
+    drawn inline worst first, D11)."""
+    return body.split('<div class="issues"', 1)[1].split("</div>", 1)[0]
+
+
+# Every class a fault colour can arrive through on a terminal row: the row's
+# own tone, its LED, its headline, a lane line and an issue tag.
+FAULT_CLASSES = ('class="pc home-pc err"', 'class="pc home-pc warn"',
+                 'class="led err', 'class="led warn',
+                 'class="hl err"', 'class="hl warn"',
+                 'class="lane err"', 'class="lane warn"',
+                 'class="tag err"', 'class="tag warn"',
+                 'class="tag solid err"', 'class="tag solid warn"')
 
 
 def test_a_healthy_row_carries_no_coloured_chip(env):
-    """The page's job is "is anything red". A row of green boxes stops the eye
-    exactly as well as a red one, which is why a healthy lane is muted."""
+    """The page's job is "is anything red". A healthy row draws no fault
+    colour anywhere, and its headline is muted."""
     _client, conn = env
     body = companions(render_grid(conn))
-    assert 'class="chip red"' not in body
-    assert 'class="chip amber"' not in body
-    assert 'class="chip green"' not in body
-    # The lanes are there, quietly, all three of them.
-    for label in ("upload: idle", "proxy download: idle", "folder sync: idle"):
-        assert label in body
-    assert 'class="chip lane quiet"' in body
-    assert 'class="why-line muted"' in body
+    for cls in FAULT_CLASSES:
+        assert cls not in body, cls
+    # The lanes are there, quietly, all three of them, in the fixed order.
+    lanes = re.findall(r'<span class="k">([^<]+)</span>.*?<span class="s">([^<]+)</span>', body)
+    assert lanes == [("upload", "idle"), ("proxy download", "idle"), ("folder sync", "idle")]
+    assert 'class="hl muted"' in body
+    assert '<span class="none">nothing wrong</span>' in issues(body)
 
 
 def test_nothing_ticked_is_not_an_error(env):
     """Owner, 2026-09-11: "Alex laptop just happens to have no synced
-    projects, not an error". Muted headline, calm dot, no coloured chip."""
+    projects, not an error". Muted headline, calm LED, no fault colour."""
     _client, conn = env
 
     def unticked(e):
@@ -226,16 +249,16 @@ def test_nothing_ticked_is_not_an_error(env):
 
     body = companions(render_grid(conn, unticked))
     assert "Nothing ticked for this computer" in body
-    assert 'class="why-line muted"' in body
-    assert 'class="why-line red"' not in body
-    assert 'class="chip red"' not in body
-    assert 'class="chip amber"' not in body
-    assert '<span class="dot red"' not in body
+    assert 'class="hl muted"' in body
+    for cls in FAULT_CLASSES:
+        assert cls not in body, cls
 
 
 def test_the_clutter_is_behind_one_collapsed_expander_with_a_count(env):
     """Folded away, but never in silence: the count is what says there is
-    something in there, and its title names each one."""
+    something in there, and its title names each one. The terminal row
+    lists the problems themselves inline (D11); the rest of the detail is
+    behind one collapsed expander that carries the count."""
     _client, conn = env
 
     def problems(e):
@@ -245,28 +268,35 @@ def test_the_clutter_is_behind_one_collapsed_expander_with_a_count(env):
                                "reason": "this project has no server folder yet",
                                "at": dbmod.utcnow_iso()}
 
-    body = render_grid(conn, problems)
-    assert "[ DETAILS ]" in body
-    # Collapsed: a <details> with no `open` attribute.
-    assert "<details class=\"proj-group row-details\"" in body
-    assert "4 notes" in body
-    assert "3 crashes" in body and "68 clips outside the tree" in body
-    # ...and the chips themselves are still on the page, inside it.
-    assert "[ CRASHES: 3 ]" in body
-    assert "[ 68 CLIPS OUTSIDE THE TREE ]" in body
-    assert "[ YOUTUBE IMPORT GAVE UP ]" in body
-    assert "<dt>PROBLEMS</dt>" in body
+    body = companions(render_grid(conn, problems))
+    # ONE expander per row, collapsed: a <details> with no `open` attribute.
+    expanders = re.findall(r'<details class="more"[^>]*>', body)
+    assert len(expanders) == 1 and " open" not in expanders[0]
+    summary = body.split('<details class="more"', 1)[1].split("</summary>", 1)[0]
+    assert "4 notes" in summary
+    assert "3 crashes" in summary and "68 clips outside the tree" in summary
+    # ...and each problem is still on the row, in its issues column.
+    row_issues = issues(body)
+    assert '<span class="w">crashes: 3</span>' in row_issues
+    assert '<span class="w">68 clips outside the tree</span>' in row_issues
+    assert '<span class="w">youtube import gave up</span>' in row_issues
+    assert '<span class="w">2 stray project dirs</span>' in row_issues
 
 
 def test_the_buttons_are_a_column_and_not_a_word_between_two_chips(env):
-    """[ ASK THIS COMPUTER WHY ] used to sit in the middle of the chip line.
+    """"Ask this computer why" used to sit in the middle of the chip line.
     Every route, target and form field is the one it was."""
     _client, conn = env
-    body = render_grid(conn, lambda e: e["guard"].update({"breaker_tripped": 1}))
-    assert '<td class="row-actions"' in body
+    body = companions(render_grid(conn, lambda e: e["guard"].update({"breaker_tripped": 1})))
+    assert '<div class="acts row-actions">' in body
     assert 'hx-post="/partials/admin/machines/ask-why"' in body
     assert 'hx-post="/partials/admin/machines/resume-lane-b"' in body
     assert 'hx-target="closest .fleet-grid-wrap"' in body
-    actions = body.split('<td class="row-actions"', 1)[1]
-    assert "[ ASK THIS COMPUTER WHY ]" in actions
-    assert "[ RESUME ]" in actions
+    actions = body.split('<div class="acts row-actions">', 1)[1]
+    assert '<span class="t">Ask this computer why</span>' in actions
+    assert '<span class="t">Resume</span>' in actions
+    # ...and neither key is among the issue tags.
+    row_issues = issues(body)
+    assert "ask-why" not in row_issues and "resume-lane-b" not in row_issues
+    for field in ('name="editor" value="owen"', 'name="machine" value="EDIT-PC"'):
+        assert field in actions

@@ -1,50 +1,27 @@
-{# The invariant checker's verdicts (SYS-9, resilience sweep wave 5,
-   2026-08-29).
-
-   THREE STATES, NEVER TWO. [ OK ] means a check ran this pass and found the
-   fact still true; [ BROKEN ] names the subjects; [ NOT CHECKED ] means this
-   deployment cannot evaluate it and says what would have to be true for it
-   to run; [ COULD NOT RUN ] is a check that raised. A check that could not
-   run must never render the same as a check that found nothing, which is the
-   rule the whole sweep turns on -- so the not-checked rows carry their
-   reason in the same column the broken rows carry their detail, rather than
-   being quietly dropped from the table. #}
-{# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
-   600 px, but between 600 and 900 it is still a grid, and a grid that
-   is wider than the window has to scroll inside itself rather than take
-   the page with it (round 2 of the sweep, 2026-08-30). #}
-{# .stack with EMPTY data-labels (MOBILE_PLAN.md §3.2, round 2 of the sweep,
-   2026-08-30): a row here is one check, and its first cell is already the
-   label -- a chip that says which of the three states it is in. The empty
-   attribute is style.css's opt-out, so the cell becomes a line with no 11 px
-   heading above it. Before this the page was 957 px wide at 390. #}
-<div class="scroll-x">
-<table class="editors stack" id="invariant-table">
-  <tbody>
-  {% for inv in invariants %}
-    <tr class="editor-row">
-      <td class="mono-sm" data-label="" style="white-space:nowrap">
-        {% if inv.state == 'ok' %}<span class="chip green">[ OK ]</span>
-        {% elif inv.state == 'broken' %}<span class="chip {{ 'red' if inv.severity == 'error' else 'amber' }}">[ BROKEN ]</span>
-        {% elif inv.state == 'check_failed' %}<span class="chip red">[ COULD NOT RUN ]</span>
-        {% else %}<span class="chip" title="this server cannot evaluate this one; the reason is beside it">[ NOT CHECKED ]</span>{% endif %}
-      </td>
-      <td data-label="">
-        <div class="mono-sm">{{ inv.title }}</div>
-        {% if inv.state == 'broken' or inv.state == 'check_failed' %}
-          <div class="muted" style="margin-top:0.25rem">{{ inv.consequence }}</div>
-          <div class="mono-sm" style="margin-top:0.25rem">WHAT TO DO: {{ inv.fix }}</div>
-        {% endif %}
-        {% if inv.detail %}<div class="muted mono-sm" style="margin-top:0.25rem">{{ inv.detail }}</div>{% endif %}
-        {% for s in inv.subjects %}
-          <div class="mono-sm" style="margin-top:0.2rem">- {{ s.subject }}{% if s.detail %}: {{ s.detail }}{% endif %}</div>
-        {% endfor %}
-      </td>
-      <td class="muted mono-sm" data-label="LAST CHECKED" style="white-space:nowrap">
-        {% if inv.checked_at %}{{ inv.checked_at | ago }}{% else %}never{% endif %}
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
+{# The invariant checker's verdicts, terminal twin (UI port phase 5). THREE
+   STATES, NEVER TWO, as partials/invariant_checks.html: ok, broken (names
+   its subjects), not checked (with the reason in the same place a broken
+   row carries its detail), could not run. #}
+<div class="scroll-y hl-list" id="invariant-table">
+{% for inv in invariants %}
+  {% set bad = inv.state in ('broken', 'check_failed') %}
+  <div class="vd{{ ' ok' if inv.state == 'ok' }}">
+    <span class="st">
+      {% if inv.state == 'ok' %}<span class="tag ok" title="The check ran on the last pass and the fact is still true.">ok</span>
+      {% elif inv.state == 'broken' %}<span class="tag solid {{ 'err' if inv.severity == 'error' else 'warn' }}" title="This fact has stopped being true. What it means and what to do are below.">broken</span>
+      {% elif inv.state == 'check_failed' %}<span class="tag solid err" title="The check itself hit an error, so this fact is unknown.">could not run</span>
+      {% else %}<span class="tag mute" title="This server cannot evaluate this one; the reason is beside it.">not checked</span>{% endif %}
+    </span>
+    <span class="ti"><span class="n">{{ '%02d' % loop.index }}</span>{{ inv.title }}</span>
+    <span class="when" title="When this check last ran.">{% if inv.checked_at %}{{ inv.checked_at | ago }}{% else %}never{% endif %}</span>
+    <div class="more">
+      {% if bad %}<div class="cq">{{ inv.consequence }}</div>{% endif %}
+      {% if inv.detail %}<div class="dt">{{ inv.detail }}</div>{% endif %}
+      {% for s in inv.subjects %}<div class="subj">{{ s.subject }}{% if s.detail %}: {{ s.detail }}{% endif %}</div>{% endfor %}
+      {% if bad %}<div class="fix">{{ inv.fix }}</div>{% endif %}
+    </div>
+  </div>
+{% else %}
+  <div class="allclear"><span class="led off"></span>No invariant pass has run yet.</div>
+{% endfor %}
 </div>

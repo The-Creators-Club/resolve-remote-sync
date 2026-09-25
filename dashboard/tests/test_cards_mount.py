@@ -430,7 +430,8 @@ def test_an_engine_that_will_not_build_is_a_failed_episode(tmp_path, fake_src,
         # needing an engine.
         page = client.get("/cards/")
         assert page.status_code == 200
-        assert "FAILED" in page.text
+        assert "cl-badge-failed" in page.text
+        assert "RuntimeError" in page.text
 
 
 def test_a_wrap_that_fails_stops_the_engine_it_already_started(

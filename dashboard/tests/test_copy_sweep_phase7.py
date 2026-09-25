@@ -1,24 +1,27 @@
 """UI port phase 7, the copy sweep (docs/UI_REDESIGN_PORT_PLAN.md 2.6, D8, R12).
 
-Copy that names a control no longer wears the classic key's brackets: it is
+Copy that names a control no longer wears the old key's brackets: it is
 the key's label in sentence case, in double quotes (`press "Resume"`), which
-reads the same next to a classic `[ RESUME ]` key, a terminal key (uppercased
-by CSS), an email and a webhook. The copy lives in Python and is shared by
-both variants, so it has to be variant-neutral.
+reads the same next to a terminal key (cased by CSS), in an email and in a
+webhook. Since the collapse (2026-09-25) the terminal look is the only look,
+so every check below is against the one set of templates.
 
 Four checks:
   * the Python bracket scan: no string that reaches a person in any module
     under src/ccsync_dashboard names a control as `[ LABEL ]` (the allow-list
     is empty and may not grow);
-  * every control the rewritten copy names is a real key on the classic page
-    it is drawn on (`[ LABEL ]` there), so a relabel cannot orphan a sentence;
-  * NOTICE_KINDS holds plain labels and each classic template wraps them;
+  * every control the rewritten copy names is a real key (or menu item, or
+    window title) on the page it is drawn on, so a relabel cannot orphan a
+    sentence;
+  * NOTICE_KINDS holds plain labels and each template draws them in a key,
+    never wrapped in brackets;
   * the two docs the image ships and /help renders carry no bracket controls
     and no page-region words the terminal variant moves (R13).
 """
 from __future__ import annotations
 
 import ast
+import html
 import re
 from pathlib import Path
 
@@ -132,7 +135,7 @@ def _code(module: str) -> str:
     return re.sub(r'"\s*\n\s*f?"', "", "\n".join(lines)).replace('\\"', '"')
 
 
-# (module whose copy names it, the D8 label, the classic template drawing it).
+# (module whose copy names it, the D8 label, the template drawing it).
 D8_LABELS = (
     ("alerts.py", "Resume", "partials/fleet_grid.html"),
     ("alerts.py", "Start syncing again", "partials/fleet_halt.html"),
@@ -140,19 +143,23 @@ D8_LABELS = (
     ("alerts.py", "Forget", "partials/fleet_grid.html"),
     ("alerts.py", "Check now", "partials/admin_packages.html"),
     ("alerts.py", "Update now", "partials/admin_packages.html"),
-    ("alerts.py", "Send a test", "partials/admin_alerts.html"),
+    ("alerts.py", "Send a test", "admin_alerts.html"),
     ("alerts.py", "Show finished", "partials/admin_jobs.html"),
     ("alerts.py", "Try again", "partials/admin_jobs.html"),
     ("alerts.py", "Cancel", "partials/admin_jobs.html"),
     ("alerts.py", "Ask this computer why", "partials/fleet_grid.html"),
+    ("alerts.py", "Move on the server and on every computer",
+     "partials/project_detail.html"),
     ("notices.py", "Update now", "partials/admin_dashboard_update.html"),
     ("notices.py", "Forget", "partials/fleet_grid.html"),
-    ("notices.py", "Send a test", "partials/admin_alerts.html"),
-    ("notices.py", "Download crash reports", "partials/admin_diagnostics.html"),
+    ("notices.py", "Send a test", "admin_alerts.html"),
+    ("notices.py", "Download crash reports", "partials/health_diagnostics.html"),
     ("notices.py", "Check now", "partials/admin_packages.html"),
     ("notices.py", "Installer", "partials/topbar.html"),
+    ("notices.py", "Move on the server and on every computer",
+     "partials/project_detail.html"),
     ("invariants.py", "Update now", "partials/admin_packages.html"),
-    ("invariants.py", "Send a test", "partials/admin_alerts.html"),
+    ("invariants.py", "Send a test", "admin_alerts.html"),
     ("protection.py", "I have backed it up", "partials/protection.html"),
     ("protection.py", "Record a restore", "partials/protection.html"),
     ("protection.py", "Resume", "partials/fleet_grid.html"),
@@ -167,44 +174,84 @@ D8_LABELS = (
     ("ui.py", "Start syncing again", "partials/fleet_halt.html"),
     ("ui.py", "Resume", "partials/fleet_grid.html"),
     ("release_feed.py", "Update now", "partials/admin_dashboard_update.html"),
-    ("setup_engine.py", "Available from the vendor", "partials/admin_packages.html"),
+    # a window title, not a key: the sentence sends the admin to it. It said
+    # "Available from the vendor" (the old section name) until 2026-09-25.
+    ("setup_engine.py", "From the vendor", "partials/admin_packages.html"),
 )
+
+# What a sentence can name on a page: a key's label (`<span class="t">` or
+# the text of a `.key`), a HUD menu item, a window title.
+_KEY = re.compile(
+    r'<span class="t">(.*?)</span>'
+    r'|<(?:button|a|label)\b[^>]*class="[^"]*\b(?:key|hud-mi)\b[^"]*"[^>]*>(.*?)'
+    r'</(?:button|a|label)>', re.S)
+# ev_macros' win(key, title) and hm.win(key, title); the packages page's own
+# bar(title, meta); a bare `"title" | cc_title`.
+_TITLE = re.compile(r'\bwin\(\s*"[^"]*"\s*,\s*"([^"]+)"'
+                    r'|\bbar\(\s*"([^"]+)"'
+                    r"|\bwin\(\s*'[^']*'\s*,\s*'([^']+)'"
+                    r'|"([a-z_]+)"\s*\|\s*cc_title')
+_LOOP = re.compile(r"\{%-?\s*for\s+([\w\s,]+?)\s+in\s+(\[.*?\])\s*-?%\}", re.S)
+
+
+def _loop_values(text: str, name: str) -> list[str]:
+    """The literal values a `{% for a, b, c in [(...), ...] %}` loop binds
+    `name` to, so a key drawn as `{{ button }}` still counts."""
+    out = []
+    for targets, body in _LOOP.findall(text):
+        names = [t.strip() for t in targets.split(",")]
+        if name not in names:
+            continue
+        try:
+            rows = ast.literal_eval(body)
+        except (ValueError, SyntaxError):
+            continue
+        i = names.index(name)
+        out += [row[i] if len(names) > 1 else row for row in rows]
+    return out
+
+
+def _named_things(text: str) -> set[str]:
+    out: set[str] = set()
+    for a, b in _KEY.findall(text):
+        raw = a or b
+        bare = re.fullmatch(r"\s*\{\{\s*(\w+)\s*\}\}\s*",
+                            re.sub(r"<[^>]+>", "", raw))
+        parts = (_loop_values(text, bare.group(1)) if bare else
+                 re.sub(r"\{%.*?%\}|\{\{.*?\}\}|<[^>]+>", "|", raw).split("|"))
+        for part in parts:
+            word = " ".join(html.unescape(str(part)).split()).lower()
+            if word:
+                out.add(word)
+    for groups in _TITLE.findall(text):
+        title = next(g for g in groups if g)
+        out.add(title.replace("_", " ").lower())
+    return out
 
 
 @pytest.mark.parametrize("module,label,template", D8_LABELS,
                          ids=[f"{m}:{lab}" for m, lab, _t in D8_LABELS])
-def test_each_quoted_label_is_a_key_on_its_classic_page(module, label, template):
+def test_each_quoted_label_is_a_key_on_its_page(module, label, template):
     assert f'"{label}"' in _code(module), f"{module} no longer names {label!r}"
-    html = (TEMPLATES / template).read_text(encoding="utf-8")
-    key = f"[ {label.upper()} ]"
-    assert key in html or key.replace("&", "&amp;") in html, (
-        f"{template} draws no {key}: the copy in {module} names a key that "
-        "is not there")
-    cc = TEMPLATES / "cc" / template
-    if not cc.is_file():   # the terminal twin arrives with its page's phase
-        return
-    corpus = "\n".join(p.read_text(encoding="utf-8")
-                       for p in (TEMPLATES / "cc").rglob("*.html")).lower()
-    found = any(form.lower() in corpus
-                for form in (label, label.replace("&", "&amp;")))
-    if not found and (module, label) in TERMINAL_GAPS:
-        pytest.skip(f"hand-off: {TERMINAL_GAPS[(module, label)]}")
-    assert found, f"no cc/ template carries a {label!r} key"
+    named = _named_things((TEMPLATES / template).read_text(encoding="utf-8"))
+    assert label.lower() in named, (
+        f"{template} draws no {label!r} key, menu item or window: the copy in "
+        f"{module} names something that is not there")
 
 
-# A terminal page built in parallel with this sweep that does not (yet) carry
-# a label the shared copy names. Each is a hand-off in
-# docs/UI_PORT_LEDGER/P7-copy.md; delete the entry when the key lands.
-TERMINAL_GAPS: dict[tuple[str, str], str] = {
-    # Emptied by the integrator (2026-09-25): every terminal key now carries
-    # its D8 label. Add an entry only for a page still being built.
-}
+def test_the_key_matcher_is_not_a_substring_search():
+    """"Open" must be a key's whole label, not a word inside a tooltip."""
+    text = ('<a class="key" title="Open the thing"><span class="t">close</span></a>'
+            '{% for k, button in [("a", "Record it")] %}'
+            '<button class="key"><span class="t">{{ button }}</span></button>'
+            '{% endfor %}<div class="win">{{ bar("from_the_vendor", "meta") }}</div>')
+    named = _named_things(text)
+    assert named == {"close", "record it", "from the vendor"}, named
 
 
 def test_the_file_move_key_is_named_in_the_vocabulary_word():
-    """R12's decision: 'Move on the server and on every computer'. The
-    classic key keeps its old text until phase 8, so only the copy is
-    checked here."""
+    """R12's decision: 'Move on the server and on every computer'. The key
+    itself is pinned by D8_LABELS above."""
     for module in ("alerts.py", "notices.py"):
         code = _code(module)
         assert '"Move on the server and on every computer"' in code
@@ -223,16 +270,22 @@ def test_notice_kinds_hold_plain_labels():
 
 
 @pytest.mark.parametrize("template,expr", [
-    ("partials/notices.html", "[ {{ n.href_label | upper }} ]"),
-    ("admin_health.html", "[ {{ row.href_label | upper }} ]"),
-    ("admin_health.html", "[ {{ row.detail_label | upper }} ]"),
+    ("partials/health_notices.html", "n.href_label"),
+    ("partials/home_problems.html", "n.href_label"),
+    ("admin_health.html", "row.href_label"),
+    ("admin_health.html", "row.detail_label"),
 ])
-def test_the_classic_templates_wrap_the_plain_label(template, expr):
-    assert expr in (TEMPLATES / template).read_text(encoding="utf-8")
+def test_the_templates_draw_the_plain_label_in_a_key(template, expr):
+    """The plain label goes into a key's `.t`, cased by CSS; no template
+    wraps it in `[ ]` (the old look's bracket keys)."""
+    text = (TEMPLATES / template).read_text(encoding="utf-8")
+    assert re.search(r'class="key[^"]*"[^>]*><span class="t">\{\{ \(?'
+                     + re.escape(expr), text), expr
+    assert not re.search(r"\[ \{\{[^}]*" + re.escape(expr), text)
 
 
-# The rendered classic button ("[ TAKE ME THERE ]" from the plain label) is
-# pinned by test_notices_sweep_wave2.py on /partials/notices.
+# The rendered key (from the plain label) is pinned by
+# test_notices_sweep_wave2.py.
 
 
 # ------------------------------------------------------------ the docs

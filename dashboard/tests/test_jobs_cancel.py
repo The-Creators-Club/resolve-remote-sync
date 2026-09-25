@@ -197,12 +197,15 @@ def test_the_jobs_page_shows_a_job_and_why_it_is_not_moving(env):
     body = admin(client).get("/admin/jobs").text
     assert f"#{job_id}" in body
     assert "no computer has ever reported to this dashboard" in body
-    assert "[ CANCEL ]" in body
+    assert f'hx-post="/partials/admin/jobs/{job_id}/cancel' in body
+    assert '<span class="t">cancel</span>' in body
 
 
 def test_the_page_says_whether_anything_pins(env):
     client, _conn = env
-    assert "[ NO PINNING HERE ]" in admin(client).get("/admin/jobs").text
+    body = admin(client).get("/admin/jobs").text
+    assert ">no pinning here</span>" in body
+    assert ">pin: this server</span>" not in body
 
 
 def test_the_page_button_cancels(env):

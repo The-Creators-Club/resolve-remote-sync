@@ -3,8 +3,10 @@
 docs/UI_REDESIGN_PORT_PLAN.md 7.1 row 6, 4.1, 7.0. The same file sits in
 music/web/tests and ytdl/web/tests: it finds its app from its own path.
 
-What it pins: the head script turns on html.cc before first paint when the
-dashboard's readable cookie lists `apps`; the helper cc_spa.js is loaded
+What it pins: html.cc is in the markup (the terminal look is the only look
+since 2026-09-25, when the classic look and its switch were deleted), and the
+head script only holds the HUD height and clears the retired look cookie; the
+topbar loader never switches html.cc; the helper cc_spa.js is loaded
 before app.js, served under the mount, and byte-identical in every app that
 ships it; the cc-spa-common CSS block is byte-identical between the music and
 youtube sheets; every phase 6 rule is scoped to html.cc (so the classic page
@@ -99,47 +101,88 @@ def _selectors(css: str):
 
 # ---------------------------------------------------------------- first paint
 
-def test_the_head_script_sets_html_cc_from_the_cookie():
+def _head_script() -> str:
     head = _text(INDEX).split("</head>", 1)[0]
-    script = head.split("<script>", 1)[1].split("</script>", 1)[0]
-    assert "document.cookie.split('; ')" in script
-    assert "indexOf('apps')" in script
-    assert "cl.add('cc')" in script
+    return head.split("<script>", 1)[1].split("</script>", 1)[0]
+
+
+def test_html_cc_is_in_the_markup_and_the_head_script_only_holds_the_hud():
+    # The look cookie used to decide html.cc here; since 2026-09-25 the
+    # terminal body is the only body, so it is markup and nothing reads it.
+    assert '<html lang="en" class="cc">' in _text(INDEX)
+    script = _head_script()
+    assert "cl.add('cc-chrome')" in script
+    assert "cl.add('cc-chrome-pending')" in script
+    assert "document.cookie.split" not in script
+    assert "indexOf('apps')" not in script
+    assert "cl.add('cc')" not in script and "remove('cc')" not in script
     # documentElement, never document.body (there is none in <head>)
     assert "document.body" not in script
     assert not _ABSOLUTE.findall(script)
 
 
 @pytest.mark.skipif(not NODE, reason="node is not on PATH")
-@pytest.mark.parametrize("cookie,expect", [
-    ("ccsync_ui_effective=chrome.apps", ["cc", "cc-chrome", "cc-chrome-pending"]),
-    ("x=1; ccsync_ui_effective=apps", ["cc"]),
-    ("ccsync_ui_effective=chrome", ["cc-chrome", "cc-chrome-pending"]),
-    ("", []),
+@pytest.mark.parametrize("cookie", [
+    "ccsync_ui_effective=chrome.apps",
+    "x=1; ccsync_ui_effective=apps",
+    "ccsync_ui_effective=chrome",
+    "",
 ])
-def test_the_head_script_runs(cookie, expect, tmp_path):
-    head = _text(INDEX).split("</head>", 1)[0]
-    script = head.split("<script>", 1)[1].split("</script>", 1)[0]
+def test_the_head_script_runs(cookie, tmp_path):
+    """Whatever an old look cookie says, the page is the terminal body with the
+    HUD height held; the cookie is cleared at the root path it was written at;
+    the 3 s safety net ends the hold and nothing else."""
     harness = (
-        "const cls = new Set();\n"
-        "global.document = {cookie: %s, documentElement: {classList: {add: c => cls.add(c), remove: c => cls.delete(c)}}};\n"
-        "global.setTimeout = () => 0;\n"
+        "const cls = new Set(['cc']);\n"
+        "const writes = [];\n"
+        "let timer = null;\n"
+        "global.document = {documentElement: {classList: {add: c => cls.add(c), remove: c => cls.delete(c)}}};\n"
+        "Object.defineProperty(global.document, 'cookie', {get: () => %s, set: v => writes.push(v)});\n"
+        "global.setTimeout = (fn, ms) => { timer = [fn, ms]; return 0; };\n"
         "%s\n"
-        "process.stdout.write(JSON.stringify([...cls].sort()));\n"
-    ) % (json.dumps(cookie), script)
+        "const held = [...cls].sort();\n"
+        "timer[0]();\n"
+        "process.stdout.write(JSON.stringify({held, after: [...cls].sort(), ms: timer[1], writes}));\n"
+    ) % (json.dumps(cookie), _head_script())
     f = tmp_path / "head.js"
     f.write_text(harness, encoding="utf-8")
     out = subprocess.run([NODE, str(f)], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
-    assert json.loads(out.stdout) == sorted(expect)
+    got = json.loads(out.stdout)
+    assert got["held"] == ["cc", "cc-chrome", "cc-chrome-pending"]
+    assert got["after"] == ["cc", "cc-chrome"]
+    assert got["ms"] == 3000
+    assert got["writes"] == ["ccsync_ui_effective=; path=/; max-age=0"]
 
 
-def test_the_topbar_marker_is_authoritative_for_html_cc():
+@pytest.mark.skipif(not NODE, reason="node is not on PATH")
+def test_the_topbar_loader_never_switches_html_cc(tmp_path):
+    """syncDashboardLook used to toggle html.cc from the topbar's data-ui-apps
+    marker; now it only keeps cc-chrome when a HUD actually arrived, and html.cc
+    stays whatever came back (a HUD, a bare topbar, nothing)."""
     js = _text(STATIC / "app.js")
+    assert "data-ui-apps" not in js
     body = js[js.index("function syncDashboardLook("):]
-    body = body[:body.index("\n}\n")]
-    assert "root.classList.toggle('cc', apps)" in body
-    assert "data-ui-apps" in body
+    body = body[:body.index("\n}\n") + 3]
+    assert "document.cookie" not in body
+    harness = (
+        "const cls = new Set(['cc', 'cc-chrome']);\n"
+        "global.document = {documentElement: {classList: {\n"
+        "  add: c => cls.add(c), remove: c => cls.delete(c),\n"
+        "  toggle: (c, on) => { if (on) cls.add(c); else cls.delete(c); }}}};\n"
+        "%s\n"
+        "const host = hud => ({querySelector: s => (s === '.hud' && hud) ? {} : null});\n"
+        "const out = [];\n"
+        "syncDashboardLook(host(true)); out.push([...cls].sort());\n"
+        "syncDashboardLook(host(false)); out.push([...cls].sort());\n"
+        "syncDashboardLook(host(true)); syncDashboardLook(null); out.push([...cls].sort());\n"
+        "process.stdout.write(JSON.stringify(out));\n"
+    ) % body
+    f = tmp_path / "sync.js"
+    f.write_text(harness, encoding="utf-8")
+    out = subprocess.run([NODE, str(f)], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == [["cc", "cc-chrome"], ["cc"], ["cc"]]
 
 
 # ---------------------------------------------------------------- the helper

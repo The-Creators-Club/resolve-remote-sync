@@ -1,6 +1,6 @@
 """GET /partials/topbar: the one header, served to the mounted SPAs.
 
-base.html includes partials/topbar.html; the b-roll and music SPAs fetch the
+shell.html includes partials/topbar.html (the HUD); the b-roll and music SPAs fetch the
 same partial (document-relative, so it resolves to this route only when they
 are mounted under the dashboard) and swap it in over their static fallback
 headers. What the SPAs' loadDashboardTopbar() depends on is pinned here:
@@ -12,10 +12,14 @@ headers. What the SPAs' loadDashboardTopbar() depends on is pinned here:
     login form into the page;
   - `?current=` marking the fetching page's own nav entry.
 
-Since the 2026-08-18 redesign the bar itself holds no module links at all:
-they are in a left drawer opened by the HTML popover API, with NO script --
-which is the only mechanism that can work here, because the SPAs inject this
-markup with innerHTML and innerHTML never runs a <script> it carries.
+Since the terminal look replaced the classic one (2026-09-25) the header is
+the HUD: a short nav in the bar, and everything it has no room for in two
+popovers (the account menu #hud-user and the "more" sheet #hud-more) plus a
+phone dock, all opened by the HTML popover API with NO script -- the only
+mechanism that can work here, because the SPAs inject this markup with
+innerHTML and innerHTML never runs a <script> it carries. (The 2026-08-18
+left drawer these tests first pinned was the classic header's version of the
+same rule; test names that say "drawer" keep their history.)
 """
 from __future__ import annotations
 
@@ -74,13 +78,27 @@ def as_user(client, user="jsmith"):
     return client
 
 
+def _between(body: str, start: str, end: str) -> str:
+    i = body.index(start)
+    return body[i:body.index(end, i)]
+
+
+def _user_menu(body: str) -> str:
+    return _between(body, 'id="hud-user"', "</div>")
+
+
+def _more_sheet(body: str) -> str:
+    return _between(body, 'id="hud-more"', 'id="install-slot"')
+
+
 def test_topbar_partial_serves_the_marked_header(tmp_path):
     with _client(tmp_path) as c:
         r = as_user(c).get("/partials/topbar")
         assert r.status_code == 200
         assert "data-dash-topbar" in r.text
-        assert "[ TRANSFERS ]" in r.text
-        assert "[ SIGN OUT ]" in r.text
+        assert 'class="hud"' in r.text
+        assert 'href="/transfers"' in r.text
+        assert 'action="/logout"' in r.text and ">sign out</button>" in r.text
         # No mounts in this app instance -> no platform links to advertise.
         assert 'href="/broll/"' not in r.text
         assert 'href="/music/"' not in r.text
@@ -88,87 +106,103 @@ def test_topbar_partial_serves_the_marked_header(tmp_path):
 
 def test_the_served_partial_carries_the_wrap_safe_structure(tmp_path):
     """What the SPAs inject has to be the wrap-safe markup too (2026-08-18):
-    the stamp and the session chip inside one .topbar-right. Their stylesheets
-    paint the header they inject, so a partial that regressed here would break
-    three pages, not one. The CSS half is pinned in test_theme_css.py."""
+    the stamp and the session chip travel as ONE item (.hud-meta, the
+    terminal's .topbar-right), so a narrow window can never strand "updated
+    4s ago" on one row and the user on the next. Their stylesheets paint the
+    header they inject, so a partial that regressed here would break three
+    pages, not one. The CSS half is pinned in test_theme_css.py."""
     with _client(tmp_path) as c:
         body = as_user(c).get("/partials/topbar").text
-        right = body[body.index('class="topbar-right"'):]
-        assert 'class="stamp"' in right and 'class="session"' in right
+        meta = _between(body, 'class="hud-meta"', 'id="hud-user"')
+        assert 'id="topbar-stamp"' in meta and 'class="hud-user' in meta
+        # The spacer, not the meta row, takes the free width: the meta row is
+        # pushed right as one unit.
+        assert body.index('class="hud-spacer"') < body.index('class="hud-meta"')
 
 
 def test_the_drawer_needs_no_javascript(tmp_path):
     """The mechanism, pinned. The SPAs inject this markup with innerHTML,
-    which never executes a <script> that came with it, so a drawer that needed
+    which never executes a <script> that came with it, so a menu that needed
     one would be dead on /broll, /music and /ytdl. The popover attribute pair
     is the whole implementation: the button names the panel, the panel
     declares itself a popover, and the browser supplies Esc, click-outside
-    and the backdrop."""
+    and the backdrop. Two panels now: the account menu and the "more"
+    sheet."""
     with _client(tmp_path) as c:
         body = as_user(c).get("/partials/topbar").text
-        assert 'popovertarget="nav-drawer"' in body
-        assert 'id="nav-drawer" popover' in body
-        assert 'aria-label="menu"' in body
+        assert 'popovertarget="hud-user"' in body
+        assert 'id="hud-user" popover' in body
+        assert 'aria-label="account menu"' in body
+        assert 'popovertarget="hud-more"' in body
+        assert 'id="hud-more" popover' in body
         assert "<script" not in body
 
 
-def test_the_bar_holds_no_module_links_and_the_drawer_holds_them_all(tmp_path):
-    """The redesign: the modules and the admin pages left the bar. Checked on
-    the partial an editor gets, whose drawer names the two hub pages they are
-    allowed to open."""
+def test_every_destination_is_reachable_from_the_phone_dock_and_sheet(tmp_path):
+    """Was test_the_bar_holds_no_module_links_and_the_drawer_holds_them_all.
+    Changed on purpose by the terminal look: the bar carries a short nav
+    again (the HUD's "> sync  > transfers"), and what the classic drawer held
+    is split between that nav, the account menu and the phone's dock + "more"
+    sheet. What survives of the 2026-08-18 rule: every destination is
+    reachable on a phone (where the nav is hidden) through the dock and the
+    sheet, and none of it is the old bracketed nav-link vocabulary."""
     with _client(tmp_path) as c:
         body = as_user(c).get("/partials/topbar").text
-        drawer = body[body.index('id="nav-drawer"'):body.index("</nav>")]
-        bar = body[:body.index('<div class="nav-drawer"')] \
-            + body[body.index("</nav>"):]
-        assert "[ SYNC STATUS ]" in drawer
-        assert "[ TRANSFERS ]" in drawer and "[ INSTALLER ]" in drawer
-        # ...and nowhere else. The bar is the menu button, the brand and who
-        # you are.
-        assert "[ TRANSFERS ]" not in bar
+        nav = _between(body, 'class="hud-nav"', "</nav>")
+        assert 'href="/"' in nav and 'href="/transfers"' in nav
+        dock = _between(body, 'class="hud-dock"', "</nav>")
+        assert 'href="/"' in dock and 'href="/transfers"' in dock
+        assert 'popovertarget="hud-more"' in dock
+        sheet = _more_sheet(body)
+        for href in ('href="/download"', 'href="/help"', 'href="/account"',
+                     'action="/logout"', 'action="/logout-everywhere"'):
+            assert href in sheet, href
         assert "nav-link" not in body
+        assert "[ " not in body
 
 
 def test_the_installer_entry_is_the_download_itself(tmp_path):
-    """[ INSTALLER ] points at /download, not at a page about a download
-    (2026-08-18, owner: the installer "must NOT be a sub-page under
+    """The installer entry points at /download, not at a page about a
+    download (2026-08-18, owner: the installer "must NOT be a sub-page under
     Settings/Transfers"). /download 303s to the current package for this
     browser's User-Agent, so the click IS the download.
 
     Everyone gets it, admin or not: the entry left the Settings strip the same
-    day, and admins install editor machines too."""
+    day, and admins install editor machines too. Both the account menu
+    (desktop) and the "more" sheet (phone) carry it."""
     with _admin_client(tmp_path) as c:
         for user in ("owen", "jsmith"):
             body = as_user(c, user).get("/partials/topbar").text
-            drawer = body[body.index('id="nav-drawer"'):body.index("</nav>")]
-            assert 'href="/download">[ INSTALLER ]' in drawer
-            # Nothing in the drawer points at the chooser page any more; it is
-            # the fallback /download itself paints for an unknown User-Agent.
+            assert 'href="/download">installer' in _user_menu(body)
+            assert 'href="/download">installer' in _more_sheet(body)
+            # Nothing points at the chooser page any more; it is the fallback
+            # /download itself paints for an unknown User-Agent.
             assert 'href="/installer"' not in body
 
 
 def test_only_an_admin_gets_the_settings_gear_and_the_settings_entry(tmp_path):
-    """The gear is the owner's own request (2026-08-18): a way into Settings
-    from every page. /admin/settings 403s for an editor, so an editor gets
-    neither the gear nor the drawer entry -- a control that always refuses is
-    worse than no control."""
+    """A way into Settings from every page is the owner's own request
+    (2026-08-18; the classic gear, the HUD's "settings" nav entry now).
+    /admin/settings 403s for an editor, so an editor gets no settings entry
+    anywhere -- a control that always refuses is worse than no control."""
     with _admin_client(tmp_path) as c:
         admin_body = as_user(c, "owen").get("/partials/topbar").text
-        # SYS-6 (wave 4, 2026-09-04): the gear lands on HEALTH, the page that
+        # SYS-6 (wave 4, 2026-09-04): the entry lands on HEALTH, the page that
         # composes all four "is my fleet all right" lists, not on the site form.
-        assert f'class="gear-link" href="{ui.SETTINGS_LANDING}"' in admin_body
-        assert "[ SETTINGS ]" in admin_body
+        nav = _between(admin_body, 'class="hud-nav"', "</nav>")
+        assert f'href="{ui.SETTINGS_LANDING}"' in nav and ">settings</a>" in nav
+        assert f'href="{ui.SETTINGS_LANDING}">settings' in _more_sheet(admin_body)
         # UX-3: the guide is one click from every page, for everyone.
-        assert '[ ? ]' in admin_body and 'href="/help"' in admin_body
-        # LOGOUT ALL moved into the drawer's foot; it stays reachable.
-        assert "[ SIGN OUT EVERYWHERE ]" in admin_body
+        assert 'href="/help"' in _user_menu(admin_body)
+        # Sign out everywhere stays reachable.
+        assert ">sign out everywhere</button>" in admin_body
 
         editor_body = as_user(c, "jsmith").get("/partials/topbar").text
-        assert "gear-link" not in editor_body
+        assert f'href="{ui.SETTINGS_LANDING}"' not in editor_body
+        assert ">settings" not in editor_body
         # ...but HELP is not admin-only: an editor needs it most.
         assert 'href="/help"' in editor_body
-        assert "[ SETTINGS ]" not in editor_body
-        assert "[ SIGN OUT EVERYWHERE ]" in editor_body
+        assert ">sign out everywhere</button>" in editor_body
 
 
 def test_the_drawer_only_names_modules_that_are_mounted(tmp_path):
@@ -176,9 +210,10 @@ def test_the_drawer_only_names_modules_that_are_mounted(tmp_path):
     at all, because a link into a 500 is worse than no link."""
     with _client(tmp_path) as c:
         body = as_user(c).get("/partials/topbar").text
-        for absent in ('href="/broll/"', 'href="/music/"', 'href="/ytdl/"'):
+        for absent in ('href="/broll/"', 'href="/music/"', 'href="/ytdl/"',
+                       'href="/cards/"'):
             assert absent not in body
-        assert "[ SYNC STATUS ]" in body
+        assert 'href="/"><span class="hud-slash"' in body
 
 
 def test_topbar_partial_redirects_a_dead_session_to_login(tmp_path):
@@ -192,20 +227,25 @@ def test_topbar_partial_redirects_a_dead_session_to_login(tmp_path):
 
 
 def test_current_marks_only_the_named_nav_entry(tmp_path):
-    """?current= highlights the fetching page's own entry. Exercised through
-    an entry that is always present (nothing is mounted in this app), by
-    checking nothing gets marked for an unknown or absent value."""
+    """?current= highlights the fetching page's own entry. Nothing gets marked
+    for a missing value or for a module that is not mounted here; a present
+    entry (transfers) is marked in the bar and in the dock, and nowhere
+    else."""
     with _client(tmp_path) as c:
         as_user(c)
-        assert "drawer-current" not in c.get("/partials/topbar").text
-        assert "drawer-current" not in c.get("/partials/topbar?current=broll").text
+        assert "aria-current" not in c.get("/partials/topbar").text
+        assert "aria-current" not in c.get("/partials/topbar?current=broll").text
+        body = c.get("/partials/topbar?current=transfers").text
+        assert body.count('aria-current="page"') == 2
+        assert body.count('href="/transfers" aria-current="page"') == 2
 
 
 def test_the_dashboards_own_pages_render_the_same_partial(tmp_path):
-    """base.html includes the partial, so the header cannot drift between the
+    """shell.html includes the partial, so the header cannot drift between the
     dashboard's pages and what the SPAs inject."""
     with _client(tmp_path) as c:
         page = as_user(c).get("/")
         assert page.status_code == 200
         assert "data-dash-topbar" in page.text
-        assert "[ TRANSFERS ]" in page.text
+        assert 'class="hud"' in page.text
+        assert 'href="/transfers"><span class="hud-slash"' in page.text

@@ -242,7 +242,7 @@ credential-checked write endpoints):
 | `GET /partials/project/{slug}/missing/{device_id}` | Files an editor's device is missing |
 | `GET /editors`, `GET /api/v1/editors` | The editor list view |
 | `GET /api/v1/projects/{slug}/presence` | Presence view, scoped by `auth.scope_for` |
-| `GET /admin/diagnostics`, `GET /partials/admin/diagnostics` | Admin only: diagnostics bundles and crash reports |
+| `GET /admin/diagnostics`, `GET /partials/health-diagnostics`, `GET /partials/computer-answer` | Admin only: diagnostics bundles and crash reports |
 | `GET /api/v1/jobs` and the Settings JOBS page | Background jobs, and each machine's capabilities and idle state as the scheduler sees them |
 | `GET /admin/users`, `GET /partials/admin/users` | Admin-only user management |
 

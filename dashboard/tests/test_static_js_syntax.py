@@ -46,24 +46,25 @@ def test_there_are_files_to_check():
     assert len(js_files()) >= 5
 
 
-# The files base.html loads on EVERY page: a glob is how they get checked, and
-# this is how a rename or a deletion gets noticed. tab_memory.js joined them
-# with CR-188 (Alex, 2026-09-04).
-ON_EVERY_PAGE = {"htmx_errors.js", "copy_value.js", "pwa.js", "tab_memory.js"}
+# What shell.html loads on every page, by path relative to static/: a glob is
+# how they get checked, and this is how a rename or a deletion gets noticed.
+# tab_memory.js joined them with CR-188 (Alex, 2026-09-04). base.html and its
+# classic `copy_value.js` were deleted when the terminal look became the only
+# look (UI port collapse, 2026-09-25); `cc/copy_value.js` is the one left.
+ON_EVERY_PAGE = {"htmx_errors.js", "cc/copy_value.js", "pwa.js", "tab_memory.js",
+                 "cc/cc.js"}
 
 
 def test_the_scripts_every_page_loads_are_among_them():
     assert ON_EVERY_PAGE <= {_rel(p) for p in js_files()}
 
 
-# What cc/shell.html loads on every terminal page (UI port 2.5), by path
-# relative to static/: `copy_value.js` and `cc/copy_value.js` are two files.
-CC_ON_EVERY_PAGE = {"htmx_errors.js", "cc/copy_value.js", "pwa.js", "tab_memory.js",
-                    "cc/cc.js"}
-
-
-def test_the_scripts_every_terminal_page_loads_are_among_them():
-    assert CC_ON_EVERY_PAGE <= {_rel(p) for p in js_files()}
+def test_the_list_is_what_the_shell_actually_loads():
+    """The set above is a claim about shell.html; read the shell to keep it true."""
+    import re
+    shell = (STATIC.parent / "templates" / "shell.html").read_text(encoding="utf-8")
+    loaded = set(re.findall(r"asset_url\('([^']+\.js)'\)", shell)) - VENDORED
+    assert loaded == ON_EVERY_PAGE, loaded
 
 
 def unterminated_string_lines(src: str) -> list[tuple[int, str]]:

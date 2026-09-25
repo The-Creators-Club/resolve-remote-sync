@@ -63,7 +63,7 @@ th.hl-led { width: 3ch; }
    aria-current, painted as the bench's checked radio. */
 .choice[aria-current="true"] { border-left-color: var(--hi); background: rgb(var(--hi-rgb) / 0.05); }
 .choice[aria-current="true"] .g { color: var(--hi); }
-.choice[aria-current="true"] .g::before { content: "\25C9"; }
+.choice[aria-current="true"] .g::before { content: "\25C9"; content: "\25C9" / ""; }
 .choice[aria-current="true"] .q { color: var(--text); }
 .rc-tight { padding-bottom: 0; }
 .rc-pickrow { gap: 10px; align-items: end; flex-wrap: wrap; }

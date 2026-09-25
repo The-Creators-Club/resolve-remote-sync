@@ -5,7 +5,8 @@ docs/UI_REDESIGN_PORT_PLAN.md 4.1, 7.0, R6, R16, R22. The dashboard's
 injects it with innerHTML, and THIS stylesheet paints it: so the hud-common
 block here must be the same bytes as the dashboard's static/cc/hud.css (fix a
 drift by copying the block), and the first-paint hold and the loader must
-agree with the dashboard's cookie. The classic drawer block is untouched (its
+agree on cc-chrome. Since 2026-09-25 the terminal look is the only look, so
+no cookie is read or written here (the retired one is cleared). The classic drawer block is untouched (its
 pins live in test_theme_css.py).
 """
 from __future__ import annotations
@@ -98,18 +99,23 @@ def test_the_first_paint_script_holds_the_hud_height():
     head = html.split("</head>", 1)[0]
     script = head.split("<script>", 1)[1].split("</script>", 1)[0]
     assert head.index("<script>") < head.index('rel="stylesheet"')
-    assert "document.cookie.split('; ')" in script
-    assert "ccsync_ui_effective=" in script and "slice(20)" in script
-    assert len("ccsync_ui_effective=") == 20
+    # The hold no longer depends on the look cookie (the only look is the
+    # terminal one); the retired cookie is cleared at the root it was set at.
+    assert "document.cookie.split" not in script
+    assert "cl.add('cc-chrome')" in script
+    assert "document.cookie = 'ccsync_ui_effective=; path=/; max-age=0'" in script
     assert "cc-chrome-pending" in script and "setTimeout" in script
     assert "match(/" not in script and "\u2014" not in script
 
 
-def test_the_loader_trusts_what_arrived_and_writes_the_cookie_at_the_root():
+def test_the_loader_trusts_what_arrived_and_writes_no_cookie():
     js = _text(STATIC / "app.js")
     fn = js.split("function syncDashboardLook(host)", 1)[1].split("\n}\n", 1)[0]
-    assert "path=/; samesite=lax" in fn and "secure" in fn
-    assert "data-ui-apps" in fn and "cc-chrome" in fn
+    # cc-chrome follows the HUD that actually arrived; the look cookie the
+    # dashboard used to be told about is gone, so nothing in app.js writes it.
+    assert "'.hud'" in fn and "'cc-chrome'" in fn
+    assert "document.cookie" not in js
+    assert "data-ui-apps" not in js
     loader = js.split("async function loadDashboardTopbar()", 1)[1].split("\n}\n", 1)[0]
     assert "finally {" in loader
     assert "cc-chrome-pending" in loader.split("finally {", 1)[1]

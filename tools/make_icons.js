@@ -39,7 +39,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 let ws, id = 0, chrome = null;
 const pending = new Map();
 
-// name -> [size, purpose]. 180 is the apple-touch-icon (base.html) and since
+// name -> [size, purpose]. 180 is the apple-touch-icon (shell.html) and since
 // 2026-09-03 the only file this script owns; 192/512 and the maskable pair are
 // tools/gen_icons.py's. Do not put them back here: two writers for one file is
 // how a mark half-changes.

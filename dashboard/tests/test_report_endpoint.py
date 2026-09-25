@@ -200,12 +200,14 @@ def test_transport_health_is_persisted_and_shown_on_the_fleet_grid(app_env):
 
     page = client.get("/")
     assert page.status_code == 200
-    assert "[ RELAYED: 1 ]" in page.text
-    assert "[ ORPHANS: 3 ]" in page.text
+    # The computer's row tags (terminal look; the classic bracket chips are
+    # gone with the classic look, 2026-09-25).
+    assert '<span class="w">relayed: 1</span>' in page.text
+    assert '<span class="w">orphans: 3</span>' in page.text
     # CR-179 (wave 4, 2026-09-04): "lane" left every visible string, so the
     # express LANE is the express UPLOAD on the page. The report field and
     # the view model keep their names.
-    assert "[ EXPRESS UPLOAD FAILED ]" in page.text
+    assert '<span class="w">express upload failed</span>' in page.text
 
 
 def test_a_direct_only_machine_is_not_flagged_as_relayed(app_env):
@@ -215,8 +217,8 @@ def test_a_direct_only_machine_is_not_flagged_as_relayed(app_env):
     assert client.post("/api/v1/report", json=p, headers=report_headers()).status_code == 200
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "admin"))
     page = client.get("/")
-    assert "[ RELAYED" not in page.text
-    assert "direct:2" in page.text
+    assert '<span class="w">relayed' not in page.text
+    assert ">direct: 2</dd>" in page.text
 
 
 def test_a_light_report_does_not_wipe_the_stored_transport_state(app_env):
@@ -358,8 +360,8 @@ def test_the_grid_chips_a_failed_update_and_a_revert(app_env):
         "reverted_from": "0.9.56"}}
     client.post("/api/v1/report", json=p, headers=report_headers())
     html = _as_admin(client).get("/partials/fleet").text
-    assert "[ UPDATE FAILED x8 ]" in html
-    assert "[ REVERTED FROM 0.9.56 ]" in html
+    assert '<span class="w">update failed x8</span>' in html
+    assert '<span class="w">reverted from 0.9.56</span>' in html
 
 
 def test_the_grid_says_a_computer_is_being_refused(app_env):
@@ -369,9 +371,9 @@ def test_the_grid_says_a_computer_is_being_refused(app_env):
            "X-CCSync-Identity": auth.make_identity_token("rotated", "jsmith")}
     client.post("/api/v1/report", json=payload(), headers=bad)
     html = _as_admin(client).get("/partials/fleet").text
-    assert "BEING REFUSED" in html
+    assert '<span class="w">being refused: sign in on its tray</span>' in html
     # UX-10 (2026-09-03): the noun agrees with the count now.
-    assert "1 COMPUTER IS BEING REFUSED" in html
+    assert "1 computer is being refused:" in html
 
 
 def test_the_grid_counts_the_retired_key_drain(app_env, tmp_path):
@@ -384,4 +386,4 @@ def test_the_grid_counts_the_retired_key_drain(app_env, tmp_path):
                                        "2026-08-28T00:00:00+00:00", retired=True)
     conn.commit()
     html = _as_admin(client).get("/partials/fleet").text
-    assert "RETIRED SIGNING KEY" in html
+    assert "1 computer still on a retired signing key." in html

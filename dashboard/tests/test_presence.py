@@ -9,6 +9,7 @@ from ccsync_dashboard import health
 from ccsync_dashboard.api import build_presence_view, build_transfers_view
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
+from conftest import HX
 
 SECRET = "s"
 TOKEN = "tok"
@@ -135,16 +136,28 @@ def test_pages_render(env):
     ), headers=hdr("editor2"))
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     # transfers page + partial
-    assert "LIVE TRANSFERS" in client.get("/transfers").text
+    tpage = client.get("/transfers").text
+    assert "</span> TRANSFERS</span></h1>" in tpage and 'id="win-live"' in tpage
     assert "b.mov" in client.get("/partials/transfers").text
-    # project page includes the sidebar checkbox + bins partial
+    # project page carries the tick key and the media presence window, whose
+    # body is the bins partial
     page = client.get("/project/2026-ff5-energy-transition")
-    assert page.status_code == 200 and 'type="checkbox"' in page.text
+    assert page.status_code == 200
+    assert ("/partials/selection/owen/2026-ff5-energy-transition/toggle?view=project"
+            "&mode=on") in page.text
+    assert 'id="media-presence"' in page.text
     bins = client.get("/partials/project/2026-ff5-energy-transition/bins")
-    assert "MEDIA PRESENCE" in bins.text and "Interviews" in bins.text
-    # sidebar checkbox toggle round-trips and returns the sidebar
-    r = client.post("/partials/selection/owen/2026-ff5-energy-transition/toggle?view=sidebar")
-    assert r.status_code == 200 and "PROJECTS" in r.text
+    assert bins.status_code == 200 and "Interviews" in bins.text
+    # the tick round-trips and answers the project window, now offering the
+    # untick, and tells the page's other plan windows to re-read
+    r = client.post("/partials/selection/owen/2026-ff5-energy-transition/toggle"
+                    "?view=project&mode=on&slug_page=2026-ff5-energy-transition",
+                    headers=HX)
+    assert r.status_code == 200
+    assert ("/partials/selection/owen/2026-ff5-energy-transition/toggle?view=project"
+            "&mode=off") in r.text
+    assert r.headers.get("HX-Trigger")
+    assert "owen" in dbmod.fetch_all_selections(conn).get("2026-ff5-energy-transition", [])
 
 
 def test_local_manifest_uses_marker_slug_not_slugify_of_rel(env):
@@ -243,7 +256,8 @@ def test_sync_backlog_diffs_both_directions(env):
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     page = client.get("/partials/transfers")
     assert page.status_code == 200
-    assert "[ QUEUED ]" in page.text
+    assert 'id="xf-queued"' in page.text
+    assert 'data-key="q:editor2:EDIT-PC:2026-ff5-energy-transition:b"' in page.text
     assert "B-roll/Proxy/b.mov" in page.text
 
 
@@ -346,7 +360,8 @@ def test_completed_feed_lands_in_history_and_incoming_need_shows(env):
     # page renders the HISTORY section
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     page = client.get("/partials/transfers")
-    assert "[ HISTORY ]" in page.text and "B-roll/a.mov" in page.text
+    history = page.text.split('id="xf-history"', 1)
+    assert len(history) == 2 and "B-roll/a.mov" in history[1]
 
 
 def test_freshly_ticked_project_shows_as_preparing(env):
@@ -376,7 +391,7 @@ def test_freshly_ticked_project_shows_as_preparing(env):
     conn.execute("DELETE FROM completion_current")
     conn.commit()
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
-    assert "GETTING READY" in client.get("/partials/transfers").text
+    assert ">getting ready</span>" in client.get("/partials/transfers").text
 
 
 # -- CR-28: the base rig is not a queue -------------------------------------

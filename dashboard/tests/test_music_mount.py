@@ -320,9 +320,12 @@ def test_a_signed_in_editor_renders_a_page_through_the_mount(tmp_path, music_env
         assert 'href="/music/"' in c.get("/").text
         # The topbar partial the SPA injects marks the page it was fetched
         # for -- and only that page (see test_topbar_partial.py).
+        # Terminal HUD (2026-09-25): music has two links, the bar's (tablet
+        # and up) and the "more" sheet's, and both, only both, are current.
         marked = c.get("/partials/topbar?current=music").text
-        assert 'drawer-current" href="/music/"' in marked
-        assert marked.count("drawer-current") == 1
+        assert 'href="/music/" aria-current="page"' in marked
+        assert marked.count('aria-current="page"') == 2
+        assert marked.count('href="/music/" aria-current="page"') == 2
 
 
 def test_the_storage_probe_creates_the_database(tmp_path, music_env):

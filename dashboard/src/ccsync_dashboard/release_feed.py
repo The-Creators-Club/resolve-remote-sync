@@ -1174,7 +1174,7 @@ def _dashboard_auto_apply_reason(conn, settings, app_state, now: str) -> tuple[s
                 f"dashboard {staged[0].get('version')} is on the vendor's channel "
                 f"but is not the version the vendor currently offers "
                 f"({offered or 'none named'}), so it is not taken automatically. "
-                f"\"Update now\" in the Dashboard panel on the Packages page "
+                f"\"Update now\" in the This dashboard panel on the Packages page "
                 f"takes it by hand")
     if not updates:
         if runtime:

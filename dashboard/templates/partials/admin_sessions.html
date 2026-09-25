@@ -1,35 +1,27 @@
-{# Live browser sessions, and the button that ends them. Its own partial and
-   its own route (ui.partial_admin_sessions) so a NAS blip cannot take it down
-   with the Users panel -- "revoke this person's sessions" is what an admin
-   reaches for when a laptop goes missing, and that is precisely the moment the
-   rest of the page must not matter. #}
+{# Signed-in browsers, terminal look (phase 4; classic twin
+   partials/admin_sessions.html). The BODY of the page's
+   "signed_in_browsers" window (plan 3.1: the frame is in cc/admin_users.html,
+   this is what its poll and the revoke form swap). #admin-sessions is on
+   this div, never on the window. #}
 <div class="admin-sessions-box" id="admin-sessions">
-  <div class="side-head">[ SIGNED-IN BROWSERS ]
-    <span class="muted">Revoking signs that account out everywhere within a second;
-      the companion's own identity token is separate and is not affected.</span></div>
+  <div class="lede-in">Revoking signs that account out everywhere within a second. The companion's own
+    identity token is separate and is not affected.</div>
 
-  {% if error %}<div class="banner">▲ {{ error }}</div>{% endif %}
+  {% if error %}<div class="body"><div class="note err"><span class="grow">{{ error }}</span></div></div>{% endif %}
 
   {% if sessions %}
-    {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): one row is one browser. #}
-    {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
-       600 px, but between 600 and 900 it is still a grid, and a grid that
-       is wider than the window has to scroll inside itself rather than take
-       the page with it (round 2 of the sweep, 2026-08-30). #}
-    <div class="scroll-x">
-    <table class="editors stack">
-      <thead><tr><th>USERNAME</th><th>SIGNED IN</th><th>LAST SEEN</th><th>FROM</th><th></th></tr></thead>
+    <div class="scroll-x"><table class="tbl stack-sm">
+      <thead><tr><th>username</th><th>signed in</th><th title="The last time that browser loaded a page.">last seen</th><th title="The address and browser it signed in from.">from</th><th></th></tr></thead>
       <tbody>
       {% for s in sessions %}
         <tr class="editor-row">
-          <td class="who" data-label="USERNAME">{{ s.username }}{{ " (you)" if s.username == session_user }}</td>
-          <td class="mono-sm muted" data-label="SIGNED IN">{{ s.created_at | ago }}</td>
-          <td class="mono-sm muted" data-label="LAST SEEN">{{ s.last_seen | ago }}</td>
-          <td class="mono-sm muted" data-label="FROM">{{ s.client }}</td>
-          <td>
-            {# C-9 / UX-22 (UX.md, 2026-08-28): the row marked (you) signs the
-               admin out of the machine they are fixing things from, and the
-               button used to read exactly like everybody else's. #}
+          <td class="who" data-label="username"><b>{{ s.username }}</b>{% if s.username == session_user %} <span class="hi">(you)</span>{% endif %}</td>
+          <td data-label="signed in">{{ s.created_at | ago }}</td>
+          <td data-label="last seen">{{ s.last_seen | ago }}</td>
+          <td data-label="from">{{ s.client }}</td>
+          <td class="acts-cell" data-label="actions">
+            {# C-9 / UX-22: the confirms are C-9's copy, pinned by
+               test_sessions.py, so they stay as written. #}
             <form class="inline-form" hx-post="/partials/admin/sessions/revoke"
                   hx-target="#admin-sessions" hx-swap="outerHTML"
                   {% if s.username == session_user %}
@@ -38,20 +30,14 @@
                   hx-confirm="Sign {{ s.username }} out of every browser? They will need to sign in again. Their computer's own sync is not affected."
                   {% endif %}>
               <input type="hidden" name="username" value="{{ s.username }}">
-              {# .tap: revoking a session is one of the two admin controls
-                 MOBILE_PLAN.md §4 M3 names for a phone. The confirm above is
-                 C-9's copy, pinned byte-for-byte by test_sessions.py and by
-                 topbar.html's plain-form twin, so it stays as written and is
-                 the one confirm over 90 characters here (2026-08-30). #}
-              <button class="btn tap" type="submit">[ {{ "SIGN ME OUT EVERYWHERE" if s.username == session_user else "REVOKE ALL" }} ]</button>
+              <button class="key sm" type="submit"><span class="t">{{ "sign me out everywhere" if s.username == session_user else "revoke all" }}</span></button>
             </form>
           </td>
         </tr>
       {% endfor %}
       </tbody>
-    </table>
-    </div>
+    </table></div>
   {% else %}
-    <div class="muted">nobody is signed in through a browser right now</div>
+    <div class="empty"><span class="glyph" aria-hidden="true">&middot; &middot; &middot;</span>Nobody is signed in through a browser right now.</div>
   {% endif %}
 </div>

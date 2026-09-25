@@ -29,18 +29,11 @@ for _ai_key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
 
 from ccsync_dashboard import db as dbmod  # noqa: E402
 
-# The terminal look's variant switch and its coverage hook (UI port phase 0,
-# tests/ui_variant_support.py).
-from ui_variant_support import ui_variant  # noqa: E402,F401
-import ui_variant_support as _uvs  # noqa: E402
-
-
-def pytest_configure(config):
-    _uvs.configure(config)
-
-
-def pytest_sessionfinish(session, exitstatus):
-    _uvs.sessionfinish(session, exitstatus)
+# The CC Terminal look is the only look (2026-09-25): every htmx request a
+# page sends carries this header (shell.html's hx-headers), and one without it
+# is answered with HX-Refresh before the route runs (app.stale_page_gate). A
+# test that drives an htmx route the way a page does sends HX.
+HX = {"HX-Request": "true", "X-CC-UI": "terminal"}
 
 
 class NasCase:

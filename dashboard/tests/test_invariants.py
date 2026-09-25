@@ -632,17 +632,21 @@ def test_the_page_renders_all_three_states_and_is_admin_only(tmp_path):
         # Anonymous gets the login gate, never the page: what is on it names
         # editors, machines and what is broken about them.
         anon = client.get("/admin/invariants")
-        assert "[ INVARIANTS ]" not in anon.text
+        assert 'id="invariant-table"' not in anon.text
+        assert "INVARIANTS</span></h1>" not in anon.text
 
         client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(secret, "owen"))
         resp = client.get("/admin/invariants")
         assert resp.status_code == 200
         html = resp.text
-        assert "[ BROKEN ]" in html              # the unshared tick
-        assert "[ OK ]" in html                  # identity uniqueness, with one machine
-        assert "[ NOT CHECKED ]" in html         # invariant 8 and the rest
+        # The verdict tags are read out of the checks list itself, not the
+        # page's explanatory note (which also shows a "not checked" tag).
+        table = html.split('id="invariant-table"', 1)[1]
+        assert '<span class="tag solid err"' in table and ">broken</span>" in table   # the unshared tick
+        assert '<span class="tag ok"' in table and ">ok</span>" in table              # identity uniqueness, with one machine
+        assert '<span class="tag mute"' in table and ">not checked</span>" in table   # invariant 8 and the rest
         assert invariants.BY_KEY["plan_has_share"].fix.split(".")[0] in html
-        assert "[ INVARIANTS ]" in html
+        assert "INVARIANTS</span></h1>" in html
 
 
 def test_the_ledger_survives_a_missing_table(tmp_path):

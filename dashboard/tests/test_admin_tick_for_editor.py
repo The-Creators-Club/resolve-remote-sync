@@ -18,6 +18,8 @@ from ccsync_dashboard import db as dbmod
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
+from conftest import HX
+
 SECRET = "test-secret"
 
 FF5 = "2026-ff5-elections"
@@ -47,7 +49,7 @@ def as_user(client, user):
 
 
 def checkbox_for(body: str, slug: str) -> str:
-    """The sidebar <input> tag for `slug` -- it spans several lines, so this
+    """The project tree's <input> tag for `slug` -- it spans several lines, so this
     matches the whole tag rather than a line."""
     for tag in re.findall(r"<input[^>]*>", body, re.S):
         if "proj-check" in tag and f"/{slug}/toggle" in tag:
@@ -59,15 +61,20 @@ def test_switcher_offers_editors_to_admins_only(env):
     client, _ = env
     as_user(client, "owen")
     body = client.get("/").text
-    assert "[ TICKING FOR ]" in body
+    # The TICKING FOR window holds the editor select (name="as").
+    assert 'data-win="ticking-for"' in body
+    assert '<select name="as"' in body
     assert '<option value="editor1"' in body
     assert '<option value="jsmith"' in body
     # the admin's own name is the empty-value "me" option, not a duplicate row
     assert '<option value="owen"' not in body
+    assert '<option value="">owen (me)</option>' in body
 
     as_user(client, "jsmith")
     body = client.get("/").text
-    assert "[ TICKING FOR ]" not in body
+    # A non-admin's TICKING FOR window (their own computers) has no editor
+    # select at all.
+    assert '<select name="as"' not in body
     assert '<option value="editor1"' not in body
 
 
@@ -87,15 +94,17 @@ def test_as_focus_binds_the_checkboxes_to_that_editor(env):
 
 
 def test_sidebar_refresh_keeps_the_focus(env):
-    """Regression: the every-30s refresh used to drop ?as=."""
+    """Regression: the every-30s refresh used to drop ?as=. The refresh is
+    the project tree's poll now (the classic sidebar is gone)."""
     client, _ = env
     as_user(client, "owen")
     body = client.get("/?as=editor1").text
     # &amp; is Jinja autoescaping inside the attribute; htmx decodes it
-    assert 'hx-get="/partials/sidebar?current=&amp;as=editor1"' in body
+    assert 'hx-get="/partials/projects-tree?current=&machine=&amp;as=editor1"' in body
 
     # and the refresh endpoint itself honours it
-    refreshed = client.get("/partials/sidebar?current=&as=editor1").text
+    refreshed = client.get("/partials/projects-tree?current=&machine=&as=editor1",
+                           headers=HX).text
     assert f"/partials/selection/editor1/{FF5}/toggle" in refreshed
     assert f"/partials/selection/owen/{FF5}/toggle" not in refreshed
 
@@ -103,8 +112,10 @@ def test_sidebar_refresh_keeps_the_focus(env):
 def test_admin_tick_lands_on_the_target_editor(env):
     client, conn = env
     as_user(client, "owen")
+    # The tick as the home page's project tree sends it (view=tree).
     r = client.post(
-        f"/partials/selection/editor1/{FF5}/toggle?view=sidebar&as=editor1")
+        f"/partials/selection/editor1/{FF5}/toggle?view=tree&mode=on&as=editor1",
+        headers=HX)
     assert r.status_code == 200
     assert [s["slug"] for s in dbmod.fetch_selections(conn, "editor1")] == [FF5]
     assert dbmod.fetch_selections(conn, "owen") == []
@@ -122,14 +133,14 @@ def test_project_page_tick_button_follows_the_focus(env):
     client, _ = env
     as_user(client, "owen")
     body = client.get(f"/project/{FF5}?as=editor1").text
-    assert "[ TICK FOR EDITOR1 ]" in body
-    assert "[ TICK FOR ME ]" not in body
+    assert '<span class="t">Tick for editor1</span>' in body
+    assert '<span class="t">Tick for me</span>' not in body
     assert f'hx-post="/partials/selection/editor1/{FF5}/toggle' in body
     # the 10s detail refresh keeps the focus too
     assert f'hx-get="/partials/project/{FF5}?as=editor1"' in body
 
     body = client.get(f"/project/{FF5}").text
-    assert "[ TICK FOR ME ]" in body
+    assert '<span class="t">Tick for me</span>' in body
 
 
 def test_non_admin_cannot_borrow_another_queue(env):

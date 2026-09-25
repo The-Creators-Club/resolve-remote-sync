@@ -1,0 +1,77 @@
+{# The terminal project tree (UI redesign port phase 2, plan 5.1). A NEW name:
+   the classic sidebar is included by every classic page, so the terminal
+   tree cannot be an overlay of it (R15). Drawn on first paint by the home
+   and project pages and by /partials/projects-tree (the 30 s poll) and by a
+   tick's own answer (partial_toggle `view=tree`); everything it reads is in
+   `t` (ui_home.tree_context).
+
+   Rows are REAL controls (5.1, wave 6): a project is a <label> holding a
+   visually hidden, focusable checkbox whose hx-post is the tick, and the
+   square is drawn from `input:checked + .box`. Year and show groups are
+   <details data-key> so the shell's keeper holds them open across the poll.
+   The tick carries `machine` (the computer picked in ticking_for) and `as`,
+   so the answer and the next poll stay about the same person and computer.
+   The tick names the state it means (`mode=on` / `mode=off`, home-project-2,
+   UI port review 2026-09-25): this body can be 30 s behind sync_queue's
+   untick, and a plain toggle from a stale row did the opposite of its
+   confirm. Every plan answer fires `cc-plan-changed`, which this body's
+   poll listens for too (home_macros.projects_win).
+   Nothing ticked is fine: the empty tree says so plainly, never as a
+   warning. #}
+{% set m = t.tree_machine or '' %}
+{% set mq = ('&machine=' ~ (m | urlencode)) if m else '' %}
+{% set cur = t.current_slug or '' %}
+{% macro row(p) -%}
+  {%- set on = p.slug in t.selected_slugs -%}
+  <div class="row proj{{ ' on' if on }}{{ ' current' if p.slug == cur }}" data-name="{{ p.label }}">
+    {% if t.toggle_editor %}
+    <label class="tick" title="{% if t.toggle_editor_base %}{{ m or t.toggle_editor }} is wired to the server: it works directly off the NAS and syncs nothing. Change it on that computer: tray, Settings, This computer.{% elif m %}Tick to sync {{ p.label }} to {{ m }} only. Untick to stop it there.{% else %}Tick to sync {{ p.label }} to every computer {{ t.toggle_editor }} uses. Per-computer plans: pick a computer above, or Settings, Sync plans.{% endif %}">
+      <input type="checkbox" class="proj-check vh" aria-label="{{ p.label }}"
+        {% if t.toggle_editor_base %}disabled
+        {% else %}
+        hx-post="/partials/selection/{{ t.toggle_editor }}/{{ p.slug }}/toggle?view=tree{{ mq }}&mode={{ 'off' if on else 'on' }}{{ ('&slug_page=' ~ cur) if cur }}{{ t.as_qs }}"
+        hx-target="closest .tree-body" hx-swap="innerHTML"
+        data-confirm-key="tick:{{ p.slug }}"
+        {% if on and not m and t.toggle_editor_machines %}
+        hx-confirm="This removes {{ p.label }} from {{ t.toggle_editor }}'s {{ t.toggle_editor_machines | length }} computer{{ 's' if t.toggle_editor_machines | length != 1 }} ({{ t.toggle_editor_machines | join(', ') }}). Their copies stay on disk; nothing new comes down and proxy sync stops for it."
+        {% elif on and m %}
+        hx-confirm="This removes {{ p.label }} from {{ m }}. Its copies stay on disk; nothing new comes down and proxy sync stops for it there."
+        {% elif p.slug == cur and t.tick_warning %}
+        hx-confirm="{{ t.tick_warning }} Sync it there anyway?"
+        {% endif %}
+        {% endif %}
+        {{ 'checked' if on }}>
+      <span class="box" aria-hidden="true"></span>
+    </label>
+    {% endif %}
+    <a class="nm" href="/project/{{ p.slug }}{{ ('?' ~ t.as_qs[1:]) if t.as_qs }}" title="{{ p.label }}"{% if p.slug == cur %} aria-current="page"{% endif %}>{{ p.short if p.short is defined else p.label }}</a>
+    {# UX-3: the tag deep-links into the glossary, as the queue's and the
+       project page's do (the classic rail's chip did; the port dropped it). #}
+    {% if p.slug in t.upload_only_slugs %}<a class="tag warn" href="{{ term_href('Upload only') }}" title="Upload only: this computer sends its video originals for this project to the server and downloads nothing."><span class="w">upload only</span></a>{% endif %}
+    {% if p.links_bad %}<span class="tag err" title="A shared-folder link on this project needs attention: open the project page."><span class="w">link</span></span>{% endif %}
+    {% if p.editors_behind %}<span class="sz" title="{{ p.editors_behind }} computer{{ 's' if p.editors_behind != 1 }} still catching up">{{ p.editors_behind }}&#8675;</span>{% endif %}
+  </div>
+{%- endmacro %}
+{% macro node(n, path) -%}
+  {% for name, child in n.groups | dictsort %}
+    {% set gp = (path ~ "/" ~ name) if path else name %}
+    <details class="proj-group" data-key="grp:{{ gp }}"{{ ' open' if cur and cur in child.slugs }}>
+      <summary class="row dir"><span class="nm">{{ name }}</span><span class="n">{{ child.slugs | length }}</span></summary>
+      <div class="kids">
+        {{ node(child, gp) }}
+        {% for p in child.projects %}{{ row(p) }}{% endfor %}
+      </div>
+    </details>
+  {% endfor %}
+{%- endmacro %}
+<div class="tree-count"><b>{{ t.tree_ticked }}</b> of {{ t.tree_total }} ticked{% if t.toggle_editor %} for <b>{{ m or t.toggle_editor }}</b>{% endif %}</div>
+<div class="tree">
+  {% set vt = t.view.tree if t.view and t.view.tree is defined else none %}
+  {% if vt and (vt.groups or vt.projects) %}
+    {{ node(vt, "") }}
+    {% for p in vt.projects %}{{ row(p) }}{% endfor %}
+  {% else %}
+    <div class="empty">No projects yet: they appear after the server's first look at the tree.</div>
+  {% endif %}
+  <div class="tree-nomatch" hidden>No project matches.</div>
+</div>

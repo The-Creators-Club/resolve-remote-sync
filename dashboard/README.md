@@ -136,7 +136,7 @@ non-admin using the break-glass form — because anything else is a
 username/role oracle. The specifics go to the log.
 
 **CSRF.** Every state-changing request that carries a session cookie needs a
-synchroniser token: `<meta name="csrf">` in `base.html`, `hx-headers` on
+synchroniser token: `<meta name="csrf">` in `shell.html`, `hx-headers` on
 `<body>` so every htmx call inherits it, and a hidden `csrf` field in the
 plain forms. A cross-site `Origin`/`Referer` is refused on top of that.
 Token-authenticated routes (`/api/v1/report`, `/api/v1/verify`, the selection

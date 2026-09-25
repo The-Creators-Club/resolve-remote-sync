@@ -9,6 +9,8 @@ does not cost Syncthing an unshare/re-share pair.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -162,10 +164,10 @@ def test_the_timeline_page_renders_the_rows_and_the_filter(env):
     client.put("/api/v1/selection/ruskin/ff4")
     page = client.get("/admin/audit")
     assert page.status_code == 200
-    assert "[ WHAT CHANGED ]" in page.text
+    assert 'data-win="what-changed"' in page.text
     assert "plan.tick" in page.text
     filtered = client.get("/partials/admin/audit?q=nothing-like-this")
-    assert "nothing in the timeline matches" in filtered.text
+    assert "Nothing in the timeline matches" in filtered.text
 
 
 def test_the_timeline_is_admins_only(env):
@@ -262,14 +264,21 @@ def test_the_fleet_page_carries_the_panel_only_for_an_admin(env):
     client.put("/api/v1/selection/ruskin/ff4")
     assert "/partials/plan-changes" in client.get("/").text
     panel = client.get("/partials/plan-changes")
-    assert "[ RECENT PLAN CHANGES ]" in panel.text and "[ UNDO ]" in panel.text
+    assert 'id="plan-changes"' in panel.text
+    assert 'hx-post="/partials/plan-changes/' in panel.text
+    assert '<span class="t">Undo</span>' in panel.text
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "ruskin"))
     assert "/partials/plan-changes" not in client.get("/").text
 
 
-def test_an_empty_hour_renders_no_panel_at_all(env):
+def test_an_empty_hour_offers_nothing_to_undo(env):
+    """The terminal home keeps the plan_changes window and says the hour was
+    quiet (an all-clear, never a warning); what must not appear is a row or
+    an Undo for a change that did not happen."""
     client, conn = env
-    assert client.get("/partials/plan-changes").text.strip() == ""
+    body = client.get("/partials/plan-changes").text
+    assert "<table" not in body and "/undo" not in body
+    assert 'class="allclear"' in body and "No tick or untick in the last hour" in body
 
 
 # ------------------------------------------------------ the enforce freeze
@@ -343,5 +352,7 @@ def test_the_project_page_untick_button_carries_the_same_confirm(env):
     report(client, "ruskin", "EDIT-PC", machine_id="mid-1")
     client.put("/api/v1/selection/ruskin/ff4")
     page = client.get("/project/ff4?as=ruskin").text
-    assert "[ UNTICK FOR RUSKIN ]" in page
-    assert "This removes 2025/FF4 from ruskin's 1 computer (EDIT-PC)" in page
+    # The confirm is on the Untick key itself, not somewhere else on the page.
+    keys = re.findall(r"<button[^>]*>\s*<span class=\"t\">\s*Untick for ruskin</span>", page)
+    assert len(keys) == 1
+    assert "This removes 2025/FF4 from ruskin's 1 computer (EDIT-PC)" in keys[0]

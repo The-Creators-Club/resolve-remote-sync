@@ -1,25 +1,26 @@
-{# SYNC KEYS (F4, account page 2026-09-25, ACCOUNT_PAGE_FEATURES.md 3.5).
-   Read-only (D-12): adding, approving and removing keys stay on the Users page,
-   because removing a key stops that computer's upload and proxy download.
-   Fingerprints only; a key's text is never in the view. #}
+{# SYNC KEYS, terminal look (UI redesign port phase 3, group `everyday`).
+   Loaded into the "sync keys" row of YOU after paint. Read-only (D-12):
+   adding, approving and removing keys stay on the Users page. Fingerprints
+   only; a key's text is never in the view. #}
+{% from "partials/ev_macros.html" import tag with context %}
 {% set key_tip = {
   "approved": "Your admin has let this computer in: its uploads and proxy downloads can run.",
   "waiting": "This computer asked to join. Until your admin approves it, nothing uploads or downloads on it.",
 } %}
 {% for k in keys["keys"] %}
   <div class="account-key">
-    {% if k.state == "approved" %}<span class="chip green" title="{{ key_tip.approved }}">[ APPROVED ]</span>
-    {% else %}<span class="chip amber" title="{{ key_tip.waiting }}">[ WAITING FOR YOUR ADMIN ]</span>{% endif %}
-    <span class="mono-sm" title="The key's fingerprint: a short code that identifies it. You never need to type it.">{{ k.fingerprint }}</span>
+    {% if k.state == "approved" %}{{ tag("ok", "approved", key_tip.approved) }}
+    {% else %}{{ tag("warn", "waiting for your admin", key_tip.waiting) }}{% endif %}
+    <span class="num" title="The key's fingerprint: a short code that identifies it. You never need to type it.">{{ k.fingerprint }}</span>
     {% if k.machine %}<span class="muted">from {{ k.machine }}</span>{% elif k.comment %}<span class="muted">{{ k.comment }}</span>{% endif %}
   </div>
 {% endfor %}
 {% if keys.installed_unknown %}
-  <div><span class="chip green">[ APPROVED ]</span> <span class="muted">a key is installed on the server; this server cannot show which one</span></div>
+  <div>{{ tag("ok", "approved") }} <span class="muted">a key is installed on the server; this server cannot show which one</span></div>
 {% endif %}
-{% if keys.unreadable %}<div class="account-result amber">{{ keys.unreadable }}</div>{% endif %}
+{% if keys.unreadable %}<div class="note warn"><span class="grow">{{ keys.unreadable }}</span></div>{% endif %}
 {% if not keys["keys"] and not keys.installed_unknown and not keys.unreadable %}
-  {% if keys.needed %}<span class="muted">none yet</span>
-  {% else %}<span class="muted">none, and none needed: a computer wired to the server syncs nothing</span>{% endif %}
+  {% if keys.needed %}<span class="dim">none yet</span>
+  {% else %}<span class="dim">none, and none needed: a computer wired to the server syncs nothing</span>{% endif %}
 {% endif %}
-<div class="field-hint muted">Your computers upload and download with these, not with your password. A key waiting for your admin means that computer's upload and proxy download cannot start yet.</div>
+<div class="hint">Your computers upload and download with these, not with your password. A key waiting for your admin means that computer's upload and proxy download cannot start yet.</div>

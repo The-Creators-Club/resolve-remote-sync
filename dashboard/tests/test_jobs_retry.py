@@ -209,6 +209,14 @@ def test_an_editor_cannot_retry_anybodys_job(env):
 
 # ----------------------------------------------------------------- the page
 
+# The terminal look's key labels and window title (partials/admin_jobs.html).
+SHOW_FINISHED = '<span class="t">show finished</span>'
+HIDE_FINISHED = '<span class="t">hide finished</span>'
+TRY_AGAIN = '<span class="t">try again</span>'
+FINISHED_TITLE = '<span aria-hidden="true">_</span><span class="vh"> </span>'.join(
+    "finished_in_the_last_24_hours".split("_"))
+
+
 def test_an_empty_queue_still_says_what_was_abandoned(env):
     client, conn = env
     for _ in range(2):
@@ -216,7 +224,7 @@ def test_an_empty_queue_still_says_what_was_abandoned(env):
     body = admin(client).get("/admin/jobs").text
     assert "Nothing is queued or running." in body
     assert "2 jobs were abandoned in the last 24 h." in body
-    assert "[ SHOW FINISHED ]" in body
+    assert SHOW_FINISHED in body
 
 
 def test_the_queue_head_counts_the_abandoned_beside_the_running(env):
@@ -234,9 +242,10 @@ def test_the_finished_list_shows_the_whole_error_and_a_try_again(env):
     end(conn, dead, error=long_error)
     body = admin(client).get("/partials/admin/jobs?finished=1").text
     assert long_error in body, "the sentence ffmpeg wrote is the evidence"
-    assert "[ TRY AGAIN ]" in body
+    assert TRY_AGAIN in body
+    assert f'hx-post="/partials/admin/jobs/{dead}/retry?finished=1"' in body
     assert "media:FF5/a.mp4" in body
-    assert "jsmith/EDIT-PC" in body
+    assert "jsmith/<b>EDIT-PC</b>" in body   # the last computer that held it
 
 
 def test_a_finished_job_that_succeeded_is_shown_but_not_retryable(env):
@@ -245,7 +254,8 @@ def test_a_finished_job_that_succeeded_is_shown_but_not_retryable(env):
     end(conn, done, state=dbmod.JOB_DONE, error="")
     body = admin(client).get("/partials/admin/jobs?finished=1").text
     assert f"#{done}" in body
-    assert "[ TRY AGAIN ]" not in body
+    assert f"/partials/admin/jobs/{done}/retry" not in body
+    assert TRY_AGAIN not in body
 
 
 def test_the_open_list_is_the_default(env):
@@ -254,7 +264,8 @@ def test_the_open_list_is_the_default(env):
     end(conn, dead, error="the one that got away")
     body = admin(client).get("/partials/admin/jobs").text
     assert "the one that got away" not in body
-    assert "[ SHOW FINISHED ]" in body
+    assert SHOW_FINISHED in body
+    assert 'data-win="finished"' not in body
 
 
 def test_the_toggle_survives_the_poll(env):
@@ -264,7 +275,7 @@ def test_the_toggle_survives_the_poll(env):
     end(conn, queue(conn))
     body = admin(client).get("/partials/admin/jobs?finished=1").text
     assert 'hx-get="/partials/admin/jobs?finished=1"' in body
-    assert "[ HIDE FINISHED ]" in body
+    assert HIDE_FINISHED in body
 
 
 def test_the_page_button_retries_and_says_which_number_it_is_now(env):
@@ -307,5 +318,8 @@ def test_both_lists_render_together(env):
     open_id = queue(conn)
     body = admin(client).get("/partials/admin/jobs?finished=1").text
     assert f"#{open_id}" in body
-    assert "[ FINISHED IN THE LAST 24 HOURS ]" in body
-    assert "[ HIDE FINISHED ]" in body
+    # The terminal heading draws the window title's underscores as hidden
+    # glyphs between the words (partials/admin_jobs.html `bar`).
+    assert 'data-win="finished"' in body
+    assert FINISHED_TITLE in body
+    assert HIDE_FINISHED in body

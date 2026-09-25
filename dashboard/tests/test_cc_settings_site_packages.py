@@ -1,9 +1,9 @@
 """The terminal Site and Packages pages (UI redesign port phase 4, first half,
 group `settings-fleet`, builder P4a, 2026-09-25).
 
-Run through the `ui_variant` fixture: classic keeps drawing classic, and the
-terminal look keeps every control the classic pages carry (a small control
-census over the Packages partial), keeps the Site page's tabs DISPLAY ONLY
+Since the collapse (2026-09-25) the terminal look is the only look. These
+pages keep every control the old pages carried (a small control census over
+the Packages partial, pinned from the old panel), keep the Site page's tabs DISPLAY ONLY
 (no nested form, only site_store.KEYS names inside #settings-form, the other
 forms siblings), lists in "roll back to" only builds a plain MAKE CURRENT
 accepts, keeps the unsigned build's signature confirm, says the delete goes
@@ -28,13 +28,14 @@ from ccsync_dashboard import db as dbmod
 from ccsync_dashboard import dashboard_update as dashupd_mod
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
+from conftest import HX
 
 from test_packages import (  # noqa: E402  (tests/ is on sys.path via conftest)
     SECRET, TEST_PUBKEY, insert_unsigned_package, publish,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-CC = ROOT / "templates" / "cc"
+CC = ROOT / "templates"
 MY_TEMPLATES = ("admin_settings.html", "partials/android_settings.html",
                 "admin_packages.html", "partials/admin_packages.html",
                 "partials/admin_dashboard_update.html")
@@ -43,7 +44,7 @@ LONG_DASHES = ("—", "–")
 
 
 @pytest.fixture
-def env(ui_variant, tmp_path):
+def env(tmp_path):
     settings = Settings(
         db_path=str(tmp_path / "p.db"), report_token="sekrit", session_secret=SECRET,
         admin_users=frozenset({"owen"}), packages_dir=str(tmp_path / "pkgs"),
@@ -63,8 +64,9 @@ def env(ui_variant, tmp_path):
         conn.close()
 
 
-def _terminal(ui_variant) -> bool:
-    return "settings-fleet" in ui_variant.groups
+def _hx(page_url: str) -> dict:
+    """The headers a page sends on an htmx request (shell.html)."""
+    return {**HX, "HX-Current-URL": page_url}
 
 
 class _Tree(HTMLParser):
@@ -120,24 +122,19 @@ def _visible_text(html: str) -> str:
 
 # ------------------------------------------------------------- packages
 
-def test_packages_page_renders_in_its_look(ui_variant, env):
+def test_packages_page_renders_in_the_terminal_look(env):
     client, _conn, _settings = env
     page = client.get("/admin/packages")
     assert page.status_code == 200
-    ui_variant.check_page(page.text)
-    if _terminal(ui_variant):
-        assert "cc/settings_fleet.css" in page.text
-        assert "cc/dashboard_update.js" in page.text
-        assert 'data-win="this_dashboard"' in page.text
-        assert 'hx-get="/partials/admin/dashboard-update"' in page.text
-    else:
-        assert "cc/dashboard_update.js" not in page.text
-        assert "[ OTHER VERSIONS HELD ON THIS SERVER ]" in page.text
+    assert 'data-ui="cc"' in page.text
+    assert "cc/settings_fleet.css" in page.text
+    assert "cc/dashboard_update.js" in page.text
+    assert 'data-win="this_dashboard"' in page.text
+    assert 'hx-get="/partials/admin/dashboard-update"' in page.text
+    assert 'data-win="other_versions_held"' in page.text
 
 
-def test_terminal_packages_rollback_select_and_held_rows(ui_variant, env):
-    if not _terminal(ui_variant):
-        pytest.skip("terminal only")
+def test_terminal_packages_rollback_select_and_held_rows(env):
     client, conn, _settings = env
     html = client.get("/admin/packages").text
     tree = _parse(html)
@@ -174,32 +171,36 @@ def test_terminal_packages_rollback_select_and_held_rows(ui_variant, env):
     # The shortcut really does roll back.
     r = client.post("/partials/admin/packages/current",
                     data={"kind": "companion", "platform": "windows", "version": "0.2.0"},
-                    headers=ui_variant.htmx_headers(client, "http://testserver/admin/packages"))
+                    headers=_hx("http://testserver/admin/packages"))
     assert r.status_code == 200
     assert dbmod.get_current_package(conn, "windows")["version"] == "0.2.0"
     assert "admin-packages-box" in r.text and "win" in r.text
 
 
-def test_terminal_packages_keeps_every_classic_control(ui_variant, env):
-    """The census, for this page: every (verb, path, fields) the classic panel
-    offers is offered by the terminal one (it may add the rollback select)."""
-    if ui_variant.name != "all":
-        pytest.skip("needs both looks in one app")
+# Every (verb, path, fields) the old panel offered for this fixture, read
+# off /partials/admin/packages at 77916b8 (the last build with that panel).
+CLASSIC_PACKAGES_CONTROLS = {
+    ("hx-post", "/partials/admin/packages/current",
+     ("confirm", "force", "kind", "platform", "version")),
+    ("hx-post", "/partials/admin/packages/current", ("kind", "platform", "version")),
+    ("hx-post", "/partials/admin/packages/delete", ("kind", "platform", "version")),
+    ("hx-post", "/partials/admin/packages/push-one", ("platform", "target", "version")),
+}
+
+
+def test_terminal_packages_keeps_every_classic_control(env):
+    """The census, for this page: every (verb, path, fields) the old panel
+    offered is offered by the terminal one (it may add the rollback select)."""
     client, _conn, _settings = env
-    classic = client.get("/partials/admin/packages",
-                         headers={"HX-Request": "true", "X-CC-UI": ""})
     terminal = client.get("/partials/admin/packages",
-                          headers=ui_variant.htmx_headers(client, "http://testserver/admin/packages"))
-    assert classic.status_code == terminal.status_code == 200
-    assert "[ MAKE CURRENT ]" in classic.text
+                          headers=_hx("http://testserver/admin/packages"))
+    assert terminal.status_code == 200
     assert "sf-pkg" in terminal.text
-    missing = _controls(classic.text) - _controls(terminal.text)
+    missing = CLASSIC_PACKAGES_CONTROLS - _controls(terminal.text)
     assert not missing, missing
 
 
-def test_terminal_packages_hooks_never_on_a_window(ui_variant, env):
-    if not _terminal(ui_variant):
-        pytest.skip("terminal only")
+def test_terminal_packages_hooks_never_on_a_window(env):
     client, _conn, _settings = env
     html = client.get("/admin/packages").text
     for n in _parse(html).nodes:
@@ -210,9 +211,7 @@ def test_terminal_packages_hooks_never_on_a_window(ui_variant, env):
     assert len(ids) == len(set(ids)), [i for i in ids if ids.count(i) > 1]
 
 
-def test_terminal_dashboard_update_partial(ui_variant, env, monkeypatch):
-    if not _terminal(ui_variant):
-        pytest.skip("terminal only")
+def test_terminal_dashboard_update_partial(env, monkeypatch):
     client, _conn, _settings = env
     view = {"image_mode": True, "running": "0.7.60", "image": "0.7.60", "source": "image",
             "runtime_id": "abcdef0123456789", "code_updates": [
@@ -224,7 +223,7 @@ def test_terminal_dashboard_update_partial(ui_variant, env, monkeypatch):
             "message": "", "last_error": "", "backups": [], "boot_attempts": 0}
     monkeypatch.setattr(dashupd_mod, "status", lambda settings, state: view)
     r = client.get("/partials/admin/dashboard-update",
-                   headers=ui_variant.htmx_headers(client, "http://testserver/admin/packages"))
+                   headers=_hx("http://testserver/admin/packages"))
     assert r.status_code == 200
     html = r.text
     assert 'id="dashboard-update"' in html
@@ -241,14 +240,11 @@ def test_terminal_dashboard_update_partial(ui_variant, env, monkeypatch):
 
 # ------------------------------------------------------------------ site
 
-def test_site_page_renders_in_its_look(ui_variant, env):
+def test_site_page_renders_in_the_terminal_look(env):
     client, _conn, _settings = env
     page = client.get("/admin/settings")
     assert page.status_code == 200
-    ui_variant.check_page(page.text)
-    if not _terminal(ui_variant):
-        assert "cc/site_settings.js" not in page.text
-        return
+    assert 'data-ui="cc"' in page.text
     html = page.text
     assert "cc/site_settings.js" in html
     assert re.search(r'src="/static/site_settings\.js', html) is None
@@ -265,10 +261,13 @@ def test_site_page_renders_in_its_look(ui_variant, env):
             assert not any(a["tag"] == "form" for a in n["anc"]), n["attrs"]
     settings_form = next(n for n in tree.nodes if n["attrs"].get("id") == "settings-form")
     kid_ids = {k["attrs"].get("id") for k in settings_form["kids"]}
-    for other in ("settings-import-form", "android-form", "ui-groups-form", "ai-providers",
+    for other in ("settings-import-form", "android-form", "ai-providers",
                   "ai-preference", "ai-cli-enabled"):
         assert other in ids, other
         assert other not in kid_ids, other
+    # The look-groups form went with the switch (2026-09-25).
+    assert "ui-groups-form" not in ids
+    assert "ui_terminal_groups" not in html
     # Serialised as site_settings.js does: only site_store.KEYS names.
     names = {k["attrs"]["name"] for k in settings_form["kids"]
              if k["tag"] in ("input", "select", "textarea") and k["attrs"].get("name")}
@@ -342,7 +341,7 @@ let outer = null, reloaded = 0, appended = [];
 Object.defineProperty(nodes['dashboard-update'], 'outerHTML', { set(v) { outer = v; } });
 global.window = { location: { reload() { reloaded++; } }, confirm() { return true; } };
 global.document = {
-  body: { getAttribute(k) { return k === 'hx-headers' ? '{"X-CSRF-Token":"t","X-CC-UI":"chrome,settings-fleet"}' : null; },
+  body: { getAttribute(k) { return k === 'hx-headers' ? '{"X-CSRF-Token":"t","X-CC-UI":"terminal"}' : null; },
           appendChild(n) { appended.push(n); } },
   getElementById(id) { return nodes[id] || null; },
   querySelector(s) { return s === '.cc-reload' ? (appended[0] || null) : null; },
@@ -361,9 +360,10 @@ eval(src);
   await window.ccsyncDashUpdate.reloadPanel();
   out.refresh = { reloaded, outer, ui: sent.headers['X-CC-UI'], hx: sent.headers['HX-Request'] };
   reloaded = 0;
-  answer(409, { 'X-CC-UI-Want': 'chrome' }, 'x');
+  answer(200, { 'HX-Redirect': '/login' }, '<form>sign in</form>');
   await window.ccsyncDashUpdate.reloadPanel();
-  out.want = { reloaded, outer, line: appended.length };
+  out.redirect = { reloaded, outer };
+  reloaded = 0;
   answer(200, {}, '<div id="dashboard-update">new</div>');
   await window.ccsyncDashUpdate.reloadPanel();
   out.ok = { outer };
@@ -387,20 +387,28 @@ def test_cc_dashboard_update_js_reload_paths(tmp_path):
     out = json.loads(proc.stdout.strip().splitlines()[-1])
     # HX-Refresh: reload, never swap the empty body over the panel.
     assert out["refresh"] == {"reloaded": 1, "outer": None,
-                              "ui": "chrome,settings-fleet", "hx": "true"}
-    # 409 + Want: the reload line, the panel kept.
-    assert out["want"]["reloaded"] == 0 and out["want"]["outer"] is None
-    assert out["want"]["line"] == 1
+                              "ui": "terminal", "hx": "true"}
+    # An expired session (200 + HX-Redirect): reload, never swap a login in.
+    assert out["redirect"] == {"reloaded": 1, "outer": None}
     assert out["ok"]["outer"] == '<div id="dashboard-update">new</div>'
     # The select copies its value onto its key (the older-bundle flow).
     assert out["sel"] == {"apply": "0.7.58", "disabled": False}
 
 
+# The routes the old static/site_settings.js called (read at 77916b8; the
+# file was deleted in the collapse, 2026-09-25).
+CLASSIC_SITE_ROUTES = {
+    "/api/v1/admin/ai-providers", "/api/v1/admin/ai-providers/",
+    "/api/v1/admin/ai-providers/preference", "/api/v1/admin/site",
+    "/api/v1/admin/site/history", "/api/v1/admin/site/import",
+    "/api/v1/admin/site/undo-last-change",
+}
+
+
 def test_cc_site_settings_js_writes_only_the_classic_routes():
     src = (ROOT / "static" / "cc" / "site_settings.js").read_text(encoding="utf-8")
-    classic = (ROOT / "static" / "site_settings.js").read_text(encoding="utf-8")
     cc_routes = set(re.findall(r'"(/api/v1/[a-z0-9_/-]+)', src))
-    classic_routes = set(re.findall(r'"(/api/v1/[a-z0-9_/-]+)', classic))
+    classic_routes = CLASSIC_SITE_ROUTES
     assert cc_routes, "no routes found"
     assert cc_routes <= classic_routes | {"/api/v1/admin/site"}, cc_routes - classic_routes
     assert "site-ask" in src          # import and undo ask through the dialog

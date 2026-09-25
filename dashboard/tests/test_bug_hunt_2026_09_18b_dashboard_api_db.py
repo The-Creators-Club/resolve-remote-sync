@@ -299,7 +299,7 @@ def test_the_packages_page_names_a_push_that_cannot_be_sent(tmp_path):
     client = TestClient(app)
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     html = client.get("/partials/admin/packages").text
-    assert "[ CANNOT BE SENT ]" in html
+    assert '<span class="tag err"' in html and ">cannot be sent</span>" in html
     assert "It still takes jobs." in html
 
 

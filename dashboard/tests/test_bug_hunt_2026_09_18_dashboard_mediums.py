@@ -377,16 +377,29 @@ def test_an_unreported_lane_carries_the_flag_the_template_now_reads():
 
 
 def test_the_grid_draws_an_unreported_lane_in_its_own_style():
-    template = (appmod.TEMPLATES_DIR if hasattr(appmod, "TEMPLATES_DIR") else None)
+    """The terminal grid (2026-09-25) draws each lane through
+    `ui_home.lane_tone`; an unreported lane must never get the class a
+    healthy lane gets, at any headline level, and the template must read it."""
     from pathlib import Path
 
     import ccsync_dashboard
+    from ccsync_dashboard import ui_home
 
     path = (Path(ccsync_dashboard.__file__).parent.parent.parent
             / "templates" / "partials" / "fleet_grid.html")
     text = path.read_text(encoding="utf-8")
-    assert "lane.reported" in text
-    assert "unknown" in text
+    assert "cc_lane_tone(lane" in text
+    strip = health.lane_strip([{"lane": "lane_a_video_up", "state": "idle",
+                                "chip": "green"}])
+    reported = [s for s in strip if s.get("reported") is not False]
+    unreported = [s for s in strip if s.get("reported") is False]
+    assert reported and unreported, strip
+    for level in ("green", "muted", "amber", "red", ""):
+        healthy = {ui_home.lane_tone(s, level) for s in reported}
+        for lane in unreported:
+            tone = ui_home.lane_tone(lane, level)
+            assert tone not in healthy, (level, tone, healthy)
+            assert tone not in ("ok", "busy"), (level, tone)
 
 
 # ---------------------------------------------------------------------------

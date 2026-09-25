@@ -1,7 +1,7 @@
 // The phone half of the dashboard: service-worker registration, polling
 // discipline, and the install chip (MOBILE_PLAN.md 4 M4, 2026-08-30).
 //
-// base.html loads this DEFERRED and BEFORE htmx, by contract (3.3). That
+// shell.html loads this DEFERRED and BEFORE htmx, by contract (3.3). That
 // order is the whole trick behind the interval rewrite: both scripts are
 // deferred, so they run in document order after parsing and before
 // DOMContentLoaded -- this file therefore sees the fully parsed page while
@@ -92,16 +92,12 @@
     if (!slot || slot.querySelector('.install-btn')) return;
     var btn = document.createElement('button');
     btn.type = 'button';
-    // UI port phase 1 (plan 2.1): with the terminal HUD on, the slot lives in
-    // its "more" sheet (on classic pages too), where hud-common paints a
-    // .hud-key and brackets are gone. The classic slot is unchanged.
-    if (slot.closest('.hud-more')) {
-      btn.className = 'hud-key install-btn';
-      btn.textContent = 'install this app';
-    } else {
-      btn.className = 'btn chip tap install-btn';
-      btn.textContent = '[ INSTALL ]';
-    }
+    // UI port phase 1 (plan 2.1): the slot lives in the HUD's "more" sheet,
+    // where hud-common paints a .hud-key. The classic drawer's bracketed
+    // chip went with the classic look (2026-09-25); the HUD is the only
+    // place a slot exists now.
+    btn.className = 'hud-key install-btn';
+    btn.textContent = 'install this app';
     btn.addEventListener('click', function () {
       if (!deferredPrompt) return;
       var prompted = deferredPrompt;

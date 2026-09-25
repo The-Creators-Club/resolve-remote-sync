@@ -172,7 +172,9 @@ def test_ui_pages_render(app_env):
 
     page = client.get("/project/2025-ff4-nuclear")
     assert page.status_code == 200
-    assert "jsmith" in page.text and "62%" in page.text and "[ MISSING FILES ]" in page.text
+    # Terminal look (2026-09-25): the "[ MISSING FILES ]" control is a key.
+    assert "jsmith" in page.text and "62%" in page.text
+    assert '<span class="t">Missing files</span></button>' in page.text
     assert client.get("/project/nope").status_code == 404
 
     partial = client.get(f"/partials/project/2025-ff4-nuclear/missing/{DEVICE_ID}")
@@ -248,8 +250,11 @@ def test_project_view_includes_report_only_machines(app_env):
     # and the page renders the report-only row (BASE chip, no missing button)
     page = client.get("/project/2025-ff4-nuclear")
     assert page.status_code == 200
-    # CR-179: the chip says WIRED now; "base rig" left the copy.
-    assert "owen" in page.text and "[ WIRED ]" in page.text
+    # CR-179: the chip says WIRED now; "base rig" left the copy. Terminal
+    # look (2026-09-25): a lower-case tag.
+    assert "owen" in page.text and '<span class="w">wired</span>' in page.text
+    # ...and only the device-backed row carries a missing-files key
+    assert page.text.count('<span class="t">Missing files</span></button>') == 1
     assert "69/0 orig" in page.text  # NAS inventory not seeded -> denominator 0
 
 
@@ -356,12 +361,17 @@ def test_the_fleet_page_banners_and_panel_show_the_refusals(app_env):
     seed(conn)
     _seed_refusals(conn)
     page = client.get("/").text
-    assert "2 SHARE REMOVALS REFUSED" in page and "shares are FROZEN" in page  # ui-dash-main-10 (2026-09-25): no "(S)"
+    # ui-dash-main-10 (2026-09-25): no "(S)". Terminal look: sentence case.
+    assert "2 share removals refused:" in page and "shares are frozen" in page
     assert "0 of 37 folders" in page
-    # the health panel + the read-only pending diff
-    assert "[ COLLECTOR ]" in page and "[ PENDING SHARE CHANGES ]" in page
-    assert "refused 2 share removal(s)" in page
-    assert "[ INCOMPLETE ]" in page
+    # the health panel + the read-only pending diff: the collector window
+    # lives on Health since the terminal look (its body is lazy-loaded)
+    assert 'id="htab-collector"' in client.get("/admin/health").text
+    panel = client.get("/partials/health-collector")
+    assert panel.status_code == 200
+    assert '<h2 class="sec">pending share changes</h2>' in panel.text
+    assert "refused 2 share removal(s)" in panel.text
+    assert '">incomplete</span>' in panel.text
 
 
 def test_an_editor_is_not_shown_the_collector_panel(app_env):
@@ -372,8 +382,13 @@ def test_an_editor_is_not_shown_the_collector_panel(app_env):
     _seed_refusals(conn)
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
     page = client.get("/").text
-    assert "[ COLLECTOR ]" not in page
-    assert "SHARE REMOVALS REFUSED" not in page and "SHARE REMOVAL(S)" not in page
+    assert "2025/FF4/Nuclear" in page            # the home page did draw
+    assert "share removals refused" not in page.lower()
+    assert "share removal(s)" not in page.lower()
+    # Terminal look (2026-09-25): the collector window is on Health, whose
+    # page and lazy body both refuse an editor.
+    assert client.get("/partials/health-collector").status_code == 403
+    assert client.get("/admin/health").status_code == 403
     assert "collector" not in client.get("/api/v1/editors").json()
 
 
@@ -389,5 +404,7 @@ def test_the_project_page_says_a_nas_inventory_was_not_replaced(app_env):
     assert dbmod.replace_nas_media(conn, pid, [], "sig2", 1, T) is False
     conn.commit()
     page = client.get("/project/2025-ff4-nuclear").text
-    assert "[ NAS INVENTORY NOT UPDATED ]" in page
+    # Terminal look (2026-09-25): the "[ NAS INVENTORY NOT UPDATED ]" chip
+    # is an err tag in a note.
+    assert '<span class="w">server count not updated</span>' in page
     assert "not replacing" in page

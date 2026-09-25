@@ -1,130 +1,135 @@
-<div class="detail-head">
-  <span class="dot {{ 'amber' if transfers.fleet_speed_bps else 'green' }}">●</span>
-  <h1>LIVE TRANSFERS</h1>
-  <span class="muted mono-sm">{{ transfers.fleet_speed_bps | human_bytes }}/s total</span>
-</div>
-<div class="rule"></div>
-{# DUI-19 (usability sweep 2026-09-03): the one sentence the editor came for.
-   This panel is good at what is MOVING and never composed it: they had to
-   read a percentage bar, a "12 files, 4.2 GB, ETA 26m" line and a
-   [ GETTING READY ] chip and do the synthesis themselves, and the question
-   they actually have is whether the lid can close. Uploads decide it (a
-   download resumes; footage that has not gone up is on one disk). Absent for
-   an admin's fleet-wide view, which has no "this computer" -
-   ui.safe_to_close returns None there. #}
-{% if safe_to_close is defined and safe_to_close %}
-<div class="{{ 'muted' if safe_to_close.safe else 'amber-text' }}" style="margin-bottom:0.6rem">
-  {{ safe_to_close.sentence }}</div>
-{% endif %}
-{% if transfers.transfers %}
-{# Both tables stack on a phone (MOBILE_PLAN.md M2, 2026-08-30): a file name
-   is the widest thing on this page and the one nobody can afford to have
-   cropped, so it gets a row of its own rather than a column to scroll to. #}
-<div class="scroll-x"><table class="editors stack transfers">
-  <thead><tr>
-    {% if scope_admin %}<th>EDITOR</th>{% endif %}
-    <th></th><th>FILE</th><th>PROGRESS</th><th>SPEED</th><th>ETA</th>
-  </tr></thead>
-  <tbody>
-  {% for t in transfers.transfers %}
-    <tr>
-      {% if scope_admin %}<td class="who" data-label="EDITOR">{{ t.editor }}</td>{% endif %}
-      <td class="mono" data-label="DIRECTION">{{ "⇡" if t.direction == "up" else "⇣" }}</td>
-      <td class="mono-sm path" data-label="FILE" title="{{ t.name }}">{{ t.name }}{% if t.granularity == "project" %} <span class="chip">folder sync</span>{% endif %}</td>
-      <td class="mono" data-label="PROGRESS">{% if t.percentage is not none %}<span class="cssbar"><span class="fill" style="width:{{ [[t.percentage, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(t.percentage) }}%{% else %}-{% endif %}</td>
-      <td class="mono-sm" data-label="SPEED">{% if t.speed_bps %}{{ t.speed_bps | human_bytes }}/s{% else %}-{% endif %}</td>
-      <td class="muted" data-label="ETA">{{ t.eta_seconds | eta if t.eta_seconds else "-" }}</td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table></div>
-{% else %}
-<div class="muted">nothing transferring right now</div>
-{% endif %}
+{# LIVE / QUEUED / HISTORY, terminal look (UI redesign port phase 3, group
+   `everyday`; bench design/transfers.html). The same view and the same
+   sentences as the classic partial; only the look changes.
 
-<div class="side-head" style="margin-top:1.4rem">[ QUEUED ]
-  <span class="muted">
-    {# bug-dash-db-2 owed round 2 (2026-09-25): a capped computer's queue row
-       counts nothing (db keeps it `uncertain` at n_files 0), so a panel whose
-       only rows are those said "0 files · 0 B waiting", which reads as done. #}
-    {% if transfers.queues and transfers.queued_files %}{{ transfers.queued_files }} file{{ "s" if transfers.queued_files != 1 }} · {{ transfers.queued_bytes | human_bytes }} waiting behind the transfers above, from the last reported disk manifests (may lag a few minutes)
-    {% elif transfers.queues %}nothing counted yet, but the rows below are not finished: see each one
-    {% else %}everything that should be somewhere is there{% endif %}
-  </span>
-</div>
-{% for q in transfers.queues %}
-  <details class="queue-group" data-key="q:{{ q.editor }}:{{ q.machine }}:{{ q.slug }}:{{ q.lane }}">
-    <summary class="mono-sm">
-      <span class="marker">▸</span>
-      {% if scope_admin %}<span class="who">{{ q.editor }}</span>{% if q.machine %} <span class="muted">{{ q.machine }}</span>{% endif %} ·{% endif %}
-      {{ q.label }}
-      {% if q.pending and q.upload_only %}
-        <span class="chip amber">[ GETTING READY ]</span>
-        <span class="muted">just ticked as upload only; waiting for this computer's first file list, then its video originals start uploading (nothing is downloaded)</span>
-      {% elif q.pending %}
-        <span class="chip amber">[ GETTING READY ]</span>
-        <span class="muted">just ticked; sharing and first file lists are being set up, syncing starts within a minute or two</span>
-      {% elif q.direction == "up" and q.uncertain and not q.n_files %}
-      {# bug-dash-db-2 owed round 2 (2026-09-25): this row exists only because
-         the computer's ORIGINALS list was capped (db.fetch_sync_backlog), so
-         its zero is "cannot tell", never "0 files · 0 B" to upload. #}
-      <span class="mono">⇡</span>
-      <span class="chip amber">[ CANNOT TELL ]</span>
-      {# d-ui owed round 3 (2026-09-25): api.build_transfers_view sets
-         `held` (CR-311) on this row too. A held machine is not uploading at
-         all, so "leave it running" is the wrong advice: show the hold and its
-         reason instead. #}
-      <span class="muted queue-note">this computer's file list was capped: it holds more video originals than it can list to the dashboard, so the dashboard cannot tell whether it still owes uploads.{% if not q.held %} Leave it running and check its tray.{% endif %}</span>
-      {% if q.held %}
-        <span class="chip red">[ ON HOLD ]</span>
-        <span class="muted">{{ q.held.sentence }}{% if q.held.since %} (since {{ q.held.since | ago }}){% endif %}</span>
-      {% endif %}
-      {% else %}
-      <span class="mono">{{ "⇡" if q.direction == "up" else "⇣" }}</span>
-      <span class="{{ 'amber-text' if q.n_files else 'muted' }}">{{ q.n_files }} file{{ "s" if q.n_files != 1 }} · {{ q.bytes | human_bytes }}</span>
-      <span class="chip">{{ "folder sync" if q.lane == "c" else ("upload" if q.direction == "up" else "proxy download") }}</span>
-      {% if q.held %}
-        <span class="chip red">[ ON HOLD ]</span>
-        <span class="muted">{{ q.held.sentence }}{% if q.held.since %} (since {{ q.held.since | ago }}){% endif %}</span>
-      {% endif %}
-      {% endif %}
-    </summary>
-    <ul class="clip-list">
-      {% for f in q.files %}
-        <li><span class="clip-name" title="{{ f.name }}">{{ f.name }}</span><span class="muted mono-sm">{{ f.size | human_bytes if f.size is not none else "" }}</span></li>
+   First paint: cc/transfers.html includes this whole fragment (the safe line
+   and the three windows). The 2 s poll then asks the SAME route with
+   hx-swap="none" and hx-select-oob, so only the inner ids below are replaced
+   (their innerHTML): the window frames, their fold buttons and the scroll
+   position of each list are never touched (plan 3.1, "the frame is static,
+   the body polls"). Every id the poll selects is therefore rendered in every
+   state, empty or not. #}
+{% from "partials/ev_macros.html" import win, meter with context %}
+{# the arrow is decoration; a screen reader hears the word (a11y-copy-1) #}
+{% macro dirmark(d) %}<span aria-hidden="true">{{ "⇡" if d == "up" else "⇣" }}</span><span class="vh">{{ "up" if d == "up" else "down" }}</span>{% endmacro %}
+{% set dir_tip = {"up": "Up: from the computer to the server.", "down": "Down: from the server to the computer."} %}
+{% set kind_tip = {
+  "upload": "Upload: new original footage going from the computer to the server.",
+  "proxy download": "Proxy download: small edit copies (proxies) coming from the server to the computer.",
+  "folder sync": "Folder sync: project files such as Resolve projects, graphics and audio kept the same on every computer.",
+} %}
+
+<div id="xf-safe" class="ev-safe">{% if safe_to_close is defined and safe_to_close %}
+  <div class="note {{ 'ok' if safe_to_close.safe else 'warn' }}">
+    {% if safe_to_close.safe %}<span class="tag ok" title="Safe: nothing of yours is going up, so you can shut down or unplug.">safe</span>
+    {% else %}<span class="tag solid warn" title="Not yet: closing or unplugging now would leave footage on one disk. Leave it running until this says safe.">not yet</span>{% endif %}
+    <span class="grow">{{ safe_to_close.sentence }}</span>
+  </div>
+{% endif %}</div>
+
+{% set n_live = transfers.transfers | length %}
+{% set live_meta %}<span id="xf-live-meta-in">{% if n_live %}<b>{{ n_live }}</b> moving &middot; {% endif %}<b>{{ transfers.fleet_speed_bps | human_bytes }}/s</b> total</span>{% endset %}
+{% call win("live", "live", "ev-xf", live_meta, "xf-live-meta") %}
+  <div class="scroll-y ev-live" id="xf-live">
+  {% if transfers.transfers %}
+    <table class="tbl stack-sm fixed xft">
+      <colgroup>{% if scope_admin %}<col style="width:18ch">{% endif %}<col style="width:5ch"><col><col style="width:24ch"><col style="width:12ch"><col style="width:9ch"></colgroup>
+      <thead><tr>
+        {% if scope_admin %}<th>editor</th>{% endif %}
+        <th><span class="vh">direction</span></th><th>file</th>
+        <th title="How much of this file has moved.">progress</th>
+        <th class="num" title="How fast this file is moving right now.">speed</th>
+        <th class="num" title="Time left for this file at the current speed.">eta</th>
+      </tr></thead>
+      <tbody>
+      {% for t in transfers.transfers %}
+        <tr>
+          {% if scope_admin %}<td class="who c-who" data-label="editor">{{ t.editor }}{% if t.machine %}<small>{{ t.machine }}</small>{% endif %}</td>{% endif %}
+          <td class="dir {{ 'up' if t.direction == 'up' else 'down' }} c-dir" data-label="" title="{{ dir_tip.up if t.direction == 'up' else dir_tip.down }}">{{ dirmark(t.direction) }}</td>
+          <td class="file c-file" data-label="file" title="{{ t.name }}">{{ t.name }}{% if t.granularity == "project" %} <span class="tag mute" title="{{ kind_tip['folder sync'] }} The sync engine reports the whole project here, not single files.">folder sync</span>{% endif %}</td>
+          <td class="c-prog" data-label="progress">{% if t.percentage is not none %}{{ meter(t.percentage) }} <b>{{ "%.0f" | format(t.percentage) }}%</b>{% else %}<span class="muted">-</span>{% endif %}</td>
+          <td class="num c-speed" data-label="speed">{% if t.speed_bps %}{{ t.speed_bps | human_bytes }}/s{% else %}<span class="muted">-</span>{% endif %}</td>
+          <td class="num c-eta" data-label="eta">{% if t.eta_seconds %}{{ t.eta_seconds | eta }}{% else %}<span class="muted">-</span>{% endif %}</td>
+        </tr>
       {% endfor %}
-      {% if q.truncated and q.files %}<li class="muted">… and {{ q.n_files - (q.files | length) }} more</li>{% endif %}
-      {# logic-sync-truth-2 / bug-dash-db-2 (2026-09-25): one "manifest was
-         capped; totals may undercount" line served both directions and was
-         wrong for both. UP: the ORIGINALS list was capped when the row is
-         `uncertain` (db.fetch_sync_backlog), and then the count really is a
-         floor; a row from before that key existed keeps the old caveat.
-         DOWN: a capped PROXY list makes db count from the manifest's totals
-         and show no names (files == []); a down row that still has names
-         was capped on the originals side only, and its count is exact. #}
-      {% if q.direction == "up" %}
-        {% if (q.uncertain and q.n_files) or (q.uncertain is not defined and q.manifest_truncated) %}<li class="muted">(this computer has more video originals than it can list to the dashboard, so the upload count may be low)</li>{% endif %}
-      {% elif q.manifest_truncated and not q.files %}<li class="muted">(this computer's proxy list was capped, so the count is worked out from its totals and no file names are shown)</li>{% endif %}
-    </ul>
-  </details>
-{% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="allclear"><span class="led"></span>Nothing is transferring right now.</div>
+  {% endif %}
+  </div>
+{% endcall %}
 
-<div class="side-head" style="margin-top:1.4rem">[ HISTORY ]
-  <span class="muted">recently completed files (companion reports + files arriving at the server; kept 7 days)</span>
-</div>
-{% if transfers.history %}
-<div class="scroll-x"><table class="editors stack transfers">
-  <tbody>
-  {% for h in transfers.history %}
-    <tr>
-      {% if scope_admin %}<td class="who" data-label="EDITOR">{{ h.editor }}</td>{% endif %}
-      <td class="mono" data-label="DIRECTION">{{ "⇡" if h.direction == "up" else "⇣" }}</td>
-      <td class="mono-sm path" data-label="FILE" title="{{ h.name }}">{{ h.name }}</td>
-      <td class="muted" data-label="DONE">{{ h.completed_at | ago }}</td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table></div>
-{% else %}
-<div class="muted">nothing completed recently</div>
-{% endif %}
+{% set q_meta %}<span>{% if transfers.queues and transfers.queued_files %}<b>{{ transfers.queued_files }}</b> file{{ "s" if transfers.queued_files != 1 }} &middot; <b>{{ transfers.queued_bytes | human_bytes }}</b> waiting{% elif transfers.queues %}not counted yet{% endif %}</span>{% endset %}
+{% call win("queued", "queued", "ev-xf", q_meta, "xf-q-meta") %}
+  <div class="scroll-y ev-queued" id="xf-queued">
+    <div class="lede ev-lede">
+      {# bug-dash-db-2 owed round 2 (2026-09-25), as classic: a capped
+         computer's row counts nothing, so "0 files, 0 B" must not read as done. #}
+      {% if transfers.queues and transfers.queued_files %}{{ transfers.queued_files }} file{{ "s" if transfers.queued_files != 1 }} waiting behind the transfers above, from the last disk lists the computers reported. <span class="muted">May lag a few minutes.</span>
+      {% elif transfers.queues %}Nothing counted yet, but the rows below are not finished: see each one.
+      {% else %}<span class="allclear-in"><span class="led"></span>Everything that should be somewhere is there.</span>{% endif %}
+    </div>
+    {% for q in transfers.queues %}
+    <details class="fgroup" data-key="q:{{ q.editor }}:{{ q.machine }}:{{ q.slug }}:{{ q.lane }}">
+      <summary>
+        <span class="mk" aria-hidden="true">&#9656;</span>
+        <span>{% if scope_admin %}<b>{{ q.editor }}</b>{% if q.machine %} <span class="muted">{{ q.machine }}</span>{% endif %} &middot; {% elif q.machine %}<span class="muted">{{ q.machine }}</span> &middot; {% endif %}{{ q.label }}</span>
+        {% if q.pending %}
+          <span class="tag warn" title="Getting ready: the project was just ticked, and the computer and server are setting it up. Nothing needs doing.">getting ready</span>
+          <span class="why">{% if q.upload_only %}Just ticked as upload only. Waiting for this computer's first file list, then its video originals start uploading (nothing is downloaded).{% else %}Just ticked. Sharing and first file lists are being set up; syncing starts within a minute or two.{% endif %}</span>
+        {% elif q.direction == "up" and q.uncertain and not q.n_files %}
+          <span class="red" title="{{ dir_tip.up }}">{{ dirmark("up") }}</span>
+          <span class="tag warn" title="The dashboard cannot tell whether this computer still owes uploads.">cannot tell</span>
+          {% if q.held %}<span class="tag solid err" title="On hold: something on this computer stops the transfer until it is fixed. The reason is on the next line.">on hold</span>{% endif %}
+          <span class="why">This computer's file list was capped: it holds more video originals than it can list to the dashboard, so the dashboard cannot tell whether it still owes uploads.{% if not q.held %} Leave it running and check its tray.{% endif %}</span>
+          {% if q.held %}<span class="why ev-err">{{ q.held.sentence }}{% if q.held.since %} (since {{ q.held.since | ago }}){% endif %}</span>{% endif %}
+        {% else %}
+          {% set kind = "folder sync" if q.lane == "c" else ("upload" if q.direction == "up" else "proxy download") %}
+          <span class="{{ 'red' if q.direction == 'up' else 'hi' }}" title="{{ dir_tip.up if q.direction == 'up' else dir_tip.down }}">{{ dirmark(q.direction) }}</span>
+          <span class="{{ 'ev-warn' if q.n_files else 'muted' }}">{{ q.n_files }} file{{ "s" if q.n_files != 1 }} &middot; {{ q.bytes | human_bytes }}</span>
+          <span class="tag mute" title="{{ kind_tip[kind] }}">{{ kind }}</span>
+          {% if q.held %}<span class="tag solid err" title="On hold: something on this computer stops the transfer until it is fixed. The reason is on the next line.">on hold</span>
+          <span class="why ev-err">{{ q.held.sentence }}{% if q.held.since %} (since {{ q.held.since | ago }}){% endif %}</span>{% endif %}
+        {% endif %}
+      </summary>
+      <div class="fgroup-body">
+        <ul class="files cap">
+          {% for f in q.files %}
+            <li><span class="g muted" aria-hidden="true">&middot;</span><span class="nm" title="{{ f.name }}">{{ f.name }}</span><span class="sz">{{ f.size | human_bytes if f.size is not none else "" }}</span></li>
+          {% endfor %}
+          {% if q.truncated and q.files %}<li class="more">... and {{ q.n_files - (q.files | length) }} more</li>{% endif %}
+          {# logic-sync-truth-2 / bug-dash-db-2 (2026-09-25), as classic. #}
+          {% if q.direction == "up" %}
+            {% if (q.uncertain and q.n_files) or (q.uncertain is not defined and q.manifest_truncated) %}<li class="note-line">This computer has more video originals than it can list to the dashboard, so the upload count may be low.</li>{% endif %}
+          {% elif q.manifest_truncated and not q.files %}<li class="note-line">This computer's proxy list was capped, so the count is worked out from its totals and no file names are shown.</li>{% endif %}
+          {% if not q.files and not q.pending and not (q.manifest_truncated or q.uncertain) %}<li class="more">no file names reported</li>{% endif %}
+        </ul>
+      </div>
+    </details>
+    {% endfor %}
+  </div>
+{% endcall %}
+
+{% call win("history", "history", "ev-xf", "kept 7 days") %}
+  <div class="scroll-y ev-history" id="xf-history">
+    <div class="lede ev-lede">Recently completed files: what the companions report, plus files arriving at the server.</div>
+  {% if transfers.history %}
+    <table class="tbl stack-sm fixed xft hist">
+      <colgroup>{% if scope_admin %}<col style="width:18ch">{% endif %}<col style="width:5ch"><col><col style="width:14ch"></colgroup>
+      <tbody>
+      {% for h in transfers.history %}
+        <tr>
+          {% if scope_admin %}<td class="who c-who" data-label="editor">{{ h.editor }}</td>{% endif %}
+          <td class="dir {{ 'up' if h.direction == 'up' else 'down' }} c-dir" data-label="" title="{{ dir_tip.up if h.direction == 'up' else dir_tip.down }}">{{ dirmark(h.direction) }}</td>
+          <td class="file c-file" data-label="file" title="{{ h.name }}">{{ h.name }}</td>
+          <td class="num muted nowrap c-eta" data-label="done">{{ h.completed_at | ago }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="allclear"><span class="led off"></span>Nothing completed recently.</div>
+  {% endif %}
+  </div>
+{% endcall %}

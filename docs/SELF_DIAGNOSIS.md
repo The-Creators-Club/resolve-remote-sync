@@ -55,7 +55,8 @@ sentences. The gap was never the data.
 ## 2. PROBLEMS THE SERVER FOUND
 
 Home page, above the fleet grid, admin only, polled every 60 s
-(`templates/partials/notices.html`, `ui.partial_notices`). Each open notice
+(`templates/partials/home_problems.html`, `ui_home.partial_home_problems`; the
+full list with its checks panel is Settings, Health, `partials/health_notices.html`). Each open notice
 renders as a banner: a severity chip, the subject (a slug, a path, an
 `editor/machine`, a device id), the body, and a `WHAT TO DO:` line. The fix is
 mandatory - every writer names a button, a page or a command, because a

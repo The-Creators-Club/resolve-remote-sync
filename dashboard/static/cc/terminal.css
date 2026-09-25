@@ -163,14 +163,14 @@ body::after {
 .key.primary:hover { --k-bg: #b81414; color: #fff; border-color: #fff; border-bottom-color: var(--red-deep); box-shadow: 0 0 calc(var(--fx-glow) * 20px) rgb(255 46 46 / 0.55); }
 .key.quiet { border-color: transparent; border-bottom-color: transparent; padding: 0 6px; color: var(--text-2); }
 .key.quiet:hover { color: var(--hi); box-shadow: none; border-color: transparent; }
-.key.quiet::before { content: "\25B8"; color: var(--red); margin-right: 2px; }
+.key.quiet::before { content: "\25B8"; content: "\25B8" / ""; color: var(--red); margin-right: 2px; }
 .key.sm { min-height: calc(28px * var(--d)); padding: 0 10px; font-size: 11px; }
 .key[disabled], .key.busy { pointer-events: none; opacity: 0.7; }
 .key .busy-t { display: none; }
 .key.busy .t { display: none; }
 .key.busy .busy-t { display: inline; }
-.spin::before { content: "|"; display: inline-block; width: 1ch; animation: spin 0.6s steps(4) infinite; }
-@keyframes spin { 0% { content: "|"; } 25% { content: "/"; } 50% { content: "-"; } 75% { content: "\\"; } }
+.spin::before { content: "|"; content: "|" / ""; display: inline-block; width: 1ch; animation: spin 0.6s steps(4) infinite; }
+@keyframes spin { 0% { content: "|"; content: "|" / ""; } 25% { content: "/"; content: "/" / ""; } 50% { content: "-"; content: "-" / ""; } 75% { content: "\\"; content: "\\" / ""; } }
 .tag {
   display: inline-flex; align-items: baseline; gap: 6px;
   padding: 0;
@@ -225,7 +225,10 @@ body::after {
   display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap;
 }
 .head h1 .prompt { color: var(--red); font-family: var(--mono); font-weight: 400; font-size: 22px; letter-spacing: 0; }
-.head .sub { margin-top: 8px; color: var(--text-2); font-size: 12px; letter-spacing: 0.5px; }
+/* The sub line carries a project's whole server path, which has no break
+   opportunity: anywhere, or a long one scrolls a phone page sideways
+   (test_mobile_fleet, 2026-09-25; classic had .path for it). */
+.head .sub { margin-top: 8px; color: var(--text-2); font-size: 12px; letter-spacing: 0.5px; overflow-wrap: anywhere; }
 .head .sub b { color: var(--hi); font-weight: 500; }
 .head .acts { display: flex; gap: 10px; flex-wrap: wrap; }
 .main { display: grid; grid-template-columns: minmax(0, 1fr); gap: calc(26px * var(--d)); min-width: 0; }
@@ -279,7 +282,7 @@ body::after {
   font-size: 13px;
 }
 .prob .todo .cmd { flex: 1; min-width: 240px; color: var(--text); }
-.prob .todo .cmd::before { content: "> "; color: var(--hi); }
+.prob .todo .cmd::before { content: "> "; content: "> " / ""; color: var(--hi); }
 .prob .todo .keys { display: flex; gap: 6px; }
 .prob.gone { opacity: 0; transform: translateX(10px); transition: opacity 0.2s, transform 0.2s; }
 .allclear { display: flex; align-items: center; gap: 12px; padding: var(--pad); color: var(--text-2); }
@@ -303,7 +306,7 @@ body::after {
 }
 .pc .issues .tag { max-width: 100%; overflow: hidden; text-overflow: ellipsis; flex: none; }
 .pc .issues .none { color: var(--muted); font-size: 12px; padding-top: 2px; }
-.pc .issues .none::before { content: "\2713  "; color: var(--ok); }
+.pc .issues .none::before { content: "\2713  "; content: "\2713  " / ""; color: var(--ok); }
 .pc .issues-n { color: var(--muted); font-size: 11px; }
 .pc.head-row { border-top: 0; padding-bottom: 4px; color: var(--muted); font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; }
 .pc:not(.head-row):hover { background: var(--row-hover); }
@@ -378,7 +381,7 @@ body::after {
 .tree .row { display: flex; align-items: baseline; white-space: pre; }
 .tree .row .br { color: var(--red-deep); }
 .tree .row.dir { color: var(--text); cursor: pointer; }
-.tree .row.dir .nm::after { content: "/"; color: var(--red); }
+.tree .row.dir .nm::after { content: "/"; content: "/" / ""; color: var(--red); }
 .tree .row.dir .n { margin-left: auto; color: var(--muted); font-size: 11px; }
 .tree .row.dir:hover .nm { color: var(--hi); }
 .tree .row.proj { color: var(--text-2); cursor: pointer; }
@@ -617,3 +620,43 @@ html.cc-hidden body::after { display: none; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
   body::after { display: none; }
 }
+
+/* ==== tab memory ==== */
+/* CR-188 (2026-09-04), carried over when the classic mobile.css was retired
+   (2026-09-25): the two properties static/tab_memory.js depends on, written
+   down so a later rule cannot take them away silently. The restore is an
+   instant jump, never an animation the reader watches, so the root states
+   `scroll-behavior: auto` and a `smooth` added later is a conflict rather
+   than a surprise. Scroll anchoring is what keeps the reader's place when
+   the 15 s fleet poll replaces the grid (an innerHTML swap, so the wrapper
+   survives to anchor to); one `overflow-anchor: none` up the tree would
+   turn it off for everything inside. */
+html { scroll-behavior: auto; }
+.page,
+.fleet-grid-wrap { overflow-anchor: auto; }
+
+/* DUI-2: the banner htmx_errors.js paints when a partial stops answering
+   ("THIS PAGE HAS STOPPED UPDATING"). Fixed to the bottom, where the buttons
+   that provoked the failure are. This rule lived in the classic style.css,
+   which the terminal pages never loaded, so on them the banner was a plain
+   .alarm appended after the last element of the page: out of sight until
+   the reader scrolled to the end (T14, found converting the DUI-2 test when
+   the terminal look became the only one, 2026-09-25). Three classes to beat
+   .alarm; a solid ground under its tint because content scrolls beneath.
+   hud.css lifts it clear of the phone dock. */
+.banner.alarm.stale-banner {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+  margin: 0;
+  padding: 0.5rem 0.9rem calc(0.5rem + var(--safe-b, 0px));
+  text-align: center;
+  background: linear-gradient(rgb(255 46 46 / 0.09), rgb(255 46 46 / 0.09)), var(--win-solid);
+}
+/* --stale-h is the banner's measured height (htmx_errors.js), so the last
+   lines of the page and any toast stay above it. */
+body[data-stale] { padding-bottom: var(--stale-h, 4rem); }
+body[data-stale] .toast-host { bottom: calc(1rem + var(--stale-h, 4rem)); z-index: 65; }
+/* ui-dash-static-7 on the terminal page: its toast is the shell's #cc-toast,
+   fixed 26px up, which sat over the banner's text. Lifted above the banner
+   (and the phone dock, which hud.css lifts the banner over); beats
+   phone.css's plain .toast (T4, 2026-09-25). */
+body[data-stale] .toast { bottom: calc(26px + var(--stale-h, 4rem) + var(--cc-dock-h, 0px)); }

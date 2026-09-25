@@ -17,14 +17,20 @@
 // dash-mounts-ui-5), and everything under PASS_THROUGH is handed to the
 // network untouched, with no respondWith at all.
 const VERSION = '__VERSION__';
-const CACHE = 'ccsync-' + VERSION;
+// LOOK is the second half of the cache name (2026-09-25). The terminal look
+// replaced the classic one without a version bump of its own, and the
+// precached /offline page was the one CLASSIC document a phone could still
+// be shown from this cache. A new name changes these bytes (so every
+// installed worker updates) and `activate` below drops every other
+// `ccsync-` cache, the classic page and sheets with it. Bump it whenever the
+// precached documents change look without a VERSION change.
+const LOOK = 'terminal-1';
+const CACHE = 'ccsync-' + VERSION + '-' + LOOK;
 
 // Enough to paint the offline page and a first screen of chrome. Nothing
 // here is session-specific: /offline renders the same for everyone.
 const PRECACHE = [
   '/offline',
-  '/static/style.css',
-  '/static/mobile.css',
   '/static/htmx.min.js',
   '/static/pwa.js',
   // DUI-2 (2026-09-04): the "this page has stopped updating" banner is the
@@ -39,9 +45,10 @@ const PRECACHE = [
   '/static/icons/icon-512-maskable.png'
 ];
 
-// UI port R8 (phase 0): the terminal look's hashed cc/ sheets and scripts and
-// the fonts at their plain urls, substituted by the /sw.js route from the
-// same content-hash map asset_url() uses. Empty when served raw.
+// UI port R8 (phase 0): the hashed cc/ sheets and scripts, the hashed shared
+// scripts and the fonts at their plain urls, substituted by the /sw.js route
+// from the same content-hash map asset_url() uses (ui_assets.precache_urls).
+// These are the urls the offline page itself asks for. Empty when served raw.
 const CC_PRECACHE = /*__CC_PRECACHE__*/[];
 
 // Prefixes this worker keeps its hands off entirely: live data, the htmx
@@ -73,7 +80,7 @@ self.addEventListener('install', function (event) {
   event.waitUntil(
     caches.open(CACHE).then(function (cache) {
       // Per file, not cache.addAll: addAll rejects as a whole, so one asset
-      // a build dropped (mobile.css before it merged, say) would leave the
+      // a build dropped (a retired sheet, say) would leave the
       // worker with NO precache at all rather than one file short.
       return Promise.all(PRECACHE.concat(CC_PRECACHE).map(function (url) {
         return cache.add(new Request(url, { cache: 'reload' })).catch(function () { });
@@ -139,7 +146,7 @@ self.addEventListener('fetch', function (event) {
         // itself, which the no-hit branch must not delay behind a cache write.
         var stored = null;
         // {cache: 'no-cache'}: revalidate past the browser's heuristic HTTP
-        // cache, or a deploy's changed classic script is not seen for hours (R8).
+        // cache, or a deploy's changed script is not seen for hours (R8).
         var network = fetch(req, {cache: 'no-cache'}).then(function (res) {
           if (res && res.ok && res.type === 'basic') {
             var copy = res.clone();

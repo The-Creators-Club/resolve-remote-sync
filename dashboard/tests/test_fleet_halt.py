@@ -5,6 +5,10 @@ Two halves that have to meet: the companion REPORTS its lane B breaker /
 halt / trash state, and an admin SETS a fleet-wide stop that rides the report
 reply back. Both are only useful if they reach the fleet grid, so the
 rendering is pinned here too.
+
+Rewritten 2026-09-25 against the terminal look (the only look): the words
+are sentence case, state tags are lowercase words, and the every-page banner
+is the shell's halt line (/partials/halt-line, partials/halt_line.html).
 """
 
 from __future__ import annotations
@@ -19,6 +23,8 @@ from ccsync_dashboard import auth
 from ccsync_dashboard import db as dbmod
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
+
+from conftest import HX
 
 DASHBOARD_ROOT = Path(__file__).resolve().parents[1]
 
@@ -89,13 +95,16 @@ def test_a_tripped_breaker_is_stored_and_shown_on_the_grid(env):
 
     page = as_admin(client).get("/partials/fleet")
     assert page.status_code == 200
-    assert "PROXY DOWNLOAD STOPPED" in page.text
+    # The row's tag, carrying the reason the companion gave.
+    assert '<span class="w">proxy download stopped itself</span>' in page.text
     assert "the NAS listed the tree as EMPTY" in page.text
     # ...and the fleet BANNER, not only the row chip: a row chip on a grid of
     # ten machines is not an alarm.
     # UX-16 / UX-10 (usability sweep 2026-09-03): "computer", and the
     # noun agrees with the count.
-    assert "PROXY DOWNLOAD STOPPED on 1 computer" in page.text
+    banners = page.text[page.text.index('<div class="grid-banners">'):]
+    assert '<div class="alertline err">' in banners
+    assert "Proxy download stopped on 1 computer" in banners
 
 
 def test_a_breaker_that_clears_clears_the_alarm(env):
@@ -108,7 +117,9 @@ def test_a_breaker_that_clears_clears_the_alarm(env):
     }), headers=report_headers())
     guards = dbmod.fetch_sync_guard_map(conn)
     assert guards[("jsmith", "EDIT-PC")]["breaker_tripped"] is False
-    assert "PROXY DOWNLOAD STOPPED" not in as_admin(client).get("/partials/fleet").text
+    grid = as_admin(client).get("/partials/fleet").text
+    assert "proxy download stopped itself" not in grid
+    assert "Proxy download stopped on" not in grid
 
 
 def test_a_report_without_a_guard_section_leaves_the_alarm_alone(env):
@@ -128,8 +139,8 @@ def test_a_halted_machine_shows_on_the_grid(env):
         "halt": {"active": True, "scope": "local", "reason": "editor stopped it"},
     }), headers=report_headers())
     page = as_admin(client).get("/partials/fleet")
-    assert "SYNCING PAUSED ON THIS COMPUTER" in page.text  # CR-179
-    assert "SYNCING IS PAUSED on 1 computer" in page.text  # UX-16 / UX-10
+    assert '<span class="w">syncing paused on this computer</span>' in page.text  # CR-179
+    assert "Syncing is paused on 1 computer" in page.text  # UX-16 / UX-10
 
 
 def test_the_skipped_exists_counter_reaches_the_grid(env):
@@ -137,7 +148,7 @@ def test_the_skipped_exists_counter_reaches_the_grid(env):
     client.post("/api/v1/report", json=payload({
         "skipped_exists": {"count": 3, "samples": ["A001.mov"]},
     }), headers=report_headers())
-    assert "WON'T UPLOAD: 3" in as_admin(client).get("/partials/fleet").text
+    assert '<span class="w">won&#39;t upload: 3</span>' in as_admin(client).get("/partials/fleet").text
 
 
 def test_an_unknown_guard_field_does_not_422_the_report(env):
@@ -219,7 +230,7 @@ def test_the_fleet_banner_says_when_the_whole_fleet_is_halted(env):
     as_admin(client).post("/api/v1/fleet/halt",
                           json={"active": True, "reason": "restoring the pool"})
     page = as_admin(client).get("/partials/fleet")
-    assert "SYNCING IS STOPPED ON EVERY COMPUTER" in page.text  # CR-179
+    assert "Syncing is stopped on every computer" in page.text  # CR-179
     assert "restoring the pool" in page.text
 
 
@@ -231,11 +242,13 @@ def test_the_users_page_panel_halts_and_releases(env):
     resp = as_admin(client).post("/partials/admin/fleet-halt",
                                  data={"active": "1", "reason": "NAS maintenance"})
     assert resp.status_code == 200
-    assert "SYNCING IS STOPPED ON EVERY COMPUTER" in resp.text  # CR-179
+    assert "Syncing is stopped on every computer" in resp.text  # CR-179
+    assert '<span class="t">start syncing again</span>' in resp.text
     assert dbmod.get_fleet_halt(conn)["active"] is True
 
     resp = as_admin(client).post("/partials/admin/fleet-halt", data={"active": "0"})
-    assert "STOP ALL SYNCING" in resp.text  # CR-179
+    assert '<span class="t">stop all syncing</span>' in resp.text  # CR-179
+    assert "Syncing is stopped on every computer" not in resp.text
     assert dbmod.get_fleet_halt(conn)["active"] is False
 
 
@@ -326,12 +339,14 @@ def test_an_expired_halt_is_released_for_every_reader(env, monkeypatch):
 
     # 2) the fleet grid no longer shows the halt banner
     grid = as_admin(client).get("/partials/fleet")
-    assert "SYNCING IS STOPPED ON EVERY COMPUTER" not in grid.text
+    assert "Syncing is stopped on every computer" not in grid.text
 
-    # 3) the standing every-page banner reads it as expired, not active
-    banner = as_admin(client).get("/partials/fleet-halt-banner")
-    assert "SYNCING IS STOPPED ON EVERY COMPUTER" not in banner.text
-    assert "THE FLEET-WIDE STOP HAS EXPIRED" in banner.text  # CR-179
+    # 3) the standing every-page halt line reads it as expired, not active
+    banner = as_admin(client).get("/partials/halt-line", headers=HX)
+    assert banner.status_code == 200
+    assert "Syncing is stopped on every computer" not in banner.text
+    assert "The fleet-wide stop has expired" in banner.text  # CR-179
+    assert '<span class="w">expired</span>' in banner.text
 
     # ...and get_fleet_halt itself agrees
     assert dbmod.get_fleet_halt(conn)["active"] is False
@@ -391,7 +406,7 @@ def test_halt_history_records_who_when_why_and_released(env):
     assert actions == ["halt", "release", "halt"]
 
     page = as_admin(client).get("/partials/admin/fleet-halt")
-    assert "PREVIOUS STOPS" in page.text  # CR-179
+    assert '<b class="sp-caps">previous stops</b>' in page.text  # CR-179
     assert "first look" in page.text
     assert "second look" in page.text
 
@@ -401,15 +416,16 @@ def test_the_banner_renders_hours_and_machines_on_a_non_fleet_page(env):
     client.post("/api/v1/report", json=payload(), headers=report_headers())
     as_admin(client).post("/api/v1/fleet/halt",
                           json={"active": True, "reason": "restoring the pool"})
-    # /transfers extends base.html same as every other page, and is not the
-    # fleet grid: the banner has to reach it too.
+    # /transfers extends shell.html same as every other page, and is not the
+    # fleet grid: the halt line has to reach it too.
     page = as_admin(client).get("/transfers")
     assert page.status_code == 200
-    assert 'hx-get="/partials/fleet-halt-banner"' in page.text
+    assert 'hx-get="/partials/halt-line"' in page.text
 
-    banner = as_admin(client).get("/partials/fleet-halt-banner")
-    assert "SYNCING IS STOPPED ON EVERY COMPUTER" in banner.text  # CR-179
-    assert "1 computer" in banner.text or "computer in the fleet" in banner.text
+    banner = as_admin(client).get("/partials/halt-line", headers=HX)
+    assert "Syncing is stopped on every computer" in banner.text  # CR-179
+    assert "hours so far" in banner.text
+    assert "1 computer in the fleet" in banner.text
 
 
 # -- UX-8 seam (a): extend on an already-expired halt must not go blank -----

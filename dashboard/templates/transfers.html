@@ -1,22 +1,36 @@
-{% extends "base.html" %}
-{% block title %}{{ brand_org | upper }}: TRANSFERS{% endblock %}
-{% block layout %}
-  <aside class="sidebar" hx-get="/partials/sidebar?current={{ as_qs }}"
-         hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
-    {% include "partials/sidebar.html" %}
-  </aside>
-  {# The 2s poll moved off <main> onto an inner wrapper (2026-08-18): the swap
-     is innerHTML, so anything rendered beside the partial inside the polled
-     element -- the Settings strip -- would be thrown away two seconds after
-     the page painted.
+{% extends "shell.html" %}
+{# TRANSFERS, terminal look (UI redesign port phase 3, group `everyday`;
+   bench design/transfers.html, plan 1.2). Same route, same view, same 2 s
+   visible-only poll of /partials/transfers as classic.
 
-     The visibility filter is MOBILE_PLAN.md §3.4 (2026-08-30): nothing polls
-     while the page is hidden. 2 s is still the desktop's rate; pwa.js slows
-     it on a touch device. #}
-  <main class="main">
-    {% include "partials/settings_nav.html" %}
-    <div hx-get="/partials/transfers" hx-trigger="load, every 2s [document.visibilityState === 'visible']" hx-swap="innerHTML">
-      {% include "partials/transfers.html" %}
+   The poll is a separate element with hx-swap="none" and hx-select-oob:
+   the fragment's frames are thrown away and only the inner ids are swapped
+   (innerHTML), so a fold, an open queue row or a scrolled list survives
+   every beat (3.1). The open rows are kept by static/cc/everyday.js, since
+   the shell's details keeper watches ordinary swaps only.
+
+   No projects tree (D17): the tree and TICKING FOR live on home. #}
+{% block title %}{{ brand_org | upper }}: TRANSFERS{% endblock %}
+{% block head %}
+  <link rel="stylesheet" href="{{ asset_url('cc/everyday.css') }}">
+  <script src="{{ asset_url('cc/everyday.js') }}" defer></script>
+{% endblock %}
+{% block layout %}
+<div class="page one ev-page">
+  {% include "partials/settings_nav.html" %}
+  <div class="head">
+    <div>
+      <h1><span><span class="prompt" aria-hidden="true">&gt;</span> TRANSFERS</span></h1>
+      <div class="sub">{{ "every editor" if scope_admin else "your files, on every computer you use" }}</div>
     </div>
-  </main>
+  </div>
+  <div class="vstack">
+    {% include "partials/transfers.html" %}
+  </div>
+  <div class="ev-poll" hidden aria-hidden="true"
+       hx-get="/partials/transfers"
+       hx-trigger="every 2s [document.visibilityState === 'visible']"
+       hx-swap="none"
+       hx-select-oob="#xf-safe:innerHTML,#xf-live-meta:innerHTML,#xf-live:innerHTML,#xf-q-meta:innerHTML,#xf-queued:innerHTML,#xf-history:innerHTML"></div>
+</div>
 {% endblock %}

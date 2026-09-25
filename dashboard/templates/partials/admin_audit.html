@@ -1,58 +1,45 @@
-{# The fleet timeline (SYS-11, resilience sweep 2026-08-28): the last 200 rows
-   of the append-only fleet_audit ledger, newest first.
-
-   `detail` is rendered as its own JSON on purpose. Every action carries a
-   different shape (a plan change carries both placements, a publish carries a
-   version and a platform), and a column per key would be a schema this page
-   has to be taught about every time a route starts writing a row. #}
+{# The fleet timeline, terminal look (phase 4; classic twin
+   partials/admin_audit.html, SYS-11). The BODY of the History page's
+   "what_changed" window: the filter form swaps #admin-audit (outerHTML), a
+   plain div inside the window's body, never the window. `detail` stays its
+   own JSON: every action carries a different shape. #}
 <div class="admin-users-box" id="admin-audit">
-  <div class="side-head">[ WHAT CHANGED ]
-    <span class="muted">Every tick, stop, resume, deletion, publish and pushed update,
-      with who did it. Kept for {{ audit_max_age_days }} days.</span></div>
-
-  <form class="inline-form" style="margin-bottom:0.6rem"
-        hx-get="/partials/admin/audit" hx-target="#admin-audit" hx-swap="outerHTML">
-    <input type="search" name="q" value="{{ audit_query }}" class="audit-filter" style="min-width:18rem"
-           placeholder="filter by project, editor, computer, version or action"
-           aria-label="filter the timeline">
-    <button class="btn tap" type="submit">[ FILTER ]</button>
-    {% if audit_query %}
-      {# A LINK, not a second `q` field: htmx would send both the input's
-         value and the button's, and which one wins is the framework's
-         business, not this page's. #}
-      <a class="btn tap" href="/admin/audit">[ CLEAR ]</a>
-    {% endif %}
-  </form>
+  <div class="body sp-tight">
+    <form class="inline-form inline" hx-get="/partials/admin/audit" hx-target="#admin-audit" hx-swap="outerHTML">
+      <div class="prompt-in sp-filter" title="Show only the lines whose project, editor, computer, version or action contains this.">
+        <span class="p" aria-hidden="true">&gt;</span>
+        <input type="search" name="q" value="{{ audit_query }}" class="audit-filter"
+               placeholder="filter by project, editor, computer, version or action"
+               aria-label="filter the timeline">
+      </div>
+      <button class="key sm" type="submit"><span class="t">filter</span></button>
+      {% if audit_query %}
+        {# A LINK, not a second `q` field. #}
+        <a class="key quiet sm" href="/admin/audit"><span class="t">clear</span></a>
+      {% endif %}
+    </form>
+  </div>
 
   {% if audit_rows %}
-    {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row is one recorded change,
-       and DETAIL is a JSON blob no phone column can hold. #}
-    {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
-       600 px, but between 600 and 900 it is still a grid, and a grid that
-       is wider than the window has to scroll inside itself rather than take
-       the page with it (round 2 of the sweep, 2026-08-30). #}
-    <div class="scroll-x">
-    <table class="editors stack">
-      <thead><tr><th>WHEN</th><th>WHO</th><th>ACTION</th><th>SUBJECT</th><th>DETAIL</th></tr></thead>
+    <div class="scroll-y sp-audit-h"><div class="scroll-x"><table class="tbl stack-sm">
+      <thead><tr><th>when</th><th>who</th><th>action</th><th title="What the action was about: a project, a person, a computer or a build.">subject</th><th title="Everything else the action recorded, as written.">detail</th></tr></thead>
       <tbody>
       {% for row in audit_rows %}
         <tr class="editor-row">
-          <td class="mono-sm muted" data-label="WHEN" title="{{ row.at }}">{{ row.at | ago }}</td>
-          {# account page 2026-09-25: the display name, the actor (the key)
-             in the title. #}
-          <td class="who" data-label="WHO" title="{{ row.actor }}">{{ row.actor | shown_as }}</td>
-          <td class="mono-sm" data-label="ACTION">{{ row.action }}</td>
-          <td class="mono-sm" data-label="SUBJECT">{{ row.subject }}</td>
-          <td class="mono-sm muted audit-detail" data-label="DETAIL">{{ row.detail_json }}</td>
+          <td data-label="when" title="{{ row.at }}">{{ row.at | ago }}</td>
+          {# account page 2026-09-25: the display name, the actor in the title. #}
+          <td class="who" data-label="who" title="{{ row.actor }}"><b>{{ row.actor | shown_as }}</b></td>
+          <td data-label="action">{{ row.action }}</td>
+          <td class="wrap" data-label="subject">{{ row.subject }}</td>
+          <td class="wrap audit-detail sp-detail" data-label="detail">{{ row.detail_json }}</td>
         </tr>
       {% endfor %}
       </tbody>
-    </table>
-    </div>
+    </table></div></div>
   {% elif audit_query %}
-    <div class="muted">nothing in the timeline matches "{{ audit_query }}"</div>
+    <div class="empty">Nothing in the timeline matches "{{ audit_query }}".</div>
   {% else %}
-    <div class="muted">nothing has been recorded yet. Every tick, stop, deletion and
+    <div class="empty"><span class="glyph" aria-hidden="true">&middot; &middot; &middot;</span>Nothing has been recorded yet. Every tick, stop, deletion and
       publish from here on lands in this list.</div>
   {% endif %}
 </div>

@@ -45,7 +45,9 @@ def test_a_make_current_button_says_it_is_working_and_cannot_be_double_clicked(e
     assert forms
     for form in forms:
         assert 'hx-disabled-elt="this"' in form and 'hx-indicator="this"' in form
-    assert "[ MAKING IT CURRENT... ]" in html
+    # The busy label the key shows while its request is in flight (hx-indicator
+    # on the form swaps `.t` for `.busy-t`).
+    assert '<span class="t">make current</span><span class="busy-t">making it current</span>' in html
 
 
 def test_a_refusal_is_drawn_on_the_row_that_was_clicked(env):  # noqa: F811
@@ -58,8 +60,8 @@ def test_a_refusal_is_drawn_on_the_row_that_was_clicked(env):  # noqa: F811
                              "version": "9.9.9"}).text
     assert dbmod.get_current_package(conn, "windows") is None
     # Not the top-of-panel banner the script moves to the FIRST matching form.
-    assert 'class="banner error-banner"' not in html
-    rows = re.split(r'<tr class="editor-row pkg-row">', html)
+    assert "error-banner" not in html
+    rows = re.split(r'<tr class="pkg-row">', html)
     refused = [r for r in rows if "row-refusal" in r]
     assert len(refused) == 1
     assert "9.9.9" in refused[0] and "no release signature" in refused[0]

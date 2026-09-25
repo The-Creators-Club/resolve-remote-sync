@@ -10,7 +10,11 @@
 .home-page .pc.home-pc > .lanes-wrap,
 .home-page .pc.home-pc > .issues { min-height: var(--pc-h); }
 .home-page .pc.home-pc > .issues { height: var(--pc-h); }
-.home-page .pc .hl { height: var(--lane-h); line-height: var(--lane-h); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text-2); }
+/* The headline is the row's answer to "what is wrong and what to do", so it
+   wraps (home-project-7, UI port review 2026-09-25): one nowrap line cut it
+   at about 40 characters at every width. Three lines on a fine pointer with
+   the whole sentence in its tip; all of it on a phone or a touch screen. */
+.home-page .pc .hl { min-height: var(--lane-h); line-height: 1.35; padding: 0.2em 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; overflow-wrap: anywhere; white-space: normal; font-size: 13px; color: var(--text-2); }
 .home-page .pc .hl.err { color: var(--err); }
 .home-page .pc .hl.warn { color: var(--warn); }
 .home-page .pc .hl.muted { color: var(--muted); }
@@ -30,6 +34,42 @@
 @media (pointer: coarse), (max-width: 760px) {
   .home-page .pc.home-pc > .issues { height: auto; min-height: 0; max-height: none; overflow: visible; }
   .home-page .pc.home-pc > .lanes-wrap { min-height: 0; }
+  .home-page .pc .hl { display: block; -webkit-line-clamp: unset; line-clamp: none; overflow: visible; }
+}
+
+/* Touch: the home controls are 44 px targets (home-project-10, UI port
+   review 2026-09-25). The tick square was 28 x 29, a project link 23 px
+   tall, a row's "details" 20 px, a fold button 11 px wide, the row keys
+   28 px. The HUD's own targets are hud.css's. */
+@media (pointer: coarse), (max-width: 760px) {
+  .home-page .tree .row.proj { align-items: center; }
+  .home-page .tree .row.proj .tick,
+  .home-page .tree .row.proj a.nm,
+  .home-page .tree details.proj-group > summary.row.dir { min-height: var(--cc-tap, 44px); display: inline-flex; align-items: center; }
+  .home-page .tree .row.proj .tick { min-width: var(--cc-tap, 44px); justify-content: center; }
+  .home-page .tree details.proj-group > summary.row.dir { display: flex; }
+  .home-page .pc > details.more > summary { min-height: var(--cc-tap, 44px); display: flex; align-items: center; gap: 0.5ch; }
+  .home-page .win > .bar > button.fold { min-width: var(--cc-tap, 44px); min-height: var(--cc-tap, 44px); }
+  .home-page .key.sm, .home-page .key { min-height: var(--cc-tap, 44px); }
+  /* F-home verifier: the rest of home's touch targets measured at 390 were
+     still 15-27 px: a window's own link (health, all transfers), a folded
+     sub-window's summary, the project links in the computers overview, and
+     the tree's find field. */
+  .home-page .win > .bar > a.act { min-height: var(--cc-tap, 44px); display: inline-flex; align-items: center; }
+  .home-page details.sub-win > summary { min-height: var(--cc-tap, 44px); display: flex; align-items: center; gap: 0.5ch; }
+  .home-page .proj-overview li > a { display: inline-flex; align-items: center; min-height: var(--cc-tap, 44px); }
+  .home-page .prompt-in .tree-find { min-height: var(--cc-tap, 44px); }
+}
+
+/* The tree first on a narrow screen (home-project-6, UI port review
+   2026-09-25): terminal.css stacks the side column LAST below 1100 px, so on
+   a phone the projects tree sat about 10,000 px down, under every computer
+   card, and the dock's "sync" link (D17: one tap reaches the tree) landed a
+   long scroll away from it. The groups are folded details, so the tree is a
+   few rows until one is opened. */
+@media (max-width: 1100px) {
+  .home-page > .side { order: 0; }
+  .home-page > .main { order: 1; }
 }
 
 /* ---- sub-windows nested in a body (banners, lost computers, collector,
@@ -69,6 +109,13 @@
 .home-page .missing { padding: 6px 0; }
 
 /* ---- transfers / queue */
+/* The owner's 35vh live-transfers window (2026-08-18): `height`, never
+   `max-height`, so an idle fleet does not shrink it and the queue below
+   never jumps on the 2 s poll. The poll swaps a wrapper inside it. */
+.home-page .live-transfers-window {
+  height: 35vh;
+  overflow: auto;
+}
 .home-page .xf-close { padding: 8px var(--pad) 0; min-height: 1.7em; }
 .home-page .xf .pct { color: var(--text); }
 .home-page .queue-box > .hint { padding: 0 0 6px; }
@@ -84,13 +131,13 @@
 .home-page .tree-count b { color: var(--hi); font-weight: 500; }
 .home-page .tree details.proj-group > summary { list-style: none; }
 .home-page .tree details.proj-group > summary::-webkit-details-marker { display: none; }
-.home-page .tree details.proj-group > summary.row.dir .nm::before { content: "+ "; color: var(--red-deep); }
-.home-page .tree details.proj-group[open] > summary.row.dir .nm::before { content: "- "; }
+.home-page .tree details.proj-group > summary.row.dir .nm::before { content: "+ "; content: "+ " / ""; color: var(--red-deep); }
+.home-page .tree details.proj-group[open] > summary.row.dir .nm::before { content: "- "; content: "- " / ""; }
 .home-page .tree .kids { padding-left: 2ch; border-left: 1px dashed var(--red-deep); margin-left: 0.5ch; }
 .home-page .tree .row.proj { gap: 0; white-space: nowrap; }
 .home-page .tree .row.proj .tick { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
-.home-page .tree .row.proj .box::before { content: "\25A1"; }
-.home-page .tree .row.proj .proj-check:checked + .box::before { content: "\25A0"; }
+.home-page .tree .row.proj .box::before { content: "\25A1"; content: "\25A1" / ""; }
+.home-page .tree .row.proj .proj-check:checked + .box::before { content: "\25A0"; content: "\25A0" / ""; }
 .home-page .tree .row.proj .proj-check:checked + .box { color: var(--hi); text-shadow: 0 0 calc(var(--fx-glow) * 8px) rgb(var(--hi-rgb) / 0.7); }
 .home-page .tree .row.proj .proj-check:focus-visible + .box { outline: 2px solid var(--hi); outline-offset: 1px; }
 .home-page .tree .row.proj .proj-check:disabled + .box { opacity: 0.4; }
@@ -125,8 +172,8 @@
    390 px screen, 2.2). */
 .home-page .move-form .move-key { white-space: normal; height: auto; min-height: 36px; text-align: left; }
 .home-page .move-form .move-key .t { white-space: normal; }
-.home-page tr.drawer td { padding-top: 0; }
-.home-page tr.drawer td:empty, .home-page tr.drawer div:empty { padding: 0; }
+.home-page tr.row-drawer td { padding-top: 0; }
+.home-page tr.row-drawer td:empty, .home-page tr.row-drawer div:empty { padding: 0; }
 .home-page .roots-box > .hint, .home-page .pres-head { padding: 0 0 8px; }
 .home-page #media-presence .pres-head { padding: 10px var(--pad) 4px; }
 .home-page details.bin { margin-left: 2ch; }
@@ -137,4 +184,10 @@
   /* iOS zooms into a field under 16 px; phone.css sets the floor, this
      keeps the scoped field rule from undercutting it. */
   .home-page .field input, .home-page .field select { font-size: 16px; }
+}
+/* The 12 px phone floor for this sheet's own small text (a11y-copy-7,
+   UI port review 2026-09-25): page sheets load after phone.css, so its
+   floor list cannot reach a rule written here. */
+@media (max-width: 760px) {
+  .home-page h3.sec, .home-page .tree-count, .home-page .field > span:not(.vh) { font-size: 12px; }
 }

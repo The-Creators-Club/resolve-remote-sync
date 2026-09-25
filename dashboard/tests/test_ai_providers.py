@@ -565,16 +565,20 @@ def test_these_routes_are_not_csrf_exempt():
 
 def test_the_settings_page_carries_the_section_and_the_tos_note(env):
     """The page's static half. The rows themselves are drawn by
-    static/site_settings.js from the admin route (a CLI status costs two
+    static/cc/site_settings.js from the admin route (a CLI status costs two
     subprocesses, and Settings must not block on those), so what is pinned
-    here is the frame: the section, the pin control, the flag, and the ToS
-    sentence that has to be in front of an admin BEFORE they turn CLI
-    providers on."""
+    here is the frame: the tab, the section, the pin control, the flag, and
+    the place the ToS sentence is hung (``ai-cli-tos``, filled from
+    ``cli_tos_note``) that has to be in front of an admin BEFORE they turn
+    CLI providers on. (Terminal look, 2026-09-25: the classic "AI PROVIDERS"
+    heading is the "ai providers" tab plus the your_ai_providers window.)"""
     client, _conn, _settings = env
     as_user(client, ADMIN)
     page = client.get("/admin/settings").text
-    assert "AI PROVIDERS" in page
+    assert 'id="tab-ai"' in page and ">ai providers</button>" in page
+    assert 'data-win="your_ai_providers"' in page
     assert 'id="ai-providers"' in page
+    assert 'id="ai-cli-tos"' in page
     assert 'id="ai-preference"' in page
     assert 'id="ai-cli-enabled"' in page
     assert 'id="ai-resolved"' in page

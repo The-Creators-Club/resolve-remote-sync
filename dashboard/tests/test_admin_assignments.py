@@ -79,7 +79,8 @@ def test_assignments_page_requires_admin(env):
     as_user(client, "owen")     # admin
     resp = client.get("/admin/assignments")
     assert resp.status_code == 200
-    assert "[ SYNC PLANS ]" in resp.text
+    # The page's own heading (terminal look: "> SYNC PLANS", no brackets).
+    assert re.search(r"<h1>.*?SYNC PLANS</span></h1>", resp.text, re.S)
 
 
 def test_grid_renders_projects_editors_and_existing_ticks(env):
@@ -344,12 +345,16 @@ def test_the_page_opens_with_the_pickers_and_no_grid(env):
     client, _conn = env
     as_user(client, "owen")
     body = client.get("/admin/assignments").text
-    assert 'class="assign-pick"' in body
+    assert re.search(r'<form class="assign-pick\b', body)
     assert '<option value="editor1"' in body and '<option value="jsmith"' in body
-    # No grid, no cells, and no computer picker until a person is chosen.
+    # No grid, no cells, and no computer to choose until a person is chosen.
+    # The terminal look draws the computer select from the start (plan 5.3)
+    # but DISABLED and holding only its placeholder, so nothing is choosable.
     assert 'id="assign-grid"' not in body
     assert "matrix-check" not in body
-    assert 'id="assign-machine"' not in body
+    machine_sel = re.search(r'<select[^>]*id="assign-machine"[^>]*>(.*?)</select>', body, re.S)
+    assert machine_sel and "disabled" in machine_sel.group(0).split(">", 1)[0]
+    assert re.findall(r'<option value="([^"]*)"', machine_sel.group(1)) == ["-"]
 
 
 def test_choosing_a_person_offers_their_computers_and_still_no_grid(env):
@@ -448,8 +453,10 @@ def test_the_fleet_size_is_still_said_in_one_line(env):
     conn.commit()
     as_user(client, "owen")
     body = client.get("/admin/assignments").text
-    assert "2 people" in body
-    assert "1 computer," in body
+    # The counts are bold numbers in the page head: compare the visible text.
+    text = " ".join(re.sub(r"<[^>]+>", " ", body).split())
+    assert "2 people" in text
+    assert re.search(r"\b1 computer\b(?!s)", text)
 
 
 def test_archiving_a_project_comes_back_to_the_same_plan(env):

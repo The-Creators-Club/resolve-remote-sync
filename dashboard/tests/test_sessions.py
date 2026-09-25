@@ -20,6 +20,8 @@ from ccsync_dashboard import auth, db, sessions
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
+from conftest import HX
+
 DASHBOARD_ROOT = Path(__file__).resolve().parents[1]
 
 # >= 24 chars, plenty of distinct characters: what broll.check_ingest_token
@@ -229,10 +231,11 @@ def test_admin_can_revoke_another_editors_sessions_from_the_users_page(strict, t
         _login(editor, "jsmith")
         panel = admin.get("/partials/admin/sessions")
         assert panel.status_code == 200
-        assert "jsmith" in panel.text and "[ REVOKE ALL ]" in panel.text
+        # Terminal look (C-collapse 2026-09-25): the key reads "revoke all".
+        assert "jsmith" in panel.text and '<span class="t">revoke all</span>' in panel.text
         resp = admin.post("/partials/admin/sessions/revoke",
                           data={"username": "jsmith"},
-                          headers={"X-CSRF-Token": _csrf(admin)})
+                          headers={"X-CSRF-Token": _csrf(admin), **HX})
         assert resp.status_code == 200 and "revoked 1 session" in resp.text
         assert editor.get("/api/v1/me").json()["user"] is None
         # ...and the admin's own session is untouched
@@ -251,8 +254,10 @@ def test_the_admins_own_row_is_labelled_sign_me_out_everywhere(strict, tmp_path)
         _login(editor, "jsmith")
         panel = admin.get("/partials/admin/sessions")
         assert panel.status_code == 200
-        assert "[ SIGN ME OUT EVERYWHERE ]" in panel.text
-        assert "[ REVOKE ALL ]" in panel.text
+        # Terminal look (C-collapse 2026-09-25): the keys read in lower case,
+        # one per row, and the (you) row's is the only "sign me out" one.
+        assert panel.text.count('<span class="t">sign me out everywhere</span>') == 1
+        assert panel.text.count('<span class="t">revoke all</span>') == 1
         # C-9's own-row copy and the generic other-row copy are both present,
         # and distinct.
         assert ("Sign yourself out of every browser, including this one? "

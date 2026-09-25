@@ -324,6 +324,10 @@ function Get-VenvPython {
     return "python"
 }
 
+# The one PyInstaller every Windows build uses; release-windows.yml pins the
+# same string (LG-11, 2026-09-25).
+$PyInstallerPin = "pyinstaller==6.21.0"
+
 function Install-CompanionEditable {
     <#
         Create the companion venv if it is missing and install the package
@@ -343,6 +347,20 @@ function Install-CompanionEditable {
         carries pystray/Pillow, without which build.spec's import probe
         silently drops the tray and the editor gets a companion with no
         menu-bar icon.
+
+        FROM THE LOCK since 2026-09-25 (LG-11, docs/LEGAL_GAP_FEATURES_PLAN.md
+        4.5). This used to be `pip install -e .[dev,tray]`, which resolves
+        pyproject.toml's floors against PyPI on the day, while CI and the
+        vendor feed install requirements.lock with --require-hashes: a
+        ship.cmd build and a feed build of the same commit were different
+        bytes, and psycopg2-binary, in pyproject.toml but not in the lock,
+        was in one and missing from the other. Now it is CI's recipe exactly:
+        the lock with hashes (every extra, tray and dev included, is in it),
+        then the package itself with --no-deps, then the same pinned
+        PyInstaller release-windows.yml installs. tools/scan_frozen.py (step
+        3) is what proves the result: it fails the build if anything frozen
+        is not in the lock, including a stray package an older venv still
+        holds (delete companion\.venv and re-run to rebuild it from the lock).
     #>
     param([string]$ProjectDir)
 
@@ -362,19 +380,41 @@ function Install-CompanionEditable {
     }
 
     if ($DryRun) {
-        Write-Step "[dry-run] would run: $py -m pip install --disable-pip-version-check -e .[dev,tray]   (in $ProjectDir)"
+        Write-Step "[dry-run] would run: $py -m pip install --disable-pip-version-check --require-hashes -r requirements.lock   (in $ProjectDir)"
+        Write-Step "[dry-run] would run: $py -m pip install --disable-pip-version-check --no-deps -e .   (in $ProjectDir)"
+        Write-Step "[dry-run] would run: $py -m pip install --disable-pip-version-check $PyInstallerPin   (in $ProjectDir)"
         return
     }
 
-    Write-Step "installing the companion (editable) + test/tray extras ..."
+    Write-Step "installing requirements.lock (--require-hashes), the same set CI builds from ..."
     $code = Invoke-Native -Exe $py -ArgList @(
-        "-m", "pip", "install", "--disable-pip-version-check", "-e", ".[dev,tray]"
+        "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "-r", "requirements.lock"
     ) -WorkingDir $ProjectDir
     if ($code -ne 0) {
-        Write-Fail "pip install -e .[dev,tray] failed (exit $code) -- NOT building. A TOMLDecodeError on line 1 means pyproject.toml has a UTF-8 BOM; re-save it without one."
+        Write-Fail "pip install --require-hashes -r requirements.lock failed (exit $code) -- NOT building. A hash mismatch means the lock and PyPI disagree; regenerate the lock (docs/RELEASE.md, 'Refreshing the lockfiles'), never edit it by hand."
         exit 1
     }
-    Write-Step "editable install OK"
+    Write-Step "installing the companion itself (editable, --no-deps) ..."
+    $code = Invoke-Native -Exe $py -ArgList @(
+        "-m", "pip", "install", "--disable-pip-version-check", "--no-deps", "-e", "."
+    ) -WorkingDir $ProjectDir
+    if ($code -ne 0) {
+        Write-Fail "pip install --no-deps -e . failed (exit $code) -- NOT building. A TOMLDecodeError on line 1 means pyproject.toml has a UTF-8 BOM; re-save it without one."
+        exit 1
+    }
+    # PyInstaller is a BUILD tool, deliberately not in the lock (GPL-2.0 with
+    # the bootloader exception; tools/check_licenses.py stays strict about
+    # the frozen set). Pinned all the same, to the release-windows.yml pin:
+    # an unpinned freezer changes what lands in the exe.
+    Write-Step "installing $PyInstallerPin ..."
+    $code = Invoke-Native -Exe $py -ArgList @(
+        "-m", "pip", "install", "--disable-pip-version-check", $PyInstallerPin
+    ) -WorkingDir $ProjectDir
+    if ($code -ne 0) {
+        Write-Fail "pip install $PyInstallerPin failed (exit $code) -- NOT building."
+        exit 1
+    }
+    Write-Step "install from the lock OK"
 }
 
 # --- 1. version parity -----------------------------------------------------
@@ -702,6 +742,26 @@ else {
         exit 1
     }
     Write-Step "built $ExePath"
+}
+
+# --- 3a. what was frozen ------------------------------------------------------
+# LG-11 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.5, 2026-09-25). THIRD_PARTY_NOTICES
+# promises that "a release build fails if it freezes a package that list does
+# not name"; this is that failure. tools/scan_frozen.py reads PyInstaller's own
+# TOCs in the workpath (build\build, from build.spec's name) and maps every
+# frozen file back to the distribution that installed it. Before the
+# signature, so a refused build is never signed.
+$ScanArgs = @((Join-Path $PSScriptRoot "scan_frozen.py"), "--component", "companion",
+              "--workpath", (Join-Path $CompanionDir "build\build"))
+if ($DryRun) {
+    Write-Step "[dry-run] would run: $BuildPython $($ScanArgs -join ' ')"
+}
+else {
+    $code = Invoke-Native -Exe $BuildPython -ArgList $ScanArgs -WorkingDir $RepoRoot
+    if ($code -ne 0) {
+        Write-Fail "scan_frozen exited $code -- the exe froze something the lock does not name (see the [scan_frozen] lines above); NOT signing or writing a manifest"
+        exit 1
+    }
 }
 
 # --- 3b. Authenticode --------------------------------------------------------

@@ -495,7 +495,10 @@ def _good_cfg(tmp_path, **overrides):
         "local_root": str(tmp_path),
         "remote": "ccsync_sftp",
         "remote_root": "/mnt/pool/share/Tree",
-        "dashboard_url": "http://dash.example:8480",
+        # https since 2026-09-25 (LG-4): plain http to a studio address is
+        # now a note in validate_config's warnings, and "fully configured"
+        # means the supported deployment, which is Tailscale Serve's https.
+        "dashboard_url": "https://dash.example:8480",
         "dashboard_token": "tok",
         "projects": ["Projects/2026/Creator Profiles/Season 1"],
         "active_project": "Projects/2026/Creator Profiles/Season 1",

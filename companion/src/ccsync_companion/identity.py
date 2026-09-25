@@ -59,13 +59,13 @@ import logging
 import threading
 import time
 import urllib.error
-import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
 from . import secretfile
+from . import transport
 from . import ui_copy
 from . import upgrade as upgrade_mod
 from .reporter import HttpPostFn, default_http_post
@@ -266,41 +266,16 @@ def _http_error_message(exc: urllib.error.HTTPError) -> str:
     }.get(exc.code, f"sign-in failed (HTTP {exc.code})")
 
 
-# Set once per process by _warn_if_plaintext(): sign-in is a tray action an
-# editor may repeat all day, and one warning is a note, twenty are noise.
-_PLAINTEXT_WARNED = False
-_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "[::1]", "localhost"}
-
-
-def _warn_if_plaintext(dashboard_url: str) -> None:
-    """Warn ONCE when sign-in will POST the editor's TrueNAS password over
-    plain HTTP to a non-loopback host.
-
-    DELIBERATELY NOT A REFUSAL. The current deployment is http over
-    LAN/Tailscale by design, and refusing here would lock every editor out of
-    a working system to fix a risk the tailnet already bounds -- but a
-    password crossing the wire in clear should not be invisible either
-    (AUDIT_3 L-13). The fix when it comes is TLS on the dashboard (a reverse
-    proxy in front of the container, or Tailscale HTTPS certs); see the
-    dashboard's deploy notes. Never raises."""
-    global _PLAINTEXT_WARNED
-    if _PLAINTEXT_WARNED:
-        return
-    try:
-        parsed = urllib.parse.urlparse(str(dashboard_url or "").strip())
-        host = (parsed.hostname or "").strip().lower()
-        if parsed.scheme.lower() != "http" or not host or host in _LOOPBACK_HOSTS:
-            return
-        _PLAINTEXT_WARNED = True
-        log.warning(
-            "sign-in posts your TrueNAS username and password to %s over plain HTTP "
-            "(no TLS) -- anyone able to read traffic between this machine and the "
-            "dashboard can read them. It is sent over the tailnet, not the open "
-            "internet; enable TLS on the dashboard to close this properly.",
-            dashboard_url,
-        )
-    except Exception:
-        log.debug("plaintext sign-in check failed", exc_info=True)
+# LG-4 (2026-09-25, docs/LEGAL_GAP_FEATURES_PLAN.md 4.4): the once-per-process
+# "sign-in posts your password over plain HTTP" log warning (AUDIT_3 L-13)
+# is gone. The shared opener's transport.CleartextGuard now REFUSES the one
+# case that warning existed for (plain http on the public internet), and the
+# settings window and the wizard say "not https" beside the address for the
+# LAN/tailnet case, where an editor can see it rather than a log nobody opens.
+CLEARTEXT_REFUSED_MESSAGE = (
+    "Not sent: the dashboard address is plain http on the internet. "
+    "Ask your admin for its https address."
+)
 
 
 def verify_credentials(
@@ -314,7 +289,6 @@ def verify_credentials(
     {"ok": True, "username": ..., "token": ...} on success, or
     {"ok": False, "error": "..."} on any failure -- bad credentials,
     throttling, a misconfigured server, or a network error. Never raises."""
-    _warn_if_plaintext(dashboard_url)
     url = f"{str(dashboard_url).rstrip('/')}/api/v1/verify"
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -338,6 +312,11 @@ def verify_credentials(
         message = _http_error_message(exc)
         log.info("verify_credentials: dashboard rejected sign-in (HTTP %s): %s", exc.code, message)
         return {"ok": False, "error": message}
+    except transport.CleartextRefused as exc:
+        # Before the generic branch: it IS a URLError, and "<urlopen error
+        # not sent: ...>" is not a sentence to show an editor.
+        log.warning("verify_credentials: %s", exc.reason)
+        return {"ok": False, "error": CLEARTEXT_REFUSED_MESSAGE}
     except Exception as exc:
         log.warning("verify_credentials: request failed: %s", exc)
         return {"ok": False, "error": str(exc)}

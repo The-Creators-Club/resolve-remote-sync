@@ -1,0 +1,14 @@
+CLAP text tower (ONNX export)
+
+This directory contains a work derived from the model
+laion/larger_clap_music_and_speech, published by LAION on Hugging Face
+(https://huggingface.co/laion/larger_clap_music_and_speech) under the Apache
+License, Version 2.0. A copy of that licence is in the file LICENSE beside
+this one.
+
+Modification statement: exported to ONNX, text tower only. The text encoder,
+its projection and a final L2 normalisation were exported to
+text_encoder.onnx, and the model's tokenizer to tokenizer.json, by Cablewrap
+Creative Ltd. on 2026-08-10 with music/indexer/export_text_encoder.py (model
+id, dimension and parameter count are recorded in manifest.json). The audio
+tower was not exported, and the weights were not otherwise changed.

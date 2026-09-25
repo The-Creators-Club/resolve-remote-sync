@@ -854,3 +854,13 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # a machine can transcode for the fleet out of one root and serve cards out of
 # another.
 # cards_vault_root = ""
+
+# ------------------------------------------------- WHAT THIS COMPUTER REPORTS
+# LG-1 (2026-09-25, docs/legal/TELEMETRY.md "What can be turned off"). Four
+# kinds of reporting this computer can switch off; sync is not affected. The
+# site can switch them off for everyone, and this file cannot switch back on
+# what the site has switched off. Settings, THIS COMPUTER, PRIVACY writes them.
+report_resolve_project = true   # the open Resolve project's name
+report_local_manifest = true    # the list of media files on this disk
+report_media_tree = true        # the Resolve bin structure
+report_input_idle = true        # time since the last keyboard or mouse input

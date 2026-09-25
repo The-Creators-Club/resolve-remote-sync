@@ -759,7 +759,7 @@
   // /admin/site/import?dry_run=1), never a guess, and [ UNDO LAST CHANGE ]
   // (named [ UNDO LAST IMPORT ] until ui-dash-admin-14) replays the newest site_history entry through the same apply path.
 
-  function importConfirmMessage(changes) {
+  function importConfirmMessage(changes, telemetryOff) {
     var n = changes.length;
     var head = "This will change " + n + " setting" + (n === 1 ? "" : "s") + ", including ";
     var shown = changes.slice(0, 3).map(function (c) {
@@ -767,7 +767,7 @@
     });
     var text = head + shown.join(", ");
     if (n > 3) text += ", and " + (n - 3) + " more";
-    return text + ". Apply it?";
+    return text + "." + telemetryOffWarning(telemetryOff) + " Apply it?";
   }
 
   function runImport(text) {
@@ -779,7 +779,7 @@
         window.alert("Nothing in that text differs from the current settings. Nothing was changed.");
         return;
       }
-      if (!window.confirm(importConfirmMessage(preview.changes))) return;
+      if (!window.confirm(importConfirmMessage(preview.changes, preview.telemetry_off))) return;
       return api("/api/v1/admin/site/import", {
         method: "POST", body: JSON.stringify({text: text}),
       }).then(function () { window.location.reload(); });
@@ -826,7 +826,11 @@
             // The exact stamp stays in the question: two saves a minute
             // apart both read "1m ago", and this is the entry the server
             // is asked to undo (expected_at, ui-dash-static-3).
-            " (" + latest.at + ")?";
+            " (" + latest.at + ")?" +
+            // LG-1 review round (2026-09-25): an undo reaches the same
+            // fleet-wide delete a Save does; the history names what it
+            // would switch off (setup_routes._undo_telemetry_off).
+            telemetryOffWarning(latest.telemetry_off);
           if (!window.confirm(message)) return;
           showResult("site-undo-result", true, "");
           api("/api/v1/admin/site/undo-last-change", {
@@ -845,7 +849,84 @@
     });
   }
 
+  // ------------------------------------------------ LG-1 / LG-4 (2026-09-25)
+
+  function telemetryBoxLabel(box) {
+    var label = box.closest("label");
+    var text = label ? label.childNodes : [];
+    var name = "";
+    Array.prototype.forEach.call(text, function (node) {
+      if (!name && node.nodeType === 3 && node.textContent.trim()) name = node.textContent.trim();
+    });
+    return name || box.dataset.telemetry;
+  }
+
+  function telemetrySwitchingOff(form) {
+    var names = [];
+    Array.prototype.forEach.call(form.querySelectorAll("input[data-telemetry]"), function (box) {
+      if (box.dataset.initial === "1" && !box.checked) names.push(telemetryBoxLabel(box));
+    });
+    return names;
+  }
+
+  // The one wording for "switching this off deletes data", shared by Save,
+  // import and undo (LG-1 review round, 2026-09-25): all three reach the
+  // same fleet-wide delete in set_many, so none may ask less plainly.
+  function telemetryOffQuestion(names) {
+    return "Stop every computer reporting: " + names.join(", ") + "?\n\n" +
+      "What this dashboard already holds about " +
+      (names.length === 1 ? "it" : "them") +
+      " is deleted for every computer now, and cannot be brought back. " +
+      "Sync is not affected.";
+  }
+
+  // `keys` are the server's category names (telemetry_off); the page's own
+  // tick labels name them where the block is drawn.
+  function telemetryOffWarning(keys) {
+    if (!keys || !keys.length) return "";
+    var names = keys.map(function (key) {
+      var box = document.querySelector('input[data-telemetry="' + key + '"]');
+      return box ? telemetryBoxLabel(box) : key;
+    });
+    return "\n\n" + telemetryOffQuestion(names);
+  }
+
+  function markTelemetrySaved(form) {
+    Array.prototype.forEach.call(form.querySelectorAll("input[data-telemetry]"), function (box) {
+      box.dataset.initial = box.checked ? "1" : "0";
+    });
+  }
+
+  // LG-4 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.4): information, never a
+  // warning. Only computers seen since this build count; none on plain http
+  // on the private network means no line at all. Plain http from the public
+  // internet is the alert's job (dashboard_reached_over_public_http), and
+  // is named here too so the two never disagree.
+  function loadTransportLine() {
+    var line = document.getElementById("site-transport-line");
+    if (!line) return;
+    api("/api/v1/admin/site")
+      .then(function (site) {
+        var counts = (site && site.report_via_counts) || {};
+        var local = Number(counts.http_local || 0);
+        var pub = Number(counts.http_public || 0);
+        var parts = [];
+        if (local) {
+          parts.push(local + (local === 1 ? " computer reaches" : " computers reach") +
+            " this dashboard over plain http on your network or tailnet. Serving it" +
+            " over https (Tailscale Serve does this) is recommended.");
+        }
+        if (pub) {
+          parts.push(pub + (pub === 1 ? " computer reaches" : " computers reach") +
+            " it over plain http from the internet: see the alerts on the home page.");
+        }
+        line.textContent = parts.join(" ");
+      })
+      .catch(function () { line.textContent = ""; });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
+    loadTransportLine();
     var form = document.getElementById("settings-form");
     if (form) {
       form.addEventListener("submit", function (evt) {
@@ -865,10 +946,20 @@
             values[el.name] = el.value;
           }
         });
+        // LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.1, 2026-09-25): switching a
+        // reporting category OFF deletes what the dashboard holds about it for
+        // every computer, at once and for good. Ask first, naming what goes;
+        // switching one back ON deletes nothing and is not asked about.
+        var switchingOff = telemetrySwitchingOff(form);
+        if (switchingOff.length && !window.confirm(telemetryOffQuestion(switchingOff))) {
+          showResult("settings-save-result", false, "not saved");
+          return;
+        }
         showResult("settings-save-result", true, "saving...");
         api("/api/v1/admin/site", {method: "PUT", body: JSON.stringify({values: values})})
           .then(function () {
             showResult("settings-save-result", true, "saved at " + clock());
+            markTelemetrySaved(form);
             return loadSiteHistory();
           })
           .catch(function (err) {

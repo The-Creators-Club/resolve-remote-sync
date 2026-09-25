@@ -40,6 +40,7 @@ from . import config as config_mod
 from . import crash_report
 from . import supervisor
 from . import eula as eula_mod
+from . import telemetry_policy
 from . import file_moves as file_moves_mod
 from . import machine as machine_mod
 from . import machine_settings as machine_settings_mod
@@ -1615,6 +1616,30 @@ def _file_move_drive_answer_due(app: Any, move_id: int) -> bool:
         return True
 
 
+def real_journal_id(journal: str) -> str:
+    """The journal an opaque id names (LG-1 note J, 2026-09-25).
+
+    With `resolve_project` withheld the report sends journal ids as
+    `withheld:project/<file>` (telemetry_policy.MASKED), because the real
+    id starts with the project's name. The file name is a UTC second
+    stamp, so it names one journal on this machine; if it names two (two
+    projects fixed in the same second) the undo is refused as not found
+    rather than guessed. Any other id is returned untouched and
+    resolve_journal.session_by_id still vets it."""
+    text = str(journal or "")
+    if not text.startswith(telemetry_policy.OPAQUE_JOURNAL_PREFIX):
+        return text
+    name = text[len(telemetry_policy.OPAQUE_JOURNAL_PREFIX):]
+    try:
+        found = [p for p in resolve_journal.sessions() if p.name == name]
+    except Exception:
+        log.exception("resolve undo: could not list this machine's journals")
+        return text
+    if len(found) != 1:
+        return text
+    return resolve_journal.journal_id(found[0])
+
+
 class CompanionApp:
     """Owns the timeline watcher, all three sync lanes, and (optionally) the
     tray icon. Every public method is safe to call from any thread (the
@@ -2373,6 +2398,10 @@ class CompanionApp:
             # this process runs with, those waiting on disk for a restart,
             # and the answer to the last ask. Every tick, light ones included.
             get_machine_settings=lambda: machine_settings_mod.report_section(self),
+            # LG-5 (docs/LEGAL_GAP_FEATURES_PLAN.md section 5): which licence
+            # this computer accepted, heavy ticks only. The record, never the
+            # document and never its path.
+            get_eula=eula_mod.report_block,
             # APP-1 (resilience sweep 2026-08-28): the ONE thing the reporter
             # says out loud. A revoked credential is a human's problem, and
             # nothing else on this machine can tell the editor about it -- the
@@ -4586,6 +4615,12 @@ class CompanionApp:
                 }
             )
         tree = {project_name: clips} if project_name else {}
+        if telemetry_policy.MEDIA_TREE in self.telemetry_withheld():
+            # LG-1 (plan 4.1, safety audit H2): COLLECT, THEN WITHHOLD. This
+            # walk is the only caller of the stale-bridge recovery above and
+            # feeds the relink and classify passes below, so it runs exactly
+            # as before; only the cache the reporter reads stays empty.
+            tree = {}
         with self._media_tree_lock:
             self._media_tree_cache = tree
 
@@ -7188,10 +7223,30 @@ class CompanionApp:
                 # Live, like the three above: a gate served from a 60 s cache
                 # is an observation about a minute ago.
                 jobs_gate_fn=self.jobs_gate,
+                # LG-1: the reporter strips these too; blanking them here
+                # keeps the diagnostics bundle honest as well.
+                withheld=self.telemetry_withheld(),
             )
         except Exception:
             log.exception("could not build the capabilities section")
             return {}
+
+    def telemetry_withheld(self) -> set[str]:
+        """The reporting categories this computer withholds right now: its
+        own switches AND the site's (LG-1, docs/LEGAL_GAP_FEATURES_PLAN.md
+        4.1). The reporter's answer when there is one, so the report and
+        everything else here cannot disagree. Never raises."""
+        try:
+            reporter = getattr(self, "reporter", None)
+            if reporter is not None and hasattr(reporter, "telemetry_effective"):
+                eff = reporter.telemetry_effective()
+            else:
+                eff = telemetry_policy.effective(
+                    getattr(self, "config", {}) or {}, site_mod.cached_site())
+            return set(telemetry_policy.withheld(eff))
+        except Exception:
+            log.debug("could not read the reporting switches", exc_info=True)
+            return set()
 
     def sync_guard(self) -> dict[str, Any]:
         """The `sync_guard` report section: breaker, trash, halt, and lane A's
@@ -8830,6 +8885,13 @@ class CompanionApp:
 
     def _resolve_undo_results(self) -> list[dict[str, Any]]:
         answers, self._resolve_undo_answers = self._resolve_undo_answers, []
+        # At REPORT time, so the switch as it is now decides (G1a review
+        # round 1): the answer was queued earlier and may name the project.
+        withheld_fn = getattr(self, "telemetry_withheld", None)
+        if (answers and callable(withheld_fn)
+                and telemetry_policy.RESOLVE_PROJECT in withheld_fn()):
+            answers = [dict(a, detail=self._withheld_undo_detail(str(a.get("detail") or "")))
+                       for a in answers]
         return answers
 
     def _queue_resolve_undo_answer(self, request_id: int, ok: bool, detail: str,
@@ -8868,6 +8930,7 @@ class CompanionApp:
                 if command is None:
                     log.warning("resolve undo: ignoring a malformed command (%r)", entry)
                     continue
+                command["journal"] = real_journal_id(command["journal"])
                 done = self.resolve_undos.entry(command["id"])
                 if done is not None and done.get("state") != "retrying":
                     self._queue_resolve_undo_answer(
@@ -9602,7 +9665,115 @@ class CompanionApp:
         out.append("")
         out.append(f"-- last 40 log lines ({self.log_path}) --")
         out.extend(f"  {line}" for line in self._diagnostic_log_tail(40))
-        return "\n".join(out)
+        return self._redact_diagnostics("\n".join(out))
+
+    # Categories whose data can ride a diagnostics bundle. input_idle is one
+    # number the bundle states as such, and G0's dashboard side agrees: a
+    # newly withheld input_idle alone keeps the stored bundles.
+    _DIAGNOSTICS_CATEGORIES = frozenset((
+        telemetry_policy.RESOLVE_PROJECT, telemetry_policy.LOCAL_MANIFEST,
+        telemetry_policy.MEDIA_TREE))
+
+    def _redact_diagnostics(self, text: str) -> str:
+        """The bundle with the withheld names and paths taken out (LG-1,
+        docs/LEGAL_GAP_FEATURES_PLAN.md 4.1, 2026-09-25).
+
+        A bundle goes to the dashboard (post_diagnostics) as well as to the
+        clipboard, and it is free text from a dozen producers and the log
+        tail, so no field table reaches into it. With any of the three
+        content categories off, the open project's name becomes <project>
+        wherever it appears, and every path under this computer's tree and
+        media roots becomes <root>/<file>. Never raises: an unredactable
+        bundle is replaced by a sentence rather than sent as it is."""
+        try:
+            withheld = self.telemetry_withheld() & self._DIAGNOSTICS_CATEGORIES
+            if not withheld:
+                return text
+            names = self._known_project_names()
+            roots = self._redaction_roots()
+            note = ("(this computer withholds " + ", ".join(sorted(withheld))
+                    + ": project names and file paths above are replaced)")
+            return telemetry_policy.redact_text(text, names, roots) + "\n" + note
+        except Exception:
+            log.exception("could not redact the diagnostics bundle")
+            return ("=== CCSYNC DIAGNOSTICS ===\n(withheld: this computer's reporting "
+                    "switches are on and the bundle could not be redacted; see the log)")
+
+    def _known_project_names(self) -> list[str]:
+        """Every Resolve project name this machine can name, for redaction.
+
+        G1a review round 1 (2026-09-25): the open project alone missed every
+        name in the log tail from before a switch, and all of them once
+        Resolve was closed (watcher.last_resolve_project goes None). So: the
+        watcher's current and last-seen names, the ignored scratch projects,
+        every journal's project AND its directory slug (a name with `/` or `:`
+        is logged under ~/.ccsync/resolve_edits/<slug>/, which is not the
+        name). Never raises; a producer that fails costs its names only."""
+        names: set[str] = set()
+        watcher = getattr(self, "watcher", None)
+        for attr in ("last_resolve_project", "_last_seen_project"):
+            value = getattr(watcher, attr, None)
+            if value:
+                names.add(str(value))
+        try:
+            names.update(str(n) for n in (getattr(watcher, "_ignored_projects", None) or ()))
+        except Exception:
+            pass
+        try:
+            ignored = (getattr(self, "config", {}) or {}).get("ignored_resolve_projects") or ()
+            if isinstance(ignored, (list, tuple, set)):
+                names.update(str(n) for n in ignored)
+        except Exception:
+            pass
+        try:
+            for summary in resolve_journal.summaries(limit=500):
+                project = str(summary.get("project") or "")
+                if project:
+                    names.add(project)
+                    names.add(resolve_journal.project_slug(project))
+        except Exception:
+            log.debug("redaction: could not list the journals' projects", exc_info=True)
+        try:
+            root = resolve_journal.journal_root()
+            if root.is_dir():
+                names.update(p.name for p in root.iterdir()
+                             if p.is_dir() and p.name != "_unknown")
+        except Exception:
+            log.debug("redaction: could not list the journal folders", exc_info=True)
+        return sorted(n for n in names if n.strip())
+
+    def _redaction_roots(self) -> list[str]:
+        """The tree and media roots, plus the undo journals' own folder
+        (its paths are `<slug>/<stamp>.json`, i.e. a project name)."""
+        cfg = getattr(self, "config", {}) or {}
+        roots = [cfg.get(key) for key in (
+            "local_root", "remote_root", "canonical_prefix", "jobs_vault_root",
+            "jobs_media_root", "cards_vault_root")]
+        try:
+            roots.append(str(config_mod.resolved_local_root(cfg)))
+        except Exception:
+            pass
+        try:
+            roots.append(str(resolve_journal.journal_root()))
+        except Exception:
+            pass
+        return [str(r) for r in roots if r]
+
+    def _withheld_undo_detail(self, detail: str) -> str:
+        """An undo answer's sentence without project names (G1a review round
+        1, 2026-09-25). resolve_bridge.undo_last_relink's retry and refusal
+        sentences name the journal's project and the open one, and the
+        dashboard stores and shows the answer. The names this machine knows
+        are replaced first, then telemetry_policy's mask (the one the
+        dashboard applies to an older build's answer) catches any quoted name
+        it could not list. Never raises; on failure, the generic sentence."""
+        try:
+            text = telemetry_policy.redact_text(
+                detail, self._known_project_names(), self._redaction_roots())
+            return telemetry_policy.redact_undo_detail(text)
+        except Exception:
+            log.exception("could not redact an undo answer")
+            return telemetry_policy.UNDO_DETAIL_WITHHELD
 
     def resolve_bridge_state(self) -> dict[str, Any]:
         """Cached "has the Resolve bridge connected this session, and is it up

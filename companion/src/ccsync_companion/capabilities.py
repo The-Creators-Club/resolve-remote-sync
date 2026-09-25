@@ -244,12 +244,55 @@ def build(
     volunteer_until_fn: Optional[Callable[[], Optional[str]]] = None,
     jobs_gate_fn: Optional[Callable[[], dict[str, Any]]] = None,
     use_cache: bool = True,
+    withheld: Any = (),
 ) -> dict[str, Any]:
     """The `capabilities` report section. Never raises.
 
     Every seam arrives as a parameter, the way proxy_gen's do, so the whole
     thing is testable without a GPU, an ffmpeg, a Resolve or a keyboard.
+
+    `withheld` (LG-1, docs/LEGAL_GAP_FEATURES_PLAN.md 4.1, 2026-09-25): the
+    reporting categories this computer has switched off. The probes still
+    run; only the answer is blanked (see _withhold).
     """
+    return _withhold(
+        _build(cfg, idle_probe, resolve_running_fn, resolve_project_fn,
+               cards_agent_fn, volunteer_until_fn, jobs_gate_fn, use_cache),
+        withheld, cfg)
+
+
+def _withhold(section: dict[str, Any], withheld: Any,
+              cfg: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Blank what the switches withhold. A COPY: the cached assembly must
+    keep the collected values for the next tick.
+
+    `idle_seconds` is also withheld while `jobs_enabled` is false (decision
+    D4): the only reader is the job scheduler, and a machine that takes no
+    jobs has no reason to send how long its keyboard has been untouched.
+    None is the safe spelling both ways: it already means "cannot tell, so
+    NOT IDLE" on both sides."""
+    names = set(withheld or ())
+    jobs_on = bool((cfg or {}).get("jobs_enabled", True))
+    if not names and jobs_on:
+        return section
+    out = dict(section)
+    if "resolve_project" in names and isinstance(out.get("resolve"), dict):
+        out["resolve"] = {**out["resolve"], "project": ""}
+    if "input_idle" in names or not jobs_on:
+        out["idle_seconds"] = None
+    return out
+
+
+def _build(
+    cfg: dict[str, Any],
+    idle_probe: Any,
+    resolve_running_fn: Optional[Callable[[], bool]],
+    resolve_project_fn: Optional[Callable[[], Optional[str]]],
+    cards_agent_fn: Optional[Callable[[], dict[str, Any]]],
+    volunteer_until_fn: Optional[Callable[[], Optional[str]]],
+    jobs_gate_fn: Optional[Callable[[], dict[str, Any]]],
+    use_cache: bool,
+) -> dict[str, Any]:
     global _cache
     now = time.monotonic()
     if use_cache:

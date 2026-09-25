@@ -31117,6 +31117,149 @@ kind/platform on the owner's instruction (94 old release assets deleted,
 every one kept in this rig's `feed/`, the channel re-signed and verified
 live).
 
+## The legal-gap features (CR-336..CR-345, 2026-09-25) - BUILT in repo, unshipped (dashboard 0.7.61 schema v59, companion 0.9.81, installer 1.0.46)
+
+Owner, 2026-09-25, of the features the counsel-cleared documents in
+`docs/legal/` describe but CC Sync lacked: "Map out the features that don't
+exist yet with some agents and make a plan, audit the plan, then make the
+fixes." Plan: `docs/LEGAL_GAP_FEATURES_PLAN.md` (revision 2, three audits),
+Tier 1 (the six `ENG-GAP` markers) + Tier 2a; Tier 2b is deferred with its
+corrected design on record there. Each group's build, departures, review
+round and hand-offs: `docs/LEGAL_GAP_FEATURES_LEDGER/`. **Deploy the
+dashboard first**: a companion on an old dashboard shows its new report keys
+on the SYS-3 "REPORT SECTION(S) IGNORED" banner. Nothing here compares a
+version; a machine supports a feature when that feature's column is non-NULL.
+
+### CR-336 - an admin could not stop the dashboard holding editors' project names, file lists, bin trees and idle time without stopping sync (LG-1)
+
+Four switches, per computer (Settings, THIS COMPUTER, PRIVACY; the wizard's
+"WHAT THIS COMPUTER REPORTS" step) and per site (Settings, Site, TELEMETRY;
+`site.toml [telemetry]`; `DASH_SITE_TELEMETRY_*`): `resolve_project`
+(implies `media_tree`), `local_manifest`, `media_tree`, `input_idle`.
+Collect, then withhold: every pass still runs, only the report goes without
+(`companion/.../telemetry_policy.py`). The dashboard strips withheld
+categories on arrival from every build (`telemetry_fields.py`, `api_report`)
+and deletes what it held (`db.apply_report_optouts`, `apply_site_optouts`,
+at save and at boot), including diagnostics bundles. Costs, by design: no
+NEW PROJECT prompt, first claim or auto-map without the project name; every
+file move in every active project, and "not reported" holdings, without the
+file list. Journal ids are masked so undo still works. The four keys are
+never remote-controlled. `GET /api/v1/site` publishes `telemetry`, and the
+dashboard's FIELDS copy carries the companion's two review-round rows
+(`resolve_undo_applied[].detail`, `sync_guard.skipped_exists.samples`) and
+the `undo_detail` mask (final review, `LEGAL_GAP_FEATURES_LEDGER/FABLE_REVIEW.md`);
+a diagnostics bundle from a computer that has not yet read a site switch is
+stored as a note. With that, PRIVACY §6 and TELEMETRY "What can be turned
+off" carry plan §8.1's wording (as amended in the G9 ledger) and no ENG-GAP
+marker is left in `docs/legal/`. Tests: `companion/tests/test_telemetry_policy.py`,
+`dashboard/tests/test_report_optouts.py`, `test_site_telemetry.py`,
+`test_legal_db.py`, `onboarding/tests/test_legal_steps.py`.
+
+### CR-337 - a person could not get a copy of what the dashboard held about them (LG-2)
+
+`POST /api/v1/admin/users/{username}/export` (Users page, `[ EXPORT DATA ]`)
+and `POST /api/v1/me/export` (/account, "Download everything the dashboard
+holds about you"): one JSON file across the dashboard, session, YouTube,
+client-folder and index stores, secrets excluded, with a `not_included` list
+in words. Subject from the session only, never `?as=`; one at a time and 5
+an hour; 50 MB cap; audited with counts. `db.SUBJECT_TABLES` is the one
+registry, and a coverage test fails on a person column in a table it does
+not name. Tests: `dashboard/tests/test_subject_data.py`, `test_legal_db.py`,
+`ytdl/web/tests/test_ytdl_subject.py`.
+
+### CR-338 - erasing a person's history meant SQL on the live file, and a delete left their history and their name behind (LG-3)
+
+`POST /api/v1/admin/users/{username}/erase-history` (`[ ERASE HISTORY ]`)
+removes history only: lane, transfer, completion and missing-file records,
+diagnostics, expired sessions, past failed sign-ins (an active lockout
+kept), finished YouTube jobs. Current state is untouched (D15). Delete now
+also removes history, every session and the revoked tokens, and replaces the
+person's and their computers' names with an HMAC stand-in
+(`deleted-user-<10 hex>`, salt in `meta`, never rotated) in the audit log,
+alerts, notices, jobs, file moves, the YouTube ledger (live leases released
+first) and client folders; an admin's own name stays on audit actor rows
+until the 180-day prune. `db.prune` deletes tokens revoked over 180 days.
+Tests: `test_legal_db.py`, `test_sessions_purge.py`, `test_subject_data.py`,
+`test_ytdl_subject.py`.
+
+### CR-339 - the companion would send an editor's password to a plain-http dashboard address on the public internet (LG-4)
+
+`companion/.../transport.py`: `classify()` and `CleartextGuard` in the one
+shared opener refuse plain http to a public address before anything is sent
+(a name is public only when every resolved address is; doubt is local; 30 s
+verdict). LAN, tailnet and loopback http pass with a note in Settings. The
+wizard refuses such an address and never follows a redirect. The dashboard
+records `machine_state.report_via` on change and raises
+`dashboard_reached_over_public_http`; Settings shows the plain-http count.
+Found on the way: an IPv6 literal had no dot, so the updater's single-label
+rule called a public IPv6 address an intranet name. Tests:
+`companion/tests/test_transport.py`, `dashboard/tests/test_report_via.py`,
+`test_legal_alerts.py`, `onboarding/tests/test_legal_steps.py`. Pre-ship: no
+machine may show `report_via = 'http_public'` before 0.9.81 goes current.
+
+### CR-340 - admins could not see which licence version each computer had accepted (LG-5)
+
+The report's `eula` section (`{version, accepted_at, eula_sha256}`, heavy
+reports) lands in `machine_state.eula_json`; the fleet grid and /account
+show "Licence <v> accepted", "Older licence accepted" or "Not reported".
+Only the version is judged. "Not accepted" is never inferred; that remains
+the `licence_pending` block reason. `api.build_editors_view` calls
+`health.annotate_legal` and `account_api._computer_view` passes `eula` and
+`report_withheld` (G2b hand-offs 2 and 3, landed by the final review), so
+the licence line and CR-336's grey "not reported" chips draw. Tests: `companion/tests/test_eula_report.py`,
+`dashboard/tests/test_report_optouts.py`, `test_site_telemetry.py`.
+
+### CR-341 - psycopg2 was a companion dependency but not in the lock, so what a build froze depended on how its venv was made and the licence check could not see it (LG-11)
+
+`companion/requirements.lock` now names `psycopg2-binary`; the allowlist
+targets the companion; `release.ps1` and `release_macos.sh` install from the
+lock exactly as CI does; `tools/scan_frozen.py` fails a build that freezes a
+distribution the lock does not name, or an LGPL one not allowlisted for that
+component, or one whose licence text is not committed at the frozen
+version. Found on the way: every build (CI's too) froze setuptools through
+a dead `import tomli` fallback; the specs now exclude it. Tests:
+`tools/tests/test_scan_frozen.py`, `test_gen_notices.py`.
+`build_editor_package.ps1 -RebuildExe/-RebuildOnboard` (ship.cmd's path)
+runs the same scan on both exes before it signs anything.
+
+### CR-342 - no binary carried the licence texts it owes (LG-12)
+
+`gen_notices.py --write-texts` writes `docs/legal/licenses/<component>/`
+and one `THIRD_PARTY_LICENSES.txt` per frozen component (the wizard's
+includes the companion it installs); the specs refuse to build without it.
+The tray's HELP has OPEN-SOURCE LICENCES, the wizard's last page shows the
+text, and the dashboard's /help publishes `.txt` under `legal/licenses/`
+only. Tests: `test_gen_notices.py`, `test_scan_frozen.py`,
+`dashboard/tests/test_published_licenses.py`,
+`companion/tests/test_telemetry_policy.py`, `onboarding/tests/test_legal_steps.py`.
+
+### CR-343 - THIRD_PARTY_NOTICES listed the same package twice under two spellings and could not notice a moved download pin (LG-13)
+
+PEP 503 name normalisation on both sides, the stale `ytdl/web` row dropped,
+and a generated "Binaries the installer fetches" table read from the code by
+symbol name, so `--check` fails when a pin moves. The table disagrees with
+two hand-section rows (rclone and editor-side Syncthing are pinned, not
+"latest"): a (counsel) item, not edited. Tests: `tools/tests/test_gen_notices.py`.
+
+### CR-344 - nothing noticed when the legal documents, the payload or the model drifted apart (LG-16)
+
+`companion/tests/test_telemetry_disclosure.py` pins every report key
+(including inside `sync_guard`) to a FIELDS row, a not-personal list or a
+still-sent list; `dashboard/tests/test_report_model_pin.py` does the same
+for `ReportIn`; `dashboard/tests/test_legal_docs.py` pins the version lines,
+the `EULA-VERSION` marker, the exact set of remaining `ENG-GAP` markers (a
+marker must still sit on a "not currently" paragraph) and the three
+byte-identical EULA copies.
+
+### CR-345 - retention could stop silently while the home page looked fine (LG-17)
+
+`db.collector_health` marks a scheduled kind that last ran fine but is past
+its observed-cadence bound (plus one full collector cycle) amber, "overdue";
+the collector panel shows "Retention last ran <ago>"; the new
+`collector_kind_overdue` alert (debounced one cycle, held quiet rather than
+"recovered" when things got worse) complements `collector_kind_failed`.
+Tests: `test_legal_db.py`, `test_legal_alerts.py`.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

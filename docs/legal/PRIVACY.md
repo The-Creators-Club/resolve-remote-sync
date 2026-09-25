@@ -195,16 +195,14 @@ That is **systematic monitoring of workers' activity**. Before deploying:
   admin can see the whole fleet grid, so this must be a rule people know
   about, not an assumption.
 
-<!-- ENG-GAP: telemetry-opt-out-switches -->
-**Data minimisation (Art. 5(1)(c)).** CC Sync does not currently provide a
-setting that stops the companion reporting the open Resolve project name, the
-local file manifest or the media-pool bin tree while leaving sync working.
-Until it does, the Customer's options are the ones listed under "What can be
-turned off" in `docs/legal/TELEMETRY.md`: leaving a named Resolve project out
-of reporting, reporting less often, or leaving a workstation's `dashboard_url`
-blank, which stops reporting from that workstation and also stops managed
-sync and updates for it. A Customer subject to strong workplace-privacy rules
-should weigh this before deploying.
+**Data minimisation (Art. 5(1)(c)).** Four kinds of reporting can be
+switched off without stopping sync, for one computer or for the whole site:
+the name of the open Resolve project wherever it is reported, the list of
+media files on the computer's disk and the file names in its Resolve and
+conflict checks, the Resolve bin structure, and the time since the last
+keyboard or mouse input. Switching one off also deletes what the dashboard
+already held about it. `docs/legal/TELEMETRY.md`, "What can be turned off",
+says how, what still goes to the dashboard, and what each switch costs.
 
 ## 7. Retention
 
@@ -232,36 +230,58 @@ Enforced by `db.prune`, run hourly by the dashboard's collector
    collection. For a person who works every day, the *current* picture is held
    for as long as they keep working; the 14- and 30-day figures describe how
    long a record survives after that person's machine goes quiet.
-2. <!-- ENG-GAP: prune-last-run-visibility -->
-   `db.prune` runs only inside the dashboard's collector. The dashboard shows
-   on its home page when the collector has stopped, but it does not currently
-   show when retention last ran or alert on a missed retention pass as such.
-   Until it does, an admin can confirm retention is running by checking that
-   the home page reports no stopped collector.
+2. `db.prune` runs only inside the dashboard's collector. The home page's
+   collector panel shows when retention last ran, turns amber when it is
+   overdue, and the dashboard raises an alert, on its home page and through
+   the configured alert channel, when it fails or is overdue.
 
 ## 8. Data-subject rights
 
 The Customer, as controller, answers requests from its own staff. What the
 Software gives it today:
 
-- <!-- ENG-GAP: telemetry-export -->
-  **Access and portability (Arts. 15, 20).** All of it is in one SQLite file,
-  `/data/dashboard.db`, and every relevant table is keyed by the editor's
-  username. CC Sync does not currently provide an export action. Until it
-  does, the Customer's administrator can produce the extract with one
-  `SELECT` per table on a copy of that file.
-- <!-- ENG-GAP: per-editor-telemetry-purge -->
-  **Erasure (Art. 17).** Deleting a person on the dashboard's Users page
-  removes them from the whole product: their account (including their NAS
-  account), every one of their computers' records (machine state, media
-  manifests, bin trees, live transfers, diagnostics bundles), their Syncthing
-  devices, their known-editor entry and every credential that could act as
-  them. It leaves lane history and transfer history, which expire on their
-  own after 30 and 7 days, the admin audit log (180 days), and the
-  Resolve-project mappings. CC Sync does not currently provide an action that
-  erases a person's telemetry while keeping their account. Until it does, the
-  Customer's administrator can remove those rows with one `DELETE` per table,
-  keyed on the username, on the live file while the dashboard is stopped.
+- **Access and portability (Arts. 15, 20).** An administrator can download
+  everything the dashboard holds about a person as one JSON file (Settings,
+  Users, Export data), and each person can download their own from their
+  account page. The file lists what it does not include: files on the
+  person's own computer and on the storage server, Syncthing's own database,
+  the text of server triage reports, Timeline Cards working records (kept per
+  episode, not per person), sign-in throttle records kept by network address,
+  and server snapshots.
+- **Erasure (Art. 17).** An administrator can erase a person's activity
+  history while keeping their account (Settings, Users, Erase history). That
+  removes their computers' past lane and transfer history, completion and
+  missing-file records, stored diagnostics bundles, expired sign-in sessions,
+  past failed sign-ins (an active sign-in lockout is kept), and the finished
+  YouTube requests they made (what they searched for stays on the record of
+  each clip downloaded and in the names of the folders the clips are stored
+  in). It does not remove their computers' current state, which the
+  computers report again on each report unless a reporting switch in section
+  6 is off.
+
+  Deleting a person on the Users page removes them from the whole product:
+  their account (including their NAS account), every one of their computers'
+  records, their Syncthing devices, their known-editor entry, their sessions,
+  their history as above, and every credential that could act as them. The
+  exception is their finished YouTube requests: a delete keeps them, under
+  the stand-in described next, alongside the other YouTube jobs. Their list
+  of search terms is removed, but the search text stays on the job and
+  download records, and in the folder names, under the stand-in. Erase their
+  history first to remove the finished requests themselves. Where
+  the dashboard keeps a record of something done (the audit log, alerts and
+  notices, background and YouTube jobs, file moves, YouTube downloads and
+  rights attestations, and client-folder entries), the person's name and
+  their computers' names are replaced by a fixed stand-in, except that an
+  administrator's name stays on the audit entries for actions they took until
+  those entries expire after 180 days.
+
+  Not covered by either action: the b-roll and music indexes' record of which
+  computer indexed a batch (replaced when the index is next published),
+  Timeline Cards working records, server triage runs (deleted after 60 days),
+  what the studio itself wrote in a client folder's contact details,
+  description and notes, and snapshots of the dashboard's storage, which
+  expire on their own schedule. Revoked credentials are deleted 180 days
+  after revocation.
 - **Rectification (Art. 16).** Usernames come from the NAS or the identity
   provider; correct them there.
 - **Objection (Art. 21).** In practice this means excluding that person's
@@ -308,14 +328,19 @@ policy describes self-hosted deployments only.
   companion and dashboard refuse a build that does not verify against the
   public keys already built into them. The executables themselves do not yet
   all carry an operating-system code-signing certificate.
-- <!-- ENG-GAP: refuse-cleartext-dashboard-url -->
-  **Transport.** The companion talks to the dashboard at whatever address
-  `dashboard_url` names, including a plain `http://` address, and the sign-in
-  request carrying an editor's password uses that same channel. CC Sync does
-  not currently refuse or warn about a cleartext address. Until it does, the
-  Customer is responsible for keeping that traffic on its own LAN or an
-  encrypted tailnet, or for publishing the dashboard over HTTPS (Tailscale
-  Serve is the supported way) and using the `https://` address.
+- **Transport.** The companion refuses to send anything, including an
+  editor's password, to a dashboard whose address is plain `http://` on the
+  public internet, and says so on the tray. The setup wizard will not accept
+  such an address. Over plain `http://` to an address on the studio's own
+  network or tailnet it works, and shows a note in its Settings; tailnet
+  traffic is encrypted underneath by WireGuard. The dashboard records how
+  each computer reaches it, as far as it can tell, shows how many use plain
+  http, and raises an alert if any computer reaches it over plain http from
+  the public internet. Behind a proxy the dashboard is not configured to
+  trust, a computer that reaches it over https is counted as plain http on a
+  private network.
+  The supported deployment serves the dashboard over HTTPS with Tailscale
+  Serve.
 
 Report security vulnerabilities to contact@thecreatorsclub.co.
 

@@ -36,14 +36,17 @@ from __future__ import annotations
 
 import logging
 import platform
+import sys
 import time
 from dataclasses import dataclass
-from typing import Callable, TYPE_CHECKING
+from pathlib import Path
+from typing import Callable, Optional, TYPE_CHECKING
 
 from . import config as config_mod
 from . import machine as machine_mod
 from . import root_guard as root_guard_mod
 from . import site as site_mod
+from . import telemetry_policy
 from . import tray as tray_mod
 from . import ui_copy
 from . import upgrade as upgrade_mod
@@ -1176,6 +1179,183 @@ def action_write_setting(app: "CompanionApp", key: str, value, sentence: str) ->
     tray_mod._spawn(app, f"Save {key}", _do)
 
 
+# -- PRIVACY (LG-1, docs/LEGAL_GAP_FEATURES_PLAN.md 4.1, 2026-09-25) --------
+#
+# The four reporting switches, in the words docs/legal/TELEMETRY.md uses. The
+# wizard's privacy step (onboarding, G8) writes the same four keys.
+REPORT_LABELS = {
+    telemetry_policy.RESOLVE_PROJECT: "The name of the open Resolve project",
+    telemetry_policy.LOCAL_MANIFEST: "The list of media files on this computer",
+    telemetry_policy.MEDIA_TREE: "The Resolve bin structure",
+    telemetry_policy.INPUT_IDLE: "How long since the keyboard or mouse was used",
+}
+SITE_OFF_NOTE = "Turned off for everyone by your administrator"
+IMPLIED_OFF_NOTE = "Off while the project name is off"
+
+
+def action_set_report_switch(app: "CompanionApp", name: str, on: bool) -> None:
+    """Tick or untick one reporting switch.
+
+    Unlike the jobs settings this takes effect AT ONCE: the running config
+    dict is the reporter's own (app.py hands it the same object), so the next
+    report is already built without it. config.toml is written as well, so
+    it survives a restart. Written first: a switch the file does not hold
+    would come back on at the next start, which is the one direction a
+    privacy switch must never move by itself."""
+    key = telemetry_policy.CONFIG_KEYS.get(name)
+    if key is None:
+        return
+    label = REPORT_LABELS.get(name, name).lower()
+    sentence = (f"This computer will report {label} again from its next report."
+                if on else
+                f"This computer will stop reporting {label}. The dashboard "
+                "forgets what it held on the next report. Sync is not affected.")
+
+    def _do() -> None:
+        try:
+            saved = config_mod.set_value(config_mod.CONFIG_PATH, key, bool(on))
+        except Exception:
+            log.exception("settings: could not write %s=%r to config.toml", key, on)
+            saved = False
+        if not saved:
+            tray_mod._notify(app, "Couldn't save that - see the log.")
+            return
+        try:
+            live = getattr(app, "config", None)
+            if isinstance(live, dict):
+                live[key] = bool(on)
+        except Exception:
+            log.exception("settings: could not apply %s to the running config", key)
+        tray_mod._notify(app, sentence)
+        show_settings(app)
+    tray_mod._spawn(app, f"Save {key}", _do)
+
+
+def _privacy_controls(app: "CompanionApp") -> list:
+    """PRIVACY rows for THIS COMPUTER. Reads the RUNNING config, which the
+    action above keeps in step with the file, and the cached site manifest.
+    A category the site has switched off is a Line, not a Button: this
+    computer cannot switch it back on (telemetry_policy.effective)."""
+    cfg = getattr(app, "config", {}) or {}
+    local = telemetry_policy.local_switches(cfg)
+    try:
+        site_off = set(telemetry_policy.site_withheld(site_mod.cached_site()))
+    except Exception:
+        log.exception("settings: could not read the site's reporting switches")
+        site_off = set()
+    items: list = [Line("PRIVACY: what this computer tells the dashboard. "
+                        "Sync is not affected.", style="muted")]
+    for name in telemetry_policy.CATEGORIES:
+        label = REPORT_LABELS[name]
+        if name in site_off:
+            items.append(Line(f"  [ ] {label}  ({SITE_OFF_NOTE})", style="muted"))
+            continue
+        on = bool(local[name])
+        if (name == telemetry_policy.MEDIA_TREE and on
+                and (not local[telemetry_policy.RESOLVE_PROJECT]
+                     or telemetry_policy.RESOLVE_PROJECT in site_off)):
+            items.append(Line(f"  [ ] {label}  ({IMPLIED_OFF_NOTE})", style="muted"))
+            continue
+        items.append(Button(
+            f"  [{'x' if on else ' '}] {label}",
+            (lambda name=name, on=on: action_set_report_switch(app, name, not on))))
+    return items
+
+
+# -- the dashboard address (LG-4, plan 4.4) ----------------------------------
+#
+# transport.classify can do a DNS lookup for a name it does not recognise,
+# and this model is rebuilt twice a second on the Tk thread, so the verdict is
+# kept per address for a few minutes. G1a review round 1 (2026-09-25): even
+# once per five minutes, a lookup on the Tk thread hangs the window for
+# seconds on a machine with broken DNS, so the shape-only answer is shown at
+# once and the lookup runs on a worker thread that replaces it when done.
+_ADDRESS_VERDICT_SECONDS = 300.0
+_address_verdicts: dict = {}
+_address_pending: set = set()
+
+
+def _address_lookup(url: str) -> None:
+    try:
+        verdict = config_mod.dashboard_url_problem(url)
+    except Exception:
+        log.exception("settings: could not classify the dashboard address")
+        verdict = ("", "")
+    _address_verdicts[url] = (time.monotonic(), verdict)
+    _address_pending.discard(url)
+
+
+def _address_verdict(url: str) -> tuple:
+    now = time.monotonic()
+    cached = _address_verdicts.get(url)
+    if cached is not None and (now - cached[0]) < _ADDRESS_VERDICT_SECONDS:
+        return cached[1]
+    try:
+        verdict = config_mod.dashboard_url_problem(url, lookup=False)
+        needs_dns = config_mod._needs_dns(url)
+    except Exception:
+        log.exception("settings: could not classify the dashboard address")
+        verdict, needs_dns = ("", ""), False
+    if not needs_dns:
+        _address_verdicts[url] = (now, verdict)
+        return verdict
+    if url not in _address_pending:
+        _address_pending.add(url)
+        try:
+            import threading
+
+            threading.Thread(target=_address_lookup, args=(url,),
+                             name="settings-address-verdict", daemon=True).start()
+        except Exception:
+            _address_pending.discard(url)
+            log.exception("settings: could not start the address lookup")
+    return cached[1] if cached is not None else verdict
+
+
+def _address_lines(app: "CompanionApp") -> list:
+    url = str((getattr(app, "config", {}) or {}).get("dashboard_url", "") or "").strip()
+    if not url:
+        return []
+    items: list = [Line(f"Dashboard address: {url}")]
+    level, sentence = _address_verdict(url)
+    if level == "error":
+        items.append(Line(f"⚠ {sentence}", style="warning"))
+    elif level == "warning":
+        items.append(Line(f"  {sentence}", style="muted"))
+    return items
+
+
+# -- open-source licences (LG-12, plan section 5) ----------------------------
+#
+# G6 bundles the concatenated texts at assets/THIRD_PARTY_LICENSES.txt, the
+# same datas layout eula.asset_path() reads EULA.md from.
+LICENCES_ASSET_NAME = "THIRD_PARTY_LICENSES.txt"
+
+
+def licences_path() -> Optional[Path]:
+    """The bundled licence texts, or None when this build has not got them."""
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "ccsync_companion" / "assets" / LICENCES_ASSET_NAME)
+    candidates.append(Path(__file__).resolve().parent / "assets" / LICENCES_ASSET_NAME)
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def action_open_licences(app: "CompanionApp") -> None:
+    path = licences_path()
+    tray_mod._open_path_or_say_why(
+        app, str(path) if path is not None else "",
+        "This copy of CCSync does not carry the open-source licence texts. "
+        "Your admin can send them, or see Help, Legal on the dashboard.")
+
+
 def _fleet_jobs_controls(app: "CompanionApp") -> list:
     """The three settings, as rows the existing renderer already draws.
 
@@ -1415,6 +1595,17 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
     # restart the companion, and the button that does it used to appear only
     # after a role change nobody has made.
     computer_items.append(Button("RESTART CCSYNC NOW", lambda: action_restart(app)))
+    # LG-4 / LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.4, 4.1): the address and
+    # what this computer reports, each behind its own try so a fault costs
+    # the rows, never the window.
+    try:
+        computer_items.extend(_address_lines(app))
+    except Exception:
+        log.exception("settings: could not draw the dashboard address")
+    try:
+        computer_items.extend(_privacy_controls(app))
+    except Exception:
+        log.exception("settings: could not draw the PRIVACY switches")
     sections.append(Section("THIS COMPUTER", computer_items))
 
     # -- [ SYNCING ] ---------------------------------------------------------
@@ -1713,6 +1904,8 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
         help_items.append(Button(
             upgrade_mod.offer_label(upgrade_info["version"]),
             lambda: tray_mod.action_update_now(app)))
+    # LG-12: the texts the notices promise travel with the binary.
+    help_items.append(Button("OPEN-SOURCE LICENCES", lambda: action_open_licences(app)))
     help_items.append(Line(f"ccsync-companion v{config_mod.VERSION}", style="muted"))
     sections.append(Section("HELP", help_items))
 

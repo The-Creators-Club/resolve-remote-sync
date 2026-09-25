@@ -239,7 +239,7 @@ class TestWizardPrefillIsRecomputedAfterTheManifestArrives:
         # 16 spaces: the same nesting as show_install(), i.e. NOT inside the
         # `if effective != picked:` branch (which is 20).
         assert re.search(r"\n {16}self\._on_role_changed\(\)\n", body), body
-        assert body.index("self._on_role_changed()") < body.index("self.show_install()")
+        assert body.index("self._on_role_changed()") < body.index("self.show_privacy()")
 
     def test_the_neutral_prefill_counts_as_a_default(self):
         source = (Path(steps.__file__).parent / "onboard.py").read_text(encoding="utf-8")

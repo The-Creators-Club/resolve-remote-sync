@@ -222,18 +222,29 @@ def _title_of(path: Path) -> str:
 
 
 def _iter_markdown(root: Path) -> list[str]:
-    """Every `.md` under `root`, as posix paths relative to it. Sorted."""
+    """Every `.md` under `root`, plus the licence texts under
+    `legal/licenses/` (LG-12, 2026-09-25: the only `.txt` this viewer
+    serves, published_docs.TEXT_TREE), as posix paths relative to it.
+    Sorted."""
     out: list[str] = []
+    walks = [(root, "*.md")]
+    texts = root.joinpath(*published_docs.TEXT_TREE.split("/"))
     try:
-        for path in root.rglob("*.md"):
-            try:
-                if not path.is_file() or path.is_symlink():
-                    continue
-            except OSError:
-                continue
-            out.append(path.relative_to(root).as_posix())
+        if texts.is_dir():
+            walks.append((texts, "*" + published_docs.TEXT_SUFFIX))
     except OSError:
-        log.exception("could not walk the docs tree at %s", root)
+        pass
+    for base, pattern in walks:
+        try:
+            for path in base.rglob(pattern):
+                try:
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                except OSError:
+                    continue
+                out.append(path.relative_to(root).as_posix())
+        except OSError:
+            log.exception("could not walk the docs tree at %s", base)
     return sorted(out)
 
 
@@ -272,7 +283,10 @@ def document_groups(is_admin: bool = False) -> list[dict]:
         path = resolve_document(rel, is_admin)
         if path is None:
             continue
-        entry["title"] = _title_of(path) or entry["name"]
+        # A licence text has no markdown heading; a `# ...` line in one is
+        # licence prose, not a title (LG-12).
+        entry["title"] = ("" if published_docs.is_licence_text(rel)
+                          else _title_of(path)) or entry["name"]
         if rel == DOC_NAME:
             entry["note"] = "the customer explainer"
         groups.setdefault(folder, []).append(entry)
@@ -360,7 +374,11 @@ def resolve_document(rel: str, is_admin: bool = False) -> Path | None:
     if not is_admin and not published_docs.is_published(rel):
         return None
     rel = (rel or "").strip().replace("\\", "/")
-    if not rel or not rel.lower().endswith(".md"):
+    # LG-12 (2026-09-25): markdown, or a licence text under legal/licenses/
+    # and nowhere else - for an admin too, so a dev checkout's stray `.txt`
+    # is not readable here either.
+    if not rel or not (rel.lower().endswith(".md")
+                       or published_docs.is_licence_text(rel)):
         return None
     if rel.startswith("/") or ":" in rel or "\x00" in rel:
         return None
@@ -501,12 +519,16 @@ def help_href(href: str, base: str) -> str:
     path, _, fragment = href.partition("#")
     if not path:
         return ""
-    if not path.lower().endswith(".md"):
+    is_text = path.lower().endswith(published_docs.TEXT_SUFFIX)
+    if not (path.lower().endswith(".md") or is_text):
         return ""
     here = _virtual(base)
     resolved = posixpath.normpath(posixpath.join(posixpath.dirname(here), path))
     rel = _from_virtual(resolved)
     if rel is None:
+        return ""
+    if is_text and not published_docs.is_licence_text(rel):
+        # LG-12: a `.txt` link is followed only into legal/licenses/.
         return ""
     url = "/help/" + quote(rel)
     return f"{url}#{quote(fragment, safe='')}" if fragment else url
@@ -717,6 +739,15 @@ def page_context(rel: str = "", is_admin: bool = False) -> dict:
     if text is None:
         base["help_missing"] = NOT_FOUND
         base["help_not_found"] = True
+        return base
+    if published_docs.is_licence_text(rel):
+        # LG-12 (2026-09-25): a licence text is shown exactly as written,
+        # escaped and preformatted. Through the markdown renderer a
+        # licence's `*`, `_` and indentation would be reflowed into
+        # something that is no longer the text the licence requires.
+        base["help_html"] = ('<pre class="licence-text">'
+                             + html.escape(text, quote=False) + "</pre>")
+        base["help_doc_title"] = posixpath.basename(rel)
         return base
     body, toc = render_markdown(text, rel)
     base["help_html"] = body

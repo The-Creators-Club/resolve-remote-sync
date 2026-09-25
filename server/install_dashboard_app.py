@@ -4535,10 +4535,17 @@ def _stage_docs_tree(staging: Path) -> None:
         trees += [n for n in getattr(published, "PUBLISHED_TREES", ())
                   if n not in trees]
 
+    # LG-12 (2026-09-25): the licence texts under docs/legal/licenses/ are
+    # the one .txt the dashboard publishes (published_docs.is_licence_text);
+    # a published_docs too old to know them ships none, which is a thinner
+    # /help, never a broken one.
+    is_licence_text = getattr(published, "is_licence_text", None)
+
     def _copy(path: Path, rel: Path) -> None:
         if path.is_symlink() or not path.is_file():
             return
-        if path.suffix.lower() != SHIPPED_DOC_SUFFIX:
+        if path.suffix.lower() != SHIPPED_DOC_SUFFIX and not (
+                callable(is_licence_text) and is_licence_text(rel.as_posix())):
             return
         target = staging / rel
         target.parent.mkdir(parents=True, exist_ok=True)

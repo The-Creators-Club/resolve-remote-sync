@@ -498,49 +498,44 @@ def test_identity_manager_role_none_when_not_signed_in_or_dashboard_omits_it(tmp
     assert mgr2.role is None  # signed in, but no role info from the dashboard
 
 
-# -- plaintext sign-in warning (AUDIT_3 L-13) -------------------------------
-
-
-@pytest.fixture
-def _reset_plaintext_warning(monkeypatch):
-    monkeypatch.setattr(identity_mod, "_PLAINTEXT_WARNED", False)
-    yield
+# -- cleartext sign-in (LG-4, 2026-09-25; was the AUDIT_3 L-13 warning) ------
 
 
 def _ok_post(url, data, headers, timeout):
     return {"ok": True, "username": "owen", "token": _token()}
 
 
-def test_http_signin_to_a_remote_host_warns_once(caplog, _reset_plaintext_warning):
-    """NOT a refusal: the deployment is http over the tailnet by design, and
-    refusing would lock every editor out to fix a risk the tailnet already
-    bounds. But a TrueNAS password crossing the wire in clear must not be
-    invisible either -- the fix is TLS on the dashboard."""
-    with caplog.at_level("WARNING", logger="ccsync.identity"):
-        verify_credentials("http://100.64.0.1:8480", "owen", "hunter2", http_post=_ok_post)
-        verify_credentials("http://100.64.0.1:8480", "owen", "hunter2", http_post=_ok_post)
-
-    warnings = [r for r in caplog.records if "plain HTTP" in r.message]
-    assert len(warnings) == 1, "one note, not one per sign-in attempt"
-    # ...and it still signs in.
+def test_http_signin_on_the_tailnet_still_signs_in():
+    """NOT a refusal: the deployment is http over the tailnet by design. The
+    once-per-process log warning is gone (the settings window says "not
+    https" beside the address instead); sign-in itself is unchanged."""
     assert verify_credentials(
         "http://100.64.0.1:8480", "owen", "hunter2", http_post=_ok_post
     )["ok"] is True
 
 
-def test_no_plaintext_warning_for_https_or_loopback(caplog, _reset_plaintext_warning):
-    with caplog.at_level("WARNING", logger="ccsync.identity"):
-        verify_credentials("https://dash.example.com", "owen", "x", http_post=_ok_post)
-        verify_credentials("http://127.0.0.1:8480", "owen", "x", http_post=_ok_post)
-        verify_credentials("http://localhost:8480", "owen", "x", http_post=_ok_post)
+def test_http_signin_to_a_public_address_is_refused_before_sending(monkeypatch):
+    """The real default_http_post, the real opener: the password never
+    leaves the machine, and the editor is told why in a sentence."""
+    import urllib.request
 
-    assert not [r for r in caplog.records if "plain HTTP" in r.message]
+    from ccsync_companion import transport
 
+    sent = []
 
-def test_plaintext_check_never_raises(_reset_plaintext_warning):
-    identity_mod._warn_if_plaintext(None)
-    identity_mod._warn_if_plaintext(5)
-    identity_mod._warn_if_plaintext("")
+    class _Recorder(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            sent.append(req.full_url)
+            raise AssertionError("the request was sent")
+
+    real_build = urllib.request.build_opener
+    monkeypatch.setattr(urllib.request, "build_opener",
+                        lambda *h: real_build(_Recorder, *h))
+    transport.clear_cache()
+    result = verify_credentials("http://8.8.8.8:8480", "owen", "hunter2")
+    assert result["ok"] is False
+    assert result["error"] == identity_mod.CLEARTEXT_REFUSED_MESSAGE
+    assert sent == []
 
 
 # -- the report token /api/v1/verify hands back (cross-component minor) ------

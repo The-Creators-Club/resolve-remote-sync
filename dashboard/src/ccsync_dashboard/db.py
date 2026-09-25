@@ -2005,6 +2005,33 @@ ALTER TABLE machine_state ADD COLUMN cfg_pending_restart TEXT;
 ALTER TABLE machine_state ADD COLUMN cfg_at TEXT;
 """
 
+# v59: the legal-gap features (docs/LEGAL_GAP_FEATURES_PLAN.md §3.1,
+# 2026-09-25). Four nullable columns and nothing backfilled: NULL is "not
+# reported" on every one of them, and a dashboard hearing from a companion
+# older than these sections must never read that as "no", "zero" or "not
+# accepted" (the plan's §2 defaults rule).
+#
+#   * report_optouts       LG-1: JSON sorted list of the categories withheld
+#                          for this machine, the union of its own switches
+#                          and the site policy. NULL = nothing known (the
+#                          machine never sent the section AND the site
+#                          withholds nothing).
+#   * report_optouts_local LG-1: the machine's own list exactly as sent; NULL
+#                          = a build that does not send it.
+#   * report_via           LG-4: 'https' | 'http_local' | 'http_public', how
+#                          the last report reached the dashboard. Written only
+#                          when it changes (no per-request write).
+#   * eula_json            LG-5: {"version","accepted_at","eula_sha256"}.
+#
+# The pseudonym salt (LG-3) is deliberately NOT a column: it is one meta row,
+# minted on first use (pseudonym_salt).
+SCHEMA_V59 = """
+ALTER TABLE machine_state ADD COLUMN report_optouts TEXT;
+ALTER TABLE machine_state ADD COLUMN report_optouts_local TEXT;
+ALTER TABLE machine_state ADD COLUMN report_via TEXT;
+ALTER TABLE machine_state ADD COLUMN eula_json TEXT;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -2161,6 +2188,10 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # 2026-09-25). One step for one feature, and gapless like every one
     # before it.
     (58, SCHEMA_V58),
+    # 59: the legal-gap features (docs/LEGAL_GAP_FEATURES_PLAN.md, 2026-09-25):
+    # the telemetry switches' record, how a report arrived, and the accepted
+    # licence. One step for one release, and gapless like every one before it.
+    (59, SCHEMA_V59),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -4284,22 +4315,117 @@ def collector_health(conn: sqlite3.Connection, now: str | None = None,
     # kinds have run. None is the page renderers, which read it off the
     # database instead (collector_stale_bound).
     status = fetch_collector_status(conn, now=now, settings=settings)
+    now = now or utcnow_iso()
+    # LG-17 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.6, 2026-09-25): a kind whose
+    # last run was OK but which has not started again within twice its own
+    # cadence is OVERDUE - amber with note "overdue", no new status. Only a
+    # kind this deployment SCHEDULES can be overdue (safety L5): one whose
+    # feature is off stops running on purpose and must not read as stuck.
+    #
+    # G0 review round (2026-09-25): the collector runs its kinds one after
+    # another in ONE thread and sets the next due time only after the whole
+    # cycle, so a 15 s kind waits behind a slow inventory or an SMTP send. The
+    # bound therefore carries the longest recent cycle (cycle_seconds), and a
+    # STOPPED collector is collector_stale's finding alone: marking every kind
+    # overdue on top of it would be one finding per kind for one fault.
+    gaps = kind_start_gaps(conn)
+    cycle = collector_cycle_seconds(conn)
+    stale = bool(status.get("collector_stale"))
     kinds = []
     for kind, run in sorted(status["kinds"].items()):
         note = (run.get("error") or "").strip() or None
+        overdue = False
+        if run.get("ok") and not stale and collector_kind_scheduled(kind, settings):
+            bound = collector_kind_overdue_after(kind, gaps.get(kind), settings,
+                                                 cycle_seconds=cycle)
+            started = str(run.get("started_at") or run.get("finished_at") or "")
+            try:
+                overdue = bool(started) and age_seconds(started, now) > bound
+            except (ValueError, TypeError):
+                overdue = False
         kinds.append({
             "kind": kind,
             "ok": bool(run.get("ok")),
             "finished_at": run.get("finished_at"),
-            "note": note,
-            "status": "red" if not run.get("ok") else ("amber" if note else "green"),
+            "note": note if note or not overdue else "overdue",
+            "overdue": overdue,
+            "status": "red" if not run.get("ok") else (
+                "amber" if note or overdue else "green"),
         })
+    prune_run = status["kinds"].get("prune") or {}
     return {
         "kinds": kinds,
         "syncthing_reachable": status["syncthing_reachable"],
         "collector_stale": status["collector_stale"],
+        # LG-17: "Retention last ran <time>" on the home page's collector
+        # panel. None = it has never run on this database.
+        "retention_last_ran": prune_run.get("finished_at") or prune_run.get("started_at"),
         **collector_alarms(conn),
     }
+
+
+def collector_kind_scheduled(kind: str, settings: Any | None = None) -> bool:
+    """True when this deployment actually runs `kind` (collector.run_cycle's
+    gates, read the same way): the Syncthing-free kinds always; the rest only
+    with a `syncthing_url`; provision and inventory only with a
+    `projects_dir` too. No settings in hand (the page renderers) is the
+    Syncthing-free kinds alone: judging a kind we cannot prove is scheduled
+    is the false alarm safety L5 forbids, and retention - the one the
+    documents name - is always among them."""
+    if kind in SYNCTHING_FREE_KINDS:
+        return True
+    if settings is None or not getattr(settings, "syncthing_url", ""):
+        return False
+    if kind in ("provision", "inventory") and not getattr(settings, "projects_dir", ""):
+        return False
+    return True
+
+
+def collector_kind_overdue_after(
+    kind: str, observed_gap: float | None, settings: Any | None = None,
+    *, cycle_seconds: float = 0.0,
+) -> float:
+    """Seconds after its last start at which a scheduled kind is overdue:
+    twice its cadence plus `cycle_seconds`, never below
+    COLLECTOR_STALE_SECONDS plus `cycle_seconds`. The cadence is the larger
+    of the OBSERVED gap (kind_start_gaps, collector_stale_bound's
+    observation) and the CONFIGURED interval, so neither a manual double run
+    nor a long configured interval reads as late. `cycle_seconds` is how long
+    one sequential collector cycle has recently taken
+    (collector_cycle_seconds): a kind cannot start again before the slow
+    kinds ahead of it finish, and a 60 s kind behind a four-minute inventory
+    is on time."""
+    from .settings import Settings         # local: settings imports none of ours
+    source = settings if settings is not None else Settings
+    try:
+        configured = float(getattr(source, f"interval_{kind}", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        configured = 0.0
+    cadence = max(float(observed_gap or 0.0), configured)
+    extra = max(0.0, float(cycle_seconds or 0.0))
+    return max(COLLECTOR_STALE_SECONDS, 2.0 * cadence) + extra
+
+
+def collector_cycle_seconds(conn: sqlite3.Connection, limit: int = 200) -> float:
+    """An upper estimate of one collector cycle's length: the sum, over the
+    kinds seen in the newest `limit` poll_runs rows, of each kind's LONGEST
+    run there. The kinds run one after another in one thread, so this is the
+    most a kind can be held up by the others (G0 review round, 2026-09-25).
+    0.0 when nothing has finished; an unparseable row is skipped."""
+    longest: dict[str, float] = {}
+    for row in conn.execute(
+        "SELECT kind, started_at, finished_at FROM poll_runs ORDER BY id DESC LIMIT ?",
+        (int(limit),),
+    ):
+        if not row["started_at"] or not row["finished_at"]:
+            continue
+        try:
+            took = age_seconds(str(row["started_at"]), str(row["finished_at"]))
+        except (ValueError, TypeError):
+            continue
+        if took > longest.get(str(row["kind"]), 0.0):
+            longest[str(row["kind"])] = took
+    return float(sum(longest.values()))
 
 
 def insert_companion_package(
@@ -6016,6 +6142,21 @@ def file_move_target_machines(
         (from_slug, media_key, _like_prefix(media_key) + "/%"),
     ):
         targets.add((row["editor_username"], row["machine"]))
+    # LG-1 (safety M2, docs/LEGAL_GAP_FEATURES_PLAN.md §4.1): a computer that
+    # withholds its file list sends no editor_media rows, so the manifest
+    # query above can never find it - and FILE_MOVES' failure is exactly the
+    # copy it still holds in a project it has since UNticked. Such a computer
+    # is therefore a target for every move in every ACTIVE project, ticked or
+    # not; the companion's not-found arm answers harmlessly where it holds
+    # nothing. Wired machines stay out on for_enforce's rule (dash-db-1): its
+    # tree root IS the share, and the rename there already happened.
+    active = conn.execute(
+        "SELECT 1 FROM projects WHERE slug=? AND active=1", (from_slug,)).fetchone()
+    if active is not None:
+        wired = base_machines(conn)
+        for pair in machines_withholding(conn, "local_manifest"):
+            if pair[1] and pair not in wired:
+                targets.add(pair)
     return sorted(targets)
 
 
@@ -8779,7 +8920,8 @@ def editor_device_ids(conn: sqlite3.Connection, editor: str) -> list[str]:
     return ids
 
 
-def forget_editor(conn: sqlite3.Connection, editor: str) -> dict[str, Any]:
+def forget_editor(conn: sqlite3.Connection, editor: str, *,
+                  was_admin: bool | None = None) -> dict[str, Any]:
     """Erase a person from the fleet's records: every computer of theirs
     (forget_machine), the unassigned bucket, their known_editors row and the
     collector's device mapping (CR-76, 2026-08-24).
@@ -8791,7 +8933,42 @@ def forget_editor(conn: sqlite3.Connection, editor: str) -> dict[str, Any]:
 
     Credentials are not this function's job: sessions and report tokens are
     revoked by api._purge_user_credentials, which must run after the commit
-    (the session store writes through its own connection)."""
+    (the session store writes through its own connection).
+
+    LG-3 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.3, 2026-09-25) completed the
+    delete: the person's HISTORY rows go too (purge_subject_history, run
+    FIRST, while the machines and devices it reaches through still exist),
+    and every record the studio keeps is pseudonymised afterwards
+    (pseudonymise_subject), with the names of their computers. `was_admin`
+    keeps an administrator's name on the audit actor column until the
+    180-day prune; the caller passes it because a local account row it
+    deleted a moment ago can no longer be asked. None reads the users table.
+    Their revoked report tokens are the caller's, AFTER the revocation
+    (delete_revoked_report_tokens)."""
+    user = str(editor or "").strip().lower()
+    if was_admin is None:
+        try:
+            role = conn.execute("SELECT role FROM users WHERE username=?",
+                                (user,)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if not _schema_predates(exc):
+                raise
+            role = None
+        was_admin = bool(role is not None and role["role"] == "admin")
+    # Every name one of their computers ever reported under, collected before
+    # anything is deleted: the free text of an alert or notice may name a
+    # computer the registry evicted long ago.
+    names: set[str] = set()
+    for table in ("machines", "machine_state", "lane_report_history",
+                  "transfer_history", "lane_report_current", "report_auth"):
+        for r in conn.execute(
+                f"SELECT DISTINCT machine FROM {table} WHERE editor_username=?", (editor,)):
+            if r["machine"]:
+                names.add(str(r["machine"]))
+    for r in conn.execute("SELECT DISTINCT machine FROM diagnostics WHERE editor=?", (editor,)):
+        if r["machine"]:
+            names.add(str(r["machine"]))
+    history = purge_subject_history(conn, user)
     machines = [
         r["machine"] for r in conn.execute(
             "SELECT machine FROM machines WHERE editor_username=?", (editor,))
@@ -8823,8 +9000,12 @@ def forget_editor(conn: sqlite3.Connection, editor: str) -> dict[str, Any]:
     deleted["user_profiles"] = conn.execute(
         "DELETE FROM user_profiles WHERE username=?",
         (str(editor or "").strip().lower(),)).rowcount
+    for table, n in history.items():
+        deleted[table] = deleted.get(table, 0) + n
+    pseudonymised = pseudonymise_subject(conn, user, names, keep_actor=bool(was_admin))
     return {"editor": editor, "machines": [f["machine"] for f in forgotten if f],
-            "deleted": deleted}
+            "deleted": deleted, "pseudonymised": pseudonymised,
+            "pseudonym": pseudonym(conn, user)}
 
 
 def forget_device(conn: sqlite3.Connection, device_id: str) -> None:
@@ -8839,6 +9020,870 @@ def forget_device(conn: sqlite3.Connection, device_id: str) -> None:
     for table in ("completion_current", "completion_history", "missing_files"):
         conn.execute(f"DELETE FROM {table} WHERE device_id=?", (row["id"],))
     conn.execute("DELETE FROM devices WHERE id=?", (row["id"],))
+
+
+# ======================================================================
+# LEGAL-GAP FEATURES (docs/LEGAL_GAP_FEATURES_PLAN.md, 2026-09-25, G0)
+#
+# What the cleared PRIVACY and TELEMETRY documents promise and the database
+# has to make true: the telemetry switches' record and the deletes they imply
+# (LG-1), the one registry of every table that holds something about a person
+# (LG-2 export, LG-3 erase and delete), the pseudonym that replaces a deleted
+# person on the records the studio keeps (LG-3, decision D2), how a report
+# reached the dashboard (LG-4) and the licence a computer accepted (LG-5).
+#
+# Nothing here is called on the collector's hot path except
+# `machines_withholding` from the two "cannot tell" readers, and nothing here
+# may stop a report landing: every helper is a plain write on the caller's
+# connection, inside the caller's transaction.
+# ======================================================================
+
+# LG-1: the four categories a computer or the site can switch off. The
+# companion's `telemetry_policy.FIELDS` names the report fields each covers;
+# this is only the NAMES, which is all the database needs (what to delete).
+REPORT_CATEGORIES = ("resolve_project", "local_manifest", "media_tree", "input_idle")
+
+# The categories whose data can ride a diagnostics bundle (the plan's FIELDS
+# table: excerpts of the inventory, bin excerpts, log lines naming the
+# project). `input_idle` never reaches one, so a machine switching only that
+# off keeps its bundles (departure noted in the G0 ledger).
+_DIAGNOSTICS_CATEGORIES = frozenset({"resolve_project", "local_manifest", "media_tree"})
+
+# The resolve_health meta keys that are PATHS (local_manifest), as opposed to
+# the counters and the open-project facts (resolve_project, which deletes the
+# whole row).
+_RESOLVE_HEALTH_PATH_KEYS = ("missing_clips", "non_canonical_refused")
+
+# What the site policy last applied, so apply_site_optouts can tell a NEWLY
+# switched-off category (which also deletes diagnostics bundles) from one that
+# was already off.
+META_SITE_REPORT_OPTOUTS = "site_report_optouts"
+
+REPORT_VIA_VALUES = ("https", "http_local", "http_public")
+
+
+def clean_report_categories(names: Any) -> list[str]:
+    """A sorted list of the KNOWN category names in `names`; anything else is
+    dropped (a newer companion's fifth name is not ours to act on). `resolve_
+    project` implies `media_tree`, the one rule the plan puts in both halves:
+    the bin structure is keyed by project name."""
+    if isinstance(names, str) or not isinstance(names, Iterable):
+        return []
+    out = {str(n).strip() for n in names if str(n).strip() in REPORT_CATEGORIES}
+    if "resolve_project" in out:
+        out.add("media_tree")
+    return sorted(out)
+
+
+def _load_categories(text: Any) -> set[str] | None:
+    """A stored category list, or None when the column is NULL (nothing
+    known). Damaged JSON reads as None too: "cannot tell" is never "nothing
+    withheld" for a reader that cares, and never raises."""
+    if text is None:
+        return None
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    return set(clean_report_categories(data)) if isinstance(data, list) else None
+
+
+def _clear_categories(conn: sqlite3.Connection, editor: str, machine: str,
+                      categories: set[str]) -> dict[str, int]:
+    """Delete or NULL, for ONE machine, everything the dashboard holds under
+    `categories` (the plan's §4.1 table, "what happens instead"). Idempotent:
+    a second call finds nothing to delete, which is why the report path can
+    run it on every report without keeping score."""
+    counts: dict[str, int] = {}
+    if "resolve_project" in categories:
+        counts["machine_state.resolve_project"] = conn.execute(
+            """UPDATE machine_state SET resolve_project=NULL, cap_resolve_project=NULL
+                WHERE editor_username=? AND machine=?
+                  AND (resolve_project IS NOT NULL OR cap_resolve_project IS NOT NULL)""",
+            (editor, machine)).rowcount
+        meta_delete(conn, f"{RESOLVE_HEALTH_META_PREFIX}{editor}/{machine}")
+        # Note J (plan §4.1): the journals are KEPT with their project name
+        # blanked, the shape the companion sends when it withholds the name
+        # and undo keys on the journal id. If G2a finds undo keys on the name
+        # instead, the companion withholds the section and this blanking is
+        # simply the stored half of the same rule.
+        # The id carries the project name too (`<slug>/<stamp>.json`, note J
+        # as G1a and G2a both found), so it is masked with the same rule the
+        # report path applies (`withheld:project/<stamp>.json`); a current
+        # companion maps it back for undo, an older one answers "not found",
+        # which is the cost the wording states. Without this, a SITE switch
+        # against an OFFLINE machine left the project slug in the stored list
+        # (G0 hand-off, landed by the final review 2026-09-25).
+        from . import telemetry_fields
+        journals = machine_resolve_journals(conn, editor, machine)
+        if any(str(j.get("project") or "")
+               or not str(j.get("id") or "").startswith(
+                   telemetry_fields.OPAQUE_JOURNAL_PREFIX)
+               for j in journals):
+            store_resolve_journals(conn, editor, machine, [
+                {**j, "project": "",
+                 "id": telemetry_fields.opaque_journal_id(j.get("id"))}
+                for j in journals])
+            counts["machine_state.resolve_journals"] = 1
+    elif "local_manifest" in categories:
+        key = f"{RESOLVE_HEALTH_META_PREFIX}{editor}/{machine}"
+        detail = meta_get_json(conn, key)
+        if isinstance(detail, dict) and any(k in detail for k in _RESOLVE_HEALTH_PATH_KEYS):
+            kept = {k: v for k, v in detail.items() if k not in _RESOLVE_HEALTH_PATH_KEYS}
+            if kept:
+                meta_set_json(conn, key, kept)
+            else:
+                meta_delete(conn, key)
+    if "local_manifest" in categories:
+        for table in ("editor_media", "editor_media_project"):
+            counts[table] = conn.execute(
+                f"DELETE FROM {table} WHERE editor_username=? AND machine=?",
+                (editor, machine)).rowcount
+    if "media_tree" in categories:
+        counts["media_tree_clips"] = conn.execute(
+            "DELETE FROM media_tree_clips WHERE editor_username=? AND machine=?",
+            (editor, machine)).rowcount
+    if "input_idle" in categories:
+        counts["machine_state.cap_idle_seconds"] = conn.execute(
+            """UPDATE machine_state SET cap_idle_seconds=NULL
+                WHERE editor_username=? AND machine=? AND cap_idle_seconds IS NOT NULL""",
+            (editor, machine)).rowcount
+    return counts
+
+
+def apply_report_optouts(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    withheld: Iterable[str], local: Iterable[str] | None,
+) -> dict[str, Any]:
+    """Record what this machine withholds and delete what the dashboard held
+    under it (LG-1, plan §4.1). Called by api_report AFTER the section writes,
+    in the same transaction, with `withheld` = site policy UNION the
+    machine's own list and `local` = the machine's own list exactly as sent
+    (None = a build that does not send `report_optouts`).
+
+    The report itself was already stripped (api_report, from every companion
+    version), so nothing withheld is written by this report; the deletes here
+    are for what earlier reports left behind, and they are idempotent.
+
+    A NEWLY withheld category that can ride a diagnostics bundle also deletes
+    this machine's stored bundles: a bundle is text, and it may carry exactly
+    what the machine has just switched off.
+
+    Returns {"withheld", "newly", "deleted"} for the caller's log line."""
+    names = set(clean_report_categories(withheld))
+    local_list = None if local is None else clean_report_categories(local)
+    row = conn.execute(
+        "SELECT report_optouts, report_optouts_local FROM machine_state"
+        " WHERE editor_username=? AND machine=?",
+        (editor, machine)).fetchone()
+    before = (_load_categories(row["report_optouts"]) if row is not None else None) or set()
+    # G0 review round (2026-09-25): ABSENT IS NOT EMPTY, as for
+    # set_machine_eula and store_resolve_journals. A report without the key
+    # (a malformed section dropped by the tolerant parser, or a build that
+    # predates it) keeps the machine's stored own list; writing NULL here made
+    # withheld() forget the machine's opt-out until its next report, switched
+    # off the file-move broadcast and the backlog's "not reported" rows, and
+    # the report after that counted it as NEWLY withheld and deleted the
+    # diagnostics again. Only an explicit list (even []) replaces it.
+    stored_local = (_load_categories(row["report_optouts_local"])
+                    if row is not None else None)
+    if local_list is None:
+        if stored_local is not None:
+            names |= stored_local
+        local_json = None if stored_local is None else json.dumps(sorted(stored_local))
+    else:
+        local_json = json.dumps(local_list)
+    if local_json is None and not names:
+        # Nothing known: an old build under a site that withholds nothing.
+        stored = None
+    else:
+        stored = json.dumps(sorted(names))
+    conn.execute(
+        """UPDATE machine_state SET report_optouts=?, report_optouts_local=?
+            WHERE editor_username=? AND machine=?""",
+        (stored, local_json, editor, machine))
+    deleted = _clear_categories(conn, editor, machine, names) if names else {}
+    newly = names - before
+    if newly & _DIAGNOSTICS_CATEGORIES:
+        deleted["diagnostics"] = _forget_diagnostics(conn, editor, machine)
+    return {"withheld": sorted(names), "newly": sorted(newly), "deleted": deleted}
+
+
+def apply_site_optouts(
+    conn: sqlite3.Connection, names: Iterable[str],
+) -> dict[str, Any]:
+    """The site policy changed: `names` is the full set of categories the
+    SITE now withholds (not a delta). Every machine's `report_optouts` is
+    recomputed as its own list UNION the site's, and what the site now
+    withholds is deleted for EVERY machine, online or not, at once (plan
+    §4.1, G2b calls this from the one `site_store.set_many` hook so import
+    and undo cannot bypass it).
+
+    Media rows are swept by editor/machine from their own tables too, not
+    only for machines with a machine_state row: a computer whose state row
+    aged out can still own an `editor_media` row for fourteen days.
+
+    Switching a category back ON deletes nothing and restores nothing; it only
+    stops the site withholding it, and the machines' own lists still hold."""
+    site = set(clean_report_categories(names))
+    before = _load_categories(meta_get(conn, META_SITE_REPORT_OPTOUTS)) or set()
+    newly = site - before
+    pairs: set[tuple[str, str]] = set()
+    for sql in ("SELECT editor_username, machine FROM machine_state",
+                "SELECT DISTINCT editor_username, machine FROM editor_media_project",
+                "SELECT DISTINCT editor_username, machine FROM editor_media",
+                "SELECT DISTINCT editor_username, machine FROM media_tree_clips"):
+        for r in conn.execute(sql):
+            pairs.add((r["editor_username"], r["machine"]))
+    for r in conn.execute(
+            "SELECT editor_username, machine, report_optouts_local FROM machine_state"):
+        local = _load_categories(r["report_optouts_local"])
+        union = (local or set()) | site
+        stored = None if (local is None and not union) else json.dumps(sorted(union))
+        conn.execute(
+            "UPDATE machine_state SET report_optouts=? WHERE editor_username=? AND machine=?",
+            (stored, r["editor_username"], r["machine"]))
+    deleted: dict[str, int] = {}
+    if site:
+        for editor, machine in sorted(pairs):
+            for key, n in _clear_categories(conn, editor, machine, site).items():
+                deleted[key] = deleted.get(key, 0) + int(n or 0)
+    if newly & _DIAGNOSTICS_CATEGORIES:
+        deleted["diagnostics"] = int(conn.execute("DELETE FROM diagnostics").rowcount or 0)
+    meta_set(conn, META_SITE_REPORT_OPTOUTS, json.dumps(sorted(site)))
+    return {"site": sorted(site), "newly": sorted(newly), "machines": len(pairs),
+            "deleted": deleted}
+
+
+def withheld(conn: sqlite3.Connection, editor: str, machine: str) -> set[str]:
+    """THE reader predicate (LG-1): the categories this machine's data is
+    withheld under, its own switches and the site's together. An empty set is
+    "nothing known to be withheld", which is today's behaviour for every
+    reader. Never raises on a damaged row."""
+    row = conn.execute(
+        "SELECT report_optouts FROM machine_state WHERE editor_username=? AND machine=?",
+        (editor, machine)).fetchone()
+    return (_load_categories(row["report_optouts"]) if row is not None else None) or set()
+
+
+def withheld_map(conn: sqlite3.Connection) -> dict[tuple[str, str], set[str]]:
+    """(editor, machine) -> withheld categories, for every machine withholding
+    anything. One query for the whole fleet (fetch_capabilities_map's rule),
+    for the views and alerts.py's Ctx, which must not ask per machine."""
+    out: dict[tuple[str, str], set[str]] = {}
+    for r in conn.execute(
+            "SELECT editor_username, machine, report_optouts FROM machine_state"
+            " WHERE report_optouts IS NOT NULL"):
+        names = _load_categories(r["report_optouts"]) or set()
+        if names:
+            out[(r["editor_username"], r["machine"])] = names
+    return out
+
+
+def machines_withholding(conn: sqlite3.Connection, category: str) -> set[tuple[str, str]]:
+    """The machines whose `category` is withheld: their holdings, idle time or
+    open project are "not reported", never zero and never "none"."""
+    return {pair for pair, names in withheld_map(conn).items() if category in names}
+
+
+def set_machine_report_via(
+    conn: sqlite3.Connection, editor: str, machine: str, via: str | None,
+) -> bool:
+    """LG-4: how this machine's report reached the dashboard. Written ONLY
+    when it changes (plan §4.4: no per-request write), inside the report's own
+    transaction. An unknown value is refused rather than stored: the alert
+    reads this column and a typo must not read as `http_public`. True when a
+    row changed."""
+    if via not in REPORT_VIA_VALUES:
+        return False
+    cur = conn.execute(
+        """UPDATE machine_state SET report_via=?
+            WHERE editor_username=? AND machine=?
+              AND (report_via IS NULL OR report_via <> ?)""",
+        (via, editor, machine, via))
+    return cur.rowcount > 0
+
+
+def report_via_map(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """(editor, machine) -> report_via, for every machine seen since v59.
+    Absent = not seen since then, which the Settings line counts as nothing."""
+    return {
+        (r["editor_username"], r["machine"]): str(r["report_via"])
+        for r in conn.execute(
+            "SELECT editor_username, machine, report_via FROM machine_state"
+            " WHERE report_via IS NOT NULL")
+    }
+
+
+_EULA_KEYS = ("version", "accepted_at", "eula_sha256")
+
+
+def set_machine_eula(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    block: Mapping[str, Any] | None,
+) -> None:
+    """LG-5: the licence this computer's companion last said it accepted.
+
+    ABSENT IS NOT EMPTY (store_resolve_journals' rule): None is a companion
+    that did not send the section, and leaves the column alone. The three
+    named keys only, as short strings: never a path, never the text. A block
+    with no version is not a statement about anything and is ignored."""
+    if not isinstance(block, Mapping):
+        return
+    clean = {k: str(block.get(k))[:128] for k in _EULA_KEYS
+             if block.get(k) is not None and str(block.get(k)).strip()}
+    if "version" not in clean:
+        return
+    conn.execute(
+        "UPDATE machine_state SET eula_json=? WHERE editor_username=? AND machine=?",
+        (json.dumps(clean, sort_keys=True), editor, machine))
+
+
+def machine_eula_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, str]]:
+    """(editor, machine) -> {"version","accepted_at","eula_sha256"} for every
+    computer that has reported one. Absent = "Not reported", NEVER "not
+    accepted" (that remains only the `licence_pending` block reason)."""
+    out: dict[tuple[str, str], dict[str, str]] = {}
+    for r in conn.execute(
+            "SELECT editor_username, machine, eula_json FROM machine_state"
+            " WHERE eula_json IS NOT NULL"):
+        try:
+            data = json.loads(r["eula_json"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("version"):
+            out[(r["editor_username"], r["machine"])] = {
+                k: str(data[k]) for k in _EULA_KEYS if data.get(k) is not None}
+    return out
+
+
+# ---------------------------------------------------------- LG-2 / LG-3
+#
+# THE REGISTRY of every dashboard table that holds something about a person.
+# Export (subject_data.collect) and erasure (purge_subject_history,
+# forget_editor) read the same list, so a table cannot be exported and
+# forgotten about at delete time, or the other way round. test_legal_db's
+# coverage test fails when a column that names a person sits in a table that
+# is in neither this list nor NOT_SUBJECT_TABLES.
+#
+# `match_sql` is a WHERE clause with ONE named parameter, :username. The
+# person's computers are reached through a subquery on `machines`, never a
+# bound list, so every entry is one statement.
+#
+# `kind`:
+#   history  - past activity; erased by "erase history" and by delete;
+#   current  - what a computer reports NOW; rewritten by the next report,
+#              so erase never touches it (D15), delete removes it;
+#   identity - the account and its credentials; removed only by delete;
+#   evidence - a record of something done; pseudonymised on delete (D2).
+
+SUBJECT_HISTORY = "history"
+SUBJECT_CURRENT = "current"
+SUBJECT_IDENTITY = "identity"
+SUBJECT_EVIDENCE = "evidence"
+
+_U = ":username"
+_MINE = f"(SELECT machine FROM machines WHERE editor_username={_U})"
+_MY_DEVICES = (f"(SELECT id FROM devices WHERE editor_username={_U} AND is_server=0"
+               f" UNION SELECT d.id FROM devices d JOIN machines m"
+               f" ON m.syncthing_device_id = d.device_id WHERE m.editor_username={_U})")
+# A machine name only this person uses. G0 review round (2026-09-25): two
+# editors' default hostnames collide often (`MacBook-Pro`), and a bare
+# machine subject matched through _MINE alone put bob's notice, with bob's
+# paths in it, into alice's export. The same "shared name" test
+# pseudonymise_subject applies, over both tables that name machines.
+_MINE_ALONE = (f"(SELECT machine FROM machines WHERE editor_username={_U}"
+               f" AND machine NOT IN (SELECT machine FROM machines"
+               f" WHERE editor_username<>{_U})"
+               f" AND machine NOT IN (SELECT machine FROM machine_state"
+               f" WHERE editor_username<>{_U}))")
+# `editor`, `editor/machine` or a machine name only this person uses. substr,
+# not LIKE: a username may contain `_`, which LIKE reads as a wildcard.
+_SUBJECT_IS_MINE = (f"(subject = {_U} OR substr(subject, 1, length({_U}) + 1) = {_U} || '/'"
+                    f" OR subject IN {_MINE_ALONE})")
+# The audit ledger names the person of a machine action in its detail
+# (`machine.forget {"editor": ...}`), which is how a shared machine name's
+# row is still found for its own person. json_valid first: a damaged row
+# must not make json_extract raise and fail the whole export.
+_AUDIT_DETAIL_IS_MINE = (
+    f"(CASE WHEN json_valid(detail_json) THEN"
+    f" json_extract(detail_json, '$.editor') = {_U}"
+    f" OR json_extract(detail_json, '$.username') = {_U} END)")
+
+
+class SubjectTable(tuple):
+    """(table, match_sql, kind, columns_excluded). A tuple subclass rather
+    than a NamedTuple only so the registry reads as one line per table."""
+    __slots__ = ()
+
+    def __new__(cls, table: str, match_sql: str, kind: str,
+                columns_excluded: tuple[str, ...] = ()):
+        return super().__new__(cls, (table, match_sql, kind, tuple(columns_excluded)))
+
+    table = property(lambda self: self[0])
+    match_sql = property(lambda self: self[1])
+    kind = property(lambda self: self[2])
+    columns_excluded = property(lambda self: self[3])
+
+
+_BY_EDITOR = f"editor_username = {_U}"
+
+SUBJECT_TABLES: tuple[SubjectTable, ...] = (
+    # Machine and current state: every _MACHINE_STATE_TABLES table, keyed by
+    # the person, plus the requester half of the two command tables.
+    SubjectTable("machines", f"{_BY_EDITOR} OR update_requested_by = {_U}"
+                 f" OR lane_b_resume_requested_by = {_U} OR diagnostics_requested_by = {_U}",
+                 SUBJECT_CURRENT),
+    SubjectTable("machine_state", _BY_EDITOR, SUBJECT_CURRENT),
+    SubjectTable("selections", f"{_BY_EDITOR} OR created_by = {_U}", SUBJECT_CURRENT),
+    SubjectTable("editor_prefs", f"{_BY_EDITOR} OR updated_by = {_U}", SUBJECT_CURRENT),
+    SubjectTable("lane_report_current", _BY_EDITOR, SUBJECT_CURRENT),
+    SubjectTable("active_transfers", _BY_EDITOR, SUBJECT_CURRENT),
+    SubjectTable("editor_media_project", _BY_EDITOR, SUBJECT_CURRENT),
+    SubjectTable("editor_media", _BY_EDITOR, SUBJECT_CURRENT),
+    SubjectTable("media_tree_clips", _BY_EDITOR, SUBJECT_CURRENT),
+    SubjectTable("report_auth", _BY_EDITOR, SUBJECT_CURRENT),
+    SubjectTable("file_move_targets", _BY_EDITOR, SUBJECT_CURRENT),
+    SubjectTable("resolve_undo_requests", f"{_BY_EDITOR} OR requested_by = {_U}",
+                 SUBJECT_CURRENT),
+    SubjectTable("broll_standins", _BY_EDITOR, SUBJECT_CURRENT),
+    SubjectTable("machine_setting_requests", f"{_BY_EDITOR} OR requested_by = {_U}",
+                 SUBJECT_CURRENT),
+    # `devices` carries the editor name and the last IP address Syncthing saw.
+    SubjectTable("devices", f"id IN {_MY_DEVICES}", SUBJECT_CURRENT),
+    SubjectTable("invariant_results", _SUBJECT_IS_MINE, SUBJECT_CURRENT),
+    # Identity and credentials: secrets excluded BY COLUMN NAME.
+    SubjectTable("known_editors", f"{_BY_EDITOR} OR suspended_by = {_U}", SUBJECT_IDENTITY),
+    SubjectTable("user_profiles", f"username = {_U} OR updated_by = {_U}", SUBJECT_IDENTITY),
+    SubjectTable("users", f"username = {_U}", SUBJECT_IDENTITY, ("password_hash",)),
+    SubjectTable("user_ssh_keys", f"username = {_U}", SUBJECT_IDENTITY),
+    SubjectTable("pending_ssh_keys", f"username = {_U}", SUBJECT_IDENTITY),
+    SubjectTable("editor_report_tokens",
+                 f"{_BY_EDITOR} OR created_by = {_U} OR revoked_by = {_U}",
+                 SUBJECT_IDENTITY, ("token_hash",)),
+    # History: erased by LG-3.
+    SubjectTable("lane_report_history", _BY_EDITOR, SUBJECT_HISTORY),
+    SubjectTable("transfer_history", _BY_EDITOR, SUBJECT_HISTORY),
+    SubjectTable("completion_history", f"device_id IN {_MY_DEVICES}", SUBJECT_HISTORY),
+    SubjectTable("missing_files", f"device_id IN {_MY_DEVICES}", SUBJECT_HISTORY),
+    SubjectTable("diagnostics", f"editor = {_U}", SUBJECT_HISTORY),
+    # Evidence: a record of something done, pseudonymised on delete.
+    SubjectTable("fleet_audit", f"actor = {_U} OR {_SUBJECT_IS_MINE}"
+                 f" OR {_AUDIT_DETAIL_IS_MINE}", SUBJECT_EVIDENCE),
+    SubjectTable("alert_log", _SUBJECT_IS_MINE, SUBJECT_EVIDENCE),
+    SubjectTable("notices", _SUBJECT_IS_MINE, SUBJECT_EVIDENCE),
+    SubjectTable("jobs", f"created_by = {_U} OR claimed_by = {_U}"
+                 f" OR cancel_requested_by = {_U}", SUBJECT_EVIDENCE),
+    SubjectTable("file_moves", f"requested_by = {_U} OR undone_by = {_U}", SUBJECT_EVIDENCE),
+    SubjectTable("project_roots", f"updated_by = {_U}", SUBJECT_EVIDENCE),
+    SubjectTable("companion_packages", f"published_by = {_U}", SUBJECT_EVIDENCE,
+                 ("signature",)),
+    SubjectTable("projects", f"archived_by = {_U}", SUBJECT_EVIDENCE),
+    SubjectTable("site_settings", f"updated_by = {_U}", SUBJECT_EVIDENCE, ("value",)),
+)
+
+# Tables in the dashboard database whose person-shaped columns do NOT name a
+# person, each with the reason in words (the coverage test reads this).
+NOT_SUBJECT_TABLES: dict[str, str] = {
+    "triage_replies": (
+        "`from_addr` is the address a triage reply was mailed from, which must be "
+        "one of the site's alert recipients (alerts_smtp_to), a mailbox of the "
+        "site's and not a user of this dashboard: no username maps to it. The "
+        "rows age out with their run after 60 days and export names triage "
+        "report bodies under not_included."),
+}
+
+# The person-shaped tables that live in OTHER stores, and the helper that
+# owns them there. Named here so the coverage test holds every store to the
+# same rule; the helpers are G2a's, G3's and G4's.
+OTHER_STORE_SUBJECT_TABLES: dict[str, dict[str, str]] = {
+    "sessions": {
+        "auth_sessions": "sessions.SessionStore.subject_rows / purge_user",
+        # `key` is the username for scope='user' rows and an IP for scope='ip'.
+        "login_attempts": "sessions.SessionStore.subject_rows / purge_user",
+    },
+    "ytdl": {
+        "jobs": "ytdl.subject_rows / forget_history / forget_requester",
+        "downloads": "ytdl.subject_rows / forget_requester (kept, pseudonymised)",
+        "attestations": "ytdl.subject_rows / forget_requester (kept, pseudonymised)",
+    },
+    "broll": {
+        "ingest_batches": "subject_data.collect (read only; replaced by publish_db.py)",
+    },
+    "music": {
+        "ingest_batches": "subject_data.collect (read only; replaced by publish_db.py)",
+    },
+    "client_shares": {
+        "client_folders": "subject_data.collect / forget_shares",
+        "client_folder_items": "subject_data.collect / forget_shares",
+    },
+}
+
+# Person-shaped tables in other stores that name no person, with the reason.
+NOT_SUBJECT_TABLES_OTHER_STORES: dict[str, dict[str, str]] = {}
+
+
+def fetch_subject_rows(conn: sqlite3.Connection, username: str) -> dict[str, list[dict[str, Any]]]:
+    """Every SUBJECT_TABLES row about `username`, table -> rows, with the
+    excluded (secret) columns dropped. The dashboard-database half of LG-2's
+    export; subject_data.collect adds the other stores. A table this build's
+    schema lacks is skipped rather than raised on (a registry row may name a
+    table a test database predates)."""
+    user = str(username or "").strip().lower()
+    out: dict[str, list[dict[str, Any]]] = {}
+    for entry in SUBJECT_TABLES:
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM {entry.table} WHERE {entry.match_sql}",
+                {"username": user}).fetchall()
+        except sqlite3.OperationalError as exc:
+            if _schema_predates(exc):
+                continue
+            raise
+        out[entry.table] = [
+            {k: r[k] for k in r.keys() if k not in entry.columns_excluded} for r in rows]
+    return out
+
+
+def purge_subject_history(conn: sqlite3.Connection, username: str) -> dict[str, int]:
+    """LG-3 "erase history, keep the account" (decision D15): delete the
+    `history` rows about this person and NOTHING else.
+
+    Never a `current` row: machine_state carries the wired mode (CR-28), the
+    breaker and halt latches, `verified` and the v58 cfg_* columns, and the
+    next report rewrites all of it anyway; editor_media is what makes the
+    machine a holder for a file move. The sessions and the YouTube history
+    are the caller's (SessionStore.purge_user, ytdl.forget_history), after
+    this transaction commits. Returns table -> rows deleted."""
+    user = str(username or "").strip().lower()
+    counts: dict[str, int] = {}
+    for entry in SUBJECT_TABLES:
+        if entry.kind != SUBJECT_HISTORY:
+            continue
+        counts[entry.table] = int(conn.execute(
+            f"DELETE FROM {entry.table} WHERE {entry.match_sql}",
+            {"username": user}).rowcount or 0)
+    return counts
+
+
+# ------------------------------------------------------------ pseudonyms
+
+META_PSEUDONYM_SALT = "pseudonym_salt"
+
+
+def pseudonym_salt(conn: sqlite3.Connection) -> bytes:
+    """32 random bytes, minted into meta on first use and NEVER rotated (LG-3,
+    plan §3.1). Deliberately not the session secret: that one rotates
+    (session_secrets_previous), and a stand-in that changed with it would
+    turn one deleted person into two."""
+    value = meta_get(conn, META_PSEUDONYM_SALT)
+    if value:
+        try:
+            salt = bytes.fromhex(value)
+            if len(salt) >= 16:
+                return salt
+        except ValueError:
+            pass
+    salt = secrets.token_bytes(32)
+    meta_set(conn, META_PSEUDONYM_SALT, salt.hex())
+    return salt
+
+
+def _stand_in(conn: sqlite3.Connection, prefix: str, name: str) -> str:
+    digest = hmac.new(pseudonym_salt(conn), f"{prefix}:{name}".encode("utf-8"),
+                      hashlib.sha256).hexdigest()
+    return f"deleted-{prefix}-{digest[:10]}"
+
+
+def pseudonym(conn: sqlite3.Connection, username: str) -> str:
+    """The fixed stand-in for a deleted person: `deleted-user-<10 hex>` of
+    HMAC-SHA256(pseudonym_salt, username). Stable, so every record of one
+    person still reads as one (unnamed) person."""
+    return _stand_in(conn, "user", str(username or "").strip().lower())
+
+
+def machine_pseudonym(conn: sqlite3.Connection, machine: str) -> str:
+    """`deleted-machine-<10 hex>`, the same rule for a deleted person's
+    computer names."""
+    return _stand_in(conn, "machine", str(machine or "").strip())
+
+
+def _word_re(name: str) -> re.Pattern[str]:
+    """`name` as a whole NAME in prose, case-sensitively (G0 review round,
+    2026-09-25). A username may carry `.` and `-` (_USERNAME_RE), so both
+    count as part of a name: deleting `alice` must leave `alice-b` and
+    `alice.smith` alone. A `.` that ends a sentence ("owned by alice.") is not
+    followed by a name character and still matches. The first build used
+    [A-Za-z0-9_] as the boundary and IGNORECASE, and rewrote a colleague's
+    notice key (`alice-b/LAPTOP`) and, for a user called `test`, "Send a test
+    email" in site notices."""
+    return re.compile(
+        rf"(?<![A-Za-z0-9_.-]){re.escape(name)}(?![A-Za-z0-9_-])(?!\.[A-Za-z0-9_-])")
+
+
+def _rewrite_text(text: Any, swaps: list[tuple[re.Pattern[str], str]]) -> Any:
+    if not isinstance(text, str) or not text:
+        return text
+    for pattern, stand_in in swaps:
+        text = pattern.sub(stand_in, text)
+    return text
+
+
+# JSON keys whose VALUE is a username or a machine name on audit detail.
+_PSEUDONYM_JSON_KEYS = frozenset({
+    "editor", "username", "user", "machine", "actor", "requested_by", "by",
+    "created_by", "owner", "claimed_by", "claimed_machine", "target_machine"})
+
+
+def _rewrite_subject(subject: Any, user: str, stand_in: str,
+                     machines: dict[str, str], bare_machine: bool) -> Any:
+    """A `subject` is a KEY (clear_notice matches it exactly), so only its
+    structured positions change, exactly and case-sensitively: `user`,
+    `user/...` and the machine in `user/machine`. A bare machine name is
+    rewritten only when the caller has already tied the row to this person
+    (`bare_machine`), since a bare subject is also how the collector keys
+    its own notices ("server", "delivery")."""
+    if not isinstance(subject, str) or not subject:
+        return subject
+    parts = subject.split("/")
+    if parts[0] == user:
+        parts[0] = stand_in
+        if len(parts) >= 2 and parts[-1] in machines:
+            parts[-1] = machines[parts[-1]]
+        return "/".join(parts)
+    if bare_machine and len(parts) == 1 and subject in machines:
+        return machines[subject]
+    return subject
+
+
+def _rewrite_json(value: Any, user: str, stand_in: str, machines: dict[str, str],
+                  swaps: list[tuple[re.Pattern[str], str]], key: str | None = None) -> Any:
+    if isinstance(value, dict):
+        return {k: _rewrite_json(v, user, stand_in, machines, swaps, str(k))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [_rewrite_json(v, user, stand_in, machines, swaps, key) for v in value]
+    if not isinstance(value, str):
+        return value
+    if key in _PSEUDONYM_JSON_KEYS:
+        if value == user:
+            return stand_in
+        if value in machines:
+            return machines[value]
+        return value
+    return _rewrite_text(value, swaps)
+
+
+def _json_names(value: Any, user: str) -> bool:
+    """True when a structured key in this JSON names `user` exactly."""
+    if isinstance(value, dict):
+        return any((k in _PSEUDONYM_JSON_KEYS and v == user) or _json_names(v, user)
+                   for k, v in value.items())
+    if isinstance(value, list):
+        return any(_json_names(v, user) for v in value)
+    return False
+
+
+# The free-text columns rewritten on delete, per table: (subject column,
+# JSON column or None, prose columns). Prose is rewritten only on a row a
+# STRUCTURED position ties to the person (G0 review round, 2026-09-25):
+# whole-word replacement over every row that merely contained the name
+# rewrote other people's records and the dashboard's own copy.
+_PSEUDONYM_TEXT_COLUMNS: tuple[tuple[str, str, str | None, tuple[str, ...]], ...] = (
+    ("fleet_audit", "subject", "detail_json", ()),
+    ("alert_log", "subject", None, ("detail",)),
+    ("notices", "subject", None, ("body", "fix")),
+)
+
+# The exact-value "who did it" columns on rows that OUTLIVE the person
+# (another editor's plan, a package, a site setting, a job). The audit
+# ledger's `actor` is handled separately (an admin's is kept, safety M5).
+_PSEUDONYM_EXACT_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("jobs", ("created_by", "claimed_by", "cancel_requested_by")),
+    ("file_moves", ("requested_by", "undone_by")),
+    ("resolve_undo_requests", ("requested_by",)),
+    ("machines", ("update_requested_by", "lane_b_resume_requested_by",
+                  "diagnostics_requested_by")),
+    ("selections", ("created_by",)),
+    ("editor_prefs", ("updated_by",)),
+    ("project_roots", ("updated_by",)),
+    ("site_settings", ("updated_by",)),
+    ("companion_packages", ("published_by",)),
+    ("projects", ("archived_by",)),
+    ("known_editors", ("suspended_by",)),
+    ("editor_report_tokens", ("created_by", "revoked_by")),
+    ("user_profiles", ("updated_by",)),
+    ("machine_setting_requests", ("requested_by",)),
+)
+
+
+def pseudonymise_subject(
+    conn: sqlite3.Connection, username: str, machines: Iterable[str] = (),
+    *, keep_actor: bool = False,
+) -> dict[str, int]:
+    """Replace a deleted person, and their computers' names, on every record
+    the studio keeps (LG-3, decision D2). Returns table -> rows rewritten.
+
+    Exact columns take the stand-in outright. A `subject` is a key, so only
+    its structured positions change, exactly: `editor`, `editor/...`, the
+    machine in `editor/machine`, and a bare machine name on a row already tied
+    to the person. Audit detail JSON changes by key (editor, username,
+    machine, actor, ...). Prose (alert detail, notice body and fix, other JSON
+    strings) is rewritten, case-sensitively and name by name, ONLY on a row
+    a structured position ties to the person (G0 review round, 2026-09-25):
+    `alice-b`, `alice.smith` and `alice2` survive the deletion of `alice`,
+    and a user called `test` does not rewrite "Send a test email".
+
+    A machine name is rewritten only when no OTHER person has a computer of
+    that name: two editors' `DESKTOP` are one string, and rewriting the
+    survivor's records would be the wrong person's history lost.
+
+    `notices` is UNIQUE(kind, subject): a rewrite that collides with a row
+    already carrying the stand-in keeps the newer and deletes the older
+    (notices are transient; the newer one is what is still true).
+
+    `keep_actor`: an administrator's name stays on the audit rows for actions
+    they took until the 180-day audit prune (safety M5), so the security
+    trail is intact; anyone else's actor is replaced like the rest."""
+    user = str(username or "").strip().lower()
+    if not user:
+        return {}
+    stand_in = pseudonym(conn, user)
+    shared = {
+        str(r["machine"]) for r in conn.execute(
+            "SELECT DISTINCT machine FROM machines WHERE editor_username <> ?", (user,))}
+    shared |= {
+        str(r["machine"]) for r in conn.execute(
+            "SELECT DISTINCT machine FROM machine_state WHERE editor_username <> ?", (user,))}
+    own_machines = sorted(
+        {str(m).strip() for m in machines if str(m).strip()} - shared,
+        key=len, reverse=True)
+    machine_stand_ins = {m: machine_pseudonym(conn, m) for m in own_machines}
+    swaps: list[tuple[re.Pattern[str], str]] = [
+        (_word_re(m), machine_stand_ins[m]) for m in own_machines]
+    # Longest names first, so `alice-laptop` is replaced as the machine before
+    # `alice` could split it.
+    swaps.append((_word_re(user), stand_in))
+    needles = [user, *own_machines]
+    counts: dict[str, int] = {}
+    for table, subject_col, json_col, prose_cols in _PSEUDONYM_TEXT_COLUMNS:
+        text_cols = [subject_col, *([json_col] if json_col else []), *prose_cols]
+        select_cols = [*text_cols, *(["actor"] if table == "fleet_audit" else [])]
+        # A candidate filter only (instr over lower() over-selects on
+        # purpose); what is rewritten is decided per row below.
+        where = " OR ".join(
+            f"instr(lower(COALESCE({c}, '')), lower(?)) > 0"
+            for c in text_cols for _ in needles)
+        params: list[Any] = [n for _c in text_cols for n in needles]
+        if table == "fleet_audit":
+            where += " OR actor = ?"
+            params.append(user)
+        try:
+            rows = conn.execute(
+                f"SELECT id, {', '.join(select_cols)} FROM {table} WHERE {where}",
+                params).fetchall()
+        except sqlite3.OperationalError as exc:
+            if _schema_predates(exc):
+                continue
+            raise
+        changed = 0
+        for row in rows:
+            subject = row[subject_col]
+            parsed: Any = None
+            if json_col and row[json_col]:
+                try:
+                    parsed = json.loads(row[json_col])
+                except (TypeError, ValueError):
+                    parsed = None
+            # TIED: a structured position names this person. Only then is
+            # prose touched, and only then may a bare machine subject be
+            # theirs. An admin's own actions keep their name (keep_actor), so
+            # the actor alone does not tie the row for them.
+            tied = ((isinstance(subject, str) and subject.split("/")[0] == user)
+                    or (parsed is not None and _json_names(parsed, user))
+                    or (table == "fleet_audit" and not keep_actor
+                        and row["actor"] == user))
+            new = {subject_col: _rewrite_subject(
+                subject, user, stand_in, machine_stand_ins, bare_machine=tied)}
+            if json_col:
+                if parsed is not None:
+                    rewritten = _rewrite_json(
+                        parsed, user, stand_in, machine_stand_ins,
+                        swaps if tied else [])
+                    new[json_col] = (row[json_col] if rewritten == parsed
+                                     else json.dumps(rewritten, sort_keys=True))
+                else:
+                    new[json_col] = (_rewrite_text(row[json_col], swaps) if tied
+                                     else row[json_col])
+            for c in prose_cols:
+                new[c] = _rewrite_text(row[c], swaps) if tied else row[c]
+            if all(new[c] == row[c] for c in text_cols):
+                continue
+            if table == "notices" and new[subject_col] != row[subject_col]:
+                clash = conn.execute(
+                    "SELECT id, last_seen FROM notices WHERE kind ="
+                    " (SELECT kind FROM notices WHERE id=?) AND subject=? AND id<>?",
+                    (row["id"], new[subject_col], row["id"])).fetchone()
+                if clash is not None:
+                    mine = conn.execute("SELECT last_seen FROM notices WHERE id=?",
+                                        (row["id"],)).fetchone()
+                    if str(clash["last_seen"] or "") >= str(mine["last_seen"] or ""):
+                        conn.execute("DELETE FROM notices WHERE id=?", (row["id"],))
+                        changed += 1
+                        continue
+                    conn.execute("DELETE FROM notices WHERE id=?", (clash["id"],))
+            sets = ", ".join(f"{c}=?" for c in text_cols)
+            conn.execute(f"UPDATE {table} SET {sets} WHERE id=?",
+                         (*[new[c] for c in text_cols], row["id"]))
+            changed += 1
+        counts[table] = changed
+    if not keep_actor:
+        counts["fleet_audit.actor"] = int(conn.execute(
+            "UPDATE fleet_audit SET actor=? WHERE actor=?", (stand_in, user)).rowcount or 0)
+    for table, columns in _PSEUDONYM_EXACT_COLUMNS:
+        n = 0
+        for column in columns:
+            try:
+                n += int(conn.execute(
+                    f"UPDATE {table} SET {column}=? WHERE {column}=?",
+                    (stand_in, user)).rowcount or 0)
+            except sqlite3.IntegrityError:
+                # A primary key that includes the column cannot take the
+                # stand-in twice; none of the listed columns is in one today,
+                # and a collision must not undo the rest of the delete.
+                log.warning("pseudonymise: %s.%s collided, left as is", table, column)
+            except sqlite3.OperationalError as exc:
+                if not _schema_predates(exc):
+                    raise
+        counts[table] = counts.get(table, 0) + n
+    # The job a machine of theirs claimed, or was aimed at, names the machine.
+    # Only a name no other person uses (the `shared` rule above).
+    for m in own_machines:
+        m_stand_in = machine_pseudonym(conn, m)
+        n = int(conn.execute(
+            "UPDATE jobs SET claimed_machine=? WHERE claimed_machine=? AND claimed_by=?",
+            (m_stand_in, m, stand_in)).rowcount or 0)
+        n += int(conn.execute(
+            "UPDATE jobs SET target_machine=? WHERE target_machine=?",
+            (m_stand_in, m)).rowcount or 0)
+        counts["jobs"] = counts.get("jobs", 0) + n
+    return counts
+
+
+def delete_revoked_report_tokens(conn: sqlite3.Connection, editor: str) -> int:
+    """LG-3 (safety L6): the deleted person's REVOKED report tokens go, in a
+    step AFTER delete_user_everywhere has revoked them. The revocation itself
+    is not moved: a token row that is missing is already refused
+    (verify_editor_report_token), so deleting a revoked one changes nothing
+    about who can report. A live token is never deleted here."""
+    return int(conn.execute(
+        "DELETE FROM editor_report_tokens WHERE editor_username=? AND revoked_at IS NOT NULL",
+        (str(editor or "").strip().lower(),)).rowcount or 0)
+
+
+# LG-3: revoked credentials are deleted this long after revocation (the
+# PRIVACY §8 wording says 180 days; the audit ledger's window, on purpose).
+REVOKED_TOKEN_MAX_AGE_DAYS = 180
 
 
 def editor_reported_resolve_project(
@@ -9141,6 +10186,14 @@ def prune(conn: sqlite3.Connection, now: str, pin: bool = False,
     # is still answerable, bounded so /data cannot grow without limit.
     conn.execute(
         "DELETE FROM fleet_audit WHERE at < ?", (cutoff(days=AUDIT_MAX_AGE_DAYS),),
+    )
+    # LG-3 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.3): a revoked report token is
+    # deleted REVOKED_TOKEN_MAX_AGE_DAYS after its revocation, as PRIVACY §8
+    # says. A live token is never touched (revoked_at IS NULL), and a missing
+    # row is already refused at verify time, so this changes nobody's access.
+    conn.execute(
+        "DELETE FROM editor_report_tokens WHERE revoked_at IS NOT NULL AND revoked_at < ?",
+        (cutoff(days=REVOKED_TOKEN_MAX_AGE_DAYS),),
     )
     # The alert ledger (v38, SYS-8). Shorter than the audit's 180 days because
     # nothing reads it past "did we already say this" and the last few weekly
@@ -10002,7 +11055,7 @@ def _original_manifest_capped(
 
 
 def fetch_sync_backlog(
-    conn: sqlite3.Connection, editor: str | None = None, files_per_group: int = 50
+    conn: sqlite3.Connection, editor: str | None = None, files_per_group: int = 50,
 ) -> list[dict[str, Any]]:
     """File-level lane A/B backlog per (editor, machine, project): what the
     machine still needs from the NAS (proxies, lane B down) and what it
@@ -10017,7 +11070,20 @@ def fetch_sync_backlog(
     report's manifest (<= ~5 min), and files currently mid-transfer (at most
     rclone's --transfers per lane) still count as queued until the next
     manifest refresh. `files_per_group` caps the per-group name list only;
-    n_files/bytes are full totals."""
+    n_files/bytes are full totals.
+
+    LG-1 (2026-09-25, G0 review round): a machine that withholds its file
+    list has no manifest, so the query above cannot see it - and a machine
+    ABSENT from this list is what "Safe to close: nothing of yours is waiting"
+    is built on (ui.safe_to_close), over originals that may exist on that
+    laptop only: the logic-sync-truth-2 shape again. So it is ALWAYS given one
+    row per (machine, ticked active project), shaped as the uncertain upload
+    row every reader already handles (lane a, up, original, 0 files, 0 bytes,
+    `uncertain`), plus `not_reported: True` for a view that words it. The
+    first build of this made the row opt-in with n_files None; the default
+    was the unsafe sentence and the opt-in raised TypeError in
+    build_transfers_view's `n_files > 0`. Wired machines are left out on the
+    rule above."""
     # The selections join is per COMPUTER since v24: this machine's own plan,
     # or the unassigned bucket when it has none of its own (the SQL spelling
     # of selections_for_machine). Before that, one person's laptop was told
@@ -10146,7 +11212,42 @@ def fetch_sync_backlog(
                 # when n_files is 0, the pre-fix behaviour).
                 "uncertain": bool(direction == "up" and up_uncertain),
             })
+    seen = {(r["editor"], r["machine"], r["slug"]) for r in out}
+    out.extend(r for r in _backlog_not_reported(conn, editor)
+               if (r["editor"], r["machine"], r["slug"]) not in seen)
     return out
+
+
+def _backlog_not_reported(
+    conn: sqlite3.Connection, editor: str | None,
+) -> list[dict[str, Any]]:
+    """The "not reported" rows fetch_sync_backlog always adds (LG-1): one per
+    ticked active project of each machine withholding `local_manifest`. The
+    upload it may owe is unknown, so the row is the `uncertain` zero-file
+    upload row (never "nothing owed"); `not_reported` says why."""
+    opted = machines_withholding(conn, "local_manifest")
+    if not opted:
+        return []
+    wired = base_machines(conn)
+    plans = fetch_machine_selections(conn, for_enforce=True)
+    labels = {r["slug"]: r["label"] for r in conn.execute(
+        "SELECT slug, label FROM projects WHERE active=1")}
+    rows: list[dict[str, Any]] = []
+    for slug, pairs in sorted(plans.items()):
+        if slug not in labels:
+            continue
+        for pair in pairs:
+            if pair not in opted or pair in wired:
+                continue
+            if editor is not None and pair[0] != editor:
+                continue
+            rows.append({
+                "editor": pair[0], "machine": pair[1], "slug": slug,
+                "label": labels[slug], "lane": "a", "direction": "up", "kind": "original",
+                "n_files": 0, "bytes": 0, "files": [], "truncated": False,
+                "manifest_truncated": False, "uncertain": True, "not_reported": True,
+            })
+    return rows
 
 
 def fetch_missing(
@@ -10205,6 +11306,33 @@ def configured_stale_bound(settings: Any | None = None) -> float:
     return max(COLLECTOR_STALE_SECONDS, 2 * min(cadences))
 
 
+def kind_start_gaps(conn: sqlite3.Connection, limit: int = 200) -> dict[str, float]:
+    """kind -> seconds between its two most recent starts, for every kind that
+    has started at least twice in the newest `limit` poll_runs rows: the
+    collector's OBSERVED cadence per kind. Factored out of
+    collector_stale_bound (LG-17, 2026-09-25) so the per-kind "overdue" test
+    reuses the same observation instead of inventing a second one. A kind
+    seen once, or with a non-positive or unparseable gap, is absent."""
+    starts: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT kind, started_at FROM poll_runs ORDER BY id DESC LIMIT ?", (int(limit),)
+    ):
+        seen = starts.setdefault(str(row["kind"]), [])
+        if len(seen) < 2 and row["started_at"]:
+            seen.append(str(row["started_at"]))
+    gaps: dict[str, float] = {}
+    for kind, pair in starts.items():
+        if len(pair) < 2:
+            continue
+        try:
+            gap = age_seconds(pair[1], pair[0])
+        except (ValueError, TypeError):
+            continue
+        if gap > 0:
+            gaps[kind] = gap
+    return gaps
+
+
 def collector_stale_bound(
     conn: sqlite3.Connection, floor_seconds: float = COLLECTOR_STALE_SECONDS,
     settings: Any | None = None,
@@ -10230,24 +11358,8 @@ def collector_stale_bound(
     repeat yet keeps the floor.
     """
     floor = float(floor_seconds)
-    gaps: dict[str, list[str]] = {}
-    for row in conn.execute(
-        "SELECT kind, started_at FROM poll_runs ORDER BY id DESC LIMIT 200"
-    ):
-        seen = gaps.setdefault(str(row["kind"]), [])
-        if len(seen) < 2 and row["started_at"]:
-            seen.append(str(row["started_at"]))
-    shortest: float | None = None
-    for starts in gaps.values():
-        if len(starts) < 2:
-            continue
-        try:
-            gap = age_seconds(starts[1], starts[0])
-        except (ValueError, TypeError):
-            continue
-        if gap <= 0:
-            continue
-        shortest = gap if shortest is None else min(shortest, gap)
+    observed = kind_start_gaps(conn)
+    shortest: float | None = min(observed.values()) if observed else None
     if shortest is None:
         # regression-5 (2026-09-18): NO REPEAT YET IS NOT 180 SECONDS. The
         # observed rhythm needs a kind to have started twice, and until then

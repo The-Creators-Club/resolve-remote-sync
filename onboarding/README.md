@@ -67,6 +67,11 @@ theme.py) and invokes `installer/windows_bootstrap.ps1` (or
    list, i.e. the person) no longer overrides it. A real NAS mapping on the
    tree drive is protected by the cleanup's and the bootstrap's own
    is-it-ours checks, not by the account's role.
+   **A plain-http address on the public internet is refused** here and
+   again before the password is sent (LG-4, 2026-09-25,
+   `steps.dashboard_url_problem`, the companion's own
+   `transport.classify`); LAN, tailnet and loopback http pass with an
+   amber note. The wizard never follows a redirect.
 3. **Tailscale** *(editor only)* — checks whether Tailscale is installed;
    offers a winget install (Windows) or the download page. "Check
    connection" runs `tailscale status` parsing (on macOS falling back to
@@ -83,6 +88,13 @@ theme.py) and invokes `installer/windows_bootstrap.ps1` (or
    per-editor `cce1.` token, the install page asks for one and writes it as
    `config.toml` `report_token`; left blank, both finish pages say NOT READY
    (logic-onboarding-2).
+4b. **What this computer reports** (LG-1, 2026-09-25) — the four
+   reporting switches (`resolve_project`, `local_manifest`, `media_tree`,
+   `input_idle`) with what each costs, seeded from this computer's
+   `config.toml` on a re-run and written as `report_*` keys at install. A
+   row the site has switched off (`/api/v1/site` `telemetry`) is greyed
+   out as "Turned off for everyone by your administrator".
+   `docs/legal/TELEMETRY.md` "What can be turned off" is the same text.
 5. **Install** — first the **clean-slate phase**. Windows: kills
    companion/syncthing processes, removes all four historical autostart
    Run values, the `CCSync-SubstP` task, old exe copies + `.old`/`.new`
@@ -108,7 +120,10 @@ theme.py) and invokes `installer/windows_bootstrap.ps1` (or
    buttons; base: success + dashboard link. On macOS a failed Resolve
    Mapped Mount write ("Resolve was running", "never launched", …) is
    surfaced here as a warning via the bootstrap's
-   `RESOLVE-MAPPING-STATUS:` marker, not buried in the log.
+   `RESOLVE-MAPPING-STATUS:` marker, not buried in the log. Both finish
+   pages carry **OPEN-SOURCE LICENCES** (LG-12), which shows the bundled
+   `THIRD_PARTY_LICENSES.txt` (the wizard's own, which includes the
+   companion it installs).
 
 ## Building onboard.exe
 

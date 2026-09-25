@@ -691,6 +691,10 @@ def mount_ytdl(app: FastAPI, settings: Settings) -> tuple[str, str]:
     dashboard already cannot log anyone in without one, so every request would
     arrive with no session at all and the sub-app would 401 by itself.
     """
+    # Before the switch: a delete's stand-in is needed on an OFF site too
+    # (forget_requester, G4 review round 2026-09-25).
+    global _DASHBOARD_DB_PATH
+    _DASHBOARD_DB_PATH = str(settings.db_path or "") or None
     if not feature_enabled(settings):
         # NOTHING IS IMPORTED HERE, deliberately: an off site must not load the
         # downloader's code, so there is no yt-dlp import cost and no pipeline
@@ -866,3 +870,212 @@ def health_snapshot(app: FastAPI) -> dict[str, Any] | None:
     except Exception as e:  # noqa: BLE001 - a diagnostic never raises
         log.debug("ytdl health snapshot failed (%s: %s)", type(e).__name__, e)
         return None
+
+
+# ------------------------------------------------ one person's ytdl records
+# LG-2 / LG-3 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.2-4.3, 2026-09-25): export,
+# "erase history" and the completed delete reach ytdl.db through these three.
+# The SQL is ytdlweb.db's (subject_rows / forget_history / forget_requester);
+# this side only finds the file.
+#
+# THE CONTRACT IS THE PLAN'S (§7.3), bare values, and a failure RAISES (G4
+# review round, 2026-09-25, items 1-3). The first build answered a
+# {"status", "detail", ...} envelope and never raised; the callers had been
+# built to the plan, so the export filed "status" as a table, hit a
+# ValueError and dropped every YouTube row, the erase counted nothing, and a
+# delete that rewrote nothing reported success. Now:
+#   subject_rows(u)     -> {table: [row dict]}
+#   forget_history(u)   -> {table: rows deleted}
+#   forget_requester(u) -> {"status": "ok"|"absent", "pseudonym", "counts"}
+# A store that does not exist (never used here, or no downloader installed)
+# answers {} / "absent": it holds nothing, and that is the true answer. A
+# store that exists and could not be opened or read raises YtdlStoreError,
+# which every caller already turns into "could not be read" / not_done / a
+# delete warning.
+#
+# NOT gated on the youtube_download switch, on purpose: a site that used the
+# downloader and then switched it off still holds what it recorded, and
+# "switched off" must not read as "holds nothing about you". Importing
+# ytdlweb.db pulls config, claude_cli and ai_backend (stdlib only), never
+# yt-dlp, so the switch's reason for existing is not undone here. A store
+# that was never created is not created by asking (the file must exist).
+
+STORE_OK = "ok"
+STORE_ABSENT = "absent"
+
+# The dashboard database mount_ytdl was handed, so a one-argument
+# forget_requester(username) (how api._forget_elsewhere calls it) can derive
+# the same stand-in the dashboard's own rows got instead of rewriting nothing.
+_DASHBOARD_DB_PATH: str | None = None
+
+
+class YtdlStoreError(RuntimeError):
+    """ytdl.db exists and could not be opened, read or written."""
+
+
+def _ytdl_db_module() -> Any | None:
+    try:
+        try:
+            from ytdlweb import db as ytdl_db  # type: ignore[import-not-found]
+        except ImportError:
+            if "ytdlweb" in sys.modules or not _add_in_repo_ytdl_web():
+                raise
+            from ytdlweb import db as ytdl_db  # type: ignore[import-not-found]
+    except Exception as e:  # noqa: BLE001 - an absent checkout holds nothing
+        log.debug("ytdlweb.db not importable (%s: %s)", type(e).__name__, e)
+        return None
+    needed = ("subject_rows", "forget_history", "forget_requester", "connect",
+              "ensure_schema")
+    # An older ytdl tree on the host (or the mount tests' fake package) has
+    # no subject helpers. Reported as ABSENT, never guessed at.
+    return ytdl_db if all(hasattr(ytdl_db, n) for n in needed) else None
+
+
+def _open_store(db_path: str | Path | None) -> tuple[Any, Any]:
+    """-> (ytdlweb.db module, open connection), or (module-or-None, None) for
+    a store that does not exist. Raises YtdlStoreError for one that does and
+    cannot be opened."""
+    ytdl_db = _ytdl_db_module()
+    if ytdl_db is None:
+        return None, None
+    if db_path is None:
+        cfg = sys.modules.get("ytdlweb.config")
+        db_path = getattr(cfg, "DB_PATH", None)
+    if not db_path or not Path(db_path).is_file():
+        return ytdl_db, None
+    try:
+        con = ytdl_db.connect(db_path)
+    except Exception as e:  # noqa: BLE001
+        log.warning("ytdl.db at %s could not be opened for a subject request "
+                    "(%s: %s)", db_path, type(e).__name__, e)
+        raise YtdlStoreError("the YouTube downloader's records could not be "
+                             f"opened ({type(e).__name__})") from e
+    try:
+        # The mount runs the same call at boot; a store left behind by an
+        # older image must be at this code's shape before its columns are
+        # named. A store NEWER than this code refuses, and that is an error
+        # the caller reports rather than a partial answer.
+        ytdl_db.ensure_schema(con)
+    except Exception as e:  # noqa: BLE001
+        con.close()
+        log.warning("ytdl.db at %s is not at this code's schema (%s: %s)",
+                    db_path, type(e).__name__, e)
+        raise YtdlStoreError("the YouTube downloader's records could not be "
+                             f"opened ({type(e).__name__})") from e
+    return ytdl_db, con
+
+
+def subject_rows(username: str, *, db_path: str | Path | None = None) -> dict[str, Any]:
+    """Everything ytdl.db holds about `username`, for the LG-2 export.
+    -> {table: [row dict]}; {} when there is no store. Raises YtdlStoreError."""
+    ytdl_db, con = _open_store(db_path)
+    if con is None:
+        return {}
+    try:
+        return ytdl_db.subject_rows(con, username)
+    except Exception as e:  # noqa: BLE001
+        log.warning("ytdl subject export failed (%s: %s)", type(e).__name__, e)
+        raise YtdlStoreError("the YouTube downloader's records could not be "
+                             f"read ({type(e).__name__})") from e
+    finally:
+        con.close()
+
+
+def forget_history(username: str, *, db_path: str | Path | None = None) -> dict[str, int]:
+    """LG-3 "erase history": delete the finished YouTube jobs `username`
+    created, with their terms and videos. Keeps the dedupe ledger
+    (`downloads`), attestations, and anything still running.
+    -> {table: rows deleted}; {} when there is no store. Raises YtdlStoreError.
+    """
+    ytdl_db, con = _open_store(db_path)
+    if con is None:
+        return {}
+    try:
+        return ytdl_db.forget_history(con, username)
+    except Exception as e:  # noqa: BLE001
+        log.warning("ytdl history erase failed (%s: %s)", type(e).__name__, e)
+        raise YtdlStoreError("the YouTube downloader's history could not be "
+                             f"erased ({type(e).__name__})") from e
+    finally:
+        con.close()
+
+
+def _dashboard_conn(conn: Any) -> tuple[Any, Any]:
+    """-> (connection to derive stand-ins from, the one opened here or None).
+
+    The stand-in must be db.pseudonym's, salted from the DASHBOARD database
+    (plan §3.1), or one deleted person reads as two."""
+    if conn is not None:
+        return conn, None
+    path = _DASHBOARD_DB_PATH or os.environ.get("DASH_DB_PATH")
+    if not path or not Path(path).is_file():
+        raise YtdlStoreError("no stand-in name for the deleted person: the "
+                             "dashboard database was not found")
+    own = db.connect(path)
+    return own, own
+
+
+def forget_requester(username: str, conn: Any = None, *, pseudonym: str | None = None,
+                     db_path: str | Path | None = None) -> dict[str, Any]:
+    """LG-3 delete: release their live leases and cancel their unfinished
+    jobs, and replace their name with the dashboard's stand-in, in one
+    ytdl.db transaction (ytdlweb.db.forget_requester says why one).
+
+    The stand-in comes from `conn` (the dashboard connection), else an
+    explicit `pseudonym` (computer names are then blanked), else the dashboard
+    database mount_ytdl recorded. With none of them it RAISES: a delete that
+    rewrote nothing must not read as done.
+
+    -> {"status": "ok"|"absent", "pseudonym", "counts"}. Raises YtdlStoreError
+    (or the stand-in's own error) on failure.
+    """
+    ytdl_db, con = _open_store(db_path)
+    if con is None:
+        # Nothing held, so no stand-in is needed and none is minted.
+        return {"status": STORE_ABSENT, "pseudonym": None, "counts": {}}
+    own = None
+    try:
+        machine_stand_in = None
+        try:
+            if pseudonym and conn is None:
+                stand_in = pseudonym
+            else:
+                dash, own = _dashboard_conn(conn)
+                stand_in = pseudonym or db.pseudonym(dash, username)
+                if own is not None:
+                    # A salt minted just now (a delete run before any other
+                    # touched it) must be the one every later call reads.
+                    own.commit()
+
+                def machine_stand_in(machine: str) -> str:
+                    return db.machine_pseudonym(dash, machine)
+        except YtdlStoreError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not derive the stand-in for a ytdl delete (%s: %s)",
+                        type(e).__name__, e)
+            raise YtdlStoreError("the stand-in name for the deleted person could "
+                                 f"not be made ({type(e).__name__})") from e
+        try:
+            counts = ytdl_db.forget_requester(con, username, stand_in, machine_stand_in)
+        except Exception as e:  # noqa: BLE001
+            log.warning("ytdl delete failed (%s: %s)", type(e).__name__, e)
+            raise YtdlStoreError("the YouTube downloader's records could not be "
+                                 f"updated ({type(e).__name__})") from e
+        if own is not None:
+            own.commit()
+    finally:
+        con.close()
+        if own is not None:
+            own.close()
+    # A cancelled or released job is picked up on the worker's next tick;
+    # nudging it is what makes "stopped" true now rather than a poll interval
+    # later. Best-effort: no worker in sys.modules (feature off) ran no job.
+    worker = sys.modules.get("ytdlweb.worker")
+    nudge = getattr(worker, "nudge", None)
+    if callable(nudge) and (counts.get("leases_released") or counts.get("jobs_stopping")):
+        try:
+            nudge()
+        except Exception:  # noqa: BLE001
+            log.debug("ytdl worker nudge after a delete failed", exc_info=True)
+    return {"status": STORE_OK, "pseudonym": stand_in, "counts": counts}

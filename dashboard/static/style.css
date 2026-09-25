@@ -598,6 +598,14 @@ details.pkg-other > summary { cursor: pointer; }
 .chip.green { color: var(--green); border-color: var(--green); }
 .chip.amber { color: var(--amber); border-color: var(--amber); }
 .chip.red { color: var(--red); border-color: var(--red); }
+/* LG-1 / LG-5 (docs/LEGAL_GAP_FEATURES_PLAN.md, 2026-09-25): a section a
+   computer does not report is somebody's choice, not a fault, so its chip is
+   GREY and dashed like an unreported lane, never amber or red. */
+.chip.grey { color: var(--muted); border-style: dashed; border-color: #4a4a55; }
+/* The licence line under a computer's version: green = the licence this
+   dashboard carries, amber = an older one, muted = not reported. */
+.eula-line .green { color: var(--green); }
+.eula-line .amber { color: var(--amber); }
 
 .btn {
   background: none;

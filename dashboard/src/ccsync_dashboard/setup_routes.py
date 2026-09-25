@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -306,7 +307,28 @@ def api_admin_site_get(request: Request, conn: sqlite3.Connection = Depends(get_
     _require_admin(request)
     manifest = site_store.resolved_manifest(conn, request.app.state.settings)
     manifest["auto_derived"] = sorted(site_store.AUTO_DERIVED_KEYS)
+    # LG-4 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.4, 2026-09-25): how many
+    # computers last reached this dashboard by each route, for the Settings
+    # page's one INFORMATIONAL line about plain http. Counts only, admin
+    # only, and on this route rather than the open manifest: which computers
+    # are on which network is fleet inventory.
+    manifest["report_via_counts"] = report_via_counts(conn)
     return manifest
+
+
+def report_via_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """{"https", "http_local", "http_public"} -> number of computers whose
+    last report arrived that way (db.report_via_map). A computer not seen
+    since v59 is in none of them: "not seen" is not "https". Never raises;
+    an unreadable table is all zeros, which the page renders as no line."""
+    counts = {via: 0 for via in db.REPORT_VIA_VALUES}
+    try:
+        for via in db.report_via_map(conn).values():
+            if via in counts:
+                counts[via] += 1
+    except sqlite3.Error:
+        log.warning("could not read report_via for the Settings page", exc_info=True)
+    return counts
 
 
 class SiteSettingsIn(BaseModel):
@@ -330,13 +352,19 @@ def api_admin_site_put(
     # import does below. Computed BEFORE set_many writes, from the same
     # validate-then-diff path the import preview uses (site_store.py), so a
     # save that fails validation leaves no half-taken snapshot.
-    tree_raw = {k: v for k, v in payload.values.items() if k in site_store.TREE_KEYS}
+    # LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.1, 2026-09-25): a telemetry
+    # switch is snapshotted the same way. Switching one off deletes data on
+    # every computer's record, so the history names who did it and when, and
+    # [ UNDO LAST CHANGE ] can switch it back on (which restores reporting
+    # from the next report, never the data already deleted).
+    tree_raw = {k: v for k, v in payload.values.items()
+                if k in site_store.TREE_KEYS or k in site_store.TELEMETRY_KEYS}
     tree_changes: list[dict[str, str]] = []
     try:
         if tree_raw:
             tree_normalized = site_store.validate_many(tree_raw)
             tree_changes = site_store.diff_against_current(conn, settings, tree_normalized)
-        site_store.set_many(conn, payload.values, updated_by=admin)
+        site_store.set_many(conn, payload.values, updated_by=admin, settings=settings)
     except site_store.SiteValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     if tree_changes:
@@ -393,11 +421,12 @@ def api_admin_site_import(
     changes = site_store.diff_against_current(conn, settings, normalized)
 
     if dry_run:
-        return {"changes": site_store.mask_changes(changes), "count": len(changes)}
+        return {"changes": site_store.mask_changes(changes), "count": len(changes),
+                "telemetry_off": site_store.telemetry_switching_off(changes)}
 
     before = {c["key"]: c["from"] for c in changes}
     after = {c["key"]: c["to"] for c in changes}
-    site_store.set_many(conn, normalized, updated_by=admin)
+    site_store.set_many(conn, normalized, updated_by=admin, settings=settings)
     if changes:
         # A re-paste of the running config changes nothing, so it leaves no
         # history entry -- [ UNDO LAST CHANGE ] never offers a no-op.
@@ -420,18 +449,46 @@ def api_admin_site_history(request: Request, conn: sqlite3.Connection = Depends(
     storage (needed for a correct undo, see db.record_site_change) and are
     not put on the wire here."""
     _require_admin(request)
+    settings = request.app.state.settings
     entries = db.site_history(conn)
-    return {
-        "entries": [
-            {
-                "at": e.get("at"),
-                "actor": e.get("actor"),
-                "action": e.get("action"),
-                "count": len(e.get("before") or {}),
-            }
-            for e in entries
-        ],
-    }
+    out = [
+        {
+            "at": e.get("at"),
+            "actor": e.get("actor"),
+            "action": e.get("action"),
+            "count": len(e.get("before") or {}),
+        }
+        for e in entries
+    ]
+    if out:
+        # LG-1 review round (2026-09-25): an undo reaches set_many ->
+        # apply_site_optouts like a Save, so undoing a change that switched
+        # reporting back ON deletes the fleet's data again, and the undo
+        # confirm named no key. The newest entry (the only one an undo can
+        # replay) carries the categories its undo would switch OFF, from the
+        # same diff the undo route makes. Category names only, never values.
+        # A newer change moves entries[0], and the undo's expected_at check
+        # refuses a confirm made against the old one. Absent when empty, so
+        # an ordinary entry keeps test_site_history's exact key set.
+        off = _undo_telemetry_off(conn, settings, entries[0])
+        if off:
+            out[0]["telemetry_off"] = off
+    return {"entries": out}
+
+
+def _undo_telemetry_off(conn: sqlite3.Connection, settings: Any, entry: dict) -> list[str]:
+    restore = {str(k): str(v) for k, v in (entry.get("before") or {}).items()
+               if str(k) in site_store.TELEMETRY_KEYS}
+    if not restore:
+        return []
+    try:
+        normalized = site_store.validate_many(restore)
+        changes = site_store.diff_against_current(conn, settings, normalized)
+    except (site_store.SiteValidationError, sqlite3.Error):
+        # The undo itself would refuse (422) or fail the same way; nothing
+        # to warn about that it could delete.
+        return []
+    return site_store.telemetry_switching_off(changes)
 
 
 class SiteUndoIn(BaseModel):
@@ -479,7 +536,7 @@ def api_admin_site_undo_last_change(
     except site_store.SiteValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     changes = site_store.diff_against_current(conn, settings, normalized)
-    site_store.set_many(conn, normalized, updated_by=admin)
+    site_store.set_many(conn, normalized, updated_by=admin, settings=settings)
     if changes:
         before = {c["key"]: c["from"] for c in changes}
         after = {c["key"]: c["to"] for c in changes}

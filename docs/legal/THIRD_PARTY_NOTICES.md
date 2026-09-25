@@ -38,15 +38,8 @@ through.
 | `bgutil-ytdlp-pot-provider` | 1.3.1 | **GNU General Public License v3 (GPLv3)** (GPL) | dashboard | metadata |
 | `certifi` | 2026.7.22 | **Mozilla Public License 2.0 (MPL 2.0)** (MPL) | dashboard, music/web, broll/web, dashboard-container | metadata+text |
 | `paramiko` | 5.0.0 | **LGPL-2.1** (LGPL) | dashboard, dashboard-container | metadata+text |
-| `psycopg2-binary` | 2.9.13 | **GNU Library or Lesser General Public License (LGPL)** (LGPL) | dashboard | metadata+text |
+| `psycopg2-binary` | 2.9.13 | **GNU Library or Lesser General Public License (LGPL)** (LGPL) | companion, dashboard | metadata+text |
 | `psycopg2-binary` | 2.9.12 | **GNU Library or Lesser General Public License (LGPL)** (LGPL) | dashboard-container | metadata |
-
-## Scan warnings
-
-These components were NOT scanned; their packages are missing from
-every table below.
-
-- ytdl/web: no venv at E:\Projects\Editing\ccsync\ytdl\web\.venv: SKIPPED, its packages are not in this inventory
 
 ## Python dependencies by component
 
@@ -57,13 +50,13 @@ installs `dashboard/deploy/requirements.txt`.
 
 ### companion
 
-editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv: `E:\Projects\Editing\ccsync\companion\.venv`, 21 package(s).
+editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv: `companion/.venv`, 22 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
 | `asn1crypto` | 1.5.1 | MIT License | https://github.com/wbond/asn1crypto |
 | `ccsync-companion` | 0.9.71 | UNKNOWN | UNKNOWN |
-| `ccsync-companion` | 0.9.71 | UNKNOWN | UNKNOWN |
+| `ccsync-companion` | 0.9.80 | UNKNOWN | UNKNOWN |
 | `colorama` | 0.4.6 | BSD License | https://github.com/tartley/colorama |
 | `flatbuffers` | 25.12.19 | Apache Software License | https://google.github.io/flatbuffers/ |
 | `iniconfig` | 2.3.0 | MIT | https://github.com/pytest-dev/iniconfig |
@@ -74,6 +67,7 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv:
 | `pillow` | 12.3.0 | MIT-CMU | https://python-pillow.github.io |
 | `pluggy` | 1.6.0 | MIT License | UNKNOWN |
 | `protobuf` | 7.35.1 | 3-Clause BSD License | https://developers.google.com/protocol-buffers/ |
+| `psycopg2-binary` | 2.9.13 | GNU Library or Lesser General Public License (LGPL) | https://psycopg.org/ |
 | `Pygments` | 2.21.0 | BSD-2-Clause | https://pygments.org |
 | `pytest` | 9.1.1 | MIT | https://docs.pytest.org/en/latest/ |
 | `python-dateutil` | 2.9.0.post0 | Apache Software License; BSD License | https://github.com/dateutil/dateutil |
@@ -85,7 +79,7 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv:
 
 ### dashboard
 
-FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Venv: `E:\Projects\Editing\ccsync\dashboard\.venv`, 59 package(s).
+FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requirements.txt, not this venv. Venv: `dashboard/.venv`, 59 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -151,7 +145,7 @@ FastAPI fleet dashboard; the deployed container installs dashboard/deploy/requir
 
 ### music/web
 
-music search UI mounted at /music; deliberately no torch. Venv: `E:\Projects\Editing\ccsync\music\web\.venv`, 32 package(s).
+music search UI mounted at /music; deliberately no torch. Venv: `music/web/.venv`, 32 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -190,7 +184,7 @@ music search UI mounted at /music; deliberately no torch. Venv: `E:\Projects\Edi
 
 ### broll/web
 
-b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\Projects\Editing\ccsync\broll\web\.venv`, 31 package(s).
+b-roll search UI mounted at /broll. Venv: `broll/web/.venv`, 31 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
@@ -245,7 +239,7 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `colorama` | 0.4.6 | BSD License | a venv's 0.4.6 |
 | `cryptography` | 50.0.0 | Apache-2.0 OR BSD-3-Clause | a venv's 50.0.0 |
 | `distro` | 1.9.0 | Apache Software License | a venv's 1.9.0 |
-| `docstring-parser` | 0.18.0 | UNKNOWN | not installed anywhere on this machine |
+| `docstring-parser` | 0.18.0 | MIT License | a venv's 0.18.0 |
 | `fastapi` | 0.141.1 | MIT | a venv's 0.141.1 |
 | `flatbuffers` | 25.12.19 | Apache Software License | a venv's 25.12.19 |
 | `h11` | 0.16.0 | MIT License | a venv's 0.16.0 |
@@ -266,7 +260,7 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `psycopg2-binary` | 2.9.12 | GNU Library or Lesser General Public License (LGPL) | a venv's 2.9.13 |
 | `pycparser` | 3.0 | BSD-3-Clause | a venv's 3.0 |
 | `pydantic` | 2.13.4 | MIT | a venv's 2.13.4 |
-| `pydantic-core` | 2.46.4 | UNKNOWN | not installed anywhere on this machine |
+| `pydantic-core` | 2.46.4 | MIT | a venv's 2.46.4 |
 | `pyjwt` | 2.13.0 | MIT | a venv's 2.13.0 |
 | `pynacl` | 1.6.2 | Apache Software License | a venv's 1.6.2 |
 | `pypinyin` | 0.55.0 | MIT License | a venv's 0.55.0 |
@@ -278,7 +272,7 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `sniffio` | 1.3.1 | Apache Software License; MIT License | a venv's 1.3.1 |
 | `sspilib` | 0.5.0 | MIT | a venv's 0.5.0 |
 | `starlette` | 1.6.0 | BSD-3-Clause | a venv's 1.6.0 |
-| `typing-extensions` | 4.16.0 | UNKNOWN | not installed anywhere on this machine |
+| `typing-extensions` | 4.16.0 | PSF-2.0 | a venv's 4.16.0 |
 | `typing-inspection` | 0.4.4 | MIT | a venv's 0.4.4 |
 | `urllib3` | 2.7.0 | MIT | a venv's 2.7.0 |
 | `uvicorn` | 0.52.3 | BSD-3-Clause | a venv's 0.52.3 |
@@ -287,7 +281,7 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 
 ## All pip dependencies (merged)
 
-82 distinct (package, version) pair(s) across every scanned venv.
+75 distinct (package, version) pair(s) across every scanned venv.
 
 | Package | Version | Licence | Components | Licence text on disk |
 |---|---|---|---|---|
@@ -299,7 +293,8 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `asn1crypto` | 1.5.1 | MIT License | companion | yes |
 | `bcrypt` | 5.0.0 | Apache Software License | dashboard, dashboard-container | yes |
 | `bgutil-ytdlp-pot-provider` | 1.3.1 | GNU General Public License v3 (GPLv3) | dashboard | no |
-| `ccsync-companion` | 0.9.71 | UNKNOWN | companion, companion | no |
+| `ccsync-companion` | 0.9.71 | UNKNOWN | companion | no |
+| `ccsync-companion` | 0.9.80 | UNKNOWN | companion | no |
 | `ccsync-dashboard` | 0.7.43 | UNKNOWN | dashboard, dashboard | no |
 | `certifi` | 2026.7.22 | Mozilla Public License 2.0 (MPL 2.0) | dashboard, music/web, broll/web, dashboard-container | yes |
 | `cffi` | 2.1.1 | MIT-0 | dashboard, dashboard-container | yes |
@@ -308,8 +303,7 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `colorama` | 0.4.6 | BSD License | companion, dashboard, music/web, broll/web, dashboard-container | yes |
 | `cryptography` | 50.0.0 | Apache-2.0 OR BSD-3-Clause | dashboard, dashboard-container | yes |
 | `distro` | 1.9.0 | Apache Software License | dashboard, dashboard-container | yes |
-| `docstring-parser` | 0.18.0 | UNKNOWN | dashboard-container | no |
-| `docstring_parser` | 0.18.0 | MIT License | dashboard | yes |
+| `docstring_parser` | 0.18.0 | MIT License | dashboard, dashboard-container | yes |
 | `fastapi` | 0.141.1 | MIT | dashboard, music/web, broll/web, dashboard-container | yes |
 | `flatbuffers` | 25.12.19 | Apache Software License | companion, dashboard, music/web, dashboard-container | no |
 | `h11` | 0.16.0 | MIT License | dashboard, music/web, broll/web, dashboard-container | yes |
@@ -320,11 +314,9 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `iniconfig` | 2.3.0 | MIT | companion, dashboard, music/web, broll/web | yes |
 | `invoke` | 3.0.3 | BSD-2-Clause | dashboard, dashboard-container | yes |
 | `jieba` | 0.42.1 | MIT License | dashboard, broll/web, dashboard-container | no |
-| `Jinja2` | 3.1.6 | BSD License | dashboard | yes |
-| `jinja2` | 3.1.6 | BSD License | dashboard-container | no |
+| `Jinja2` | 3.1.6 | BSD License | dashboard, dashboard-container | yes |
 | `jiter` | 0.16.0 | MIT | dashboard, dashboard-container | yes |
-| `MarkupSafe` | 3.0.3 | BSD-3-Clause | dashboard | yes |
-| `markupsafe` | 3.0.3 | BSD-3-Clause | dashboard-container | no |
+| `MarkupSafe` | 3.0.3 | BSD-3-Clause | dashboard, dashboard-container | yes |
 | `numpy` | 2.5.2 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | companion, dashboard, music/web, broll/web, dashboard-container | yes |
 | `onnxruntime` | 1.29.0 | MIT License | companion | yes |
 | `onnxruntime` | 1.28.0 | MIT License | dashboard, music/web, dashboard-container | yes |
@@ -335,17 +327,14 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `pillow` | 12.3.0 | MIT-CMU | companion | yes |
 | `pluggy` | 1.6.0 | MIT License | companion, dashboard, music/web, broll/web | yes |
 | `protobuf` | 7.35.1 | 3-Clause BSD License | companion, dashboard, music/web, dashboard-container | yes |
-| `psycopg2-binary` | 2.9.13 | GNU Library or Lesser General Public License (LGPL) | dashboard | yes |
+| `psycopg2-binary` | 2.9.13 | GNU Library or Lesser General Public License (LGPL) | companion, dashboard | yes |
 | `psycopg2-binary` | 2.9.12 | GNU Library or Lesser General Public License (LGPL) | dashboard-container | no |
 | `pycparser` | 3.0 | BSD-3-Clause | dashboard, dashboard-container | yes |
 | `pydantic` | 2.13.4 | MIT | dashboard, music/web, broll/web, dashboard-container | yes |
-| `pydantic-core` | 2.46.4 | UNKNOWN | dashboard-container | no |
-| `pydantic_core` | 2.46.4 | MIT | dashboard, music/web, broll/web | yes |
+| `pydantic_core` | 2.46.4 | MIT | dashboard, music/web, broll/web, dashboard-container | yes |
 | `Pygments` | 2.21.0 | BSD-2-Clause | companion, dashboard, music/web, broll/web | yes |
-| `PyJWT` | 2.13.0 | MIT | dashboard | yes |
-| `pyjwt` | 2.13.0 | MIT | dashboard-container | no |
-| `PyNaCl` | 1.6.2 | Apache Software License | dashboard | yes |
-| `pynacl` | 1.6.2 | Apache Software License | dashboard-container | no |
+| `PyJWT` | 2.13.0 | MIT | dashboard, dashboard-container | yes |
+| `PyNaCl` | 1.6.2 | Apache Software License | dashboard, dashboard-container | yes |
 | `pypinyin` | 0.55.0 | MIT License | dashboard, dashboard-container | yes |
 | `pyspnego` | 0.12.1 | MIT | dashboard, dashboard-container | yes |
 | `pytest` | 9.1.1 | MIT | companion, dashboard, music/web, broll/web | yes |
@@ -353,8 +342,7 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `python-dotenv` | 1.2.3 | BSD-3-Clause | music/web, broll/web | yes |
 | `python-multipart` | 0.0.32 | Apache-2.0 | dashboard, music/web, dashboard-container | yes |
 | `PyYAML` | 6.0.3 | MIT License | music/web, broll/web | yes |
-| `RapidFuzz` | 3.14.5 | MIT | dashboard, broll/web | yes |
-| `rapidfuzz` | 3.14.5 | MIT | dashboard-container | no |
+| `RapidFuzz` | 3.14.5 | MIT | dashboard, broll/web, dashboard-container | yes |
 | `requests` | 2.34.2 | Apache Software License | dashboard, dashboard-container | yes |
 | `scramp` | 1.4.17 | MIT No Attribution License (MIT-0) | companion | yes |
 | `six` | 1.17.0 | MIT License | companion | yes |
@@ -362,9 +350,8 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `sniffio` | 1.3.1 | Apache Software License; MIT License | dashboard, dashboard-container | yes |
 | `sspilib` | 0.5.0 | MIT | dashboard, dashboard-container | yes |
 | `starlette` | 1.6.0 | BSD-3-Clause | dashboard, music/web, broll/web, dashboard-container | yes |
-| `typing-extensions` | 4.16.0 | UNKNOWN | dashboard-container | no |
 | `typing-inspection` | 0.4.4 | MIT | dashboard, music/web, broll/web, dashboard-container | yes |
-| `typing_extensions` | 4.16.0 | PSF-2.0 | dashboard, music/web, broll/web | yes |
+| `typing_extensions` | 4.16.0 | PSF-2.0 | dashboard, music/web, broll/web, dashboard-container | yes |
 | `urllib3` | 2.7.0 | MIT | dashboard, dashboard-container | yes |
 | `uvicorn` | 0.52.3 | BSD-3-Clause | dashboard, music/web, broll/web, dashboard-container | yes |
 | `watchdog` | 6.0.0 | Apache Software License | companion | yes |
@@ -373,6 +360,33 @@ what the deployed dashboard image installs -- the artefact a customer receives, 
 | `xxhash` | 4.0.1 | BSD-2-Clause | companion | yes |
 | `yt-dlp` | 2026.8.19 | Unlicense | dashboard, dashboard-container | yes |
 | `zstandard` | 0.25.0 | BSD-3-Clause | companion, dashboard, dashboard-container | yes |
+
+## Binaries the installer fetches
+
+Generated from the pins in the code (LG-13, 2026-09-25): every binary
+CC Sync downloads onto a customer's machine at install or run time, by
+version and the sha256 of the asset as downloaded. A download whose
+bytes do not match is deleted, not installed. The licence of each is in
+the hand-maintained inventory below.
+
+| Component | Version | Platform | Asset | sha256 | Fetched by | Pinned in |
+|---|---|---|---|---|---|---|
+| rclone | `v1.75.0` | Windows x64 | `rclone-v1.75.0-windows-amd64.zip` | `203581f0a7baeae873f2347483a798c79e2eaf5c384a4e9d866aa374f1c89ac0` | the editor installer | `installer/windows_bootstrap.ps1`: `$RcloneVersion`, `$RcloneZipSha256` |
+| Syncthing | `v2.1.3` | Windows x64 | `syncthing-windows-amd64-v2.1.3.zip` | `c0b79cffa6ce5dad5ed41ede86454f3325d13ccac33447a528cb59d65fbc3a21` | the editor installer | `installer/windows_bootstrap.ps1`: `$SyncthingVersion`, `$SyncthingZipSha256` |
+| rclone | `v1.75.0` | macOS arm64 | `rclone-v1.75.0-osx-arm64.zip` | `35e8f2a666ce789b29111db0dd843ddabc0d59c6b609d07bcaae5d1a07cba6f8` | the editor installer | `installer/macos_bootstrap.sh`: `RCLONE_VERSION`, `RCLONE_SHA256_ARM64` |
+| rclone | `v1.75.0` | macOS x64 | `rclone-v1.75.0-osx-amd64.zip` | `19edbb8e5e73096eb66e92a42abbc5c34bfa8981ea3986a53872c7eef85a22f4` | the editor installer | `installer/macos_bootstrap.sh`: `RCLONE_VERSION`, `RCLONE_SHA256_AMD64` |
+| Syncthing | `v2.1.3` | macOS arm64 | `syncthing-macos-arm64-v2.1.3.zip` | `e0f0d8df05bf0118c48c6515214a96bf3a3f11dbd115f56c3c0b52251b3f71aa` | the editor installer | `installer/macos_bootstrap.sh`: `SYNCTHING_VERSION`, `SYNCTHING_SHA256_ARM64` |
+| Syncthing | `v2.1.3` | macOS x64 | `syncthing-macos-amd64-v2.1.3.zip` | `207557c0f708578375be9a286d13078cd709bfccae43d61d004913bb512b10aa` | the editor installer | `installer/macos_bootstrap.sh`: `SYNCTHING_VERSION`, `SYNCTHING_SHA256_AMD64` |
+| ffmpeg | `b6.1.1` | Windows x64 | `ffmpeg-win32-x64.gz` | `8883a3dffbd0a16cf4ef95206ea05283f78908dbfb118f73c83f4951dcc06d77` | the companion, on first use | `companion/src/ccsync_companion/sidecar_tools.py`: `FFMPEG_RELEASE_TAG`, `PINNED_ASSETS` |
+| ffprobe | `b6.1.1` | Windows x64 | `ffprobe-win32-x64.gz` | `f309e6223ad89d2fe54bccd420a7709b66fd27540674e92309578ed491a43c8d` | the companion, on first use | `companion/src/ccsync_companion/sidecar_tools.py`: `FFMPEG_RELEASE_TAG`, `PINNED_ASSETS` |
+| deno | `v2.9.5` | Windows x64 | `deno-x86_64-pc-windows-msvc.zip` | `171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a` | the companion, on first use | `companion/src/ccsync_companion/sidecar_tools.py`: `DENO_RELEASE_TAG`, `PINNED_ASSETS` |
+| ffmpeg | `b6.1.1` | macOS arm64 | `ffmpeg-darwin-arm64.gz` | `8923876afa8db5585022d7860ec7e589af192f441c56793971276d450ed3bbfa` | the companion, on first use | `companion/src/ccsync_companion/sidecar_tools.py`: `FFMPEG_RELEASE_TAG`, `PINNED_ASSETS` |
+| ffprobe | `b6.1.1` | macOS arm64 | `ffprobe-darwin-arm64.gz` | `d986a8ec7b030899fe66a8a288ed809a3543338705a3ce178cfb85869c5d80be` | the companion, on first use | `companion/src/ccsync_companion/sidecar_tools.py`: `FFMPEG_RELEASE_TAG`, `PINNED_ASSETS` |
+| deno | `v2.9.5` | macOS arm64 | `deno-aarch64-apple-darwin.zip` | `b796aadd131f6930560c1ee040cf0d6f53933fbb987464e9ff46bd7ea4830615` | the companion, on first use | `companion/src/ccsync_companion/sidecar_tools.py`: `DENO_RELEASE_TAG`, `PINNED_ASSETS` |
+| ffmpeg | `b6.1.1` | macOS x64 | `ffmpeg-darwin-x64.gz` | `929b375c1182d956c51f7ac25e0b2b0411fb01f6f407aa15c9758efeb4242106` | the companion, on first use | `companion/src/ccsync_companion/sidecar_tools.py`: `FFMPEG_RELEASE_TAG`, `PINNED_ASSETS` |
+| ffprobe | `b6.1.1` | macOS x64 | `ffprobe-darwin-x64.gz` | `d4da574d6e2e197bd259b47d69cf262df9e312af24ad960444f6d806d3d4c186` | the companion, on first use | `companion/src/ccsync_companion/sidecar_tools.py`: `FFMPEG_RELEASE_TAG`, `PINNED_ASSETS` |
+| deno | `v2.9.5` | macOS x64 | `deno-x86_64-apple-darwin.zip` | `c1b8b89a81e91b2a8b3f96def3195d08cfe3a105651da7908d53061f7140510d` | the companion, on first use | `companion/src/ccsync_companion/sidecar_tools.py`: `DENO_RELEASE_TAG`, `PINNED_ASSETS` |
+| ffmpeg (NAS side) | `7.0.2` | Linux x64 (the dashboard container) | `ffmpeg-7.0.2-amd64-static.tar.xz` | `abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67` | the dashboard deploy | `server/install_dashboard_app.py`: `DEFAULT_FFMPEG_URL`, `DEFAULT_FFMPEG_SHA256` |
 
 <!-- BEGIN HAND-MAINTAINED -->
 ## Non-pip components (hand-maintained)
@@ -608,7 +622,6 @@ Cards page's project-library route, which reads DaVinci Resolve's PostgreSQL
 database, on a site that enables that page (`tools/license_allowlist.toml`,
 `[allow.psycopg2-binary]`).
 
-<!-- ENG-GAP: companion-frozen-psycopg2 -->
 **`psycopg2` in the companion executable.** The companion's Timeline Cards
 role reads DaVinci Resolve's PostgreSQL project library, and for that
 `companion/build.spec` collects `psycopg2` (from `psycopg2-binary`, a
@@ -620,7 +633,10 @@ version in a given build is available without charge from
 <https://github.com/psycopg/psycopg2> and from PyPI, and Cablewrap Creative
 Ltd. makes the same written offer for it as for ffmpeg above, on the same
 terms and at the same address, for three years from the build's
-publication.
+publication. Every companion build, whether built on the Licensor's own
+machine or by its build service for the release feed, is built from the same
+locked list of dependencies, which names psycopg2, and a release build fails
+if it freezes a package that list does not name.
 
 **`soundfile` / `librosa` (LGPL-2.1 via bundled `libsndfile`/`libsoxr`).**
 Imported by exactly one module, `music/indexer/music_index/features.py`: the

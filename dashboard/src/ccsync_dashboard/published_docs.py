@@ -79,6 +79,25 @@ REQUIRED_TREES: tuple[str, ...] = ("legal",)
 
 SUFFIX = ".md"
 
+# LG-12 (docs/LEGAL_GAP_FEATURES_PLAN.md §5, 2026-09-25): the licence TEXTS
+# every binary carries (`gen_notices.py --write-texts` writes them under
+# docs/legal/licenses/). Plain text, and ONLY under this one subtree: a
+# `.txt` anywhere else in docs/ stays unpublished, so this cannot become a
+# way to ship a stray log or a scratch file to every customer. The legal
+# tree already ships; these are the only non-markdown files in it.
+TEXT_TREE = "legal/licenses"
+TEXT_SUFFIX = ".txt"
+
+
+def is_licence_text(rel: str) -> bool:
+    """Is `rel` a licence text under `legal/licenses/` (the one place a
+    `.txt` is served)? Shape only: the realpath check is help.py's."""
+    rel = (rel or "").strip().replace("\\", "/").lstrip("/")
+    if not rel.lower().endswith(TEXT_SUFFIX):
+        return False
+    rel = posixpath.normpath(rel)
+    return rel.startswith(TEXT_TREE + "/") and ".." not in rel.split("/")
+
 
 def is_published(rel: str) -> bool:
     """Is `rel` (a browser path under the docs root) customer-facing?
@@ -86,6 +105,8 @@ def is_published(rel: str) -> bool:
     Fails CLOSED: anything this function does not recognise is not published.
     """
     rel = (rel or "").strip().replace("\\", "/").lstrip("/")
+    if is_licence_text(rel):
+        return True
     if not rel or not rel.lower().endswith(SUFFIX):
         return False
     rel = posixpath.normpath(rel)

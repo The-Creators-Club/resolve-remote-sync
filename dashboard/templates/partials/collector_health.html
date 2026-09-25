@@ -19,6 +19,13 @@
    glyphs wide whatever the viewport, so a phone scrolled sideways to see
    nothing (MOBILE_PLAN.md §3.2, round 2, 2026-08-30). #}
 <div class="rule"></div>
+{# LG-17 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.6, 2026-09-25): the retention
+   pass is what the privacy notice's deletion schedule depends on, so when it
+   last ran is one line here, not a row to find. `retention_last_ran` is the
+   `prune` kind's last run (db.collector_health); absent = never ran. #}
+{% if fleet.collector.retention_last_ran is defined %}
+<div class="mono-sm retention-line">Retention last ran {% if fleet.collector.retention_last_ran %}<span title="{{ fleet.collector.retention_last_ran }}">{{ fleet.collector.retention_last_ran | ago }}</span>{% else %}<span class="muted">never on this database</span>{% endif %}</div>
+{% endif %}
 {% if fleet.collector.collector_stale %}
 <div class="banner">▲ the last collector cycle finished too long ago: everything below is
   the last thing it managed to do, not the state now.</div>
@@ -38,6 +45,8 @@
       <td class="muted" data-label="LAST RUN">{{ k.finished_at | ago }}</td>
       <td class="mono-sm" data-label="WHAT IT DID NOT DO">
         {% if not k.ok %}<span class="chip red">[ FAILED ]</span> {{ k.note or "no reason recorded" }}
+        {# LG-17: late, not failed. Amber like a note, named for what it is. #}
+        {% elif k.overdue %}<span class="chip amber" title="It last ran fine, and has not run again in far longer than it usually waits.">[ OVERDUE ]</span> {{ k.note if k.note and k.note != "overdue" else "has not run again on time" }}
         {% elif k.note %}<span class="chip amber">[ INCOMPLETE ]</span> {{ k.note }}
         {% else %}<span class="muted">nothing</span>{% endif %}
       </td>

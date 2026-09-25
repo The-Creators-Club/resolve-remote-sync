@@ -232,7 +232,13 @@ def collect_files(repo_root: Path) -> list[tuple[str, Path]]:
                 f"would boot a dashboard whose {bundle_name} root is empty")
         md_only = source_rel in MD_ONLY_TREES
         for path in iter_tree(source):
-            if md_only and path.suffix.lower() != ".md":
+            # LG-12 (2026-09-25): a .txt travels only from the licence
+            # subtree published_docs.is_licence_text admits (docs/legal/
+            # licenses/), judged by its path under docs/ the way /help does.
+            if md_only and path.suffix.lower() != ".md" and not (
+                    path.is_relative_to(repo_root / "docs")
+                    and published_docs.is_licence_text(
+                        path.relative_to(repo_root / "docs").as_posix())):
                 continue
             rel = path.relative_to(source).as_posix()
             name = f"{bundle_name}/{rel}"

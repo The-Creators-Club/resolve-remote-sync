@@ -139,15 +139,18 @@ since they last touched the keyboard or mouse.
 - `POST {dashboard_url}/api/v1/report`, JSON body, via `urllib.request`
   (`reporter.py:post_once`, `reporter.py:default_http_post`). No redirect is
   followed.
-- <!-- ENG-GAP: refuse-cleartext-dashboard-url -->
-  **The scheme is whatever `dashboard_url` says**, and `config.validate_config`
-  accepts a plain `http://` address. The same channel carries the sign-in POST
-  that contains the editor's password (`identity.py`). CC Sync does not
-  currently refuse or warn about a cleartext address that is not on the local
-  machine. Until it does, the customer is responsible for keeping that traffic
-  on its own LAN or an encrypted Tailscale tailnet (WireGuard), or for
-  publishing the dashboard over HTTPS with Tailscale Serve and giving the
-  companions the `https://` address.
+- **Plain http is refused on the internet and noted on a private network.**
+  Every request the companion makes to `dashboard_url` goes through one guard
+  (`transport.py`): a plain `http://` address on the public internet is
+  refused before anything is sent, and the setup wizard will not save it;
+  an address on the local machine, the studio's network or a tailnet is
+  allowed with a note in Settings. A name is judged public only when every
+  address it resolves to is public. The dashboard stores, per computer,
+  whether its last report arrived over https, plain http on a private
+  network, or plain http from the internet (`machine_state.report_via`), as
+  far as it can tell: behind a proxy it is not configured to trust
+  (`DASH_TRUSTED_PROXIES`), an https report is recorded as plain http on a
+  private network.
 - Two headers authenticate the report (`reporter.py:post_once`):
   - `X-CCSync-Token`: the editor's own report token (`cce1.…`, bound to that
     person), or, during migration, the shared fleet token
@@ -196,25 +199,20 @@ Storage is a single SQLite file on the customer's NAS: `/data/dashboard.db`
    only describe how long a record survives after someone stops using the
    Software. `lane_report_history` and `transfer_history` are the genuinely
    time-bounded histories.
-2. <!-- ENG-GAP: prune-last-run-visibility -->
-   **Pruning only runs if the collector runs.** `db.prune` is reachable from
+2. **Pruning only runs if the collector runs.** `db.prune` is reachable from
    one place, the collector's hourly `prune` cycle (`collector.py`,
    `settings.interval_prune` = 3600 s). The collector keeps `prune` in
    `SYNCTHING_FREE_KINDS` so a deployment without Syncthing still expires
    data, and the dashboard's home page shows when the collector has stopped.
-   The dashboard does not currently show when retention last ran, or alert on
-   a missed retention pass as such. Until it does, an admin confirms retention
-   is running by checking that the home page reports no stopped collector.
+   The collector panel on the home page shows when retention last ran and turns
+   amber when it is overdue, and a failed or overdue retention pass raises an
+   alert.
 
-<!-- ENG-GAP: per-editor-telemetry-purge -->
-<!-- ENG-GAP: telemetry-export -->
-Deleting a person on the dashboard's Users page removes their account and
-every one of their computers' records, as described under "Data-subject
-rights" in `docs/legal/PRIVACY.md`. CC Sync does not currently provide an
-action that deletes one editor's telemetry while keeping their account, or one
-that exports it. Until it does, an admin can do either with SQL on
-`/data/dashboard.db`, keyed on the editor's username, as that section
-describes.
+An administrator can export everything the dashboard holds about a person,
+erase their activity history while keeping their account, or delete them
+entirely, as described under "Data-subject rights" in
+`docs/legal/PRIVACY.md`. Each person can also export their own data from
+their account page.
 
 ## Who can see it
 
@@ -262,15 +260,50 @@ its DPO should know it.
 | Reporting *less often* | Raise `dashboard_report_interval` and `dashboard_report_interval_active` | Fewer ticks. Must be positive (`config.validate_config`). |
 | Taking fleet background jobs | `jobs_enabled = false` | This machine takes no background jobs. It still reports `capabilities`, including `idle_seconds`. |
 
-<!-- ENG-GAP: telemetry-opt-out-switches -->
-**Everything else cannot currently be turned off.** CC Sync does not currently
-provide a setting that stops the companion reporting `resolve_project`,
-`local_manifest`, `media_tree` or the idle time while leaving the sync lanes
-working: every section above is sent whenever the companion reports (only
-`get_queue_info` is gated, on managed mode). Until such settings exist, a
-customer whose works council or data-protection assessment does not accept
-this reporting can use the options in the table above, or decide not to
-deploy the Software to the workstations concerned.
+**Four more switches, per computer or for the whole site.** On a computer:
+Settings, THIS COMPUTER, PRIVACY (or the setup wizard's privacy step). For
+the whole site: the dashboard's Settings, Site, TELEMETRY. They are:
+`resolve_project` (the open project's name, wherever the companion reports
+it, including Resolve health, fix journals and the answers to an undo),
+`local_manifest` (the disk file list, plus the file names in the Resolve
+health and sync-conflict checks, which are then sent only as counts, the
+names of stray or moved project folders, and the sample file names from
+upload checks), `media_tree` (the bin structure; switching off the project
+name switches this off too, because the bin structure is organised by
+project name), and `input_idle` (the idle time, which is also not sent while
+`jobs_enabled` is false). Sync is not affected.
+
+A switched-off item is not sent. The dashboard also discards it on arrival
+from any computer while the site switch is off, including computers whose
+companion predates these switches. It deletes what it already held: for a
+site switch at once for every computer, and for a computer's own switch on
+that computer's next report, together with that computer's stored
+diagnostics bundles. A site switch can only switch items off; a computer
+cannot switch back on what the site has switched off, and the dashboard
+cannot switch a computer's own switches back on.
+
+Still sent, because sync or the editor's own action needs them: the names
+of files being transferred and recently transferred, the result of a file
+move the dashboard ordered, a project name the editor types or sends when
+setting up a project, and, only if an editor turns on the Timeline Cards
+agent for their computer, the project and timeline it is driving.
+
+The costs are deliberate. With the file list off, the dashboard sends every
+file move in every active project to that computer, and shows its holdings
+and upload progress as "not reported". With the project name off, the
+dashboard does not offer to set up a new project for it, the editor cannot
+be the first to map a Resolve project to a folder (an administrator can),
+and projects are not mapped automatically from that computer. With the idle
+time off, that computer is not offered background jobs that wait for an
+idle computer. While the project name is switched off for the whole site, a
+computer whose companion predates these switches cannot have CC Sync's
+fixes to its Resolve projects undone from the dashboard (it can still undo
+them from its own tray). While the project name, the file list or the bin
+structure is switched off for the whole site, that computer's diagnostics
+bundles are replaced by a note, because it cannot remove the withheld names
+from them itself; the same note replaces a bundle from any computer that
+has not yet read a site switch that was just turned off (a computer rereads
+the site's settings every 15 minutes).
 
 ## Employee monitoring: for the customer's DPO
 

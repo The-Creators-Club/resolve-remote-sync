@@ -153,7 +153,7 @@ log = logging.getLogger("ccsync.config")
 # and this loop claims it BY ID through a closed idle gate, and a whisper pass
 # finally reports progress -- its stdout is read on a drain thread instead of
 # being buffered until exit, so the fleet chip moves while the GPU works.
-VERSION = "0.9.80"
+VERSION = "0.9.81"
 
 # The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
 # resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy
@@ -855,6 +855,26 @@ DEFAULTS: dict[str, Any] = {
     # exists so a machine can transcode for the fleet out of one root and
     # serve cards out of another.
     "cards_vault_root": "",
+
+    # -- WHAT THIS COMPUTER REPORTS (LG-1, 2026-09-25) --------------------
+    #
+    # docs/LEGAL_GAP_FEATURES_PLAN.md 4.1; docs/legal/TELEMETRY.md, "What can
+    # be turned off". True = reported, today's behaviour. Switching one off
+    # withholds that kind of data from the report; it never stops a pass from
+    # running (the media-pool walk is what recovers a stale Resolve bridge),
+    # and never stops sync. The site can switch each off for everyone
+    # (/api/v1/site `telemetry`), and a computer cannot switch back on what
+    # the site switched off: telemetry_policy.effective() is local AND site.
+    #
+    # NEVER REMOTE-CONTROLLED (safety audit L2): these four keys must never be
+    # added to machine_settings.ACCEPTS or to the dashboard's
+    # MACHINE_SETTING_KEYS. An admin can switch a category off for the whole
+    # site; nobody but the person at this computer can switch this
+    # computer's own switch back on. tests/test_telemetry_policy.py pins it.
+    "report_resolve_project": True,
+    "report_local_manifest": True,
+    "report_media_tree": True,
+    "report_input_idle": True,
 }
 
 # Profile defaults applied by load_config when mode is set and the file does
@@ -1502,6 +1522,16 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # scripting dies for all of them (docs/GOTCHAS.md section 15).
 # cards_agent = false
 # cards_vault_root = ""
+
+# ------------------------------------------------- WHAT THIS COMPUTER REPORTS
+# Four kinds of reporting you can switch off for this computer (Settings,
+# THIS COMPUTER, PRIVACY does the same). Sync is not affected. Your admin can
+# also switch them off for everyone; this file cannot switch back on what the
+# site has switched off. See docs/legal/TELEMETRY.md, "What can be turned off".
+report_resolve_project = true   # the open Resolve project's name
+report_local_manifest = true    # the list of media files on this disk
+report_media_tree = true        # the Resolve bin structure
+report_input_idle = true        # time since the last keyboard or mouse input
 """
 
 
@@ -1894,8 +1924,83 @@ def _apply_site_manifest(merged: dict[str, Any], data: Any) -> None:
         log.debug("site manifest not applied to config", exc_info=True)
 
 
-def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _needs_dns(url: str) -> bool:
+    """True when transport.classify would have to ask DNS about `url`: plain
+    http to a dotted name that is not an IP literal, not an intranet suffix
+    and not a reserved name. Everything else it answers from the shape."""
+    import ipaddress
+    import urllib.parse
+
+    from . import transport as transport_mod
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if (parsed.scheme or "").lower() != "http":
+            return False
+        host = (parsed.hostname or "").strip().rstrip(".").lower()
+        if not host or "." not in host:
+            return False
+        try:
+            ipaddress.ip_address(host)
+            return False
+        except ValueError:
+            pass
+        if host.endswith(transport_mod.LOCAL_SUFFIXES + transport_mod.RESERVED_SUFFIXES):
+            return False
+        if any(host == d or host.endswith("." + d) for d in transport_mod.RESERVED_DOMAINS):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def dashboard_url_problem(url: Any, lookup: bool = True) -> tuple[str, str]:
+    """("error" | "warning" | "", sentence) for a dashboard address (LG-4,
+    docs/LEGAL_GAP_FEATURES_PLAN.md 4.4, 2026-09-25).
+
+    Plain http on the public internet is an error: transport.CleartextGuard
+    refuses to send anything there, sign-in passwords included. Plain http on
+    the studio network or a tailnet is a note, and never more: the live fleet
+    runs on one. `transport.classify` is the one rule; an address it cannot
+    judge (a name that does not resolve) is never an error.
+
+    `lookup=False` (G1a review round 1, 2026-09-25): a name only DNS could
+    judge is answered as the studio-network note WITHOUT the lookup.
+    getaddrinfo on a machine with broken DNS blocks for seconds, and this is
+    asked at startup (CompanionApp.__init__) and by the settings window; the
+    transport guard still does the lookup before anything is sent, so the
+    refusal itself never depends on this answer."""
+    from . import transport as transport_mod
+
+    text = str(url or "").strip()
+    if not text:
+        return "", ""
+    if not lookup and _needs_dns(text):
+        return "warning", DASHBOARD_URL_LOCAL_HTTP
+    kind = transport_mod.classify(text)
+    if kind == transport_mod.HTTP_PUBLIC:
+        return "error", DASHBOARD_URL_PUBLIC_HTTP
+    if kind == transport_mod.HTTP_LOCAL:
+        return "warning", DASHBOARD_URL_LOCAL_HTTP
+    return "", ""
+
+
+# Editor-visible (the settings window shows them): no em dashes.
+DASHBOARD_URL_PUBLIC_HTTP = (
+    "The dashboard address is plain http on the internet, so CCSync will not "
+    "send anything to it. Ask your admin for its https address.")
+DASHBOARD_URL_LOCAL_HTTP = (
+    "This address is not https. It is fine on your studio network or tailnet.")
+
+
+def validate_config(cfg: dict[str, Any], for_save: bool = False) -> tuple[list[str], list[str]]:
     """Return (errors, warnings) describing problems with `cfg`.
+
+    `for_save` (LG-4, 2026-09-25): a SAVE of a public plain-http
+    `dashboard_url` is an error that refuses the save; at START the same
+    address is only a warning, because an error here stops the lanes (DEL-3)
+    and nothing in the legal-gap work may stop sync. The transport guard
+    refuses the sends either way.
 
     Exists because the failure mode these catch is silence: a blank
     `remote_root`, or a `remote` naming a nonexistent rclone stanza, doesn't
@@ -2053,6 +2158,24 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
                 "dashboard_url is set but dashboard_token is blank -- reports will "
                 "be sent without the X-CCSync-Token header, which the dashboard "
                 "server may reject"
+            )
+        # A lookup only for a SAVE (G1a review round 1): at start the answer
+        # is a warning either way, and startup must not wait on DNS.
+        level, sentence = dashboard_url_problem(dashboard_url, lookup=for_save)
+        if level == "error" and for_save:
+            errors.append(f"dashboard_url {dashboard_url!r}: {sentence}")
+        elif level:
+            warnings.append(f"dashboard_url {dashboard_url!r}: {sentence}")
+
+    # LG-1: the four reporting switches are bools. A wrong-typed one is read
+    # as OFF (telemetry_policy._switch_value, the direction that withholds),
+    # so it is a warning: it costs a report field, never sync.
+    for key in ("report_resolve_project", "report_local_manifest",
+                "report_media_tree", "report_input_idle"):
+        if key in cfg and not isinstance(cfg.get(key), bool):
+            warnings.append(
+                f"{key} must be true or false, got {cfg.get(key)!r} -- treated as "
+                f"false, so this computer does not report it"
             )
 
     try:

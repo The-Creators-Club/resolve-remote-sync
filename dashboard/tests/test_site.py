@@ -38,6 +38,10 @@ EXPECTED_KEYS = {
     # docs/MUSIC_INGEST_PLAN.md step 3): the companion fetches the CLAP audio
     # model from here, and no vendor host may be hardcoded in the repo.
     "release_feed_base",
+    # LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §3.3, 2026-09-25): the four
+    # reporting switches the companion acts on. Four bools, all true unless
+    # this site switched one off.
+    "telemetry",
 }
 
 SITE_ENV = {
@@ -361,3 +365,30 @@ def test_the_env_spelling_is_one_and_nothing_else(tmp_path):
         assert s.site_feature_youtube_download is False, value
     assert Settings.from_env(
         {"DASH_SITE_YOUTUBE_DOWNLOAD": "1"}).site_feature_youtube_download is True
+
+
+# --------------------------------------------------------------------------
+# Telemetry switches (LG-1, docs/LEGAL_GAP_FEATURES_PLAN.md §3.3, 2026-09-25)
+# --------------------------------------------------------------------------
+# DEFAULT TRUE, the opposite of `features`: reporting is what every fleet
+# has always done, and a companion that cannot read this block (or a lost
+# cache) keeps reporting, which is safe because the dashboard also strips a
+# switched-off category on arrival.
+
+ALL_ON = {"resolve_project": True, "local_manifest": True,
+          "media_tree": True, "input_idle": True}
+
+
+def test_the_manifest_publishes_every_telemetry_switch_on_by_default(tmp_path):
+    settings = Settings(db_path=str(tmp_path / "t.db"))
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/api/v1/site").json()["telemetry"] == ALL_ON
+
+
+def test_a_site_switch_from_the_environment_is_published(tmp_path):
+    settings = replace(Settings.from_env({"DASH_SITE_TELEMETRY_LOCAL_MANIFEST": "0"}),
+                       db_path=str(tmp_path / "t.db"))
+    with TestClient(create_app(settings)) as client:
+        body = client.get("/api/v1/site").json()
+    assert body["telemetry"] == {**ALL_ON, "local_manifest": False}
+    assert all(isinstance(v, bool) for v in body["telemetry"].values())

@@ -114,6 +114,37 @@ KEYS: dict[str, str] = {
     # dropping the old one mid-rollout bricks every installed copy.
     "android.package_name": "str",
     "android.sha256_cert_fingerprints": "csv",
+    # LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §3.3/§4.1, 2026-09-25): the four
+    # kinds of companion reporting the whole site can switch off. "1" = the
+    # companion reports it (every fleet's behaviour before these existed),
+    # "0" = withheld by every computer and discarded by the dashboard on
+    # arrival. Published by `api_site` as a `telemetry` object: the companion
+    # is the client that acts on it. Writing any of them runs
+    # `db.apply_site_optouts` from `set_many`, so a save, an import and an
+    # undo all clear what the dashboard already held.
+    "telemetry.resolve_project": "bool",
+    "telemetry.local_manifest": "bool",
+    "telemetry.media_tree": "bool",
+    "telemetry.input_idle": "bool",
+}
+
+# LG-1: the four telemetry keys, in the order the Settings page, the manifest
+# and the export print them. The category names are db.REPORT_CATEGORIES'
+# spelling (the companion's telemetry_policy.FIELDS uses the same four).
+TELEMETRY_KEYS: tuple[str, ...] = (
+    "telemetry.resolve_project",
+    "telemetry.local_manifest",
+    "telemetry.media_tree",
+    "telemetry.input_idle",
+)
+
+# The Settings attribute that answers for each telemetry key when no row
+# exists (FEATURE_SETTINGS_ATTRS' pattern below).
+TELEMETRY_SETTINGS_ATTRS = {
+    "resolve_project": "site_telemetry_resolve_project",
+    "local_manifest": "site_telemetry_local_manifest",
+    "media_tree": "site_telemetry_media_tree",
+    "input_idle": "site_telemetry_input_idle",
 }
 
 # What `keytool -list` and Play Console both print: 32 hex byte pairs, colon
@@ -400,6 +431,15 @@ def validate(key: str, raw: str) -> str:
         return _validate_android_fingerprints(raw)
     if kind == "int":
         return _validate_int(key, raw)
+    if key in TELEMETRY_KEYS:
+        # LG-1: `_validate_bool` reads "" as "0", which for a feature flag is
+        # the safe reading (off). For these four "0" DELETES what the
+        # dashboard holds, fleet-wide, so a blank is refused rather than
+        # taken as an instruction nobody gave.
+        value = str(raw or "").strip()
+        if value not in ("1", "0"):
+            raise SiteValidationError(key, "must be '1' or '0'")
+        return value
     if kind == "bool":
         return _validate_bool(key, raw)
     if kind == "csv":
@@ -432,13 +472,25 @@ def validate_many(values: Mapping[str, str]) -> dict[str, str]:
 
 
 def set_many(
-    conn: sqlite3.Connection, values: Mapping[str, str], updated_by: str
+    conn: sqlite3.Connection, values: Mapping[str, str], updated_by: str,
+    *, settings: Any = None,
 ) -> dict[str, str]:
     """Validate every field in `values` FIRST (so a form with one bad field
     changes nothing rather than half-applying), then upsert them all in one
     transaction. Returns the normalised values actually stored. Caller
     commits (matches every other write helper in this codebase, e.g.
-    db.upsert_project) -- api routes commit after calling this."""
+    db.upsert_project) -- api routes commit after calling this.
+
+    LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.1, 2026-09-25): THE HOOK. A
+    write that carries any telemetry key re-applies the site's whole
+    telemetry policy through `db.apply_site_optouts`, in the caller's
+    transaction, so a Settings save, a site.toml import and [ UNDO LAST
+    CHANGE ] all clear what a switched-off category left behind, for every
+    computer at once, online or not. There is no second write path to
+    forget: all three routes end here. `settings` answers for the keys that
+    have no row; without it the product defaults (everything reported)
+    stand in, which can only under-withhold until the boot-time pass in
+    `seed_from_env_once` runs."""
     normalized = validate_many(values)
     now = None
     from . import db as dbmod
@@ -451,6 +503,11 @@ def set_many(
             "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
             (key, value, now, updated_by),
         )
+    if any(key in TELEMETRY_KEYS for key in normalized):
+        result = dbmod.apply_site_optouts(conn, telemetry_policy(conn, settings))
+        log.info("site telemetry policy applied by %s: withheld %s, newly %s, "
+                 "cleared %s", updated_by, result.get("site"), result.get("newly"),
+                 result.get("deleted"))
     return normalized
 
 
@@ -504,6 +561,24 @@ def mask_changes(changes: Iterable[Mapping[str, str]]) -> list[dict[str, str]]:
     ]
 
 
+def telemetry_switching_off(changes: Iterable[Mapping[str, str]]) -> list[str]:
+    """The reporting categories (`local_manifest`, ...) a change list turns
+    from on to off, in list order. LG-1 review round (2026-09-25): import and
+    undo reach `set_many` -> `apply_site_optouts` exactly as Save does, and
+    that deletes fleet-wide data, but only Save's confirm said so; the
+    import preview named three changes and hid the rest behind "and N
+    more", and the undo confirm named no key at all. Both previews now
+    carry this list so their confirm can say what is deleted."""
+    names: list[str] = []
+    for c in changes:
+        key = str(c.get("key") or "")
+        if key not in TELEMETRY_KEYS:
+            continue
+        if str(c.get("from") or "").strip() != "0" and str(c.get("to") or "").strip() == "0":
+            names.append(key.split(".", 1)[1])
+    return names
+
+
 def seed_from_env_once(conn: sqlite3.Connection, settings: Any) -> bool:
     """Copy this deployment's DASH_SITE_* env into the table, exactly once.
 
@@ -513,7 +588,47 @@ def seed_from_env_once(conn: sqlite3.Connection, settings: Any) -> bool:
     DASH_SITE_* variables never seeds, and the table stays empty until the
     wizard's own writes populate it. Returns whether it seeded, for the
     caller's boot log.
+
+    LG-1 (2026-09-25, G0 ledger hand-off 7): this is also where the site's
+    telemetry policy is enforced once per boot, because it is the one
+    site-manifest hook `app.py`'s lifespan already calls. A policy that
+    comes from `DASH_SITE_TELEMETRY_*` never passes through `set_many`, and
+    only a restart can change the environment, so boot is exactly when an
+    offline computer's already-held data has to be cleared.
     """
+    try:
+        return _seed_from_env_once(conn, settings)
+    finally:
+        enforce_telemetry_policy(conn, settings)
+
+
+def enforce_telemetry_policy(conn: sqlite3.Connection, settings: Any) -> dict[str, Any] | None:
+    """Apply the site's full telemetry policy to every computer and commit.
+
+    Idempotent on the full set (`db.apply_site_optouts`): a second call finds
+    nothing to delete. Never raises, because it runs at boot and the rule is
+    that nothing here may stop the dashboard booting; a failure is logged and
+    the next Settings save, or the next report under the site switch, does
+    the same work."""
+    try:
+        from . import db as dbmod
+
+        result = dbmod.apply_site_optouts(conn, telemetry_policy(conn, settings))
+        conn.commit()
+        if result.get("site"):
+            log.info("site telemetry policy at boot: withheld %s, cleared %s",
+                     result.get("site"), result.get("deleted"))
+        return result
+    except Exception:                                              # noqa: BLE001
+        log.exception("could not apply the site telemetry policy at boot")
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return None
+
+
+def _seed_from_env_once(conn: sqlite3.Connection, settings: Any) -> bool:
     if not table_is_empty(conn):
         return False
     if not any(k.startswith("DASH_SITE_") and v.strip() for k, v in os.environ.items()):
@@ -542,6 +657,7 @@ def seed_from_env_once(conn: sqlite3.Connection, settings: Any) -> bool:
         "features.ai_cli_auto_update": "1" if settings.site_feature_ai_cli_auto_update else "0",
         "features.auto_update": "1" if settings.site_feature_auto_update else "0",
         "indexer_model_tier": settings.site_indexer_model_tier,
+        **{key: _telemetry_fallback(key, settings) for key in TELEMETRY_KEYS},
     }
     # template_folders / shared_asset_folders come from provision.py (its own
     # DASH_SITE_TEMPLATE_FOLDERS / DASH_SITE_SHARED_ASSETS env reader, applied
@@ -671,6 +787,15 @@ def _shape(db_values: Mapping[str, str], settings: Any) -> dict[str, Any]:
                 if p.strip()
             ],
         },
+        # LG-1 (2026-09-25): True = reported. The four values AS SET, not
+        # with `resolve_project` off already folded into `media_tree`: that
+        # rule lives once on each side (telemetry_policy below, the
+        # companion's telemetry_policy.effective), and a Settings page that
+        # unticked one box by itself would lose the admin's own choice for
+        # the day they switch the project name back on.
+        "telemetry": {
+            key.split(".", 1)[1]: pick(key).strip() != "0" for key in TELEMETRY_KEYS
+        },
         # For the Settings page: which fields the DB actually overrides,
         # vs. which are still falling through to Settings/defaults.
         "_from_db": sorted(k for k in KEYS if k in db_values),
@@ -718,6 +843,59 @@ def feature_enabled(conn: sqlite3.Connection, settings: Any, name: str) -> bool:
     if row is not None:
         return str(row["value"]).strip() == "1"
     return bool(getattr(settings, attr, False))
+
+
+def _telemetry_fallback(key: str, settings: Any) -> str:
+    """"1"/"0" for a telemetry key with no row: the Settings attribute, or
+    the product default (reported) when there is no settings object or it
+    does not carry the attribute. Never "0" by accident: absent is ON."""
+    attr = TELEMETRY_SETTINGS_ATTRS.get(key.split(".", 1)[-1], "")
+    source = settings if settings is not None else settings_mod.Settings
+    return "1" if bool(getattr(source, attr, True)) else "0"
+
+
+def telemetry_policy(conn: sqlite3.Connection, settings: Any = None) -> set[str]:
+    """LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.1, 2026-09-25): the
+    categories THIS SITE withholds, by `db.REPORT_CATEGORIES` name.
+
+    THE site-side predicate. `api_report` strips a report by it before any
+    section is written, from every companion version, and `set_many` /
+    `seed_from_env_once` clear what the dashboard already held by it.
+    DB row first, then `settings`, then the product default (reported), the
+    same precedence as every manifest key. `resolve_project` withheld
+    implies `media_tree` withheld (db.clean_report_categories: the bin
+    structure is keyed by project name).
+
+    Never raises: it is on the report path, and a report is never refused
+    over it. When the table cannot be read, the answer is `settings` UNION
+    the set the policy last APPLIED (`db.META_SITE_REPORT_OPTOUTS`, written
+    by apply_site_optouts), so a broken read does not quietly let a stored
+    "0" lapse; only if both reads fail can it under-withhold, until the next
+    successful read."""
+    from . import db as dbmod
+
+    rows: dict[str, str] = {}
+    last_applied: set[str] = set()
+    try:
+        placeholders = ",".join("?" for _ in TELEMETRY_KEYS)
+        for row in conn.execute(
+                f"SELECT key, value FROM {TABLE} WHERE key IN ({placeholders})",
+                TELEMETRY_KEYS):
+            rows[str(row["key"])] = str(row["value"])
+    except sqlite3.Error:
+        log.warning("could not read the site telemetry policy; using the "
+                    "container's settings and the last applied policy",
+                    exc_info=True)
+        try:
+            raw = dbmod.meta_get(conn, dbmod.META_SITE_REPORT_OPTOUTS)
+            import json
+
+            last_applied = set(dbmod.clean_report_categories(json.loads(raw) if raw else []))
+        except Exception:                                          # noqa: BLE001
+            last_applied = set()
+    off = [key.split(".", 1)[1] for key in TELEMETRY_KEYS
+           if str(rows.get(key, _telemetry_fallback(key, settings))).strip() == "0"]
+    return set(dbmod.clean_report_categories(off)) | last_applied
 
 
 # ------------------------------------------- the manifest, without a connection
@@ -836,6 +1014,10 @@ def _settings_fallback(key: str, settings: Any) -> str:
         # Android app configured", which is what a fresh site is.
         "android.package_name": "",
         "android.sha256_cert_fingerprints": "",
+        # LG-1: absent is REPORTED ("1"), so the diff an import or an undo
+        # records says "from 1" for a site that never set one, and an undo
+        # writes "1" back rather than a blank that would read as off.
+        **{k: _telemetry_fallback(k, settings) for k in TELEMETRY_KEYS},
     }
     return str(mapping.get(key, ""))
 
@@ -867,6 +1049,10 @@ _SECTIONS: list[tuple[str, list[str]]] = [
     # that lost the asset links would relaunch every editor's app with a URL
     # bar and nothing saying why.
     ("android", ["android.package_name", "android.sha256_cert_fingerprints"]),
+    # LG-1 (2026-09-25): `site.toml [telemetry]`, the plan's §3.3 spelling. A
+    # NAS migration that dropped these would silently switch a works
+    # council's opt-out back on at the new site.
+    ("telemetry", list(TELEMETRY_KEYS)),
 ]
 
 # toml key name (section-local) for each manifest key, where it differs from
@@ -884,6 +1070,10 @@ _TOML_KEY_NAMES = {
     "indexer_model_tier": "model_tier",
     "android.package_name": "package_name",
     "android.sha256_cert_fingerprints": "sha256_cert_fingerprints",
+    "telemetry.resolve_project": "resolve_project",
+    "telemetry.local_manifest": "local_manifest",
+    "telemetry.media_tree": "media_tree",
+    "telemetry.input_idle": "input_idle",
 }
 
 
@@ -929,6 +1119,7 @@ def export_toml(conn: sqlite3.Connection, settings: Any) -> str:
         "indexer_model_tier": manifest["indexer"]["model_tier"],
         "android.package_name": manifest["android"]["package_name"],
         "android.sha256_cert_fingerprints": manifest["android"]["sha256_cert_fingerprints"],
+        **{key: manifest["telemetry"][key.split(".", 1)[1]] for key in TELEMETRY_KEYS},
     }
     for section, keys in _SECTIONS:
         lines.append(f"[{section}]")

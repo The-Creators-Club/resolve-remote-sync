@@ -577,9 +577,22 @@ def safe_to_close(transfers_view: dict | None, editor: str | None) -> dict | Non
         f"{m or 'one of your computers'} ({label})" if label else (m or "one of your computers")
         for m, label in unsure)
     if not up_files and unsure:
-        sentence = (f"Cannot tell yet: {unsure_where} holds more video originals "
-                    f"than it can list to the dashboard, so some may not have "
-                    f"uploaded. Leave it running and check its tray.")
+        # LG-1 (G0 hand-off 8, landed by the final review 2026-09-25): a
+        # computer that withholds its file list reaches here as the same
+        # uncertain zero-file upload row, but for a different reason, and
+        # "holds more than it can list" would send the editor looking for a
+        # cap that does not exist. Both are never "Safe to close".
+        withheld_only = all(
+            q.get("not_reported") for q in queues
+            if q.get("direction") == "up" and q.get("uncertain"))
+        if withheld_only:
+            sentence = (f"Cannot tell yet: {unsure_where} does not report its file "
+                        f"list to the dashboard, so the dashboard cannot tell "
+                        f"whether everything uploaded. Check its tray.")
+        else:
+            sentence = (f"Cannot tell yet: {unsure_where} holds more video originals "
+                        f"than it can list to the dashboard, so some may not have "
+                        f"uploaded. Leave it running and check its tray.")
         return {"safe": False, "sentence": sentence, "up_files": 0,
                 "up_bytes": 0, "eta_seconds": None, "uncertain": True}
     if not up_files:

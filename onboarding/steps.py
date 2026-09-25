@@ -46,6 +46,19 @@ from urllib.parse import urlparse
 from ccsync_companion import config as config_mod
 from ccsync_companion import identity as identity_mod
 from ccsync_companion import site as site_mod
+# LG-4 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.4, 2026-09-25): the companion's own
+# address table, so the wizard and the companion's guard can never disagree
+# about what "plain http on the public internet" is. A leaf module with no
+# package imports, which is why the wizard can take it.
+from ccsync_companion import transport as transport_mod
+# LG-1 (plan 4.1): the categories, their config keys and the one rule that
+# turns them into "withheld" (effective, site_withheld). A leaf module like
+# transport, so the wizard reads the companion's copy rather than keeping one.
+from ccsync_companion import telemetry_policy as policy_mod
+# The companion's no-redirect opener, which also carries transport's
+# CleartextGuard (2026-09-25 review round, point 2). Imports only config,
+# release_pubkey, ed25519 and transport: nothing of the sync stack.
+from ccsync_companion import upgrade as upgrade_mod
 
 # -- constants ---------------------------------------------------------------
 
@@ -132,7 +145,7 @@ from ccsync_companion import site as site_mod
 # CCSYNC_CANONICAL_PREFIX/CCSYNC_TREE_NAME) so one failed fetch cannot map
 # one letter while config.toml names another. Both bootstraps changed, so
 # the shared number moves.
-INSTALLER_VERSION = "1.0.45"
+INSTALLER_VERSION = "1.0.46"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every
@@ -842,19 +855,66 @@ def record_eula_acceptance(version: Optional[str] = None,
 def default_http_post(url: str, data: dict, headers: dict, timeout: float) -> Any:
     """Same wire behavior as ccsync_companion.reporter.default_http_post --
     duplicated (rather than imported) only so this module has zero import-time
-    dependency on the sync/watchdog stack reporter.py pulls in transitively."""
+    dependency on the sync/watchdog stack reporter.py pulls in transitively.
+
+    Through upgrade.build_no_redirect_opener, like every credentialed call
+    the companion makes (2026-09-25 review round, point 2). A plain urlopen
+    FOLLOWED a 301/302/303 and CPython keeps custom headers across it, so an
+    https front end answering `302 Location: http://<public host>/...` got
+    the X-CCSync-Identity token re-sent in cleartext to whatever host it
+    named (tested against a local server), past the LG-4 check that had only
+    seen the first address. The opener refuses every redirect (it surfaces as
+    an HTTPError carrying the 3xx) and its CleartextGuard refuses a public
+    plain-http address on every hop; GOTCHAS section 12 already said no
+    dashboard call follows a redirect."""
     body = json.dumps(data).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with upgrade_mod.build_no_redirect_opener().open(req, timeout=timeout) as resp:
         resp_data = resp.read()
     return json.loads(resp_data.decode("utf-8")) if resp_data else {}
 
 
 def default_http_get(url: str, timeout: float) -> Any:
+    """See default_http_post: no redirect is followed, no public plain http."""
     req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with upgrade_mod.build_no_redirect_opener().open(req, timeout=timeout) as resp:
         resp_data = resp.read()
     return json.loads(resp_data.decode("utf-8")) if resp_data else {}
+
+
+def _redirect_message(exc: BaseException) -> Optional[str]:
+    """The sentence for a dashboard that answered with a redirect, else None.
+
+    The wizard no longer follows one (see default_http_post), so a 3xx
+    arrives here as an HTTPError. Said by name because the generic "the
+    dashboard answered with an error" would send the editor looking for a
+    fault on a server that is working."""
+    code = getattr(exc, "code", None)
+    try:
+        if code is None or not 300 <= int(code) < 400:
+            return None
+    except (TypeError, ValueError):
+        return None
+    target = ""
+    try:
+        target = str((getattr(exc, "headers", None) or {}).get("Location") or "")
+    except Exception:
+        target = ""
+    where = f" to {target}" if target else ""
+    return (f"the dashboard answered with a redirect ({code}){where}. CC Sync never "
+            "follows one, so nothing more was sent. Ask your admin for the "
+            "dashboard's direct address.")
+
+
+def _send_error_message(exc: BaseException) -> Optional[str]:
+    """What to say for a refusal made on the wire rather than by the
+    pre-checks: a redirect, or transport.CleartextGuard refusing a public
+    plain-http hop (a DNS answer that changed after dashboard_url_problem
+    looked). None for anything else, which keeps its old wording."""
+    if isinstance(exc, transport_mod.CleartextRefused):
+        return (f"{exc.host or exc.url} is plain http on the public internet, so "
+                "nothing was sent. Ask your admin for the dashboard's https address.")
+    return _redirect_message(exc)
 
 
 # -- account verification (the install gate) ----------------------------------
@@ -884,6 +944,13 @@ def verify_account(
         return {"ok": False, "error": "username is required"}
     if not password:
         return {"ok": False, "error": "password is required"}
+    # LG-4 (2026-09-25): the one request in this wizard that carries a
+    # password. Refused HERE, on the worker thread and before any byte is
+    # written, whatever the role page let through (a scripted
+    # CCSYNC_DASHBOARD_URL, a name whose DNS answer changed since).
+    refusal = dashboard_url_problem(dashboard_url)
+    if refusal:
+        return {"ok": False, "error": refusal}
 
     url = f"{dashboard_url.rstrip('/')}/api/v1/verify"
     headers = {"Content-Type": "application/json"}
@@ -892,11 +959,12 @@ def verify_account(
         resp = http_post(url, payload, headers, timeout)
     except urllib.error.HTTPError as exc:
         # Reuse the companion's status-code -> human message mapping instead
-        # of re-deriving it here.
-        message = identity_mod._http_error_message(exc)
+        # of re-deriving it here. A redirect first: it is not refused
+        # credentials, and the map has no words for it.
+        message = _redirect_message(exc) or identity_mod._http_error_message(exc)
         return {"ok": False, "error": message}
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": _send_error_message(exc) or str(exc)}
 
     if not isinstance(resp, dict) or not resp.get("ok"):
         error = resp.get("error") if isinstance(resp, dict) else None
@@ -1033,6 +1101,10 @@ def submit_ssh_key(
     key_text = (key_text or "").strip()
     if not key_text:
         return {"ok": False, "error": "no SSH public key to send"}
+    # LG-4: the identity token rides this request.
+    refusal = dashboard_url_problem(dashboard_url)
+    if refusal:
+        return {"ok": False, "error": refusal}
     url = f"{dashboard_url.rstrip('/')}/api/v1/ssh-key"
     headers = {"Content-Type": "application/json",
                "X-CCSync-Identity": identity_token}
@@ -1040,9 +1112,10 @@ def submit_ssh_key(
     try:
         resp = http_post(url, payload, headers, timeout)
     except urllib.error.HTTPError as exc:
-        return {"ok": False, "error": identity_mod._http_error_message(exc)}
+        return {"ok": False, "error": (_redirect_message(exc)
+                                       or identity_mod._http_error_message(exc))}
     except Exception as exc:  # noqa: BLE001 - see the docstring
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": _send_error_message(exc) or str(exc)}
     if not isinstance(resp, dict) or not resp.get("ok"):
         return {"ok": False, "error": "the dashboard did not accept the key"}
     return {"ok": True, "fingerprint": resp.get("fingerprint") or ""}
@@ -1206,6 +1279,8 @@ DASHBOARD_REACH_TIMEOUT = "timeout"
 DASHBOARD_REACH_HTTP = "http"
 DASHBOARD_REACH_BLANK = "blank"
 DASHBOARD_REACH_ERROR = "error"
+# LG-4: refused before anything was sent (see dashboard_url_problem).
+DASHBOARD_REACH_CLEARTEXT = "cleartext_public"
 
 
 def dashboard_probe(
@@ -1223,12 +1298,20 @@ def dashboard_probe(
     if not url_base:
         return {"ok": False, "kind": DASHBOARD_REACH_BLANK, "url": "",
                 "message": "no dashboard address set. Ask your admin for it."}
+    refusal = dashboard_url_problem(url_base)
+    if refusal:
+        return {"ok": False, "kind": DASHBOARD_REACH_CLEARTEXT, "url": url_base,
+                "message": refusal}
     url = f"{url_base.rstrip('/')}/api/v1/health"
     try:
         http_get(url, timeout)
         return {"ok": True, "kind": "ok", "url": url_base,
                 "message": f"connected: {url_base} is answering"}
     except urllib.error.HTTPError as exc:
+        redirected = _redirect_message(exc)
+        if redirected:
+            return {"ok": False, "kind": DASHBOARD_REACH_HTTP, "url": url_base,
+                    "message": redirected}
         # Something IS there: a 404 is an older dashboard, a 502 is the
         # container down behind a proxy that is up. Either way the address is
         # right, which is the thing the editor is being asked to fix.
@@ -1236,6 +1319,9 @@ def dashboard_probe(
                 "message": (f"{url_base} answered with an error ({getattr(exc, 'code', '?')}). "
                             "The address is right, so this is the dashboard's end: "
                             "tell your admin.")}
+    except transport_mod.CleartextRefused as exc:
+        return {"ok": False, "kind": DASHBOARD_REACH_CLEARTEXT, "url": url_base,
+                "message": _send_error_message(exc)}
     except Exception as exc:
         kind, message = _classify_reach_error(exc, url_base)
         return {"ok": False, "kind": kind, "url": url_base, "message": message}
@@ -1307,6 +1393,9 @@ def fetch_site(
     process here guaranteed to have just talked to the dashboard."""
     url = site_mod.site_url(normalise_dashboard_url(dashboard_url))
     if not url:
+        return {}
+    # LG-4: nothing goes to a plain-http public address, not even this GET.
+    if dashboard_url_problem(url):
         return {}
     try:
         site = site_mod.normalise(http_get(url, timeout))
@@ -3469,6 +3558,7 @@ def ensure_config(
     platform: Optional[str] = None,
     site: Optional[dict[str, Any]] = None,
     report_token: Optional[str] = None,
+    report_switches: Optional[dict[str, bool]] = None,
 ) -> Path:
     """Write or refresh ~/.ccsync/config.toml BEFORE anything launches the
     companion. An existing file is merged (user tweaks survive; the keys the
@@ -3531,6 +3621,12 @@ def ensure_config(
     # cannot erase one an admin put here by hand.
     if str(report_token or "").strip():
         forced["report_token"] = _toml_string(str(report_token).strip())
+    # LG-1 (2026-09-25): the privacy step's answers. FORCED, because the page
+    # was seeded from this file (read_report_switches), so what it hands back
+    # already is the machine's previous answer wherever the editor changed
+    # nothing, including a row the site had greyed out. None (a caller that
+    # never showed the page) leaves all four keys exactly as they are.
+    forced.update(report_switch_literals(report_switches))
     if role == "base":
         root = local_root or default_base_local_root(platform)
         forced["local_root"] = _toml_string(root)
@@ -3855,3 +3951,307 @@ def forbidden_installer_message(drive_letter: str,
             "install is about to unmount that drive out from under itself "
             "(and running it off the NAS locks the file for everyone). "
             "Copy onboard.exe to your Desktop and run it from there.")
+
+
+# -- legal-gap features (docs/LEGAL_GAP_FEATURES_PLAN.md, 2026-09-25) ----------
+# Group G8's part of that plan: the LG-1 privacy step, the LG-4 address check
+# and the LG-12 licences link. The GUI half is onboard.py's show_privacy,
+# _on_role_next and _show_licences; every decision is here so it is tested.
+
+# LG-4. Plain http on the public internet is refused; plain http on the
+# studio network or a tailnet is allowed with a note, because that is how the
+# live fleet runs (`http://192.168.0.10:8480`) and "require https" is a
+# deferred Tier 2b feature. The table is transport.classify's, never a copy.
+# The companion Settings window's own sentence, not a pasted copy (review
+# round point 5).
+CLEARTEXT_LOCAL_NOTE = config_mod.DASHBOARD_URL_LOCAL_HTTP
+
+
+def dashboard_url_class(dashboard_url: str) -> str:
+    """transport.classify of the address as the wizard will use it (with the
+    scheme normalise_dashboard_url puts on a bare host). "" for a blank one.
+    May resolve a name the table cannot judge by its shape; the answer is
+    cached by transport for 30 s, so the pages after the role page ask again
+    for free. Never raises."""
+    url = normalise_dashboard_url(dashboard_url)
+    if not url:
+        return ""
+    try:
+        return transport_mod.classify(url)
+    except Exception:
+        # classify never raises; a wizard that cannot judge an address must
+        # not refuse it either (plan 4.4, safety H3: never on doubt).
+        return transport_mod.HTTP_LOCAL
+
+
+def dashboard_url_problem(dashboard_url: str) -> Optional[str]:
+    """The refusal to show when this address may not be used, else None.
+
+    Only `http_public` is refused: a password typed on the next page would
+    cross the internet unencrypted. `invalid` (ftp://, no host) is not this
+    check's business: the reachability probe already names it, and refusing
+    it here would change what every older test of this wizard pins."""
+    if dashboard_url_class(dashboard_url) != transport_mod.HTTP_PUBLIC:
+        return None
+    url = normalise_dashboard_url(dashboard_url)
+    return (f"{url} is plain http on the public internet, so your password "
+            "would cross it unencrypted. Nothing was sent. Ask your admin for "
+            "the dashboard's https address.")
+
+
+def dashboard_url_note(dashboard_url: str) -> Optional[str]:
+    """The amber note for an address that is allowed but not https, else
+    None. The same sentence the companion's Settings shows beside it."""
+    if dashboard_url_class(dashboard_url) == transport_mod.HTTP_LOCAL:
+        return CLEARTEXT_LOCAL_NOTE
+    return None
+
+
+# LG-1. The four reporting switches, in the order the page shows them. The
+# categories, their config keys and the rule are telemetry_policy's (G1a,
+# plan 7.3 G1a -> G8), imported, never restated. The LABELS are the
+# companion Settings window's REPORT_LABELS word for word (settings_window
+# imports Tk and the tray, so the wizard cannot import it; a test pins the two
+# equal instead). The COSTS are TELEMETRY.md's replacement paragraph (plan
+# 8.1) in full, so what the editor ticks here is what the document says they
+# ticked (2026-09-25 review round, point 4: the first cut left three out).
+REPORT_LABELS: dict[str, str] = {
+    policy_mod.RESOLVE_PROJECT: "The name of the open Resolve project",
+    policy_mod.LOCAL_MANIFEST: "The list of media files on this computer",
+    policy_mod.MEDIA_TREE: "The Resolve bin structure",
+    policy_mod.INPUT_IDLE: "How long since the keyboard or mouse was used",
+}
+REPORT_COSTS: dict[str, str] = {
+    policy_mod.RESOLVE_PROJECT: (
+        "Off: the dashboard does not offer to set up a new project for it, you "
+        "cannot be the first to map a Resolve project to a folder (an admin "
+        "can), and projects are not mapped automatically from this computer."),
+    policy_mod.LOCAL_MANIFEST: (
+        "Off: file names in the Resolve and conflict checks are sent only as "
+        "counts, the dashboard sends this computer every file move in every "
+        "active project, and shows its holdings and upload progress as not "
+        "reported."),
+    policy_mod.MEDIA_TREE: (
+        "Also off whenever the project name is off, because bins are organised "
+        "by project."),
+    policy_mod.INPUT_IDLE: (
+        "Off: background jobs that wait for an idle computer are not offered "
+        "to this one."),
+}
+REPORT_SWITCHES: tuple[dict[str, str], ...] = tuple(
+    {"category": category, "key": policy_mod.CONFIG_KEYS[category],
+     "label": REPORT_LABELS[category], "cost": REPORT_COSTS[category]}
+    for category in policy_mod.CATEGORIES)
+REPORT_CATEGORIES = tuple(policy_mod.CATEGORIES)
+REPORT_SWITCH_KEYS = tuple(policy_mod.CONFIG_KEYS[c] for c in REPORT_CATEGORIES)
+
+PRIVACY_INTRO = (
+    "Choose what this computer tells the dashboard. Sync works the same\n"
+    "whichever you pick, and you can change these later in the companion's\n"
+    "Settings, THIS COMPUTER, PRIVACY. Switching one off also deletes what\n"
+    "the dashboard already holds about it.")
+# Plan 8.1's "still sent" list, all four items (review round point 4).
+PRIVACY_STILL_SENT = (
+    "Still sent, because sync or your own action needs them: the names of "
+    "files being transferred and recently transferred, the result of a file "
+    "move the dashboard ordered, a project name you type or send when setting "
+    "up a project, and, only if the Timeline Cards agent is turned on for this "
+    "computer, the project and timeline it is driving.")
+SITE_OFF_NOTE = "Turned off for everyone by your administrator"
+IMPLIED_OFF_NOTE = "Off while the project name is off"
+
+# The last companion build that ignores the four report_* keys. The page's
+# promise ("switching one off ... deletes what the dashboard already holds")
+# is only true once the installed companion sends report_optouts, so the
+# install log warns when the bundled one is not newer than this (review round
+# point 3). Not the G1a version itself: that number is chosen at ship time.
+REPORT_SWITCHES_IGNORED_UP_TO = (0, 9, 80)
+
+
+def read_report_switches(config_path: Optional[Path] = None) -> dict[str, bool]:
+    """This computer's own four switches, by category, from config.toml,
+    read the way the companion reads them: tomllib, then
+    telemetry_policy.local_switches. So an absent key is on (today's
+    behaviour) and a key that is present but not a bool is OFF, which is what
+    the companion withholds on (review round point 5: the first cut read it
+    as on, so the page showed a tick the companion was not honouring and
+    then wrote `true` over it).
+
+    A file that does not parse is read the way config.load_config reads it:
+    from its last good copy (APP-4), else all on. A missing or unreadable
+    file is a first run: all four on. Never raises."""
+    import tomllib
+    path = Path(config_path) if config_path is not None else config_mod.CONFIG_PATH
+    try:
+        cfg = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except tomllib.TOMLDecodeError:
+        try:
+            cfg = config_mod._read_backup(path) or {}
+        except Exception:
+            cfg = {}
+    except Exception:
+        cfg = {}
+    try:
+        return dict(policy_mod.local_switches(cfg if isinstance(cfg, dict) else {}))
+    except Exception:
+        return {category: True for category in REPORT_CATEGORIES}
+
+
+def site_telemetry_off(site: Optional[dict], dashboard_url: str = "") -> set[str]:
+    """The categories the SITE has switched off for every computer:
+    telemetry_policy.site_withheld of the manifest (plan 3.3), so only an
+    explicit false counts. `site` None or empty (this run's fetch failed)
+    falls back to the cached manifest on the same terms as
+    site_manifest_value. A missed site switch here costs a greyed-out tick,
+    never a leak: the dashboard strips on arrival. Never raises."""
+    manifest = site if isinstance(site, dict) and site else None
+    if manifest is None:
+        try:
+            cached = site_mod.cached_site(max_age_seconds=SITE_CACHE_MAX_AGE_SECONDS)
+        except Exception:
+            cached = None
+        if isinstance(cached, dict) and _same_dashboard(
+                cached.get("dashboard_url", ""), dashboard_url):
+            manifest = cached
+    try:
+        return set(policy_mod.site_withheld(manifest or {}))
+    except Exception:
+        return set()
+
+
+def privacy_rows(choices: dict[str, bool], site_off: set[str]) -> list[dict[str, Any]]:
+    """What each tick shows: {category, key, label, cost, checked, enabled,
+    note}.
+
+    `choices` is this computer's own answer; it is never changed here. What
+    is actually withheld is telemetry_policy.effective of that answer and the
+    site's, the only copy of the rule (plan 4.1). A row the site switched off
+    shows unticked, fixed, and says who did it. A row the editor left on that
+    effective() still turns off (today: the bins, while the project name is
+    off) shows unticked and fixed with IMPLIED_OFF_NOTE. A fixed row keeps
+    the computer's own answer underneath (see report_switch_literals), so an
+    admin who later turns a site switch back on gets this computer's choice,
+    not a silent "off"."""
+    local = {category: bool(choices.get(category, True)) for category in REPORT_CATEGORIES}
+    cfg = {policy_mod.CONFIG_KEYS[c]: on for c, on in local.items()}
+    site = {"telemetry": {c: False for c in site_off if c in REPORT_CATEGORIES}}
+    eff = policy_mod.effective(cfg, site)
+    rows: list[dict[str, Any]] = []
+    for row in REPORT_SWITCHES:
+        category = row["category"]
+        entry = dict(row)
+        if category in site_off:
+            entry.update(checked=False, enabled=False, note=SITE_OFF_NOTE)
+        elif local[category] and not eff[category]:
+            entry.update(checked=False, enabled=False, note=IMPLIED_OFF_NOTE)
+        else:
+            entry.update(checked=local[category], enabled=True, note="")
+        rows.append(entry)
+    return rows
+
+
+def bundled_companion_version(exe_path: Optional[Path] = None) -> Optional[tuple[int, ...]]:
+    """The version of the companion this wizard is about to install, from
+    the `ccsync-release.json` tools/release.ps1 and release_macos.sh write
+    beside the binary, or None when there is no such file or it does not
+    parse (a `+dirty` stamp included: upgrade.parse_version refuses to rank
+    what it does not fully understand). Never raises."""
+    try:
+        exe = find_companion_exe(exe_path)
+        data = json.loads((exe.parent / "ccsync-release.json").read_text(encoding="utf-8-sig"))
+        return upgrade_mod.parse_version(data.get("version") if isinstance(data, dict) else None)
+    except Exception:
+        return None
+
+
+def report_switches_install_warning(choices: Optional[dict[str, bool]],
+                                    version: Optional[tuple[int, ...]]) -> Optional[str]:
+    """The install-log line owed when this computer switched something off
+    but the companion being installed may not honour it, else None (review
+    round point 3). A build up to REPORT_SWITCHES_IGNORED_UP_TO ignores the
+    report_* keys and never sends report_optouts, so the dashboard keeps
+    receiving, and keeps, what the page said would stop. Nothing switched
+    off locally means nothing to warn about: the SITE switches are enforced
+    by the dashboard for every build."""
+    if not choices:
+        return None
+    off = [c for c in REPORT_CATEGORIES if not choices.get(c, True)]
+    if not off:
+        return None
+    floor = ".".join(str(n) for n in REPORT_SWITCHES_IGNORED_UP_TO)
+    if version is None:
+        return (f"note: could not tell which companion build is being installed. "
+                f"The reporting switches you turned off ({', '.join(off)}) are only "
+                f"honoured by a companion newer than {floor}; check its version in "
+                "the tray once it is running.")
+    if tuple(version) <= REPORT_SWITCHES_IGNORED_UP_TO:
+        have = ".".join(str(n) for n in version)
+        return (f"WARNING: the companion being installed is {have}, which ignores the "
+                f"reporting switches you turned off ({', '.join(off)}). The dashboard "
+                "will keep receiving them until this computer is updated to a "
+                f"companion newer than {floor}.")
+    return None
+
+
+def report_switch_literals(choices: Optional[dict[str, bool]]) -> dict[str, str]:
+    """{config key: TOML bool literal} for ensure_config. {} for None.
+    Unknown categories are dropped; a known one missing from `choices` is
+    written as on, the companion's default."""
+    if choices is None:
+        return {}
+    return {row["key"]: ("true" if bool(choices.get(row["category"], True)) else "false")
+            for row in REPORT_SWITCHES}
+
+
+# LG-12. The licence texts of everything frozen into this binary. G6 bundles
+# them (plan 5, LG-12) as assets/THIRD_PARTY_LICENSES.txt, beside EULA.md, and
+# the companion carries its own copy under ccsync_companion/assets. The
+# wizard's last page links whichever it finds.
+LICENSES_ASSET_NAME = "THIRD_PARTY_LICENSES.txt"
+LICENSES_MISSING_TEXT = (
+    "The open-source licence texts are not bundled in this build. Copies are\n"
+    "available on request from the contact address in the licence agreement.")
+
+
+def find_licenses_file(asset_path: Optional[Path] = None) -> Optional[Path]:
+    """The bundled licence texts, or None. Same lookup order as
+    find_eula_asset, then the dev tree's generated copies, then the notices
+    document itself. None never stops anything: the finish page then says
+    where copies can be had, which the cleared THIRD_PARTY_NOTICES offers."""
+    candidates: list[Path] = []
+    if asset_path is not None:
+        candidates.append(Path(asset_path))
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "assets" / LICENSES_ASSET_NAME)
+        candidates.append(Path(meipass) / "ccsync_companion" / "assets" / LICENSES_ASSET_NAME)
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / "assets" / LICENSES_ASSET_NAME)
+    here = Path(__file__).resolve().parent
+    candidates.append(here / "assets" / LICENSES_ASSET_NAME)
+    candidates.append(here.parent / "companion" / "src" / "ccsync_companion" / "assets"
+                      / LICENSES_ASSET_NAME)
+    legal = here.parent / "docs" / "legal"
+    candidates.append(legal / "licenses" / "onboarding" / LICENSES_ASSET_NAME)
+    candidates.append(legal / "licenses" / "companion" / LICENSES_ASSET_NAME)
+    candidates.append(legal / "THIRD_PARTY_NOTICES.md")
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def licenses_text(asset_path: Optional[Path] = None) -> str:
+    """The text the licences window shows: the bundled file, or the
+    sentence saying copies are available on request. Never raises."""
+    path = find_licenses_file(asset_path)
+    if path is None:
+        return LICENSES_MISSING_TEXT
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return LICENSES_MISSING_TEXT
+    return text if text.strip() else LICENSES_MISSING_TEXT

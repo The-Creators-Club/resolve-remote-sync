@@ -1437,3 +1437,114 @@ def detail_notes(row: Mapping[str, Any]) -> list[str]:
     if resolve.get("wedged_seconds"):
         notes.append("Resolve is wedged on a call")
     return notes
+
+
+# ------------------------------------------------ LG-1 / LG-5 row facts
+# docs/LEGAL_GAP_FEATURES_PLAN.md §4.1 and §5 (2026-09-25). Two facts about a
+# computer that are NOT health: what it does not report (its own switches or
+# the site's), and which licence its companion says was accepted. Neither
+# ever changes a dot, a headline, `detail_notes` or an alert: a withheld
+# section is a choice somebody made, and "Nothing ticked is fine" applies to
+# it in spirit. They are worked out here so the fleet grid and /account read
+# one answer.
+
+# What the grid's grey chip says for each category, in the order shown.
+WITHHELD_LABELS: dict[str, str] = {
+    "resolve_project": "OPEN RESOLVE PROJECT",
+    "local_manifest": "FILE LIST",
+    "media_tree": "RESOLVE BINS",
+    "input_idle": "IDLE TIME",
+}
+# The chip's wording, which partials/fleet_grid.html spells out (the grid
+# has no global for it); tests/test_site_telemetry.py pins the two equal.
+WITHHELD_CHIP = "NOT REPORTED BY THIS COMPUTER"
+WITHHELD_HELP = (
+    "This computer does not send this to the dashboard: its own privacy "
+    "switch (tray, Settings, THIS COMPUTER, PRIVACY) or the site one "
+    "(Settings, Site, TELEMETRY) is off. Sync is not affected, and nothing "
+    "here is a fault.")
+
+EULA_CURRENT = "current"
+EULA_OLDER = "older"
+EULA_NOT_REPORTED = "not_reported"
+
+
+def withheld_sections(names: Iterable[str] | None) -> list[dict[str, str]]:
+    """[{name, label}] for each known withheld category, in WITHHELD_LABELS
+    order. Unknown names are dropped (a newer companion's category is not
+    ours to label) and None is nothing withheld."""
+    have = {str(n) for n in (names or [])}
+    return [{"name": name, "label": label}
+            for name, label in WITHHELD_LABELS.items() if name in have]
+
+
+def eula_status(block: Mapping[str, Any] | None,
+                bundled_version: str | None) -> dict[str, Any]:
+    """The fleet grid's licence line for one computer (LG-5).
+
+    THE VERSION ALONE IS JUDGED (plan §5, buildability M5): green when it
+    equals the EULA-VERSION this dashboard carries, amber when it differs,
+    grey "Not reported" when the computer has not said. The sha is carried
+    for display and never compared, so no second hashing rule exists. This
+    never answers "not accepted": that remains only the companion's own
+    `licence_pending` block reason, which is a statement the computer makes,
+    not one inferred from a missing column. With no bundled version to
+    compare against (a build shipped without docs/legal) a reported version
+    is shown uncoloured rather than judged."""
+    if not isinstance(block, Mapping) or not str(block.get("version") or "").strip():
+        return {"state": EULA_NOT_REPORTED, "colour": "", "text": "Not reported",
+                "version": None, "accepted_at": None, "eula_sha256": None}
+    version = str(block.get("version")).strip()
+    accepted_at = str(block.get("accepted_at") or "").strip() or None
+    sha = str(block.get("eula_sha256") or "").strip() or None
+    bundled = str(bundled_version or "").strip()
+    if bundled and version != bundled:
+        return {"state": EULA_OLDER, "colour": AMBER,
+                "text": "Older licence accepted", "version": version,
+                "accepted_at": accepted_at, "eula_sha256": sha}
+    return {"state": EULA_CURRENT, "colour": GREEN if bundled else "",
+            "text": f"Licence {version} accepted", "version": version,
+            "accepted_at": accepted_at, "eula_sha256": sha}
+
+
+def bundled_eula_version() -> str | None:
+    """The `EULA-VERSION` of the licence this dashboard serves to /setup, or
+    None when it carries none. Read through setup_engine so the grid and the
+    first-run wizard can never be judging against two different files."""
+    try:
+        from . import setup_engine
+
+        path = setup_engine.eula_path()
+        if not path.is_file():
+            return None
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            return setup_engine.eula_marker_version(fh.read(8192))
+    except Exception:                                              # noqa: BLE001
+        return None
+
+
+def annotate_legal(conn: Any, editors: Iterable[dict[str, Any]],
+                   bundled_version: str | None = None) -> None:
+    """Put `report_withheld` ([{name, label}]) and `eula` (eula_status) on
+    each fleet entry, in place. Two fleet-wide reads, never one per machine.
+
+    Called by the view builder that owns the entries (G2b hand-off to G2a:
+    api.build_editors_view), so the fleet grid and /account, which reads the
+    grid's own entries, show the same line. A database that cannot be read
+    leaves every entry "not reported", never fine and never a fault."""
+    from . import db as dbmod
+
+    try:
+        withheld = dbmod.withheld_map(conn)
+    except Exception:                                              # noqa: BLE001
+        withheld = {}
+    try:
+        eulas = dbmod.machine_eula_map(conn)
+    except Exception:                                              # noqa: BLE001
+        eulas = {}
+    if bundled_version is None:
+        bundled_version = bundled_eula_version()
+    for entry in editors:
+        key = (str(entry.get("editor_username") or ""), str(entry.get("machine") or ""))
+        entry["report_withheld"] = withheld_sections(withheld.get(key))
+        entry["eula"] = eula_status(eulas.get(key), bundled_version)

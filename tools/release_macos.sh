@@ -464,11 +464,18 @@ fi
 echo ""
 step "--- step 3/6: venv + tests ---"
 
-# ".[dev,tray]", not ".[dev]": dev is only pytest, and the tray extra is what
-# carries pystray/Pillow (plus pyobjc on darwin). Without them build.spec's
-# import probe quietly drops the tray from the bundle and the editor gets a
-# companion with no menu-bar icon -- i.e. no visible interface at all.
-PIP_EXTRAS='.[dev,tray]'
+# FROM THE LOCK since 2026-09-25 (LG-11, docs/LEGAL_GAP_FEATURES_PLAN.md 4.5),
+# the recipe release-macos.yml and release.ps1 use: requirements.lock with
+# --require-hashes (it carries every extra, tray's Pillow + pyobjc and dev's
+# pytest included, so build.spec's import probe still finds the tray), then
+# the package itself with --no-deps, then the one pinned PyInstaller. It used
+# to be `pip install -e .[dev,tray] pyinstaller`, which resolved
+# pyproject.toml's floors against PyPI on the day and took whatever
+# PyInstaller was newest: a Mac build and a CI build of one commit were
+# different bytes, and psycopg2-binary, in pyproject.toml but not in the
+# lock, was in one and not the other. tools/scan_frozen.py (step 4) proves
+# the result.
+PYINSTALLER_PIN='pyinstaller==6.21.0'
 
 if [ "$DRY_RUN" = 1 ]; then
     if [ -x "$VENV_PY" ]; then
@@ -476,7 +483,9 @@ if [ "$DRY_RUN" = 1 ]; then
     else
         dry "would create a venv: python3 -m venv $VENV_DIR"
     fi
-    dry "would run: \$VENV/bin/python -m pip install -e '$PIP_EXTRAS' pyinstaller   (in $COMPANION_DIR)"
+    dry "would run: \$VENV/bin/python -m pip install --require-hashes -r requirements.lock   (in $COMPANION_DIR)"
+    dry "would run: \$VENV/bin/python -m pip install --no-deps -e .   (in $COMPANION_DIR)"
+    dry "would run: \$VENV/bin/python -m pip install $PYINSTALLER_PIN   (in $COMPANION_DIR)"
 else
     if [ -x "$VENV_PY" ]; then
         step "reusing the venv at $VENV_DIR"
@@ -487,9 +496,12 @@ else
     fi
     [ -x "$VENV_PY" ] || fail "no python at $VENV_PY after creating the venv"
     step "python: $("$VENV_PY" --version 2>&1)"
-    step "installing the companion (editable) + pyinstaller ..."
-    ( cd "$COMPANION_DIR" && "$VENV_PY" -m pip install --disable-pip-version-check -e "$PIP_EXTRAS" pyinstaller ) \
-        || fail "pip install failed -- nothing was built"
+    step "installing requirements.lock (--require-hashes), the companion (--no-deps) and $PYINSTALLER_PIN ..."
+    ( cd "$COMPANION_DIR" \
+        && "$VENV_PY" -m pip install --disable-pip-version-check --require-hashes -r requirements.lock \
+        && "$VENV_PY" -m pip install --disable-pip-version-check --no-deps -e . \
+        && "$VENV_PY" -m pip install --disable-pip-version-check "$PYINSTALLER_PIN" ) \
+        || fail "pip install failed -- nothing was built (a hash mismatch means regenerating the lock, docs/RELEASE.md 'Refreshing the lockfiles', never editing it)"
 fi
 
 if [ "$SKIP_TESTS" = 1 ]; then
@@ -570,6 +582,14 @@ else
     [ -f "$ARTIFACT" ] || fail "PyInstaller reported success but there is no binary at $ARTIFACT"
     chmod +x "$ARTIFACT" 2>/dev/null || true
     step "built $ARTIFACT"
+
+    # LG-11 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.5, 2026-09-25): refuse a build
+    # that froze a distribution companion/requirements.lock does not name, or
+    # a copyleft one the allowlist does not name `companion` for. Before any
+    # signature, so a refused build is never signed or notarised.
+    "$VENV_PY" "$REPO_ROOT/tools/scan_frozen.py" --component companion \
+        --workpath "$COMPANION_DIR/build/build" \
+        || fail "tools/scan_frozen.py refused this build (see the [scan_frozen] lines above) -- NOT signing, NOT writing a manifest"
 
     # --- Developer ID + notarisation (COMMERCIAL_READINESS.md item 4,
     # 2026-08-17). Set these on the release Mac:

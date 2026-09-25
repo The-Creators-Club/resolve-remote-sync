@@ -137,8 +137,12 @@ def test_the_three_shipping_routes_agree_with_the_one_list():
 
     ignore = (REPO / ".dockerignore").read_text(encoding="utf-8").splitlines()
     reincluded = {line.strip() for line in ignore if line.strip().startswith("!docs")}
+    # LG-12 (2026-09-25): plus the licence texts, the one .txt subtree
+    # published_docs.is_licence_text admits.
     assert reincluded == ({f"!{name}" for name in files}
-                          | {f"!{name}/*.md" for name in trees}), reincluded
+                          | {f"!{name}/*.md" for name in trees}
+                          | {f"!docs/{published_docs.TEXT_TREE}/**/*"
+                             f"{published_docs.TEXT_SUFFIX}"}), reincluded
 
     sys.path.insert(0, str(REPO / "tools"))
     try:

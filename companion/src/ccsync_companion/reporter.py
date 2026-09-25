@@ -24,6 +24,9 @@ from typing import Any, Callable, Optional
 
 from . import config as config_mod
 from . import machine as machine_mod
+from . import site as site_mod
+from . import telemetry_policy
+from . import transport as transport_mod
 from . import upgrade as upgrade_mod
 from .sync.base import STATE_SYNCING, LaneStatus
 
@@ -217,6 +220,14 @@ OMITTABLE_SECTIONS = ("local_manifest", "media_tree")
 # (comp-lane-c-3, 2026-08-21). One loopback GET; the id only changes when
 # Syncthing's home is regenerated under a running companion.
 DEVICE_ID_REFRESH_SECONDS = 300.0
+
+# LG-4 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.4, 2026-09-25): the tray line when
+# the transport guard refuses a report, word for word the plan's (and
+# identity.CLEARTEXT_REFUSED_MESSAGE's, which sign-in shows). No em dash.
+CLEARTEXT_REFUSED_LINE = (
+    "Not sent: the dashboard address is plain http on the internet. Ask your "
+    "admin for its https address.")
+CLEARTEXT_REFUSED_STATUS = "refused: plain http on the internet"
 
 # -- reporter health (APP-1, resilience sweep 2026-08-28) -------------------
 # A revoked per-editor token, or a `dashboard_url` with a typo in the port,
@@ -474,8 +485,20 @@ class DashboardReporter:
         get_machine_settings: Optional[Callable[[], dict[str, Any]]] = None,
         notify: Optional[Callable[[str], None]] = None,
         state_dir: Optional[Path] = None,
+        get_eula: Optional[Callable[[], Optional[dict[str, Any]]]] = None,
+        get_site: Optional[Callable[[], Optional[dict[str, Any]]]] = None,
     ) -> None:
         self._get_statuses = get_statuses
+        # LG-5 (docs/LEGAL_GAP_FEATURES_PLAN.md section 5, 2026-09-25): which
+        # licence this computer accepted. Heavy ticks only: it changes once a
+        # year, and absent reads as "not reported" on the dashboard.
+        self._get_eula = get_eula
+        # LG-1 (plan 4.1): the site half of the reporting switches, read from
+        # the cached manifest on every build of the payload. A getter so the
+        # tests never read a real ~/.ccsync.
+        self._get_site = get_site or site_mod.cached_site
+        # LG-4: the refusal is announced once per run, not every 30 s.
+        self._cleartext_notified = False
         # Answers to the dashboard's file-move commands (docs/FILE_MOVES.md).
         # DRAIN semantics like get_completions, but safe: an unanswered
         # command is simply redelivered on the next reply and answered again
@@ -728,6 +751,15 @@ class DashboardReporter:
         code = getattr(exc, "code", None)
         self.last_status = (f"HTTP {code}" if isinstance(code, int)
                             else type(exc).__name__)
+        if isinstance(exc, transport_mod.CleartextRefused):
+            # LG-4 (plan 4.4): nothing was sent, and it never will be until
+            # the address changes. The tray balloon says so once per run in
+            # the plan's words; the status is what the diagnostics and the
+            # Settings window read.
+            self.last_status = CLEARTEXT_REFUSED_STATUS
+            if not self._cleartext_notified:
+                self._cleartext_notified = True
+                self._toast(CLEARTEXT_REFUSED_LINE)
         self.consecutive_failures += 1
         self._failure_seq += 1
         rejected = isinstance(code, int) and code in AUTH_REJECT_CODES
@@ -1062,8 +1094,53 @@ class DashboardReporter:
                     payload["media_tree"] = self._get_media_tree()
                 except Exception:
                     log.exception("get_media_tree() failed")
+            if self._get_eula is not None:
+                try:
+                    eula_block = self._get_eula()
+                except Exception:
+                    log.exception("get_eula() failed")
+                    eula_block = None
+                if isinstance(eula_block, dict) and eula_block:
+                    payload["eula"] = eula_block
+        payload = self._withhold(payload)
+        if not light:
+            # AFTER the withhold (G1a review round 1, 2026-09-25): run first,
+            # a withheld-but-unchanged manifest was booked as "omitted as
+            # unchanged", so its stamp survived the switch being off and,
+            # switched back on within SECTION_RESEND_SECONDS, the manifest
+            # stayed away while the dashboard had already deleted the rows
+            # (db.apply_report_optouts) -- no inventory, and no file-move
+            # target either. Withheld now reads as "not sent", so
+            # _note_sections_sent drops the stamp.
             self._drop_unchanged_sections(payload)
         return payload
+
+    # -- the reporting switches (LG-1, docs/LEGAL_GAP_FEATURES_PLAN.md 4.1) --
+    def telemetry_effective(self) -> dict[str, bool]:
+        """This computer's switches AND the site's. Never raises: a manifest
+        that cannot be read is "the site withholds nothing", which the
+        dashboard's own strip on arrival makes safe."""
+        try:
+            site = self._get_site()
+        except Exception:
+            log.debug("site manifest unreadable for the reporting switches",
+                      exc_info=True)
+            site = None
+        return telemetry_policy.effective(self.cfg, site)
+
+    def _withhold(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Strip what the switches withhold, LAST, after every getter has
+        run (collect, then withhold), and say which categories were
+        withheld. `report_optouts` is sent on every report, empty included,
+        so "nothing withheld" is not mistaken for "an older build"."""
+        eff = self.telemetry_effective()
+        try:
+            out = telemetry_policy.strip(payload, eff)
+        except Exception:
+            log.exception("could not apply the reporting switches")
+            out = payload
+        out[telemetry_policy.OPTOUTS_KEY] = telemetry_policy.withheld(eff)
+        return out
 
     # -- unchanged-section suppression (ops-efficiency-1, 2026-08-21) -----
     def _drop_unchanged_sections(self, payload: dict[str, Any]) -> None:

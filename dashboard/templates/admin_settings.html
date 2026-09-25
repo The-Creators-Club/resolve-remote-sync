@@ -159,6 +159,46 @@
                     {{ "checked" if manifest.features.ai_cli_auto_update }}> Keep Claude Code up to date
         <span class="muted">once a day, this server installs the publisher's newer Claude Code (checked against the publisher's checksum) so new Claude models work without anyone clicking UPDATE</span></label>
 
+      {# LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.1, 2026-09-25): the site's
+         four reporting switches. Inside the form, so [ SAVE ] carries them
+         like every other flag; site_settings.js asks before a save that
+         switches one OFF, because that deletes what the dashboard holds for
+         every computer at once. `data-initial` is what it compares against.
+         `manifest.telemetry` is absent on a build without LG-1, and then the
+         block is not drawn at all rather than drawn all-ticked. #}
+      {% if manifest.telemetry is defined %}
+      <div class="side-head" style="margin-top:1.2rem" id="telemetry">[ TELEMETRY ]
+        <span class="muted">What every computer reports to this dashboard. Switching one
+          off stops every computer sending it, deletes what the dashboard already holds
+          about it for every computer, and does not affect sync. A computer can also
+          switch these off for itself (its tray: Settings, THIS COMPUTER, PRIVACY); it
+          cannot switch back on what the site has switched off.</span></div>
+      {% set TELEMETRY_ROWS = [
+        ("resolve_project", "Open Resolve project name",
+         "The name of the project open in Resolve, wherever it is reported. Off also stops the Resolve bin structure, which is organised by project name. Cost: no NEW PROJECT prompt for that project, an editor cannot be first to map a Resolve project to a folder (an admin can), and projects are not mapped automatically from that computer."),
+        ("local_manifest", "Files on each computer's disk",
+         "The list of media files on the computer's disk, and the file names in its Resolve and sync-conflict checks, which are then sent only as counts. Cost: every file move in every active project is sent to that computer, and its holdings and upload progress show as not reported."),
+        ("media_tree", "Resolve bin structure",
+         "The bins and the clips in them, as the companion reads them from Resolve."),
+        ("input_idle", "Time since the last keyboard or mouse input",
+         "Used only to offer background jobs to an idle computer. Cost: that computer is not offered jobs that wait for an idle computer."),
+      ] %}
+      {% for name, label, hint in TELEMETRY_ROWS %}
+      <label title="{{ hint }}"><input type="checkbox" name="telemetry.{{ name }}"
+                    data-telemetry="{{ name }}"
+                    data-initial="{{ '1' if manifest.telemetry[name] else '0' }}"
+                    {{ "checked" if manifest.telemetry[name] }}> {{ label }}
+        <span class="muted">{{ hint }}</span></label>
+      {% endfor %}
+      {% endif %}
+
+      {# LG-4 (§4.4): one INFORMATIONAL line, filled by site_settings.js from
+         GET /api/v1/admin/site's report_via_counts. No notice and no alert
+         for plain http on a private network; the alert is for the public
+         internet only. Empty until the counts arrive, and empty when every
+         computer uses https. #}
+      <div id="site-transport-line" class="muted" style="margin-top:0.6rem"></div>
+
       <div class="side-head" style="margin-top:1.2rem">[ B-ROLL INDEXING MODEL ]
         <span class="muted">The indexer on your wired computer reads this choice from the dashboard;
           it can be overridden per computer in the indexer's config.</span></div>

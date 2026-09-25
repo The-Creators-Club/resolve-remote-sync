@@ -1554,6 +1554,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(account_api.router)
     app.include_router(account_ui.router)
+    # LG-2/LG-3 data-subject routes (docs/LEGAL_GAP_FEATURES_PLAN.md,
+    # 2026-09-25): export and erase-history, before ui.router for the same
+    # reason as the two above; none is CSRF-exempt.
+    from . import subject_data_api
+
+    app.include_router(subject_data_api.router)
     app.include_router(ui.router)
     # The admin project<->editor assignment matrix (2026-08-17): one page,
     # /admin/assignments, that writes nothing itself -- it calls the selection

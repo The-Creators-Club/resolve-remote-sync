@@ -48,6 +48,9 @@ docs
 !docs/HOW_IT_WORKS.md
 !docs/EDITOR_SETUP.md
 !docs/legal/*.md
+# LG-12 (2026-09-25): the licence texts /help serves under legal/licenses/,
+# the ONE place a .txt is published (published_docs.is_licence_text).
+!docs/legal/licenses/**/*.txt
 broll/indexer
 music/indexer
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib
 import json
 import logging
 import re
@@ -25,12 +26,13 @@ from typing import Any, Iterator, Literal, Mapping
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, PlainTextResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 
 from . import VERSION, auth, db, health, links, local_users, package_store, release_trust
 from . import jobs as jobs_mod
 from . import notices
 from . import locate as locate_mod
+from . import netclass, telemetry_fields
 from .nas import EDITORS_GROUP, NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
 from .nas import factory as nas_factory
 from .syncthing_client import SyncthingClient, SyncthingError
@@ -532,6 +534,40 @@ def build_project_view(conn: sqlite3.Connection, slug: str, now: str | None = No
     }
 
 
+def _upload_only_tick_withheld(conn: sqlite3.Connection, editor: str, machine: str,
+                               no_manifest: set[tuple[str, str]],
+                               base_pairs: set[tuple[str, str]]) -> bool:
+    """Does this upload-only tick belong to computers that withhold their
+    file list (LG-1, correctness H4), so it can never get the manifest that
+    ends "getting ready"?
+
+    A machine's own tick: that machine's switch. db.fetch_machine_selections
+    has already resolved the unassigned bucket to real computers, so machine
+    '' reaches here only for a person with no registered computer. Then the
+    tick stands for the computers of theirs that have reported state and have
+    no plan of their own (selections_for_machine's inheritance rule), wired
+    rigs aside, and is "not reported" only when EVERY one of those withholds,
+    never because ANY of the person's computers does (G2a review round, point
+    4, 2026-09-25: the reviewer's two-computer case resolves before this, but
+    "any" was the wrong rule for the case that does not). No computer known:
+    not withheld, and the preparing row stands."""
+    if machine:
+        return (editor, machine) in no_manifest
+    if not any(w == editor for w, _wm in no_manifest):
+        return False
+    try:
+        known = {r["machine"] for r in conn.execute(
+            "SELECT machine FROM machine_state WHERE editor_username=? AND machine != ''",
+            (editor,))}
+        own_plan = {r["machine"] for r in conn.execute(
+            "SELECT DISTINCT machine FROM selections WHERE editor_username=?"
+            " AND machine != ''", (editor,))}
+    except sqlite3.Error:
+        return False
+    stands_for = {m for m in known - own_plan if (editor, m) not in base_pairs}
+    return bool(stands_for) and all((editor, m) in no_manifest for m in stands_for)
+
+
 def build_transfers_view(
     conn: sqlite3.Connection, now: str | None = None, editor: str | None = None
 ) -> dict[str, Any]:
@@ -737,6 +773,16 @@ def build_transfers_view(
     # machine's first media manifest for the project (an editor_media_project
     # row) -- from then on the lane A backlog above says exactly what is left
     # to send, and "nothing left" is a finished upload, not a missing share.
+    # EXCEPT a machine that withholds its file list (LG-1, correctness H4,
+    # 2026-09-25): it never sends that manifest, so its tick would sit in
+    # "getting ready" for ever, the CR-28 shape. It gets the "not reported"
+    # row db._backlog_not_reported gives a FULL tick instead (that helper
+    # reads full ticks only): an uncertain zero-file upload, never "nothing
+    # owed", so the queue panel never says "Safe to close" over it.
+    try:
+        no_manifest = db.machines_withholding(conn, "local_manifest")
+    except sqlite3.Error:
+        no_manifest = set()
     for slug, pairs in upload_only_plans.items():
         if slug not in labels:
             continue
@@ -746,6 +792,15 @@ def build_transfers_view(
             if (e, slug) in queued_pairs:
                 continue
             if (e or "") in base_editors or (e or "", m or "") in base_pairs:
+                continue
+            if _upload_only_tick_withheld(conn, e or "", m or "", no_manifest, base_pairs):
+                queues.append({
+                    "editor": e, "machine": m, "slug": slug,
+                    "label": labels[slug], "lane": "a", "direction": "up",
+                    "kind": "original", "n_files": 0, "bytes": 0, "files": [],
+                    "truncated": False, "manifest_truncated": False,
+                    "uncertain": True, "not_reported": True, "upload_only": True,
+                })
                 continue
             reported = conn.execute(
                 """SELECT 1 FROM editor_media_project
@@ -1249,6 +1304,16 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         m for m in db.lost_machines(conn, now)
         if (m["editor_username"], m["machine"]) not in live
     ]
+    # LG-1 / LG-5 (2026-09-25, G2b hand-off 2): `report_withheld` (the grey
+    # "NOT REPORTED BY THIS COMPUTER" chips) and `eula` (the licence line) on
+    # every row, live and lost, from two fleet-wide reads. /account reads the
+    # grid's own entries, so both surfaces show one answer. Never fatal: an
+    # unreadable column leaves every row "not reported".
+    try:
+        health.annotate_legal(conn, [*result, *lost])
+    except Exception as e:  # noqa: BLE001 - a status page must never die on a fact
+        log.warning("could not annotate the fleet rows with the legal facts (%s: %s)",
+                    type(e).__name__, e)
     return {"generated_at": now, "editors": result,
             "lost_machines": lost,
             # SYS-3: report sections this dashboard accepted and does not read.
@@ -1926,6 +1991,18 @@ def api_site(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> 
             # cannot reach one, keeps waiting for a human click.
             "auto_update": site["features"]["auto_update"],
         },
+        # LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md 3.3, 2026-09-25): the four
+        # site reporting switches, True = reported. The OPPOSITE default to
+        # `features`: only a real `false` switches one off, and a companion
+        # that cannot read this key reports as it always has, which is safe
+        # because api_report strips a switched-off category on arrival from
+        # every build. Published because the companion is the client that
+        # acts on it (its "do not even send" half, and the tray/wizard rows
+        # that say "Turned off for everyone by your administrator"); without
+        # it a current companion under a site switch still SENDS the withheld
+        # data and cannot show why (G2b hand-off 1, landed by the final
+        # review 2026-09-25). tests/test_site.py pins the four keys.
+        "telemetry": dict(site["telemetry"]),
         # Which LOCAL vision model the b-roll indexer should load: "good"
         # (Qwen3-VL 4B, needs 8 GB VRAM) or "best" (Qwen3-VL 8B, needs 12 GB),
         # chosen on Settings by how much VRAM the indexing machine has
@@ -5117,6 +5194,13 @@ def delete_user_everywhere(request: Request, conn: sqlite3.Connection, username:
             status_code=404,
             detail=f"{username!r} is not an account or an editor this dashboard knows")
 
+    # LG-3 (G0 hand-off 2, 2026-09-25): asked BEFORE step 1, because the local
+    # account row step 1 deletes is where forget_editor would otherwise look,
+    # and an administrator read as "not an admin" would have their name
+    # pseudonymised off the audit actor column the plan keeps for 180 days
+    # (safety M5). A disabled local admin is still one for this purpose.
+    was_admin = bool(auth.is_admin(settings, username, conn)
+                     or (account or {}).get("role") == "admin")
     result: dict[str, Any] = {"username": username, "account": None, "warnings": []}
     if local and account is not None:
         try:
@@ -5147,9 +5231,14 @@ def delete_user_everywhere(request: Request, conn: sqlite3.Connection, username:
             ) from exc
         result["warnings"].extend(result["account"].get("warnings") or [])
 
-    result["fleet"] = db.forget_editor(conn, username)
-    db.audit(conn, admin, "user.delete", username,
-             {"machines": result["fleet"]["machines"],
+    result["fleet"] = db.forget_editor(conn, username, was_admin=was_admin)
+    # The one row that records the delete names the person by their stand-in,
+    # or it would re-identify them on the very log forget_editor has just
+    # pseudonymised (LG-3, D2). Counts only, as before. The machine names are
+    # not in it for the same reason.
+    db.audit(conn, admin, "user.delete",
+             result["fleet"].get("pseudonym") or db.pseudonym(conn, username),
+             {"machines": len(result["fleet"]["machines"]),
               "devices_removed": len(result["devices_removed"])})
     conn.commit()
     # forget_editor deleted their display name: drop the 30 s label cache so
@@ -5161,6 +5250,7 @@ def delete_user_everywhere(request: Request, conn: sqlite3.Connection, username:
         log.debug("display-name cache not invalidated", exc_info=True)
     purged = _purge_user_credentials(request, conn, username, by=admin)
     result.update(purged)
+    _forget_elsewhere(request, conn, username, result)
     log.warning(
         "admin %r deleted user %r: account=%s, %d machine(s) forgotten (%s), %d syncthing "
         "device(s) removed, %d session(s), %d report token(s) revoked",
@@ -5171,6 +5261,91 @@ def delete_user_everywhere(request: Request, conn: sqlite3.Connection, username:
         len(result["devices_removed"]), purged["sessions_revoked"],
         purged["report_tokens_revoked"])
     return result
+
+
+def _forget_elsewhere(request: Request, conn: sqlite3.Connection, username: str,
+                      result: dict[str, Any]) -> None:
+    """The half of a delete that lives outside this transaction (LG-3,
+    docs/LEGAL_GAP_FEATURES_PLAN.md 4.3, 2026-09-25), run after the account
+    commit and after _purge_user_credentials has revoked every credential:
+
+      * the revoked report tokens are DELETED, not kept revoked (safety L6).
+        The revocation itself is not moved: a token row that is gone is
+        already refused (db.resolve_editor_report_token finds nothing);
+      * the session store's rows go, all of them (sessions.purge_user), on
+        its own connection, which is why this is after the commit;
+      * the YouTube ledger's requester columns are pseudonymised and any live
+        lease released first (ytdl.forget_requester, G4), and the client
+        folders' `created_by`/`added_by` likewise (subject_data.forget_shares,
+        G3). Both are other databases.
+
+    Each step is best effort and says so in `result["warnings"]`: the person
+    is already deleted, and a store that is down must not turn a finished
+    delete into a 500 the admin retries into a 404."""
+    warnings = result.setdefault("warnings", [])
+    try:
+        result["report_tokens_deleted"] = db.delete_revoked_report_tokens(conn, username)
+        conn.commit()
+    except Exception as e:  # noqa: BLE001
+        conn.rollback()
+        log.warning("revoked report tokens of %r were not deleted (%s: %s)",
+                    username, type(e).__name__, e)
+        warnings.append("their revoked report tokens were kept; they are deleted "
+                        "180 days after revocation")
+    store = auth.session_store(request)
+    if store is not None:
+        try:
+            # Two ints beside `sessions_revoked` (an int), never the store's
+            # dict: a client summing the `deleted` block's counts must not
+            # meet a dict in it (G2a review round, point 6, 2026-09-25).
+            counts = store.purge_user(username) or {}
+            result["sessions_deleted"] = int(counts.get("auth_sessions") or 0)
+            result["login_attempts_deleted"] = int(counts.get("login_attempts") or 0)
+        except Exception as e:  # noqa: BLE001
+            log.warning("sessions of %r were not deleted (%s: %s)",
+                        username, type(e).__name__, e)
+            warnings.append("their signed-out sessions were kept until they expire")
+    # The stand-in is keyed on the DASHBOARD's pseudonym salt, and both other
+    # stores refuse to guess it: subject_data.forget_shares raises with
+    # neither `stand_in` nor `conn`, and ytdl.forget_requester falls back to a
+    # DASH_DB_PATH the container may not set. The first build passed the
+    # username alone, so every delete on a dashboard with client folders kept
+    # the real name there and warned about it (G2a review round, point 1,
+    # 2026-09-25). forget_editor minted and committed the salt above.
+    try:
+        stand_in = (result.get("fleet") or {}).get("pseudonym") or db.pseudonym(conn, username)
+        if conn.in_transaction:
+            conn.commit()
+    except Exception as e:  # noqa: BLE001
+        conn.rollback()
+        log.warning("no stand-in for %r's other stores (%s: %s)",
+                    username, type(e).__name__, e)
+        stand_in = None
+    for label, module_name, func_name, kwargs in (
+            ("YouTube requests", "ytdl", "forget_requester",
+             {"conn": conn, "pseudonym": stand_in}),
+            ("client folders", "subject_data", "forget_shares",
+             {"stand_in": stand_in, "conn": conn})):
+        try:
+            func = getattr(importlib.import_module(f"{__package__}.{module_name}"),
+                           func_name, None)
+        except ImportError:
+            func = None
+        if func is None:
+            continue
+        try:
+            result[f"{module_name}_forgotten"] = func(username, **kwargs)
+            if conn.in_transaction:
+                conn.commit()
+        except Exception as e:  # noqa: BLE001
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            log.warning("%s of %r were not pseudonymised (%s: %s)",
+                        label, username, type(e).__name__, e)
+            warnings.append(f"their name could not be removed from {label}: "
+                            "the dashboard log names the reason")
 
 
 def forget_machine_everywhere(request: Request, conn: sqlite3.Connection, editor: str,
@@ -5241,7 +5416,13 @@ def api_admin_delete_user(
                         "machines": result["fleet"]["machines"],
                         "devices_removed": result["devices_removed"],
                         "sessions_revoked": result["sessions_revoked"],
-                        "report_tokens_revoked": result["report_tokens_revoked"]},
+                        "report_tokens_revoked": result["report_tokens_revoked"],
+                        # LG-3 (2026-09-25): additive, absent when a step was
+                        # skipped (no session store) or failed (a warning).
+                        **{k: result[k] for k in ("sessions_deleted",
+                                                   "login_attempts_deleted",
+                                                   "report_tokens_deleted")
+                           if k in result}},
             "warnings": result["warnings"],
             "view": build_admin_users_view(settings, conn)}
 
@@ -9253,6 +9434,37 @@ class MachineSettingsIn(_ReportSectionIn):
                 if k in MACHINE_SETTINGS_RESTART_KEYS and _restart_value_ok(k, v)}
 
 
+class EulaIn(_ReportSectionIn):
+    """The licence this computer's companion last accepted (LG-5,
+    docs/LEGAL_GAP_FEATURES_PLAN.md, 2026-09-25): `eula.report_block()` on the
+    companion, from its on-disk record. Three short strings, never a path and
+    never the text. Absent is NOT REPORTED, and "not accepted" is never
+    inferred from it: that remains only the `licence_pending` block reason.
+    The version alone is judged by the views; the sha is shown, not judged
+    (buildability M5)."""
+    version: str | None = Field(default=None, max_length=32)
+    accepted_at: str | None = Field(default=None, max_length=64)
+    eula_sha256: str | None = Field(default=None, max_length=128)
+
+
+class ReportOptoutsIn(RootModel[list[str]]):
+    """The categories this computer withholds by its OWN switches (LG-1, plan
+    4.1). Always sent by a build that has the switches, empty when nothing is
+    withheld, so "nothing withheld" can be told apart from "old build"
+    (absent). A tolerant section: a non-list is dropped with a warning and
+    the rest of the report lands (B6). Unknown names and non-strings are
+    dropped entry by entry, the MachineSettingsIn.accepts rule: a newer
+    companion's fifth category is not ours to act on and must not cost the
+    other four."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _known_names_only(cls, value):
+        if not isinstance(value, list):
+            return value
+        return telemetry_fields.clean(value)
+
+
 # Which model parses each of the tolerant sections. Explicit rather than
 # derived from the annotations: this table is what
 # ReportIn._a_bad_section_never_422s consults, and it must not silently grow.
@@ -9264,6 +9476,9 @@ _TOLERANT_SECTIONS: dict[str, type[BaseModel]] = {
     "capabilities": CapabilitiesIn,
     # account page 2026-09-25 (docs/ACCOUNT_PAGE_FEATURES.md §4.1).
     "machine_settings": MachineSettingsIn,
+    # LG-1 and LG-5 (docs/LEGAL_GAP_FEATURES_PLAN.md 3.2, 2026-09-25).
+    "report_optouts": ReportOptoutsIn,
+    "eula": EulaIn,
 }
 
 
@@ -9693,6 +9908,13 @@ class ReportIn(BaseModel):
     # db.store_machine_settings leaves the cfg_* columns alone, and the page
     # says "not reported" and offers no request (cfg_accepts NULL).
     machine_settings: MachineSettingsIn | None = None
+    # LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.1, 2026-09-25): the categories
+    # this computer withholds by its own switches. Absent = a build without
+    # the switches, which is "not reported", never "nothing withheld"; the
+    # site policy is enforced on its report all the same (api_report strips).
+    report_optouts: ReportOptoutsIn | None = None
+    # LG-5: the licence this computer accepted. Absent = not reported.
+    eula: EulaIn | None = None
     # Set by _truncate_report_sections, never by the client: {section:
     # entries dropped}. Echoed in the reply and logged, so a truncated report
     # is loud rather than silent (B6).
@@ -9736,7 +9958,8 @@ class ReportIn(BaseModel):
         return [lane for lane in lanes if lane.name in LANE_LABELS]
 
     @field_validator("proxy_coverage", "youtube_import", "broll_ingest",
-                     "music_ingest", "capabilities", "machine_settings", mode="before")
+                     "music_ingest", "capabilities", "machine_settings",
+                     "report_optouts", "eula", mode="before")
     @classmethod
     def _a_bad_section_never_422s(cls, value, info):
         """A diagnostic section that will not parse is DROPPED, not fatal.
@@ -9762,6 +9985,91 @@ class ReportIn(BaseModel):
     # by _truncate_rather_than_reject above, on the raw body. They were
     # raising validators here until B6 -- see MAX_REPORT_PROJECTS for why a
     # raise was the wrong shape.
+
+
+def _site_withheld(settings: Any, conn: sqlite3.Connection) -> set[str]:
+    """The categories the SITE withholds (LG-1). `site_store.telemetry_policy`
+    is the authority (G2b); when it cannot answer, the set the site policy
+    last APPLIED (db.META_SITE_REPORT_OPTOUTS, written by apply_site_optouts)
+    stands in, so a broken read never quietly lets withheld data back in.
+    Never raises."""
+    try:
+        from . import site_store
+        policy = getattr(site_store, "telemetry_policy", None)
+        if policy is not None:
+            return set(telemetry_fields.clean(policy(conn, settings) or ()))
+    except Exception as e:  # noqa: BLE001 - a report must never fail on this
+        log.warning("site telemetry policy unreadable (%s: %s); using the last "
+                    "applied one", type(e).__name__, e)
+    try:
+        raw = db.meta_get(conn, db.META_SITE_REPORT_OPTOUTS)
+        return set(telemetry_fields.clean(json.loads(raw) if raw else ()))
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _report_withheld(settings: Any, conn: sqlite3.Connection, editor: str, machine: str,
+                     payload: "ReportIn") -> tuple[set[str], list[str] | None]:
+    """(withheld, local) for one report: `withheld` = site policy UNION the
+    machine's own list, `local` = its own list exactly as sent, or None when
+    the report did not carry `report_optouts`.
+
+    ABSENT KEEPS THE STORED OWN LIST (G0 hand-off 9, 2026-09-25): a build that
+    has switches but whose section was dropped as malformed must not have its
+    switches read as "all on" for one report. The stored OWN list is read,
+    not db.withheld (the stored union), so a site switch turned back on is not
+    kept alive by the machine's old union. Never raises."""
+    site = _site_withheld(settings, conn)
+    local: list[str] | None = None
+    if payload.report_optouts is not None:
+        local = telemetry_fields.clean(payload.report_optouts.root)
+        own = set(local)
+    else:
+        own = set()
+        try:
+            row = conn.execute(
+                "SELECT report_optouts_local FROM machine_state"
+                " WHERE editor_username=? AND machine=?", (editor, machine)).fetchone()
+            if row is not None and row["report_optouts_local"]:
+                own = set(telemetry_fields.clean(json.loads(row["report_optouts_local"])))
+        except Exception:  # noqa: BLE001 - damaged or pre-v59: nothing known
+            own = set()
+    return set(telemetry_fields.clean(site | own)), local
+
+
+def _record_legal_sections(conn: sqlite3.Connection, editor: str, machine: str,
+                           payload: "ReportIn", withheld: set[str],
+                           local: list[str] | None, via: str | None) -> None:
+    """The three legal-gap writes of one report (LG-1, LG-4, LG-5), each on
+    the report's own connection and before its commit. Each is best effort
+    on its own: a report is the fleet's status channel, and a missing column
+    on a database that has not reached v59 must not take a machine off the
+    grid (the "never gut the live thing" rule).
+
+    `via` is computed by api_report BEFORE its first write (G2a review round,
+    point 3, 2026-09-25): classifying a Host header can mean a DNS lookup,
+    and running it here held the dashboard's write lock across it."""
+    try:
+        outcome = db.apply_report_optouts(conn, editor, machine, withheld, local)
+        if outcome.get("newly"):
+            log.info("%s/%s now withholds %s; what the dashboard held under it was "
+                     "deleted (LG-1)", editor, machine, ", ".join(outcome["newly"]))
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not record %s/%s's reporting switches (%s: %s)",
+                    editor, machine, type(e).__name__, e)
+    try:
+        if via is not None and db.set_machine_report_via(conn, editor, machine, via):
+            (log.warning if via == netclass.HTTP_PUBLIC else log.info)(
+                "%s/%s now reaches this dashboard over %s (LG-4)", editor, machine, via)
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not record how %s/%s reached the dashboard (%s: %s)",
+                    editor, machine, type(e).__name__, e)
+    try:
+        db.set_machine_eula(conn, editor, machine,
+                            None if payload.eula is None else _declared_dump(payload.eula))
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not record %s/%s's licence acceptance (%s: %s)",
+                    editor, machine, type(e).__name__, e)
 
 
 # The first companion that WAKES on a report reply instead of only noting it
@@ -9881,6 +10189,11 @@ def api_report(
     if account_refusal:
         raise _refuse_identity(_ACCOUNT_REFUSAL_DETAIL[account_refusal], account_refusal)
     verified = id_user is not None and id_user == editor
+    # LG-4: named here, after the credential checks (a stranger's Host header
+    # buys no lookup) and BEFORE the first write below, because naming a Host
+    # can mean a bounded DNS lookup and no write transaction may be open
+    # across it (G2a review round, point 3, 2026-09-25). Never raises.
+    report_via = netclass.request_report_via(settings, request)
     # This machine IS reporting and IS being accepted: clear yesterday's
     # refusal, and count (or stop counting) it against the rotation drain.
     db.clear_report_refused(conn, editor, machine)
@@ -9949,6 +10262,19 @@ def api_report(
         except Exception as e:  # noqa: BLE001 - a banner must never 500 a report
             log.warning("could not record the ignored report sections (%s: %s)",
                         type(e).__name__, e)
+
+    # LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.1, 2026-09-25): STRIP BEFORE ANY
+    # WRITE, from every companion version. The companion's switches are the
+    # "do not even send" half; this is what makes the SITE switch true for a
+    # machine whose companion predates the switches (correctness H3), and it
+    # runs before the first section below is written so nothing withheld is
+    # stored even for the length of one transaction.
+    report_withheld, report_local = _report_withheld(settings, conn, editor, machine, payload)
+    if report_withheld:
+        # Note J rides the table: a journal id carries the project name, so
+        # telemetry_fields masks it (`withheld:project/<file>`) rather than
+        # dropping the list, which would keep what an earlier report stored.
+        telemetry_fields.strip(payload, report_withheld)
 
     for lane in payload.lanes:
         db.upsert_lane_report(
@@ -10210,6 +10536,14 @@ def api_report(
                 applied.detail, received_at):
             log.info("%s/%s answered the fleet-work settings request %s: %s",
                      editor, machine, applied.id, applied.state)
+
+    # LG-1: record what this machine withholds and delete what earlier
+    # reports left under it (idempotent, same transaction, after the section
+    # writes). LG-4: how this report arrived, written only when it changes.
+    # LG-5: the licence it accepted; absent leaves the column alone. None of
+    # the three may cost the report: a failure is logged and the rest lands.
+    _record_legal_sections(conn, editor, machine, payload,
+                           report_withheld, report_local, report_via)
 
     # -- media presence (all optional; absent field ⇒ table untouched) --
     # (`mode` is read above, with the machine_state write that now stores it.)
@@ -10855,10 +11189,29 @@ def api_diagnostics(
         log.info("diagnostics from %s/%s carried an unknown trigger %r",
                  editor, machine, trigger)
         trigger = trigger or "other"
+    text = payload.text
+    withheld = _diagnostics_withheld_unredacted(settings, conn, editor, machine)
+    if withheld:
+        # LG-1, correctness H3's rule applied to the OTHER channel (G2a review
+        # round, point 2, 2026-09-25): a companion that predates the switches
+        # sends its bundle whole, with the Resolve project name, inventory
+        # excerpts and paths the site now withholds, and "ask this machine
+        # why" would fetch exactly that. The bundle is replaced by a stub that
+        # says why, so an admin's request is still answered and still reads
+        # as answered. A companion with the switches redacts its own bundle
+        # (app._redact_diagnostics) and is stored as sent.
+        log.info("diagnostics from %s/%s not stored: its companion predates the "
+                 "reporting switches and this site withholds %s (LG-1)",
+                 editor, machine, ", ".join(sorted(withheld)))
+        text = ("=== CCSYNC DIAGNOSTICS ===\n(not stored: this site withholds "
+                + ", ".join(sorted(withheld))
+                + ", and this computer's companion is too old to take those out of "
+                "its bundle. Update the companion on this computer to see its "
+                "bundles again.)")
     bundle_id = db.record_diagnostics(
         conn, editor=editor, machine=machine,
         machine_id=(payload.machine_id or "").strip(), trigger=trigger,
-        at=(payload.at or "").strip(), received_at=received_at, text=payload.text,
+        at=(payload.at or "").strip(), received_at=received_at, text=text,
     )
     # THE ADMIN'S REQUEST IS ANSWERED BY THE ARRIVAL, not by the reply that
     # carried it (see the report reply's `commands.diagnostics`): this is the
@@ -10868,11 +11221,47 @@ def api_diagnostics(
         db.clear_diagnostics_request(conn, editor, machine)
     db.audit(conn, editor, "diagnostics.received", machine,
              {"editor": editor, "machine": machine, "trigger": trigger,
-              "chars": len(payload.text or ""), "id": bundle_id}, now=received_at)
+              "chars": len(text or ""), "id": bundle_id,
+              **({"withheld": sorted(withheld)} if withheld else {})}, now=received_at)
     conn.commit()
     log.info("diagnostics bundle #%s from %s/%s (%s, %d chars)",
-             bundle_id, editor, machine, trigger, len(payload.text or ""))
-    return {"ok": True, "id": bundle_id}
+             bundle_id, editor, machine, trigger, len(text or ""))
+    out: dict[str, Any] = {"ok": True, "id": bundle_id}
+    if withheld:
+        out["stored"] = False   # additive: the stub is stored, the bundle is not
+    return out
+
+
+def _diagnostics_withheld_unredacted(settings: Any, conn: sqlite3.Connection,
+                                     editor: str, machine: str) -> set[str]:
+    """The withheld categories a bundle from this machine would carry
+    UNREDACTED: the site's content categories that the machine's own last
+    `report_optouts` did not name. No list on record (`report_optouts_local`
+    NULL, or no state row yet) is a companion that predates the switches and
+    never redacts: the whole site set.
+
+    The list a companion sends is local AND site (telemetry_policy.effective,
+    read from its cached manifest), so a category the site withholds and the
+    list lacks means that companion has NOT learned the site policy yet: its
+    manifest cache is up to SITE_REFRESH_SECONDS (900 s) old, or was lost, or
+    the dashboard it read predates api_site's `telemetry`. In that window it
+    redacts nothing under that category and its bundle is as bare as an old
+    build's (final review 2026-09-25; the first build read ANY own list, even
+    [], as "redacts its own bundle"). Never raises; a failed read is the site
+    set, the fail-closed side."""
+    site = _site_withheld(settings, conn) & set(db._DIAGNOSTICS_CATEGORIES)
+    if not site:
+        return set()
+    try:
+        row = conn.execute(
+            "SELECT report_optouts_local FROM machine_state"
+            " WHERE editor_username=? AND machine=?", (editor, machine)).fetchone()
+        if row is None or row["report_optouts_local"] is None:
+            return site
+        sent = set(telemetry_fields.clean(json.loads(row["report_optouts_local"])))
+    except (sqlite3.Error, TypeError, ValueError):
+        return site
+    return site - sent
 
 
 @router.post("/admin/machines/{editor}/{machine}/ask-why")

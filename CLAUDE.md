@@ -303,6 +303,28 @@ run alongside the tray app — it would hold port 8899.
   redelivery. An absent `pending_restart` means "cannot tell", stored NULL,
   never "nothing waiting". Deploy the dashboard first: an old dashboard
   banners the new report section on every report.
+- **Reporting switches: collect, then withhold; the site strips on arrival**
+  (LG-1, 2026-09-25, `docs/LEGAL_GAP_FEATURES_PLAN.md` §4.1, CR-336): four
+  categories (`resolve_project` implies `media_tree`, `local_manifest`,
+  `input_idle`) switched off per computer (`report_*` config keys, NEVER in
+  `MACHINE_SETTING_KEYS`) or per site (`[telemetry]`). A switch never stops a
+  pass from running (stale-bridge recovery, relink and the manifest walk
+  depend on them); only the report goes without, and it always carries
+  `report_optouts`. The dashboard strips withheld fields BEFORE any write,
+  from every companion version, and deletes what it held, at save and at
+  boot. `telemetry_policy.FIELDS` and `telemetry_fields.FIELDS` are one table
+  pinned equal from both sides; a new report key needs a row (or a
+  "not personal" entry) and a line in `docs/legal/TELEMETRY.md`. Journal ids
+  carry the project slug, so they are masked, not sent. `docs/GOTCHAS.md` §24.
+- **Plain http to a public address is refused, never on doubt** (LG-4,
+  CR-339): every call to `dashboard_url` goes through
+  `upgrade.build_no_redirect_opener()`, which carries
+  `transport.CleartextGuard`; a name is public only when every resolved
+  address is global, and doubt is local, because a wrong refusal silences a
+  fleet whose only fix channel is the report reply. LAN/tailnet http gets a
+  note, not a refusal. The dashboard records `machine_state.report_via` on
+  change and alerts only on `http_public`. Site-wide "require https" is
+  deferred (plan §6): it could strand the live http fleet.
 - **The server triage agent** (2026-09-24, `docs/SERVER_TRIAGE_AGENT.md`,
   schema v57): `triage.py` runs Claude Code at `alerts_triage_hours` in the
   site zone, READ-ONLY (Read/Grep/Glob over a scrubbed `evidence.json` and

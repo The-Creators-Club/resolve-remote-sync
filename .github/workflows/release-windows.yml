@@ -258,6 +258,18 @@ jobs:
               exit 0
             }
           } finally { Pop-Location }
+          # LG-11 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.5, 2026-09-25): the wizard
+          # is frozen from the COMPANION's venv but judged against its OWN lock
+          # (onboarding/requirements.lock: no runtime dependency at all), so a
+          # wheel leaking out of the companion's venv into onboard.exe fails
+          # here. The exe is deleted rather than left beside a manifest:
+          # publish_latest.py must have nothing to publish.
+          & companion/.venv/Scripts/python.exe tools/scan_frozen.py --component onboarding --workpath onboarding/build/build_onboard
+          if ($LASTEXITCODE -ne 0) {
+            Remove-Item -Force onboarding/dist/onboard.exe
+            "onboard.exe REFUSED by tools/scan_frozen.py (exit $LASTEXITCODE; see the [scan_frozen] lines in the log) -- companion artefact is still good" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            exit 0
+          }
           # The same shared signtool call site tools/release.ps1 and
           # installer/build_editor_package.ps1 use. A no-op when no identity
           # is configured; a hard failure only when signtool ran and failed,

@@ -113,6 +113,44 @@ it stops and names it; that is the enforcement.
 | `ai_cli_providers` | `false` | **F**. Lets the downloader's two AI calls use a **Claude Code / Codex CLI on the dashboard host** (§2.5a): one the customer installed themselves, or one the **SET UP wizard** fetched from the publisher at their click. Nothing is bundled either way. Using a personal subscription to power a service may breach its terms — the customer's decision, taken on the wizard's first step. Accepting that notice is what turns this flag on. **Not published in `GET /api/v1/site`**: no client needs it |
 | `ai_cli_auto_update` | `false` | **F**. Keeps a **wizard-installed** Claude Code current by itself (CR-309, 2026-09-24): once about five minutes after the dashboard starts and then at most once a day, the collector compares the publisher's `latest` with the installed version and, if it is newer, runs the **same** install the SET UP wizard's UPDATE runs, so the publisher's checksum is still a condition (a release without one is refused and nothing is installed). Never a downgrade, never beside an install an admin started, never over a CLI whose path an admin typed. The version it replaces stays on disk for an hour so a call already running it keeps its file. A failure opens an `ai_cli_update_failed` card on the home page. Why it exists: Timeline Cards asks Claude Code for a model by family (`opus`), and a CLI older than a new model refuses it. Needs `ai_cli_providers`. **Not published in `GET /api/v1/site`** |
 
+### `[telemetry]`
+
+The site's half of the four reporting switches (LG-1,
+[`LEGAL_GAP_FEATURES_PLAN.md`](LEGAL_GAP_FEATURES_PLAN.md) §4.1, 2026-09-25).
+All four default to `true` (reported, today's behaviour). A switch here can
+only turn a category **off** for every computer; it can never turn back on
+what a computer switched off for itself ([§3](#reporting-switches-lg-1)).
+
+| Key | Default | Withholds |
+|---|---|---|
+| `resolve_project` | `true` | The open Resolve project's name wherever it is reported: top-level `resolve_project`, `capabilities.resolve.project`, the Resolve-health project fields, fix-journal projects and ids (masked, so undo still works), undo answers' text. **Implies `media_tree`**, because the bin structure is keyed by project name |
+| `local_manifest` | `true` | The disk file list, and the file names in the Resolve-health and sync-conflict checks, stray and moved project folders and lane A's "skipped, exists" samples (the counts are still sent) |
+| `media_tree` | `true` | The Resolve bin structure |
+| `input_idle` | `true` | `capabilities.idle_seconds` (also never sent while `jobs_enabled` is false) |
+
+- **Switching one off deletes what the dashboard holds at once, for every
+  computer**, online or not (`db.apply_site_optouts`, through the one
+  `site_store.set_many` hook, so Settings save, `POST /admin/site/import` and
+  undo all take the same path), and the report route strips it on arrival from
+  every companion, including ones that predate the switches. Undo turns
+  reporting back on; it cannot bring deleted rows back, and the confirm says so.
+- Where it is set: **Settings → Site → TELEMETRY** (a `site_settings` row,
+  which wins), a `[telemetry]` table in a `site.toml` imported on that page,
+  or the `DASH_SITE_TELEMETRY_*` environment fallback ([§2.5](#25-site-manifest-dash_site_)).
+  **The deploy script does not project `[telemetry]` into the environment
+  yet** (`server/` was out of scope on 2026-09-25): a key in the NAS-side
+  `site.toml` is read only when the file is imported through Settings.
+- The policy is re-applied in full at every boot
+  (`site_store.enforce_telemetry_policy`), so an environment-only policy also
+  clears offline computers.
+- A blank value is refused (422), not read as off: off deletes data fleet-wide.
+- Published at `GET /api/v1/site` as `telemetry: {four bools}`; the companion
+  and the wizard grey out a switch the site has turned off. A computer
+  rereads the manifest every 15 minutes (`SITE_REFRESH_SECONDS`); until it
+  does, the strip on arrival is the enforcement, and a diagnostics bundle
+  from it that could carry a newly withheld category is stored as a note
+  (`api._diagnostics_withheld_unredacted`).
+
 ### `[releases]`
 
 Whose builds this fleet takes. The vendor publishes one signed `channel.json`;
@@ -321,6 +359,13 @@ be wrong about): `DASH_SITE_YOUTUBE_DOWNLOAD`, `DASH_SITE_YOUTUBE_UNBLOCK`.
 
 `DASH_SITE_AI_CLI_PROVIDERS` — same `"1"`-only rule, and off in the vendor
 build (§2.5a).
+
+`DASH_SITE_TELEMETRY_RESOLVE_PROJECT`, `_LOCAL_MANIFEST`, `_MEDIA_TREE`,
+`_INPUT_IDLE` (LG-1, 2026-09-25, see `[telemetry]` above) — the **mirror** of
+the feature flags' rule: `"0"` and nothing else is **off**, and anything else,
+unset included, is on. On is the direction it is safe to be wrong about here,
+because off deletes data from every computer. A `site_settings` row for the
+same key wins.
 
 `DASH_SITE_INDEXER_MODEL_TIER` — `good` (default) or `best` (2026-08-18, see
 `[indexer]` above). Case-insensitive; anything else falls back to `good` with
@@ -579,7 +624,7 @@ laptops.
 
 | Key | Default | Notes |
 |---|---|---|
-| `dashboard_url` | `""` | Blank disables the reporter thread entirely |
+| `dashboard_url` | `""` | Blank disables the reporter thread entirely. **Plain `http://` on the public internet is refused** (LG-4, 2026-09-25): every request to it goes through `transport.CleartextGuard` in the shared opener and nothing is sent; the tray says so once per run. Plain http to loopback, a private or CGNAT address, a single-label name, `.ts.net`/`.local`/`.lan`/`.internal`/`.home.arpa`, or a name any of whose resolved addresses is private is allowed, with a note in Settings, THIS COMPUTER. A name is public only when **every** address it resolves to is public; a failed lookup is local (never refuse on doubt); a verdict is cached 30 s. The setup wizard refuses it (`steps.dashboard_url_problem`); `validate_config(cfg, for_save=True)` would make it an **error** but nothing calls it yet (2026-09-25); at start it is only a warning, and start never asks DNS |
 | `dashboard_token` / `report_token` | `""` | **S**. `X-CCSync-Token`. Prefer a per-editor token |
 | `require_login` | `true` | |
 | `dashboard_report_interval` | `60` | And `_active` = `5` while transferring |
@@ -589,6 +634,38 @@ laptops.
 | `selection_fetch_ttl` / `project_roots_ttl` | `30` / `300` | |
 | `project_rotation_seconds` | `600` | Starvation guard on the per-project rotation |
 | `sequencer_idle_seconds` | `60` | |
+
+### Reporting switches (LG-1)
+
+This computer's half of the four switches (2026-09-25,
+[`LEGAL_GAP_FEATURES_PLAN.md`](LEGAL_GAP_FEATURES_PLAN.md) §4.1;
+[`legal/TELEMETRY.md`](legal/TELEMETRY.md) is the disclosure). All default to
+`true`. What is sent is this computer's switch AND the site's
+([`[telemetry]`](#telemetry)), and `report_resolve_project = false` also turns
+off `report_media_tree`. The rule lives once, in
+`telemetry_policy.effective`.
+
+| Key | Default | Notes |
+|---|---|---|
+| `report_resolve_project` | `true` | The open project's name everywhere it is reported; fix-journal ids are masked to `withheld:project/<file>` and mapped back locally, so undo from the dashboard still works on this build |
+| `report_local_manifest` | `true` | The disk file list and the file names in the Resolve and conflict checks (counts still sent) |
+| `report_media_tree` | `true` | The bin structure |
+| `report_input_idle` | `true` | `idle_seconds`. Independently, idle time is never sent while `jobs_enabled = false` (D4) |
+
+- **Collect, then withhold.** A switch never stops a pass from running (the
+  stale-bridge recovery, proxy relink, pool classifier and manifest walk all
+  still run); only the cache the reporter reads and the report itself go
+  without. The report always carries `report_optouts` (the sorted withheld
+  names, `[]` when none), so "nothing withheld" differs from "old build".
+- Diagnostics bundles are redacted (project names, tree and media roots) while
+  any of the first three is off.
+- Set from **Settings, THIS COMPUTER, PRIVACY** (takes effect at once, and is
+  written to `config.toml`), from the setup wizard's "WHAT THIS COMPUTER
+  REPORTS" step, or by hand (read at the next start). A wrong-typed value
+  reads as **off** plus a warning.
+- **Never remote-controlled**: the four keys are not in
+  `db.MACHINE_SETTING_KEYS` / `machine_settings.ACCEPTS`, so the dashboard
+  cannot switch a computer's privacy switches back on.
 
 ### Syncthing (lane C)
 

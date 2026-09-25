@@ -137,7 +137,9 @@ companion).
   "nas_kind": "truenas",
   "release_feed_base": "",
   "features": { "youtube_download": false, "youtube_unblock": false },
-  "indexer": { "model_tier": "good" }
+  "indexer": { "model_tier": "good" },
+  "telemetry": { "resolve_project": true, "local_manifest": true,
+                 "media_tree": true, "input_idle": true }
 }
 ```
 
@@ -176,6 +178,15 @@ Rules a client can rely on:
   static files, and every byte a client takes from it is signature- or
   sha256-verified afterwards. Blank means "this fleet cannot fetch models",
   which every client reads as a refusal with a fix, not an error.
+- `telemetry` (LG-1, 2026-09-25) is the site's reporting policy: four bools,
+  `false` = the site withholds that category from every computer
+  (`CONFIG.md` `[telemetry]`). Published **as set**: `resolve_project: false`
+  also switches off `media_tree`, but that implication is applied on each
+  side (`site_store.telemetry_policy`, the companion's
+  `telemetry_policy.effective`), not folded into the manifest. Absent, a
+  missing key, or anything but a JSON `false` reads as `true` (today's
+  behaviour); that is safe because the report route strips a withheld
+  category on arrival whatever the companion sent.
 - `schema` is a monotonic integer, not the dashboard version. Unknown keys are
   additive; a client that cannot read `features` must behave as if the feature
   is **off**.
@@ -264,6 +275,43 @@ Request (abridged — `api.ReportIn`):
 | `broll_ingest` | one local b-roll indexing batch (below) |
 | `music_ingest` | one local MUSIC indexing batch: the same fields plus `kind: "music"` |
 | `machine_settings` | the settings the `/account` page shows and the answer to a fleet-jobs change asked from it (below; account page 2026-09-25) |
+| `report_optouts` | LG-1 (2026-09-25): the categories THIS computer withholds, a list drawn from `resolve_project`, `local_manifest`, `media_tree`, `input_idle` (unknown names are dropped one at a time; a non-list drops the section). A current companion sends it on **every** report, `[]` included; absent means a build that predates the switches, which the dashboard answers with the list it last stored, never "nothing withheld" |
+| `eula` | LG-5 (2026-09-25): `{version, accepted_at, eula_sha256}` from the editor's acceptance record, heavy reports only; no path, no text. Stored in `machine_state.eula_json`; absent leaves the stored value alone. Only the version is judged (fleet grid: current, older, not reported); the sha is shown, never compared, and "not accepted" is never inferred from it |
+
+Both are tolerant sections (`api._TOLERANT_SECTIONS`): malformed, they are
+dropped with a warning and the rest of the report lands.
+
+**The site's reporting policy is enforced on arrival (LG-1, 2026-09-25).**
+Before any section is written, `api_report` computes `withheld = site policy
+∪ this computer's own list` and strips every field of those categories
+(`telemetry_fields.FIELDS`, a copy of the companion's table pinned equal by a
+test on each side; journal ids are masked, not removed, so undo keeps
+working). Then `db.apply_report_optouts` stores the two lists
+(`machine_state.report_optouts`, `report_optouts_local`) and deletes what
+the dashboard held for a newly withheld category, including the machine's
+stored diagnostics bundles. A computer withholding `resolve_project` never
+gets `resolve_project_unmapped` back, and a computer withholding
+`local_manifest` is sent every file move in every active project and shows
+"not reported" holdings, never zero.
+
+**How the report arrived (LG-4, 2026-09-25).** The route records
+`machine_state.report_via` = `https` | `http_local` | `http_public`, written
+only when it changes (`netclass.request_report_via`). The scheme is
+`X-Forwarded-Proto` only from a `DASH_TRUSTED_PROXIES` peer, else the
+socket's; the host is the `Host` header, classified with the companion's
+rule (a name is public only when every address resolves public; a lookup is
+bounded at 1 s and doubt is `http_local`). Behind a proxy the dashboard does
+not trust, such as Tailscale Serve reaching the container from an address not
+in `DASH_TRUSTED_PROXIES`, an https connection is recorded as `http_local`.
+Any `http_public` machine raises the `dashboard_reached_over_public_http`
+alert.
+
+**Diagnostics under a site switch.** `POST /api/v1/diagnostics` from a
+computer with no own list on record (a companion that predates the switches,
+so it never redacts) while the site withholds `resolve_project`,
+`local_manifest` or `media_tree` stores a stub naming the withheld
+categories instead of the bundle, and answers `stored: false` (additive). A
+current companion redacts its own bundle and is stored as sent.
 
 `proxy_coverage` and `youtube_import` were **undeclared until 2026-08-18**, so
 pydantic's `extra="ignore"` silently dropped both on every tick since their
@@ -785,6 +833,18 @@ installed. `unreadable` is `The server could not be asked which keys are
 approved just now.` when the NAS could not be asked (the waiting half still
 shows). `needed` is false when every computer of yours is a wired rig.
 
+### Your data -- `POST /api/v1/me/export`
+
+LG-2 (2026-09-25). The same file `POST /admin/users/{username}/export`
+builds (§5 Users), for the signed-in person only. The subject comes from the
+**session** (`auth.get_session_user`), never from `auth.Scope` or `?as=`: for
+an admin `Scope.editor` is None (everyone), and `?as=` would change whose
+data is downloaded. POST behind the CSRF gate (the /account "your data" row
+is a plain form carrying the `csrf` field, because a download cannot come
+back through htmx). Same limits as the admin route, counted in a bucket of
+its own so admins cannot use up a person's own exports; the `413` sentence
+says to ask an admin. Audited as `user.export`, counts only.
+
 ### Ask a computer to change its fleet-jobs settings -- `/api/v1/machines/{editor}/{machine}/settings`
 
 | Route | Body | Answer |
@@ -835,7 +895,9 @@ Every route here requires a session belonging to a user in `DASH_ADMIN_USERS`
 | `POST /admin/users/{username}/disable` | **local mode only** (`400` otherwise): `{disabled: bool}` |
 | `POST /admin/users/{username}/keys` | **local mode only**: add an SSH key — `{key_text, label?}` → `{"fingerprint": "SHA256:…"}` |
 | `DELETE /admin/users/{username}/keys/{fingerprint}` | **local mode only**: revoke a key |
-| `DELETE /admin/users/{username}` | delete a person **everywhere** (CR-76, 2026-08-24; every mode). Goes, in this order: the account (local row, or the NAS account through the backend's `delete_editor`, behind the same refusals `POST /admin/users` has), every one of their computers' records, their Syncthing devices and shares, then browser sessions and per-editor report tokens. Kept: `lane_report_history`, `transfer_history`, the tree itself, and whatever is on their computers. Response `deleted` carries `machines`, `devices_removed`, `sessions_revoked`, `report_tokens_revoked`; `warnings` names the home directory's fate (TrueNAS keeps it, DSM removes it). A username the fleet knows but no backend has an account for is deletable too. `404` unknown everywhere; `409` for the lockout guards (the account you are signed in as; local mode's last enabled admin); `502` when Syncthing or the NAS could not be asked, and the detail says what was and was not done — a Syncthing failure means **nothing** was deleted, because a device left behind would be unmapped and keep its shares forever (B16). `DISABLE` is the non-destructive button |
+| `DELETE /admin/users/{username}` | delete a person **everywhere** (CR-76, 2026-08-24; every mode). Goes, in this order: the account (local row, or the NAS account through the backend's `delete_editor`, behind the same refusals `POST /admin/users` has), every one of their computers' records, their Syncthing devices and shares, then browser sessions and per-editor report tokens. Since LG-3 (2026-09-25) it also deletes their history (as `erase-history` below, **except finished YouTube jobs**: `_forget_elsewhere` calls `ytdl.forget_requester` and never `ytdl.forget_history`, so those jobs, their videos and `jobs.term`/`term_dir` are kept under the stand-in and only `job_terms` goes; erase history before deleting to remove them), every session and username-keyed throttle row, and the report tokens it just revoked, and **pseudonymises** what outlives them: the person's name and their computers' names become `deleted-user-<10 hex>` / `deleted-machine-<10 hex>` (HMAC-SHA256 keyed on `meta['pseudonym_salt']`, which never rotates) in the audit log, alerts, notices, jobs, file moves, undo requests and the other "who did it" columns, in the YouTube ledger (`ytdl.forget_requester`: live leases released and unfinished jobs cancelled first) and in client folders (`subject_data.forget_shares`; links keep working). An admin's own name stays in `fleet_audit.actor` until the 180-day prune, and the `user.delete` audit row's subject is the stand-in. Kept: the tree itself, whatever is on their computers, the b-roll/music `ingest_batches` (replaced at the next index publish), Timeline Cards records and server snapshots. Response `deleted` carries `machines`, `devices_removed`, `sessions_revoked`, `report_tokens_revoked`, and (additive, absent when that step was skipped or failed) `sessions_deleted`, `login_attempts_deleted`, `report_tokens_deleted`; a step in another store that fails is a line in `warnings`, never a 500; `warnings` names the home directory's fate (TrueNAS keeps it, DSM removes it). A username the fleet knows but no backend has an account for is deletable too. `404` unknown everywhere; `409` for the lockout guards (the account you are signed in as; local mode's last enabled admin); `502` when Syncthing or the NAS could not be asked, and the detail says what was and was not done — a Syncthing failure means **nothing** was deleted, because a device left behind would be unmapped and keep its shares forever (B16). `DISABLE` is the non-destructive button |
+| `POST /admin/users/{username}/export` | LG-2 (2026-09-25): everything the dashboard holds about that person, as a download: `Content-Disposition: attachment; filename="ccsync-data-<username>-<date>.json"`, `Cache-Control: no-store`. Body `{generated_at, dashboard_version, subject, tables, not_included}`; `tables` is flat, dashboard tables by name and other stores as `<store>.<table>` (`sessions.auth_sessions`, `ytdl.jobs`, `client_shares.client_folders`, ...). Secret columns are never included (`password_hash`, `token_hash`, a session `sid`, a client folder's `token`). `not_included` names, in words, what the file cannot carry, and any store that could not be read. Limits: one export at a time per person and 5 per person per hour (`429` + `Retry-After`; admin and self exports count in separate buckets), 50 MB built in memory (`413`, nothing audited). `400` bad name, `404` a person the dashboard holds nothing about. Audited as `user.export` with counts only. A plain-form post gets an HTML refusal page with the same status |
+| `POST /admin/users/{username}/erase-history` | LG-3 (2026-09-25): erase a person's **history**, keep the account. Deletes `lane_report_history`, `transfer_history`, `completion_history`, `missing_files` and `diagnostics` for them, then (after the commit) revoked or expired sessions and past failed sign-ins **except** an active lockout, then their finished YouTube jobs and those jobs' terms. Never touches current state (`machine_state`, `editor_media*`, `media_tree_clips`, `machines`, `selections`, tokens, live sessions, the `downloads` ledger, attestations): the next report rewrites it; the reporting switches (LG-1, `CONFIG.md` `[telemetry]` and "Reporting switches") are what stop that. Audited as `user.erase_history` with counts and `not_done` (a store that could not be reached). `POST /partials/admin/users/erase-history` is the Users panel's twin |
 | `POST /admin/devices/approve` | approve a pending Syncthing device: `{username, device_id}` — unchanged, Syncthing device approval is independent of which auth method identifies editors |
 
 The NAS-account rows above need NAS credentials in the container
@@ -1009,6 +1071,26 @@ into a re-exec on the new tree. Poll `/status` while `in_progress`, then
 | `PUT /admin/site` | `{"values": {"org_name": "…", "sftp_port": "2222", …}}` → the resolved manifest. **All-or-nothing**: every field is validated before any is written, so one bad field changes nothing. `422` names the field and why |
 | `GET /admin/site/export` | `site.toml`-shaped `text/plain`, section names matching `site.example.toml` |
 | `POST /admin/site/import` | `{"text": "…"}` — parses pasted `site.toml`-shaped text (stdlib `tomllib`) into the same validated write `PUT` uses. Unrecognised `[section]`s are ignored, not refused (an import is additive to what this store owns) |
+
+**Telemetry keys (LG-1, 2026-09-25).** `telemetry.resolve_project`,
+`telemetry.local_manifest`, `telemetry.media_tree` and `telemetry.input_idle`
+are `"1"`/`"0"`, and a blank or a word is a `422` (the generic bool rule reads
+`""` as `"0"`, which here would delete data fleet-wide). Any write that
+carries one, from `PUT`, import or undo, re-applies the site's whole policy
+through `db.apply_site_optouts` in the same transaction, which deletes what
+the dashboard held for a newly withheld category on every computer. A save
+that changes one is snapshotted in `site_history`, so `[ UNDO LAST CHANGE ]`
+can switch reporting back on (it cannot bring the rows back).
+`POST /admin/site/import?dry_run=1` answers `telemetry_off` (the categories
+the import would switch off), and `GET /admin/site/history` puts the same
+key on `entries[0]` when an undo would switch one off; both carry category
+names only, and are absent when empty. The page's confirm uses them.
+
+**`report_via_counts` (LG-4, 2026-09-25).** `GET /admin/site` also carries
+`{"https", "http_local", "http_public"} -> count` from
+`machine_state.report_via`, admin only, never on the open manifest. The
+Settings page draws its informational "N computers reach this dashboard over
+plain http" line from it.
 
 Values are always strings on the wire (`"1"`/`"0"` for the two boolean
 `features.*` keys, comma-joined for `template_folders` and

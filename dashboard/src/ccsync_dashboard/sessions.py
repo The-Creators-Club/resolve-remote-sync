@@ -498,6 +498,83 @@ class SessionStore:
         with _write_lock:
             return int(self._run(go, write=True) or 0)
 
+    # --------------------------------------------- a person's rows (LG-2/LG-3)
+
+    def subject_rows(self, username: str) -> dict[str, list[dict]]:
+        """Everything this store holds about `username`, for the data export
+        (LG-2, docs/LEGAL_GAP_FEATURES_PLAN.md 4.2, 2026-09-25).
+
+        The sid is left out, and so is anything derived from it: the sid IS
+        a keyed digest of the cookie (auth.session_id_for), and an export is
+        a file that travels. IP-keyed throttle rows cannot be tied to a
+        person and are not included; the export's `not_included` says so."""
+        name = (username or "").strip().lower()
+
+        def go(conn: sqlite3.Connection):
+            sessions = conn.execute(
+                "SELECT created_at, last_seen, client, revoked, revoked_at, revoked_by "
+                "FROM auth_sessions WHERE username = ? ORDER BY created_at",
+                (name,),
+            ).fetchall()
+            attempts = conn.execute(
+                "SELECT scope, key, failures, first_failure, last_failure, blocked_until "
+                "FROM login_attempts WHERE scope = ? AND key = ?",
+                (SCOPE_USER, name),
+            ).fetchall()
+            return sessions, attempts
+
+        result = self._run(go) or ([], [])
+        return {"auth_sessions": [dict(r) for r in result[0]],
+                "login_attempts": [dict(r) for r in result[1]]}
+
+    def purge_user(self, username: str, revoked_only: bool = False,
+                   now: str | None = None) -> dict[str, int]:
+        """Delete this person's rows from this store (LG-3, plan 4.3).
+
+        `revoked_only=True` is ERASE HISTORY, and keeps the account working:
+        it deletes only sessions that are already dead (revoked, idle-expired
+        or past the absolute lifetime), and past failed sign-ins EXCEPT a row
+        whose `blocked_until` is still in the future (safety L1, 2026-09-25):
+        erasing an active lockout would hand whoever is guessing that
+        password a fresh budget, which is not what "erase their history"
+        means. A live session is never touched here.
+
+        `revoked_only=False` is DELETE: every session and every username-keyed
+        throttle row. It runs after api.delete_user_everywhere has revoked the
+        sessions, so nothing live is lost that was not already refused.
+
+        Called AFTER the caller's db commit, because this store writes through
+        its own connection to the same file (buildability M2). Returns
+        {"auth_sessions": n, "login_attempts": n}."""
+        name = (username or "").strip().lower()
+        now = now or db.utcnow_iso()
+        idle_cutoff = _shift(now, -self.idle_seconds)
+        absolute_cutoff = _shift(now, -self.absolute_seconds)
+
+        def go(conn: sqlite3.Connection) -> dict[str, int]:
+            if revoked_only:
+                sessions = conn.execute(
+                    "DELETE FROM auth_sessions WHERE username = ? AND "
+                    "(revoked = 1 OR last_seen < ? OR created_at < ?)",
+                    (name, idle_cutoff, absolute_cutoff),
+                ).rowcount
+                attempts = conn.execute(
+                    "DELETE FROM login_attempts WHERE scope = ? AND key = ? "
+                    "AND (blocked_until IS NULL OR blocked_until <= ?)",
+                    (SCOPE_USER, name, now),
+                ).rowcount
+            else:
+                sessions = conn.execute(
+                    "DELETE FROM auth_sessions WHERE username = ?", (name,)).rowcount
+                attempts = conn.execute(
+                    "DELETE FROM login_attempts WHERE scope = ? AND key = ?",
+                    (SCOPE_USER, name),
+                ).rowcount
+            return {"auth_sessions": int(sessions or 0), "login_attempts": int(attempts or 0)}
+
+        with _write_lock:
+            return self._run(go, write=True) or {"auth_sessions": 0, "login_attempts": 0}
+
     # -------------------------------------------------------- login throttle
 
     def throttled(self, username: str, ip: str | None = None,

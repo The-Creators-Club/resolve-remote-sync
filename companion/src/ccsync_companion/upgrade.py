@@ -51,7 +51,6 @@ reporter.py).
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import logging
 import os
@@ -70,6 +69,7 @@ from typing import Any, Callable, Optional
 
 from . import config as config_mod
 from . import release_pubkey
+from . import transport
 
 log = logging.getLogger("ccsync.upgrade")
 
@@ -804,32 +804,11 @@ def verify_offer(
     )
 
 
-def _host_is_local(host: str) -> bool:
-    """True for a tailnet/LAN/loopback host.
-
-    100.64.0.0/10 is the CGNAT range Tailscale hands out; *.ts.net is a
-    MagicDNS name for the same thing. RFC1918 and loopback cover a LAN
-    deployment, and so do the intranet name shapes a customer's NAS actually
-    answers to: a single-label host (`truenas`, resolved by the search
-    domain) and the .local/.lan/.internal/.home.arpa suffixes. Everything
-    else -- anything that looks like a name the public DNS could resolve --
-    is "the open internet" as far as this check is concerned."""
-    host = (host or "").strip().lower().split("%")[0]
-    if host.startswith("[") and host.endswith("]"):
-        host = host[1:-1]
-    if not host:
-        return False
-    if host == "localhost" or "." not in host:
-        return True
-    if host.endswith((".ts.net", ".local", ".lan", ".internal", ".home.arpa")):
-        return True
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    if ip.is_loopback or ip.is_private or ip.is_link_local:
-        return True
-    return ip in ipaddress.ip_network("100.64.0.0/10")
+# LG-4 (2026-09-25, docs/LEGAL_GAP_FEATURES_PLAN.md 4.4): the body moved to
+# transport.host_is_local so the cleartext guard, the settings window, the
+# wizard and the dashboard's parity copy share one table. Kept as an alias:
+# transport_ok below and the updater's tests still read this name.
+_host_is_local = transport.host_is_local
 
 
 def transport_ok(base_url: Any) -> tuple[bool, str]:
@@ -920,8 +899,15 @@ def build_no_redirect_opener(*handlers) -> urllib.request.OpenerDirector:
     The result is renamed over the running companion and launched detached
     (AUDIT_3 H-1, tightening AUDIT_2 CORE-M10).
 
-    Extra `handlers` exist so a test can drive the real chain."""
-    return urllib.request.build_opener(NoRedirectHandler, *handlers)
+    Extra `handlers` exist so a test can drive the real chain.
+
+    It also carries `transport.CleartextGuard` (LG-4, 2026-09-25): this is
+    the one opener every credentialed dashboard call goes through, so it is
+    the one place a plain-http address on the public internet is refused
+    (`transport.CleartextRefused`, a URLError). https and LAN/tailnet http
+    pass untouched."""
+    return urllib.request.build_opener(
+        NoRedirectHandler, transport.CleartextGuard, *handlers)
 
 
 def default_http_open(url: str, headers: dict, timeout: float):

@@ -1571,3 +1571,65 @@ and it is the one the guard exists to prevent.
 
 The POSIX path (`_acquire_lock_file`) shares the probe but not the bug: a pid
 file has no handle semantics, so there is nothing to hold on past death.
+
+## 24. The reporting switches and the cleartext guard (LG-1, LG-4, 2026-09-25)
+
+`docs/LEGAL_GAP_FEATURES_PLAN.md` §4.1 and §4.4. Five traps, each of which
+would make a counsel-cleared sentence in `docs/legal/` untrue without any
+test going red unless the pins below are kept.
+
+**Collect, then withhold.** A switch in `telemetry_policy` never stops a pass
+from RUNNING. `_refresh_media_tree_once` is the only caller of
+`_maybe_recover_stale_bridge()` (the 2026-08-12 stale-fusionscript lesson) and
+also runs the proxy relink and the pool classifier; the `ManifestCache` walk
+is what `guard.sync_conflicts` counts from, and absent is how "no conflicts"
+is spelled. Skipping either to "save work" while a category is off breaks
+Resolve recovery or turns "not reported" into "zero". Only the cache write the
+reporter reads, and the report itself, go without. The withhold runs BEFORE
+`_drop_unchanged_sections`, or a section switched off and back on inside the
+resend window is booked as "unchanged" and never sent again.
+
+**A new report key is a disclosure decision.** `telemetry_policy.FIELDS` (the
+companion) and `telemetry_fields.FIELDS` (the dashboard) are one table in two
+copies, pinned equal from both sides; `test_telemetry_disclosure.py` and
+`test_report_model_pin.py` fail when a payload or `ReportIn` key is in
+neither FIELDS nor an explicit "not personal" / "still sent" list. Add the
+row, then TELEMETRY.md's table, then the list. Two carriers that looked
+harmless and were not: a Resolve journal's **id** is
+`<project slug>/<stamp>.json`, so it is masked to `withheld:project/<file>`
+(and mapped back locally so undo works), not left as "just an id"; and an
+undo answer's `detail` quotes project names.
+
+**The dashboard strips on arrival, whatever the companion did.** A site
+switch must hold for a companion that predates the switches, so `api_report`
+strips before the first section write and `db.apply_site_optouts` clears
+every computer at save time, online or not. Do not move that strip behind a
+"does this companion support it" check; capability is only ever read from a
+non-NULL column, never a version.
+
+**The Timeline Cards agent is not a report.** The agent tunnel
+(`/cards/agent/*`) carries the project and timeline it is driving, and no
+switch covers it: it is the editor's own action on their own computer, off
+everywhere by default (`cards_agent`), and the legal text lists it under
+"still sent". A change that routes agent state through the report, or report
+state through the tunnel, has to revisit that sentence.
+
+**The cleartext guard.** Every dashboard call goes through
+`upgrade.build_no_redirect_opener()`, which carries `transport.CleartextGuard`
+(a new module that talks to `dashboard_url` must use
+`broll_ingest.default_request` or `reporter.default_http_post`; the AST scan
+in `test_transport.py` fails otherwise). The guard also covers lane C's
+Syncthing admin calls, so a public plain-http `syncthing_url` is refused too.
+A name is public only when EVERY resolved address is global, and a failed
+lookup is local: the refusal never fires on doubt, because a refusal that
+fires wrongly silences a fleet whose only fix channel is the report reply. The
+DNS verdict lives 30 s (it was 600 s in the plan: a laptop that cached "local"
+on the studio's split-horizon DNS would have sent the fleet token in
+cleartext for ten minutes after joining another network). One race remains
+and cannot be closed from Python: the guard's lookup and the connection's
+lookup are two `getaddrinfo` calls. The updater's `transport_ok` is
+deliberately STRICTER than the guard (shape only, no DNS). Start never asks
+DNS about the address (`validate_config(for_save=False)`). The wizard's check
+(`steps.dashboard_url_problem`) and the Settings window's note (on a daemon
+thread) do; `validate_config(for_save=True)` would too, but nothing calls it
+yet (2026-09-25), so do not cite it as what refuses a save.

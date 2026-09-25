@@ -341,6 +341,13 @@ step "building (this takes a minute)..."
 ( cd "$ONBOARDING_DIR" && "$VENV_PY" -m PyInstaller build_onboard_macos.spec --noconfirm ) \
     || fail "PyInstaller failed -- whatever is in onboarding/dist is stale; nothing was zipped"
 [ -d "$APP_PATH" ] || fail "PyInstaller reported success but there is no bundle at $APP_PATH"
+# LG-11 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.5, 2026-09-25): the wizard is frozen
+# from the companion's venv but judged against onboarding/requirements.lock,
+# which names no runtime dependency, so a wheel leaking into the bundle fails
+# here, before anything is signed or zipped.
+"$VENV_PY" "$REPO_ROOT/tools/scan_frozen.py" --component onboarding \
+    --workpath "$ONBOARDING_DIR/build/build_onboard_macos" \
+    || fail "tools/scan_frozen.py refused the wizard bundle (see the [scan_frozen] lines above) -- nothing was signed or zipped"
 step "built $APP_PATH"
 
 # --- Developer ID + notarisation (COMMERCIAL_READINESS.md item 4, 2026-08-17)

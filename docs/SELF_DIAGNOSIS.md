@@ -169,7 +169,7 @@ whole detail is bounded at `notices.SERVER_ERROR_DETAIL_CHARS`).
 
 ## 4. What the server checks (alerts)
 
-`alerts.ALERT_KINDS` is a tuple of fifty-nine `AlertKind(kind, severity, title,
+`alerts.ALERT_KINDS` is a tuple of sixty-four `AlertKind(kind, severity, title,
 what, check)` rows evaluated by `scan()` every alerts cycle into findings of
 `{subject, diagnosis, fix, detail}`. The diagnosis is one or two sentences an
 owner can act on; `fix` names the button or the tray action; `detail` is the
@@ -209,6 +209,7 @@ Per machine (from the fleet view's `guard` section):
 | | | `out_of_tree` NAMES the open Resolve project (CR-232, 2026-09-10) from `machine_state.resolve_project`, in a per-finding `title` override as well as the sentence, and is SILENT for a project it cannot tie to the tree: an editor's own project on their own disk is not a fault. `_synced_project` decides that the three ways the dashboard already does (a `project_roots` mapping, the identity of a ticked or active project folder, `match_project_label_confident`); a computer that did not say which project is open keeps the unnamed warning |
 | `versions_behind` | warn | 3 or more PUBLISHED, non-retracted builds newer than the one running (counts fixes missed, not version arithmetic) |
 | `retracted_running` | error | running a build that has been recalled |
+| `dashboard_reached_over_public_http` | error | the machine's last report reached this dashboard over plain http from the public internet (`machine_state.report_via = 'http_public'`, LG-4, 2026-09-25); only a companion older than the cleartext guard can do that, and its sign-ins send a password in clear. Plain http on the LAN or tailnet is never alerted (Settings shows the count as information). Past `SILENT_SECONDS` it is said once, not daily, and never dropped for age |
 | `red_unexplained` | error | red for 1 h and no kind above named it (fix: `[ ASK WHY ]`) |
 
 Fleet and server:
@@ -218,6 +219,7 @@ Fleet and server:
 | `fleet_halt` / `fleet_halt_expired` | warn | a halt is live / a halt ran past its own expiry and syncing resumed by itself |
 | `nas_engine_down` | error | the server cannot reach its own Syncthing |
 | `collector_kind_failed` | error | a collector kind is red |
+| `collector_kind_overdue` | warn | a scheduled kind whose last run was OK has not run again within `db.collector_kind_overdue_after` (twice its observed or configured cadence, 180 s floor, plus the longest recent cycle) plus one alerts interval (LG-17, 2026-09-25). `prune` (retention) has its own words, because the privacy notice promises its schedule. Held quiet, never "recovered", while the collector is stale or the kind's last run failed: those are `collector_stale` / `collector_kind_failed` |
 | `collector_stale` | error | the collector has not completed a cycle recently |
 | `watchdog_restart` | error | the collector thread was restarted since the last alerts pass (handed in by `collector._run_alerts`; an event, not a state, so it is not derivable later) |
 | `enforce_refusal`, `deactivation_refusal`, `enforce_plan` | error / error / warn | the persisted brakes and a held plan |

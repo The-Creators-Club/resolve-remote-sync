@@ -30,6 +30,9 @@ Flow (Back/Next through a single window, frames swapped in place):
                     download page on macOS.)
     4. Sign in   -- the account's username/password; verify_account() is the
                     install gate. Failure does NOT advance.
+    4b. Privacy  -- the four LG-1 reporting switches, written to config.toml
+                    as report_* (docs/LEGAL_GAP_FEATURES_PLAN.md 4.1). A row
+                    the site switched off is greyed out.
     5. Install   -- clean-slate removal of every previous-version trace
                     (steps.build_cleanup_plan/execute_cleanup, or their
                     _macos twins), config + identity written FIRST, then:
@@ -41,7 +44,11 @@ Flow (Back/Next through a single window, frames swapped in place):
                               value on Windows, LaunchAgent on macOS) +
                               launch; drive mappings / NAS mounts untouched.
     6. Finish    -- editor: Syncthing device ID + SSH public key w/ Copy
-                    buttons; base: success + dashboard link.
+                    buttons; base: success + dashboard link. Both carry an
+                    OPEN-SOURCE LICENCES button (LG-12).
+
+A plain-http dashboard address on the public internet is refused on the role
+page and again before the password is sent (LG-4, steps.dashboard_url_problem).
 """
 
 from __future__ import annotations
@@ -187,6 +194,19 @@ class OnboardWizard:
         # logic-onboarding-5: whether _offer_ssh_key got the key onto the
         # dashboard, so the finish page does not ask for it a second time.
         self.ssh_key_sent = False
+        # LG-1 (2026-09-25): this computer's own four reporting switches, by
+        # category. None until the privacy page first opens, when they are
+        # read from config.toml; ensure_config leaves the keys alone on None.
+        self.report_choices: Optional[dict] = None
+        # LG-4 (2026-09-25 review round, point 6): the address check can
+        # resolve a name, and getaddrinfo on a dead resolver blocks for as
+        # long as it likes, so it runs on a worker. This is set while one is
+        # out for the role page, so a second NEXT does not start another.
+        self._role_checking = False
+        # The address the install worker checks, captured on the Tk thread.
+        self._install_url = ""
+        self._privacy_vars: dict = {}
+        self._privacy_widgets: dict = {}
         # Non-fatal problems that still mean "this machine is NOT ready":
         # a hard-capability miss in the bootstrap (no rclone, no Syncthing,
         # no device ID) or a missing SSH key. The Finish page reports them
@@ -718,10 +738,44 @@ class OnboardWizard:
                 text="dashboard url is required -- ask your admin for it "
                      "(e.g. http://<your-dashboard>:8480)")
             return
-        if self.role_var.get() == "base":
-            self.show_signin()
-        else:
-            self.show_tailscale()
+        # LG-4 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.4, 2026-09-25): plain http on
+        # the public internet cannot be saved, because the sign-in two pages on
+        # would send the password across it in the clear. On a worker: the
+        # check may resolve the name (review round point 6).
+        if self._role_checking:
+            return
+        self._role_checking = True
+        url = self.dashboard_url_var.get()
+        role = self.role_var.get()
+        self.role_status_lbl.config(text="")
+
+        def _worker() -> None:
+            try:
+                refusal = steps.dashboard_url_problem(url)
+            except Exception:
+                log.exception("address check failed -- not refusing on doubt")
+                refusal = None
+
+            def _ui() -> None:
+                self._role_checking = False
+                try:
+                    if not self.role_status_lbl.winfo_exists():
+                        return  # the editor went BACK meanwhile
+                except tk.TclError:
+                    return
+                if self.dashboard_url_var.get() != url or self.role_var.get() != role:
+                    return  # edited while the check ran: the next NEXT decides
+                if refusal:
+                    self.role_status_lbl.config(text=refusal)
+                    return
+                if role == "base":
+                    self.show_signin()
+                else:
+                    self.show_tailscale()
+
+            self._safe_after(_ui)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # -- page 3: tailscale (editor only) --------------------------------------------------
 
@@ -783,6 +837,29 @@ class OnboardWizard:
                    "https:// in front. Go Back and edit it if the one above is wrong.)",
                    fg=theme.AMBER, font=theme.mono(9), wraplength=560).pack(
                 anchor="w", pady=(0, 4))
+        # LG-4: allowed, and said once where the address is shown. Worked
+        # out on a worker and filled in when it answers (review round point
+        # 6): this runs on every draw of two pages, BACK included.
+        note_lbl = _label(frame, "", fg=theme.AMBER, font=theme.mono(9), wraplength=560)
+        note_lbl.pack(anchor="w", pady=(0, 4))
+
+        def _worker() -> None:
+            try:
+                note = steps.dashboard_url_note(url) or ""
+            except Exception:
+                note = ""
+
+            def _ui() -> None:
+                try:
+                    if note_lbl.winfo_exists():
+                        note_lbl.config(text=note)
+                except tk.TclError:
+                    pass  # the page moved on
+
+            if note:
+                self._safe_after(_ui)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _refresh_tailscale_status(self, installed: Optional[bool] = None) -> None:
         """INSTALLED / NOT INSTALLED, from the disk, now (ui-onboarding-4)."""
@@ -1033,11 +1110,87 @@ class OnboardWizard:
                 # C:\<tree_name>. _on_role_changed only replaces a value that
                 # is still one of the defaults, so a hand-edited path is safe.
                 self._on_role_changed()
-                self.show_install()
+                # LG-1: the privacy step sits between sign-in and install,
+                # because the site's switches arrive with the manifest above.
+                self.show_privacy()
 
             self._safe_after(_ui)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    # -- page 4b: privacy (LG-1) -----------------------------------------------
+
+    def show_privacy(self) -> None:
+        """The four reporting switches (docs/LEGAL_GAP_FEATURES_PLAN.md 4.1,
+        2026-09-25). Seeded from this computer's config.toml on the first
+        visit, so a re-run opens on what the companion is doing now; what is
+        written is self.report_choices, at install time. Words and greying
+        live in steps.privacy_rows."""
+        if self.report_choices is None:
+            try:
+                self.report_choices = steps.read_report_switches()
+            except Exception:
+                log.exception("could not read the reporting switches -- all on")
+                self.report_choices = {c: True for c in steps.REPORT_CATEGORIES}
+        frame = self._new_page()
+        _heading(frame, "STEP 4: WHAT THIS COMPUTER REPORTS")
+        _label(frame, steps.PRIVACY_INTRO, wraplength=560).pack(anchor="w", pady=(0, 10))
+
+        self._privacy_vars = {}
+        self._privacy_widgets = {}
+        for row in steps.REPORT_SWITCHES:
+            category = row["category"]
+            var = tk.BooleanVar(value=True)
+            block = tk.Frame(frame, bg=theme.BG)
+            block.pack(anchor="w", fill="x", pady=(0, 6))
+            check = tk.Checkbutton(
+                block, text=row["label"], variable=var,
+                command=lambda c=category: self._on_privacy_toggle(c),
+                bg=theme.BG, fg=theme.TEXT, selectcolor=theme.FIELD,
+                activebackground=theme.BG, activeforeground=theme.RED,
+                disabledforeground=theme.MUTED,
+                font=theme.mono(10, bold=True), anchor="w")
+            check.pack(anchor="w")
+            _label(block, row["cost"], fg=theme.MUTED, font=theme.mono(9),
+                   wraplength=540).pack(anchor="w", padx=(24, 0))
+            note = _label(block, "", fg=theme.AMBER, font=theme.mono(9), wraplength=540)
+            note.pack(anchor="w", padx=(24, 0))
+            self._privacy_vars[category] = var
+            self._privacy_widgets[category] = (check, note)
+
+        _label(frame, steps.PRIVACY_STILL_SENT, fg=theme.MUTED, font=theme.mono(9),
+               wraplength=560).pack(anchor="w", pady=(6, 0))
+        self._refresh_privacy_rows()
+        self._nav_bar(frame, back=self.show_signin, next_=self.show_install, next_label="NEXT")
+
+    def _privacy_site_off(self) -> set:
+        return steps.site_telemetry_off(self._site(), self.dashboard_url_var.get())
+
+    def _refresh_privacy_rows(self) -> None:
+        """Draw every tick from self.report_choices and the site policy. A
+        greyed row shows unticked but never changes the computer's own
+        answer underneath (steps.privacy_rows)."""
+        rows = steps.privacy_rows(self.report_choices or {}, self._privacy_site_off())
+        for row in rows:
+            widgets = self._privacy_widgets.get(row["category"])
+            var = self._privacy_vars.get(row["category"])
+            if widgets is None or var is None:
+                continue
+            check, note = widgets
+            try:
+                var.set(bool(row["checked"]))
+                check.config(state="normal" if row["enabled"] else "disabled")
+                note.config(text=row["note"])
+            except tk.TclError:
+                pass  # the page moved on
+
+    def _on_privacy_toggle(self, category: str) -> None:
+        var = self._privacy_vars.get(category)
+        if var is None or self.report_choices is None:
+            return
+        self.report_choices[category] = bool(var.get())
+        # Turning the project name off greys the bins out (and back).
+        self._refresh_privacy_rows()
 
     # -- page 4: install --------------------------------------------------
 
@@ -1052,7 +1205,7 @@ class OnboardWizard:
     def show_install(self) -> None:
         frame = self._new_page()
         role = self._effective_role()
-        _heading(frame, f"STEP 4: INSTALL  (signed in as {self.verified_username})")
+        _heading(frame, f"STEP 5: INSTALL  (signed in as {self.verified_username})")
         if role == "base" and IS_MACOS:
             _label(frame, "This removes every trace of older CCSync versions, installs\n"
                            "the current companion app, and signs it in. Your NAS mounts\n"
@@ -1189,7 +1342,7 @@ class OnboardWizard:
         # (clicking BACK mid-_clean_slate destroyed the log widget under the
         # worker thread, whose next _append_log raised TclError into an
         # invisible handler). Take the BACK widget from _last_back_btn instead.
-        self._nav_bar(frame, back=self.show_signin, next_=None)
+        self._nav_bar(frame, back=self.show_privacy, next_=None)
         self._install_back_btn = self._last_back_btn
 
     def _append_log(self, text: str) -> None:
@@ -1285,6 +1438,9 @@ class OnboardWizard:
             self.fleet_token_error_lbl.config(text=f"✖ {token_problem}" if token_problem else "")
         if token_problem:
             return
+        # LG-4: checked once more by the worker, before the clean slate
+        # (_install_url_refused). Captured here, on the Tk thread.
+        self._install_url = self.dashboard_url_var.get()
         self._installing = True
         self.install_btn.config(state="disabled", fg=theme.MUTED)
         if self._install_back_btn is not None:
@@ -1300,6 +1456,23 @@ class OnboardWizard:
         worker = self._worker_base if role == "base" else self._worker_editor
         self._append_log(f"role: {role}")
         threading.Thread(target=worker, daemon=True).start()
+
+    def _install_url_refused(self) -> bool:
+        """LG-4, once more before anything on this computer is removed: the
+        role page refused the address already, and this catches a DNS answer
+        that has changed since. On the install worker, never the Tk thread,
+        because it may resolve the name (review round point 6). True means
+        refused, logged and the install button handed back."""
+        try:
+            problem = steps.dashboard_url_problem(self._install_url)
+        except Exception:
+            log.exception("address check failed -- not refusing on doubt")
+            problem = None
+        if not problem:
+            return False
+        self._append_log(f"not installing: {problem}")
+        self._safe_after(lambda: self._install_failed())
+        return True
 
     def _clean_slate(self, role: str) -> None:
         """Shared clean-slate phase: enumerate + remove every trace of
@@ -1347,8 +1520,22 @@ class OnboardWizard:
             # prefix (bug-hunt-2026-09-03 install-onboard-1).
             site=self._site(),
             report_token=self._fleet_token(),
+            # LG-1: None when the privacy page never opened, which leaves
+            # the four report_* keys as they are.
+            report_switches=self.report_choices,
         )
         self._append_log(f"config written (mode={role}).")
+        if self.report_choices is not None:
+            withheld = [c for c in steps.REPORT_CATEGORIES
+                        if not self.report_choices.get(c, True)]
+            self._append_log("reporting switched off on this computer: "
+                             + (", ".join(withheld) if withheld else "nothing"))
+            # Review round point 3: a companion up to 0.9.80 ignores these
+            # keys, so say so rather than let the page's promise stand.
+            warning = steps.report_switches_install_warning(
+                self.report_choices, steps.bundled_companion_version())
+            if warning:
+                self._append_log(warning)
         # logic-onboarding-2 (2026-09-25): a machine with no credential the
         # dashboard will accept is NOT READY, and both finish pages say so.
         if self.needs_fleet_token and not self._fleet_token():
@@ -1408,6 +1595,8 @@ class OnboardWizard:
                 return
 
             self.install_warnings = []
+            if self._install_url_refused():
+                return
 
             self._append_log("checking SSH key…")
             try:
@@ -1535,6 +1724,8 @@ class OnboardWizard:
 
             # logic-onboarding-2: the base finish page reads this list now too.
             self.install_warnings = []
+            if self._install_url_refused():
+                return
             self._clean_slate("base")
             self._write_config_and_identity("base")
 
@@ -1656,6 +1847,35 @@ class OnboardWizard:
         self.copy_log_btn = _button(self._last_nav_bar, "COPY LOG", self._on_copy_log,
                                     primary=False)
         self.copy_log_btn.pack(side="left")
+        # LG-12 (docs/LEGAL_GAP_FEATURES_PLAN.md 5, 2026-09-25): the licence
+        # texts of everything frozen into this installer and the companion.
+        _button(self._last_nav_bar, "OPEN-SOURCE LICENCES", self._show_licences,
+                primary=False).pack(side="left", padx=(12, 0))
+
+    def _show_licences(self) -> None:
+        """The bundled licence texts in a read-only window of their own.
+
+        Shown in-process rather than handed to the OS: a one-file build
+        extracts the file to a temp folder that is deleted when this window
+        closes, so an external viewer could lose it mid-read."""
+        text = steps.licenses_text()
+        win = tk.Toplevel(self.root)
+        win.title("Open-source licences")
+        win.configure(bg=theme.BG)
+        win.geometry("720x560")
+        body = tk.Frame(win, bg=theme.FIELD, highlightthickness=1,
+                        highlightbackground=theme.FIELD_BORDER)
+        body.pack(fill="both", expand=True, padx=12, pady=(12, 6))
+        view = tk.Text(body, bg=theme.FIELD, fg=theme.TEXT, font=theme.mono(9),
+                       relief="flat", wrap="word")
+        scroll = tk.Scrollbar(body, command=view.yview)
+        view.configure(yscrollcommand=scroll.set)
+        view.insert("1.0", text)
+        view.config(state="disabled")
+        view.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        _button(win, "CLOSE", win.destroy, primary=True).pack(
+            side="right", padx=12, pady=(0, 12))
 
     def _finish_log_note(self, frame) -> None:
         """Name the install log on the way out (OPS-5). This window is about

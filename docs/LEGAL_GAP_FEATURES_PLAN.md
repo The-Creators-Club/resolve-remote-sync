@@ -233,11 +233,14 @@ editor can also switch them off for their own computer.
 
 This table is the contract. G1a pins it in `telemetry_policy.FIELDS`, and
 LG-16's payload pin fails when a new report key is added without a row here.
+(Amended 2026-09-25 after the build: the two masked rows and the
+`skipped_exists` samples were found in the G1a review round and are in both
+FIELDS copies; `FIELDS` is the authority where this table and it differ.)
 
 | Category | Fields withheld by the companion and stripped by the dashboard | What happens instead |
 |---|---|---|
-| `resolve_project` | top-level `resolve_project`; `capabilities.resolve.project`; `sync_guard.resolve_health.open_project` and `.project_open`; `resolve_journals[].project` (see note J); the whole of `media_tree` (its keys are project names, so this category **implies** `media_tree`) | Empty or absent. The dashboard NULLs `machine_state.resolve_project` and `cap_resolve_project`, and deletes the `meta` row `resolve_health:<editor>/<machine>` |
-| `local_manifest` | `local_manifest`; `sync_guard.resolve_health.missing_clips` and `.non_canonical_refused` (paths); `sync_guard.sync_conflicts.paths` (the **count** is still sent); `stray_projects`; `moved_project_dirs`; the inventory excerpts in diagnostics | The dashboard deletes `editor_media` and `editor_media_project` rows for the machine and the path lists in the `resolve_health:` meta row. `machine_state.sync_conflicts` keeps the count, which is all it ever stored |
+| `resolve_project` | top-level `resolve_project`; `capabilities.resolve.project`; `sync_guard.resolve_health.open_project` and `.project_open`; `resolve_journals[].project` (see note J); `resolve_journals[].id` (masked to `withheld:project/<file>`, note J); `resolve_undo_applied[].detail` (masked: quoted names and journal ids replaced, added at build); the whole of `media_tree` (its keys are project names, so this category **implies** `media_tree`) | Empty or absent. The dashboard NULLs `machine_state.resolve_project` and `cap_resolve_project`, and deletes the `meta` row `resolve_health:<editor>/<machine>` |
+| `local_manifest` | `local_manifest`; `sync_guard.resolve_health.missing_clips` and `.non_canonical_refused` (paths); `sync_guard.sync_conflicts.paths` (the **count** is still sent); `sync_guard.stray_projects`; `sync_guard.moved_project_dirs`; `sync_guard.skipped_exists.samples` (the counts are still sent, added at build); the inventory excerpts in diagnostics | The dashboard deletes `editor_media` and `editor_media_project` rows for the machine and the path lists in the `resolve_health:` meta row. `machine_state.sync_conflicts` keeps the count, which is all it ever stored |
 | `media_tree` | `media_tree`; bin excerpts in diagnostics | The dashboard deletes `media_tree_clips` for the machine |
 | `input_idle` | `capabilities.idle_seconds` (also withheld whenever `jobs_enabled` is false: decision D4) | The dashboard NULLs `cap_idle_seconds`. NULL already means "cannot tell, so NOT IDLE" end to end |
 
@@ -626,7 +629,10 @@ config and UI):**
   - `classify(url) -> "https" | "loopback" | "http_local" | "http_public" |
     "invalid"`.
   - **A name the rule does not recognise** (for example a split-horizon DNS
-    name) is classified by its resolved addresses, cached for 10 minutes. It
+    name) is classified by its resolved addresses, cached for 30 seconds
+    (amended at build, transport ledger review point 1: 10 minutes let a
+    laptop that cached "local" on the studio's split-horizon DNS send the
+    fleet token in cleartext after joining another network). It
     is `http_public` **only** on positive evidence: an IP literal that is
     public, or a name whose every resolved address is public. When resolution
     fails, the result is `http_local`. The refusal therefore never fires on

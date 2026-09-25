@@ -1029,7 +1029,8 @@ Finding = dict            # {"subject", "diagnosis", "fix", "detail"}
 
 
 def _f(subject: str, diagnosis: str, fix: str, detail: str = "",
-       *, repeat: bool = True, title: str = "", quiet: bool = False) -> Finding:
+       *, repeat: bool = True, title: str = "", quiet: bool = False,
+       withdrawn: bool = False) -> Finding:
     """One finding. `repeat=False` (DDIAG-3, 2026-09-04) says "still true,
     still worth showing, but do not mail it again while it stays true" - the
     warn repeat rule on a finding an error kind produced. It is NOT the same
@@ -1050,6 +1051,14 @@ def _f(subject: str, diagnosis: str, fix: str, detail: str = "",
     not for one that judged it fine, which is what a recovery means. A quiet
     finding is never a new mail and never a recovery; if it was open it stays
     open and is counted in the digest's "still open from before".
+
+    `withdrawn` (LG-1 review round, 2026-09-25) is for a subject the check
+    has stopped judging ON PURPOSE and for good: the computer or the site
+    switched off the reporting it reads. `deliver` closes an open row
+    WITHOUT a message (a `<kind>.ok` row that says so) and says nothing about
+    one never raised. Quiet was wrong there: a privacy switch can stay off
+    for months, and a quiet hold kept the row open with a stale count and in
+    every digest's "still open from before" for all of them.
     """
     finding: Finding = {"subject": subject, "diagnosis": diagnosis, "fix": fix,
                         "detail": detail, "repeat": repeat}
@@ -1057,6 +1066,8 @@ def _f(subject: str, diagnosis: str, fix: str, detail: str = "",
         finding["title"] = title
     if quiet:
         finding["quiet"] = True
+    if withdrawn:
+        finding["withdrawn"] = True
     return finding
 
 
@@ -1215,6 +1226,28 @@ class Ctx:
         except sqlite3.Error:
             log.debug("alerts: could not read the fleet's ticks", exc_info=True)
             self.plan_slugs = {}
+        # LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.1, 2026-09-25): what each
+        # computer withholds, "editor/machine" -> category names. One
+        # fleet-wide read on the Ctx rule. A withheld category is "not
+        # reported": a check that reads it must neither raise nor RECOVER a
+        # finding about it (see _withheld_quiet). Empty when unreadable,
+        # which is the behaviour before LG-1.
+        self.withheld: dict[str, set[str]] = {}
+        try:
+            self.withheld = {f"{e}/{m}": set(names)
+                             for (e, m), names in db.withheld_map(conn).items()}
+        except sqlite3.Error:
+            log.debug("alerts: could not read the telemetry opt-outs", exc_info=True)
+        # LG-4 (§4.4): how each computer's last report arrived. None when it
+        # could not be read, which `_check_public_http` reports as nothing
+        # (the alert is about positive evidence of plain http on the
+        # internet, never about an unreadable column).
+        try:
+            self.report_via: dict[str, str] | None = {
+                f"{e}/{m}": via for (e, m), via in db.report_via_map(conn).items()}
+        except sqlite3.Error:
+            log.debug("alerts: could not read report_via", exc_info=True)
+            self.report_via = None
         # Machines a more specific kind has already named, so the catch-all
         # ("red for an hour and we cannot say why") does not repeat them.
         self.named: set[str] = set()
@@ -2327,9 +2360,36 @@ def _check_out_of_tree(ctx: Ctx) -> list[Finding]:
     return out
 
 
+def _withheld_quiet(ctx: Ctx, kind: str, e: Mapping[str, Any],
+                    category: str) -> Finding | None:
+    """LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.1, 2026-09-25). For a
+    computer that withholds `category`, the answer a check that reads it
+    must give: nothing about a subject never raised, and a WITHDRAWN finding
+    for one already open, which `deliver` closes without a message. Silence
+    would be a recovery ("this has cleared, no action is needed") about a
+    problem nobody touched (the dash-collector-alerts-1 rule); a quiet hold
+    (the first build) kept the row open for as long as the switch stayed
+    off, and §4.1 says a withheld section is never an alert (review round,
+    2026-09-25). None = the computer reports it; judge as usual. An empty
+    dict = withheld and never raised; say nothing."""
+    who = _who(e)
+    if category not in ctx.withheld.get(who, set()):
+        return None
+    if who not in ctx.open_alert_subjects(kind):
+        return {}
+    return _f(who, f"{who} no longer reports this, so it cannot be checked.",
+              "Nothing to do: the computer or the site switched this reporting off.",
+              f"withheld={category}", withdrawn=True)
+
+
 def _check_stray_projects(ctx: Ctx) -> list[Finding]:
     out = []
     for e in ctx.editors:
+        withheld = _withheld_quiet(ctx, "stray_projects", e, "local_manifest")
+        if withheld is not None:
+            if withheld:
+                out.append(withheld)
+            continue
         g = ctx.guard(e)
         count = g.get("stray_projects_count")
         if not count:
@@ -2349,6 +2409,11 @@ def _check_stray_projects(ctx: Ctx) -> list[Finding]:
 def _check_moved_project_dirs(ctx: Ctx) -> list[Finding]:
     out = []
     for e in ctx.editors:
+        withheld = _withheld_quiet(ctx, "moved_project_dir", e, "local_manifest")
+        if withheld is not None:
+            if withheld:
+                out.append(withheld)
+            continue
         g = ctx.guard(e)
         count = g.get("moved_project_dirs_count")
         if not count:
@@ -3665,6 +3730,123 @@ def _check_broll_share_expiring(ctx: Ctx) -> list[Finding]:
     return out
 
 
+def _check_collector_overdue(ctx: Ctx) -> list[Finding]:
+    """LG-17 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.6, 2026-09-25): a scheduled
+    collector kind whose last run was OK and which has not run again in far
+    longer than its own cadence. A FAILED kind is `collector_kind_failed`'s
+    and a stopped collector is `collector_stale`'s: `db.collector_health`
+    marks nothing overdue in either case, so one fault is one finding.
+
+    Debounced by one alerts cycle (G0 ledger hand-off 10): the kind has to
+    be past its bound PLUS this check's own interval, measured from its last
+    FINISH (later than its start, so never earlier than the page's amber).
+    A kind that is merely slow this cycle turns amber on the panel and is
+    not mailed; one that stays late is. The retention kind (`prune`) is the
+    one the privacy documents promise, so it gets its own words."""
+    kinds = ctx.collector.get("kinds") or []
+    # Review round (2026-09-25): `db.collector_health` marks nothing overdue
+    # while the collector is stale, nor a kind whose last run failed, so
+    # those are "cannot judge", not "on time". An open subject that went
+    # silent then was mailed "cleared" beside collector_stale; it is held
+    # QUIET instead (dash-collector-alerts-1). A kind that ran again on time
+    # is ok, not overdue, and recovers as it should.
+    out: list[Finding] = []
+    stale = bool(ctx.collector.get("collector_stale"))
+    open_subjects: set[str] | None = None
+    for k in kinds:
+        name = str(k.get("kind") or "")
+        if k.get("overdue") or not (stale or not k.get("ok")):
+            continue
+        if open_subjects is None:
+            open_subjects = ctx.open_alert_subjects("collector_kind_overdue")
+        subject = f"poll {name}"
+        if subject in open_subjects:
+            out.append(_f(
+                subject,
+                f"The server's background job '{name}' cannot be judged "
+                f"late or on time while "
+                + ("the collector is stopped." if stale else "its last run failed."),
+                "See the collector alert beside this one.",
+                "collector_stale" if stale else "last run failed", quiet=True))
+    late = [k for k in kinds if k.get("overdue")]
+    if not late:
+        return out
+    gaps = db.kind_start_gaps(ctx.conn)
+    cycle = db.collector_cycle_seconds(ctx.conn)
+    margin = float(getattr(ctx.settings, "interval_alerts", 600.0) or 600.0)
+    for k in late:
+        name = str(k.get("kind") or "")
+        finished = str(k.get("finished_at") or "")
+        age = _age(finished, ctx.now) if finished else None
+        bound = db.collector_kind_overdue_after(
+            name, gaps.get(name), ctx.settings, cycle_seconds=cycle)
+        if age is None or age <= bound + margin:
+            continue
+        if name == "prune":
+            diagnosis = (
+                f"The server's retention job last ran {_age_words(finished, ctx.now)} "
+                f"and has not run since. It is what deletes old history, "
+                f"diagnostics and revoked credentials on the schedule the "
+                f"privacy notice describes, so nothing is being deleted on "
+                f"time while it is late.")
+        else:
+            diagnosis = (
+                f"The server's own background job '{name}' last ran "
+                f"{_age_words(finished, ctx.now)} and has not run since, far "
+                f"longer than it normally waits. The part of the fleet "
+                f"picture it produces is going stale.")
+        out.append(_f(
+            f"poll {name}", diagnosis,
+            "Restart the ccsync container on the NAS. If it happens again, "
+            "send us the container log.",
+            f"finished_at={finished} bound={int(bound)}s"))
+    return out
+
+
+def _check_public_http(ctx: Ctx) -> list[Finding]:
+    """LG-4 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.4, 2026-09-25): a computer
+    whose last report reached this dashboard over plain http FROM THE PUBLIC
+    INTERNET (`machine_state.report_via = 'http_public'`, recorded by
+    api_report). Only a companion from before the cleartext guard can still
+    do that, and it is a real exposure: a sign-in sends a password.
+
+    Plain http on the studio network or tailnet (`http_local`) is NOT
+    alerted, ever: the Settings page states it once, as information. An
+    unreadable column is nothing, never a guess."""
+    if not ctx.report_via:
+        return []
+    # Review round (2026-09-25): the row is the computer's LAST report, which
+    # for a retired laptop can be months old; an error repeats daily, so it
+    # mailed about a computer nobody has seen until someone forgot it. The
+    # finding now says when, and past SILENT_SECONDS (machine_silent's own
+    # bound, which owns a quiet computer) it is said once, not daily. It is
+    # never DROPPED for age: silence is a recovery mail, and nothing about
+    # the exposure was fixed.
+    seen = {_who(e): e.get("received_at") for e in ctx.editors}
+    out = []
+    for who, via in sorted(ctx.report_via.items()):
+        if via != "http_public":
+            continue
+        received = seen.get(who)
+        age = _age(received, ctx.now) if received else None
+        current = age is not None and age < SILENT_SECONDS
+        out.append(_f(
+            who,
+            f"{who} last reached this dashboard over plain http from the "
+            f"public internet{f' ({_age_words(received, ctx.now)})' if received else ''}. "
+            f"Everything it "
+            f"sends that way crosses the internet unencrypted, including an "
+            f"editor's password when they sign in.",
+            "Serve the dashboard over https (Tailscale Serve does this), then "
+            "put the https address in that computer's tray: Settings, THIS "
+            "COMPUTER. Updating its CC Sync also stops it sending anything "
+            "over plain http on the internet. If that computer is gone for "
+            "good, open FLEET and press [ FORGET ] on its row.",
+            f"report_via=http_public received_at={received or 'unknown'}",
+            repeat=current))
+    return out
+
+
 def _check_red_unexplained(ctx: Ctx) -> list[Finding]:
     """The catch-all. Runs LAST, and only for machines no other check named.
 
@@ -3739,6 +3921,16 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
               "computers that rolled a build back", _check_upgrade_reverted),
     AlertKind("collector_kind_failed", SEV_ERROR, "a server background job is failing",
               "the server's background jobs", _check_collector_kinds),
+    # LG-17 (2026-09-25): late, not failed. Registered with its evaluator in
+    # the same change, per the notices rule.
+    AlertKind("collector_kind_overdue", SEV_WARN, "a server background job is late",
+              "the server's background jobs running on time", _check_collector_overdue),
+    # LG-4 (2026-09-25): plain http from the internet only; ERROR, so it
+    # repeats daily for as long as a password path stays exposed.
+    AlertKind("dashboard_reached_over_public_http", SEV_ERROR,
+              "a computer reaches this dashboard unencrypted over the internet",
+              "computers reaching the dashboard over plain http from the internet",
+              _check_public_http),
     AlertKind("collector_stale", SEV_ERROR, "the server's collector has stopped",
               "the collector's own liveness", _check_collector_stale),
     AlertKind("watchdog_restart", SEV_ERROR, "the server restarted its collector",
@@ -4708,6 +4900,17 @@ def deliver(
         seen.add((kind, subject))
         severity = finding.get("severity", SEV_WARN)
         was_open = _is_open(conn, kind, subject)
+        # LG-1 review round (2026-09-25): a WITHDRAWN finding closes its row
+        # without a message (see `_f`). The `.ok` row is what `_is_open`
+        # reads; nothing is transmitted and it is not counted as recovered.
+        # It is in `seen`, so the recovery pass below cannot mail it either.
+        if finding.get("withdrawn"):
+            if was_open:
+                db.record_alert(conn, kind + RECOVERED_SUFFIX, subject, "", True,
+                                "closed without a message: that computer no "
+                                "longer reports what this checks", now)
+                conn.commit()
+            continue
         # dash-collector-alerts-1 (2026-09-11): a QUIET finding is here only
         # to hold its ledger row where it is. Nothing is sent about it and
         # the recovery pass below skips it because it is in `seen`.

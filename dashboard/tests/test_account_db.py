@@ -50,14 +50,16 @@ CFG = {"cfg_accepts", "cfg_jobs_volunteer_minutes", "cfg_drive_reminder_minutes"
 def test_v58_is_the_head_and_the_list_stays_gapless():
     numbers = [n for n, _ in dbmod._MIGRATION_STEPS]
     assert numbers == list(range(1, dbmod.SCHEMA_VERSION + 1))
-    assert dbmod.SCHEMA_VERSION == 58
+    # v59 (the legal-gap features, 2026-09-25) took the head; v58 stays a
+    # gapless step below it (G0 hand-off 1).
+    assert dbmod.SCHEMA_VERSION >= 58
     assert dict(dbmod._MIGRATION_STEPS)[58] is dbmod.SCHEMA_V58
 
 
 def test_v58_on_a_fresh_database(conn):
     assert {"user_profiles", "machine_setting_requests"} <= _tables(conn)
     assert CFG <= _columns(conn, "machine_state")
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 58
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
 
 
 @pytest.mark.parametrize("start", [57, 50])
@@ -67,7 +69,7 @@ def test_v58_on_an_older_database_reaches_the_same_shape(tmp_path, start):
     assert old.execute("PRAGMA user_version").fetchone()[0] == start
     assert "user_profiles" not in _tables(old)
     dbmod.migrate(old)
-    assert old.execute("PRAGMA user_version").fetchone()[0] == 58
+    assert old.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
     fresh = sqlite3.connect(":memory:")
     dbmod.migrate(fresh)
     assert _tables(old) == _tables(fresh)
@@ -96,7 +98,7 @@ def test_v58_interrupted_between_two_add_columns_replays(tmp_path):
     c.commit()
     assert c.execute("PRAGMA user_version").fetchone()[0] == 57
     dbmod.migrate(c)
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 58
+    assert c.execute("PRAGMA user_version").fetchone()[0] == dbmod.SCHEMA_VERSION
     assert CFG <= _columns(c, "machine_state")
     c.close()
 

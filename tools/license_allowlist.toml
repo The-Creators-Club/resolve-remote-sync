@@ -63,20 +63,42 @@ licence text, and a written offer for the source of the version we install."""
 # build without touching our code. psycopg2 additionally carries its own
 # LINKING EXCEPTION (its metadata says "LGPL with exceptions"), which is more
 # permissive than plain LGPL, not less.
+#
+# `companion` joined the targets on 2026-09-25 (LG-11, decision D6 in
+# docs/LEGAL_GAP_FEATURES_PLAN.md): the Timeline Cards role imports the
+# MulticamPipeline engine into the frozen companion, and that engine reads
+# Resolve's project library through psycopg2. It had been in pyproject.toml
+# and build.spec since 2026-08-31 but not in companion/requirements.lock, so
+# this gate could not see it and feed builds did not contain it. The pg8000
+# alternative was rejected (it binds and types differently inside Resolve's
+# own database); the posture in the frozen binary is the one counsel cleared
+# in THIRD_PARTY_NOTICES, restated in `reason`. tools/scan_frozen.py reads
+# `targets` too: without `companion` here, every companion build fails.
 [allow.psycopg2-binary]
 license = "GNU Library or Lesser General Public License (LGPL)"
-targets = ["dashboard-container"]
+targets = ["dashboard-container", "companion"]
 reason = """\
-LGPL with psycopg2's own linking exception, shipped exactly the way paramiko \
-above is and for the same reasons: pip-installed as an ordinary importable \
-package into the container's /venv (or an image layer built from the same \
-requirements.lock), nothing statically linked, and the customer can replace \
-the installed copy with their own build without touching our code. It is \
-imported only by the mounted Timeline Cards page's project-library route, \
-which reads Resolve's PostgreSQL directly, and only on a site that sets \
-DASH_CARDS_ENABLED. Obligations still owed and tracked in \
-docs/legal/THIRD_PARTY_NOTICES.md: the notice, the licence text, and a \
-written offer for the source of the version we install."""
+LGPL with psycopg2's own linking exception. In the dashboard container it is \
+shipped exactly the way paramiko above is and for the same reasons: \
+pip-installed as an ordinary importable package into the container's /venv \
+(or an image layer built from the same requirements.lock), nothing \
+statically linked, and the customer can replace the installed copy with \
+their own build without touching our code; it is imported only by the \
+mounted Timeline Cards page's project-library route, and only on a site that \
+sets DASH_CARDS_ENABLED. In the companion (since 2026-09-25, LG-11) it is \
+frozen by PyInstaller as SEPARATE files, the psycopg2 extension module and \
+the libpq and OpenSSL shared libraries its wheel carries, which are \
+extracted to a temporary directory at run time and loaded from there as \
+separate, replaceable shared-library files rather than code linked into \
+ours. Their code is not changed; on macOS PyInstaller does rewrite each \
+collected library's load commands (install names) and re-sign it, so there \
+the files are not byte-identical to the wheel's (flagged for counsel against \
+THIRD_PARTY_NOTICES' "unmodified", 2026-09-25 review round). It is used \
+only by the Timeline Cards role. Both are covered by \
+psycopg2's own linking exception as well. Obligations, met in \
+docs/legal/THIRD_PARTY_NOTICES.md and in the licence texts every binary \
+carries (tools/gen_notices.py --write-texts): the notice, the licence text, \
+and a written offer for the source of the version we ship."""
 
 # bgutil-ytdlp-pot-provider is GPLv3, and unlike paramiko above this is a
 # CUSTOMER-ENABLED OPTIONAL FEATURE, not something every deployment carries

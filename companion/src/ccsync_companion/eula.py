@@ -254,3 +254,34 @@ def acceptance_ok(path: Optional[Path] = None) -> bool:
     least the bundled one -- or the bundled document is missing, which fails
     open on purpose."""
     return acceptance_problem(path) is None
+
+
+# The three keys the dashboard is told, and nothing else: no path, no text.
+REPORT_KEYS = ("version", "accepted_at", "eula_sha256")
+
+
+def report_block(path: Optional[Path] = None) -> Optional[dict[str, Any]]:
+    """The `eula` report section (LG-5, docs/LEGAL_GAP_FEATURES_PLAN.md
+    section 5, 2026-09-25): which licence this computer accepted and when,
+    from the on-disk record, or None when there is no usable record.
+
+    None is "not reported", never "not accepted": the reporter omits the
+    section, and the dashboard shows "Not reported". Whether this computer
+    may sync is still acceptance_problem()'s question alone, and it already
+    reaches the dashboard as the `licence_pending` block reason. Values are
+    capped so a hand-edited record cannot put a novel on the wire. Never
+    raises: it runs on the reporter thread."""
+    try:
+        record = read_acceptance(path)
+    except Exception:
+        return None
+    if not record:
+        return None
+    version = str(record.get("version") or "").strip()
+    if not version:
+        return None
+    return {
+        "version": version[:32],
+        "accepted_at": str(record.get("accepted_at") or "").strip()[:64],
+        "eula_sha256": str(record.get("eula_sha256") or "").strip()[:64],
+    }

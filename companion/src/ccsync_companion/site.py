@@ -118,6 +118,17 @@ LIST_KEYS = ("template_folders", "shared_asset_folders")
 # manifest through normalise(). Every new flag goes here AND in
 # tests/test_site.py's round-trip test.
 FEATURE_KEYS = ("youtube_download", "youtube_unblock", "auto_update")
+# LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md 3.3, 2026-09-25): the site's four
+# reporting switches, under the manifest's `telemetry` object. The OPPOSITE
+# default to `features`: only a real JSON `false` switches a category off, and
+# absent (an older dashboard, a lost cache) is "reported", which is today's
+# behaviour. That is safe because the dashboard strips a switched-off category
+# on arrival from every build; only the "do not even send" half depends on
+# this cache. Without this whitelist normalise() threw the block away and the
+# companion half of the site switch was silently dead (buildability audit H2),
+# exactly the `auto_update` shape above. telemetry_policy.CATEGORIES spells the
+# same four names; tests/test_telemetry_policy.py pins them equal.
+TELEMETRY_KEYS = ("resolve_project", "local_manifest", "media_tree", "input_idle")
 # 0 for sftp_concurrency means "the server didn't say" -- unlike config.toml,
 # where an explicit 0 means "disable the flag entirely".
 INT_KEYS = {"sftp_port": 22, "sftp_concurrency": 0}
@@ -171,6 +182,9 @@ def normalise(data: Any) -> Optional[dict[str, Any]]:
     features = data.get("features")
     features = features if isinstance(features, dict) else {}
     out["features"] = {key: features.get(key) is True for key in FEATURE_KEYS}
+    telemetry = data.get("telemetry")
+    telemetry = telemetry if isinstance(telemetry, dict) else {}
+    out["telemetry"] = {key: telemetry.get(key) is not False for key in TELEMETRY_KEYS}
     return out
 
 

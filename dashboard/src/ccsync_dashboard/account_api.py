@@ -256,6 +256,11 @@ def _computer_view(conn: sqlite3.Connection, user: str, viewer_can_manage: bool,
         "live": live,
         "lost": lost,
         "why": entry.get("why"),
+        # LG-1 / LG-5 (2026-09-25, G2b hand-off 3): the grid's own entry
+        # carries both (health.annotate_legal in api.build_editors_view);
+        # partials/account_computer.html draws them, and absent draws nothing.
+        "eula": entry.get("eula"),
+        "report_withheld": list(entry.get("report_withheld") or []),
         "plan": _plan_rows(conn, user, machine),
         "jobs": {
             "enabled": caps.get("jobs_enabled") if caps else None,

@@ -27,6 +27,14 @@
       {% if pc.up_to_date %}<span class="chip green" title="The current CCSync{% if pc.current_version %}, {{ pc.current_version }}{% endif %}.">[ UP TO DATE ]</span>
       {% elif pc.current_version %}<span class="chip amber" title="This computer runs an older CCSync than the current {{ pc.current_version }}.">[ OUT OF DATE: {{ pc.current_version }} ]</span>{% endif %}</dd>
     {% if pc.platform %}<dt>system</dt><dd>{{ pc.platform }}</dd>{% endif %}
+    {# LG-5 (docs/LEGAL_GAP_FEATURES_PLAN.md §5, 2026-09-25): the same licence
+       line as the fleet grid (health.eula_status on the grid's own entry).
+       Grey "Not reported" is never "not accepted". Absent (a view that does
+       not carry the fact yet) is no row at all. #}
+    {% if pc.eula %}<dt>licence</dt>
+    <dd class="eula-line">{% if pc.eula.colour %}<span class="{{ pc.eula.colour }}">{{ pc.eula.text }}</span>{% else %}<span class="muted">{{ pc.eula.text }}</span>{% endif %}{% if pc.eula.accepted_at %} <span class="muted" title="{{ pc.eula.accepted_at }}">{{ pc.eula.accepted_at | ago }}</span>{% endif %}</dd>{% endif %}
+    {% if pc.report_withheld %}<dt>not reported</dt>
+    <dd>{% for w in pc.report_withheld %}<span class="chip grey" title="This computer does not send this to the dashboard. Its privacy switches are in its tray: Settings, THIS COMPUTER, PRIVACY. Sync is not affected.">[ {{ w.label }} ]</span> {% endfor %}</dd>{% endif %}
     <dt>last report</dt>
     <dd><span title="{{ pc.last_seen or '' }}">{{ pc.last_seen | ago }}</span></dd>
     {% if pc.why_sentence %}<dt>now</dt><dd class="why-line {{ 'muted' if (pc.why and pc.why.informational) else 'amber' }}">{{ pc.why_sentence }}</dd>{% endif %}

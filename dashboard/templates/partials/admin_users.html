@@ -3,6 +3,27 @@
    before the box, because htmx scans only a response's direct children for
    an out-of-band swap. #}
 {% include "partials/minted_secret.html" %}
+{# LG-2 / LG-3 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.2 and 4.3, 2026-09-25): the
+   two data-subject buttons, one macro so every row that names a person
+   carries the same pair. EXPORT is a plain form, not htmx: the answer is a
+   file download, which htmx would swap into the panel as text. It carries the
+   hidden `csrf` field app.csrf_gate reads. ERASE keeps the account and every
+   computer's current state (decision D15), and its confirm says exactly that,
+   in the plan's words. #}
+{% macro subject_buttons(name) -%}
+  <form class="inline-form" method="post" action="/api/v1/admin/users/{{ name | urlencode }}/export">
+    <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+    <button class="btn tap" type="submit"
+            title="downloads one JSON file with everything this dashboard holds about {{ name }}: their computers' records, history, sessions, requests and audit entries. Passwords and keys are left out. The download is recorded in the audit log.">[ EXPORT DATA ]</button>
+  </form>
+  <form class="inline-form" hx-post="/partials/admin/users/erase-history"
+        hx-target="closest .admin-users-box" hx-swap="outerHTML"
+        hx-confirm="Erase the history of {{ name }}? Their account and what their computers report now stay.">
+    <input type="hidden" name="username" value="{{ name }}">
+    <button class="btn tap" type="submit"
+            title="removes their computers' past sync and transfer history, completion and missing-file records, stored diagnostics, expired sign-in sessions, past failed sign-ins and finished YouTube requests. Their account, their computers and what those computers report now all stay.">[ ERASE HISTORY ]</button>
+  </form>
+{%- endmacro %}
 <div class="admin-users-box">
   <div class="side-head">[ USERS ]
     <span class="muted">Create editor accounts, approve new Syncthing devices, set known passwords.</span></div>
@@ -121,6 +142,7 @@
                       title="a disabled account cannot sign into the dashboard or SFTP, its sessions and report tokens are revoked, and its computers are turned away when they report. The files already on those computers stay there, and [ ENABLE ] here undoes all of it.">{% if u.disabled %}[ ENABLE ]{% else %}[ DISABLE ]{% endif %}</button>
             </form>
             {% set suspend_user = u.username %}{% include "partials/admin_suspend_button.html" with context %}
+            {{ subject_buttons(u.username) }}
             {# Deletion is the irreversible twin of DISABLE, so it is second and
                it asks first. The confirm names what survives as well as what
                goes: an admin who wanted "stop this person signing in" wants
@@ -233,6 +255,7 @@
             <button class="btn tap" type="submit"
                     title="all of their computers go: sync plans, status rows and Syncthing devices (they stop receiving projects). Any report tokens and browser sessions in their name are revoked. Files already on their computers stay there.">[ DELETE ]</button>
           </form>
+          {{ subject_buttons(name) }}
         </td>
       </tr>
     {% endfor %}
@@ -434,6 +457,7 @@
                directory's fate is the NAS's own (TrueNAS keeps it, DSM does
                not) and comes back as a notice above. #}
             {% set suspend_user = e.username %}{% include "partials/admin_suspend_button.html" with context %}
+            {{ subject_buttons(e.username) }}
             <form class="inline-form" hx-post="/partials/admin/users/delete"
                   hx-target="closest .admin-users-box" hx-swap="outerHTML"
                   hx-confirm="Delete {{ e.username }}: their NAS account, their computers and their sync plans?">

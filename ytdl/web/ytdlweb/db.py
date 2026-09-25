@@ -840,6 +840,8 @@ def set_job(c, job_id, **cols):
     sets = ''.join(f'{k}=?, ' for k in cols)
     c.execute(f'UPDATE jobs SET {sets}updated_at=? WHERE id=?',
               [*cols.values(), now(), job_id])
+    if cols.get('phase') in TERMINAL:
+        _drop_forgotten_terms(c, job_id)
     c.commit()
 
 
@@ -899,12 +901,17 @@ def cancel_now(c, job_id):
     the job sees the request on its next loop rather than writing the next
     phase over `cancelled`.
     """
-    ph = ','.join('?' * len(IDLE))
-    cur = c.execute(
-        f"UPDATE jobs SET phase='cancelled', cancel_requested=1, updated_at=? "
-        f'WHERE id=? AND phase IN ({ph})', (now(), job_id, *IDLE))
+    cur = _cancel_now_sql(c, job_id, 1)
     c.commit()
     return bool(cur.rowcount)
+
+
+def _cancel_now_sql(c, job_id, flag):
+    # No commit: forget_requester runs this inside its one transaction.
+    ph = ','.join('?' * len(IDLE))
+    return c.execute(
+        f"UPDATE jobs SET phase='cancelled', cancel_requested=?, updated_at=? "
+        f'WHERE id=? AND phase IN ({ph})', (flag, now(), job_id, *IDLE))
 
 
 def clear_cancel(c, job_id):
@@ -1211,14 +1218,18 @@ def expire_lease(c, job_id, at=None):
     laptop that closed -- which is what credits the clips that did land and
     re-queues the ones that did not. One reclaim path, not three.
     """
-    at = at or now()
-    cur = c.execute(
+    cur = _expire_lease_sql(c, job_id, at or now())
+    c.commit()
+    return bool(cur.rowcount)
+
+
+def _expire_lease_sql(c, job_id, at):
+    # No commit: forget_requester runs this inside its one transaction.
+    return c.execute(
         'UPDATE jobs SET lease_expires_at=?, updated_at=? '
         f"WHERE id=? AND download_mode='{MODE_LOCAL}' "
         'AND lease_expires_at IS NOT NULL AND lease_expires_at>?',
         (at, at, job_id, at))
-    c.commit()
-    return bool(cur.rowcount)
 
 
 def end_lease(c, job_id, editor=None, at=None):
@@ -1869,11 +1880,20 @@ def count_downloads(c):
 def ledger_add(c, video_id, title, channel, project_slug, project_label, term,
                rel_path, job_id=None, downloaded_by=None):
     """Record a landed download. Upserts: re-downloading into another project
-    moves the record rather than raising on the primary key."""
+    moves the record rather than raising on the primary key.
+
+    With a `job_id`, the credit is that job's created_by AS STORED NOW, and
+    `downloaded_by` is only the fallback for a job row that is gone. Every
+    caller passes the job's own created_by, read when its phase started; a
+    delete (forget_requester, LG-3, G4 review round 2026-09-25) can rename it
+    while a server download is mid-clip, and the in-memory copy would then
+    credit that clip to the deleted person's real name for good.
+    """
     c.execute(
         'INSERT INTO downloads(video_id,title,channel,project_slug,project_label,'
         'term,term_dir,rel_path,job_id,downloaded_by,downloaded_at) '
-        'VALUES(?,?,?,?,?,?,?,?,?,?,?) '
+        'VALUES(?,?,?,?,?,?,?,?,?,'
+        'COALESCE((SELECT created_by FROM jobs WHERE id=?),?),?) '
         'ON CONFLICT(video_id) DO UPDATE SET title=excluded.title, '
         'channel=excluded.channel, project_slug=excluded.project_slug, '
         'project_label=excluded.project_label, term=excluded.term, '
@@ -1881,7 +1901,8 @@ def ledger_add(c, video_id, title, channel, project_slug, project_label, term,
         'rel_path=excluded.rel_path, job_id=excluded.job_id, '
         'downloaded_by=excluded.downloaded_by, downloaded_at=excluded.downloaded_at',
         (video_id, title, channel, project_slug, project_label, term,
-         _term_dir_of(rel_path, term), rel_path, job_id, downloaded_by, now()))
+         _term_dir_of(rel_path, term), rel_path, job_id, job_id, downloaded_by,
+         now()))
     c.commit()
 
 
@@ -2135,3 +2156,253 @@ def record_attestation(c, username, version, text_sha256):
         (str(username or ''), str(version), str(text_sha256), now()))
     c.commit()
     return attestation_of(c, username, version)
+
+
+# ---------------------------------------------------- one person's records
+# LG-2 / LG-3 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.2-4.3, 2026-09-25). The
+# dashboard's export, "erase history" and delete reach this store through
+# ccsync_dashboard.ytdl, which owns finding the file; the SQL lives here like
+# every other statement against ytdl.db.
+#
+# A person appears in five places: jobs.created_by (they asked), jobs.claimed_by
+# (their computer fetched), job_videos.download_host (whose IP got the clip),
+# downloads.downloaded_by (the ALREADY IN credit) and attestations.username
+# (what they agreed to). job_terms is what they typed. Matched NOCASE because
+# the dashboard folds usernames to lower case (db.forget_editor) and this
+# store keeps whatever the gate's header said at the time.
+
+SUBJECT_MATCH = {
+    'jobs': 'created_by=:u COLLATE NOCASE OR claimed_by=:u COLLATE NOCASE',
+    'job_terms': 'job_id IN (SELECT id FROM jobs WHERE created_by=:u COLLATE NOCASE)',
+    # 'server' is the NAS worker's own mark (MODE_SERVER), never a person,
+    # even for an account that happens to be called that.
+    'job_videos': "download_host=:u COLLATE NOCASE AND lower(download_host)<>'server'",
+    'downloads': 'downloaded_by=:u COLLATE NOCASE',
+    'attestations': 'username=:u COLLATE NOCASE',
+}
+
+
+def _subject_name(username):
+    name = str(username or '').strip()
+    if not name:
+        # 'server' and NULL both live in the columns this matches; a blank
+        # name is a caller bug, and answering it would rewrite nobody's rows
+        # at best and the NAS worker's at worst.
+        raise ValueError('a username is required')
+    return name
+
+
+def subject_rows(c, username):
+    """table -> [row dict] for everything this store holds about `username`.
+
+    Read only. Nothing is excluded: this store keeps no secret (the fleet token
+    and the identity secret are configuration, never rows).
+    """
+    u = _subject_name(username)
+    out = {}
+    for table, where in SUBJECT_MATCH.items():
+        if not _table_exists(c, table):
+            continue
+        rows = [dict(r) for r in c.execute(
+            f'SELECT * FROM {table} WHERE {where} ORDER BY rowid', {'u': u})]
+        if table in ('jobs', 'job_videos'):
+            rows = _mask_others(c, table, rows, u)
+        out[table] = rows
+    return out
+
+
+# A job somebody ELSE asked for that this person's computer fetched is in the
+# export because claimed_by / download_host is theirs, but its created_by and
+# what was typed (term, term_dir, the filepath under term_dir, the AI's notes
+# on the search) are the OTHER person's, and /me/export hands the file to the
+# subject (G4 review round, 2026-09-25, item 8). Only the fetch itself is kept.
+_OTHERS_JOB_COLS = ('id', 'kind', 'phase', 'download_mode', 'claimed_by',
+                    'claimed_machine', 'claim_free_bytes', 'lease_expires_at',
+                    'mode_lock', 'dl_total', 'dl_done', 'dl_failed',
+                    'created_at', 'updated_at')
+_OTHERS_VIDEO_COLS = ('id', 'job_id', 'video_id', 'url', 'title', 'channel',
+                      'duration', 'upload_date', 'dl_state', 'dl_error',
+                      'download_host')
+
+
+def _mask_others(c, table, rows, u):
+    if not rows:
+        return rows
+    key = 'id' if table == 'jobs' else 'job_id'
+    ids = sorted({r[key] for r in rows})
+    own = set()
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        q = ','.join('?' * len(chunk))
+        own.update(r['id'] for r in c.execute(
+            f'SELECT id FROM jobs WHERE id IN ({q}) AND created_by=? COLLATE NOCASE',
+            (*chunk, u)))
+    keep = _OTHERS_JOB_COLS if table == 'jobs' else _OTHERS_VIDEO_COLS
+    return [r if r[key] in own else {k: r[k] for k in keep if k in r}
+            for r in rows]
+
+
+def forget_history(c, username):
+    """Delete the FINISHED jobs `username` created, with their terms, videos and
+    term links. -> {table: rows deleted}.
+
+    "Erase history, keep the account" (LG-3). Deliberately narrow:
+      - only TERMINAL jobs. A job that is queued, parked or running is not
+        history yet, and deleting a row the worker is inside is how a phase
+        write lands on nothing;
+      - never `downloads`: it is the fleet's dedupe ledger and the credit
+        record, and a deleted row there re-downloads a clip the tree already
+        has (plan correctness M2, safety M6);
+      - never attestations: evidence of what was agreed to;
+      - never a job somebody ELSE created that this person's computer fetched:
+        that job is the other person's history, and claimed_by on it is the
+        record of whose IP got the clips.
+    The child rows are deleted explicitly rather than left to ON DELETE
+    CASCADE, because the cascade needs PRAGMA foreign_keys on THIS connection
+    and a caller's connection is not guaranteed to have set it.
+    """
+    u = _subject_name(username)
+    ph = ','.join('?' * len(TERMINAL))
+    ids = [r['id'] for r in c.execute(
+        f'SELECT id FROM jobs WHERE created_by=? COLLATE NOCASE AND phase IN ({ph})',
+        (u, *TERMINAL))]
+    counts = {'jobs': 0, 'job_terms': 0, 'job_videos': 0, 'job_video_terms': 0}
+    if not ids:
+        return counts
+    try:
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            q = ','.join('?' * len(chunk))
+            for table in ('job_video_terms', 'job_videos', 'job_terms', 'jobs'):
+                col = 'id' if table == 'jobs' else 'job_id'
+                cur = c.execute(f'DELETE FROM {table} WHERE {col} IN ({q})', chunk)
+                counts[table] += max(cur.rowcount, 0)
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    return counts
+
+
+# The cancel_requested value forget_requester writes (G4 review round,
+# 2026-09-25, item 4). Truthy like the ordinary 1, so every reader that asks
+# "was a cancel asked for" still answers yes; set_job reads the 2 when the job
+# finally reaches a terminal phase and drops its job_terms then. A job still
+# inside a phase keeps its terms until it stops (its worker may be mid-search,
+# and the job_video_terms rows it inserts reference them), and nobody calls
+# the delete twice, so the stop itself has to be what finishes the delete.
+FORGOTTEN_CANCEL = 2
+
+
+def _drop_forgotten_terms(c, job_id):
+    # No commit: set_job's own commit carries it with the phase write.
+    gate = 'EXISTS (SELECT 1 FROM jobs WHERE id=? AND cancel_requested=?)'
+    for table in ('job_video_terms', 'job_terms'):
+        c.execute(f'DELETE FROM {table} WHERE job_id=? AND {gate}',
+                  (job_id, job_id, FORGOTTEN_CANCEL))
+
+
+def forget_requester(c, username, pseudonym, machine_stand_in=None, at=None):
+    """Take `username` out of this store for a delete (LG-3, decision D2).
+    -> {what: count}.
+
+    ONE TRANSACTION (G4 review round, 2026-09-25, item 5). The lease used to be
+    expired in a commit of its own and the name rewritten in a later one; in
+    between, claim_next_job could hand the worker the expired job still
+    carrying claimed_by=<real name>, and _reclaim_local_job then wrote that
+    name into job_videos.download_host AFTER the rename, for good. Now the
+    worker sees either the live lease (job hidden) or the expiry and the
+    stand-in together. Inside that one transaction:
+      1. every LIVE lease they hold is expired - the stop signal the cancel
+         button and the server pin use (expire_lease): their companion is
+         told 410 at its next call and the worker takes the job back. A job
+         someone else created carries on, on the server;
+      2. every job THEY created that has not finished is cancelled the way
+         POST /api/jobs/{id}/cancel does it: outright if no phase is in
+         flight, otherwise the flag plus the lease expiry. The flag is
+         FORGOTTEN_CANCEL, so a job still winding down loses its job_terms
+         the moment it stops (set_job);
+      3. job_terms (the term list) is deleted for their FINISHED jobs. What
+         they typed also survives in jobs.term / term_dir and downloads.term,
+         which name the folders the clips sit in on disk; those are not
+         touched (the plan names job_terms only);
+      4. the name is replaced by `pseudonym` in jobs.created_by,
+         jobs.claimed_by, job_videos.download_host, downloads.downloaded_by
+         and attestations.username. Rows are KEPT: downloads is the dedupe
+         ledger, attestations are evidence. created_machine (a hostname) on
+         their own jobs goes through `machine_stand_in`, or is blanked
+         without one.
+
+    A server download mid-clip when the flag lands can finish that clip; its
+    credit is read from the job row at write time (ledger_add), so it lands
+    under the stand-in. `jobs_stopping` counts the jobs still winding down.
+    Idempotent: a second call finds nothing live and nothing under the name.
+    """
+    u = _subject_name(username)
+    stand_in = str(pseudonym or '').strip()
+    if not stand_in:
+        raise ValueError('a pseudonym is required')
+    at = at or now()
+    counts = {'leases_released': 0, 'jobs_cancelled': 0, 'jobs_stopping': 0}
+    try:
+        for job in c.execute('SELECT * FROM jobs WHERE claimed_by=? COLLATE NOCASE',
+                             (u,)).fetchall():
+            if lease_active(job, at) and _expire_lease_sql(c, job['id'], at).rowcount:
+                counts['leases_released'] += 1
+
+        ph = ','.join('?' * len(TERMINAL))
+        for job in c.execute(
+                f'SELECT * FROM jobs WHERE created_by=? COLLATE NOCASE '
+                f'AND phase NOT IN ({ph})', (u, *TERMINAL)).fetchall():
+            if _cancel_now_sql(c, job['id'], FORGOTTEN_CANCEL).rowcount:
+                counts['jobs_cancelled'] += 1
+                continue
+            c.execute('UPDATE jobs SET cancel_requested=?, updated_at=? WHERE id=?',
+                      (FORGOTTEN_CANCEL, at, job['id']))
+            if _expire_lease_sql(c, job['id'], at).rowcount:
+                counts['leases_released'] += 1
+            counts['jobs_stopping'] += 1
+
+        finished = (f'SELECT id FROM jobs WHERE created_by=? COLLATE NOCASE '
+                    f'AND phase IN ({ph})')
+        c.execute(f'DELETE FROM job_video_terms WHERE job_id IN ({finished})',
+                  (u, *TERMINAL))
+        cur = c.execute(f'DELETE FROM job_terms WHERE job_id IN ({finished})',
+                        (u, *TERMINAL))
+        counts['job_terms'] = max(cur.rowcount, 0)
+
+        machines = [r['created_machine'] for r in c.execute(
+            'SELECT DISTINCT created_machine FROM jobs WHERE created_by=? '
+            'COLLATE NOCASE AND created_machine IS NOT NULL', (u,))]
+        for m in machines:
+            new = machine_stand_in(m) if machine_stand_in else None
+            c.execute('UPDATE jobs SET created_machine=? WHERE created_by=? '
+                      'COLLATE NOCASE AND created_machine=?', (new, u, m))
+        counts['created_machines'] = len(machines)
+
+        for key, sql in (
+                ('jobs_created', 'UPDATE jobs SET created_by=? '
+                                 'WHERE created_by=? COLLATE NOCASE'),
+                ('jobs_claimed', 'UPDATE jobs SET claimed_by=? '
+                                 'WHERE claimed_by=? COLLATE NOCASE'),
+                ('job_videos', 'UPDATE job_videos SET download_host=? '
+                               'WHERE download_host=? COLLATE NOCASE '
+                               "AND lower(download_host)<>'server'"),
+                ('downloads', 'UPDATE downloads SET downloaded_by=? '
+                              'WHERE downloaded_by=? COLLATE NOCASE')):
+            counts[key] = max(c.execute(sql, (stand_in, u)).rowcount, 0)
+
+        # (username, version) is the key: a re-run, or two spellings of one
+        # name, can find the stand-in already holding a version. Both rows are
+        # the same person's acceptance of the same wording, so the one already
+        # under the stand-in is kept and the duplicate goes.
+        cur = c.execute('UPDATE OR IGNORE attestations SET username=? '
+                        'WHERE username=? COLLATE NOCASE', (stand_in, u))
+        counts['attestations'] = max(cur.rowcount, 0)
+        c.execute('DELETE FROM attestations WHERE username=? COLLATE NOCASE',
+                  (u,))
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    return counts

@@ -399,6 +399,20 @@ class Settings:
     # "whoever controls the dashboard controls every editor's machine".
     site_feature_auto_update: bool = False
 
+    # LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §3.3/§4.1, 2026-09-25): the four
+    # kinds of companion reporting a SITE can switch off. ON by default,
+    # unlike every feature flag above: on is what every fleet has always done
+    # and what sync-side readers (file moves, the backlog, the first-claim
+    # popup) are built on, so an unset value must not start deleting data.
+    # The environment spelling is therefore the mirror of the features' rule:
+    # "0" and nothing else switches one OFF. A site_settings row beats all of
+    # this (site_store's precedence), and a site switch can only ever switch
+    # reporting off, never back on for a computer that switched it off itself.
+    site_telemetry_resolve_project: bool = True
+    site_telemetry_local_manifest: bool = True
+    site_telemetry_media_tree: bool = True
+    site_telemetry_input_idle: bool = True
+
     # Published companion builds (the upgrade channel). Empty = default to a
     # "packages" dir next to the SQLite file, which in production lands under
     # /data -- the only volume that survives a redeploy -- with no compose
@@ -858,6 +872,15 @@ class Settings:
             site_feature_ai_cli_providers=env.get("DASH_SITE_AI_CLI_PROVIDERS", "") == "1",
             site_feature_ai_cli_auto_update=env.get("DASH_SITE_AI_CLI_AUTO_UPDATE", "") == "1",
             site_feature_auto_update=env.get("DASH_SITE_AUTO_UPDATE", "") == "1",
+            # LG-1: "0" and nothing else is OFF (see the field comments).
+            site_telemetry_resolve_project=(
+                env.get("DASH_SITE_TELEMETRY_RESOLVE_PROJECT", "").strip() != "0"),
+            site_telemetry_local_manifest=(
+                env.get("DASH_SITE_TELEMETRY_LOCAL_MANIFEST", "").strip() != "0"),
+            site_telemetry_media_tree=(
+                env.get("DASH_SITE_TELEMETRY_MEDIA_TREE", "").strip() != "0"),
+            site_telemetry_input_idle=(
+                env.get("DASH_SITE_TELEMETRY_INPUT_IDLE", "").strip() != "0"),
             broll_enabled=env.get("DASH_BROLL_ENABLED", "") == "1",
             broll_ingest_token=env.get("BROLL_INGEST_TOKEN", "").strip(),
             jobs_max_running=_parse_kind_limits(

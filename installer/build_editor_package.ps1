@@ -539,6 +539,29 @@ if ($RebuildExe) {
             $ErrorActionPreference = $prevEAP
             Pop-Location
         }
+        # LG-11 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.5, 2026-09-25; G6 review
+        # round point 2): what was frozen, judged against requirements.lock
+        # by tools/scan_frozen.py, exactly as tools/release.ps1 step 3a and
+        # CI do. This path is the one ship.cmd takes for -RebuildExe, and it
+        # was the one build nobody scanned. A refused exe is DELETED so the
+        # restamp and the publish below have nothing to describe or upload.
+        if ($script:PyInstallerExit -eq 0 -and (Test-Path -LiteralPath $ExePath)) {
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                & $venvPython (Join-Path $RepoRoot "tools\scan_frozen.py") --component companion `
+                    --workpath (Join-Path $CompanionDir "build\build") 2>&1 |
+                    ForEach-Object { Write-Host "    $_" }
+                $scanExit = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $prevEAP
+            }
+            if ($scanExit -ne 0) {
+                Remove-Item -Force -LiteralPath $ExePath -ErrorAction SilentlyContinue
+                Set-Failed "tools\scan_frozen.py refused the companion exe (exit $scanExit; see the [scan_frozen] lines above) -- it froze something companionequirements.lock does not name, so it was deleted and nothing will be published"
+            }
+        }
         # Restamp dist\ccsync-release.json to describe THIS exe. Without it,
         # every rebuild here left the manifest describing the previous
         # tools\release.ps1 build, so publish and check_deploy_drift warned
@@ -639,6 +662,28 @@ if ($RebuildOnboard) {
         # different bytes, so undoing it costs another version bump.
         if ($script:OnboardPyInstallerExit -ne 0) {
             Set-Failed "PyInstaller exited $script:OnboardPyInstallerExit for onboard.exe -- dist\ still holds the PREVIOUS installer"
+        }
+        # LG-11 (2026-09-25; G6 review round point 2): the wizard is frozen
+        # from the companion venv but judged against onboarding/requirements.lock
+        # (no runtime dependency at all), so a wheel leaking into onboard.exe
+        # fails here, as it does in release-windows.yml. Before the signature,
+        # and a refused exe is deleted so -Publish has nothing to upload.
+        if ($script:OnboardPyInstallerExit -eq 0 -and (Test-Path -LiteralPath $OnboardExePath)) {
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                & $onboardPython (Join-Path $RepoRoot "tools\scan_frozen.py") --component onboarding `
+                    --workpath (Join-Path $OnboardingDir "build\build_onboard") 2>&1 |
+                    ForEach-Object { Write-Host "    $_" }
+                $scanExit = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $prevEAP
+            }
+            if ($scanExit -ne 0) {
+                Remove-Item -Force -LiteralPath $OnboardExePath -ErrorAction SilentlyContinue
+                Set-Failed "tools\scan_frozen.py refused onboard.exe (exit $scanExit; see the [scan_frozen] lines above) -- it was deleted and nothing will be published"
+            }
         }
         # --- Authenticode, on the artefact a FRESH INSTALL runs -------------
         # installer-onboard-tools-1 (2026-08-21). tools/release.ps1 signed the

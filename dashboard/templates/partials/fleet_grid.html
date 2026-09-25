@@ -348,6 +348,16 @@
             </dd>
             {% endif %}
 
+            {# LG-1 (docs/LEGAL_GAP_FEATURES_PLAN.md §4.1, 2026-09-25): what this
+               computer does not send, by its own privacy switch or the site's.
+               GREY, never a fault colour, never counted in `notes`, never an
+               alert: somebody chose it, and sync is not affected. Absent (a
+               view built before the fact was attached) is nothing at all. #}
+            {% if e.report_withheld %}
+            <dt>REPORTING</dt>
+            <dd>{% for w in e.report_withheld %}<span class="chip grey" title="This computer does not send this to the dashboard: its own privacy switch (tray, Settings, THIS COMPUTER, PRIVACY) or the site one (Settings, Site, TELEMETRY) is off. Sync is not affected, and nothing here is a fault.">[ NOT REPORTED BY THIS COMPUTER: {{ w.label }} ]</span> {% endfor %}</dd>
+            {% endif %}
+
             {# WHAT THIS COMPUTER CAN DO (TIMELINE-CARDS-INTO-CCSYNC.md §4.3,
                2026-08-29): "which machines could take this work" is a
                question an admin has to be able to answer while the queue is
@@ -435,6 +445,12 @@
            machines that already took it, which are the ones a recall is
            about; Packages has the button that rolls them back. #}
         {% if e.companion_retracted_reason is not none %}<span class="chip red" title="{{ e.companion_retracted_reason or 'no reason given' }}">[ RECALLED BUILD ]</span>{% endif %}
+        {# LG-5 (docs/LEGAL_GAP_FEATURES_PLAN.md §5, 2026-09-25): the licence
+           this computer's companion says was accepted. The VERSION alone is
+           judged (health.eula_status); the sha is shown, never compared.
+           "Not reported" is grey and is never "not accepted": that stays the
+           companion's own licence_pending reason. #}
+        {% if e.eula %}<div class="mono-sm eula-line" title="{% if e.eula.accepted_at %}accepted {{ e.eula.accepted_at }}{% endif %}{% if e.eula.eula_sha256 %} · sha256 {{ e.eula.eula_sha256[:12] }}{% endif %}">{% if e.eula.colour %}<span class="{{ e.eula.colour }}">{{ e.eula.text }}</span>{% else %}<span class="muted">{{ e.eula.text }}</span>{% endif %}{% if e.eula.accepted_at %} <span class="muted">{{ e.eula.accepted_at | ago }}</span>{% endif %}</div>{% endif %}
       </td>
       <td class="muted" data-label="LAST REPORT">{{ e.received_at | ago }}</td>
       {# THE BUTTONS, in a column of their own (2026-09-11). They used to sit

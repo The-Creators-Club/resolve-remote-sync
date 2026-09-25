@@ -44,5 +44,15 @@
         {% else %}<span class="chip green" title="You can sign in. An admin can switch an account off, and then it cannot.">[ ACTIVE ]</span>{% endif %}</dd>
     <dt title="What each of your computers uses to prove it is yours when it uploads or downloads. It is not your password.">sync keys</dt>
     <dd hx-get="/partials/account/sync-keys" hx-trigger="load" hx-swap="innerHTML"><span class="muted">asking which keys are approved</span></dd>
+    {# LG-2 (docs/LEGAL_GAP_FEATURES_PLAN.md 4.2, 2026-09-25): a person's own
+       copy. A plain form, not htmx, because the answer is a download; the
+       hidden field is the CSRF token app.csrf_gate reads. The route takes the
+       subject from the session, so an admin viewing as someone else still
+       downloads their own. #}
+    <dt title="One JSON file with your computers' records, your history, your sign-in sessions, your requests and the audit entries about you. Passwords and keys are left out, and the file lists what it does not include.">your data</dt>
+    <dd><form class="inline-form" method="post" action="/api/v1/me/export">
+        <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+        <button class="btn tap" type="submit" title="Downloads the file straight away. The download is recorded in the audit log.">[ DOWNLOAD ]</button>
+      </form> <span class="muted">Download everything the dashboard holds about you</span></dd>
   </dl>
 </div>
